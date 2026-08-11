@@ -1,373 +1,276 @@
-# Night Orders — design v0.2
+# Night Orders — design v0.3
 
-A control plane for fleets of coding agents.
+**Standing orders for your agents. Wake me only for these.**
 
-**Status:** design, pre-M0. Nothing is built yet.
-**Supersedes:** v0.1, after an adversarial review by Codex that falsified several of its claims. Changes are listed in the appendix.
-
----
-
-## 1. What this is
-
-Night Orders owns four things and deliberately nothing else:
-
-| | |
-|---|---|
-| **Work graph** | tasks, dependencies, priority, holds, acceptance criteria |
-| **Scheduler** | what runs, where, and whether it is safe to start |
-| **Attention surface** | typed things waiting on a human — decisions and setup gaps |
-| **Event log** | append-only; every view is a projection |
-
-Worktrees, the review gate, credential storage, and the agents themselves are **not** owned. They are adapters over tools that already do those jobs well.
-
-The daemon holds metadata. **Runners** on each machine hold the repositories, the credentials, and the execution. Runners pull work and push events; the control plane never reaches into a runner.
-
-```
-   web UI          muster CLI          (MCP bridge, later)
-      └────────────────┼────────────────────┘
-                       ▼
-        ┌──── CONTROL PLANE ── muster serve ─────┐
-        │  graph · scheduler · attention · log   │
-        │  SQLite (single user) · Postgres (team)│
-        └────┬──────────────────────────┬────────┘
-             │  pull work / push events
-      ┌──────▼────────┐        ┌────────▼───────┐
-      │ runner @ mbp  │        │ runner @ linux │
-      │ repos · creds │        │ repos · creds  │
-      │ worktrees     │        │ worktrees      │
-      │ agents · gate │        │ agents · gate  │
-      └───────────────┘        └────────────────┘
-```
+Status: design, pre-M0.
+v0.3 repositions around two axes after finding [agor](https://github.com/preset-io/agor). v0.2's architecture survives; its scope does not.
 
 ---
 
-## 2. Why a small core (corrected thesis)
+## 1. The bet
 
-**v0.1 claimed:** GUI-first orchestrators die; CLI-first primitives that own state survive.
+A captain's night orders are written standing instructions for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* The name is the specification.
 
-**That claim is false**, and the v0.1 document's own data refuted it. Orca (41.8k★, desktop) and Agent Orchestrator (9.2k★, desktop) are both actively developed. cc-haha (14k★, desktop) shipped the same week. Meanwhile container-use and agentapi — both CLI/daemon primitives — had gone months without a push. Last-push age conflates shutdown, pivot, maintenance mode, slow-stable development, and repository migration. It is not a mortality signal.
+Two claims, and everything else serves them:
 
-**The corrected argument is about maintenance surface, not interface.**
+**Sixty seconds to first value.** You run one command and immediately see every branch, PR, and open issue in flight across every repo on the machine — before configuring anything, before an agent runs.
 
-opcode reached 22k★ and then stopped: a wide desktop surface tightly coupled to one fast-moving agent CLI produced a maintenance queue no one could drain. vibe-kanban's shutdown post cites commercial failure — thousands of daily users, almost all free — not obsolescence.
+**It survives the night.** Work dispatches itself from a dependency graph, fails safely, and parks a typed decision instead of guessing. In the morning you read a briefing, not a transcript.
 
-Both failures are about **surface you must maintain against a substrate you do not control**. The defence is not "be a CLI." It is:
+Everything below is downstream of those two.
 
-1. Own durable state that agent CLIs have no interest in owning — a graph, a lease, a decision record.
-2. Keep anything touching fast-moving vendors behind narrow, versioned, contract-tested adapters.
-3. Ship no feature that a coding agent's own roadmap will obviously eat.
+---
 
-That argument still yields a small core. It just does not get to sneer at GUIs.
+## 2. Positioning
 
-### Prior art this does not duplicate
+[agor](https://github.com/preset-io/agor) (preset-io, TypeScript, BSL 1.1) already owns the execution-plane category: self-hosted daemon, browser UI, six interchangeable agent runtimes, branches with isolated dev environments, MCP-native self-driving sessions, multiplayer with branch-scoped RBAC, per-user credentials, per-prompt token *and dollar* accounting. It is well built and shipping.
 
-| Tool | Owns | Relationship |
+**We do not compete on that surface.** Specifically deferred, and not because they are bad ideas:
+
+- the spatial board / zones canvas — agor's signature, and expensive to match
+- live multiplayer cursors and comments
+- in-browser terminals and dev-server management
+
+What agor does *not* do, from its own documentation:
+
+| | agor | Night Orders |
 |---|---|---|
-| `treehouse` | pooled worktrees with durable leases | adapter; **its lease semantics are copied wholesale** |
-| `no-mistakes` | blocking review gate → PR | adapter |
-| `beads` / `Backlog.md` | dependency-graph issue state | import source; overlaps — see §11 |
-| `gnhf` | overnight loop, failure taxonomy | **state machine adopted, not reinvented** |
-| `Orca` / `Agent Orchestrator` | desktop ADE, terminals, PR views | not competing |
-| `sandcastle` | sandboxed orchestration, schema repair | mechanism borrowed |
-| `axi` | agent-ergonomic CLI design | **the CLI conforms to it** |
+| Getting started | `init` → `daemon start` → `open` → add repo → wizard | one command, zero config, reads what is already on disk |
+| Dispatch | manual — drag a branch into a zone to fire a prompt | automatic — dependency graph with a ready-query |
+| Unattended | `schedules` fire prompts on a timer | a loop with a failure taxonomy, leases, and rollback |
+| Blocked on a human | conversation history | typed, validated decision record |
+| Missing credential | per-user env vars you set in advance | probed before dispatch; gaps ranked by tasks unblocked |
 
-Night Orders is not the first tool to pitch "sleep, wake to finished work" — gnhf's tagline is literally that, and Orca ships phone steering. v0.1 claimed otherwise; that was wrong.
+Two products can share an architecture and still differ entirely in what they optimize. Agor optimizes for a team steering many agents *live*. Night Orders optimizes for one person who is asleep.
 
-**What is actually unclaimed:** a *typed, server-validated* record of what needs a human, separate from the transcript that produced it.
+**Licence: MIT.** agor is BSL 1.1 — source-available, not open source. A permissively-licensed tool in this slot has room theirs structurally cannot occupy.
 
----
+### What we still delegate
 
-## 3. Data model
-
-Every record carries `workspace_id` and `actor_id`. Every mutation takes an `idempotency_key` and is safe to retry.
-
-**Task**
-```
-id · workspace · actor · repo · title · body
-priority · state · acceptance_criteria[]
-depends_on[]              -- edges are their own table, not an array column
-hold { reason, kind, until }
-zones[]                   -- protected-path hints ONLY; see §4
-```
-
-**Run**
-```
-id · task · runner · role          -- planner|builder|driver|reviewer|repair
-base_revision · branch · worktree_path
-provider · model · effort · tokens_in · tokens_out
-state · parent_run · caused_by_event
-started_at · ended_at
-```
-
-**Claim** *(new — the most important addition in v0.2)*
-```
-id · task · runner
-lease_id                  -- immutable, per-acquisition, random
-lease_generation          -- monotonic fencing token
-expires_at · heartbeat_at
-```
-Dispatch is a compare-and-swap on `(task, lease_generation)`. Completion is rejected if the generation moved. A runner that dies holding a lease is reclaimed on expiry and its late completion is fenced out. Without this the scheduler is a race-condition generator — the sharpest finding in review.
-
-**Decision**
-```
-id · run · urgency · kind · state    -- open|answered|expired|superseded
-recap · question
-options[] { option_id, label, consequence, reversible }
-recommendation → option_id
-evidence[] { kind, artifact_ref }
-assignee · deadline · answer · answered_by · schema_version
-```
-
-**Capability** *(new)*
-```
-id · repo · kind                     -- env|mcp|cli|auth|quota
-name · required_by[] · probe
-status                               -- unknown|missing|present|expired|failing
-last_verified_at · expires_at
-```
-**There is no value column, and there never will be.** See §6.
-
-**SetupRequest** *(new)*
-```
-id · capability · blocks_count
-instructions · verify_command · state
-```
-Deliberately *not* a Decision: no options, no recommendation, no evidence. A missing key is not a judgement call.
-
-**Runner**
-```
-id · host · credential_hash · scopes[] · expires_at
-repos[] · capacity · agents[] · quotas[] · last_heartbeat
-```
-Hashed credential and scopes — never a bearer token in a projection.
-
-**Artifact** *(new)*
-```
-id · run · kind                      -- screenshot|log|diff|test-report
-runner_ref · size · retention_until · redacted
-```
-Evidence lives on the runner; the control plane stores a reference and serves it through a signed, short-lived runner proxy. "Metadata only" was violated in v0.1 the moment screenshots appeared in a mockup — this is the honest fix.
-
-**Event**
-```
-seq · event_id · at · actor · workspace
-kind · aggregate · aggregate_version
-causation_id · correlation_id · schema_version · payload
-```
-
-**Notification** *(new)*
-```
-id · subject · channel · dedupe_key
-attempts · last_attempt_at · delivered_at · receipt
-```
+`treehouse` (worktree pool + lease semantics, copied wholesale) · `no-mistakes` (review gate) · `beads` / `Backlog.md` / GitHub Issues (graph import — see §9) · `gnhf` (failure taxonomy, adopted not reinvented) · `sandcastle` (schema repair) · `axi` (CLI shape).
 
 ---
 
-## 4. The scheduler
+## 3. Onboarding
 
-A task dispatches only when all of these hold:
+The wedge. Everything here is read-only and uses credentials that already exist — `git` and `gh` are authenticated on the machine, so there is **no OAuth app, no client secret, no callback server, no token to store.**
 
-1. **Dependencies satisfied** — every `depends_on` edge closed.
-2. **No active hold** — holds carry a reason and optional expiry.
-3. **Capacity exists** — a runner has this repo, a free slot, an adapter for the role's agent, **and remaining provider quota**. A free CPU slot against an exhausted Claude quota is not capacity.
-4. **Capabilities verified** — every required `Capability` is `present` and freshly probed. See §6.
-5. **Claim acquired** — compare-and-swap on the lease generation. Losing the CAS is normal, not an error.
-6. **Attention budget** — if open decisions ≥ `--max-open-decisions` (default 5), stop dispatching work in zones whose historical park rate exceeds threshold. Measured from the event log, not predicted.
-
-### What happened to glob-collision detection
-
-v0.1 proposed refusing to dispatch tasks whose declared file globs overlapped an in-flight run. **Cut.** Tasks cannot honestly predict their file surface before exploring the codebase: broad globs serialize unrelated work, narrow ones miss generated files, lockfiles, shared types, snapshots, and migrations. Inferring them with a cheap model converts uncertainty into authoritative-looking bad data.
-
-Replaced by three things that work:
-
-- **Branch isolation is the concurrency boundary**, not a predicted write-set.
-- **`zones[]` survive only as policy** — protected paths (migrations, auth, CI, lockfiles) route to a stricter gate and feed advisory scheduling scores.
-- **Real overlap is computed after the fact**, via `git diff --name-only <base>...<branch>` across in-flight branches, surfaced before integration. Only possible because of §6's ingestion.
-
----
-
-## 5. Role routing
-
-Agent selection is two independent axes, and conflating them costs money.
-
-**Tier is economics.** A park → decide → resume roundtrip costs roughly **30k tokens on a cheap driver against 200k on the builder**, because the builder holds 150–200k of context resent on every gate turn.
-
-**Provider is correctness.** A reviewer from a different vendor catches a different bug distribution and spreads load across two subscriptions.
-
-| Role | Provider | Tier | Context | Why |
-|---|---|---|---|---|
-| Planner | claude | Opus 5 | interactive | Interrogates the spec until ambiguity is gone |
-| Builder | claude | Opus 5 | 150–200k | Builds, commits, emits `HANDOFF: INTENT` |
-| Driver | claude | **Sonnet 5** | few-k | Runs the gate: many cheap turns, tiny context |
-| Reviewer | codex | — | fresh | Cross-provider; reviewing in the authoring session inherits its blind spots |
-| Repair | claude | Opus 5 | resumed | See below |
-
-Config, not law. `Run` records resolved provider, model, and token counts, so role cost is measured rather than asserted.
-
-**Correction from v0.1:** the doc said a builder "dies, never resumed." That over-stated the source. The real rule is narrower — a builder is never resumed *to drive the gate*, but **is** resumed when a finding needs real code fixes. Discarding the only context that can cheaply repair its own change is wasteful. Hence the `repair` role, with an explicit causal link to the finding that triggered it.
-
----
-
-## 6. Capabilities, environment, and secrets
-
-The highest-frequency overnight failure is not a bad design decision. It is a missing or expired credential, discovered at 3am after an agent has burned 40k tokens flailing.
-
-### Detect before dispatch
-
-Capabilities are inferred from what is already on disk — `.env.example`, `.mcp.json`, `supabase/config.toml`, CI workflow `env:` blocks — and each carries a cheap liveness probe:
-
-```
-gh auth status                       auth
-supabase projects list               api
-mcp initialize <server>              mcp handshake
-test -n "$STRIPE_SECRET_KEY"         env presence
+```sh
+npx nightorders            # no init, no daemon start, no wizard
 ```
 
-**Presence is not enough.** An expired key is worse than a missing one, because the agent pays to discover it. Probes run at enrollment and at every checkpoint.
-
-### Where values live
-
-**The control plane stores metadata about secrets and never their values.**
-
-- **Control plane:** name, scope, which repos need it, status, last-verified, expiry.
-- **Values:** on the runner — OS keychain (Keychain / libsecret / Credential Manager), a gitignored `.env`, or an existing manager (`op read`, Doppler, `gh secret`).
-- **The UI writes to the runner, not the database.** A value pasted in the browser travels over the local runner connection into the keychain. The control plane records only `present, verified at T`.
-
-In team mode this is the difference between a shared backlog and a shared breach: a colleague's control plane must never see your keys. Event log and agent transcripts are redacted by the same rule.
-
-**Boundary:** the human pastes credentials. Agents never do. Night Orders reports exactly what is missing and how to obtain it; it does not type keys on anyone's behalf.
-
-### Repos are the easy part
-
-Onboarding needs no OAuth app, client secret, or callback server, because `git` and `gh` are already authenticated on the machine. The whole discovery pass is read-only shell:
+First run walks the filesystem for `.git`, then for each repo:
 
 ```sh
 git worktree list --porcelain
 git for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads
-gh repo list  --json name,defaultBranchRef,pushedAt
+git diff --name-only <base>...<branch>
 gh pr list    --json number,headRefName,statusCheckRollup
 gh issue list --json number,title,labels
 ```
 
-**Discovery is total and read-only; management is opt-in per repo.** Night Orders indexes everything it can see and drives only what you enrolled. Anything unenrolled is visible context it must not touch.
+and prints what is in flight. **No agent has run. Nothing has been configured.** That output alone is worth installing for — it is the thing no dashboard gives you today, because every other tool starts from an empty database it expects you to fill.
 
-Adoption, not discovery, is the hard part — a dirty working tree, a worktree your terminal is sitting in, a branch with a live PR. treehouse's rules apply: untracked files count as dirty even when repo config hides them; in-use is detected from running processes; reconstructed state is marked leased-until-verified.
+**Discovery is total and read-only; management is opt-in per repo.** Night Orders indexes everything it can see and drives only what you enroll. Anything unenrolled is visible context it must not touch.
+
+Adoption is the hard part, not discovery. A dirty tree, a worktree your terminal is sitting in, a branch with a live PR. treehouse's rules apply: untracked files count as dirty even when repo config hides them; in-use is detected from running processes; reconstructed state is marked leased-until-verified.
+
+### Capability preflight
+
+The most expensive overnight failure is a missing or expired credential found at 3am, after an agent has burned 40k tokens discovering it.
+
+Capabilities are inferred from what is already on disk — `.env.example`, `.mcp.json`, `supabase/config.toml`, CI `env:` blocks — and each carries a cheap liveness probe:
+
+```
+gh auth status · supabase projects list · mcp initialize <server> · test -n "$KEY"
+```
+
+**Presence is not enough**; an expired key costs more than a missing one. Probes run at enrollment and at every checkpoint, and a task whose capabilities are not *verified* does not dispatch.
+
+### Secrets
+
+**The control plane stores metadata about secrets and never their values.**
+
+- Control plane: name, scope, which repos need it, status, last-verified, expiry.
+- Values: on the runner — OS keychain, a gitignored `.env`, or an existing manager (`op read`, Doppler, `gh secret`).
+- The UI writes to the runner, not the database. A value pasted in the browser travels over the local runner connection into the keychain; the control plane records only `present, verified at T`.
+
+The human pastes credentials. Agents never do.
 
 ---
 
-## 7. The checkpoint
+## 4. The night
 
-One daily ritual, not two. Opening Night Orders shows three queues, and gaps rank by **how many tasks they unblock** — never alphabetically.
+### The loop
+
+Parking never stalls it. A blocked task steps aside and the scheduler returns to the ready set.
 
 ```
-muster ── good morning ───────────────────────────
-  overnight   7 PRs · 2 aborted · 412k tokens
-  ▸ BLOCKED   1 gap unblocks 3 tasks
-      SUPABASE_SERVICE_ROLE_KEY — oddcircle
-      expired 2d ago   [paste] [verify]
-  ▸ DECIDE    3 waiting
-  ▸ REVIEW    7 PRs
+tick ─► gates ─► claim ─► lease worktree
+                            │
+                   BUILDER (Opus, 150–200k)
+                   spec → failing test → implement → verify
+                   commit · HANDOFF: INTENT
+                            │
+                   DRIVER (Sonnet, few-k, fresh)
+                   runs the gate adapter
+              ┌─────────────┼─────────────┐
+         auto-fixable   needs a human    green
+         apply          PARK → briefing  open PR
+              └─────────► tick ◄─────────┘
 ```
 
-Notifications are a **durable outbox**, not a fire-and-forget call: delivery attempts, dedupe keys, receipts, escalation, per-assignee routing, quiet hours, deep links to the exact decision. An inbox nobody opens is not an overnight control plane.
+### Surviving it
 
----
-
-## 8. The overnight loop
-
-**Parking never stalls the loop.** A blocked task steps aside and the scheduler returns to the ready set.
-
-Failure handling is adopted from gnhf rather than reinvented, including the parts v0.1 omitted:
+Adopted from gnhf rather than reinvented, including the parts most tools omit:
 
 - agent-reported failure → next iteration immediately
 - retryable infrastructure error → exponential backoff
 - permanent error (exhausted credit, revoked auth) → abort, print run log
-- **commit failure → preserve the work for repair**; do *not* `git reset --hard`
+- **commit failure → preserve the work for repair**; never blanket-reset
 - complete no-op iteration → counts as a failure
-- 3 consecutive failures → abort
-- mid-iteration token cap, graceful stop, persisted notes, resume, permanent exit summary
+- three consecutive failures → abort
+- mid-iteration token cap · graceful stop · persisted notes · resume · permanent exit summary
 
-Rollback proves worktree cleanliness and base revision first. A blanket `git reset --hard` leaves untracked files behind and can destroy repairable work.
+Rollback proves worktree cleanliness and base revision first. `git reset --hard` leaves untracked files behind and can destroy repairable work.
 
-**Malformed agent output gets bounded repair, not an instant 422.** On schema failure the adapter resumes the same session with a compact error so the agent re-emits only the bad payload (sandcastle's mechanism), up to two attempts, then emits a distinct `malformed_decision` failure. A typed inbox that hard-fails on first malformed park is aspirational rather than operational.
+**Malformed agent output gets bounded repair, not an instant 422.** On schema failure the adapter resumes the same session with a compact error so the agent re-emits only the bad payload (sandcastle's mechanism), twice, then emits `malformed_decision`.
 
 **Irreversible options never auto-apply**, regardless of stated confidence. `reversible` is a field, so the scheduler enforces it.
 
----
+### The morning
 
-## 9. Interfaces
+One ritual. Gaps rank by **how many tasks they unblock** — never alphabetically.
 
-### CLI is primary, and it is an AXI
-
-Not "the same API for everyone" — the same *service*, with a surface shaped for each caller. Per `axi`: TOON output by default, 3–4 field default schemas, truncation with `--full`, precomputed aggregates, definitive empty states, idempotent writes, structured errors, contextual next-step hints.
-
-```sh
-muster                      # content-first: ready work, active runs, blockers
-muster ready --runner mbp
-muster show oc-42 --full
-muster park run_7f3 --recap-file r.md --option "Keep + backfill" \
-                    --option "Drop it:irreversible" --recommend 0
-muster done oc-42 --pr https://github.com/ap9000/muster/pull/12
+```
+nightorders ── good morning ──────────────────────
+  overnight    7 PRs · 2 aborted · 412k tokens · $18.40
+  ▸ BLOCKED    1 gap unblocks 3 tasks
+       SUPABASE_SERVICE_ROLE_KEY — oddcircle
+       expired 2d ago    [paste] [verify]
+  ▸ DECIDE     3 waiting
+  ▸ REVIEW     7 PRs
 ```
 
-`--json` remains the automation escape hatch.
-
-**MCP is deferred past M4.** For agents with shell access an AXI-style CLI is cheaper, easier to debug, and less adapter surface. MCP returns later as a thin bridge if users ask. (v0.1 also claimed the MCP client "speaks the same HTTP + SSE API" — it does not; it speaks MCP to a bridge.)
-
-### Web UI
-
-Three views: **checkpoint** (home), **board**, **graph**. It exists for the two jobs a terminal genuinely cannot do well — rendering a decision with visual evidence, and pasting/verifying credentials across several repos.
+Notifications are a **durable outbox** — attempts, dedupe keys, receipts, escalation, quiet hours, deep links. An inbox nobody opens is not an overnight control plane.
 
 ---
 
-## 10. Milestones
+## 5. The decision record
 
-For one person working with agents. v0.1 claimed ~7 weeks for all six; that was fantasy, principally at M5.
+The convention agents drift from in prose becomes a schema the server validates. `POST /runs/:id/park` returns **422** without a recap, options, and a recommendation.
+
+```json
+{
+  "urgency": "blocking",
+  "recap": "Tightening the onboarding form. The agent added a migration
+            dropping `signup_source`, which analytics reads.",
+  "question": "Drop the column, or keep it and backfill?",
+  "options": [
+    { "label": "Keep + backfill", "reversible": true,
+      "consequence": "Analytics unaffected. +1 migration." },
+    { "label": "Drop it", "reversible": false,
+      "consequence": "3 dashboards break silently." }
+  ],
+  "recommendation": 0,
+  "evidence": [{ "kind": "diff" }, { "kind": "screenshot" }, { "kind": "test" }]
+}
+```
+
+Because it is a typed record rather than a transcript, it renders identically every time and fits on a phone. `reversible` being a *field* is what lets the scheduler refuse to auto-apply it.
+
+A missing credential is **not** this. `SetupRequest` has its own, simpler shape — what is missing, what it blocks, how to supply it, how we verify. No options, no recommendation. A missing key is not a judgement call.
+
+---
+
+## 6. Data model
+
+Every record carries `workspace_id` and `actor_id`. Every mutation takes an `idempotency_key`.
+
+| Record | Carries |
+|---|---|
+| **Task** | repo · title · body · priority · state · acceptance_criteria[] · depends_on (own table) · hold{reason,until} · zones[] |
+| **Run** | task · runner · role · base_revision · branch · provider · model · tokens · parent_run · caused_by_event |
+| **Claim** | task · runner · `lease_id` (immutable) · `lease_generation` (fencing) · expires_at · heartbeat_at |
+| **Decision** | run · urgency · state · recap · question · options[{id,label,consequence,reversible}] · recommendation · evidence[] · assignee · deadline |
+| **Capability** | repo · kind · name · required_by[] · probe · status · last_verified_at · expires_at — **no value column, ever** |
+| **SetupRequest** | capability · blocks_count · instructions · verify_command |
+| **Runner** | host · credential_hash · scopes[] · repos[] · capacity · agents[] · quotas[] · heartbeat |
+| **Artifact** | run · kind · runner_ref · retention_until · redacted |
+| **Event** | seq · event_id · actor · aggregate · aggregate_version · causation_id · correlation_id · schema_version |
+| **Notification** | subject · channel · dedupe_key · attempts · delivered_at · receipt |
+
+**Claim is the one that matters.** Dispatch is a compare-and-swap on `(task, lease_generation)`; completion is rejected if the generation moved. A runner that dies holding a lease is reclaimed on expiry and its late completion fenced out. Without it there is no scheduler, only a race.
+
+Evidence lives on the runner; the control plane stores a reference and serves it via a signed, short-lived runner proxy.
+
+---
+
+## 7. Dispatch gates
+
+1. **Dependencies satisfied** — every `depends_on` edge closed.
+2. **No active hold.**
+3. **Capacity** — a runner has this repo, a free slot, the role's agent, **and remaining provider quota.** A free CPU slot against an exhausted quota is not capacity.
+4. **Capabilities verified** — §3.
+5. **Claim acquired** — CAS on the lease generation. Losing is normal, not an error.
+6. **Attention budget** — above `--max-open-decisions` (default 5), stop dispatching work in zones whose measured park rate exceeds threshold.
+
+**Cut from v0.2:** refusing dispatch on predicted file-glob overlap. Tasks cannot honestly predict their file surface before exploring, and inferring it converts uncertainty into authoritative-looking bad data. Branch isolation is the concurrency boundary; `zones[]` survive only as protected-path policy and advisory scoring; real overlap is computed after the fact from `git diff --name-only` across in-flight branches, before integration.
+
+---
+
+## 8. Role routing
+
+Two independent axes, and conflating them costs money. **Tier is economics** — a park → decide → resume roundtrip is ~30k tokens on a cheap driver against ~200k on the builder, which holds 150–200k of context resent every gate turn. **Provider is correctness** — a different vendor catches a different bug distribution.
+
+| Role | Provider | Tier | Context |
+|---|---|---|---|
+| Planner | claude | Opus 5 | interactive |
+| Builder | claude | Opus 5 | 150–200k |
+| Driver | claude | **Sonnet 5** | few-k |
+| Reviewer | codex | — | fresh |
+| Repair | claude | Opus 5 | resumed |
+
+Config, not law. `Run` records the resolved provider, model, and tokens, so role cost is measured rather than asserted — and the morning briefing reports real dollars.
+
+A builder is never resumed *to drive the gate*, but **is** resumed when a finding needs real code fixes. Discarding the only context that can cheaply repair its own change is wasteful.
+
+---
+
+## 9. Milestones
+
+Re-cut around the two claims in §1. One person working with agents.
 
 | | Scope | Ships when |
 |---|---|---|
-| **M0** | Graph, dependency edges, **Claim/lease with fencing**, idempotency keys, SQLite store, AXI CLI, **repo + branch + PR + issue ingestion**. No agents run. | `nightorders` shows what is in flight across every repo |
-| **M1** | Runner registration **with auth from the first commit**, heartbeat, treehouse lease adapter, claude builder, reconciliation for dead runner / orphaned worktree / duplicate completion. | one task goes queued → branch → commit unattended |
-| **M2** | Capability probes, SetupRequest, secrets-on-runner, checkpoint UI, notification outbox. | you fill one gap and three tasks start |
-| **M3** | Decision schema + validation + schema repair, driver role, evidence artifacts, web decision view. | a park renders as one screen, answerable on a phone |
-| **M4** | Overnight loop, gnhf failure taxonomy, quota-aware scheduling, crash/duplicate/disconnect survival. | queue twelve, sleep, wake to PRs and a short checkpoint |
-| **M5** | Workspace / Actor / Membership / Role records, Postgres store, export–import. | two people, one graph |
+| **M0** | Zero-config discovery, graph, dependency edges, **Claim/lease with fencing**, idempotency, SQLite, AXI CLI. No agents run. | `npx nightorders` shows every branch, PR, and issue in flight. **Useful before it is autonomous.** |
+| **M1** | Runner registration **with auth from the first commit**, heartbeat, treehouse adapter, claude builder, reconciliation for dead runner / orphaned worktree / duplicate completion. | one task goes queued → branch → commit unattended |
+| **M2** | Capability probes, SetupRequest, secrets-on-runner, morning briefing, notification outbox. | fill one gap, three tasks start |
+| **M3** | Decision schema, validation, bounded schema repair, driver role, evidence artifacts, web decision view. | a park renders as one screen, answerable on a phone |
+| **M4** | The loop: gnhf failure taxonomy, quota-aware scheduling, survives crash / duplicate / disconnect. | **queue twelve, sleep, wake to PRs and a short briefing** |
+| — | *deferred:* spatial board and zones, multiplayer, in-browser terminals, Postgres, RBAC, export | after M4 earns them |
 
-M5 is not "UI and policy" — v0.1 said the schema already supported it, which was untrue. There were no Workspace, Actor, Membership, or Role records at all.
+M4 is the product. M0 is what makes anyone install it long enough to reach M4.
 
-**Export–import lands with M5 at the latest.** vibe-kanban had to bolt export on at shutdown. A state moat without an exit is lock-in to an experimental daemon.
-
-The honest definition of done for v1: **one complete SQLite overnight loop that survives crashes, duplicate messages, exhausted quotas, malformed agent output, and a disconnected runner.** Everything else earns its way back after that.
+Done means one complete SQLite overnight loop that survives crashes, duplicate messages, exhausted quotas, malformed agent output, and a disconnected runner.
 
 ---
 
-## 11. Open questions
+## 10. Open before M0
 
-1. **Overlap with beads.** beads (26k★) already does dependency-graph work state with branch-aware sync. Is Night Orders's graph a thin projection over an existing tracker rather than a competing store? Resolving this before M0 could remove a third of the build.
-2. **Does the loop ever push to `main`?** Recommendation: never — a PR terminus is the only reason the gate is trustworthy.
-3. **License.** MIT matches orca, no-mistakes, cc-haha; Apache-2.0 matches agent-orchestrator and adds patent cover.
-4. **CLI alias.** `nightorders` is twelve characters. `no` is unusable as a shell alias, so either the full name stands or something less collision-prone is needed.
-
-> **On the name.** A captain's night orders are the written standing instructions left for the officer of the watch: proceed on this course without me, and wake me under exactly these conditions. That is the product — an autonomous loop plus a typed set of wake conditions — so the name is the specification, not decoration. Chosen over `blockpost`, `dogwatch`, and `watchbill`; `muster` was already taken on npm.
+1. **beads.** It already does dependency-graph work state with a ready-query and branch-aware sync, at 26k★. Is our graph a projection over it rather than a competing store? That would remove roughly a third of M0 and buy instant interop — at the cost of not owning the state. **Decide before writing schema.**
+2. **Does agor already have an approval primitive?** If so the decision record is a PR to them, not a feature here.
+3. **Does the loop ever push to `main`?** Recommendation: never. A PR terminus is the only reason the gate is trustworthy.
+4. **CLI alias.** `nightorders` is twelve characters and `no` is unusable as a shell alias.
 
 ---
 
-## Appendix — changes from v0.1
+## Appendix — history
 
-**Falsified and removed**
+**v0.3** repositions on onboarding + unattended operation after finding agor; explicitly defers the spatial board, multiplayer, RBAC, and Postgres; makes MIT a stated differentiator against agor's BSL 1.1; promotes zero-config discovery from a feature to the wedge.
 
-- "Every GUI-first orchestrator has stalled" — contradicted by the doc's own table.
-- "No other tool is pitching that" — gnhf and Orca both do.
-- "Every adapter ships with a fallback" — the builder row had none.
-- "Every record carries workspace_id and actor_id" — only Task did.
-- "The schema already supports all of it" (M5) — no such records existed.
-- "You review evidence, never a raw diff" — evidence prioritizes review, it does not replace it.
-- "Builder dies, never resumed" — over-stated; repair resumption is correct.
-- Glob-collision as a hard dispatch gate — unimplementable as specified.
-- "Sixteen projects" over a table of fourteen.
+**v0.2** followed an adversarial Codex review that falsified v0.1's thesis. Removed: "every GUI-first orchestrator has stalled" (contradicted by the doc's own table — Orca and Agent Orchestrator are desktop and thriving); "no other tool is pitching that" (gnhf and Orca both do); "every adapter ships with a fallback"; "every record carries workspace_id"; "the schema already supports all of it"; "builder dies, never resumed" (over-stated — repair resumption is correct); glob-collision as a dispatch gate. Added: Claim/lease with fencing, Capability, SetupRequest, Artifact, Notification outbox, secrets-on-runner, ingestion, role routing, quota-aware capacity, schema repair, gnhf taxonomy, runner auth at M1.
 
-**Added**
+The corrected argument for a small core is **maintenance surface**, not interface. opcode reached 22k★ and stopped because a wide desktop surface coupled to one fast-moving agent CLI produced an undrainable maintenance queue. Own durable state agent CLIs do not want; keep vendor-facing surface behind narrow, contract-tested adapters; ship nothing an agent CLI's roadmap will obviously eat.
 
-Claim/lease with fencing · idempotency keys · dependency edges as a table · Capability · SetupRequest · Artifact · Notification outbox · secrets-on-runner · repo/branch/PR ingestion · role routing by tier and provider · quota-aware capacity · schema-repair retries · gnhf failure taxonomy · repair role · export–import · runner auth at M1 · event causality and versioning.
-
-**Sources.** Design review by Codex (default model and effort, read-only, 2026-08-10). Landscape figures gathered 2026-08-10 via the GitHub API and are point-in-time. Workflow patterns from Jason Ku's *A Meta Engineer's Agentic Engineering Workflow* and the `agents-md-snippets`, `no-mistakes`, `treehouse`, `gnhf`, `tasks-axi`, and `axi` repositories. Several review citations — a vibe-kanban shutdown post, HumanLayer PR #646, agentapi v0.12.2 dates — are Codex's and have not been independently verified.
+**Sources.** Codex design review (default model/effort, read-only, 2026-08-10). Landscape figures from the GitHub API, 2026-08-10/11, point-in-time. Workflow patterns from Jason Ku's *A Meta Engineer's Agentic Engineering Workflow* and `agents-md-snippets`, plus `no-mistakes`, `treehouse`, `gnhf`, `tasks-axi`, `axi`. Agor capabilities are from its README, not hands-on use.
