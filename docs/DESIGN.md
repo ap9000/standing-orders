@@ -68,19 +68,29 @@ Adoption is the hard part, not discovery. treehouse's rules apply: untracked fil
 
 ### Choosing the graph
 
-Detected, not asked. The same pass that finds repos finds whatever work tracker is already there:
+Detected, not asked — and **detection is not authorization.** Finding a populated tracker tells you it exists; it does not tell you the operator wants Night Orders scheduling, closing, or restructuring its contents.
 
 ```
   Work graph — detected in your repos
-  ▸ beads            .beads/ in 2 repos · 47 open · deps      [default]
-    tasks-axi        backlog.md in 1 repo · 14 queued
-    GitHub Issues    112 open across 6 repos · no deps
-    built-in         SQLite · no external dependency
+  ▸ beads            .beads/ in 2 repos · 47 open · native deps · runtime ok
+    GitHub Issues    112 open across 6 repos · native deps · gh 2.67 too old
+    built-in         local task store · nothing to install
+  Nothing is enrolled. `nightorders enroll <repo>` grants write access.
 ```
 
-**Rules:** exactly one present → adopt it and say so. Several → default to the most populated that supports dependency edges. None → built-in SQLite. Never present an empty choice to someone who has not used any of them.
+**Data and runtime are detected independently.** A populated `backlog.md` with no working runtime is displayed and recommended; it is not dispatchable. That is the correct failure mode for unattended operation — better a visible gap at 9am than a dead loop at 3am.
 
-Switching later does not lose Night Orders' own state, because our records reference tasks by `(backend, external_id)` rather than owning them. See §4.
+**The ladder:**
+
+1. A previously enrolled, healthy backend with a valid write grant.
+2. The *sole* populated, healthy repo-local tracker with native readiness and dependencies, and an available runtime — beads, tasks-axi, Backlog.md. **Several populated → stay discovery-only until one is enrolled.** Task count is not write authority; the biggest tracker may be the abandoned one.
+3. GitHub Issues **only** where existing native dependency use signals real tracker intent, and the operator confirms repo write scope.
+4. The built-in local task store.
+5. Edge-free GitHub Issues stay visible in discovery but are never an autonomous-scheduling default.
+
+GitHub Issues has native `blocked_by` dependencies and sub-issues over REST, so an earlier draft's "no deps" was wrong. Native relations are used where a capability probe confirms them — including the `gh` version, since dependency fields need `gh ≥ 2.94` even though the REST route works on any version. Cross-repository dependency semantics are **unverified and fail closed.**
+
+Switching later does not lose Night Orders' own state, because Claim, Run, Decision, and Capability reference tasks by `(backend, external_id)`. See §4.
 
 ### Capability preflight
 
@@ -104,9 +114,15 @@ The human pastes credentials. Agents never do.
 
 ## 4. The graph is a backend
 
-Two proven graph layers already exist — `beads` (26k★) and `tasks-axi`, which openly borrows beads' dependency and ready-query model. Rebuilding either would be re-fighting a solved problem and would put every task-CRUD feature request on us.
+Two proven graph layers already exist — `beads` (26k★) and `tasks-axi`, which openly borrows beads' dependency and ready-query model. Rebuilding either would re-fight a solved problem and put every task-CRUD feature request on us.
 
-So Night Orders owns **no task store**. It owns an overlay.
+The honest statement of the boundary:
+
+> **Night Orders owns a minimal local task store as a fallback, adapts richer external trackers when present, and keeps operational Claim, Run, Decision, Capability, and event state in a backend-independent overlay.**
+
+An earlier draft claimed we own *no* task store while shipping a built-in one. That was self-deception: anything that can create, store, transition, and link tasks is a task store, whether it takes 150 lines or 15,000. The defensible position is not "we own nothing" — it is "we own something deliberately small and decline to compete with full trackers." The built-in ships enough authoring and inspection to be usable, and no search, labels, comments, or sync.
+
+**Never install anything.** Discovery executes no package manager, package runner, or third-party initializer — not `npx -y tasks-axi`, which fetches and runs code, and emphatically not `bd init`, which can modify agent integrations and hooks, stage files, and create a bootstrap commit. When installation or initialization is needed, Night Orders prints the upstream command *and a summary of its side effects* as text. The operator runs it outside Night Orders. Management then requires separate write enrollment.
 
 ```
 GraphBackend
@@ -115,13 +131,16 @@ GraphBackend
   add_edge(from, to)                  hold(id, reason, until) / unhold(id)
 ```
 
-Backends lacking holds or dependency edges get them **emulated in the overlay** — that is what makes GitHub Issues a viable backend despite having neither.
+**Scheduling edges are never emulated.** A dependency graph the backend cannot see is shadow data: other tools and teammates read a task as ready while our private overlay says it is blocked, and the divergence becomes migration-critical the moment anyone wants out. If a backend has no native edges, it is **ineligible for dependency scheduling** — not repaired with invisible ones. Holds may live in the overlay, because a hold is an operational pause rather than a claim about the work's structure.
+
+**No network calls in the scheduler hot path.** GitHub allows 5,000 authenticated REST requests/hour; reading dependencies for 112 issues once a minute is 6,720 requests/hour before any ordinary query. External backends are read into a **local materialized snapshot out of band**, and dispatch stops when the snapshot's freshness bound expires rather than degrading into rate-limit failures at 3am.
 
 **What we own regardless of backend:**
 
 | Record | Carries |
 |---|---|
-| **TaskRef** | `(backend, external_id)` · zones[] · capability_requirements[] · acceptance_criteria[] · park_rate |
+| **TaskRef** | `(backend, external_id)` · zones[] · capability_requirements[] · park_rate |
+| **BackendGrant** | repo · backend · exact paths or GitHub repos · allowed mutation classes · task selector · credential scope · whether git history observes the writes |
 | **Claim** | task · runner · `lease_id` (immutable) · `lease_generation` (fencing) · expires_at · heartbeat_at |
 | **Run** | task · runner · role · base_revision · branch · provider · model · tokens · parent_run · caused_by_event |
 | **Decision** | run · urgency · state · recap · question · options[{id,label,consequence,reversible}] · recommendation · evidence[] · assignee · deadline |
@@ -137,6 +156,18 @@ Every record carries `workspace_id` and `actor_id`; every mutation takes an `ide
 **`Claim` is the one that matters.** Dispatch is a compare-and-swap on `(task, lease_generation)`; completion is rejected if the generation moved. A runner that dies holding a lease is reclaimed on expiry and its late completion fenced out. Without it there is no scheduler, only a race. No existing graph backend provides this — which is precisely why it is ours.
 
 Evidence lives on the runner; the control plane stores a reference and serves it through a signed, short-lived runner proxy.
+
+### Writing to someone else's store
+
+Discovery is always read-only. Managing a repo requires a persisted per-repo **`BackendGrant`** that displays and constrains exactly what Night Orders may touch: which files or GitHub repos, which mutation classes, which tasks, which credential scope, and whether the changes will be visible to other tools or land in git history.
+
+**Default write scope covers only tasks explicitly enrolled or created through Night Orders** — never every open task it happened to find. Agents operate strictly inside the grant; widening it takes another human action.
+
+### When a backend vanishes
+
+A deleted `.beads/`, an uninstalled binary, a moved repo, an incompatible schema, and a revoked API token need different diagnosis and different recovery, so this gets its own path rather than borrowing the expired-credential one.
+
+The operational overlay **stays writable** — it must still fence claims, preserve runs and artifacts, and record mutations pending replay. Only the last-known task projection goes read-only. New dispatch stops for the affected backend; work already running preserves its result without claiming backend completion. The operator gets a typed **`BackendIncident`**, which reuses `SetupRequest`'s ranking, notification, and presentation but not its capability schema.
 
 ---
 

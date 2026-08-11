@@ -8,7 +8,7 @@ A captain's night orders are the written standing instructions left for the offi
 
 Night Orders is a control plane for coding agents, optimized for the case where **the operator is asleep**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
 
-It owns no task store, no worktree pool, no review gate, and no agents. Those are adapters over [`beads`](https://github.com/gastownhall/beads), [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, and `codex`.
+It owns a deliberately small local task store, adapts richer trackers when they are already there, and owns no worktree pool, no review gate, and no agents. Those are adapters over [`beads`](https://github.com/gastownhall/beads), [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, and `codex`.
 
 ## Two claims
 
@@ -24,11 +24,13 @@ The same pass detects your work graph and picks one, rather than asking:
 
 ```
 Work graph — detected in your repos
-▸ beads            .beads/ in 2 repos · 47 open · deps      [default]
-  tasks-axi        backlog.md in 1 repo · 14 queued
-  GitHub Issues    112 open across 6 repos · no deps
-  built-in         SQLite · no external dependency
+▸ beads          .beads/ in 2 repos · 47 open · native deps · runtime ok
+  GitHub Issues  112 open across 6 repos · native deps · gh 2.67 too old
+  built-in       local task store · nothing to install
+Nothing is enrolled. `nightorders enroll <repo>` grants write access.
 ```
+
+Detection is not authorization, and **nothing is ever installed for you** — `bd init` stages files and can create a commit, so Night Orders prints the command and its side effects and lets you run it.
 
 **It survives the night, cheaply.** Work dispatches itself from a dependency graph, fails safely, and parks a *typed* decision — recap, options with reversibility, a recommendation, evidence — instead of guessing. Parking never stalls the loop; the blocked task steps aside and eleven others keep going.
 
