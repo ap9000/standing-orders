@@ -1,0 +1,43 @@
+{
+  "name": "nightorders",
+  "version": "0.0.0",
+  "description": "Standing orders for your agents. Wake me only for these.",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ap9000/nightorders.git"
+  },
+  "keywords": [
+    "agents",
+    "orchestration",
+    "claude-code",
+    "codex",
+    "git-worktree"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/ap9000/nightorders/issues"
+  },
+  "homepage": "https://github.com/ap9000/nightorders#readme",
+  "bin": {
+    "nightorders": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

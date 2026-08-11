@@ -5,4 +5,4 @@ dist/
 !.env.example
 .DS_Store
 *.log
-.muster/
+.nightorders/
