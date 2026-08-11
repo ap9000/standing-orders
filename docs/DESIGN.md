@@ -279,9 +279,9 @@ Adopting a graph backend removed roughly a third of M0 and replaced it with adap
 ## 11. Open before M0
 
 1. ~~Whether the graph should project over beads.~~ **Resolved in v0.4:** pluggable backend, detected during onboarding, built-in SQLite only as fallback.
-2. **Does agor already have an approval primitive?** If so the decision record is a PR to them, not a feature here. Unverified — their docs would say.
-3. **Does the loop ever push to `main`?** Recommendation: never. A PR terminus is the only reason the gate is trustworthy.
-4. **CLI alias.** `nightorders` is twelve characters and `no` is unusable as a shell alias.
+2. ~~Does agor already have an approval primitive?~~ **Resolved:** no. Agor gates *tool calls* (`auto-approve | supervised | manual`), which is a synchronous "may I run this command?" carrying no semantic content. A decision record is asynchronous, describes a judgement call, and lets the loop continue without you. Their callbacks are agent-to-agent, not human escalation. Also confirmed absent: approval inbox, credential preflight, dependency-graph scheduling, failure taxonomy — their Scheduler is cron-style triggers for templated prompts. **Re-check before launch:** *Cards (Beta)* and *In-Conversation Widgets* are plausible substrate for structured decisions and are still moving.
+3. ~~Does the loop ever push to `main`?~~ **Resolved: never.** A pull request is always the terminus. The gate is only trustworthy because nothing reaches the default branch without passing it, and an autonomous loop with commit rights to `main` has no safe failure mode.
+4. **CLI alias.** `nightorders` is twelve characters and `no` is unusable as a shell alias. Deliberately left open — decide it after typing it a hundred times, not from a design doc.
 
 ---
 

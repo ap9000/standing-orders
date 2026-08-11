@@ -1,42 +1,69 @@
 # Night Orders
 
-A control plane for fleets of coding agents.
+**Standing orders for your agents. Wake me only for these.**
 
-> **Status: design only.** No code yet. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.2).
+> **Status: design only.** No code yet. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.4).
 
-Night Orders owns the **work graph**, the **scheduler**, the **attention surface** — the typed queue of things waiting on a human — and an append-only **event log**.
+A captain's night orders are the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product.
 
-It does not own worktrees, the review gate, credential storage, or the agents. Those are adapters over tools that already do those jobs well: [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, `codex`.
+Night Orders is a control plane for coding agents, optimized for the case where **the operator is asleep**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
 
-The daemon holds metadata. **Runners** on each machine hold the repositories, the credentials, and the execution.
+It owns no task store, no worktree pool, no review gate, and no agents. Those are adapters over [`beads`](https://github.com/gastownhall/beads), [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, and `codex`.
 
-## The idea
+## Two claims
 
-Two things agents are bad at, that a control plane can be good at:
+**Sixty seconds to first value.**
 
-**Knowing when to stop and ask.** A parked decision is a validated record — recap, options with reversibility, a recommendation, evidence — not a transcript you have to read. It renders the same way every time and fits on a phone.
+```sh
+npx nightorders     # no init, no daemon start, no wizard, no OAuth app
+```
 
-**Knowing it cannot start.** The most expensive overnight failure is a missing or expired credential found at 3am, after an agent has burned 40k tokens discovering it. Capabilities are probed before dispatch, and gaps rank by how many tasks they unblock.
+It walks the filesystem for `.git` and reads branches, PRs, and open issues through the `git` and `gh` credentials already on your machine — then shows you everything in flight across every repo. No agent has run. Nothing has been configured. Every other tool in this space starts from an empty database it expects you to fill.
 
-## Where it is going
+The same pass detects your work graph and picks one, rather than asking:
+
+```
+Work graph — detected in your repos
+▸ beads            .beads/ in 2 repos · 47 open · deps      [default]
+  tasks-axi        backlog.md in 1 repo · 14 queued
+  GitHub Issues    112 open across 6 repos · no deps
+  built-in         SQLite · no external dependency
+```
+
+**It survives the night, cheaply.** Work dispatches itself from a dependency graph, fails safely, and parks a *typed* decision — recap, options with reversibility, a recommendation, evidence — instead of guessing. Parking never stalls the loop; the blocked task steps aside and eleven others keep going.
+
+And it costs nothing while idle. **An LLM never polls.** The daemon handles everything that needs no judgement — ticks, capability probes, lease reaping, CI polling, notifications — at zero token cost, and wakes an agent only on a real event. The target is a testable invariant: an eight-hour run with twelve tasks shows near-zero token spend across idle windows.
+
+## What breaks overnight, and the answer
+
+| Failure | Mechanism |
+|---|---|
+| Expired key found at 3am after 40k wasted tokens | capabilities probed *before* dispatch; gaps ranked by tasks unblocked |
+| A runner dies holding a worktree | `Claim` with an immutable lease id and a fencing generation; late completions rejected |
+| Agent guesses on an irreversible call | `reversible` is a schema field; irreversible options never auto-apply |
+| You wake to five transcripts | one briefing: what ran, what is blocked, what needs deciding |
+| Secrets on a shared server | the control plane stores metadata only; values stay in the runner's keychain |
+
+## Milestones
 
 | | | |
 |---|---|---|
-| M0 | graph, leases, ingestion, CLI | `nightorders` shows what is in flight across every repo |
+| M0 | discovery, graph adapters, leases, CLI | `npx nightorders` shows what is in flight — **useful before it is autonomous** |
 | M1 | runners, worktrees, first builder | one task goes queued → branch → commit unattended |
-| M2 | capabilities, secrets, checkpoint UI | fill one gap, three tasks start |
-| M3 | decisions, evidence, web view | a park renders as one screen |
-| M4 | the overnight loop | queue twelve, sleep, wake to PRs |
-| M5 | workspaces, Postgres, export | two people, one graph |
+| M2 | capability probes, secrets, briefing | fill one gap, three tasks start |
+| M3 | decisions, evidence, web view | a park renders as one screen, answerable on a phone |
+| M4 | the loop | **queue twelve, sleep, wake to PRs — with near-zero idle spend** |
 
-Done means one complete overnight loop that survives crashes, duplicate messages, exhausted quotas, malformed agent output, and a disconnected runner.
+Deferred until M4 earns them: the spatial board, multiplayer, in-browser terminals, Postgres, RBAC.
 
-## Open before M0
+M4 is the product. M0 is what makes anyone install it long enough to reach M4.
 
-- Whether the graph should be a projection over [`beads`](https://github.com/gastownhall/beads) rather than a competing store.
-- License — MIT or Apache-2.0.
-- Whether the CLI keeps the full `nightorders` or takes a shorter alias.
+## Not competing with
+
+[**agor**](https://github.com/preset-io/agor) owns the execution-plane category and does it well — browser UI, six runtimes, multiplayer, a spatial board. It optimizes for a team steering agents *live*; we optimize for nobody being awake. It is BSL 1.1; this is MIT.
+
+[**firstmate**](https://github.com/kunchenguid/firstmate) proves the orchestrator role works as conventions plus tmux, with no UI and no schema. Its event-driven bash watcher is where the zero-token supervision rule came from. Our bet is that the same role is better with a typed decision record and a browser you can answer from.
 
 ## Credits
 
-The workflow this formalizes comes from [Jason Ku's agentic engineering session](https://youtu.be/Ukju3maxbEQ) and his [`agents-md-snippets`](https://github.com/jasonku09/agents-md-snippets), plus Kun Chen's `treehouse`, `no-mistakes`, `gnhf`, and `axi`. The design was reviewed adversarially by Codex; §2 of the design doc exists because that review falsified the original thesis.
+The workflow this formalizes comes from [Jason Ku's agentic engineering session](https://youtu.be/Ukju3maxbEQ) and his [`agents-md-snippets`](https://github.com/jasonku09/agents-md-snippets), plus Kun Chen's `treehouse`, `no-mistakes`, `gnhf`, `tasks-axi`, and `axi`. The design was reviewed adversarially by Codex; the appendix in `docs/DESIGN.md` lists every claim that review falsified, because the corrections are more useful than a clean spec would have been.
