@@ -331,3 +331,204 @@ describe("renderGraph", () => {
     expect(output).toContain("! /code/thing: database is locked");
   });
 });
+
+/** Remote state keyed the way the report expects it. */
+const remoteFor = (
+  entries: Record<string, Partial<import("./remote.js").RemoteState>>,
+): Map<string, import("./remote.js").RemoteState> =>
+  new Map(
+    Object.entries(entries).map(([path, state]) => [
+      path,
+      {
+        pulls: [],
+        issues: [],
+        pullsRead: true,
+        issuesRead: true,
+        problems: [],
+        skipped: false,
+        ...state,
+      },
+    ]),
+  );
+
+const pull = (number: number, over: Partial<import("./pulls.js").Pull> = {}) => ({
+  number,
+  title: `pull ${number}`,
+  branch: `feat/${number}`,
+  url: `https://github.com/o/r/pull/${number}`,
+  isDraft: false,
+  mergeable: "MERGEABLE" as const,
+  checks: "passing" as const,
+  createdAt: ago(2 * DAY),
+  updatedAt: ago(2 * DAY),
+  ...over,
+});
+
+const issue = (id: string) => ({ id, title: `issue ${id}`, state: "queued" as const });
+
+describe("renderReport with pull requests and issues", () => {
+  test("counts all three in one headline", () => {
+    // The milestone's actual sentence: one command, every branch, pull
+    // request and issue in flight.
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+    const remote = remoteFor({
+      "/code/nightorders": { pulls: [pull(45)], issues: [issue("1"), issue("2")] },
+    });
+
+    const output = renderReport(snapshots, { now: NOW, remote });
+
+    expect(output).toContain("1 branch, 1 pull request and 2 issues in flight");
+  });
+
+  test("leaves out what is zero rather than reporting zeroes", () => {
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+
+    const output = renderReport(snapshots, {
+      now: NOW,
+      remote: remoteFor({ "/code/nightorders": {} }),
+    });
+
+    expect(output).toContain("1 branch in flight");
+    expect(output).not.toContain("0 pull requests");
+  });
+
+  test("says nothing about pull requests when it never looked", () => {
+    // A zero nobody looked for is a different claim from a zero that was
+    // measured, so an unread remote produces no count at all.
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+
+    const output = renderReport(snapshots, { now: NOW });
+
+    expect(output).not.toContain("pull request");
+  });
+
+  test("gives each waiting pull request its own line, under its repository", () => {
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+    const remote = remoteFor({ "/code/nightorders": { pulls: [pull(45), pull(46)] } });
+
+    const output = renderReport(snapshots, { now: NOW, remote });
+    const lines = output.split("\n");
+    const repoLine = lines.findIndex(line => line.startsWith("nightorders"));
+    const pullLine = lines.findIndex(line => line.includes("#45"));
+
+    expect(pullLine).toBeGreaterThan(repoLine);
+    expect(output).toContain("#46");
+    expect(output).toContain("ready to merge");
+  });
+
+  test("does not list a pull request that is waiting on CI", () => {
+    // A machine still working is not waiting on anybody, and a report that
+    // lists it is asking for attention nothing needs.
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+    const remote = remoteFor({
+      "/code/nightorders": { pulls: [pull(45, { checks: "running" })] },
+    });
+
+    expect(renderReport(snapshots, { now: NOW, remote })).not.toContain("#45");
+  });
+
+  test("counts issues rather than listing them", () => {
+    // A hundred open issues is context, not a to-do list; printing them all
+    // would bury everything above.
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+    const issues = Array.from({ length: 40 }, (_, index) => issue(String(index)));
+
+    const output = renderReport(snapshots, {
+      now: NOW,
+      remote: remoteFor({ "/code/nightorders": { issues } }),
+    });
+
+    expect(output).toContain("40 issues open");
+    expect(output).not.toContain("issue 12");
+  });
+
+  test("gives a repository a heading when its only news is a pull request", () => {
+    // Otherwise the pull request appears under whichever repo happens to be
+    // above it, which is worse than not showing it.
+    const snapshots = [repo({ branches: [] })];
+    const remote = remoteFor({ "/code/nightorders": { pulls: [pull(45)] } });
+
+    const output = renderReport(snapshots, { now: NOW, remote });
+
+    expect(output).toContain("nightorders");
+    expect(output.indexOf("nightorders")).toBeLessThan(output.indexOf("#45"));
+  });
+
+  test("names the repositories the budget did not reach", () => {
+    // Counted rather than named leaves an operator to work out which ones, and
+    // the whole reason the line exists is that a repository nobody looked at
+    // must not be mistaken for one with nothing in it.
+    const snapshots = [
+      repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] }),
+      repo({ name: "oddcircle", path: "/code/oddcircle" }),
+    ];
+    const remote = remoteFor({
+      "/code/nightorders": {},
+      "/code/oddcircle": { skipped: true },
+    });
+
+    const output = renderReport(snapshots, { now: NOW, remote });
+
+    expect(output).toContain("Not checked for pull requests or issues: oddcircle.");
+    expect(output).toContain("nightorders pulls");
+  });
+
+  test("does not claim nothing is in flight when it did not look", () => {
+    // The false statement this prevents: every repository quiet locally, every
+    // remote read skipped, and a report that says "nothing in flight" about
+    // work it never asked about.
+    const snapshots = [repo({ branches: [] })];
+    const remote = remoteFor({ "/code/nightorders": { skipped: true } });
+
+    const output = renderReport(snapshots, { now: NOW, remote });
+
+    expect(output).toContain("that were checked");
+    expect(output).toContain("Not checked for pull requests or issues: nightorders.");
+  });
+
+  test("truncates a long list of skipped repositories", () => {
+    const snapshots = Array.from({ length: 9 }, (_, index) =>
+      repo({ name: `repo-${index}`, path: `/code/${index}`, branches: [branch("x", { ahead: 1 }, DAY)] }),
+    );
+    const remote = remoteFor(
+      Object.fromEntries(snapshots.map(snapshot => [snapshot.path, { skipped: true }])),
+    );
+
+    const output = renderReport(snapshots, { now: NOW, remote });
+
+    expect(output).toContain("and 3 more");
+  });
+
+  test("does not report a failed issue read as an empty tracker", () => {
+    // `issues: []` with issuesRead false is "we could not look", and the
+    // problem line is the only thing standing between that and "there is
+    // nothing there".
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+    const remote = remoteFor({
+      "/code/nightorders": {
+        issuesRead: false,
+        problems: ["could not read issues: gh auth login required"],
+      },
+    });
+
+    const output = renderReport(snapshots, { now: NOW, remote });
+
+    expect(output).toContain("auth login required");
+    expect(output).not.toContain("0 issues");
+  });
+
+  test("surfaces a remote problem rather than dropping it", () => {
+    const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
+    const remote = remoteFor({
+      "/code/nightorders": { problems: ["could not read pull requests: timed out"] },
+    });
+
+    expect(renderReport(snapshots, { now: NOW, remote })).toContain("timed out");
+  });
+
+  test("tells an operator who stayed local what they are not seeing", () => {
+    const output = renderReport([repo({ branches: [branch("main", {}, DAY)] })], { now: NOW });
+
+    expect(output).toContain("--local");
+  });
+});

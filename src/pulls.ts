@@ -60,6 +60,8 @@ export type Runner = (
 export type ReadPullsOptions = {
   runner?: Runner;
   limit?: number;
+  /** Overridden when a caller is spending a shared budget; see `remote.ts`. */
+  timeoutMs?: number;
 };
 
 const GH = "gh";
@@ -120,12 +122,12 @@ const MS_PER_DAY = 86_400_000;
  * has not logged in, must not end a report covering everything else.
  */
 export async function readPulls(path: string, options: ReadPullsOptions = {}): Promise<PullsRead> {
-  const { runner = run, limit = DEFAULT_PULL_LIMIT } = options;
+  const { runner = run, limit = DEFAULT_PULL_LIMIT, timeoutMs = PULL_TIMEOUT_MS } = options;
 
   const result = await runner(
     GH,
     ["pr", "list", "--state", "open", "--limit", String(limit), "--json", FIELDS],
-    { cwd: path, timeoutMs: PULL_TIMEOUT_MS },
+    { cwd: path, timeoutMs },
   );
 
   if (result.notFound) {

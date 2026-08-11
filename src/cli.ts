@@ -28,7 +28,8 @@ import {
 import { openStore, databasePath, type Store } from "./store.js";
 import type { BackendGrant } from "./grant.js";
 import { runOperate, OPERATE_HELP, type OperateOptions } from "./operate.js";
-import { renderReport, renderPulls, renderGraph, type PullGroup } from "./render.js";
+import { renderReport, renderPulls, renderGraph, type PullGroup, type RemoteMap } from "./render.js";
+import { readRemote } from "./remote.js";
 import { DEFAULT_MAX_DEPTH } from "./scan.js";
 import {
   BIN_NAME,
@@ -49,6 +50,8 @@ export type CliOptions = {
   /** Report everything discoverable, ignoring the enrolled list. */
   all: boolean;
   dirty: boolean;
+  /** Skip the network entirely: branches only, no pull requests or issues. */
+  local: boolean;
   help: boolean;
 };
 
@@ -84,6 +87,7 @@ Options
   --depth <n>   directory levels to descend (default: ${DEFAULT_MAX_DEPTH})
   --hidden      include dot-directories, which are skipped by default
   --dirty       also read each working tree for uncommitted files
+  --local       branches only: no network, no pull requests, no issues
   --json        emit a machine-readable envelope instead of a report
   -h, --help    show this
 
@@ -109,6 +113,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
     includeHidden: false,
     all: false,
     dirty: false,
+    local: false,
     help: false,
   };
 
@@ -123,6 +128,8 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       options.all = true;
     } else if (argument === "--dirty") {
       options.dirty = true;
+    } else if (argument === "--local") {
+      options.local = true;
     } else if (argument === "--help" || argument === "-h") {
       options.help = true;
     } else if (argument === "--depth") {
@@ -223,13 +230,30 @@ export async function main(
     scan: { maxDepth: options.maxDepth, includeHidden: options.includeHidden },
     dirty: options.dirty,
   });
+  const remote = await maybeReadRemote(repos, options);
 
   const output = options.json
-    ? renderJson(repos, present, missing, now)
-    : renderReport(repos, { now, roots: present });
+    ? renderJson(repos, present, missing, now, remote)
+    : renderReport(repos, { now, roots: present, ...(remote === undefined ? {} : { remote }) });
 
   write(output);
   return 0;
+}
+
+/**
+ * Pull requests and issues, unless the operator asked to stay local.
+ *
+ * Reading them is the difference between "every branch in flight" and "every
+ * branch, pull request and issue in flight", which is what the milestone asks
+ * for — but it is also the only part of this report that touches the network,
+ * so it is bounded and `--local` turns it off entirely.
+ */
+async function maybeReadRemote(
+  repos: readonly RepoSnapshot[],
+  options: CliOptions,
+): Promise<RemoteMap | undefined> {
+  if (options.local) return undefined;
+  return readRemote(repos.map(repo => ({ path: repo.path, remoteUrl: repo.remoteUrl })));
 }
 
 function configFile(): string {
@@ -249,9 +273,10 @@ async function reportEnrolled(
 ): Promise<number> {
   const { present, missing } = partitionRoots(repos, existsSync);
   const snapshots = await inspectAll(present, { dirty: options.dirty });
+  const remote = await maybeReadRemote(snapshots, options);
 
   if (options.json) {
-    write(renderJson(snapshots, present, missing, now));
+    write(renderJson(snapshots, present, missing, now, remote));
     return 0;
   }
 
@@ -260,7 +285,13 @@ async function reportEnrolled(
     write(`Drop it with \`nightorders repos remove ${missing[0]}\`.`);
     write("");
   }
-  write(renderReport(snapshots, { now, roots: present }));
+  write(
+    renderReport(snapshots, {
+      now,
+      roots: present,
+      ...(remote === undefined ? {} : { remote }),
+    }),
+  );
   return 0;
 }
 
@@ -650,14 +681,44 @@ async function runUnlink(dir: string, yes: boolean, write: Write): Promise<numbe
   return 0;
 }
 
+/**
+ * The machine-readable envelope. Remote state is folded into each repository
+ * rather than sitting in a parallel map, so a consumer never has to join two
+ * collections to answer "what is happening in this repo" — and `remoteRead`
+ * says whether the absence of pull requests means none or means we did not ask.
+ */
 function renderJson(
   repos: readonly RepoSnapshot[],
   roots: readonly string[],
   missingRoots: readonly string[],
   now: Date,
+  remote?: RemoteMap,
 ): string {
+  const withRemote = repos.map(repo => {
+    const state = remote?.get(repo.path);
+    return {
+      ...repo,
+      pulls: state?.pulls ?? [],
+      issues: state?.issues ?? [],
+      // Per repository, not only at the top level. An empty `pulls` means
+      // three different things — none open, not asked, or asked and failed —
+      // and a consumer should not have to join two parts of the envelope to
+      // find out which.
+      pullsRead: state?.pullsRead ?? false,
+      issuesRead: state?.issuesRead ?? false,
+      remoteSkipped: state?.skipped ?? false,
+      remoteProblems: state?.problems ?? [],
+    };
+  });
+
   return JSON.stringify(
-    { scannedAt: now.toISOString(), roots, missingRoots, repos },
+    {
+      scannedAt: now.toISOString(),
+      roots,
+      missingRoots,
+      remoteRead: remote !== undefined,
+      repos: withRemote,
+    },
     null,
     2,
   );

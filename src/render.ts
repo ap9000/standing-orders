@@ -23,13 +23,22 @@ import {
   type Attention,
   type Pull,
 } from "./pulls.js";
+import type { RemoteState } from "./remote.js";
 
 export type ReportOptions = {
   now: Date;
   /** Where the scan looked, used only to make the empty result actionable. */
   roots?: readonly string[];
   maxBranches?: number;
+  /**
+   * Pull requests and issues per repository path. Undefined means they were
+   * never read — which the report says out loud rather than showing zeroes,
+   * because "none" and "did not look" are different answers.
+   */
+  remote?: RemoteMap;
 };
+
+export type RemoteMap = ReadonlyMap<string, RemoteState>;
 
 export const DEFAULT_MAX_BRANCHES = 6;
 
@@ -86,34 +95,169 @@ function isInFlight(branch: Branch): boolean {
 }
 
 export function renderReport(snapshots: readonly RepoSnapshot[], options: ReportOptions): string {
-  const { now, roots = [], maxBranches = DEFAULT_MAX_BRANCHES } = options;
+  const { now, roots = [], maxBranches = DEFAULT_MAX_BRANCHES, remote } = options;
 
   if (snapshots.length === 0) return renderEmpty(roots);
 
   const sections = [...snapshots]
     .sort(byRecency)
-    .map(snapshot => collectRows(snapshot, now, maxBranches))
+    .map(snapshot => composeSection(snapshot, now, maxBranches, remote))
     .filter(rows => rows.length > 0);
 
-  if (sections.length === 0) return renderNothingInFlight(snapshots.length);
+  const totals = countInFlight(snapshots, remote);
+  const withheld = renderWithheld(snapshots, remote);
+
+  // "Nothing in flight" is a claim about what was looked at. If the budget ran
+  // out before some repositories were asked, saying it flatly would be the
+  // silence this tool exists to break — so the withheld line goes here too,
+  // and it is the whole point of this branch rather than a footnote.
+  if (sections.length === 0) {
+    return [...renderNothingInFlight(snapshots.length, remote, withheld.length > 0), ...withheld]
+      .join("\n")
+      .trimEnd();
+  }
 
   const rows = sections.flat();
   const nameWidth = widthOf(rows, row => row.indent.length + row.name.length, MIN_NAME_WIDTH, MAX_NAME_WIDTH);
   const stateWidth = widthOf(rows, row => row.state.length, MIN_STATE_WIDTH, MAX_STATE_WIDTH);
 
-  const inFlight = snapshots.reduce(
-    (total, snapshot) => total + (snapshot.hasTracking ? snapshot.branches.filter(isInFlight).length : 0),
-    0,
-  );
   const unmeasured = snapshots.filter(snapshot => !snapshot.hasTracking).length;
 
   const body = sections.map(section =>
     section.map(row => renderRow(row, nameWidth, stateWidth)).join("\n"),
   );
 
-  return [renderHeader(inFlight, snapshots.length, unmeasured), "", ...body]
+  return [renderHeader(totals, snapshots.length, unmeasured), "", ...body, ...withheld]
     .join("\n")
     .trimEnd();
+}
+
+/**
+ * One repository's block, from both halves.
+ *
+ * The local rows already end in a blank separator, so remote rows are spliced
+ * in ahead of it rather than appended after — otherwise a repository's pull
+ * requests would appear under the gap, reading as though they belonged to the
+ * repository below.
+ */
+function composeSection(
+  snapshot: RepoSnapshot,
+  now: Date,
+  maxBranches: number,
+  remote: RemoteMap | undefined,
+): Row[] {
+  const local = collectRows(snapshot, now, maxBranches);
+  const fromRemote = collectRemoteRows(snapshot, remote, now);
+  if (fromRemote.length === 0) return local;
+
+  if (local.length === 0) {
+    // Nothing local to say, but a pull request waiting is still news, and the
+    // repository needs a heading of its own to be attributed to.
+    return [
+      { indent: "", name: snapshot.name, state: snapshot.head ?? "detached", tail: "" },
+      ...fromRemote,
+      { indent: "", name: "", state: "", tail: "" },
+    ];
+  }
+
+  return [...local.slice(0, -1), ...fromRemote, local[local.length - 1] as Row];
+}
+
+type Totals = { branches: number; pulls: number; issues: number; remoteRead: boolean };
+
+function countInFlight(
+  snapshots: readonly RepoSnapshot[],
+  remote: RemoteMap | undefined,
+): Totals {
+  const branches = snapshots.reduce(
+    (total, snapshot) => total + (snapshot.hasTracking ? snapshot.branches.filter(isInFlight).length : 0),
+    0,
+  );
+
+  let pulls = 0;
+  let issues = 0;
+  for (const snapshot of snapshots) {
+    const state = remote?.get(snapshot.path);
+    if (state === undefined) continue;
+    pulls += state.pulls.length;
+    issues += state.issues.length;
+  }
+
+  return { branches, pulls, issues, remoteRead: remote !== undefined };
+}
+
+/**
+ * Pull requests waiting on somebody, and a count of open issues.
+ *
+ * Pull requests get a row each because a pull request that nobody has looked at
+ * is the single most actionable thing this report can surface — the case that
+ * motivated the tool was two of them sitting green and ignored for two months.
+ * Issues get a count: a hundred open issues is context, not a to-do list, and
+ * printing all of them would bury everything above.
+ */
+function collectRemoteRows(
+  snapshot: RepoSnapshot,
+  remote: RemoteMap | undefined,
+  now: Date,
+): Row[] {
+  const state = remote?.get(snapshot.path);
+  if (state === undefined || state.skipped) return [];
+
+  const rows: Row[] = [];
+
+  const waiting = state.pulls.filter(pull => {
+    const attention = classify(pull);
+    return attention === "human" || attention === "agent";
+  });
+
+  for (const pull of waiting) {
+    rows.push({
+      indent: INDENT,
+      name: `#${pull.number} ${pull.branch}`,
+      state: describePull(pull),
+      tail: formatIdle(pull.updatedAt, now),
+    });
+  }
+
+  if (state.issues.length > 0) {
+    rows.push({
+      indent: INDENT,
+      name: `${plural(state.issues.length, "issue", "issues")} open`,
+      state: "",
+      tail: "",
+    });
+  }
+
+  for (const problem of state.problems) {
+    rows.push({ indent: INDENT, name: `! ${problem}`, state: "", tail: "" });
+  }
+
+  return rows;
+}
+
+/** What the budget did not reach, named rather than silently missing. */
+function renderWithheld(
+  snapshots: readonly RepoSnapshot[],
+  remote: RemoteMap | undefined,
+): string[] {
+  if (remote === undefined) return [];
+  const skipped = snapshots.filter(snapshot => remote.get(snapshot.path)?.skipped === true);
+  if (skipped.length === 0) return [];
+
+  // Named, not counted. "3 repositories were not checked" leaves an operator
+  // to work out which three, and the whole reason this line exists is that a
+  // repository nobody looked at must not be mistaken for one with nothing in
+  // it. Long lists are truncated, because at that point the budget is the
+  // story rather than the names.
+  const shown = skipped.slice(0, MAX_SKIPPED_NAMED).map(snapshot => snapshot.name);
+  const rest = skipped.length - shown.length;
+  const names = rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.join(", ");
+
+  return [
+    "",
+    `Not checked for pull requests or issues: ${names}.`,
+    "The network budget ran out. `nightorders pulls` reads them without one.",
+  ];
 }
 
 function renderRow(row: Row, nameWidth: number, stateWidth: number): string {
@@ -138,10 +282,27 @@ function widthOf(
   return Math.min(max, Math.max(min, widest + GUTTER));
 }
 
-function renderHeader(inFlight: number, repoCount: number, unmeasured: number): string {
-  const branches = plural(inFlight, "branch", "branches");
+/**
+ * The one line the milestone is actually about: every branch, pull request and
+ * issue in flight, counted together.
+ *
+ * Zeroes are dropped rather than printed. "3 branches, 0 pull requests, 0
+ * issues" reads as a system reporting on itself; "3 branches" reads as an
+ * answer. But a zero that was never *looked* for is different from one that
+ * was, which is why the remote counts only appear when the remote read
+ * actually happened.
+ */
+function renderHeader(totals: Totals, repoCount: number, unmeasured: number): string {
+  const parts = [plural(totals.branches, "branch", "branches")];
+  if (totals.remoteRead && totals.pulls > 0) {
+    parts.push(plural(totals.pulls, "pull request", "pull requests"));
+  }
+  if (totals.remoteRead && totals.issues > 0) {
+    parts.push(plural(totals.issues, "issue", "issues"));
+  }
+
   const repos = plural(repoCount, "repository", "repositories");
-  const headline = `${branches} in flight across ${repos}`;
+  const headline = `${joinWords(parts)} in flight across ${repos}`;
 
   // A count that quietly excludes repositories it could not measure is a lie
   // of omission. The remedy is named once here rather than on every repo — and
@@ -157,13 +318,33 @@ function renderHeader(inFlight: number, repoCount: number, unmeasured: number): 
 }
 
 /** Repositories were found and read; none of them had anything outstanding. */
-function renderNothingInFlight(repoCount: number): string {
+function renderNothingInFlight(
+  repoCount: number,
+  remote: RemoteMap | undefined,
+  anyWithheld: boolean,
+): string[] {
   return [
-    `Nothing in flight across ${plural(repoCount, "repository", "repositories")}.`,
-    "Every branch is level with its upstream.",
+    anyWithheld
+      ? `Nothing in flight across the ${plural(repoCount, "repository", "repositories")} that were checked.`
+      : `Nothing in flight across ${plural(repoCount, "repository", "repositories")}.`,
+    remote === undefined
+      ? "Every branch is level with its upstream."
+      : "Every branch is level with its upstream, and nothing is waiting on a person.",
     "",
     "Uncommitted work is not counted here — add --dirty to read working trees.",
-  ].join("\n");
+    // Said in addition to, not instead of: an operator who ran --local has two
+    // things missing from this answer, and hearing about one of them would
+    // leave them believing the other was checked.
+    ...(remote === undefined
+      ? ["Pull requests and issues were not read — drop --local to include them."]
+      : []),
+  ];
+}
+
+/** "a, b and c" — the report is prose at this point, not a field list. */
+function joinWords(parts: readonly string[]): string {
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
 function renderEmpty(roots: readonly string[]): string {
@@ -175,6 +356,9 @@ function renderEmpty(roots: readonly string[]): string {
     "`nightorders --depth 8`. Nothing has been written or configured.",
   ].join("\n");
 }
+
+/** Past this, the budget is the story rather than which repositories missed out. */
+const MAX_SKIPPED_NAMED = 6;
 
 /** Long enough to catch work you have put down, short enough to exclude archaeology. */
 const RECENT_WINDOW = 30 * DAY;

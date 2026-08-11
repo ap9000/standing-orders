@@ -269,3 +269,70 @@ describe("graph command", () => {
     expect(() => JSON.parse(lines.join("\n"))).not.toThrow();
   });
 });
+
+describe("the unified report envelope", () => {
+  let base: string;
+
+  beforeAll(async () => {
+    base = await mkdtemp(join(tmpdir(), "nightorders-envelope-"));
+    await mkdir(join(base, "alpha", ".git"), { recursive: true });
+  });
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("--local reads nothing from the network and says so in the envelope", async () => {
+    const lines: string[] = [];
+
+    const code = await main(["--json", "--local", base], line => lines.push(line));
+
+    expect(code).toBe(0);
+    const payload = JSON.parse(lines.join("\n"));
+    expect(payload.remoteRead).toBe(false);
+    for (const repo of payload.repos) {
+      // Empty arrays beside `false` flags: nothing was found because nothing
+      // was asked, and a consumer can tell that from a genuine zero.
+      expect(repo.pulls).toEqual([]);
+      expect(repo.pullsRead).toBe(false);
+      expect(repo.issuesRead).toBe(false);
+    }
+  });
+
+  test("carries the remote fields on every repository", async () => {
+    // Per repository rather than only at the top level: an empty `pulls` means
+    // three different things and a consumer should not have to join two parts
+    // of the envelope to find out which.
+    const lines: string[] = [];
+
+    await main(["--json", "--local", base], line => lines.push(line));
+
+    const [repo] = JSON.parse(lines.join("\n")).repos;
+    for (const field of ["pulls", "issues", "pullsRead", "issuesRead", "remoteSkipped", "remoteProblems"]) {
+      expect(repo).toHaveProperty(field);
+    }
+  });
+
+  test("keeps the fields the old envelope had", async () => {
+    // Additive, so a consumer reading the previous shape still works.
+    const lines: string[] = [];
+
+    await main(["--json", "--local", base], line => lines.push(line));
+
+    const payload = JSON.parse(lines.join("\n"));
+    expect(payload).toHaveProperty("scannedAt");
+    expect(payload).toHaveProperty("roots");
+    expect(payload).toHaveProperty("missingRoots");
+    expect(payload.repos[0]).toHaveProperty("branches");
+    expect(payload.repos[0]).toHaveProperty("path");
+  });
+
+  test("--local is a different question from --dirty and --all", async () => {
+    const parsed = parseArgs(["--local"]);
+    if ("error" in parsed) throw new Error(parsed.error);
+
+    expect(parsed.options.local).toBe(true);
+    expect(parsed.options.dirty).toBe(false);
+    expect(parsed.options.all).toBe(false);
+  });
+});

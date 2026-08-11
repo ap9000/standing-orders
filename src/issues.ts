@@ -52,15 +52,22 @@ export type IssuesOptions = {
   repo: string;
   runner?: Runner;
   limit?: number;
+  /** Overridden when a caller is spending a shared budget; see `remote.ts`. */
+  timeoutMs?: number;
   /** Whether `gh` is new enough for the dependency fields; see `graph.ts`. */
   deps?: Deps;
 };
 
 export function githubIssues(options: IssuesOptions): GraphBackend {
-  const { repo, runner = run, limit = DEFAULT_LIMIT, deps = "unverified" } = options;
+  const {
+    repo,
+    runner = run,
+    limit = DEFAULT_LIMIT,
+    timeoutMs = ISSUE_TIMEOUT_MS,
+    deps = "unverified",
+  } = options;
 
-  const call = (args: readonly string[]) =>
-    runner(GH, args, { cwd: repo, timeoutMs: ISSUE_TIMEOUT_MS });
+  const call = (args: readonly string[]) => runner(GH, args, { cwd: repo, timeoutMs });
 
   return {
     name: "github-issues",
