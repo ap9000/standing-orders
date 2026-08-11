@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseArgs, main, isDirectInvocation } from "./cli.js";
+import { parseArgs, main, isDirectInvocation, partitionRoots } from "./cli.js";
 
 const options = (argv: string[]) => {
   const parsed = parseArgs(argv);
@@ -60,6 +60,37 @@ describe("parseArgs", () => {
   test("names an unknown flag instead of ignoring it", () => {
     // Silently ignoring a typo'd flag is how someone concludes the tool is broken
     expect(error(["--jsonn"])).toContain("--jsonn");
+  });
+});
+
+describe("missing paths", () => {
+  test("splits roots into those that exist and those that do not", () => {
+    const { present, missing } = partitionRoots(["/here", "/gone"], path => path === "/here");
+
+    expect(present).toEqual(["/here"]);
+    expect(missing).toEqual(["/gone"]);
+  });
+
+  test("calls a typo a typo instead of reporting an empty search", async () => {
+    const lines: string[] = [];
+
+    const code = await main(["/Users/nobody/Documentd"], line => lines.push(line));
+
+    expect(code).toBe(2);
+    expect(lines.join("\n")).toContain("does not exist");
+    expect(lines.join("\n")).not.toContain("No git repositories found");
+  });
+
+  test("keeps JSON parseable when a path is missing", async () => {
+    // A warning printed above the envelope would break every consumer of it
+    const lines: string[] = [];
+
+    const code = await main(["--json", "/Users/nobody/Documentd"], line => lines.push(line));
+
+    expect(code).toBe(2);
+    const payload = JSON.parse(lines.join("\n"));
+    expect(payload.missingRoots).toEqual(["/Users/nobody/Documentd"]);
+    expect(payload.repos).toEqual([]);
   });
 });
 

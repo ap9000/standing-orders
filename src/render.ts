@@ -161,21 +161,42 @@ function renderEmpty(roots: readonly string[]): string {
   ].join("\n");
 }
 
+/** Long enough to catch work you have put down, short enough to exclude archaeology. */
+const RECENT_WINDOW = 30 * DAY;
+
 /**
  * Which branches to show. With tracking, the ones that have diverged. Without
- * it, the most recent — filtering on a signal that was never computed would
- * discard every branch and leave the repository represented by a complaint.
+ * it, recency is the only signal left — filtering on ahead/behind that was
+ * never computed would discard every branch and leave the repository
+ * represented by a complaint, and listing all of them buries the report under
+ * whichever repo happens to have the most abandoned branches.
  */
-function selectBranches(snapshot: RepoSnapshot): Branch[] {
+function selectBranches(snapshot: RepoSnapshot, now: Date): { shown: Branch[]; note: string | null } {
   const byRecent = [...snapshot.branches].sort(byCommittedAtDesc);
-  return snapshot.hasTracking ? byRecent.filter(isInFlight) : byRecent;
+  if (snapshot.hasTracking) return { shown: byRecent.filter(isInFlight), note: null };
+
+  const recent = byRecent.filter(branch => isWithinWindow(branch.committedAt, now));
+  if (recent.length > 0) return { shown: recent, note: null };
+
+  const count = plural(snapshot.branches.length, "branch", "branches");
+  return { shown: [], note: `${count}, none touched in 30 days` };
+}
+
+function isWithinWindow(iso: string, now: Date): boolean {
+  const then = Date.parse(iso);
+  return !Number.isNaN(then) && now.getTime() - then < RECENT_WINDOW;
 }
 
 function collectRows(snapshot: RepoSnapshot, now: Date, maxBranches: number): Row[] {
-  const selected = selectBranches(snapshot);
+  const { shown: selected, note } = selectBranches(snapshot, now);
 
   // A quiet, clean repo with nothing outstanding is not worth a line.
-  if (selected.length === 0 && !snapshot.dirtyFiles && snapshot.problems.length === 0) {
+  if (
+    selected.length === 0 &&
+    note === null &&
+    !snapshot.dirtyFiles &&
+    snapshot.problems.length === 0
+  ) {
     return [];
   }
 
@@ -197,6 +218,7 @@ function collectRows(snapshot: RepoSnapshot, now: Date, maxBranches: number): Ro
     })),
   ];
 
+  if (note !== null) rows.push({ indent: INDENT, name: note, state: "", tail: "" });
   if (withheld > 0) {
     rows.push({ indent: INDENT, name: `… and ${withheld} more`, state: "", tail: "" });
   }

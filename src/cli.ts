@@ -133,17 +133,45 @@ export async function main(
   }
 
   const now = new Date();
-  const repos = await discover(options.roots, {
+  const { present, missing } = partitionRoots(options.roots, existsSync);
+
+  // A path that does not exist is a typo, not an empty search, and saying
+  // "no repositories found" about it would be answering a question we never
+  // asked. Warnings go inside the envelope in JSON mode so it stays parseable.
+  if (present.length === 0) {
+    write(options.json ? renderJson([], options.roots, missing, now) : describeMissing(missing));
+    return USAGE_EXIT;
+  }
+  if (missing.length > 0 && !options.json) {
+    write(describeMissing(missing));
+    write("");
+  }
+
+  const repos = await discover(present, {
     scan: { maxDepth: options.maxDepth, includeHidden: options.includeHidden },
     dirty: options.dirty,
   });
 
   const output = options.json
-    ? renderJson(repos, options.roots, now)
-    : renderReport(repos, { now, roots: options.roots });
+    ? renderJson(repos, present, missing, now)
+    : renderReport(repos, { now, roots: present });
 
   write(output);
   return 0;
+}
+
+export function partitionRoots(
+  roots: readonly string[],
+  exists: (path: string) => boolean,
+): { present: string[]; missing: string[] } {
+  return {
+    present: roots.filter(exists),
+    missing: roots.filter(root => !exists(root)),
+  };
+}
+
+function describeMissing(missing: readonly string[]): string {
+  return missing.map(root => `${root} does not exist — check the path.`).join("\n");
 }
 
 export type LinkArgs = { to?: string; yes: boolean };
@@ -285,8 +313,17 @@ async function runUnlink(dir: string, yes: boolean, write: Write): Promise<numbe
   return 0;
 }
 
-function renderJson(repos: readonly RepoSnapshot[], roots: readonly string[], now: Date): string {
-  return JSON.stringify({ scannedAt: now.toISOString(), roots, repos }, null, 2);
+function renderJson(
+  repos: readonly RepoSnapshot[],
+  roots: readonly string[],
+  missingRoots: readonly string[],
+  now: Date,
+): string {
+  return JSON.stringify(
+    { scannedAt: now.toISOString(), roots, missingRoots, repos },
+    null,
+    2,
+  );
 }
 
 /**

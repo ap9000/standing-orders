@@ -177,6 +177,18 @@ describe("renderReport", () => {
     expect(output).toContain("2d ago");
   });
 
+  test("summarises instead of listing when every branch is old", () => {
+    // One repo full of abandoned backup/* branches should not bury the report
+    const branches = Array.from({ length: 18 }, (_, index) =>
+      branch(`backup/2026-03-0${index % 9}`, {}, 150 * DAY),
+    );
+
+    const output = renderReport([repo({ hasTracking: false, branches })], { now: NOW });
+
+    expect(output).toContain("18 branches, none touched in 30 days");
+    expect(output).not.toContain("backup/");
+  });
+
   test("says when a repository is shown by recency rather than by state", () => {
     const snapshots = [
       repo({ hasTracking: false, branches: [branch("main", {}, DAY)] }),
