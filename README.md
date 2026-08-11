@@ -78,7 +78,29 @@ Four properties make that loop safe to run unattended.
 
 **`fenced` means stop.** A runner whose machine slept, whose lease expired, and whose task was reclaimed will be told exactly that at its next heartbeat — long before it finishes work nobody will accept. Dispatch is a compare-and-swap on `(task, lease_generation)`, enforced by the database rather than by anything the caller remembers to check.
 
-**Next in M0:** graph adapters that read and write rather than only count, and `BackendGrant` with the `enroll` command that creates one — the record that has to exist before any builder writes to a repository.
+## Writing to a tracker you already have
+
+Detection tells you what is there; a grant is what lets anything be written to it.
+
+```sh
+nightorders enroll . --backend github-issues --paths owner/name   # shows the terms
+nightorders enroll . --backend github-issues --paths owner/name --yes
+nightorders grants          # what has been granted, and to what
+nightorders revoke .        # take it back
+
+nightorders ready --backend github-issues     # reads need no grant
+nightorders task add "..." --backend beads    # writes do
+```
+
+The grant is not a boolean. It records which paths or repositories may be touched, which mutation classes are allowed, which tasks are covered, which credential scope applies, and whether the writes will turn up in `git status` — that last one asked of `git check-ignore` rather than assumed. Two defaults carry weight: only tasks Night Orders created or was given, because enrolling a repo with four hundred open issues is not volunteering all four hundred; and `close` is withheld, because closing what somebody else filed is not the same act as transitioning your own task.
+
+Every backend goes through the same contract, and the authorization wraps it rather than living inside each adapter — an adapter written later inherits the check instead of having to remember it.
+
+**Edges are never emulated.** beads has native dependencies and they are used. This GitHub adapter has not confirmed the dependency endpoint against a live repository, so `addEdge` refuses rather than storing a graph only Night Orders can see — one that would read as ready to every human on the repo. That is the design's rule, and the refusal says so.
+
+The beads adapter is built to beads' own documentation and exercised against a stubbed runner; it has never run against a real installation, because `bd` was not present on the machine it was written on. Commands whose flags could not be established — a general status update, in particular — refuse rather than guess.
+
+**Next in M0:** issues in the default report, and a materialised snapshot so a scheduler can read an external backend without a network call in its hot path.
 
 **It survives the night, cheaply.** Work dispatches itself from a dependency graph, fails safely, and parks a *typed* decision — recap, options with reversibility, a recommendation, evidence — instead of guessing. Parking never stalls the loop; the blocked task steps aside and eleven others keep going.
 

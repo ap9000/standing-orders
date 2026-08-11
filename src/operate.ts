@@ -38,6 +38,9 @@ import {
   DEFAULT_MUTATIONS,
   type MutationClass,
 } from "./grant.js";
+import { builtIn, guarded, type GraphBackend } from "./backend.js";
+import { beads } from "./beads.js";
+import { githubIssues } from "./issues.js";
 
 export type Write = (line: string) => void;
 
@@ -169,7 +172,7 @@ async function dispatch(
 ): Promise<number> {
   switch (command) {
     case "ready":
-      return readyCommand(context);
+      return readyCommand(flags, context);
     case "task":
       return taskCommand(positional, flags, context);
     case "claim":
@@ -198,6 +201,26 @@ async function dispatch(
   }
 }
 
+/**
+ * The backend a command is talking to, already wrapped in its guard.
+ *
+ * Constructed here rather than at each call site so that no command can
+ * accidentally reach an adapter that has not been through `guarded` — the
+ * unguarded constructors exist for tests and for this function, and for
+ * nothing else.
+ */
+function openBackend(name: string, store: Store, repo: string): GraphBackend | null {
+  if (name === BUILT_IN) return builtIn(store);
+  if (name === "beads") return guarded(beads({ repo }), { store, repo });
+  if (name === "github-issues") return guarded(githubIssues({ repo }), { store, repo });
+  return null;
+}
+
+/** The repository a backend command applies to, normalised like the grant is. */
+function repoFrom(flags: Map<string, string | true>): string {
+  return resolve(text(flags, "repo") ?? process.cwd());
+}
+
 // ---- the dispatch loop ----------------------------------------------------
 
 /**
@@ -208,8 +231,41 @@ async function dispatch(
  * parsing anything, and the alternative is every scheduler re-implementing
  * that check against an empty array.
  */
-function readyCommand(context: Context): number {
+async function readyCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
   const { store, write, json, now } = context;
+  const backendName = text(flags, "backend") ?? BUILT_IN;
+
+  // An external tracker is asked directly. This is a network or subprocess
+  // round trip and is deliberately not somewhere a scheduler should sit in a
+  // tight loop — §4 wants a materialised snapshot for that, which belongs with
+  // the scheduler rather than here.
+  if (backendName !== BUILT_IN) {
+    const repo = repoFrom(flags);
+    const backend = openBackend(backendName, store, repo);
+    if (backend === null) {
+      return fail(write, json, "ready", "usage", `no backend \`${backendName}\``, EXIT.usage);
+    }
+
+    const result = await backend.listReady();
+    if (!result.ok) return fail(write, json, "ready", result.reason, result.message, EXIT.failed);
+
+    const tasks = result.value;
+    if (json) {
+      write(JSON.stringify({ ok: tasks.length > 0, command: "ready", backend: backendName, count: tasks.length, tasks }, null, 2));
+      return tasks.length > 0 ? EXIT.ok : EXIT.refused;
+    }
+    if (tasks.length === 0) {
+      write(`Nothing is ready in ${backendName}.`);
+      return EXIT.refused;
+    }
+    write(`${tasks.length} ready in ${backendName}:`);
+    for (const task of tasks) write(`  ${task.id}  ${task.title}`);
+    return EXIT.ok;
+  }
+
   const ready = store.listReady(now);
 
   if (json) {
@@ -530,7 +586,7 @@ function taskCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): number | Promise<number> {
   const [action, ...rest] = positional;
 
   // `task` on its own is somebody asking what this can do, not a mistake.
@@ -566,14 +622,38 @@ function taskCommand(
   }
 }
 
-function addTask(
+async function addTask(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, now } = context;
   const title = positional.join(" ").trim();
   if (title === "") return fail(write, json, "task add", "usage", "a task needs a title", EXIT.usage);
+
+  const backendName = text(flags, "backend") ?? BUILT_IN;
+  if (backendName !== BUILT_IN) {
+    const repo = repoFrom(flags);
+    const backend = openBackend(backendName, store, repo);
+    if (backend === null) {
+      return fail(write, json, "task add", "usage", `no backend \`${backendName}\``, EXIT.usage);
+    }
+
+    const created = await backend.create({ title });
+    if (!created.ok) {
+      // A denial is a refusal, not a breakage: the tool worked exactly as
+      // asked and the answer is that permission was never given.
+      const code = created.reason === "denied" ? EXIT.refused : EXIT.failed;
+      return fail(write, json, "task add", created.reason, created.message, code);
+    }
+
+    // Created through Night Orders, so it is ours — recorded here rather than
+    // asserted later, which is what the grant's default selector rests on.
+    store.refFor(backendName, created.value, "ours");
+    return succeed(write, json, "task add", { id: created.value, backend: backendName }, () => [
+      `Filed ${created.value} in ${backendName}.`,
+    ]);
+  }
 
   const id = text(flags, "id") ?? slug(title, now);
 
@@ -652,11 +732,11 @@ function showTask(positional: readonly string[], context: Context): number {
   ]);
 }
 
-function stateTask(
+async function stateTask(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, now } = context;
   const [id, state] = positional;
   if (id === undefined || state === undefined) {
@@ -664,6 +744,24 @@ function stateTask(
   }
   if (!STATES.includes(state as TaskState)) {
     return fail(write, json, "task state", "usage", `state is one of ${STATES.join(", ")}`, EXIT.usage);
+  }
+
+  const backendName = text(flags, "backend") ?? BUILT_IN;
+  if (backendName !== BUILT_IN) {
+    const repo = repoFrom(flags);
+    const backend = openBackend(backendName, store, repo);
+    if (backend === null) {
+      return fail(write, json, "task state", "usage", `no backend \`${backendName}\``, EXIT.usage);
+    }
+
+    const moved = await backend.setState(id, state as TaskState);
+    if (!moved.ok) {
+      const code = moved.reason === "denied" || moved.reason === "unsupported" ? EXIT.refused : EXIT.failed;
+      return fail(write, json, "task state", moved.reason, moved.message, code);
+    }
+    return succeed(write, json, "task state", { id, state, backend: backendName }, () => [
+      `${id} is now ${state} in ${backendName}.`,
+    ]);
   }
 
   const moved = store.setTaskState(id, state as TaskState, now, mutationFrom(flags, now));
