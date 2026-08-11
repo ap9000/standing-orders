@@ -6,7 +6,7 @@
     "doc": "docs"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "test": "vitest run",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit"

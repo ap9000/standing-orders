@@ -418,11 +418,6 @@ async function runLinkCommand(
   }
 
   const { to, yes } = parsed.args;
-  const resolved = binSource === undefined ? resolveBinSource() : { source: binSource };
-  if ("error" in resolved) {
-    write(resolved.error);
-    return USAGE_EXIT;
-  }
 
   const choice = chooseTarget({
     pathEntries: (process.env["PATH"] ?? "").split(delimiter).filter(Boolean),
@@ -430,9 +425,17 @@ async function runLinkCommand(
     ...(to === undefined ? {} : { override: to }),
   });
 
-  return command === "link"
-    ? runLink(resolved.source, choice, yes, write)
-    : runUnlink(choice.dir, yes, write);
+  // Only `link` needs something to point at. Demanding a build before you are
+  // allowed to uninstall would strand anyone whose dist/ has been cleaned.
+  if (command === "unlink") return runUnlink(choice.dir, yes, write);
+
+  const resolved = binSource === undefined ? resolveBinSource() : { source: binSource };
+  if ("error" in resolved) {
+    write(resolved.error);
+    return USAGE_EXIT;
+  }
+
+  return runLink(resolved.source, choice, yes, write);
 }
 
 /**
@@ -488,10 +491,26 @@ async function runLink(
   write(`Linked. \`${BIN_NAME}\` is now a command.`);
   if (!choice.onPath) {
     write("");
-    write(`${choice.dir} is not on your PATH. Add this to your shell profile:`);
-    write(`  export PATH="${choice.dir}:$PATH"`);
+    write(`${choice.dir} is not on your PATH. ${describePathFix(choice.dir)}`);
   }
   return 0;
+}
+
+/**
+ * The instruction has to be one the operator can paste into the shell they are
+ * actually in. `export` is meaningless in PowerShell, and the separator between
+ * PATH entries is not `:` everywhere.
+ */
+function describePathFix(dir: string): string {
+  if (process.platform === "win32") {
+    return [
+      "Add it for this session:",
+      `  $env:PATH = "${dir}${delimiter}$env:PATH"`,
+      "or permanently, for your user only:",
+      `  setx PATH "${dir}${delimiter}%PATH%"`,
+    ].join("\n");
+  }
+  return ["Add this to your shell profile:", `  export PATH="${dir}${delimiter}$PATH"`].join("\n");
 }
 
 async function runUnlink(dir: string, yes: boolean, write: Write): Promise<number> {

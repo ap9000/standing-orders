@@ -26,7 +26,12 @@ describe("parseArgs", () => {
   });
 
   test("resolves positional paths against the working directory", () => {
-    expect(options(["src", "/tmp"]).roots).toEqual([resolve(process.cwd(), "src"), "/tmp"]);
+    // Compared against resolve() rather than the literals, because an absolute
+    // POSIX path is not absolute on Windows: "/tmp" resolves onto the current
+    // drive. What is being asserted is that paths are resolved, not how.
+    const absolute = resolve(tmpdir());
+
+    expect(options(["src", absolute]).roots).toEqual([resolve(process.cwd(), "src"), absolute]);
   });
 
   test("reads --depth", () => {
@@ -99,12 +104,13 @@ describe("missing paths", () => {
   test("keeps JSON parseable when a path is missing", async () => {
     // A warning printed above the envelope would break every consumer of it
     const lines: string[] = [];
+    const absent = join(tmpdir(), "nightorders-nobody", "Documentd");
 
-    const code = await main(["--json", "/Users/nobody/Documentd"], line => lines.push(line));
+    const code = await main(["--json", absent], line => lines.push(line));
 
     expect(code).toBe(2);
     const payload = JSON.parse(lines.join("\n"));
-    expect(payload.missingRoots).toEqual(["/Users/nobody/Documentd"]);
+    expect(payload.missingRoots).toEqual([resolve(absent)]);
     expect(payload.repos).toEqual([]);
   });
 });
@@ -141,21 +147,21 @@ describe("isDirectInvocation", () => {
 });
 
 describe("link command", () => {
+  const NEVER_CREATED = join(tmpdir(), "nightorders-never-created");
+
   test("changes nothing without --yes", async () => {
     // The tool refuses to install things on your behalf; that has to include
     // installing itself. Showing the plan is the whole point.
     const lines: string[] = [];
 
-    const code = await main(
-      ["link", "--to", "/tmp/nightorders-never-created"],
-      line => lines.push(line),
-      { binSource: process.execPath },
-    );
+    const code = await main(["link", "--to", NEVER_CREATED], line => lines.push(line), {
+      binSource: process.execPath,
+    });
 
     expect(code).toBe(0);
     const output = lines.join("\n");
     expect(output).toContain("Nothing has been written");
-    expect(existsSync("/tmp/nightorders-never-created")).toBe(false);
+    expect(existsSync(NEVER_CREATED)).toBe(false);
   });
 
   test("rejects a --to with no directory", async () => {
@@ -168,11 +174,12 @@ describe("link command", () => {
   });
 
   test("says nothing to remove when the link is not there", async () => {
+    // Deliberately no binSource: `unlink` has nothing to point at, so it must
+    // not go looking for a build. Requiring one would strand anyone whose
+    // dist/ has been cleaned since they linked.
     const lines: string[] = [];
 
-    const code = await main(["unlink", "--to", "/tmp/nightorders-never-created"], line =>
-      lines.push(line),
-    );
+    const code = await main(["unlink", "--to", NEVER_CREATED], line => lines.push(line));
 
     expect(code).toBe(0);
     expect(lines.join("\n")).toContain("Nothing to remove");
