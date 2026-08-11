@@ -1,6 +1,7 @@
 import { describe, test, expect } from "vitest";
-import { formatAge, formatTrack, renderReport } from "./render.js";
+import { formatAge, formatTrack, renderReport, renderGraph } from "./render.js";
 import type { RepoSnapshot } from "./discover.js";
+import type { Detection } from "./graph.js";
 
 const NOW = new Date("2026-08-10T12:00:00Z");
 const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
@@ -205,5 +206,107 @@ describe("renderReport", () => {
     const output = renderReport(snapshots, { now: NOW });
 
     expect(output).toContain("could not read branches");
+  });
+});
+
+/** Detections are verbose; build them from a sensible default. */
+const detection = (over: Partial<Detection> & Pick<Detection, "kind">): Detection => ({
+  label: over.kind,
+  repos: ["/code/thing"],
+  count: { of: "ready", value: 4 },
+  deps: "native",
+  runtime: { state: "ok", version: "1.0.0" },
+  dispatchable: true,
+  problems: [],
+  ...over,
+});
+
+describe("renderGraph", () => {
+  test("marks only the suggested backend, and says nothing is enrolled", () => {
+    // The one thing this report must never read as is a list of things
+    // already switched on.
+    const output = renderGraph([
+      detection({ kind: "beads", label: "beads" }),
+      detection({
+        kind: "github-issues",
+        label: "GitHub Issues",
+        count: { of: "open", value: 112 },
+        dispatchable: false,
+      }),
+    ]);
+
+    expect(output).toContain("▸ beads");
+    expect(output).not.toContain("▸ GitHub Issues");
+    expect(output).toContain("Nothing is enrolled, and detection grants nothing.");
+  });
+
+  test("says a recommended backend is not schedulable when it is not", () => {
+    const output = renderGraph([
+      detection({
+        kind: "beads",
+        label: "beads",
+        count: null,
+        dispatchable: false,
+        runtime: { state: "missing", binary: "bd" },
+      }),
+    ]);
+
+    expect(output).toContain("bd not installed");
+    expect(output).toContain("Nothing here could be scheduled from it tonight");
+    // It cannot be read either, so it must not claim otherwise.
+    expect(output).not.toContain("It can be read");
+  });
+
+  test("says a count is unknown rather than leaving the column blank", () => {
+    // An empty space where a number goes reads as zero, which is a different
+    // and much more confident claim than "we could not count".
+    const output = renderGraph([detection({ kind: "beads", label: "beads", count: null })]);
+
+    expect(output).toContain("count unknown");
+  });
+
+  test("names both trackers rather than picking one", () => {
+    const output = renderGraph([
+      detection({ kind: "beads", label: "beads" }),
+      detection({
+        kind: "backlog-md",
+        label: "Backlog.md",
+        deps: "unverified",
+        dispatchable: false,
+      }),
+    ]);
+
+    expect(output).toContain("beads and Backlog.md are both populated");
+    expect(output).not.toContain("▸");
+  });
+
+  test("reports an outdated gh as a version problem, not a missing one", () => {
+    const output = renderGraph([
+      detection({
+        kind: "github-issues",
+        label: "GitHub Issues",
+        count: { of: "open", value: 3 },
+        dispatchable: false,
+        runtime: { state: "outdated", version: "2.67.0", needs: "2.94.0" },
+      }),
+    ]);
+
+    expect(output).toContain("2.67.0 too old, needs 2.94.0");
+  });
+
+  test("says what it looked for when it found nothing", () => {
+    // An empty result has to be distinguishable from not having looked.
+    const output = renderGraph([]);
+
+    expect(output).toContain(".beads/");
+    expect(output).toContain("Nothing was installed or created");
+  });
+
+  test("surfaces problems instead of dropping them", () => {
+    const output = renderGraph([
+      detection({ kind: "beads", label: "beads", problems: ["/code/thing: database is locked"] }),
+    ]);
+
+    expect(output).toContain("! /code/thing: database is locked");
   });
 });

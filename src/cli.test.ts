@@ -238,3 +238,34 @@ describe("main", () => {
     expect(lines.join("\n")).toContain("repositor");
   });
 });
+
+describe("graph command", () => {
+  test("rejects an option it does not have", async () => {
+    const lines: string[] = [];
+
+    const code = await main(["graph", "--deep"], line => lines.push(line));
+
+    expect(code).toBe(2);
+    expect(lines.join("\n")).toContain("--deep");
+  });
+
+  test("says a named path does not exist rather than reporting nothing found", async () => {
+    // Same rule as the main report: a typo is not an empty search.
+    const lines: string[] = [];
+    const absent = join(tmpdir(), "nightorders-no-such-repo");
+
+    const code = await main(["graph", absent], line => lines.push(line));
+
+    expect(code).toBe(2);
+    expect(lines.join("\n")).toContain("does not exist");
+  });
+
+  test("emits JSON when asked, for the half of the audience that is an agent", async () => {
+    const lines: string[] = [];
+
+    const code = await main(["graph", "--json", tmpdir()], line => lines.push(line));
+
+    expect(code).toBe(0);
+    expect(() => JSON.parse(lines.join("\n"))).not.toThrow();
+  });
+});

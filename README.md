@@ -37,7 +37,23 @@ No agent has run. Nothing has been configured, written, or installed. Every othe
 
 Reads are priced before they are made. Listing refs is O(refs) and finishes in milliseconds; `git status` is O(working tree) and was measured at over two minutes on a real repo, so it is off by default behind `--dirty`. Computing ahead/behind walks history — 22s cold on a 304MB repo — so it is bounded at 5s and degrades to a branch list that says what it withheld. Every call goes through `--no-optional-locks`, so a scan never takes the index lock from an editor you have open.
 
-**Next in M0:** PRs and issues via `gh`, and work-graph detection — beads, GitHub Issues, or a built-in store, chosen by looking rather than asking. Detection is not authorization, and **nothing is ever installed for you**: `bd init` stages files and can create a commit, so Night Orders prints the command and its side effects and lets you run it.
+`nightorders pulls` answers the narrower question of what is waiting on a person, and `nightorders graph` says which work graph is already here:
+
+```
+Work graph — detected in your repos
+
+▸ beads          2 repos · 47 ready · native deps · runtime ok (1.4.0)
+  GitHub Issues  112 open · native deps · 2.67.0 too old, needs 2.94.0
+
+Suggested: beads — the only work graph in your repos, and its runtime answers.
+Nothing is enrolled, and detection grants nothing.
+```
+
+Backends are chosen by looking rather than asking, but **detection is not authorization** — finding a populated tracker says it exists, not that anyone wants an agent scheduling or closing what is in it. Data and runtime are detected separately, so a tracker whose binary is missing is reported as real work this machine cannot dispatch, which is a visible gap at 9am instead of a dead loop at 3am. Two populated trackers means neither is chosen: task count is not authority, and the biggest one may be the abandoned one. Where a fact is not established — Backlog.md's dependency edges, for instance — it is marked unverified and **fails closed**, because a private dependency graph other tools cannot see is shadow data.
+
+**Nothing is ever installed for you.** `bd init` stages files, edits agent integrations, and can create a commit, so Night Orders prints the command and its side effects and lets you run it.
+
+**Next in M0:** the operational overlay — `TaskRef`, `BackendGrant`, and the `Claim` lease with a fencing generation, which is the record that makes dispatch a compare-and-swap rather than a race — plus the built-in local task store as a fallback, and issues in the default report.
 
 **It survives the night, cheaply.** Work dispatches itself from a dependency graph, fails safely, and parks a *typed* decision — recap, options with reversibility, a recommendation, evidence — instead of guessing. Parking never stalls the loop; the blocked task steps aside and eleven others keep going.
 

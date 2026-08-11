@@ -8,6 +8,7 @@
 
 import type { RepoSnapshot } from "./discover.js";
 import type { Branch, TrackingState } from "./git.js";
+import { chooseBackend, LABELS as GRAPH_LABELS, type Detection } from "./graph.js";
 import {
   classify,
   describe as describePull,
@@ -420,4 +421,108 @@ function renderQuiet(entries: readonly PullEntry[]): string[] {
 
 function renderProblems(problems: readonly string[]): string[] {
   return problems.length === 0 ? [] : ["", ...problems.map(problem => `! ${problem}`)];
+}
+
+/**
+ * What work graph is already here.
+ *
+ * The recommended backend is marked with a pointer and nothing else is, because
+ * the one thing this report must not read as is a menu of things already
+ * switched on. Every line ends by saying what is *not* authorized, since
+ * detection is not authorization and a report that omitted that would be
+ * inviting exactly the wrong conclusion.
+ */
+export function renderGraph(detections: readonly Detection[]): string {
+  if (detections.length === 0) {
+    return [
+      "No work graph found in your repositories.",
+      "",
+      "Night Orders looked for `.beads/`, `backlog.md`, and open GitHub Issues.",
+      "Nothing was installed or created — a tracker is yours to set up.",
+    ].join("\n");
+  }
+
+  const choice = chooseBackend(detections);
+  const chosen = choice.action === "recommend" ? choice.kind : null;
+
+  const rows = detections.map(detection => ({
+    marker: detection.kind === chosen ? "▸ " : "  ",
+    label: detection.label,
+    facts: describeDetection(detection),
+  }));
+  const labelWidth = Math.max(...rows.map(row => row.label.length));
+
+  const problems = detections.flatMap(detection => detection.problems);
+
+  return [
+    "Work graph — detected in your repos",
+    "",
+    ...rows.map(row => `${row.marker}${row.label.padEnd(labelWidth)}  ${row.facts}`),
+    "",
+    ...describeChoice(choice),
+    ...renderProblems(problems),
+  ]
+    .join("\n")
+    .trimEnd();
+}
+
+/** The middle column: where it is, how much is in it, and whether it could run. */
+function describeDetection(detection: Detection): string {
+  const parts: string[] = [];
+
+  if (detection.repos.length > 0) {
+    parts.push(`${plural(detection.repos.length, "repo", "repos")}`);
+  }
+  // A row with no number at all reads as zero. Absence of a count is its own
+  // fact and has to be said out loud.
+  parts.push(
+    detection.count === null
+      ? "count unknown"
+      : `${detection.count.value} ${detection.count.of}`,
+  );
+  parts.push(describeDeps(detection.deps));
+  parts.push(describeRuntime(detection));
+
+  return parts.join(" · ");
+}
+
+function describeDeps(deps: Detection["deps"]): string {
+  if (deps === "native") return "native deps";
+  if (deps === "none") return "no deps";
+  return "deps unverified";
+}
+
+function describeRuntime(detection: Detection): string {
+  const { runtime } = detection;
+  if (runtime.state === "missing") return `${runtime.binary} not installed`;
+  if (runtime.state === "outdated") return `${runtime.version} too old, needs ${runtime.needs}`;
+  if (runtime.state === "unreadable") return "runtime would not answer";
+  return runtime.version === null ? "runtime ok" : `runtime ok (${runtime.version})`;
+}
+
+/**
+ * The closing line always says nothing is enrolled, including when a backend
+ * is recommended. A recommendation that read as an activation would be the one
+ * misunderstanding this whole module is written to prevent.
+ */
+function describeChoice(choice: ReturnType<typeof chooseBackend>): string[] {
+  const lines: string[] = [];
+
+  if (choice.action === "recommend") {
+    lines.push(`Suggested: ${GRAPH_LABELS[choice.kind]} — ${choice.why}.`);
+    if (!choice.dispatchable) {
+      // Deliberately not "it can be read, but…": when the runtime is missing
+      // it cannot be read either, and the sentence would contradict the row
+      // directly above it.
+      lines.push("Nothing here could be scheduled from it tonight.");
+    }
+  } else if (choice.action === "ambiguous") {
+    const names = choice.kinds.map(kind => GRAPH_LABELS[kind]).join(" and ");
+    lines.push(`${names} are both populated — ${choice.why}.`);
+  } else {
+    lines.push(choice.why.charAt(0).toUpperCase() + choice.why.slice(1) + ".");
+  }
+
+  lines.push("Nothing is enrolled, and detection grants nothing.");
+  return lines;
 }
