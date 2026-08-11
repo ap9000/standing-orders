@@ -2,7 +2,7 @@
 
 **Standing orders for your agents. Wake me only for these.**
 
-> **Status: design only.** No code yet. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.4).
+> **Status: M0 in progress.** Discovery works today and is worth running. No agents run yet, and nothing is published to npm. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.5).
 
 A captain's night orders are the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product.
 
@@ -12,25 +12,32 @@ It owns a deliberately small local task store, adapts richer trackers when they 
 
 ## Two claims
 
-**Sixty seconds to first value.**
+**Sixty seconds to first value.** No init, no daemon start, no wizard, no OAuth app.
 
 ```sh
-npx nightorders     # no init, no daemon start, no wizard, no OAuth app
+git clone https://github.com/ap9000/nightorders && cd nightorders
+npm install && npm run dev -- ~/code      # `npx nightorders` once it ships
 ```
 
-It walks the filesystem for `.git` and reads branches, PRs, and open issues through the `git` and `gh` credentials already on your machine — then shows you everything in flight across every repo. No agent has run. Nothing has been configured. Every other tool in this space starts from an empty database it expects you to fill.
-
-The same pass detects your work graph and picks one, rather than asking:
+It walks the filesystem for `.git` and reads every repo through the `git` credentials already on your machine, then shows what is in flight:
 
 ```
-Work graph — detected in your repos
-▸ beads          .beads/ in 2 repos · 47 open · native deps · runtime ok
-  GitHub Issues  112 open across 6 repos · native deps · gh 2.67 too old
-  built-in       local task store · nothing to install
-Nothing is enrolled. `nightorders enroll <repo>` grants write access.
+10 branches in flight across 24 repositories
+
+vamarketplacenew                   main
+  feat/wise-payouts                upstream gone       4d ago
+  feature/public-api-v1            ahead 17            1mo ago
+  api-pricing-impl                 behind 84           2mo ago
+
+oddcircle                          redesign/instrumentation-cash-flag
+  main                             ahead 3, behind 56  23d ago
 ```
 
-Detection is not authorization, and **nothing is ever installed for you** — `bd init` stages files and can create a commit, so Night Orders prints the command and its side effects and lets you run it.
+No agent has run. Nothing has been configured, written, or installed. Every other tool in this space starts from an empty database it expects you to fill. `--json` emits the same thing as `{ scannedAt, roots, repos }`, because half the intended audience is an agent.
+
+Reads are priced before they are made. Listing refs is O(refs) and finishes in milliseconds; `git status` is O(working tree) and was measured at over two minutes on a real repo, so it is off by default behind `--dirty`. Computing ahead/behind walks history — 22s cold on a 304MB repo — so it is bounded at 5s and degrades to a branch list that says what it withheld. Every call goes through `--no-optional-locks`, so a scan never takes the index lock from an editor you have open.
+
+**Next in M0:** PRs and issues via `gh`, and work-graph detection — beads, GitHub Issues, or a built-in store, chosen by looking rather than asking. Detection is not authorization, and **nothing is ever installed for you**: `bd init` stages files and can create a commit, so Night Orders prints the command and its side effects and lets you run it.
 
 **It survives the night, cheaply.** Work dispatches itself from a dependency graph, fails safely, and parks a *typed* decision — recap, options with reversibility, a recommendation, evidence — instead of guessing. Parking never stalls the loop; the blocked task steps aside and eleven others keep going.
 
