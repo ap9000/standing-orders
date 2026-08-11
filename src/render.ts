@@ -129,10 +129,16 @@ function renderHeader(inFlight: number, repoCount: number, unmeasured: number): 
   const headline = `${branches} in flight across ${repos}`;
 
   // A count that quietly excludes repositories it could not measure is a lie
-  // of omission, and the second run is usually fast enough to fix it.
+  // of omission. The remedy is named once here rather than on every repo — and
+  // it is printed, never run, because it writes to someone else's .git.
   if (unmeasured === 0) return headline;
   const which = unmeasured === 1 ? "1 repository is" : `${unmeasured} repositories are`;
-  return `${headline}\n${which} listed by recency: ahead/behind was too slow to compute. Run again — git caches it.`;
+  return [
+    headline,
+    `${which} listed by recency: ahead/behind was too slow to compute.`,
+    "`git commit-graph write --reachable` in it makes this permanent —",
+    "it writes to .git, so run it yourself.",
+  ].join("\n");
 }
 
 /** Repositories were found and read; none of them had anything outstanding. */

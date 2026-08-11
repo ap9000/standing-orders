@@ -65,8 +65,13 @@ export const DEFAULT_CONCURRENCY = 8;
 
 /** Ref reads land in tens of milliseconds; seconds here means something is wrong. */
 export const REF_TIMEOUT_MS = 5_000;
-/** Ahead/behind is worth waiting a little longer for, but not much. */
-export const TRACK_TIMEOUT_MS = 5_000;
+/**
+ * Ahead/behind is worth waiting for, since it is the signal itself. Ten
+ * seconds because a 59MB repo with 18 branches and no commit-graph measured
+ * 7.5s cold — just over a five second bound, which is the worst place for a
+ * limit to sit.
+ */
+export const TRACK_TIMEOUT_MS = 10_000;
 /** The working tree is unbounded, so the bound has to be ours. */
 export const STATUS_TIMEOUT_MS = 10_000;
 
