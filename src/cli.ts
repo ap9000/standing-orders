@@ -13,11 +13,12 @@
 
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
-import { renderReport } from "./render.js";
+import { readPulls } from "./pulls.js";
+import { renderReport, renderPulls, type PullGroup } from "./render.js";
 import { DEFAULT_MAX_DEPTH } from "./scan.js";
 import {
   BIN_NAME,
@@ -51,6 +52,7 @@ export const HELP = `nightorders — standing orders for your agents
 
 Usage
   nightorders [path...]        report what is in flight
+  nightorders pulls            report what is waiting on a person
   nightorders repos            list connected repositories, and how to adjust
   nightorders repos add <path> connect one (no path: the repo you are in)
   nightorders repos remove <path>
@@ -141,6 +143,7 @@ export async function main(
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
   if (first === "repos") return runReposCommand(rest, write);
+  if (first === "pulls") return runPullsCommand(rest, write);
 
   const parsed = parseArgs(argv);
 
@@ -330,6 +333,51 @@ async function removeFromRepos(
   await saveRepos(file, removeRepos(existing, targets));
   for (const path of removed) write(`Disconnected ${path}`);
   return 0;
+}
+
+/**
+ * `pulls` reads the same repositories the default report does, because the
+ * question "what is waiting on me" is asked about the same set of work. It is
+ * a separate command rather than part of the report because it costs a network
+ * round trip per repository, and the default report is meant to stay local.
+ */
+async function runPullsCommand(argv: readonly string[], write: Write): Promise<number> {
+  const json = argv.includes("--json");
+  const unknown = argv.find(argument => argument.startsWith("-") && argument !== "--json");
+  if (unknown !== undefined) {
+    write(`unknown option ${unknown} — \`pulls\` takes paths and --json`);
+    return USAGE_EXIT;
+  }
+
+  const named = argv.filter(argument => !argument.startsWith("-")).map(path => resolve(path));
+  const targets = named.length > 0 ? named : await defaultPullTargets(write);
+  if (targets === null) return 1;
+
+  const { present, missing } = partitionRoots(targets, existsSync);
+  if (present.length === 0) {
+    write(json ? "[]" : describeMissing(missing));
+    return USAGE_EXIT;
+  }
+
+  const groups: PullGroup[] = await Promise.all(
+    present.map(async path => {
+      const read = await readPulls(path);
+      return { repo: basename(path), pulls: read.pulls, problems: read.problems };
+    }),
+  );
+
+  write(json ? JSON.stringify(groups, null, 2) : renderPulls(groups, { now: new Date() }));
+  return 0;
+}
+
+/** null means the configuration could not be read, and was already reported. */
+async function defaultPullTargets(write: Write): Promise<string[] | null> {
+  const enrolled = await loadRepos(configFile());
+  if ("error" in enrolled) {
+    write(enrolled.error);
+    return null;
+  }
+  return enrolled.repos.length > 0 ? enrolled.repos : [process.cwd()];
 }
 
 export type LinkArgs = { to?: string; yes: boolean };

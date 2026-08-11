@@ -8,6 +8,14 @@
 
 import type { RepoSnapshot } from "./discover.js";
 import type { Branch, TrackingState } from "./git.js";
+import {
+  classify,
+  describe as describePull,
+  idleDays,
+  DEFAULT_STALE_DAYS,
+  type Attention,
+  type Pull,
+} from "./pulls.js";
 
 export type ReportOptions = {
   now: Date;
@@ -258,4 +266,158 @@ function pad(text: string, width: number): string {
 
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
+}
+
+/** One repository's open pull requests, as read. */
+export type PullGroup = {
+  repo: string;
+  pulls: readonly Pull[];
+  problems: readonly string[];
+};
+
+export type PullsOptions = {
+  now: Date;
+  staleDays?: number;
+};
+
+/**
+ * How long since anything happened. Phrased as idleness rather than age
+ * because a pull request opened in May and discussed yesterday is not old in
+ * any sense the operator cares about.
+ */
+export function formatIdle(iso: string, now: Date): string {
+  const age = formatAge(iso, now);
+  if (age === "unknown") return "";
+  if (age === "just now") return "just now";
+  return `${age.replace(" ago", "")} idle`;
+}
+
+/**
+ * Grouped by whose move it is, because that is the only question being asked.
+ * Drafts and running builds are counted but not listed — nobody is blocked on
+ * them, and a report that lists everything is the attention problem it was
+ * written to solve.
+ */
+export function renderPulls(
+  groups: readonly PullGroup[],
+  options: PullsOptions,
+): string {
+  const { now, staleDays = DEFAULT_STALE_DAYS } = options;
+
+  const entries = groups.flatMap(group =>
+    group.pulls.map(pull => ({ repo: group.repo, pull, attention: classify(pull) })),
+  );
+  const problems = groups.flatMap(group =>
+    group.problems.map(problem => `${group.repo}: ${problem}`),
+  );
+
+  const blocking: readonly Attention[] = ["human", "agent"];
+  const sections = blocking
+    .map(attention => renderAttention(attention, entries, now))
+    .filter((section): section is string => section !== null);
+
+  if (sections.length === 0) {
+    return [renderNothingWaiting(entries, problems), ...renderProblems(problems)]
+      .join("\n")
+      .trimEnd();
+  }
+
+  const waiting = entries.filter(entry => blocking.includes(entry.attention));
+  const stalled = waiting.filter(entry => (idleDays(entry.pull, now) ?? 0) >= staleDays);
+
+  return [
+    renderPullsHeader(waiting.length, stalled.length, staleDays),
+    "",
+    ...sections,
+    ...renderProblems(problems),
+    ...renderQuiet(entries),
+  ]
+    .join("\n")
+    .trimEnd();
+}
+
+type PullEntry = { repo: string; pull: Pull; attention: Attention };
+
+const ATTENTION_HEADINGS: Record<Attention, string> = {
+  human: "Waiting on you",
+  agent: "Waiting on an agent",
+  machine: "Waiting on CI",
+  none: "In progress",
+};
+
+/**
+ * Longest-idle first. The one that has been ignored the longest is the one
+ * most likely to have been forgotten rather than deferred.
+ */
+function renderAttention(
+  attention: Attention,
+  entries: readonly PullEntry[],
+  now: Date,
+): string | null {
+  const mine = entries
+    .filter(entry => entry.attention === attention)
+    .sort((a, b) => (idleDays(b.pull, now) ?? 0) - (idleDays(a.pull, now) ?? 0));
+
+  if (mine.length === 0) return null;
+
+  const rows: Row[] = mine.map(entry => ({
+    indent: INDENT,
+    name: `${entry.repo} #${entry.pull.number}`,
+    state: describePull(entry.pull),
+    tail: formatIdle(entry.pull.updatedAt, now),
+  }));
+
+  const nameWidth = widthOf(
+    rows,
+    row => row.indent.length + row.name.length,
+    MIN_NAME_WIDTH,
+    MAX_NAME_WIDTH,
+  );
+  const stateWidth = widthOf(rows, row => row.state.length, MIN_STATE_WIDTH, MAX_STATE_WIDTH);
+
+  return [
+    ATTENTION_HEADINGS[attention],
+    ...rows.map(row => renderRow(row, nameWidth, stateWidth)),
+    "",
+  ].join("\n");
+}
+
+function renderPullsHeader(waiting: number, stalled: number, staleDays: number): string {
+  const headline = `${plural(waiting, "pull request", "pull requests")} waiting.`;
+  if (stalled === 0) return headline;
+
+  const which = stalled === 1 ? "1 has" : `${stalled} have`;
+  return `${headline} ${which} been waiting more than ${plural(staleDays, "day", "days")}.`;
+}
+
+/**
+ * Nothing waiting is only good news if we managed to look. A repository whose
+ * pull requests could not be read has told us nothing, and saying "nothing is
+ * waiting" about it would be the silence this tool exists to break.
+ */
+function renderNothingWaiting(
+  entries: readonly PullEntry[],
+  problems: readonly string[],
+): string {
+  if (problems.length > 0 && entries.length === 0) return "No pull requests were read.";
+
+  const quiet = renderQuiet(entries);
+  return ["Nothing is waiting on you.", ...quiet].join("\n");
+}
+
+/** Drafts and running builds: counted, so their absence above is not a mystery. */
+function renderQuiet(entries: readonly PullEntry[]): string[] {
+  const drafts = entries.filter(entry => entry.attention === "none").length;
+  const running = entries.filter(entry => entry.attention === "machine").length;
+
+  const parts = [
+    drafts > 0 ? `${plural(drafts, "draft", "drafts")} in progress` : null,
+    running > 0 ? `${running} waiting on CI` : null,
+  ].filter((part): part is string => part !== null);
+
+  return parts.length === 0 ? [] : ["", `${parts.join(", ")}.`];
+}
+
+function renderProblems(problems: readonly string[]): string[] {
+  return problems.length === 0 ? [] : ["", ...problems.map(problem => `! ${problem}`)];
 }
