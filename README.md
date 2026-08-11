@@ -53,7 +53,32 @@ Backends are chosen by looking rather than asking, but **detection is not author
 
 **Nothing is ever installed for you.** `bd init` stages files, edits agent integrations, and can create a commit, so Night Orders prints the command and its side effects and lets you run it.
 
-**Next in M0:** the operational overlay — `TaskRef`, `BackendGrant`, and the `Claim` lease with a fencing generation, which is the record that makes dispatch a compare-and-swap rather than a race — plus the built-in local task store as a fallback, and issues in the default report.
+## Queueing work, and taking it
+
+The built-in store is the fallback backend, and the commands over it are written for an agent first — because the agent is what runs them ten thousand times while you are asleep.
+
+```sh
+nightorders task add "migrate the payouts schema" --id schema
+nightorders task add "wire the payouts API" --id api
+nightorders task block api --on schema     # api waits for schema
+
+nightorders ready --json                   # what could be dispatched now
+nightorders claim schema --runner builder-1 --key dispatch-schema
+nightorders heartbeat <lease>              # still working
+nightorders release <lease>                # done holding it
+```
+
+Four properties make that loop safe to run unattended.
+
+**Every outcome is data.** `--json` returns the same envelope from every command, failures included: `{ ok, command, reason, message }`. `reason` is a stable token — `held`, `fenced`, `unknown-task` — because prose gets reworded and anything branching on it breaks silently.
+
+**Exit codes separate "no" from "broken".** `0` got it · `1` something broke · `2` bad usage · `3` ran fine, the answer is no. Losing a claim race and finding the ready set empty are correct answers, not errors, and a loop that stops on them is as wrong as one that ignores real breakage.
+
+**Every mutation takes `--key`.** An agent whose command succeeded but whose output was lost *will* retry. With a key that retry returns the first answer instead of queueing a second task or taking a second lease. Mutations that changed nothing are never recorded, so a refusal never becomes a permanent no.
+
+**`fenced` means stop.** A runner whose machine slept, whose lease expired, and whose task was reclaimed will be told exactly that at its next heartbeat — long before it finishes work nobody will accept. Dispatch is a compare-and-swap on `(task, lease_generation)`, enforced by the database rather than by anything the caller remembers to check.
+
+**Next in M0:** graph adapters that read and write rather than only count, and `BackendGrant` with the `enroll` command that creates one — the record that has to exist before any builder writes to a repository.
 
 **It survives the night, cheaply.** Work dispatches itself from a dependency graph, fails safely, and parks a *typed* decision — recap, options with reversibility, a recommendation, evidence — instead of guessing. Parking never stalls the loop; the blocked task steps aside and eleven others keep going.
 

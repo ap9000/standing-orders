@@ -19,6 +19,7 @@ import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
 import { detectGraphs, chooseBackend, setupOptions } from "./graph.js";
+import { runOperate, OPERATE_HELP, type OperateOptions } from "./operate.js";
 import { renderReport, renderPulls, renderGraph, type PullGroup } from "./render.js";
 import { DEFAULT_MAX_DEPTH } from "./scan.js";
 import {
@@ -60,6 +61,12 @@ Usage
   nightorders repos remove <path>
   nightorders link             put \`nightorders\` on your PATH
   nightorders unlink           take it off again
+
+Operating the queue — see \`nightorders task\` for the whole surface
+  nightorders ready            what could be dispatched right now
+  nightorders task add <title> queue work
+  nightorders claim <id> --runner <name>
+  nightorders heartbeat <lease> / release <lease> / reap
 
 With nothing connected it reports everything it can find below the working
 directory. Once you connect repositories it reports those instead.
@@ -132,8 +139,11 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   };
 }
 
+/** The commands that operate the queue rather than report on the world. */
+const OPERATE_COMMANDS = new Set(["ready", "task", "claim", "heartbeat", "release", "reap"]);
+
 /** binSource exists so tests can exercise linking without depending on a build. */
-export type MainOptions = { binSource?: string };
+export type MainOptions = { binSource?: string; operate?: OperateOptions };
 
 export async function main(
   argv: readonly string[],
@@ -147,6 +157,9 @@ export async function main(
   if (first === "repos") return runReposCommand(rest, write);
   if (first === "pulls") return runPullsCommand(rest, write);
   if (first === "graph") return runGraphCommand(rest, write);
+  if (first !== undefined && OPERATE_COMMANDS.has(first)) {
+    return runOperate(first, rest, write, mainOptions.operate ?? {});
+  }
 
   const parsed = parseArgs(argv);
 
@@ -614,7 +627,32 @@ export function isDirectInvocation(
   }
 }
 
+/**
+ * Node prints `ExperimentalWarning: SQLite is an experimental feature` to
+ * stderr the first time the store is opened. One line is fair warning; one
+ * line per invocation, in a dispatch loop that runs the command thousands of
+ * times overnight, is a log nobody can read.
+ *
+ * It is filtered here and nowhere else. This runs only when the CLI is the
+ * program — a process it legitimately owns — so importing any of these modules
+ * as a library still leaves the host's warnings exactly as they were. The
+ * mechanism matters too: wrapping `process.emitWarning`, which is what Node's
+ * own experimental notice goes through, leaves every `warning` listener anyone
+ * else registered working normally. An earlier attempt swapped the listeners
+ * themselves and quietly made everybody's `once` permanent.
+ */
+function hushExperimentalSqlite(): void {
+  const original = process.emitWarning.bind(process);
+  process.emitWarning = ((warning: unknown, ...rest: unknown[]) => {
+    const type = typeof rest[0] === "string" ? rest[0] : (rest[0] as { type?: string })?.type;
+    const text = warning instanceof Error ? warning.message : String(warning);
+    if (type === "ExperimentalWarning" && text.includes("SQLite")) return;
+    (original as (...args: unknown[]) => void)(warning, ...rest);
+  }) as typeof process.emitWarning;
+}
+
 if (isDirectInvocation(import.meta.url, process.argv[1])) {
+  hushExperimentalSqlite();
   main(process.argv.slice(2)).then(code => {
     process.exitCode = code;
   });

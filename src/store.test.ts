@@ -210,14 +210,30 @@ describe("the built-in task store", () => {
       expect(store.getTask("t-1")?.title).toBe("first");
     });
 
-    test("hands back the original answer rather than recomputing it", () => {
+    test("records only mutations that mutated something", () => {
+      // A state change matching no task did nothing, so there is nothing to
+      // replay. Recording it would answer "no such task" forever — including
+      // after somebody creates it, which is exactly what happens when work is
+      // queued in one order and dispatched in another.
       const first = store.setTaskState("ghost", "done", T0, { idempotencyKey: "k-2", at: T0 });
       store.createTask({ id: "ghost", title: "now it exists" }, T0);
-      const replayed = store.setTaskState("ghost", "done", T0, { idempotencyKey: "k-2", at: T0 });
+      const afterwards = store.setTaskState("ghost", "done", T0, { idempotencyKey: "k-2", at: T0 });
 
       expect(first).toBe(false);
-      expect(replayed).toBe(false);
-      expect(store.getTask("ghost")?.state).toBe("queued");
+      expect(afterwards).toBe(true);
+      expect(store.getTask("ghost")?.state).toBe("done");
+    });
+
+    test("still replays a mutation that did happen", () => {
+      store.createTask({ id: "t-1", title: "first" }, T0, { idempotencyKey: "k-3", at: T0 });
+      store.setTaskState("t-1", "done", T0, { idempotencyKey: "k-4", at: T0 });
+
+      // The retry must not re-run against a task that has moved on since.
+      store.setTaskState("t-1", "running", later(1_000));
+      const replayed = store.setTaskState("t-1", "done", T0, { idempotencyKey: "k-4", at: T0 });
+
+      expect(replayed).toBe(true);
+      expect(store.getTask("t-1")?.state).toBe("running");
     });
 
     test("treats different keys as different mutations", () => {

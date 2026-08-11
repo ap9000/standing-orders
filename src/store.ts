@@ -28,7 +28,7 @@
 
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 export const SCHEMA_VERSION = 1;
 
@@ -180,6 +180,17 @@ export type Database = {
   close(): void;
 };
 
+/**
+ * Beside `repos.json`, for the same reason it is there: someone will want to
+ * back it up, sync it, or delete it, and a database hidden somewhere clever is
+ * a database nobody can find when it matters.
+ */
+export function databasePath(env: Record<string, string | undefined>, home: string): string {
+  const xdg = env["XDG_CONFIG_HOME"];
+  const base = xdg !== undefined && xdg !== "" ? xdg : join(home, ".config");
+  return join(base, "nightorders", "orders.db");
+}
+
 export type OpenOptions = {
   /** Substituted in tests; production opens node:sqlite itself. */
   connect?: (file: string) => Database;
@@ -271,13 +282,44 @@ export class Store {
     return row === undefined ? null : readTask(row);
   }
 
+  /** Oldest first, so a list reads in the order the work was thought of. */
+  listTasks(state?: TaskState): Task[] {
+    const rows =
+      state === undefined
+        ? this.db.prepare("SELECT * FROM task ORDER BY created_at, id").all()
+        : this.db.prepare("SELECT * FROM task WHERE state = ? ORDER BY created_at, id").all(state);
+    return rows.map(readTask);
+  }
+
+  /** What this task is waiting for, whether or not those are finished. */
+  blockers(id: string): string[] {
+    return this.db
+      .prepare("SELECT blocker FROM task_edge WHERE blocked = ? ORDER BY blocker")
+      .all(id)
+      .map(row => String(row["blocker"]));
+  }
+
+  /** The external id behind a reference, for reporting a claim back in words. */
+  externalIdFor(taskRef: number): string | null {
+    const row = this.db.prepare("SELECT external_id FROM task_ref WHERE id = ?").get(taskRef);
+    return row === undefined ? null : String(row["external_id"]);
+  }
+
   setTaskState(id: string, state: TaskState, now: Date, mutation: Mutation = {}): boolean {
-    return this.once(mutation, "setTaskState", () => {
-      const { changes } = this.db
-        .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
-        .run(state, now.toISOString(), id);
-      return Number(changes) > 0;
-    });
+    return this.once(
+      mutation,
+      "setTaskState",
+      () => {
+        const { changes } = this.db
+          .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
+          .run(state, now.toISOString(), id);
+        return Number(changes) > 0;
+      },
+      // A state change that matched no task mutated nothing, so there is
+      // nothing to replay — and recording it would answer "no such task"
+      // forever, including after somebody creates it.
+      moved => moved,
+    );
   }
 
   /**
@@ -302,6 +344,7 @@ export class Store {
           .run(blocked, blocker);
         return { ok: true as const };
       }),
+      result => result.ok,
     );
   }
 
@@ -410,10 +453,15 @@ export class Store {
   }
 
   unhold(taskRef: number, mutation: Mutation = {}): boolean {
-    return this.once(mutation, "unhold", () => {
-      const { changes } = this.db.prepare("DELETE FROM hold WHERE task_ref = ?").run(taskRef);
-      return Number(changes) > 0;
-    });
+    return this.once(
+      mutation,
+      "unhold",
+      () => {
+        const { changes } = this.db.prepare("DELETE FROM hold WHERE task_ref = ?").run(taskRef);
+        return Number(changes) > 0;
+      },
+      lifted => lifted,
+    );
   }
 
   /** The hold in force right now, if any. An elapsed `until` is not one. */
