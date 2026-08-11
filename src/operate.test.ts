@@ -259,3 +259,229 @@ describe("operating the queue from the command line", () => {
     expect(out()).toContain("nightorders claim");
   });
 });
+
+describe("write access", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "nightorders-grant-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  test("grants nothing without --yes, and shows the terms first", async () => {
+    // Printing the terms after the fact would be a receipt, not consent.
+    const code = await run(["enroll", dir, "--backend", "beads", "--paths", ".beads"]);
+
+    expect(code).toBe(EXIT.ok);
+    expect(out()).toContain("Nothing has been granted");
+    expect(out()).toContain("may do");
+    expect(out()).toContain("only those Night Orders created or was given");
+
+    await run(["grants", "--json"]);
+    expect(payload().count).toBe(0);
+  });
+
+  test("records the grant once it is agreed to", async () => {
+    await run(["enroll", dir, "--backend", "beads", "--paths", ".beads", "--yes", "--json"]);
+
+    expect(payload()).toMatchObject({ ok: true, command: "enroll" });
+    await run(["grants", "--json"]);
+    expect(payload().grants[0]).toMatchObject({ backend: "beads", selector: "ours" });
+  });
+
+  test("withholds `close` unless it is asked for", async () => {
+    await run(["enroll", dir, "--backend", "beads", "--paths", ".beads", "--yes", "--json"]);
+    expect(payload().grant.mutations).not.toContain("close");
+
+    await run([
+      "enroll", dir, "--backend", "beads", "--paths", ".beads",
+      "--allow", "create,close", "--yes", "--json",
+    ]);
+    expect(payload().grant.mutations).toEqual(["create", "close"]);
+  });
+
+  test("refuses a mutation class it does not have", async () => {
+    expect(
+      await run(["enroll", dir, "--backend", "beads", "--paths", ".beads", "--allow", "delete-everything"]),
+    ).toBe(EXIT.usage);
+  });
+
+  test("will not enrol a non-built-in backend without being told what it may write", async () => {
+    // Guessing where somebody's tracker keeps its data and then writing there
+    // is the exact move this module exists to prevent.
+    expect(await run(["enroll", dir, "--backend", "beads"])).toBe(EXIT.usage);
+    expect(out()).toContain("--paths");
+  });
+
+  test("replaces rather than accumulates on a second enrolment", async () => {
+    await run(["enroll", dir, "--backend", "beads", "--paths", ".beads", "--yes"]);
+    await run(["enroll", dir, "--backend", "beads", "--paths", ".beads", "--selector", "all", "--yes"]);
+
+    await run(["grants", "--json"]);
+    expect(payload().count).toBe(1);
+    expect(payload().grants[0].selector).toBe("all");
+  });
+
+  test("takes it back without ceremony", async () => {
+    // A confirmation prompt on the brakes is how people stop using them.
+    await run(["enroll", dir, "--backend", "beads", "--paths", ".beads", "--yes"]);
+
+    expect(await run(["revoke", dir, "--backend", "beads"])).toBe(EXIT.ok);
+    await run(["grants", "--json"]);
+    expect(payload().count).toBe(0);
+  });
+
+  test("says so when there was nothing to revoke", async () => {
+    expect(await run(["revoke", dir, "--backend", "beads", "--json"])).toBe(EXIT.refused);
+    expect(payload().reason).toBe("no-grant");
+  });
+
+  test("says plainly that nothing is enrolled", async () => {
+    await run(["grants"]);
+    expect(out()).toContain("read-only until something is");
+  });
+
+  test("refuses a selector it does not understand", async () => {
+    expect(
+      await run(["enroll", dir, "--backend", "beads", "--paths", ".beads", "--selector", "everything"]),
+    ).toBe(EXIT.usage);
+  });
+});
+
+describe("the grant is actually enforced", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "nightorders-enforce-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  test("refuses to claim a task in an unenrolled tracker", async () => {
+    // This is the check that makes the boundary real rather than decorative:
+    // taking somebody's issue transitions it, and that is a write.
+    const code = await run([
+      "claim", "17", "--backend", "github-issues", "--repo", dir, "--runner", "r", "--json",
+    ]);
+
+    expect(code).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "no-grant" });
+    expect(payload().message).toContain("nightorders enroll");
+  });
+
+  test("still refuses once enrolled, when the task is not ours", async () => {
+    // The default selector is the spec's "never every open task it happened
+    // to find" — enrolling a repo full of issues does not volunteer them.
+    await run([
+      "enroll", dir, "--backend", "github-issues", "--paths", "owner/name", "--yes",
+    ]);
+
+    const code = await run([
+      "claim", "17", "--backend", "github-issues", "--repo", dir, "--runner", "r", "--json",
+    ]);
+
+    expect(code).toBe(EXIT.refused);
+    expect(payload().reason).toBe("selector");
+  });
+
+  test("allows it once the grant covers every task", async () => {
+    await run([
+      "enroll", dir, "--backend", "github-issues", "--paths", "owner/name",
+      "--selector", "all", "--yes",
+    ]);
+
+    expect(
+      await run(["claim", "17", "--backend", "github-issues", "--repo", dir, "--runner", "r"]),
+    ).toBe(EXIT.ok);
+  });
+
+  test("refuses when the granted mutation class does not cover a claim", async () => {
+    await run([
+      "enroll", dir, "--backend", "github-issues", "--paths", "owner/name",
+      "--selector", "all", "--allow", "create", "--yes",
+    ]);
+
+    const code = await run([
+      "claim", "17", "--backend", "github-issues", "--repo", dir, "--runner", "r", "--json",
+    ]);
+
+    expect(code).toBe(EXIT.refused);
+    expect(payload().reason).toBe("mutation");
+  });
+
+  test("does not accept a grant made for a different repository", async () => {
+    await run([
+      "enroll", dir, "--backend", "github-issues", "--paths", "owner/name",
+      "--selector", "all", "--yes",
+    ]);
+
+    const code = await run([
+      "claim", "17", "--backend", "github-issues", "--repo", join(dir, "elsewhere"),
+      "--runner", "r", "--json",
+    ]);
+
+    expect(code).toBe(EXIT.refused);
+    expect(payload().reason).toBe("no-grant");
+  });
+
+  test("recognises the same repository written a different way", async () => {
+    // enroll resolves its path; if the claim side did not, a grant stored
+    // absolute would be missed by a lookup for `.` — denying permission that
+    // was genuinely given, in a way that looks exactly like the check working.
+    await run([
+      "enroll", dir, "--backend", "github-issues", "--paths", "owner/name",
+      "--selector", "all", "--yes",
+    ]);
+
+    const code = await run([
+      "claim", "17", "--backend", "github-issues", "--repo", join(dir, "sub", ".."),
+      "--runner", "r",
+    ]);
+
+    expect(code).toBe(EXIT.ok);
+  });
+
+  test("leaves the built-in queue alone, since it is ours by construction", async () => {
+    await run(["task", "add", "a thing", "--id", "t-1"]);
+
+    expect(await run(["claim", "t-1", "--runner", "r"])).toBe(EXIT.ok);
+  });
+
+  test("records who created a task rather than taking the caller's word", async () => {
+    // Merely referring to a task must never be what makes it ours to write.
+    await run(["task", "add", "ours", "--id", "mine", "--json"]);
+    expect(payload().task.id).toBe("mine");
+
+    await run(["ready", "--json"], later(1_000));
+    expect(payload().tasks[0].id).toBe("mine");
+  });
+});

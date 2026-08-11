@@ -29,6 +29,7 @@
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 
 export const SCHEMA_VERSION = 1;
 
@@ -67,6 +68,8 @@ export type TaskRef = {
   zones: string[];
   capabilityRequirements: string[];
   parkRate: number;
+  /** Recorded, not asserted: what the grant's selector is checked against. */
+  origin: TaskOrigin;
 };
 
 export type Hold = { taskRef: number; reason: string; until: string | null; heldAt: string };
@@ -109,6 +112,11 @@ CREATE TABLE IF NOT EXISTS task_edge (
 
 -- The overlay starts here. Nothing below this line knows which backend the
 -- work actually lives in.
+-- The origin column is what the grant's default selector actually rests on.
+-- It records whether Night Orders created this task or merely came across it,
+-- and it is written here rather than asserted by whoever is asking to write:
+-- a policy that says "only our tasks" while letting the caller declare which
+-- those are is not a policy.
 CREATE TABLE IF NOT EXISTS task_ref (
   id                      INTEGER PRIMARY KEY AUTOINCREMENT,
   backend                 TEXT NOT NULL,
@@ -116,6 +124,7 @@ CREATE TABLE IF NOT EXISTS task_ref (
   zones                   TEXT NOT NULL DEFAULT '[]',
   capability_requirements TEXT NOT NULL DEFAULT '[]',
   park_rate               REAL NOT NULL DEFAULT 0,
+  origin                  TEXT NOT NULL DEFAULT 'theirs',
   UNIQUE (backend, external_id)
 );
 
@@ -149,6 +158,21 @@ CREATE TABLE IF NOT EXISTS claim (
   heartbeat_at     TEXT NOT NULL,
   released_at      TEXT,
   UNIQUE (task_ref, lease_generation)
+);
+
+-- Permission to write to a tracker, one row per repository and backend.
+-- Absence of a row is denial; there is no wildcard and no inheritance.
+CREATE TABLE IF NOT EXISTS backend_grant (
+  repo             TEXT NOT NULL,
+  backend          TEXT NOT NULL,
+  paths            TEXT NOT NULL DEFAULT '[]',
+  mutations        TEXT NOT NULL DEFAULT '[]',
+  selector         TEXT NOT NULL,
+  credential_scope TEXT,
+  observed_by_git  INTEGER NOT NULL,
+  granted_at       TEXT NOT NULL,
+  granted_by       TEXT NOT NULL,
+  PRIMARY KEY (repo, backend)
 );
 
 CREATE TABLE IF NOT EXISTS mutation (
@@ -266,7 +290,8 @@ export class Store {
           "INSERT INTO task (id, title, state, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
         )
         .run(spec.id, spec.title, stamp, stamp);
-      this.refFor(BUILT_IN, spec.id);
+      // Created here, so it is ours — the one place that is true by construction.
+      this.refFor(BUILT_IN, spec.id, "ours");
       return {
         id: spec.id,
         title: spec.title,
@@ -422,20 +447,42 @@ export class Store {
 
   // ---- the overlay --------------------------------------------------------
 
-  /** Get or create the reference. Creating one grants nothing on its own. */
-  refFor(backend: string, externalId: string): TaskRef {
+  /**
+   * Get or create the reference.
+   *
+   * Creating one grants nothing on its own, and defaults to `theirs`: merely
+   * referring to a task — which happens whenever anything is looked up — must
+   * never be what makes it ours to write.
+   */
+  refFor(backend: string, externalId: string, origin: TaskOrigin = "theirs"): TaskRef {
     const existing = this.db
       .prepare("SELECT * FROM task_ref WHERE backend = ? AND external_id = ?")
       .get(backend, externalId);
-    if (existing !== undefined) return readTaskRef(existing);
+    if (existing !== undefined) {
+      // Ownership only ever widens by an explicit act, never by being looked
+      // up again with a more generous argument.
+      if (origin === "ours" && String(existing["origin"]) !== "ours") {
+        this.db.prepare("UPDATE task_ref SET origin = 'ours' WHERE id = ?").run(existing["id"]);
+        return readTaskRef({ ...existing, origin: "ours" });
+      }
+      return readTaskRef(existing);
+    }
 
     this.db
-      .prepare("INSERT INTO task_ref (backend, external_id) VALUES (?, ?)")
-      .run(backend, externalId);
+      .prepare("INSERT INTO task_ref (backend, external_id, origin) VALUES (?, ?, ?)")
+      .run(backend, externalId, origin);
     const created = this.db
       .prepare("SELECT * FROM task_ref WHERE backend = ? AND external_id = ?")
       .get(backend, externalId);
     return readTaskRef(created as Record<string, unknown>);
+  }
+
+  /** Whether this task is one we created, as recorded — not as asserted. */
+  originOf(backend: string, externalId: string): TaskOrigin {
+    const row = this.db
+      .prepare("SELECT origin FROM task_ref WHERE backend = ? AND external_id = ?")
+      .get(backend, externalId);
+    return row !== undefined && String(row["origin"]) === "ours" ? "ours" : "theirs";
   }
 
   hold(taskRef: number, reason: string, until: Date | null, now: Date, mutation: Mutation = {}): void {
@@ -476,6 +523,71 @@ export class Store {
       until: row["until"] === null ? null : String(row["until"]),
       heldAt: String(row["held_at"]),
     };
+  }
+
+  // ---- grants -------------------------------------------------------------
+
+  /**
+   * Enrolling twice replaces rather than accumulates. Two grants over one
+   * backend would mean the effective permission is whichever row a query
+   * happened to reach first, and a permission you cannot read off the page is
+   * not a permission anyone can reason about.
+   */
+  saveGrant(grant: BackendGrant, mutation: Mutation = {}): void {
+    this.once(mutation, "saveGrant", () => {
+      this.db
+        .prepare(
+          `INSERT INTO backend_grant
+             (repo, backend, paths, mutations, selector, credential_scope, observed_by_git, granted_at, granted_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (repo, backend) DO UPDATE SET
+             paths = excluded.paths, mutations = excluded.mutations,
+             selector = excluded.selector, credential_scope = excluded.credential_scope,
+             observed_by_git = excluded.observed_by_git,
+             granted_at = excluded.granted_at, granted_by = excluded.granted_by`,
+        )
+        .run(
+          grant.repo,
+          grant.backend,
+          JSON.stringify(grant.paths),
+          JSON.stringify(grant.mutations),
+          grant.selector,
+          grant.credentialScope,
+          grant.observedByGit ? 1 : 0,
+          grant.grantedAt,
+          grant.grantedBy,
+        );
+      return null;
+    });
+  }
+
+  /** null is denial, and is the answer for anything never enrolled. */
+  grantFor(repo: string, backend: string): BackendGrant | null {
+    const row = this.db
+      .prepare("SELECT * FROM backend_grant WHERE repo = ? AND backend = ?")
+      .get(repo, backend);
+    return row === undefined ? null : readGrant(row);
+  }
+
+  listGrants(): BackendGrant[] {
+    return this.db
+      .prepare("SELECT * FROM backend_grant ORDER BY repo, backend")
+      .all()
+      .map(readGrant);
+  }
+
+  revokeGrant(repo: string, backend: string, mutation: Mutation = {}): boolean {
+    return this.once(
+      mutation,
+      "revokeGrant",
+      () => {
+        const { changes } = this.db
+          .prepare("DELETE FROM backend_grant WHERE repo = ? AND backend = ?")
+          .run(repo, backend);
+        return Number(changes) > 0;
+      },
+      revoked => revoked,
+    );
   }
 
   // ---- idempotency --------------------------------------------------------
@@ -551,6 +663,21 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     zones: readJsonArray(row["zones"]),
     capabilityRequirements: readJsonArray(row["capability_requirements"]),
     parkRate: Number(row["park_rate"]),
+    origin: String(row["origin"]) === "ours" ? "ours" : "theirs",
+  };
+}
+
+function readGrant(row: Record<string, unknown>): BackendGrant {
+  return {
+    repo: String(row["repo"]),
+    backend: String(row["backend"]),
+    paths: readJsonArray(row["paths"]),
+    mutations: readJsonArray(row["mutations"]) as MutationClass[],
+    selector: String(row["selector"]) === "all" ? "all" : "ours",
+    credentialScope: row["credential_scope"] === null ? null : String(row["credential_scope"]),
+    observedByGit: Number(row["observed_by_git"]) === 1,
+    grantedAt: String(row["granted_at"]),
+    grantedBy: String(row["granted_by"]),
   };
 }
 

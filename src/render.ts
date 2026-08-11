@@ -12,6 +12,7 @@ import {
   chooseBackend,
   setupOptions,
   LABELS as GRAPH_LABELS,
+  type BackendKind,
   type Detection,
 } from "./graph.js";
 import {
@@ -437,7 +438,10 @@ function renderProblems(problems: readonly string[]): string[] {
  * detection is not authorization and a report that omitted that would be
  * inviting exactly the wrong conclusion.
  */
-export function renderGraph(detections: readonly Detection[]): string {
+export function renderGraph(
+  detections: readonly Detection[],
+  options: { enrolled?: BackendKind } = {},
+): string {
   if (detections.length === 0) {
     return [
       "No work graph found in your repositories.",
@@ -447,7 +451,10 @@ export function renderGraph(detections: readonly Detection[]): string {
     ].join("\n");
   }
 
-  const choice = chooseBackend(detections);
+  const choice = chooseBackend(
+    detections,
+    options.enrolled === undefined ? {} : { enrolled: options.enrolled },
+  );
   const chosen = choice.action === "recommend" ? choice.kind : null;
 
   const rows = detections.map(detection => ({
@@ -541,6 +548,13 @@ function describeRuntime(detection: Detection): string {
  */
 function describeChoice(choice: ReturnType<typeof chooseBackend>): string[] {
   const lines: string[] = [];
+
+  if (choice.action === "recommend" && choice.why === "already enrolled") {
+    // An enrolled backend is not a suggestion, and must not read like one.
+    lines.push(`Enrolled: ${GRAPH_LABELS[choice.kind]}. Write access has been granted.`);
+    lines.push("`nightorders grants` shows exactly what, and `revoke` takes it back.");
+    return lines;
+  }
 
   if (choice.action === "recommend") {
     lines.push(`Suggested: ${GRAPH_LABELS[choice.kind]} — ${choice.why}.`);

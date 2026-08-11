@@ -26,8 +26,18 @@
  */
 
 import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { openStore, databasePath, BUILT_IN, type Store, type TaskState } from "./store.js";
 import { acquire, heartbeat, release, reap, currentClaim, DEFAULT_LEASE_MS } from "./claim.js";
+import {
+  proposeGrant,
+  describeGrant,
+  describeWithheld,
+  permits,
+  MUTATION_CLASSES,
+  DEFAULT_MUTATIONS,
+  type MutationClass,
+} from "./grant.js";
 
 export type Write = (line: string) => void;
 
@@ -65,6 +75,16 @@ export const OPERATE_HELP = `nightorders — operating the queue
   nightorders release <lease>           done with it; fenced if superseded
   nightorders reap                      release every lease that ran out
 
+Write access — discovery stays read-only until you grant it
+  nightorders enroll [repo] --backend <name> --paths <p>[,<p>]
+                                        show what it would grant; --yes agrees
+  nightorders grants                    what has been granted, and to what
+  nightorders revoke [repo] --backend <name>
+
+  --allow <a,b>     mutation classes (default: ${DEFAULT_MUTATIONS.join(",")})
+  --selector ours|all   which tasks (default: ours — never a whole backlog)
+  --credentials <name>  which credential scope it may use
+
 Options
   --json            one envelope per command: { ok, command, ... }
   --key <key>       idempotency key; a retry returns the first answer
@@ -84,7 +104,10 @@ type Args = {
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string | true>();
-  const wantsValue = new Set(["key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend"]);
+  const wantsValue = new Set([
+    "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
+    "allow", "selector", "paths", "credentials", "repo",
+  ]);
 
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index] as string;
@@ -157,6 +180,12 @@ async function dispatch(
       return leaseCommand("release", positional, flags, context);
     case "reap":
       return reapCommand(context);
+    case "enroll":
+      return enrollCommand(positional, flags, context);
+    case "grants":
+      return grantsCommand(context);
+    case "revoke":
+      return revokeCommand(positional, flags, context);
     default:
       return fail(
         context.write,
@@ -239,6 +268,29 @@ function claimCommand(
 
   const ttl = readTtl(flags);
   if (ttl === null) return fail(write, json, "claim", "usage", "--ttl takes whole seconds", EXIT.usage);
+
+  // Taking a task in somebody else's tracker is a write to it — the claim
+  // transitions their task and, for a repo-local backend, touches their files.
+  // So this is where the grant is checked rather than assumed, and the
+  // built-in store is exempt because it is ours by construction.
+  if (backend !== BUILT_IN) {
+    // Resolved, because `enroll` resolves too. Storing a grant under an
+    // absolute path and looking it up under `.` denies a permission that was
+    // genuinely given, which is a failure mode that looks exactly like the
+    // security check working and is therefore the hardest kind to diagnose.
+    const repo = resolve(text(flags, "repo") ?? process.cwd());
+    const verdict = permits(store.grantFor(repo, backend), {
+      repo,
+      backend,
+      mutation: "transition",
+      // Read from the store, never from the caller: a rule that says "only our
+      // tasks" while letting the asker declare which those are is not a rule.
+      origin: store.originOf(backend, id),
+    });
+    if (!verdict.ok) {
+      return fail(write, json, "claim", verdict.reason, verdict.message, EXIT.refused);
+    }
+  }
 
   const ref = store.refFor(backend, id);
   const result = acquire(store, ref.id, runner, {
@@ -329,6 +381,147 @@ function reapCommand(context: Context): number {
   write(`Released ${reaped.length}:`);
   for (const claim of reaped) write(`  ${claim.leaseId}  held by ${claim.runner}`);
   return EXIT.ok;
+}
+
+// ---- write access ---------------------------------------------------------
+
+/**
+ * Hand a repository over, deliberately.
+ *
+ * Like `link`, this shows what it would do and does nothing without `--yes` —
+ * for a stronger reason. `link` writes one file into a directory the operator
+ * named; this one is the moment discovery stops being read-only, and the
+ * grant's own terms are what somebody is agreeing to. Printing them after the
+ * fact would be a receipt, not consent.
+ */
+async function enrollCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, now } = context;
+  const repo = positional[0] === undefined ? process.cwd() : resolve(positional[0]);
+  const backend = text(flags, "backend") ?? BUILT_IN;
+
+  const mutations = readMutations(flags);
+  if (mutations === null) {
+    return fail(write, json, "enroll", "usage", `--allow takes ${MUTATION_CLASSES.join(", ")}`, EXIT.usage);
+  }
+
+  const selectorFlag = text(flags, "selector") ?? "ours";
+  if (selectorFlag !== "ours" && selectorFlag !== "all") {
+    return fail(write, json, "enroll", "usage", "--selector is `ours` or `all`", EXIT.usage);
+  }
+
+  const paths = readPaths(flags, backend);
+  if (paths.length === 0) {
+    return fail(
+      write,
+      json,
+      "enroll",
+      "usage",
+      `--paths says what may be written for backend \`${backend}\``,
+      EXIT.usage,
+    );
+  }
+
+  const grant = await proposeGrant({
+    repo,
+    backend,
+    paths,
+    mutations,
+    selector: selectorFlag,
+    credentialScope: text(flags, "credentials") ?? null,
+    now,
+  });
+
+  if (!flags.has("yes")) {
+    if (json) {
+      write(JSON.stringify({ ok: false, command: "enroll", reason: "unconfirmed", grant }, null, 2));
+      return EXIT.refused;
+    }
+    write("Would grant write access:");
+    write("");
+    for (const line of describeGrant(grant)) write(line);
+    for (const line of describeWithheld(grant)) write(line);
+    write("");
+    write("Nothing has been granted. Re-run with --yes to agree to this.");
+    return EXIT.ok;
+  }
+
+  store.saveGrant(grant, mutationFrom(flags, now));
+
+  return succeed(write, json, "enroll", { grant }, () => [
+    `Granted. Night Orders may now write to ${backend} in ${repo}.`,
+    ...describeGrant(grant),
+    ...describeWithheld(grant),
+    "",
+    "Take it back with `nightorders revoke`.",
+  ]);
+}
+
+function grantsCommand(context: Context): number {
+  const { store, write, json } = context;
+  const grants = store.listGrants();
+
+  if (json) {
+    write(JSON.stringify({ ok: true, command: "grants", count: grants.length, grants }, null, 2));
+    return EXIT.ok;
+  }
+  if (grants.length === 0) {
+    write("Nothing is enrolled. Discovery is read-only until something is.");
+    write("  nightorders enroll <repo> --backend <name> --paths <path>");
+    return EXIT.ok;
+  }
+  for (const grant of grants) {
+    write(`${grant.repo}  ${grant.backend}`);
+    for (const line of describeGrant(grant).slice(2)) write(line);
+    write("");
+  }
+  return EXIT.ok;
+}
+
+function revokeCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, now } = context;
+  const repo = positional[0] === undefined ? process.cwd() : resolve(positional[0]);
+  const backend = text(flags, "backend") ?? BUILT_IN;
+
+  // No --yes here on purpose: taking permission away is the safe direction,
+  // and a confirmation prompt on the brakes is how people stop using them.
+  const revoked = store.revokeGrant(repo, backend, mutationFrom(flags, now));
+  if (!revoked) {
+    return fail(write, json, "revoke", "no-grant", `${repo} was not enrolled for ${backend}`, EXIT.refused);
+  }
+
+  return succeed(write, json, "revoke", { repo, backend }, () => [
+    `Revoked. ${backend} in ${repo} is read-only again.`,
+  ]);
+}
+
+/** null when a name was given that is not a mutation class. */
+function readMutations(flags: Map<string, string | true>): MutationClass[] | null {
+  const given = text(flags, "allow");
+  if (given === undefined) return [...DEFAULT_MUTATIONS];
+
+  const wanted = given.split(",").map(one => one.trim()).filter(Boolean);
+  if (wanted.some(one => !MUTATION_CLASSES.includes(one as MutationClass))) return null;
+  return wanted as MutationClass[];
+}
+
+/**
+ * What may be written. The built-in store is ours and needs no path, so it
+ * gets one implicitly; every other backend has to be told, because guessing
+ * where somebody's tracker keeps its data and then writing there is exactly
+ * the move this whole module exists to prevent.
+ */
+function readPaths(flags: Map<string, string | true>, backend: string): string[] {
+  const given = text(flags, "paths");
+  if (given !== undefined) return given.split(",").map(one => one.trim()).filter(Boolean);
+  return backend === BUILT_IN ? [BUILT_IN] : [];
 }
 
 // ---- authoring ------------------------------------------------------------

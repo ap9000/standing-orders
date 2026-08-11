@@ -18,7 +18,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
-import { detectGraphs, chooseBackend, setupOptions } from "./graph.js";
+import {
+  detectGraphs,
+  chooseBackend,
+  setupOptions,
+  LABELS as GRAPH_LABELS,
+  type BackendKind,
+} from "./graph.js";
+import { openStore, databasePath, type Store } from "./store.js";
+import type { BackendGrant } from "./grant.js";
 import { runOperate, OPERATE_HELP, type OperateOptions } from "./operate.js";
 import { renderReport, renderPulls, renderGraph, type PullGroup } from "./render.js";
 import { DEFAULT_MAX_DEPTH } from "./scan.js";
@@ -140,7 +148,17 @@ export function parseArgs(argv: readonly string[]): ParseResult {
 }
 
 /** The commands that operate the queue rather than report on the world. */
-const OPERATE_COMMANDS = new Set(["ready", "task", "claim", "heartbeat", "release", "reap"]);
+const OPERATE_COMMANDS = new Set([
+  "ready",
+  "task",
+  "claim",
+  "heartbeat",
+  "release",
+  "reap",
+  "enroll",
+  "grants",
+  "revoke",
+]);
 
 /** binSource exists so tests can exercise linking without depending on a build. */
 export type MainOptions = { binSource?: string; operate?: OperateOptions };
@@ -412,17 +430,56 @@ async function runGraphCommand(argv: readonly string[], write: Write): Promise<n
 
   const detections = await detectGraphs(present);
 
+  // An enrolled backend outranks anything detection would have picked — the
+  // ladder's first rung, and now reachable because grants are persisted. An
+  // operator who already said which one must not be re-asked because a second
+  // tracker turned up somewhere else on the machine.
+  const enrolled = enrolledBackend(present);
+
   // The envelope carries the choice and the setup commands, not just the raw
   // detections: an agent reading this has the same question a person does —
   // what is here, what would you use, and what would I have to run.
   const envelope = {
     detections,
-    choice: chooseBackend(detections),
+    choice: chooseBackend(detections, enrolled === undefined ? {} : { enrolled }),
     setup: setupOptions(),
   };
 
-  write(json ? JSON.stringify(envelope, null, 2) : renderGraph(detections));
+  write(
+    json
+      ? JSON.stringify(envelope, null, 2)
+      : renderGraph(detections, enrolled === undefined ? {} : { enrolled }),
+  );
   return 0;
+}
+
+/**
+ * The backend enrolled for any of these repositories, if one is.
+ *
+ * Read-only and failure-tolerant on purpose: `graph` is a reporting command,
+ * and a queue that cannot be opened must degrade to plain detection rather
+ * than take the report down with it.
+ */
+function enrolledBackend(repos: readonly string[]): BackendKind | undefined {
+  let store: Store;
+  try {
+    store = openStore(databasePath(process.env, homedir()));
+  } catch {
+    return undefined;
+  }
+  try {
+    const wanted = new Set(repos);
+    const grant = store.listGrants().find((one: BackendGrant) => wanted.has(one.repo));
+    // A grant may name the built-in store, which detection never reports, so
+    // only a backend the graph report knows about is passed through.
+    return grant !== undefined && isBackendKind(grant.backend) ? grant.backend : undefined;
+  } finally {
+    store.close();
+  }
+}
+
+function isBackendKind(name: string): name is BackendKind {
+  return Object.prototype.hasOwnProperty.call(GRAPH_LABELS, name);
 }
 
 /** null means the configuration could not be read, and was already reported. */
