@@ -142,14 +142,26 @@ async function readBranches(git: Git): Promise<BranchRead> {
   return { result: cheap, degraded: cheap.code === 0 };
 }
 
+/**
+ * Inspect known repositories, skipping the walk entirely. Enrolled paths are
+ * already the answer to "which repositories" — searching for them again would
+ * be the tool distrusting a list the operator wrote down.
+ */
+export async function inspectAll(
+  paths: readonly string[],
+  options: InspectOptions & { concurrency?: number } = {},
+): Promise<RepoSnapshot[]> {
+  const { runner = run, dirty = false, concurrency = DEFAULT_CONCURRENCY } = options;
+  return mapWithConcurrency(paths, concurrency, path => inspectRepo(path, { runner, dirty }));
+}
+
 /** Every repository at or below `roots`, inspected with bounded concurrency. */
 export async function discover(
   roots: readonly string[],
   options: DiscoverOptions = {},
 ): Promise<RepoSnapshot[]> {
-  const { scan, runner = run, dirty = false, concurrency = DEFAULT_CONCURRENCY } = options;
-  const paths = await findRepos(roots, scan);
-  return mapWithConcurrency(paths, concurrency, path => inspectRepo(path, { runner, dirty }));
+  const { scan, ...rest } = options;
+  return inspectAll(await findRepos(roots, scan), rest);
 }
 
 function emptySnapshot(path: string): RepoSnapshot {

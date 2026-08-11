@@ -13,9 +13,10 @@
 
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discover, type RepoSnapshot } from "./discover.js";
+import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
+import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { renderReport } from "./render.js";
 import { DEFAULT_MAX_DEPTH } from "./scan.js";
 import {
@@ -29,9 +30,13 @@ import {
 
 export type CliOptions = {
   roots: string[];
+  /** Whether roots came from the command line, as opposed to the default. */
+  rootsGiven: boolean;
   maxDepth: number;
   json: boolean;
   includeHidden: boolean;
+  /** Report everything discoverable, ignoring the enrolled list. */
+  all: boolean;
   dirty: boolean;
   help: boolean;
 };
@@ -45,13 +50,20 @@ const USAGE_EXIT = 2;
 export const HELP = `nightorders — standing orders for your agents
 
 Usage
-  nightorders [path...]        report what is in flight (default: .)
+  nightorders [path...]        report what is in flight
+  nightorders repos            list connected repositories, and how to adjust
+  nightorders repos add <path> connect one (no path: the repo you are in)
+  nightorders repos remove <path>
   nightorders link             put \`nightorders\` on your PATH
   nightorders unlink           take it off again
 
+With nothing connected it reports everything it can find below the working
+directory. Once you connect repositories it reports those instead.
+
 Options
+  --all         report everything discoverable, ignoring connected repos
   --depth <n>   directory levels to descend (default: ${DEFAULT_MAX_DEPTH})
-  --all         include dot-directories, which are skipped by default
+  --hidden      include dot-directories, which are skipped by default
   --dirty       also read each working tree for uncommitted files
   --json        emit a machine-readable envelope instead of a report
   -h, --help    show this
@@ -72,9 +84,11 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   const roots: string[] = [];
   const options: CliOptions = {
     roots: [],
+    rootsGiven: false,
     maxDepth: DEFAULT_MAX_DEPTH,
     json: false,
     includeHidden: false,
+    all: false,
     dirty: false,
     help: false,
   };
@@ -84,8 +98,10 @@ export function parseArgs(argv: readonly string[]): ParseResult {
 
     if (argument === "--json") {
       options.json = true;
-    } else if (argument === "--all") {
+    } else if (argument === "--hidden") {
       options.includeHidden = true;
+    } else if (argument === "--all") {
+      options.all = true;
     } else if (argument === "--dirty") {
       options.dirty = true;
     } else if (argument === "--help" || argument === "-h") {
@@ -103,7 +119,13 @@ export function parseArgs(argv: readonly string[]): ParseResult {
     }
   }
 
-  return { options: { ...options, roots: roots.length > 0 ? roots : [process.cwd()] } };
+  return {
+    options: {
+      ...options,
+      roots: roots.length > 0 ? roots : [process.cwd()],
+      rootsGiven: roots.length > 0,
+    },
+  };
 }
 
 /** binSource exists so tests can exercise linking without depending on a build. */
@@ -118,6 +140,7 @@ export async function main(
   if (first === "link" || first === "unlink") {
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
+  if (first === "repos") return runReposCommand(rest, write);
 
   const parsed = parseArgs(argv);
 
@@ -133,6 +156,18 @@ export async function main(
   }
 
   const now = new Date();
+
+  // An enrolled list is a decision the operator already made; honour it unless
+  // they asked otherwise by naming paths or passing --all.
+  const enrolled = await loadRepos(configFile());
+  if ("error" in enrolled) {
+    write(enrolled.error);
+    return 1;
+  }
+  if (!options.all && !options.rootsGiven && enrolled.repos.length > 0) {
+    return reportEnrolled(enrolled.repos, options, now, write);
+  }
+
   const { present, missing } = partitionRoots(options.roots, existsSync);
 
   // A path that does not exist is a typo, not an empty search, and saying
@@ -160,6 +195,38 @@ export async function main(
   return 0;
 }
 
+function configFile(): string {
+  return configPath(process.env, homedir());
+}
+
+/**
+ * Report the enrolled repositories directly. A path that has since been moved
+ * or deleted is named rather than silently dropped — a list that quietly
+ * shrinks is worse than one that tells you it is stale.
+ */
+async function reportEnrolled(
+  repos: readonly string[],
+  options: CliOptions,
+  now: Date,
+  write: Write,
+): Promise<number> {
+  const { present, missing } = partitionRoots(repos, existsSync);
+  const snapshots = await inspectAll(present, { dirty: options.dirty });
+
+  if (options.json) {
+    write(renderJson(snapshots, present, missing, now));
+    return 0;
+  }
+
+  if (missing.length > 0) {
+    for (const repo of missing) write(`${repo} is enrolled but is no longer there.`);
+    write(`Drop it with \`nightorders repos remove ${missing[0]}\`.`);
+    write("");
+  }
+  write(renderReport(snapshots, { now, roots: present }));
+  return 0;
+}
+
 export function partitionRoots(
   roots: readonly string[],
   exists: (path: string) => boolean,
@@ -172,6 +239,97 @@ export function partitionRoots(
 
 function describeMissing(missing: readonly string[]): string {
   return missing.map(root => `${root} does not exist — check the path.`).join("\n");
+}
+
+/**
+ * `repos` with no arguments lists what is connected and shows how to change
+ * it, so the way to adjust the list is visible at the moment you are looking
+ * at it — rather than being something you have to remember a flag for.
+ */
+async function runReposCommand(argv: readonly string[], write: Write): Promise<number> {
+  const [action, ...paths] = argv;
+  const file = configFile();
+  const loaded = await loadRepos(file);
+  if ("error" in loaded) {
+    write(loaded.error);
+    return 1;
+  }
+
+  if (action === undefined) return listRepos(loaded.repos, file, write);
+  if (action !== "add" && action !== "remove") {
+    write(`unknown command \`repos ${action}\` — try \`repos\`, \`repos add\`, or \`repos remove\``);
+    return USAGE_EXIT;
+  }
+
+  // `repos add` with no path means the repository you are standing in.
+  const targets = (paths.length > 0 ? paths : [process.cwd()]).map(path => resolve(path));
+  return action === "add"
+    ? addToRepos(loaded.repos, targets, file, write)
+    : removeFromRepos(loaded.repos, targets, file, write);
+}
+
+function listRepos(repos: readonly string[], file: string, write: Write): number {
+  if (repos.length === 0) {
+    write("No repositories connected. Night Orders reports on everything it can find.");
+    write("");
+    write("Connect the ones you actually work in:");
+    write("  nightorders repos add ~/code/thing");
+    write("  nightorders repos add            # the repo you are standing in");
+    return 0;
+  }
+
+  write(`${repos.length === 1 ? "1 repository" : `${repos.length} repositories`} connected:`);
+  for (const repo of repos) write(`  ${repo}${existsSync(repo) ? "" : "   (missing)"}`);
+  write("");
+  write("  nightorders repos add <path>      connect another");
+  write("  nightorders repos remove <path>   disconnect one");
+  write("  nightorders --all                 report everything, ignoring this list");
+  write(`  ${file}`);
+  return 0;
+}
+
+async function addToRepos(
+  existing: readonly string[],
+  targets: readonly string[],
+  file: string,
+  write: Write,
+): Promise<number> {
+  // Enrolling something that is not a repository would fail later and further
+  // away, so it fails here instead.
+  const rejected = targets.filter(path => !existsSync(join(path, ".git")));
+  if (rejected.length > 0) {
+    for (const path of rejected) write(`${path} is not a git repository.`);
+    return USAGE_EXIT;
+  }
+
+  const added = targets.filter(path => !existing.includes(path));
+  await saveRepos(file, addRepos(existing, targets));
+
+  if (added.length === 0) {
+    write(`Already connected: ${targets.join(", ")}`);
+    return 0;
+  }
+  for (const path of added) write(`Connected ${path}`);
+  write("");
+  write("`nightorders` now reports these. `nightorders --all` still shows everything.");
+  return 0;
+}
+
+async function removeFromRepos(
+  existing: readonly string[],
+  targets: readonly string[],
+  file: string,
+  write: Write,
+): Promise<number> {
+  const removed = targets.filter(path => existing.includes(path));
+  if (removed.length === 0) {
+    write(`Not connected: ${targets.join(", ")}`);
+    return 0;
+  }
+
+  await saveRepos(file, removeRepos(existing, targets));
+  for (const path of removed) write(`Disconnected ${path}`);
+  return 0;
 }
 
 export type LinkArgs = { to?: string; yes: boolean };

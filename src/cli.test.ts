@@ -39,11 +39,26 @@ describe("parseArgs", () => {
     expect(error(["--depth", "-1"])).toContain("--depth");
   });
 
-  test("reads --json and --all", () => {
-    const parsed = options(["--json", "--all"]);
+  test("reads --json and --hidden", () => {
+    const parsed = options(["--json", "--hidden"]);
 
     expect(parsed.json).toBe(true);
     expect(parsed.includeHidden).toBe(true);
+  });
+
+  test("keeps --all and --hidden as different questions", () => {
+    // --hidden is about where to look; --all is about whether the connected
+    // list applies. Conflating them would make one of them unreachable.
+    const parsed = options(["--all"]);
+
+    expect(parsed.all).toBe(true);
+    expect(parsed.includeHidden).toBe(false);
+  });
+
+  test("records whether paths were given, not just what they defaulted to", () => {
+    // The connected list applies only when the operator named no paths.
+    expect(options([]).rootsGiven).toBe(false);
+    expect(options(["/tmp"]).rootsGiven).toBe(true);
   });
 
   test("leaves the working-tree read off unless --dirty is given", () => {
