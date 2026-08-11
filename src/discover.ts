@@ -33,6 +33,12 @@ export type RepoSnapshot = {
   worktrees: Worktree[];
   /** Uncommitted files, or null when the working tree was not read. */
   dirtyFiles: number | null;
+  /**
+   * Whether ahead/behind could be computed. False means every branch carries a
+   * zeroed track, which is absence of data and not evidence of being in sync —
+   * a distinction the report has to respect or it hides the whole repository.
+   */
+  hasTracking: boolean;
   /** What could not be read, in words. Never silently dropped. */
   problems: string[];
 };
@@ -114,6 +120,7 @@ export async function inspectRepo(path: string, options: InspectOptions = {}): P
     branches: branches.code === 0 ? parseBranches(branches.stdout) : [],
     worktrees: worktrees.code === 0 ? parseWorktrees(worktrees.stdout) : [],
     dirtyFiles: status !== null && status.code === 0 ? countLines(status.stdout) : null,
+    hasTracking: branches.code === 0 && !branchRead.degraded,
     problems,
   };
 }
@@ -149,6 +156,7 @@ function emptySnapshot(path: string): RepoSnapshot {
     branches: [],
     worktrees: [],
     dirtyFiles: null,
+    hasTracking: false,
     problems: [],
   };
 }

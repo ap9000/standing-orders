@@ -17,6 +17,7 @@ const repo = (overrides: Partial<RepoSnapshot> = {}): RepoSnapshot => ({
   branches: [],
   worktrees: [],
   dirtyFiles: 0,
+  hasTracking: true,
   problems: [],
   ...overrides,
 });
@@ -145,6 +146,45 @@ describe("renderReport", () => {
 
     expect(output).toContain("3 uncommitted");
     expect(output).toContain("detached");
+  });
+
+  test("says so plainly when repos were found but nothing is in flight", () => {
+    // Otherwise this is a header with silence underneath, which reads as a bug
+    const snapshots = [repo({ branches: [branch("main", {}, DAY)] }), repo({ name: "other" })];
+
+    const output = renderReport(snapshots, { now: NOW });
+
+    expect(output).toContain("Nothing in flight");
+    expect(output).toContain("2 repositories");
+    // --dirty is off by default, so say where uncommitted work went
+    expect(output).toContain("--dirty");
+  });
+
+  test("falls back to recent branches when ahead/behind is unavailable", () => {
+    // Without tracking there is nothing for the in-flight filter to match, so
+    // filtering would hide every branch and leave only a complaint on screen.
+    const snapshots = [
+      repo({
+        hasTracking: false,
+        problems: ["ahead/behind skipped: it took over 5s to compute here"],
+        branches: [branch("main", {}, DAY), branch("feature/onboarding", {}, 2 * DAY)],
+      }),
+    ];
+
+    const output = renderReport(snapshots, { now: NOW });
+
+    expect(output).toContain("feature/onboarding");
+    expect(output).toContain("2d ago");
+  });
+
+  test("says when a repository is shown by recency rather than by state", () => {
+    const snapshots = [
+      repo({ hasTracking: false, branches: [branch("main", {}, DAY)] }),
+    ];
+
+    const output = renderReport(snapshots, { now: NOW });
+
+    expect(output).toContain("recency");
   });
 
   test("surfaces problems rather than hiding them", () => {

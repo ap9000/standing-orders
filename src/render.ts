@@ -80,20 +80,25 @@ export function renderReport(snapshots: readonly RepoSnapshot[], options: Report
     .map(snapshot => collectRows(snapshot, now, maxBranches))
     .filter(rows => rows.length > 0);
 
+  if (sections.length === 0) return renderNothingInFlight(snapshots.length);
+
   const rows = sections.flat();
   const nameWidth = widthOf(rows, row => row.indent.length + row.name.length, MIN_NAME_WIDTH, MAX_NAME_WIDTH);
   const stateWidth = widthOf(rows, row => row.state.length, MIN_STATE_WIDTH, MAX_STATE_WIDTH);
 
   const inFlight = snapshots.reduce(
-    (total, snapshot) => total + snapshot.branches.filter(isInFlight).length,
+    (total, snapshot) => total + (snapshot.hasTracking ? snapshot.branches.filter(isInFlight).length : 0),
     0,
   );
+  const unmeasured = snapshots.filter(snapshot => !snapshot.hasTracking).length;
 
   const body = sections.map(section =>
     section.map(row => renderRow(row, nameWidth, stateWidth)).join("\n"),
   );
 
-  return [renderHeader(inFlight, snapshots.length), "", ...body].join("\n").trimEnd();
+  return [renderHeader(inFlight, snapshots.length, unmeasured), "", ...body]
+    .join("\n")
+    .trimEnd();
 }
 
 function renderRow(row: Row, nameWidth: number, stateWidth: number): string {
@@ -118,10 +123,26 @@ function widthOf(
   return Math.min(max, Math.max(min, widest + GUTTER));
 }
 
-function renderHeader(inFlight: number, repoCount: number): string {
+function renderHeader(inFlight: number, repoCount: number, unmeasured: number): string {
   const branches = plural(inFlight, "branch", "branches");
   const repos = plural(repoCount, "repository", "repositories");
-  return `${branches} in flight across ${repos}`;
+  const headline = `${branches} in flight across ${repos}`;
+
+  // A count that quietly excludes repositories it could not measure is a lie
+  // of omission, and the second run is usually fast enough to fix it.
+  if (unmeasured === 0) return headline;
+  const which = unmeasured === 1 ? "1 repository is" : `${unmeasured} repositories are`;
+  return `${headline}\n${which} listed by recency: ahead/behind was too slow to compute. Run again — git caches it.`;
+}
+
+/** Repositories were found and read; none of them had anything outstanding. */
+function renderNothingInFlight(repoCount: number): string {
+  return [
+    `Nothing in flight across ${plural(repoCount, "repository", "repositories")}.`,
+    "Every branch is level with its upstream.",
+    "",
+    "Uncommitted work is not counted here — add --dirty to read working trees.",
+  ].join("\n");
 }
 
 function renderEmpty(roots: readonly string[]): string {
@@ -134,16 +155,26 @@ function renderEmpty(roots: readonly string[]): string {
   ].join("\n");
 }
 
+/**
+ * Which branches to show. With tracking, the ones that have diverged. Without
+ * it, the most recent — filtering on a signal that was never computed would
+ * discard every branch and leave the repository represented by a complaint.
+ */
+function selectBranches(snapshot: RepoSnapshot): Branch[] {
+  const byRecent = [...snapshot.branches].sort(byCommittedAtDesc);
+  return snapshot.hasTracking ? byRecent.filter(isInFlight) : byRecent;
+}
+
 function collectRows(snapshot: RepoSnapshot, now: Date, maxBranches: number): Row[] {
-  const inFlight = snapshot.branches.filter(isInFlight).sort(byCommittedAtDesc);
+  const selected = selectBranches(snapshot);
 
   // A quiet, clean repo with nothing outstanding is not worth a line.
-  if (inFlight.length === 0 && !snapshot.dirtyFiles && snapshot.problems.length === 0) {
+  if (selected.length === 0 && !snapshot.dirtyFiles && snapshot.problems.length === 0) {
     return [];
   }
 
-  const shown = inFlight.slice(0, maxBranches);
-  const withheld = inFlight.length - shown.length;
+  const shown = selected.slice(0, maxBranches);
+  const withheld = selected.length - shown.length;
 
   const rows: Row[] = [
     {

@@ -110,6 +110,8 @@ describe("inspectRepo", () => {
     expect(calls).toContain("for-each-ref:cheap");
     expect(snapshot.branches.map(branch => branch.name)).toEqual(["main", "feature/onboarding"]);
     expect(snapshot.branches[0]?.track).toEqual({ ahead: 0, behind: 0, gone: false });
+    // the zeroed track is absence of data, not evidence of being in sync
+    expect(snapshot.hasTracking).toBe(false);
     // what was withheld is stated, never silently dropped
     expect(snapshot.problems.join(" ")).toContain("ahead/behind");
   });
