@@ -1,4 +1,4 @@
-# Muster — design v0.2
+# Night Orders — design v0.2
 
 A control plane for fleets of coding agents.
 
@@ -9,7 +9,7 @@ A control plane for fleets of coding agents.
 
 ## 1. What this is
 
-Muster owns four things and deliberately nothing else:
+Night Orders owns four things and deliberately nothing else:
 
 | | |
 |---|---|
@@ -71,7 +71,7 @@ That argument still yields a small core. It just does not get to sneer at GUIs.
 | `sandcastle` | sandboxed orchestration, schema repair | mechanism borrowed |
 | `axi` | agent-ergonomic CLI design | **the CLI conforms to it** |
 
-Muster is not the first tool to pitch "sleep, wake to finished work" — gnhf's tagline is literally that, and Orca ships phone steering. v0.1 claimed otherwise; that was wrong.
+Night Orders is not the first tool to pitch "sleep, wake to finished work" — gnhf's tagline is literally that, and Orca ships phone steering. v0.1 claimed otherwise; that was wrong.
 
 **What is actually unclaimed:** a *typed, server-validated* record of what needs a human, separate from the transcript that produced it.
 
@@ -235,7 +235,7 @@ test -n "$STRIPE_SECRET_KEY"         env presence
 
 In team mode this is the difference between a shared backlog and a shared breach: a colleague's control plane must never see your keys. Event log and agent transcripts are redacted by the same rule.
 
-**Boundary:** the human pastes credentials. Agents never do. Muster reports exactly what is missing and how to obtain it; it does not type keys on anyone's behalf.
+**Boundary:** the human pastes credentials. Agents never do. Night Orders reports exactly what is missing and how to obtain it; it does not type keys on anyone's behalf.
 
 ### Repos are the easy part
 
@@ -249,7 +249,7 @@ gh pr list    --json number,headRefName,statusCheckRollup
 gh issue list --json number,title,labels
 ```
 
-**Discovery is total and read-only; management is opt-in per repo.** Muster indexes everything it can see and drives only what you enrolled. Anything unenrolled is visible context it must not touch.
+**Discovery is total and read-only; management is opt-in per repo.** Night Orders indexes everything it can see and drives only what you enrolled. Anything unenrolled is visible context it must not touch.
 
 Adoption, not discovery, is the hard part — a dirty working tree, a worktree your terminal is sitting in, a branch with a live PR. treehouse's rules apply: untracked files count as dirty even when repo config hides them; in-use is detected from running processes; reconstructed state is marked leased-until-verified.
 
@@ -257,7 +257,7 @@ Adoption, not discovery, is the hard part — a dirty working tree, a worktree y
 
 ## 7. The checkpoint
 
-One daily ritual, not two. Opening Muster shows three queues, and gaps rank by **how many tasks they unblock** — never alphabetically.
+One daily ritual, not two. Opening Night Orders shows three queues, and gaps rank by **how many tasks they unblock** — never alphabetically.
 
 ```
 muster ── good morning ───────────────────────────
@@ -326,7 +326,7 @@ For one person working with agents. v0.1 claimed ~7 weeks for all six; that was 
 
 | | Scope | Ships when |
 |---|---|---|
-| **M0** | Graph, dependency edges, **Claim/lease with fencing**, idempotency keys, SQLite store, AXI CLI, **repo + branch + PR + issue ingestion**. No agents run. | `muster` shows what is in flight across every repo |
+| **M0** | Graph, dependency edges, **Claim/lease with fencing**, idempotency keys, SQLite store, AXI CLI, **repo + branch + PR + issue ingestion**. No agents run. | `nightorders` shows what is in flight across every repo |
 | **M1** | Runner registration **with auth from the first commit**, heartbeat, treehouse lease adapter, claude builder, reconciliation for dead runner / orphaned worktree / duplicate completion. | one task goes queued → branch → commit unattended |
 | **M2** | Capability probes, SetupRequest, secrets-on-runner, checkpoint UI, notification outbox. | you fill one gap and three tasks start |
 | **M3** | Decision schema + validation + schema repair, driver role, evidence artifacts, web decision view. | a park renders as one screen, answerable on a phone |
@@ -343,10 +343,12 @@ The honest definition of done for v1: **one complete SQLite overnight loop that 
 
 ## 11. Open questions
 
-1. **Overlap with beads.** beads (26k★) already does dependency-graph work state with branch-aware sync. Is Muster's graph a thin projection over an existing tracker rather than a competing store? Resolving this before M0 could remove a third of the build.
+1. **Overlap with beads.** beads (26k★) already does dependency-graph work state with branch-aware sync. Is Night Orders's graph a thin projection over an existing tracker rather than a competing store? Resolving this before M0 could remove a third of the build.
 2. **Does the loop ever push to `main`?** Recommendation: never — a PR terminus is the only reason the gate is trustworthy.
 3. **License.** MIT matches orca, no-mistakes, cc-haha; Apache-2.0 matches agent-orchestrator and adds patent cover.
-4. **Name.** `muster` availability on npm and GitHub is unchecked. Alternates: `marshal`, `blockpost`, `signalbox`.
+4. **CLI alias.** `nightorders` is twelve characters. `no` is unusable as a shell alias, so either the full name stands or something less collision-prone is needed.
+
+> **On the name.** A captain's night orders are the written standing instructions left for the officer of the watch: proceed on this course without me, and wake me under exactly these conditions. That is the product — an autonomous loop plus a typed set of wake conditions — so the name is the specification, not decoration. Chosen over `blockpost`, `dogwatch`, and `watchbill`; `muster` was already taken on npm.
 
 ---
 

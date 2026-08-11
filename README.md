@@ -1,10 +1,10 @@
-# Muster
+# Night Orders
 
 A control plane for fleets of coding agents.
 
 > **Status: design only.** No code yet. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.2).
 
-Muster owns the **work graph**, the **scheduler**, the **attention surface** — the typed queue of things waiting on a human — and an append-only **event log**.
+Night Orders owns the **work graph**, the **scheduler**, the **attention surface** — the typed queue of things waiting on a human — and an append-only **event log**.
 
 It does not own worktrees, the review gate, credential storage, or the agents. Those are adapters over tools that already do those jobs well: [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, `codex`.
 
@@ -22,7 +22,7 @@ Two things agents are bad at, that a control plane can be good at:
 
 | | | |
 |---|---|---|
-| M0 | graph, leases, ingestion, CLI | `muster` shows what is in flight across every repo |
+| M0 | graph, leases, ingestion, CLI | `nightorders` shows what is in flight across every repo |
 | M1 | runners, worktrees, first builder | one task goes queued → branch → commit unattended |
 | M2 | capabilities, secrets, checkpoint UI | fill one gap, three tasks start |
 | M3 | decisions, evidence, web view | a park renders as one screen |
@@ -35,7 +35,7 @@ Done means one complete overnight loop that survives crashes, duplicate messages
 
 - Whether the graph should be a projection over [`beads`](https://github.com/gastownhall/beads) rather than a competing store.
 - License — MIT or Apache-2.0.
-- The name. `muster` availability is unchecked.
+- Whether the CLI keeps the full `nightorders` or takes a shorter alias.
 
 ## Credits
 
