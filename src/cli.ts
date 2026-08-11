@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
-import { detectGraphs } from "./graph.js";
+import { detectGraphs, chooseBackend, setupOptions } from "./graph.js";
 import { renderReport, renderPulls, renderGraph, type PullGroup } from "./render.js";
 import { DEFAULT_MAX_DEPTH } from "./scan.js";
 import {
@@ -399,7 +399,16 @@ async function runGraphCommand(argv: readonly string[], write: Write): Promise<n
 
   const detections = await detectGraphs(present);
 
-  write(json ? JSON.stringify(detections, null, 2) : renderGraph(detections));
+  // The envelope carries the choice and the setup commands, not just the raw
+  // detections: an agent reading this has the same question a person does —
+  // what is here, what would you use, and what would I have to run.
+  const envelope = {
+    detections,
+    choice: chooseBackend(detections),
+    setup: setupOptions(),
+  };
+
+  write(json ? JSON.stringify(envelope, null, 2) : renderGraph(detections));
   return 0;
 }
 

@@ -294,6 +294,27 @@ describe("renderGraph", () => {
     expect(output).toContain("2.67.0 too old, needs 2.94.0");
   });
 
+  test("prints the setup commands, and their side effects, when nothing is set up", () => {
+    // The empty case used to be a dead end. §4: print the upstream command
+    // *and* a summary of what it does, then let the operator run it.
+    const output = renderGraph([
+      detection({ kind: "github-issues", label: "GitHub Issues", count: null, repos: [] }),
+    ]);
+
+    expect(output).toContain("bd init");
+    expect(output).toContain("brew install beads");
+    // the side effect is the part someone would be angry to discover later
+    expect(output).toContain("AGENTS.md");
+    expect(output).toContain("Night Orders runs none of these");
+  });
+
+  test("does not offer setup commands when a backend was found", () => {
+    // Someone who already has beads does not need to be sold beads.
+    const output = renderGraph([detection({ kind: "beads", label: "beads" })]);
+
+    expect(output).not.toContain("brew install");
+  });
+
   test("says what it looked for when it found nothing", () => {
     // An empty result has to be distinguishable from not having looked.
     const output = renderGraph([]);

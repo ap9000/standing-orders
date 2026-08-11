@@ -83,6 +83,68 @@ export type ChooseOptions = {
   enrolled?: BackendKind;
 };
 
+/**
+ * What the operator would run to set a backend up, and what it would do to
+ * their repository.
+ *
+ * This is text, and stays text. `bd init` creates or updates `AGENTS.md` and
+ * installs Claude and Codex integrations unless told not to — which is a
+ * substantial thing to do to somebody's repository, and not ours to do on
+ * their behalf. A tool that refuses to run `bd init` for you and then quietly
+ * ran it from inside a helpful setup prompt would have spent the only
+ * credibility it had.
+ *
+ * There is deliberately no prompt. A wizard would cost the zero-config opening
+ * this tool is built around, and half the intended audience is an agent or a
+ * scheduled run, where anything that blocks on an answer simply hangs.
+ *
+ * Commands are quoted from each tool's own documentation rather than inferred.
+ * Backlog.md is detected but not offered here, because its install path has
+ * not been verified — and printing a command that has not been checked is how
+ * an operator ends up running the wrong thing on our say-so.
+ */
+export type SetupOption = {
+  kind: BackendKind | "built-in";
+  label: string;
+  /** null when there is nothing to install. */
+  install: string | null;
+  /** null when there is nothing to initialize. */
+  init: string | null;
+  /** What it changes in the repository. Never omitted where there is one. */
+  sideEffects: string | null;
+  note: string | null;
+};
+
+export function setupOptions(): SetupOption[] {
+  return [
+    {
+      kind: "beads",
+      label: LABELS.beads,
+      install: "brew install beads   # or: npm install -g @beads/bd",
+      init: "bd init",
+      sideEffects:
+        "creates .beads/, and creates or updates AGENTS.md and installs Claude/Codex integrations unless you pass --skip-agents or --stealth",
+      note: "native dependency edges and a ready query",
+    },
+    {
+      kind: "github-issues",
+      label: LABELS["github-issues"],
+      install: null,
+      init: null,
+      sideEffects: null,
+      note: `already there if the repo is on GitHub; needs gh ${GH_DEPS_MIN_VERSION}+ for dependency fields`,
+    },
+    {
+      kind: "built-in",
+      label: "built-in",
+      install: null,
+      init: null,
+      sideEffects: null,
+      note: "a deliberately small local store, not built yet",
+    },
+  ];
+}
+
 export type Runner = (
   file: string,
   args: readonly string[],

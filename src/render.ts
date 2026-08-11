@@ -8,7 +8,12 @@
 
 import type { RepoSnapshot } from "./discover.js";
 import type { Branch, TrackingState } from "./git.js";
-import { chooseBackend, LABELS as GRAPH_LABELS, type Detection } from "./graph.js";
+import {
+  chooseBackend,
+  setupOptions,
+  LABELS as GRAPH_LABELS,
+  type Detection,
+} from "./graph.js";
 import {
   classify,
   describe as describePull,
@@ -460,10 +465,39 @@ export function renderGraph(detections: readonly Detection[]): string {
     ...rows.map(row => `${row.marker}${row.label.padEnd(labelWidth)}  ${row.facts}`),
     "",
     ...describeChoice(choice),
+    ...(choice.action === "built-in" ? renderSetup() : []),
     ...renderProblems(problems),
   ]
     .join("\n")
     .trimEnd();
+}
+
+/**
+ * The way forward when nothing is set up.
+ *
+ * Without this the empty case is a dead end — "no tracker found, and the
+ * fallback does not exist yet" — which tells an operator nothing they can act
+ * on. §4 requires the opposite: print the upstream command *and* what it will
+ * do, and let them run it.
+ *
+ * The side effects are not a footnote. `bd init` rewrites AGENTS.md and
+ * installs agent integrations, and somebody who ran it because a tool
+ * suggested it and only found that out afterwards would be right to be angry.
+ */
+function renderSetup(): string[] {
+  const lines: string[] = ["", "Setting one up — commands to run yourself, in your own shell:"];
+
+  for (const option of setupOptions()) {
+    lines.push("");
+    lines.push(`  ${option.label}${option.note === null ? "" : ` — ${option.note}`}`);
+    if (option.install !== null) lines.push(`      ${option.install}`);
+    if (option.init !== null) lines.push(`      ${option.init}`);
+    if (option.sideEffects !== null) lines.push(`      → ${option.sideEffects}`);
+  }
+
+  lines.push("");
+  lines.push("Night Orders runs none of these. Re-run `nightorders graph` afterwards.");
+  return lines;
 }
 
 /** The middle column: where it is, how much is in it, and whether it could run. */
