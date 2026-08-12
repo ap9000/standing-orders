@@ -3146,7 +3146,10 @@ async function addTask(
   // run: a task filed from the wrong directory would silently bind to it.
   const placedIn = text(flags, "repo");
   if (placedIn !== undefined) {
-    store.placeTask(store.refFor(BUILT_IN, id).id, resolve(placedIn));
+    const placed = store.placeTask(store.refFor(BUILT_IN, id).id, resolve(placedIn));
+    if (typeof placed === "object" && !placed.ok) {
+      return fail(write, json, "task add", "scoped", "this task already has a scope — placement is immutable once somebody could have approved it", EXIT.refused);
+    }
   }
 
   return succeed(write, json, "task add", { task: outcome.task, repo: placedIn === undefined ? null : resolve(placedIn) }, () => [

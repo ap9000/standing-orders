@@ -35,7 +35,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -771,6 +771,18 @@ CREATE TABLE IF NOT EXISTS watch_episode (
   built       INTEGER NOT NULL DEFAULT 0,
   broke       INTEGER NOT NULL DEFAULT 0
 );
+
+-- A project the console has opened: identity is the canonical repo path.
+-- Registry only — a row here NEVER authorizes access (the ceiling is server
+-- configuration); it remembers names and recency for the opener page. v6.
+CREATE TABLE IF NOT EXISTS project (
+  path           TEXT PRIMARY KEY,
+  name           TEXT NOT NULL,
+  added_at       TEXT NOT NULL,
+  last_opened_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS project_recent ON project (last_opened_at);
 
 -- Standing permission to publish built work: git push and PR creation are
 -- two different external writes, so they are two named capabilities under
@@ -2186,13 +2198,13 @@ export class Store {
    * scope together or not at all.
    */
   createConsoleTask(
-    spec: { id: string; title: string; repo?: string; goal?: string },
+    spec: { id?: string; title: string; repo?: string; goal?: string },
     now: Date,
     cap = 500,
   ):
-    | { ok: true }
+    | { ok: true; id: string }
     | { ok: false; reason: "backlog-full" | "bad-id" | "bad-title" | "bad-goal" | "duplicate" } {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(spec.id)) {
+    if (spec.id !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(spec.id)) {
       return { ok: false, reason: "bad-id" };
     }
     if (spec.title.trim() === "" || spec.title.length > 200 || hasForbiddenControls(spec.title)) {
@@ -2206,16 +2218,30 @@ export class Store {
         .prepare("SELECT COUNT(*) AS n FROM task WHERE state IN ('queued','running')")
         .get();
       if (Number(backlog?.["n"] ?? 0) >= cap) return { ok: false as const, reason: "backlog-full" as const };
-      const exists = this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(spec.id);
-      if (exists !== undefined) return { ok: false as const, reason: "duplicate" as const };
 
-      this.createTask({ id: spec.id, title: spec.title.trim() }, now);
-      const ref = this.refFor(BUILT_IN, spec.id, "ours");
+      // No id given: slug the title, uniquified inside this same transaction
+      // so two concurrent creates cannot mint the same one.
+      let id = spec.id;
+      if (id === undefined) {
+        const base =
+          spec.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 56) || "task";
+        id = base;
+        for (let n = 2; this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(id) !== undefined; n++) {
+          id = `${base}-${n}`;
+        }
+      } else if (this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(id) !== undefined) {
+        return { ok: false as const, reason: "duplicate" as const };
+      }
+
+      this.createTask({ id, title: spec.title.trim() }, now);
+      const ref = this.refFor(BUILT_IN, id, "ours");
+      // Placement happens BEFORE the scope exists, so the immutability guard
+      // in placeTask never fires here — atomic create, place, then scope.
       if (spec.repo !== undefined && spec.repo !== "") this.placeTask(ref.id, spec.repo);
       if (spec.goal !== undefined) {
         const draft = { goal: spec.goal.trim(), outOfScope: null, touches: [] as string[] };
         this.saveScope({
-          taskId: spec.id,
+          taskId: id,
           ...draft,
           proposedAt: now.toISOString(),
           digest: digestOf(draft),
@@ -2224,7 +2250,7 @@ export class Store {
           approvedDigest: null,
         });
       }
-      return { ok: true as const };
+      return { ok: true as const, id };
     });
   }
 
@@ -2234,15 +2260,17 @@ export class Store {
    * never stored; edges are preserved, and `task requeue <blocker>` is the
    * way out.
    */
-  strandedTasks(): { id: string; blockedBy: string[] }[] {
+  strandedTasks(repo: string | null = null): { id: string; blockedBy: string[] }[] {
     const rows = this.db
       .prepare(
         `SELECT task_edge.blocked AS id, task_edge.blocker AS blocker FROM task_edge
          JOIN task AS dependent ON dependent.id = task_edge.blocked AND dependent.state = 'queued'
          JOIN task AS blocker ON blocker.id = task_edge.blocker AND blocker.state IN ('failed','cancelled')
+         JOIN task_ref ON task_ref.backend = '${'built-in'}' AND task_ref.external_id = task_edge.blocked
+         WHERE (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
          ORDER BY task_edge.blocked, task_edge.blocker`,
       )
-      .all();
+      .all(repo, repo);
     const grouped = new Map<string, string[]>();
     for (const row of rows) {
       const id = String(row["id"]);
@@ -2268,12 +2296,37 @@ export class Store {
   }
 
   /** Say which repository a task's work lives in. */
-  placeTask(taskRef: number, repo: string, mutation: Mutation = {}): boolean {
+  /**
+   * Placement is immutable once a scope exists: an approval restates a goal
+   * *for a project*, and moving the task afterwards would re-aim the yes at
+   * a repo nobody agreed to. Place first, then scope — or requeue a fresh
+   * task. (Console v2 review, finding 3.)
+   */
+  placeTask(
+    taskRef: number,
+    repo: string,
+    mutation: Mutation = {},
+  ): boolean | { ok: false; reason: "scoped" } {
     return this.once(mutation, "placeTask", () => {
-      const { changes } = this.db
-        .prepare("UPDATE task_ref SET repo = ? WHERE id = ?")
-        .run(repo, taskRef);
-      return Number(changes) > 0;
+      return this.transact(() => {
+        const external = this.db
+          .prepare("SELECT external_id FROM task_ref WHERE id = ?")
+          .get(taskRef);
+        if (external !== undefined) {
+          const scoped = this.db
+            .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ?")
+            .get(String(external["external_id"]));
+          const current = this.db.prepare("SELECT repo FROM task_ref WHERE id = ?").get(taskRef);
+          const already = current?.["repo"] === null ? null : String(current?.["repo"]);
+          if (scoped !== undefined && already !== repo) {
+            return { ok: false as const, reason: "scoped" as const };
+          }
+        }
+        const { changes } = this.db
+          .prepare("UPDATE task_ref SET repo = ? WHERE id = ?")
+          .run(repo, taskRef);
+        return Number(changes) > 0;
+      });
     });
   }
 
@@ -2511,6 +2564,62 @@ export class Store {
       .map(row => ({ ...readRun(row), taskId: String(row["task_id"]) }));
   }
 
+  /**
+   * The scoped read family: every list the console shows can be filtered to
+   * one project. NULL repo rows (unplaced work) are always included — they
+   * belong to every view — and a NULL filter means "no filter". Bounding
+   * happens in the SQL, never by slicing a global read afterwards.
+   */
+  runsSinceScoped(since: string, repo: string | null): (Run & { taskId: string })[] {
+    return this.db
+      .prepare(
+        `SELECT run.*, task_ref.external_id AS task_id FROM run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE run.started_at >= ? AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         ORDER BY run.id`,
+      )
+      .all(since, repo, repo)
+      .map(row => ({ ...readRun(row), taskId: String(row["task_id"]) }));
+  }
+
+  /**
+   * One bounded page of tasks for the list pane, newest first, with the
+   * selected task injected even when it falls outside the page — a detail
+   * view whose own row is missing from its list reads as a bug.
+   */
+  listTasksScoped(
+    repo: string | null,
+    state: TaskState | undefined,
+    limit: number,
+    selectedId: string | null,
+  ): (Task & { repo: string | null })[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 500));
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (
+           SELECT task.*, task_ref.repo AS task_repo FROM task
+           JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+           WHERE (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+             AND (? IS NULL OR task.state = ?)
+           ORDER BY task.created_at DESC, task.id DESC LIMIT ?
+         )
+         UNION
+         SELECT task.*, task_ref.repo AS task_repo FROM task
+         JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+         WHERE task.id = ?
+         ORDER BY created_at DESC, id DESC`,
+      )
+      .all(BUILT_IN, repo, repo, state ?? null, state ?? null, page, BUILT_IN, selectedId);
+    return rows.map(row => ({
+      id: String(row["id"]),
+      title: String(row["title"]),
+      state: String(row["state"]) as TaskState,
+      createdAt: String(row["created_at"]),
+      updatedAt: String(row["updated_at"]),
+      repo: row["task_repo"] === null ? null : String(row["task_repo"]),
+    }));
+  }
+
   /** Newest first, because the question is almost always "what just happened". */
   runsFor(taskRef: number): Run[] {
     return this.db
@@ -2526,16 +2635,22 @@ export class Store {
    * top". The limit is clamped here, not trusted from the caller: a page is
    * bounded by construction or it is not a page.
    */
-  listRunsBefore(cursor: number | null, limit: number): (Run & { taskId: string })[] {
+  listRunsBefore(
+    cursor: number | null,
+    limit: number,
+    repo: string | null = null,
+  ): (Run & { taskId: string })[] {
     if (cursor !== null && (!Number.isSafeInteger(cursor) || cursor <= 0)) return [];
     const page = Math.max(1, Math.min(Math.floor(limit), 200));
     return this.db
       .prepare(
         `SELECT run.*, task_ref.external_id AS task_id FROM run
          JOIN task_ref ON task_ref.id = run.task_ref
-         WHERE (? IS NULL OR run.id < ?) ORDER BY run.id DESC LIMIT ?`,
+         WHERE (? IS NULL OR run.id < ?)
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         ORDER BY run.id DESC LIMIT ?`,
       )
-      .all(cursor, cursor, page)
+      .all(cursor, cursor, repo, repo, page)
       .map(row => ({ ...readRun(row), taskId: String(row["task_id"]) }));
   }
 
@@ -2636,6 +2751,34 @@ export class Store {
       )
       .all(taskRef)
       .map(readDecision);
+  }
+
+  /** Unanswered decisions whose task belongs to this project (or is unplaced). */
+  listDecisionsScoped(repo: string | null): (Decision & { taskId: string })[] {
+    return this.db
+      .prepare(
+        `SELECT decision.*, task_ref.external_id AS task_id FROM decision
+         JOIN run ON run.id = decision.run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE decision.state IN ('open','expired')
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         ORDER BY decision.id`,
+      )
+      .all(repo, repo)
+      .map(row => ({ ...readDecision(row), taskId: String(row["task_id"]) }));
+  }
+
+  countUnansweredScoped(repo: string | null): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM decision
+         JOIN run ON run.id = decision.run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE decision.state IN ('open','expired')
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)`,
+      )
+      .get(repo, repo);
+    return Number(row?.["n"] ?? 0);
   }
 
   countUnanswered(): number {
@@ -2871,15 +3014,17 @@ export class Store {
   }
 
   /** Unresolved, task attached, oldest first. No time window: these do not age out. */
-  openIncidents(): (Incident & { taskId: string })[] {
+  openIncidents(repo: string | null = null): (Incident & { taskId: string })[] {
     return this.db
       .prepare(
         `SELECT incident.*, task_ref.external_id AS task_id FROM incident
          JOIN run ON run.id = incident.run
          JOIN task_ref ON task_ref.id = run.task_ref
-         WHERE incident.resolved_at IS NULL ORDER BY incident.id`,
+         WHERE incident.resolved_at IS NULL
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         ORDER BY incident.id`,
       )
-      .all()
+      .all(repo, repo)
       .map(row => ({ ...readIncident(row), taskId: String(row["task_id"]) }));
   }
 
@@ -3347,6 +3492,43 @@ export class Store {
       )
       .run(now.toISOString(), `ci:${prNumber}:%`, exceptKey);
     return Number(changes);
+  }
+
+  // ---- projects ------------------------------------------------------------
+
+  /** Remember a project was opened. Upsert keeps added_at; recency always moves. */
+  upsertProject(path: string, name: string, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO project (path, name, added_at, last_opened_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (path) DO UPDATE SET name = excluded.name, last_opened_at = excluded.last_opened_at`,
+      )
+      .run(path, name, now.toISOString(), now.toISOString());
+  }
+
+  /** Most recently opened first — the opener page's order. */
+  listProjects(): { path: string; name: string; addedAt: string; lastOpenedAt: string }[] {
+    return this.db
+      .prepare("SELECT * FROM project ORDER BY last_opened_at DESC")
+      .all()
+      .map(row => ({
+        path: String(row["path"]),
+        name: String(row["name"]),
+        addedAt: String(row["added_at"]),
+        lastOpenedAt: String(row["last_opened_at"]),
+      }));
+  }
+
+  /** Every repo the queue has ever seen — candidates for the opener, never authorization. */
+  knownRepos(): string[] {
+    return this.db
+      .prepare(
+        `SELECT DISTINCT repo AS path FROM task_ref WHERE repo IS NOT NULL
+         UNION SELECT DISTINCT repo FROM capability
+         UNION SELECT DISTINCT repo FROM publication_grant`,
+      )
+      .all()
+      .map(row => String(row["path"]));
   }
 
   // ---- the watch episode ---------------------------------------------------
