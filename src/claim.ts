@@ -65,6 +65,8 @@ export type AcquireOptions = {
   ttlMs?: number;
   /** Injected in tests so a lease id can be asserted on. */
   newLeaseId?: () => string;
+  /** The watch incarnation dispatching this claim, for crash recovery keyed to it. */
+  incarnation?: string;
   mutation?: Mutation;
 };
 
@@ -140,8 +142,8 @@ function acquireLocked(
       const { changes } = db
         .prepare(
           `INSERT OR IGNORE INTO claim
-             (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at, released_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+             (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at, released_at, incarnation)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
         )
         .run(
           claim.leaseId,
@@ -151,6 +153,7 @@ function acquireLocked(
           claim.acquiredAt,
           claim.expiresAt,
           claim.heartbeatAt,
+          options.incarnation ?? null,
         );
 
       if (Number(changes) === 0) {
@@ -462,6 +465,7 @@ export function release(store: Store, leaseId: string, now: Date): FenceResult {
     }
 
     const row = db.prepare("SELECT * FROM claim WHERE lease_id = ?").get(leaseId);
+    store.bumpWake();
     return { ok: true as const, claim: readClaim(row as Record<string, unknown>) };
   });
 }
@@ -544,6 +548,7 @@ export function completeFenced(
       });
     }
 
+    store.bumpWake();
     return { ok: true as const, claim };
   });
 }

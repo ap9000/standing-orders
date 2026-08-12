@@ -1026,3 +1026,84 @@ describe("migration from an M3 database", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("the watch foundations", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+  });
+
+  afterEach(() => store.close());
+
+  test("the wake sequence moves when readiness could have", () => {
+    const before = store.wakeSeq();
+    store.createTask({ id: "t-1", title: "w" }, T0);
+    expect(store.wakeSeq()).toBeGreaterThan(before);
+
+    const afterCreate = store.wakeSeq();
+    store.setTaskState("t-1", "done", later(1_000));
+    expect(store.wakeSeq()).toBeGreaterThan(afterCreate);
+  });
+
+  test("one watch per (runner, repo); takeover names the superseded incarnation", () => {
+    const first = store.acquireWatchLease("builder-1", "/repo", "inc-a", 60_000, T0);
+    expect(first).toMatchObject({ ok: true, generation: 1, superseded: null });
+
+    const contender = store.acquireWatchLease("builder-1", "/repo", "inc-b", 60_000, later(1_000));
+    expect(contender).toMatchObject({ ok: false, reason: "watch-busy", holder: "inc-a" });
+
+    // A different repo is a different watch entirely.
+    expect(store.acquireWatchLease("builder-1", "/other", "inc-b", 60_000, later(1_000))).toMatchObject({
+      ok: true,
+    });
+
+    // Expiry hands over — and says whose mess to recover.
+    const takeover = store.acquireWatchLease("builder-1", "/repo", "inc-b", 60_000, later(120_000));
+    expect(takeover).toMatchObject({ ok: true, generation: 2, superseded: "inc-a" });
+  });
+
+  test("recovery is keyed to the incarnation, not to runner liveness", async () => {
+    const { register } = await import("./runner.js");
+    register(store, { name: "builder-1", host: "h", now: T0 });
+    store.createTask({ id: "t-1", title: "w" }, T0);
+    const ref = store.refFor(BUILT_IN, "t-1").id;
+    // The dead incarnation's claim, task mid-flight, run open, worktree leased.
+    acquire(store, ref, "builder-1", { now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "lease-a", incarnation: "inc-a" });
+    store.setTaskState("t-1", "running", T0);
+    const run = store.startRun({
+      taskRef: ref, leaseId: "lease-a", runner: "builder-1", branch: "b", worktree: "/w", now: T0,
+    });
+    store.saveWorktree({
+      path: "/w", repo: "/repo", branch: "b", runner: "builder-1", taskRef: ref,
+      createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+    });
+
+    // The successor is the same runner, heartbeating — which is exactly how
+    // this crash would hide from liveness-based recovery.
+    const recovered = store.recoverIncarnation("builder-1", "inc-a", later(5_000));
+
+    expect(recovered).toBe(1);
+    expect(store.getTask("t-1")?.state).toBe("queued");
+    expect(store.getRun(run)).toMatchObject({ outcome: "failed", reason: "interrupted" });
+    expect(store.getWorktree("/w")?.releasedAt).not.toBeNull();
+    expect(store.getWorktree("/w")?.verified).toBe(false);
+    // The claim is released as recovered: its late completion will be fenced.
+    const claim = store.handle.prepare("SELECT released_by FROM claim WHERE lease_id = 'lease-a'").get();
+    expect(String(claim?.["released_by"])).toBe("recovered");
+  });
+
+  test("recovery leaves other incarnations' work alone", () => {
+    store.createTask({ id: "t-1", title: "w" }, T0);
+    store.createTask({ id: "t-2", title: "w" }, T0);
+    const one = store.refFor(BUILT_IN, "t-1").id;
+    const two = store.refFor(BUILT_IN, "t-2").id;
+    acquire(store, one, "builder-1", { now: T0, newLeaseId: () => "lease-old", incarnation: "inc-a" });
+    acquire(store, two, "builder-1", { now: T0, newLeaseId: () => "lease-live", incarnation: "inc-b" });
+
+    expect(store.recoverIncarnation("builder-1", "inc-a", later(1_000))).toBe(1);
+
+    const live = store.handle.prepare("SELECT released_at FROM claim WHERE lease_id = 'lease-live'").get();
+    expect(live?.["released_at"]).toBeNull();
+  });
+});

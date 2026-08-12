@@ -223,6 +223,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
     "choose", "note", "max-open-decisions", "port", "host", "allow-host",
+    "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -353,6 +354,8 @@ async function dispatch(
       return incidentCommand(positional, flags, context);
     case "serve":
       return serveCommand(flags, context);
+    case "watch":
+      return watchCommand(flags, context);
     case "bridge":
       return bridgeCommand(positional, flags, context);
     case "enroll":
@@ -1068,6 +1071,7 @@ async function tickCommand(
       ttlMs: leaseTtlMs,
       repo,
       ...(model === undefined ? {} : { model }),
+      ...(text(flags, "incarnation") === undefined ? {} : { incarnation: text(flags, "incarnation") as string }),
       ...(text(flags, "max-open-decisions") === undefined
         ? {}
         : { maxOpenDecisions: Number(text(flags, "max-open-decisions")) }),
@@ -2083,6 +2087,189 @@ function incidentCommand(
   }
   return succeed(write, json, "incident resolve", { id, by: asWho }, () => [
     `Resolved incident ${id}, as ${asWho}. The task's hold is lifted; the next tick may take it.`,
+  ]);
+}
+
+// ---- the watch loop --------------------------------------------------------
+
+const WATCH_LEASE_MS = 90_000;
+const WATCH_HEARTBEAT_MS = 30_000;
+
+/**
+ * `nightorders watch` — the loop (§5, §6): the cron chain as one
+ * work-conserving process, still spending zero tokens while idle.
+ *
+ * Composition, not new semantics: every pass it runs — tick, reconcile, the
+ * bridge — is the same tested command cron calls, and cron remains
+ * first-class; ordinary claims make watch-and-cron coexistence safe, so
+ * only watch+watch contends (per runner and repo, loudly, `watch-busy`).
+ *
+ * Work-conserving by the wake sequence: every readiness-changing write
+ * bumps a durable counter; watch records what it saw before a pass and
+ * runs again immediately if the world moved while it worked — a decision
+ * answered from a phone triggers the next tick in seconds, not at the next
+ * interval. Timers are the fallback, not the mechanism.
+ *
+ * Crash-safe by incarnation: this process's claims carry its UUID, and a
+ * successor taking over the lease recovers exactly the superseded
+ * incarnation's claims, runs, and worktrees before dispatching anything —
+ * the case liveness cannot see, because the successor IS the runner,
+ * alive and heartbeating.
+ *
+ * Graceful stop: a signal stops admitting new passes; the in-flight one
+ * finishes under its own bounded timeouts while the lease keeps beating,
+ * then the lease is handed back. (A hard kill of the provider process
+ * group on grace expiry is deferred, in the ledger, with this note.)
+ */
+async function watchCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const runner = text(flags, "runner");
+  const token = text(flags, "token");
+  if (runner === undefined || token === undefined) {
+    return fail(write, json, "watch", "usage", "`nightorders watch --runner <name> --token <t> --repo <path> [--for <ms>]`", EXIT.usage);
+  }
+  const auth = authenticate(store, runner, token);
+  if (!auth.ok) {
+    return fail(write, json, "watch", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
+  }
+  const repo = repoFrom(flags);
+
+  const tickEveryMs = Number(text(flags, "tick-every") ?? 60_000);
+  const bridgeEveryMs = Number(text(flags, "bridge-every") ?? 45_000);
+  const reconcileEveryMs = Number(text(flags, "reconcile-every") ?? 5 * 60_000);
+  const runFor = text(flags, "for") === undefined ? null : Number(text(flags, "for"));
+
+  const incarnation = randomUUID();
+  const lease = store.acquireWatchLease(runner, repo, incarnation, WATCH_LEASE_MS, new Date());
+  if (!lease.ok) {
+    return fail(
+      write,
+      json,
+      "watch",
+      "watch-busy",
+      `another watch holds ${runner} on ${repo} until ${lease.until} — one watch per runner and repo; cron ticks may coexist, watches may not`,
+      EXIT.refused,
+    );
+  }
+  if (lease.superseded !== null) {
+    const recovered = store.recoverIncarnation(runner, lease.superseded, new Date());
+    if (recovered > 0) {
+      write(`Recovered ${recovered} claim(s) from the previous watch (${lease.superseded.slice(0, 8)}…) before dispatching anything.`);
+    }
+  }
+
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  const heartbeat = setInterval(() => {
+    store.heartbeatWatchLease(runner, repo, incarnation, WATCH_LEASE_MS, new Date());
+  }, WATCH_HEARTBEAT_MS);
+  heartbeat.unref?.();
+
+  // Passes reuse the tested commands with a quiet sink; watch narrates one
+  // line per pass that did something instead of streaming their reports.
+  const quiet: string[] = [];
+  const sink: Write = line => quiet.push(line);
+  const passFlags = (extra: Record<string, string> = {}): Map<string, string | true> => {
+    const copy = new Map(flags);
+    copy.set("json", true);
+    copy.set("incarnation", incarnation);
+    for (const [key, value] of Object.entries(extra)) copy.set(key, value);
+    return copy;
+  };
+  const quietContext: Context = { ...context, write: sink, json: true };
+
+  const startedAt = Date.now();
+  const deadline = runFor === null ? null : startedAt + runFor;
+  let lastTick = 0;
+  let lastBridge = 0;
+  let lastReconcile = 0;
+  let ticks = 0;
+  let built = 0;
+  let brokeCount = 0;
+
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  try {
+    while (!stopping && (deadline === null || Date.now() < deadline)) {
+      const seqBefore = store.wakeSeq();
+      const now = Date.now();
+
+      if (now - lastReconcile >= reconcileEveryMs) {
+        lastReconcile = now;
+        quiet.length = 0;
+        await reconcileCommand(passFlags(), quietContext);
+      }
+
+      // The tick pass runs whenever the loop spins — and the loop only
+      // spins when the sequence moved, a timer came due, or work just
+      // finished, so this IS the schedule.
+      let tickDidWork = false;
+      {
+        lastTick = now;
+        quiet.length = 0;
+        store.expireOverdueDecisions(new Date());
+        const code = await tickCommand(passFlags(), quietContext);
+        ticks++;
+        if (code === EXIT.ok) {
+          tickDidWork = true;
+          built++;
+          write(`watch: pass ${ticks} did work (${new Date().toISOString()})`);
+        } else if (code === EXIT.failed) {
+          tickDidWork = true;
+          brokeCount++;
+          write(`watch: pass ${ticks} broke something — the run records have it`);
+        }
+      }
+
+      if (now - lastBridge >= bridgeEveryMs) {
+        lastBridge = now;
+        const source = loadBotToken(process.env, context.telegramTokenFile);
+        if (source !== null) {
+          quiet.length = 0;
+          await bridgeCommand(["telegram"], passFlags(), quietContext);
+        }
+      }
+
+      // Work-conserving: if the world moved while we worked — or we just
+      // finished something that may have freed a dependent — go again now.
+      if (tickDidWork || store.wakeSeq() !== seqBefore) continue;
+
+      // Idle: doze in short steps until the sequence moves, a timer comes
+      // due, a signal lands, or the trial window (--for) ends. Reading one
+      // integer from SQLite twice a second is the entire idle cost — no
+      // token has anywhere to be spent from here.
+      const idleUntil =
+        Math.min(
+          lastTick + tickEveryMs,
+          lastBridge + bridgeEveryMs,
+          lastReconcile + reconcileEveryMs,
+          deadline ?? Number.MAX_SAFE_INTEGER,
+        ) - Date.now();
+      const step = Math.max(50, Math.min(500, idleUntil));
+      const seqIdle = store.wakeSeq();
+      const dozeUntil = Date.now() + Math.max(step, 0);
+      while (!stopping && Date.now() < dozeUntil && store.wakeSeq() === seqIdle) {
+        await sleep(50);
+      }
+    }
+  } finally {
+    clearInterval(heartbeat);
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+    store.releaseWatchLease(runner, repo, incarnation, new Date());
+  }
+
+  return succeed(write, json, "watch", { ticks, built, broke: brokeCount, incarnation }, () => [
+    `Watched ${repo} for ${Math.round((Date.now() - startedAt) / 1000)}s: ${ticks} pass(es), ${built} with work, ${brokeCount} broke.`,
+    "The lease is handed back; cron or the next watch may take it.",
   ]);
 }
 

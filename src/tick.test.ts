@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
+import { acquire } from "./claim.js";
 import type { Runner } from "./builder.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
@@ -1420,5 +1421,150 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     );
     expect(code).toBe(EXIT.ok);
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built", committed: true }]);
+  });
+});
+
+describe("watch — the loop, zero tokens idle", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+
+  const agent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    await writeFile(join(cwd, `made-${Math.random().toString(36).slice(2, 8)}.ts`), "export {};\n");
+    await concludeDone(cwd, args);
+    return { ...OK, stdout: AGENT_SAID };
+  };
+
+  const run = (argv: string[], runner: Runner = agent) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), {
+      databaseFile: db,
+      agentRunner: runner,
+    });
+  };
+
+  const payload = () => {
+    const opens = lines.map((line, index) => ({ line, index })).filter(one => one.line.startsWith("{"));
+    const from = opens[opens.length - 1]?.index ?? 0;
+    return JSON.parse(lines.slice(from).join("\n"));
+  };
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-watch-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const setup = async () => {
+    await run(["runner", "register", "builder-1", "--json"]);
+    const runnerToken = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    return { runnerToken, approverToken };
+  };
+
+  const approved = async (id: string, approverToken: string) => {
+    await run(["task", "add", "the work", "--id", id]);
+    await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
+    await run(["task", "approve", id, "--json"]);
+    const digest = payload().scope.digest as string;
+    await run(["task", "approve", id, "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
+  };
+
+  test("one watch drains a dependency chain without waiting for the next interval", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await approved("t-1", approverToken);
+    await approved("t-2", approverToken);
+    await run(["task", "block", "t-2", "--on", "t-1"]);
+
+    // Interval far past the trial window: only the wake sequence and the
+    // work-conserving drain can get t-2 built after t-1 frees it.
+    const code = await run([
+      "watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
+      "--for", "4000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
+      "--json",
+    ]);
+
+    expect(code).toBe(EXIT.ok);
+    await run(["task", "show", "t-1", "--json"]);
+    expect(payload().task.state).toBe("done");
+    await run(["task", "show", "t-2", "--json"]);
+    expect(payload().task.state).toBe("done");
+  });
+
+  test("watch + watch is a loud refusal; the lease names the holder", async () => {
+    const { runnerToken } = await setup();
+    const store = openStore(db);
+    store.acquireWatchLease("builder-1", realpathSync(repo), "someone-else", 60_000, new Date());
+    store.close();
+
+    const code = await run([
+      "watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
+      "--for", "300", "--json",
+    ]);
+
+    expect(code).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "watch-busy" });
+  });
+
+  test("a successor recovers its predecessor's mid-flight claims before dispatching", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await approved("t-1", approverToken);
+
+    // The predecessor: an expired watch lease and a claim it never released,
+    // its task stranded mid-flight — the crash liveness cannot see, because
+    // the runner name will be back and heartbeating immediately.
+    const store = openStore(db);
+    const ref = store.refFor("built-in", "t-1").id;
+    const past = new Date(Date.now() - 10 * 60_000);
+    store.acquireWatchLease("builder-1", realpathSync(repo), "inc-dead", 1_000, past);
+    acquire(store, ref, "builder-1", {
+      now: past, ttlMs: 60 * 60_000, newLeaseId: () => "lease-dead", incarnation: "inc-dead",
+    });
+    store.setTaskState("t-1", "running", past);
+    store.startRun({
+      taskRef: ref, leaseId: "lease-dead", runner: "builder-1", branch: "nightorders/t-1",
+      worktree: join(pool, "x"), now: past,
+    });
+    store.close();
+
+    const code = await run([
+      "watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
+      "--for", "4000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
+      "--json",
+    ]);
+
+    expect(code).toBe(EXIT.ok);
+    // The dead incarnation's claim was recovered, and the task then built.
+    const after = openStore(db);
+    try {
+      const claim = after.handle.prepare("SELECT released_by FROM claim WHERE lease_id = 'lease-dead'").get();
+      expect(String(claim?.["released_by"])).toBe("recovered");
+      expect(after.getTask("t-1")?.state).toBe("done");
+      const interrupted = after.handle
+        .prepare("SELECT COUNT(*) AS n FROM run WHERE reason = 'interrupted'")
+        .get();
+      expect(Number(interrupted?.["n"])).toBe(1);
+    } finally {
+      after.close();
+    }
   });
 });

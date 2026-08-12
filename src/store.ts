@@ -676,6 +676,31 @@ CREATE TABLE IF NOT EXISTS bridge_lease (
 -- admits exactly one real dispatch after the reset; its success clears the
 -- row, the same structured signal re-stamps it. Nothing stamps this from
 -- stderr prose — only structured signals or an operator.
+-- The scheduler's durable wake signal. Every readiness-changing write bumps
+-- the sequence; watch records what it saw before a pass and runs again
+-- immediately if the world moved while it worked. A boolean dirty flag
+-- loses the wake that lands mid-pass; a monotonic sequence cannot.
+CREATE TABLE IF NOT EXISTS wake (
+  id  INTEGER PRIMARY KEY CHECK (id = 1),
+  seq INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO wake (id, seq) VALUES (1, 0);
+
+-- One watch per (runner, repo), with an incarnation the claims it dispatches
+-- carry. A restarted watch that heartbeats before its dead predecessor is
+-- noticed would otherwise mask the crash forever (finding 8): recovery is
+-- keyed to the superseded incarnation, not to runner liveness.
+CREATE TABLE IF NOT EXISTS watch_lease (
+  runner       TEXT NOT NULL,
+  repo         TEXT NOT NULL,
+  owner        TEXT NOT NULL,
+  generation   INTEGER NOT NULL,
+  started_at   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  PRIMARY KEY (runner, repo)
+);
+
 CREATE TABLE IF NOT EXISTS quota (
   runner      TEXT NOT NULL,
   provider    TEXT NOT NULL,
@@ -1186,6 +1211,7 @@ export class Store {
         .run(spec.id, spec.title, stamp, stamp);
       // Created here, so it is ours — the one place that is true by construction.
       this.refFor(BUILT_IN, spec.id, "ours");
+      this.bumpWake();
       return {
         id: spec.id,
         title: spec.title,
@@ -1239,6 +1265,7 @@ export class Store {
         const { changes } = this.db
           .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
           .run(state, now.toISOString(), id);
+        if (Number(changes) > 0) this.bumpWake();
         return Number(changes) > 0;
       },
       // A state change that matched no task mutated nothing, so there is
@@ -1459,6 +1486,7 @@ export class Store {
         const { changes } = this.db
           .prepare("DELETE FROM hold WHERE task_ref = ? AND owner_kind = 'operator'")
           .run(taskRef);
+        if (Number(changes) > 0) this.bumpWake();
         return Number(changes) > 0;
       },
       lifted => lifted,
@@ -1911,6 +1939,7 @@ export class Store {
     // is a new fact, and must be allowed to say so.
     if (Number(changes) > 0 && outcome.status === "verified") {
       this.clearGapEpisode(repo, kind, name);
+      this.bumpWake();
     }
     return Number(changes) > 0;
   }
@@ -1959,6 +1988,7 @@ export class Store {
         .run(now.toISOString(), taskId);
       // The stall's page is answered by the act itself.
       this.resolveEpisode(`stalled:${taskRef}`, now);
+      this.bumpWake();
       return { ok: true as const, resolvedIncidents: incidents.length };
     });
   }
@@ -2466,6 +2496,7 @@ export class Store {
 
     this.releaseOwnedHold("decision", String(answer.id));
     this.resolveEpisode(`decision:${answer.id}`, now);
+    this.bumpWake();
     return { ok: true as const, decision: this.getDecision(answer.id) as Decision };
   }
 
@@ -2580,6 +2611,7 @@ export class Store {
       .run(now.toISOString(), by, id);
     if (Number(changes) === 0) return false;
     this.releaseOwnedHold("incident", String(id));
+    this.bumpWake();
     return true;
   }
 
@@ -2856,6 +2888,154 @@ export class Store {
     this.db
       .prepare("UPDATE bridge_lease SET expires_at = ? WHERE bot_id = ? AND owner = ?")
       .run(now.toISOString(), botId, owner);
+  }
+
+  // ---- the wake sequence ---------------------------------------------------
+
+  /** Something changed that could make work dispatchable. Cheap, and safe anywhere. */
+  bumpWake(): void {
+    this.db.prepare("UPDATE wake SET seq = seq + 1 WHERE id = 1").run();
+  }
+
+  wakeSeq(): number {
+    const row = this.db.prepare("SELECT seq FROM wake WHERE id = 1").get();
+    return Number(row?.["seq"] ?? 0);
+  }
+
+  // ---- the watch lease -----------------------------------------------------
+
+  /**
+   * One watch per (runner, repo). Same shape as the bridge's poll lease:
+   * takeover on expiry bumps the generation, and the superseded owner's
+   * name comes back so its claims can be recovered before anything new
+   * dispatches. `watch + cron tick` deliberately does NOT contend here —
+   * ordinary claims make that race safe; only watch+watch is an error.
+   */
+  acquireWatchLease(
+    runner: string,
+    repo: string,
+    owner: string,
+    ttlMs: number,
+    now: Date,
+  ):
+    | { ok: true; generation: number; superseded: string | null }
+    | { ok: false; reason: "watch-busy"; holder: string; until: string } {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const expires = new Date(now.getTime() + ttlMs).toISOString();
+      const row = this.db
+        .prepare("SELECT * FROM watch_lease WHERE runner = ? AND repo = ?")
+        .get(runner, repo);
+      if (row === undefined) {
+        this.db
+          .prepare(
+            `INSERT INTO watch_lease (runner, repo, owner, generation, started_at, expires_at, heartbeat_at)
+             VALUES (?, ?, ?, 1, ?, ?, ?)`,
+          )
+          .run(runner, repo, owner, stamp, expires, stamp);
+        return { ok: true as const, generation: 1, superseded: null };
+      }
+      const holder = String(row["owner"]);
+      const live = String(row["expires_at"]) > stamp;
+      if (live && holder !== owner) {
+        return {
+          ok: false as const,
+          reason: "watch-busy" as const,
+          holder,
+          until: String(row["expires_at"]),
+        };
+      }
+      const generation = live && holder === owner ? Number(row["generation"]) : Number(row["generation"]) + 1;
+      this.db
+        .prepare(
+          `UPDATE watch_lease SET owner = ?, generation = ?, expires_at = ?, heartbeat_at = ?
+            WHERE runner = ? AND repo = ?`,
+        )
+        .run(owner, generation, expires, stamp, runner, repo);
+      return {
+        ok: true as const,
+        generation,
+        superseded: holder === owner ? null : holder,
+      };
+    });
+  }
+
+  heartbeatWatchLease(runner: string, repo: string, owner: string, ttlMs: number, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE watch_lease SET expires_at = ?, heartbeat_at = ?
+          WHERE runner = ? AND repo = ? AND owner = ? AND expires_at > ?`,
+      )
+      .run(
+        new Date(now.getTime() + ttlMs).toISOString(),
+        now.toISOString(),
+        runner,
+        repo,
+        owner,
+        now.toISOString(),
+      );
+    return Number(changes) > 0;
+  }
+
+  releaseWatchLease(runner: string, repo: string, owner: string, now: Date): void {
+    this.db
+      .prepare("UPDATE watch_lease SET expires_at = ? WHERE runner = ? AND repo = ? AND owner = ?")
+      .run(now.toISOString(), runner, repo, owner);
+  }
+
+  /**
+   * Recover everything a dead incarnation still holds, atomically, before
+   * its successor dispatches anything: its live claims released as
+   * 'recovered', their running tasks requeued, their open runs finished as
+   * interrupted, their worktrees released unverified. Keyed to the
+   * incarnation, never to runner liveness — the successor IS the runner,
+   * alive and heartbeating, which is exactly how the crash would otherwise
+   * hide.
+   */
+  recoverIncarnation(runner: string, incarnation: string, now: Date): number {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const claims = this.db
+        .prepare(
+          `SELECT lease_id, task_ref FROM claim
+            WHERE runner = ? AND incarnation = ? AND released_at IS NULL
+              AND lease_generation = (
+                SELECT MAX(newest.lease_generation) FROM claim AS newest
+                WHERE newest.task_ref = claim.task_ref
+              )`,
+        )
+        .all(runner, incarnation);
+
+      for (const row of claims) {
+        const leaseId = String(row["lease_id"]);
+        const taskRef = Number(row["task_ref"]);
+        this.db
+          .prepare("UPDATE claim SET released_at = ?, released_by = 'recovered' WHERE lease_id = ?")
+          .run(stamp, leaseId);
+        this.db
+          .prepare(
+            `UPDATE task SET state = 'queued', updated_at = ?
+              WHERE state = 'running' AND id = (
+                SELECT external_id FROM task_ref WHERE id = ? AND backend = ?
+              )`,
+          )
+          .run(stamp, taskRef, BUILT_IN);
+        this.db
+          .prepare(
+            `UPDATE run SET outcome = 'failed', reason = 'interrupted', finished_at = ?
+              WHERE lease_id = ? AND outcome IS NULL`,
+          )
+          .run(stamp, leaseId);
+        this.db
+          .prepare(
+            `UPDATE worktree SET released_at = ?, verified = 0
+              WHERE runner = ? AND task_ref = ? AND released_at IS NULL`,
+          )
+          .run(stamp, runner, taskRef);
+      }
+      if (claims.length > 0) this.bumpWake();
+      return claims.length;
+    });
   }
 
   // ---- quota ---------------------------------------------------------------
