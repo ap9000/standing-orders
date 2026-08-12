@@ -209,7 +209,7 @@ Parking never stalls the loop. A blocked task steps aside and the scheduler retu
 
 Rollback proves worktree cleanliness and base revision first. `git reset --hard` leaves untracked files behind and can destroy repairable work.
 
-**Malformed agent output gets bounded repair, not an instant 422** — the adapter resumes the same session with a compact error so the agent re-emits only the bad payload (sandcastle's mechanism), twice, then emits `malformed_decision`.
+**Malformed agent output gets bounded repair, not an instant 422** — the adapter resumes the same session with a compact error so the agent re-emits only the bad payload (sandcastle's mechanism), twice, then emits `malformed-decision` (hyphenated, like every public reason token).
 
 **Irreversible options never auto-apply**, regardless of stated confidence.
 

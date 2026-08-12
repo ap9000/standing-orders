@@ -96,12 +96,20 @@ whatever pings your phone.
 | Notification outbox | **done** | durable rows enqueued in the same transaction as the run record they describe; dedupe keys are episode identities (a gap re-nags after it fills and recurs); delivery passes text as environment, never into the command line; receipts and failed attempts recorded. Quiet hours, escalation, deep links → M4 with the loop |
 | Exit-code cleanup (deferred here from M1) | **done** | standalone `build` now exits 1 when the attempt broke (agent/timeout/git) and 3 only when a gate said no |
 
-## M3 — a park renders as one screen, answerable on a phone — in progress
+## M3 — a park renders as one screen, answerable on a phone — **complete 2026-08-11**
 
-Ships when: exactly that, executably. Plan Codex-reviewed 2026-08-11 (16
-findings, 11 HIGH); the findings reshaped the park lifecycle into fenced
-transactions, gave holds owners, made decision identity the run alone, and
-kept the driver role honestly unshipped until M4.
+Ships when: exactly that, and it does, executably — `serve.test.ts`'s first
+test parks, renders the one screen, answers it, and watches the hold lift;
+`tick.test.ts` carries the answer into the resumed agent's brief against
+real git. Plan Codex-reviewed 2026-08-11 (16 findings, 11 HIGH); the
+findings reshaped the park lifecycle into fenced transactions, gave holds
+owners, made decision identity the run alone, and kept the driver role
+honestly unshipped until M4.
+
+The morning shape now: `nightorders reconcile && nightorders tick` from
+cron; `brief` with coffee; `decide` (or `serve`, from the phone) for the
+questions; `outbox deliver` for the paging; `incident resolve` for the
+parks that could not say what they wanted.
 
 | Item | State | Proof |
 |---|---|---|
@@ -127,6 +135,16 @@ kept the driver role honestly unshipped until M4.
 | `tick` loops / daemonizes | a pass is the M1 shape; the loop and its economics are the product | M4 |
 
 ## History
+
+- **2026-08-11 (M3)** — M3 completes: the decision schema and its
+  rebuild migration (`0049c1c`), the park with machine-captured evidence
+  (`3da88e4`), bounded repair as parented repair runs (`03b3393`),
+  authenticated `decide` + incidents (`0cc0549`), the causal resume and
+  the attention budget (`4102cd0`), and `serve` — the milestone sentence
+  as a test (`04a60ef`). Plan Codex-reviewed before implementation; its
+  16 findings drove the fenced park transaction, owned holds, run-only
+  decision identity, the mailbox discipline, and web auth. Driver role
+  recorded honestly as deferred to M4. Suite 575.
 
 - **2026-08-11 (M2)** — M2 completes in one sitting: capabilities +
   probes (`65f0381`), the gate in the claim transaction and the builder

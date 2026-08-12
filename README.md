@@ -2,7 +2,7 @@
 
 **Standing orders for your agents. Wake me only for these.**
 
-> **Status: M2 complete.** Discovery works today and is worth running; one task goes queued → branch → commit unattended; and the machine now knows what the work needs before it spends: capabilities are recorded and probed (never valued — the schema has nowhere to put a secret), a task whose requirements are not verified does not dispatch, `nightorders gaps` ranks what is missing by how many tasks filling it would start, `brief` is the morning ritual, and the outbox holds every fact that wants a person until it is delivered with a receipt. The nightly shape: `nightorders reconcile && nightorders tick` from cron, `brief` with coffee. Nothing is published to npm yet. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.5); what has actually shipped, item by item, lives in [`docs/PROGRESS.md`](docs/PROGRESS.md).
+> **Status: M3 complete.** Discovery works today and is worth running; one task goes queued → branch → commit unattended; the machine knows what the work needs before it spends (capabilities probed, never valued; `gaps` ranked by what filling one frees); and an agent that hits a judgement call now **parks a typed decision instead of guessing** — recap, question, options with stated reversibility, a recommendation, and evidence the machine captured itself. The park is one fenced transaction; the task waits under the decision's own hold; `nightorders decide` (terminal) or `nightorders serve` (a phone-sized web view behind the approver credential) answers it; and the next pass resumes the task with the answer quoted — as data, never as instructions — in the agent's brief. Irreversible options never ride one accidental tap. The morning shape: `nightorders reconcile && nightorders tick` from cron, `brief` with coffee, `decide` for the questions. Nothing is published to npm yet. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.5); what has actually shipped, item by item, lives in [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 A captain's night orders are the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product.
 
@@ -135,7 +135,7 @@ And it costs nothing while idle. **An LLM never polls.** The daemon handles ever
 | M0 | discovery, graph adapters, leases, CLI | `npx nightorders` shows what is in flight — **useful before it is autonomous** |
 | M1 | runners, worktrees, first builder | one task goes queued → branch → commit unattended |
 | M2 | capability probes, secrets, briefing | fill one gap, three tasks start |
-| M3 | decisions, evidence, web view | a park renders as one screen, answerable on a phone |
+| M3 | decisions, evidence, web view | a park renders as one screen, answerable on a phone — **and it does, executably** |
 | M4 | the loop | **queue twelve, sleep, wake to PRs — with near-zero idle spend** |
 
 Deferred until M4 earns them: the spatial board, multiplayer, in-browser terminals, Postgres, RBAC.
