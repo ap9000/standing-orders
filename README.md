@@ -98,12 +98,30 @@ through the same authenticated path as the CLI and the web view — the hold
 lifts, and the next pass resumes the task with the answer in the agent's
 brief. No LLM is anywhere in this path.
 
+Setup, once:
+
+1. In Telegram, message **@BotFather**: `/newbot`, pick a name and a
+   username. Copy the token it hands you.
+2. `nightorders bridge telegram token <that-token>` — stored in a 0600 file
+   beside the database (or set `NIGHTORDERS_TELEGRAM_TOKEN`, which wins;
+   or paste it into `serve`'s settings card from your phone).
+3. `nightorders approver add you` if you have no approver credential yet —
+   the token prints once; keep it.
+4. `nightorders bridge telegram pair --as you --token <approver-token>` —
+   prints a one-time code, good for ten minutes.
+5. From your phone, open your bot's chat, press Start, send
+   `/pair <that-code>`, then run `nightorders bridge telegram` once to
+   complete it. The bot replies with who the chat now answers as.
+
+Then cron the pass next to `tick`:
+
 ```sh
-nightorders bridge telegram token <token-from-@BotFather>   # or serve's settings card
-nightorders bridge telegram pair --as you --token <approver-token>
-# send the printed /pair code to your bot from your phone, then cron the pass:
 nightorders bridge telegram        # sends pending, applies taps, exits
 ```
+
+`bridge telegram status` shows the token source, the binding, and what is
+waiting. Answer latency is your cron interval — the always-on `--follow`
+mode arrives with M4's loop.
 
 A chat is not a person: pairing binds one private chat and one immutable
 Telegram user id to one approver credential. Buttons carry opaque one-time
