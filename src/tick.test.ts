@@ -1102,6 +1102,45 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built", committed: true }]);
   });
 
+
+  test("the resumed agent is handed the answer — fenced, with the rules after it", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await tick(runnerToken, parkingAgent);
+    await run(["decide", "1", "--choose", "closed", "--as", "alex", "--token", approverToken, "--note", "pause is fine, retry hourly"]);
+
+    let prompt = "";
+    const capturing: Runner = async (_file, args, options) => {
+      prompt = args[args.indexOf("-p") + 1] ?? "";
+      const cwd = options?.cwd ?? "";
+      await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+      return { ...OK, stdout: AGENT_SAID };
+    };
+    const code = await tick(runnerToken, capturing);
+    expect(code).toBe(EXIT.ok);
+
+    // The answer arrived: question, chosen option, consequence, and the note,
+    // every line fenced as data before the rules.
+    expect(prompt).toContain("--- BEGIN ANSWERED DECISIONS ---");
+    expect(prompt).toContain("| Decision 1 — question: Fail open or fail closed?");
+    expect(prompt).toContain("| Chosen option: closed — Fail closed");
+    expect(prompt).toContain("| Operator note: pause is fine, retry hourly");
+    // The trusted directive names only ids, and the rules bound the quotes.
+    expect(prompt).toContain('The operator chose option "closed" for decision 1');
+    expect(prompt).toContain("park again rather than widening it");
+    // And the rules still come after the quoted block.
+    expect(prompt.indexOf("--- END ANSWERED DECISIONS ---")).toBeLessThan(
+      prompt.indexOf("Rules, which are not negotiable"),
+    );
+
+    // The causal record: the resume run was given exactly this answer.
+    const store = openStore(db);
+    try {
+      expect(store.answersFor(2)).toMatchObject([{ choice: "closed", note: "pause is fine, retry hourly" }]);
+    } finally {
+      store.close();
+    }
+  });
+
   test("the brief carries DECIDE while a decision waits, and stops when it is answered", async () => {
     const { runnerToken, approverToken } = await setup();
     await tick(runnerToken, parkingAgent);

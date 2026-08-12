@@ -873,6 +873,12 @@ export class Store {
     return row === undefined ? null : String(row["external_id"]);
   }
 
+  /** The whole reference by its id — the overlay's view of one task. */
+  refForId(taskRef: number): TaskRef | null {
+    const row = this.db.prepare("SELECT * FROM task_ref WHERE id = ?").get(taskRef);
+    return row === undefined ? null : readTaskRef(row);
+  }
+
   setTaskState(id: string, state: TaskState, now: Date, mutation: Mutation = {}): boolean {
     return this.once(
       mutation,
@@ -1672,6 +1678,25 @@ export class Store {
         result.now.toISOString(),
         id,
       );
+    // The park rate is *measured* — parked over concluded builder attempts —
+    // and maintained where attempts conclude, because the attention budget's
+    // gate reads it inside a claim transaction and must never trust a number
+    // something else remembered to update.
+    if (result.outcome === "parked" || result.outcome === "built") {
+      this.db
+        .prepare(
+          `UPDATE task_ref SET park_rate = COALESCE((
+             SELECT CAST(SUM(CASE WHEN outcome = 'parked' THEN 1 ELSE 0 END) AS REAL) / COUNT(*)
+               FROM run
+              WHERE run.task_ref = task_ref.id
+                AND run.role = 'builder'
+                AND run.outcome IN ('built', 'parked')
+           ), 0)
+           WHERE id = (SELECT task_ref FROM run
+                        WHERE run.id = ? AND run.role = 'builder')`,
+        )
+        .run(id);
+    }
   }
 
   getRun(id: number): Run | null {
@@ -1791,6 +1816,59 @@ export class Store {
       .prepare("SELECT COUNT(*) AS n FROM decision WHERE state IN ('open','expired')")
       .get();
     return Number(row?.["n"] ?? 0);
+  }
+
+  /**
+   * Attach every answered-but-undelivered decision of this task to a run,
+   * snapshot included — the causal record of which answers this attempt was
+   * actually given (§4's parent_run provenance, as a relation).
+   *
+   * "Undelivered" means: not yet attached to any run that finished `built`.
+   * A resume that failed may be handed the same answers again; the accepted
+   * build is the durable terminus. Selection is causal, never temporal —
+   * "newer than the last built run" stops being true the moment a resume
+   * fails and a second decision is answered in between.
+   */
+  attachAnswers(runId: number, taskRef: number): (Decision & { taskId: string })[] {
+    const rows = this.db
+      .prepare(
+        `SELECT decision.*, task_ref.external_id AS task_id FROM decision
+         JOIN run ON run.id = decision.run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE run.task_ref = ? AND decision.state = 'answered'
+           AND NOT EXISTS (
+             SELECT 1 FROM run_decision
+             JOIN run AS delivered ON delivered.id = run_decision.run
+             WHERE run_decision.decision = decision.id AND delivered.outcome = 'built'
+           )
+         ORDER BY decision.id`,
+      )
+      .all(taskRef);
+    for (const row of rows) {
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO run_decision (run, decision, choice, note) VALUES (?, ?, ?, ?)`,
+        )
+        .run(runId, Number(row["id"]), row["choice"], row["note"]);
+    }
+    return rows.map(row => ({ ...readDecision(row), taskId: String(row["task_id"]) }));
+  }
+
+  /** The answers a run was given, exactly as it was given them. */
+  answersFor(runId: number): { decision: Decision; choice: string; note: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT decision.*, run_decision.choice AS given_choice, run_decision.note AS given_note
+           FROM run_decision
+           JOIN decision ON decision.id = run_decision.decision
+          WHERE run_decision.run = ? ORDER BY decision.id`,
+      )
+      .all(runId)
+      .map(row => ({
+        decision: readDecision(row),
+        choice: String(row["given_choice"]),
+        note: row["given_note"] === null ? null : String(row["given_note"]),
+      }));
   }
 
   /**

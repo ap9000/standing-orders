@@ -202,7 +202,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
-    "choose", "note",
+    "choose", "note", "max-open-decisions",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -1019,7 +1019,14 @@ async function tickCommand(
       continue;
     }
 
-    const claimed = acquireIfReady(store, ref.id, runner, { now: clock(), ttlMs: leaseTtlMs, repo });
+    const claimed = acquireIfReady(store, ref.id, runner, {
+      now: clock(),
+      ttlMs: leaseTtlMs,
+      repo,
+      ...(text(flags, "max-open-decisions") === undefined
+        ? {}
+        : { maxOpenDecisions: Number(text(flags, "max-open-decisions")) }),
+    });
     if (!claimed.ok) {
       // Losing a race, finding the task no longer ready, and a machine that
       // lacks what the task needs are all the system working. None fails the

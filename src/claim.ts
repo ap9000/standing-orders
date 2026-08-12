@@ -184,7 +184,14 @@ function latest(db: Store["handle"], taskRef: number): Record<string, unknown> |
  * about the task's own state; `capability` is about the machine's — a gap a
  * person can fill, named so the caller can say which.
  */
-export type NotReady = { ok: false; reason: "not-ready" | "capability"; message: string };
+export type NotReady = {
+  ok: false;
+  reason: "not-ready" | "capability" | "attention-budget";
+  message: string;
+};
+
+/** DESIGN §8 gate 6: above this many open decisions, stop dispatching the parkers. */
+export const DEFAULT_MAX_OPEN_DECISIONS = 5;
 
 /**
  * Take the task, if it is free *and still worth taking*.
@@ -204,7 +211,7 @@ export function acquireIfReady(
   store: Store,
   taskRef: number,
   runner: string,
-  options: AcquireOptions & { repo?: string },
+  options: AcquireOptions & { repo?: string; maxOpenDecisions?: number },
 ): AcquireResult | NotReady {
   return inTransaction(store, () => {
     const why = notReady(store, taskRef, options.now);
@@ -214,6 +221,22 @@ export function acquireIfReady(
     // the take must not be dispatched on the survey's answer.
     const gap = missingCapability(store, taskRef, options.repo ?? null, options.now);
     if (gap !== null) return { ok: false as const, reason: "capability" as const, message: gap };
+    // The attention budget (§8, gate 6), proved where every other readiness
+    // fact is proved. A phone with thirty open questions answers none of
+    // them; above the budget, tasks with a *measured* habit of parking step
+    // aside so the night keeps building what builds. First-time parkers pass
+    // — a rate nobody measured is not a rate.
+    const budget = options.maxOpenDecisions ?? DEFAULT_MAX_OPEN_DECISIONS;
+    if (store.countUnanswered() >= budget) {
+      const rate = store.refForId(taskRef)?.parkRate ?? 0;
+      if (rate > 0) {
+        return {
+          ok: false as const,
+          reason: "attention-budget" as const,
+          message: `${store.countUnanswered()} decisions already wait and this task parks ${Math.round(rate * 100)}% of its attempts — answer some before it may add more`,
+        };
+      }
+    }
     return acquireLocked(store, taskRef, runner, options);
   });
 }

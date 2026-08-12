@@ -839,3 +839,147 @@ describe("sealing a park", () => {
     expect(store.activeHolds(task, later(9e8))).toHaveLength(0);
   });
 });
+
+describe("the resume and the attention budget", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  const openRun = (leaseId: string, at: Date = T0) =>
+    store.startRun({
+      taskRef: task,
+      leaseId,
+      runner: "runner-a",
+      branch: "nightorders/t-1",
+      worktree: "/pool/t-1",
+      now: at,
+    });
+
+  const parkAndAnswer = (choice = "closed") => {
+    acquire(store, task, "runner-a", {
+      now: T0,
+      ttlMs: 60 * 60_000,
+      newLeaseId: ids("lease-park"),
+    });
+    const runId = openRun("lease-park");
+    const sealed = finalizeParkFenced(store, {
+      leaseId: currentClaim(store, task, T0)!.leaseId,
+      runId,
+      taskId: "t-1",
+      decision: {
+        urgency: "blocking",
+        recap: "r",
+        question: "Fail open or fail closed?",
+        options: [
+          { id: "open", label: "Fail open", consequence: "slips", reversible: true },
+          { id: "closed", label: "Fail closed", consequence: "pauses", reversible: true },
+        ],
+        recommendation: "closed",
+        assignee: null,
+        deadline: null,
+      },
+      artifactIds: [],
+      now: later(1_000),
+    });
+    if (!sealed.ok) throw new Error("seal failed");
+    store.answerDecision({ id: sealed.decisionId, choice, by: "alex", via: "cli", note: "go" }, later(2_000));
+    return sealed.decisionId;
+  };
+
+  test("answers attach to the resume causally, and a built run is the terminus", () => {
+    const decisionId = parkAndAnswer();
+
+    // First resume: the answer is attached, snapshot and all.
+    const resume1 = openRun("lease-resume-1", later(3_000));
+    const attached = store.attachAnswers(resume1, task);
+    expect(attached.map(one => one.id)).toEqual([decisionId]);
+    expect(store.answersFor(resume1)).toMatchObject([{ choice: "closed", note: "go" }]);
+
+    // The resume fails; a second resume is handed the same answer again.
+    store.finishRun(resume1, { outcome: "failed", reason: "agent", now: later(4_000) });
+    const resume2 = openRun("lease-resume-2", later(5_000));
+    expect(store.attachAnswers(resume2, task).map(one => one.id)).toEqual([decisionId]);
+
+    // The second resume builds: delivered. A third run gets nothing.
+    store.finishRun(resume2, { outcome: "built", committed: true, now: later(6_000) });
+    const later3 = openRun("lease-later", later(7_000));
+    expect(store.attachAnswers(later3, task)).toEqual([]);
+  });
+
+  test("attaching twice is once — the relation is idempotent", () => {
+    parkAndAnswer();
+    const resume = openRun("lease-resume", later(3_000));
+    store.attachAnswers(resume, task);
+    store.attachAnswers(resume, task);
+    expect(store.answersFor(resume)).toHaveLength(1);
+  });
+
+  test("above the budget, a measured parker steps aside; a first-timer does not", () => {
+    // Five open decisions on five other tasks fill the budget.
+    for (let i = 0; i < 5; i++) {
+      store.createTask({ id: `other-${i}`, title: "x" }, T0);
+      const ref = store.refFor("built-in", `other-${i}`).id;
+      const run = store.startRun({
+        taskRef: ref, leaseId: `l-${i}`, runner: "r", branch: "b", worktree: "/w", now: T0,
+      });
+      store.saveDecision(
+        {
+          run,
+          urgency: "blocking",
+          recap: "r",
+          question: "q",
+          options: [
+            { id: "a", label: "a", consequence: "c", reversible: true },
+            { id: "b", label: "b", consequence: "c", reversible: true },
+          ],
+          recommendation: "a",
+        },
+        T0,
+      );
+    }
+    expect(store.countUnanswered()).toBe(5);
+
+    // t-1 has a parking history: one parked, zero built → rate 1.
+    const history = openRun("lease-history");
+    store.finishRun(history, { outcome: "parked", reason: "decision:x", now: later(1_000) });
+    expect(store.refForId(task)?.parkRate).toBe(1);
+
+    const refused = acquireIfReady(store, task, "runner-a", { now: later(2_000) });
+    expect(refused).toMatchObject({ ok: false, reason: "attention-budget" });
+
+    // A task that has never parked is not punished for the backlog.
+    store.createTask({ id: "fresh", title: "x" }, T0);
+    const fresh = store.refFor("built-in", "fresh").id;
+    const taken = acquireIfReady(store, fresh, "runner-a", { now: later(2_000) });
+    expect(taken).toMatchObject({ ok: true });
+
+    // And under the budget, the parker dispatches again.
+    const generous = acquireIfReady(store, task, "runner-a", {
+      now: later(3_000),
+      maxOpenDecisions: 50,
+    });
+    expect(generous).toMatchObject({ ok: true });
+  });
+
+  test("the park rate is measured from concluded builder attempts", () => {
+    const first = openRun("lease-1");
+    store.finishRun(first, { outcome: "parked", reason: "decision:1", now: later(1_000) });
+    expect(store.refForId(task)?.parkRate).toBe(1);
+
+    const second = openRun("lease-2", later(2_000));
+    store.finishRun(second, { outcome: "built", committed: true, now: later(3_000) });
+    expect(store.refForId(task)?.parkRate).toBe(0.5);
+
+    // Refusals and repair children do not move it: they are not concluded builds.
+    const third = openRun("lease-3", later(4_000));
+    store.finishRun(third, { outcome: "refused", reason: "fenced", now: later(5_000) });
+    expect(store.refForId(task)?.parkRate).toBe(0.5);
+  });
+});
