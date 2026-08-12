@@ -928,14 +928,8 @@ function readClaim(row: Record<string, unknown>): Claim {
  * reading, both deciding they won, and one failing at commit time.
  */
 function inTransaction<T>(store: Store, body: () => T): T {
-  const db = store.handle;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = body();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
+  // The store's transact: same BEGIN IMMEDIATE, plus reentrancy — a caller
+  // composing a fenced finalizer with more writes (completion + publication
+  // intent) joins one transaction instead of dying on a nested BEGIN.
+  return store.transact(body);
 }

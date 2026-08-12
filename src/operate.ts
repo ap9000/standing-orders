@@ -67,6 +67,13 @@ import {
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { overnight, spendLine } from "./summary.js";
+import {
+  bodyHashOf,
+  describePublicationGrant,
+  publicationBody,
+  publishPass,
+  type PublishExec,
+} from "./publish.js";
 
 type CapabilityKind = Capability["kind"];
 import {
@@ -137,6 +144,7 @@ export type OperateOptions = {
   gitRunner?: CommandRunner;
   /** Injected by tests: the Telegram Bot API. Production dials the real one. */
   telegramTransport?: TelegramTransport;
+  publishExec?: PublishExec;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
@@ -236,7 +244,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
     "choose", "note", "max-open-decisions", "port", "host", "allow-host",
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
-    "token-file", "bin", "poll",
+    "token-file", "bin", "poll", "github", "remote", "head-prefix",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -303,6 +311,7 @@ export async function runOperate(
       ...(options.agentRunner === undefined ? {} : { agentRunner: options.agentRunner }),
       ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
       ...(options.telegramTransport === undefined ? {} : { telegramTransport: options.telegramTransport }),
+      ...(options.publishExec === undefined ? {} : { publishExec: options.publishExec }),
     });
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
@@ -322,6 +331,8 @@ type Context = {
   agentRunner?: CommandRunner;
   gitRunner?: CommandRunner;
   telegramTransport?: TelegramTransport;
+  /** Injected by tests: what `publish` runs for git and gh. */
+  publishExec?: PublishExec;
 };
 
 async function dispatch(
@@ -373,6 +384,8 @@ async function dispatch(
       return daemonCommand(positional, flags, context);
     case "bridge":
       return bridgeCommand(positional, flags, context);
+    case "publish":
+      return publishCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -1217,14 +1230,56 @@ async function tickCommand(
       // the world moved past this lease between the builder's final check and
       // now; the commit exists on the branch, but the task is not ours to
       // close, and reporting "built" would count work the fence disowned.
-      const sealed = completeFenced(store, lease, "done", clock());
-      if (sealed.ok) {
+      // One transaction around all of it: the fenced release, the run's
+      // outcome, and — when a grant covers this task — the publication
+      // intent, so "done" and "this must reach a PR" cannot come apart.
+      const sealed = store.transact(() => {
+        const fence = completeFenced(store, lease, "done", clock());
+        if (!fence.ok) return fence;
         store.finishRun(runId, {
           outcome: result.noChange === true ? "no-change" : "built",
           ...(result.noChange === true ? { reason: "handoff" } : {}),
           committed: result.committed,
           now: clock(),
         });
+        // A stated no-change publishes nothing — there is nothing to push,
+        // and an empty PR would be noise wearing a grant.
+        if (result.noChange !== true && result.committed) {
+          const grant = store.publicationGrantFor(repo);
+          const headSha = store.getRun(runId)?.headRevision ?? null;
+          if (
+            grant !== null &&
+            headSha !== null &&
+            branch.startsWith(grant.headPrefix) &&
+            (grant.selector === "all" || ref.origin === "ours")
+          ) {
+            const intentId = store.createPublicationIntent(
+              {
+                run: runId,
+                taskRef: ref.id,
+                githubRepo: grant.githubRepo,
+                remote: grant.remote,
+                base: grant.base,
+                head: branch,
+                headSha,
+                bodyHash: "",
+                draft: grant.draft,
+              },
+              clock(),
+            );
+            // The body's identity is computed from the rows this very
+            // transaction made durable — reproducible after any crash.
+            const publication = store.publicationForRun(runId);
+            if (publication !== null) {
+              store.handle
+                .prepare("UPDATE publication SET body_hash = ? WHERE id = ?")
+                .run(bodyHashOf(publicationBody(store, publication)), intentId);
+            }
+          }
+        }
+        return fence;
+      });
+      if (sealed.ok) {
         // A concluded success ends the failure streak and its backoff —
         // and proves the credential, clearing any quota stamp it was
         // dispatched through as a half-open probe.
@@ -2311,6 +2366,21 @@ async function watchCommand(
         }
       }
 
+      // Built work goes out in the same window it was built: the pass is one
+      // SELECT when nothing is owed, and each phase is durable if we crash.
+      if (store.pendingPublications().length > 0) {
+        const published = await publishPass(store, {
+          repo,
+          ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
+        });
+        if (published.pushed + published.opened + published.adopted + published.failed > 0) {
+          write(
+            `watch: published — pushed ${published.pushed}, opened ${published.opened}, adopted ${published.adopted}` +
+              (published.failed > 0 ? `, gave up on ${published.failed}` : ""),
+          );
+        }
+      }
+
       // The embedded follower owns the wire while it lives; the timer-driven
       // pass is the fallback shape for a watch started before a token existed.
       if (follower === null && now - lastBridge >= bridgeEveryMs) {
@@ -2559,6 +2629,130 @@ async function bridgeCommand(
     return fail(write, json, "bridge", "idle", "nothing to send, nothing arrived", EXIT.refused, { report });
   }
   return succeed(write, json, "bridge", { report }, lines);
+}
+
+// ---- publication -----------------------------------------------------------
+
+/**
+ * `nightorders publish …` — built work to a pushed branch and a PR, under a
+ * grant whose terms were shown before the yes.
+ *
+ *   publish                              one pass: push intents, open/adopt PRs
+ *   publish grant --github <owner/name> [--base main] [--remote origin]
+ *                 [--head-prefix nightorders/] [--all-tasks] [--ready]
+ *                 --as <you> --token <approver-token> [--yes]
+ *   publish revoke --as <you> --token <approver-token>
+ *   publish status
+ *
+ * Granting without --yes prints the exact terms and does nothing — the same
+ * see-it-first ceremony as a scope approval. Revocation is immediate: the
+ * next pass pushes nothing, whatever intents exist.
+ */
+async function publishCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const repo = repoFrom(flags);
+  const [action] = positional;
+
+  if (action === "grant") {
+    const github = text(flags, "github");
+    if (github === undefined || !/^[\w.-]+\/[\w.-]+$/.test(github)) {
+      return fail(write, json, "publish grant", "usage", "`--github <owner/name>` is required, exactly", EXIT.usage);
+    }
+    const spec = {
+      repo,
+      githubRepo: github,
+      remote: text(flags, "remote") ?? "origin",
+      headPrefix: text(flags, "head-prefix") ?? "nightorders/",
+      base: text(flags, "base") ?? "main",
+      capabilities: ["push-branch", "open-pr"] as ("push-branch" | "open-pr")[],
+      selector: (flags.has("all-tasks") ? "all" : "ours") as "all" | "ours",
+      draft: !flags.has("ready"),
+    };
+
+    if (!flags.has("yes")) {
+      return succeed(write, json, "publish grant", { proposed: spec, granted: false }, () => [
+        "This grant would allow, unattended:",
+        ...describePublicationGrant(spec),
+        "",
+        "Nothing is granted yet. Repeat with --yes --as <you> --token <approver-token> to agree to exactly this.",
+      ]);
+    }
+
+    const asWho = text(flags, "as");
+    const token = text(flags, "token");
+    if (asWho === undefined || token === undefined) {
+      return fail(write, json, "publish grant", "usage", "granting takes --as <you> --token <approver-token> — pushing your repos is a person's yes", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, asWho, token);
+    if (!authenticated.ok) {
+      return fail(write, json, "publish grant", authenticated.reason, describeApproveFailure(authenticated.reason, asWho), EXIT.refused);
+    }
+
+    store.savePublicationGrant({ ...spec, grantedBy: asWho }, clock());
+    return succeed(write, json, "publish grant", { granted: true, grant: spec }, () => [
+      `Granted by ${asWho}:`,
+      ...describePublicationGrant(spec),
+      "Revoke any time: `nightorders publish revoke --as <you> --token <t>`.",
+    ]);
+  }
+
+  if (action === "revoke") {
+    const asWho = text(flags, "as");
+    const token = text(flags, "token");
+    if (asWho === undefined || token === undefined) {
+      return fail(write, json, "publish revoke", "usage", "`--as <you> --token <approver-token>`", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, asWho, token);
+    if (!authenticated.ok) {
+      return fail(write, json, "publish revoke", authenticated.reason, describeApproveFailure(authenticated.reason, asWho), EXIT.refused);
+    }
+    const revoked = store.revokePublicationGrant(repo, asWho, clock());
+    return succeed(write, json, "publish revoke", { revoked }, () => [
+      revoked
+        ? "Revoked. The next pass pushes nothing, whatever intents exist."
+        : "There was no live grant to revoke.",
+    ]);
+  }
+
+  if (action === "status") {
+    const grant = store.publicationGrantFor(repo);
+    const pending = store.pendingPublications();
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "publish status", grant, pending }, null, 2));
+      return EXIT.ok;
+    }
+    write(grant === null ? "No live publication grant." : `Granted by ${grant.grantedBy} at ${grant.grantedAt}:`);
+    if (grant !== null) for (const line of describePublicationGrant(grant)) write(line);
+    write(pending.length === 0 ? "Nothing owed." : `Owed: ${pending.length} publication(s) pending.`);
+    return EXIT.ok;
+  }
+
+  if (action !== undefined) {
+    return fail(write, json, "publish", "usage", "`nightorders publish [grant|revoke|status]`", EXIT.usage);
+  }
+
+  // The pass.
+  const report = await publishPass(store, {
+    repo,
+    clock,
+    ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
+  });
+  const idle = report.pushed === 0 && report.opened === 0 && report.adopted === 0 && report.failed === 0;
+  const lines = () => [
+    `Pushed ${report.pushed}, opened ${report.opened}, adopted ${report.adopted}, gave up on ${report.failed}.`,
+    ...report.problems.map(problem => `  problem: ${problem}`),
+  ];
+  if (report.problems.length > 0) {
+    return fail(write, json, "publish", "publish-problems", lines().join("\n"), EXIT.failed, { report });
+  }
+  if (idle) {
+    return fail(write, json, "publish", "idle", "nothing owed — no pending publications", EXIT.refused, { report });
+  }
+  return succeed(write, json, "publish", { report }, lines);
 }
 
 // ---- the outbox -----------------------------------------------------------

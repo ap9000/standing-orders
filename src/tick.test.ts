@@ -172,6 +172,62 @@ describe("tick, against real git", () => {
     expect(payload()).toMatchObject({ ok: false, reason: "empty" });
   });
 
+  test("a built task under a publication grant leaves as a pushed branch and a PR", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-1", approverToken);
+
+    // Terms first: without --yes nothing is granted, and status says so.
+    await run(["publish", "grant", "--github", "alex/thing", "--repo", repo, "--json"]);
+    expect(payload().granted).toBe(false);
+    await run(["publish", "status", "--repo", repo, "--json"]);
+    expect(payload().grant).toBeNull();
+
+    await run([
+      "publish", "grant", "--github", "alex/thing", "--repo", repo,
+      "--yes", "--as", "alex", "--token", approverToken, "--json",
+    ]);
+    expect(payload().granted).toBe(true);
+
+    await tick(runnerToken);
+    expect(payload().dispatched[0]).toMatchObject({ id: "t-1", outcome: "built" });
+
+    // The intent was written with the completion — the exact accepted SHA.
+    await run(["publish", "status", "--repo", repo, "--json"]);
+    expect(payload().pending).toHaveLength(1);
+    const head = await git(["rev-parse", "nightorders/t-1"]);
+    expect(payload().pending[0]).toMatchObject({
+      state: "intended",
+      head: "nightorders/t-1",
+      headSha: head.stdout.trim(),
+      githubRepo: "alex/thing",
+    });
+
+    // The pass, against a scripted git and gh: push the SHA, open the PR.
+    const calls: { file: string; args: string[] }[] = [];
+    const publishExec = async (file: string, args: readonly string[]) => {
+      calls.push({ file, args: [...args] });
+      if (file === "gh" && args[1] === "list") return { ...OK, stdout: "[]" };
+      if (file === "gh" && args[1] === "create") {
+        return { ...OK, stdout: "https://github.com/alex/thing/pull/12\n" };
+      }
+      return { ...OK };
+    };
+    lines = [];
+    const code = await runOperate("publish", ["--repo", repo, "--json"], line => lines.push(line), {
+      databaseFile: db,
+      publishExec,
+    });
+
+    expect(code).toBe(EXIT.ok);
+    expect(payload().report).toMatchObject({ pushed: 1, opened: 1 });
+    expect(calls[0]).toMatchObject({
+      file: "git",
+      args: ["push", "origin", `${head.stdout.trim()}:refs/heads/nightorders/t-1`],
+    });
+    await run(["publish", "status", "--repo", repo, "--json"]);
+    expect(payload().pending).toHaveLength(0);
+  });
+
   test("a ready task nobody approved is reported, not built", async () => {
     const { runnerToken } = await credentials();
     await run(["task", "add", "the work", "--id", "t-1"]);

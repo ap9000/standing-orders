@@ -35,7 +35,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -260,6 +260,49 @@ export type Incident = {
   createdAt: string;
   resolvedAt: string | null;
   resolvedBy: string | null;
+};
+
+/** What a publication grant permits — two external writes, named separately. */
+export type PublicationCapability = "push-branch" | "open-pr";
+
+export type PublicationGrant = {
+  id: number;
+  repo: string;
+  /** owner/name on GitHub — exact, never inferred from a remote at publish time. */
+  githubRepo: string;
+  remote: string;
+  /** Only branches under this prefix may be pushed. */
+  headPrefix: string;
+  base: string;
+  capabilities: PublicationCapability[];
+  selector: "ours" | "all";
+  draft: boolean;
+  grantedBy: string;
+  grantedAt: string;
+  revokedBy: string | null;
+  revokedAt: string | null;
+};
+
+/** One run's road to a PR, durable at every phase. */
+export type Publication = {
+  id: number;
+  run: number;
+  taskRef: number;
+  githubRepo: string;
+  remote: string;
+  base: string;
+  head: string;
+  /** The exact commit completion accepted — what gets pushed, byte for byte. */
+  headSha: string;
+  bodyHash: string;
+  draft: boolean;
+  state: "intended" | "pushed" | "opened" | "failed";
+  prNumber: number | null;
+  prUrl: string | null;
+  attempts: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 /** Every mutation takes one. A repeat returns the first answer, unchanged. */
@@ -711,6 +754,56 @@ CREATE TABLE IF NOT EXISTS quota (
   observed_at TEXT NOT NULL,
   reset_at    TEXT,
   PRIMARY KEY (runner, provider, scope)
+);
+
+-- Standing permission to publish built work: git push and PR creation are
+-- two different external writes, so they are two named capabilities under
+-- one grant whose every term — exact GitHub repository, remote, allowed
+-- head prefix, base branch — was shown to the approver before the yes.
+-- Absence is denial; revocation is immediate. v5.
+CREATE TABLE IF NOT EXISTS publication_grant (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo         TEXT NOT NULL,
+  github_repo  TEXT NOT NULL,
+  remote       TEXT NOT NULL,
+  head_prefix  TEXT NOT NULL,
+  base         TEXT NOT NULL,
+  capabilities TEXT NOT NULL,
+  selector     TEXT NOT NULL CHECK (selector IN ('ours','all')),
+  draft        INTEGER NOT NULL DEFAULT 1,
+  granted_by   TEXT NOT NULL,
+  granted_at   TEXT NOT NULL,
+  revoked_by   TEXT,
+  revoked_at   TEXT
+);
+
+-- One live grant per repo: proposing again replaces, revoking ends it.
+CREATE UNIQUE INDEX IF NOT EXISTS publication_grant_live
+  ON publication_grant (repo) WHERE revoked_at IS NULL;
+
+-- The durable publication intent (§M4): completion and "this must reach a
+-- PR" are one fenced write, and everything the worker needs afterwards —
+-- the exact SHA to push, the exact refs, the body's identity — lives here,
+-- so every phase is retryable after a crash and a retry can adopt the PR
+-- it already opened instead of minting a twin. v5.
+CREATE TABLE IF NOT EXISTS publication (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+  task_ref    INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  github_repo TEXT NOT NULL,
+  remote      TEXT NOT NULL,
+  base        TEXT NOT NULL,
+  head        TEXT NOT NULL,
+  head_sha    TEXT NOT NULL,
+  body_hash   TEXT NOT NULL,
+  draft       INTEGER NOT NULL,
+  state       TEXT NOT NULL CHECK (state IN ('intended','pushed','opened','failed')),
+  pr_number   INTEGER,
+  pr_url      TEXT,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
 );
 
 -- A machine that may be given work.
@@ -3077,6 +3170,146 @@ export class Store {
       .run(now.toISOString(), botId, owner);
   }
 
+  // ---- publication ---------------------------------------------------------
+
+  /** Grant publication for a repo. Replaces any live grant — one at a time, the newest word wins. */
+  savePublicationGrant(
+    grant: {
+      repo: string;
+      githubRepo: string;
+      remote: string;
+      headPrefix: string;
+      base: string;
+      capabilities: PublicationCapability[];
+      selector: "ours" | "all";
+      draft: boolean;
+      grantedBy: string;
+    },
+    now: Date,
+  ): void {
+    this.transact(() => {
+      this.db
+        .prepare("UPDATE publication_grant SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+        .run(now.toISOString(), grant.grantedBy, grant.repo);
+      this.db
+        .prepare(
+          `INSERT INTO publication_grant
+             (repo, github_repo, remote, head_prefix, base, capabilities, selector, draft, granted_by, granted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          grant.repo,
+          grant.githubRepo,
+          grant.remote,
+          grant.headPrefix,
+          grant.base,
+          JSON.stringify(grant.capabilities),
+          grant.selector,
+          grant.draft ? 1 : 0,
+          grant.grantedBy,
+          now.toISOString(),
+        );
+    });
+  }
+
+  /** Revocation is immediate: intents not yet pushed die with the grant. */
+  revokePublicationGrant(repo: string, by: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE publication_grant SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+      .run(now.toISOString(), by, repo);
+    return Number(changes) > 0;
+  }
+
+  publicationGrantFor(repo: string): PublicationGrant | null {
+    const row = this.db
+      .prepare("SELECT * FROM publication_grant WHERE repo = ? AND revoked_at IS NULL")
+      .get(repo);
+    return row === undefined ? null : readPublicationGrant(row);
+  }
+
+  /**
+   * The intent, written wherever completion was proved — callers run this
+   * inside the fenced completion transaction, so "done" and "this must
+   * reach a PR" are one write or neither.
+   */
+  createPublicationIntent(
+    intent: {
+      run: number;
+      taskRef: number;
+      githubRepo: string;
+      remote: string;
+      base: string;
+      head: string;
+      headSha: string;
+      bodyHash: string;
+      draft: boolean;
+    },
+    now: Date,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO publication
+           (run, task_ref, github_repo, remote, base, head, head_sha, body_hash, draft, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'intended', ?, ?)`,
+      )
+      .run(
+        intent.run,
+        intent.taskRef,
+        intent.githubRepo,
+        intent.remote,
+        intent.base,
+        intent.head,
+        intent.headSha,
+        intent.bodyHash,
+        intent.draft ? 1 : 0,
+        now.toISOString(),
+        now.toISOString(),
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /** Work the publisher still owes, oldest first — crash-retryable by construction. */
+  pendingPublications(): Publication[] {
+    return this.db
+      .prepare("SELECT * FROM publication WHERE state IN ('intended','pushed') ORDER BY id")
+      .all()
+      .map(readPublication);
+  }
+
+  publicationForRun(run: number): Publication | null {
+    const row = this.db.prepare("SELECT * FROM publication WHERE run = ?").get(run);
+    return row === undefined ? null : readPublication(row);
+  }
+
+  markPublicationPushed(id: number, now: Date): void {
+    this.db
+      .prepare("UPDATE publication SET state = 'pushed', updated_at = ? WHERE id = ? AND state = 'intended'")
+      .run(now.toISOString(), id);
+  }
+
+  markPublicationOpened(id: number, prNumber: number, prUrl: string, now: Date): void {
+    this.db
+      .prepare(
+        "UPDATE publication SET state = 'opened', pr_number = ?, pr_url = ?, updated_at = ? WHERE id = ? AND state = 'pushed'",
+      )
+      .run(prNumber, prUrl, now.toISOString(), id);
+  }
+
+  /** One more failed attempt, error kept. Returns the new count; the caller decides when enough is enough. */
+  recordPublicationError(id: number, error: string, now: Date): number {
+    this.db
+      .prepare("UPDATE publication SET attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?")
+      .run(error.slice(0, 2_000), now.toISOString(), id);
+    const row = this.db.prepare("SELECT attempts FROM publication WHERE id = ?").get(id);
+    return Number(row?.["attempts"] ?? 0);
+  }
+
+  failPublication(id: number, now: Date): void {
+    this.db
+      .prepare("UPDATE publication SET state = 'failed', updated_at = ? WHERE id = ? AND state IN ('intended','pushed')")
+      .run(now.toISOString(), id);
+  }
+
   // ---- the wake sequence ---------------------------------------------------
 
   /** Something changed that could make work dispatchable. Cheap, and safe anywhere. */
@@ -3608,6 +3841,46 @@ function readIncident(row: Record<string, unknown>): Incident {
     createdAt: String(row["created_at"]),
     resolvedAt: row["resolved_at"] === null ? null : String(row["resolved_at"]),
     resolvedBy: row["resolved_by"] === null ? null : String(row["resolved_by"]),
+  };
+}
+
+function readPublicationGrant(row: Record<string, unknown>): PublicationGrant {
+  return {
+    id: Number(row["id"]),
+    repo: String(row["repo"]),
+    githubRepo: String(row["github_repo"]),
+    remote: String(row["remote"]),
+    headPrefix: String(row["head_prefix"]),
+    base: String(row["base"]),
+    capabilities: JSON.parse(String(row["capabilities"])) as PublicationCapability[],
+    selector: String(row["selector"]) as "ours" | "all",
+    draft: Number(row["draft"]) === 1,
+    grantedBy: String(row["granted_by"]),
+    grantedAt: String(row["granted_at"]),
+    revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
+    revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
+  };
+}
+
+function readPublication(row: Record<string, unknown>): Publication {
+  return {
+    id: Number(row["id"]),
+    run: Number(row["run"]),
+    taskRef: Number(row["task_ref"]),
+    githubRepo: String(row["github_repo"]),
+    remote: String(row["remote"]),
+    base: String(row["base"]),
+    head: String(row["head"]),
+    headSha: String(row["head_sha"]),
+    bodyHash: String(row["body_hash"]),
+    draft: Number(row["draft"]) === 1,
+    state: String(row["state"]) as Publication["state"],
+    prNumber: row["pr_number"] === null ? null : Number(row["pr_number"]),
+    prUrl: row["pr_url"] === null ? null : String(row["pr_url"]),
+    attempts: Number(row["attempts"]),
+    lastError: row["last_error"] === null ? null : String(row["last_error"]),
+    createdAt: String(row["created_at"]),
+    updatedAt: String(row["updated_at"]),
   };
 }
 

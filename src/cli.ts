@@ -182,6 +182,7 @@ const OPERATE_COMMANDS = new Set([
   "watch",
   "daemon",
   "bridge",
+  "publish",
   "reconcile",
 ]);
 
