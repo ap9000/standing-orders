@@ -29,7 +29,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Store, Mutation } from "./store.js";
+import { BUILT_IN, type Store, type Mutation, type TaskState } from "./store.js";
 
 export type Claim = {
   taskRef: number;
@@ -80,12 +80,26 @@ export function acquire(
   runner: string,
   options: AcquireOptions,
 ): AcquireResult {
+  return inTransaction(store, () => acquireLocked(store, taskRef, runner, options));
+}
+
+/**
+ * The body of `acquire`, for callers already holding the transaction.
+ * `acquireIfReady` needs its readiness check and the CAS to be one atomic
+ * step, and SQLite does not nest transactions.
+ */
+function acquireLocked(
+  store: Store,
+  taskRef: number,
+  runner: string,
+  options: AcquireOptions,
+): AcquireResult {
   const { now, ttlMs = DEFAULT_LEASE_MS, newLeaseId = randomUUID, mutation = {} } = options;
   const db = store.handle;
 
-  // Idempotency wraps the transaction, not the other way round: a retried
+  // Idempotency wraps the CAS, not the other way round: a retried
   // acquire must hand back the first answer rather than take a second lease.
-  return inTransaction(store, () =>
+  return (
     store.replay(mutation, "acquire", () => {
       const stamp = now.toISOString();
       const existing = latest(db, taskRef);
@@ -147,7 +161,7 @@ export function acquire(
     // the refusal would make this key a permanent "no" for a task that is
     // free again five minutes later.
     result => result.ok,
-    ),
+    )
   );
 }
 
@@ -156,6 +170,72 @@ function latest(db: Store["handle"], taskRef: number): Record<string, unknown> |
   return db
     .prepare("SELECT * FROM claim WHERE task_ref = ? ORDER BY lease_generation DESC LIMIT 1")
     .get(taskRef);
+}
+
+/** Why `acquireIfReady` said no before the race was even run. */
+export type NotReady = { ok: false; reason: "not-ready"; message: string };
+
+/**
+ * Take the task, if it is free *and still worth taking*.
+ *
+ * `listReady` then `acquire` is two reads of a world that moves between them:
+ * a hold placed, a blocker reopened, the task cancelled — and the CAS admits
+ * the claim anyway, because the CAS only defends against other claimants. An
+ * unattended pass has nobody watching who would notice the stale dispatch, so
+ * the readiness conditions are re-proved inside the same transaction as the
+ * acquire, against rows the write lock has already pinned.
+ *
+ * "Not ready" is a different answer from "held": held means somebody else got
+ * it, which is a race being won; not-ready means nobody should have it, and
+ * says why.
+ */
+export function acquireIfReady(
+  store: Store,
+  taskRef: number,
+  runner: string,
+  options: AcquireOptions,
+): AcquireResult | NotReady {
+  return inTransaction(store, () => {
+    const why = notReady(store, taskRef, options.now);
+    if (why !== null) return { ok: false as const, reason: "not-ready" as const, message: why };
+    return acquireLocked(store, taskRef, runner, options);
+  });
+}
+
+/** The first readiness condition this reference fails, in words, or null. */
+function notReady(store: Store, taskRef: number, now: Date): string | null {
+  const db = store.handle;
+  const stamp = now.toISOString();
+
+  const task = db
+    .prepare(
+      `SELECT task.id, task.state FROM task
+       JOIN task_ref ON task_ref.external_id = task.id AND task_ref.backend = ?
+       WHERE task_ref.id = ?`,
+    )
+    .get(BUILT_IN, taskRef);
+  if (task === undefined) return "no such task";
+  if (String(task["state"]) !== "queued") return `state is ${String(task["state"])}, not queued`;
+
+  const hold = db
+    .prepare(
+      `SELECT reason FROM hold
+       WHERE task_ref = ? AND (until IS NULL OR until > ?) LIMIT 1`,
+    )
+    .get(taskRef, stamp);
+  if (hold !== undefined) return `held: ${String(hold["reason"])}`;
+
+  const blocker = db
+    .prepare(
+      `SELECT blocker.id FROM task_edge
+       JOIN task AS blocker ON blocker.id = task_edge.blocker
+       WHERE task_edge.blocked = ? AND blocker.state <> 'done'
+       ORDER BY blocker.id LIMIT 1`,
+    )
+    .get(String(task["id"]));
+  if (blocker !== undefined) return `waiting on ${String(blocker["id"])}`;
+
+  return null;
 }
 
 
@@ -257,6 +337,70 @@ export function release(store: Store, leaseId: string, now: Date): FenceResult {
 
     const row = db.prepare("SELECT * FROM claim WHERE lease_id = ?").get(leaseId);
     return { ok: true as const, claim: readClaim(row as Record<string, unknown>) };
+  });
+}
+
+/**
+ * Release the lease and write the task's terminal state, as one step.
+ *
+ * Release-then-mark is a window: between the two, the freed task is back in
+ * the ready set, and another pass can claim it before the terminal state
+ * lands — two builders for one task, the second dispatched by our own
+ * bookkeeping. Here the state is written inside the same transaction as the
+ * fenced release, so a task is never simultaneously free and unfinished.
+ *
+ * A fenced or unknown lease writes nothing: a runner the world moved past
+ * does not get to say how the task ended. A duplicate release reports
+ * `duplicate` and also writes nothing — the first completion already said,
+ * and a retry changing the answer would make "done" negotiable.
+ */
+export function completeFenced(
+  store: Store,
+  leaseId: string,
+  state: Extract<TaskState, "done" | "failed">,
+  now: Date,
+  mutation: Mutation = {},
+): FenceResult {
+  const db = store.handle;
+
+  return inTransaction(store, () => {
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+
+    if (Number(changes) === 0) {
+      // Same reconciliation as `release`: a lease that already completed is
+      // told "you already did this", not "you were fenced".
+      const duplicate = db
+        .prepare("SELECT * FROM claim WHERE lease_id = ? AND released_at IS NOT NULL")
+        .get(leaseId);
+      if (duplicate !== undefined) {
+        return { ok: true as const, claim: readClaim(duplicate), duplicate: true };
+      }
+      return refusal(db, leaseId);
+    }
+
+    const row = db.prepare("SELECT * FROM claim WHERE lease_id = ?").get(leaseId);
+    const claim = readClaim(row as Record<string, unknown>);
+
+    const taskId = db
+      .prepare("SELECT external_id FROM task_ref WHERE id = ? AND backend = ?")
+      .get(claim.taskRef, BUILT_IN);
+    if (taskId !== undefined) {
+      store.replay(mutation, "completeFenced", () => {
+        db.prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?").run(
+          state,
+          now.toISOString(),
+          String(taskId["external_id"]),
+        );
+        return true;
+      });
+    }
+
+    return { ok: true as const, claim };
   });
 }
 

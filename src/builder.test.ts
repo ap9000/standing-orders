@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
-import { acquire } from "./claim.js";
+import { acquire, reap } from "./claim.js";
 import { propose, approve, addApprover } from "./scope.js";
 import { build, PROTECTED, type Runner } from "./builder.js";
 
@@ -114,6 +114,28 @@ describe("the builder's gates", () => {
     acquire(store, taskRef, "builder-2", { now: T0, ttlMs: 60 * 60_000 });
 
     expect(await build(store, request())).toMatchObject({ ok: false, reason: "not-yours" });
+    expect(agentCalls).toHaveLength(0);
+  });
+
+  test("will not build under a different lease than the one it was given", async () => {
+    // Same runner, newer lease: the old attempt expired, was reaped, and the
+    // task came back to builder-1 under a fresh grant. The runner-name check
+    // says "yours"; only the lease id knows this attempt is the stale one.
+    approveScope();
+    const first = acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 1_000 });
+    if (!first.ok) throw new Error("setup");
+    reap(store, new Date(T0.getTime() + 2_000));
+    acquire(store, taskRef, "builder-1", {
+      now: new Date(T0.getTime() + 3_000),
+      ttlMs: 60 * 60_000,
+    });
+
+    const result = await build(store, request({
+      leaseId: first.claim.leaseId,
+      now: new Date(T0.getTime() + 4_000),
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: "not-yours" });
     expect(agentCalls).toHaveLength(0);
   });
 

@@ -35,7 +35,16 @@ import {
   type Store,
   type TaskState,
 } from "./store.js";
-import { acquire, heartbeat, release, reap, currentClaim, DEFAULT_LEASE_MS } from "./claim.js";
+import {
+  acquire,
+  acquireIfReady,
+  completeFenced,
+  heartbeat,
+  release,
+  reap,
+  currentClaim,
+  DEFAULT_LEASE_MS,
+} from "./claim.js";
 import {
   proposeGrant,
   describeGrant,
@@ -55,7 +64,12 @@ import {
 } from "./runner.js";
 import { propose, approve, addApprover, describeScope, approvalOf } from "./scope.js";
 import { WorktreePool } from "./worktree.js";
-import { build } from "./builder.js";
+import {
+  build,
+  DEFAULT_BUILD_TIMEOUT_MS,
+  type Runner as CommandRunner,
+} from "./builder.js";
+import { run } from "./exec.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 
@@ -75,6 +89,13 @@ export type OperateOptions = {
   databaseFile?: string;
   openDatabase?: (file: string) => Store;
   now?: Date;
+  /**
+   * Injected by tests: the processes `tick` and `build` run. The agent runner
+   * is what spends money, so a test that forgets to stub it fails loudly on a
+   * missing `claude` binary rather than quietly building something.
+   */
+  agentRunner?: CommandRunner;
+  gitRunner?: CommandRunner;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
@@ -94,6 +115,14 @@ export const OPERATE_HELP = `nightorders — operating the queue
   nightorders heartbeat <lease>         still working; extends the lease
   nightorders release <lease>           done with it; fenced if superseded
   nightorders reap                      release every lease that ran out
+
+  nightorders tick --runner <name> --token <t> --repo <path>
+                                        one unattended pass: claim what is
+                                        ready and approved, build it in a
+                                        leased worktree, commit to a branch.
+                                        [--max <n>] tasks (default 1),
+                                        [--base <ref>] for first attempts.
+                                        Never pushes.
 
 Runners — the machines that may be given work
   nightorders runner register <name> [--capacity <n>]
@@ -136,6 +165,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
+    "max",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -179,8 +209,22 @@ export async function runOperate(
     return fail(write, json, command, "database", describe(error), EXIT.failed);
   }
 
+  // One `Date` per command is fine for a lookup and wrong for a pass that
+  // runs an agent for half an hour: leases granted, extended, and released
+  // with the same stale stamp. Injected time stays frozen — a test's clock
+  // must not advance under it — while real time is read again at each step.
+  const clock = options.now === undefined ? () => new Date() : () => now;
+
   try {
-    return await dispatch(command, positional, flags, { store, write, json, now });
+    return await dispatch(command, positional, flags, {
+      store,
+      write,
+      json,
+      now,
+      clock,
+      ...(options.agentRunner === undefined ? {} : { agentRunner: options.agentRunner }),
+      ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
+    });
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
   } finally {
@@ -188,7 +232,15 @@ export async function runOperate(
   }
 }
 
-type Context = { store: Store; write: Write; json: boolean; now: Date };
+type Context = {
+  store: Store;
+  write: Write;
+  json: boolean;
+  now: Date;
+  clock: () => Date;
+  agentRunner?: CommandRunner;
+  gitRunner?: CommandRunner;
+};
 
 async function dispatch(
   command: string,
@@ -215,6 +267,8 @@ async function dispatch(
       return approverCommand(positional, flags, context);
     case "build":
       return buildCommand(positional, flags, context);
+    case "tick":
+      return tickCommand(flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -704,6 +758,248 @@ async function buildCommand(
       "",
       "Nothing has been pushed. Look at the branch before it goes anywhere.",
     ],
+  );
+}
+
+// ---- the unattended pass --------------------------------------------------
+
+/** What happened to one task this pass looked at. */
+type TickOutcome = {
+  id: string;
+  outcome: "built" | "skipped" | "failed";
+  /** Why it was skipped or how it failed; absent on a build. */
+  reason?: string;
+  committed?: boolean;
+  branch?: string;
+  worktree?: string;
+};
+
+/**
+ * One scheduling pass: the M1 loop, without the human typing each step.
+ *
+ * This is deliberately a pass and not a daemon. M4 owns the loop, the failure
+ * taxonomy, and the economics of staying awake; what M1 needs is that a task
+ * can go queued → branch → commit with nobody present, and a single pass a
+ * cron job can call is the smallest honest shape of that. Run it twice and
+ * the fences hold: the second pass finds the first's claims and skips them.
+ *
+ * The pass never decides what to build — only whether each ready task has
+ * already been agreed to. Approval is checked here once to avoid burning a
+ * claim on a task the builder would refuse, and checked again inside
+ * `build()`, which trusts no caller, this one included.
+ *
+ * Refusals are sorted by what they mean, not treated alike:
+ *
+ *   unapproved, scope-changed   waiting on a person — left queued, untouched
+ *   lease/branch invariants     this machine's problem — left queued, pass fails
+ *   agent, timeout, git         the attempt itself broke — task marked failed
+ *
+ * The lease is granted for longer than the build may run, so a healthy build
+ * cannot outlive its own claim and be reaped mid-commit by the next pass.
+ */
+async function tickCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const runner = text(flags, "runner");
+  const token = text(flags, "token");
+
+  if (runner === undefined || token === undefined) {
+    return fail(write, json, "tick", "usage", "`nightorders tick --runner <name> --token <t> --repo <path> [--max <n>] [--base <ref>]`", EXIT.usage);
+  }
+
+  // Heartbeat rather than bare auth: a pass that is about to hold leases for
+  // half an hour should also be on record as alive.
+  const auth = heartbeatRunner(store, runner, token, clock());
+  if (!auth.ok) {
+    return fail(write, json, "tick", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
+  }
+
+  const maxGiven = text(flags, "max");
+  const max = maxGiven === undefined ? 1 : Number(maxGiven);
+  if (!Number.isInteger(max) || max <= 0) {
+    return fail(write, json, "tick", "usage", "--max takes a whole number of tasks", EXIT.usage);
+  }
+
+  const repo = repoFrom(flags);
+  const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
+  const model = text(flags, "model");
+  const turns = text(flags, "turns");
+  const timeoutMs = DEFAULT_BUILD_TIMEOUT_MS;
+  // The margin is what keeps "still building" and "lease ran out" disjoint.
+  const leaseTtlMs = timeoutMs + 5 * 60_000;
+
+  const git = context.gitRunner ?? run;
+  const worktrees = new WorktreePool(store, {
+    root: pool,
+    ...(context.gitRunner === undefined ? {} : { runner: context.gitRunner }),
+  });
+
+  // Where a first attempt's branch grows from, resolved once per pass. A
+  // detached HEAD refuses the pass rather than guessing: an unattended commit
+  // onto "wherever the operator happened to be" is not a default.
+  let base = text(flags, "base");
+  if (base === undefined) {
+    const head = await git("git", ["symbolic-ref", "--short", "-q", "HEAD"], { cwd: repo });
+    if (head.code !== 0 || head.stdout.trim() === "") {
+      return fail(write, json, "tick", "git", `${repo} has no branch checked out — say --base explicitly`, EXIT.refused);
+    }
+    base = head.stdout.trim();
+  }
+
+  const ready = store.listReady(clock());
+  const considered = ready.length;
+  const dispatched: TickOutcome[] = [];
+  let built = 0;
+  let broke = 0;
+
+  for (const ref of ready) {
+    if (built >= max) break;
+    const id = ref.externalId;
+
+    // Skip, not refuse: an unapproved task in the ready set is a person's
+    // pending decision, and the pass reports it rather than spending on it.
+    if (!approvalOf(store.getScope(id)).approved) {
+      dispatched.push({ id, outcome: "skipped", reason: "unapproved" });
+      continue;
+    }
+
+    const claimed = acquireIfReady(store, ref.id, runner, { now: clock(), ttlMs: leaseTtlMs });
+    if (!claimed.ok) {
+      // Losing a race and finding the task no longer ready are both the
+      // system working. Neither fails the pass.
+      dispatched.push({ id, outcome: "skipped", reason: claimed.reason });
+      continue;
+    }
+    const lease = claimed.claim.leaseId;
+    const branch = `nightorders/${id}`;
+
+    // A retry of this task reuses its branch; a first attempt creates it from
+    // base. Suffixing instead would scatter one logical attempt across
+    // branches nobody asked for.
+    const exists = await git(
+      "git",
+      ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+      { cwd: repo },
+    );
+
+    const leased = await worktrees.lease({
+      repo,
+      branch,
+      runner,
+      taskRef: ref.id,
+      now: clock(),
+      ...(exists.code === 0 ? {} : { base }),
+    });
+    if (!leased.ok) {
+      // The task is fine; this machine's pool is not. Hand the claim back so
+      // a healthier pass can take it, and let the exit code say we broke.
+      release(store, lease, clock());
+      dispatched.push({ id, outcome: "failed", reason: leased.reason });
+      broke++;
+      continue;
+    }
+
+    const result = await build(store, {
+      taskId: id,
+      taskRef: ref.id,
+      runner,
+      leaseId: lease,
+      worktree: leased.worktree.path,
+      branch,
+      now: clock(),
+      timeoutMs,
+      ...(model === undefined ? {} : { model }),
+      ...(turns === undefined ? {} : { maxTurns: Number(turns) }),
+      ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+      ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+    });
+
+    // Handed back either way; a tree with somebody's work in it comes back
+    // unverified rather than cleaned, same as `build`.
+    await worktrees.release(leased.worktree.path, clock());
+
+    if (result.ok) {
+      completeFenced(store, lease, "done", clock());
+      dispatched.push({
+        id,
+        outcome: "built",
+        committed: result.committed,
+        branch,
+        worktree: leased.worktree.path,
+      });
+      built++;
+      continue;
+    }
+
+    if (result.reason === "unapproved" || result.reason === "scope-changed") {
+      // Approval drifted between our prefilter and the builder's own gate.
+      // That is a person's pending decision, not a fault.
+      release(store, lease, clock());
+      dispatched.push({ id, outcome: "skipped", reason: result.reason });
+      continue;
+    }
+
+    if (result.reason === "agent" || result.reason === "timeout" || result.reason === "git") {
+      // The attempt itself broke. The terminal state and the release are one
+      // step, so the task is never simultaneously free and unfinished.
+      completeFenced(store, lease, "failed", clock());
+      dispatched.push({ id, outcome: "failed", reason: result.reason, worktree: leased.worktree.path });
+      broke++;
+      continue;
+    }
+
+    // no-claim, not-yours, not-leased, protected-branch, wrong-branch,
+    // moved-branch: invariants this dispatcher was supposed to uphold. The
+    // task is left queued for a correct pass; this one admits it broke.
+    release(store, lease, clock());
+    dispatched.push({ id, outcome: "failed", reason: result.reason });
+    broke++;
+  }
+
+  const summary = () => {
+    const lines = [`Considered ${considered}, built ${built}, broke ${broke}.`];
+    for (const entry of dispatched) {
+      const detail =
+        entry.outcome === "built"
+          ? entry.committed === true
+            ? `committed to ${entry.branch}`
+            : "the agent changed nothing, which is a real answer"
+          : entry.reason ?? "";
+      lines.push(`  ${entry.id.padEnd(24)} ${entry.outcome}  ${detail}`.trimEnd());
+    }
+    if (built > 0) {
+      lines.push("", "Nothing has been pushed. Look at the branches before they go anywhere.");
+    }
+    return lines;
+  };
+
+  // One broken build fails the pass even if others succeeded: exit 0 must
+  // mean "nothing needs you", and a half-broken night does.
+  if (broke > 0) {
+    return fail(write, json, "tick", "build-failed", `${broke} of ${dispatched.length} dispatched tasks broke`, EXIT.failed, {
+      considered,
+      dispatched,
+    });
+  }
+  if (built > 0) {
+    return succeed(write, json, "tick", { considered, dispatched }, summary);
+  }
+  if (considered === 0) {
+    return fail(write, json, "tick", "empty", "nothing is ready", EXIT.refused, {
+      considered,
+      dispatched,
+    });
+  }
+  return fail(
+    write,
+    json,
+    "tick",
+    "nothing-dispatched",
+    "everything ready is waiting on a person or held by somebody else",
+    EXIT.refused,
+    { considered, dispatched },
   );
 }
 

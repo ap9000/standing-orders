@@ -78,6 +78,8 @@ Operating the queue — see \`nightorders task\` for the whole surface
   nightorders task add <title> queue work
   nightorders claim <id> --runner <name>
   nightorders heartbeat <lease> / release <lease> / reap
+  nightorders tick --runner <name> --token <t> --repo <path>
+                               one unattended pass over the ready set
 
 With nothing connected it reports everything it can find below the working
 directory. Once you connect repositories it reports those instead.
@@ -168,6 +170,7 @@ const OPERATE_COMMANDS = new Set([
   "runner",
   "approver",
   "build",
+  "tick",
 ]);
 
 /** binSource exists so tests can exercise linking without depending on a build. */

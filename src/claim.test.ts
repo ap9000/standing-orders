@@ -2,6 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import {
   acquire,
+  acquireIfReady,
+  completeFenced,
   heartbeat,
   release,
   reap,
@@ -390,5 +392,126 @@ describe("a completion that happened, retried late", () => {
     acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
 
     expect(release(store, "lease-a", later(62_000))).toEqual({ ok: false, reason: "fenced" });
+  });
+});
+
+describe("acquireIfReady", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("takes a task that is genuinely ready", () => {
+    const result = acquireIfReady(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+
+    expect(result).toMatchObject({ ok: true, reclaimed: false });
+  });
+
+  test("refuses a task that left the queued state, and says which", () => {
+    // listReady saw it queued; by claim time it is cancelled. The CAS alone
+    // would admit this — the whole point of re-proving readiness inside the
+    // transaction is that it does not.
+    store.setTaskState("t-1", "cancelled", later(1_000));
+
+    const result = acquireIfReady(store, task, "runner-a", { now: later(2_000) });
+
+    expect(result).toEqual({ ok: false, reason: "not-ready", message: "state is cancelled, not queued" });
+  });
+
+  test("refuses a task under an active hold, with the hold's reason", () => {
+    store.hold(task, "waiting on legal", null, later(1_000));
+
+    const result = acquireIfReady(store, task, "runner-a", { now: later(2_000) });
+
+    expect(result).toEqual({ ok: false, reason: "not-ready", message: "held: waiting on legal" });
+  });
+
+  test("a hold that has expired is not a hold", () => {
+    store.hold(task, "overnight only", later(5_000), later(1_000));
+
+    const result = acquireIfReady(store, task, "runner-a", { now: later(6_000), newLeaseId: ids("lease-a") });
+
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  test("refuses a task whose blocker is not done, and names the blocker", () => {
+    store.createTask({ id: "t-0", title: "first" }, T0);
+    store.addEdge("t-1", "t-0");
+
+    const result = acquireIfReady(store, task, "runner-a", { now: later(1_000) });
+
+    expect(result).toEqual({ ok: false, reason: "not-ready", message: "waiting on t-0" });
+  });
+
+  test("still loses an ordinary race, as a race", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+
+    const result = acquireIfReady(store, task, "runner-b", { now: later(1_000) });
+
+    expect(result).toMatchObject({ ok: false, reason: "held", by: "runner-a" });
+  });
+});
+
+describe("completeFenced", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("releases the lease and writes the terminal state together", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+
+    const result = completeFenced(store, "lease-a", "done", later(1_000));
+
+    expect(result).toMatchObject({ ok: true });
+    expect(store.getTask("t-1")?.state).toBe("done");
+    expect(currentClaim(store, task, later(2_000))).toBeNull();
+  });
+
+  test("a fenced lease writes nothing", () => {
+    // Runner-a slept through its lease; runner-b holds the task now. Runner-a
+    // waking up must not get to say how the task ended.
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
+
+    const result = completeFenced(store, "lease-a", "failed", later(62_000));
+
+    expect(result).toEqual({ ok: false, reason: "fenced" });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+  });
+
+  test("a duplicate completion reports duplicate and does not change the answer", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    completeFenced(store, "lease-a", "done", later(1_000));
+
+    const retry = completeFenced(store, "lease-a", "failed", later(2_000));
+
+    expect(retry).toMatchObject({ ok: true, duplicate: true });
+    expect(store.getTask("t-1")?.state).toBe("done");
+  });
+
+  test("closes the release-then-mark window: a freed task is never unfinished", () => {
+    // The race this exists for: with release and setTaskState apart, another
+    // pass claims the freed task before the terminal state lands. Here the
+    // task is done the same instant the lease lets go, so a later claim finds
+    // it not-ready rather than dispatching a second builder.
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    completeFenced(store, "lease-a", "done", later(1_000));
+
+    const second = acquireIfReady(store, task, "runner-b", { now: later(2_000) });
+
+    expect(second).toEqual({ ok: false, reason: "not-ready", message: "state is done, not queued" });
   });
 });

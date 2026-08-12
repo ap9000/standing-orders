@@ -44,6 +44,13 @@ export type BuildRequest = {
   taskId: string;
   taskRef: number;
   runner: string;
+  /**
+   * The exact lease this attempt was dispatched under. Optional for a person
+   * driving `build` by hand; an unattended pass always sets it, because the
+   * runner-name check alone cannot tell a live attempt from a superseded one
+   * the same runner started earlier.
+   */
+  leaseId?: string;
   worktree: string;
   branch: string;
   now: Date;
@@ -134,6 +141,19 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ok: false,
       reason: "not-yours",
       message: `${taskId} is claimed by ${claim.runner}, not ${runner}`,
+    };
+  }
+  // A runner name is an identity, not a fence. The same runner can hold a
+  // *newer* lease on this task than the one a stale attempt was dispatched
+  // under — its old lease expired, was reaped, and the task came back to it —
+  // and matching on the name alone would let the superseded attempt build
+  // under the new lease's authority. The attempt must present the exact lease
+  // it was given.
+  if (request.leaseId !== undefined && claim.leaseId !== request.leaseId) {
+    return {
+      ok: false,
+      reason: "not-yours",
+      message: `${taskId} is held under lease ${claim.leaseId}, not ${request.leaseId} — this attempt was superseded`,
     };
   }
 
