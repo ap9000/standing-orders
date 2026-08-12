@@ -113,6 +113,10 @@ describe("tick, against real git", () => {
     ]);
   };
 
+  const tickArgs = (runnerToken: string) => [
+    "tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json",
+  ];
+
   const tick = (runnerToken: string, extra: string[] = [], runner: Runner = agent) =>
     run(
       ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json", ...extra],
@@ -198,7 +202,7 @@ describe("tick, against real git", () => {
     expect(payload().task.state).toBe("queued");
   });
 
-  test("a broken agent marks the task failed and the pass exits 1", async () => {
+  test("a broken agent earns a strike and a backoff, not a terminal failure", async () => {
     const { runnerToken, approverToken } = await credentials();
     await queueApproved("t-1", approverToken);
 
@@ -208,15 +212,41 @@ describe("tick, against real git", () => {
     expect(payload()).toMatchObject({
       ok: false,
       reason: "build-failed",
-      dispatched: [{ id: "t-1", outcome: "failed", reason: "agent" }],
+      dispatched: [{ id: "t-1", outcome: "failed", reason: "unknown — retry 1/3" }],
     });
+
+    // gnhf's shape: the task requeues behind a doubling backoff rather than
+    // dying on the first unknown exit — and stays off the ready set until
+    // the pause lapses.
+    await run(["task", "show", "t-1", "--json"]);
+    expect(payload().task.state).toBe("queued");
+    expect(payload().runs).toHaveLength(1);
+    expect(payload().runs[0]).toMatchObject({ outcome: "failed", reason: "unknown" });
+    await run(["ready", "--json"]);
+    expect((payload().tasks ?? []).map((t: { id: string }) => t.id)).toEqual([]);
+  });
+
+  test("three straight failures stall the task with an incident, not a fourth attempt", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-1", approverToken);
+
+    // Each pass fails once; the backoff between them is waited out by
+    // advancing the injected clock past the doubling pauses.
+    await run(tickArgs(runnerToken), brokenAgent, T0);
+    await run(tickArgs(runnerToken), brokenAgent, new Date(T0.getTime() + 5 * 60_000));
+    const third = await run(tickArgs(runnerToken), brokenAgent, new Date(T0.getTime() + 15 * 60_000));
+
+    expect(third).toBe(EXIT.failed);
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "failed", reason: "unknown — stalled" }]);
 
     await run(["task", "show", "t-1", "--json"]);
     expect(payload().task.state).toBe("failed");
+    await run(["incident", "list", "--json"]);
+    expect(payload().incidents).toMatchObject([{ kind: "attempts-exhausted", taskId: "t-1" }]);
 
-    // The broken attempt is on the record too, with its reason.
-    expect(payload().runs).toHaveLength(1);
-    expect(payload().runs[0]).toMatchObject({ outcome: "failed", reason: "agent" });
+    // A fourth pass finds nothing to try: the stall holds.
+    const fourth = await run(tickArgs(runnerToken), brokenAgent, new Date(T0.getTime() + 60 * 60_000));
+    expect(fourth).toBe(EXIT.refused);
   });
 
   test("a second pass finds nothing left to do", async () => {
@@ -697,7 +727,7 @@ describe("the outbox", () => {
     expect(payload().notifications).toHaveLength(1);
     expect(payload().notifications[0]).toMatchObject({
       kind: "build-failed",
-      subject: "t-1: build failed (agent)",
+      subject: "t-1: attempt failed (unknown), retry 1/3",
     });
   });
 });
@@ -781,7 +811,7 @@ describe("the morning briefing", () => {
     expect(report.overnight.built).toHaveLength(1);
     expect(report.overnight.built[0]).toMatchObject({ committed: true });
     expect(report.overnight.failed).toHaveLength(1);
-    expect(report.overnight.failed[0]).toMatchObject({ reason: "agent" });
+    expect(report.overnight.failed[0]).toMatchObject({ reason: "unknown" });
     const seen = [report.overnight.built[0].taskId, report.overnight.failed[0].taskId].sort();
     expect(seen).toEqual(["t-bad", "t-good"]);
     // REVIEW was not read, and says so — not "zero PRs".

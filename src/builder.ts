@@ -143,6 +143,7 @@ export type BuildRefusal =
   | "moved-head"
   | "timeout"
   | "git"
+  | "commit-failure"
   | "malformed-decision";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
@@ -956,7 +957,9 @@ async function commit(
   summary: string,
 ): Promise<BuildResult> {
   const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
-  if (status.code !== 0) return { ok: false, reason: "git", message: firstLine(status.stderr) };
+  if (status.code !== 0) {
+    return { ok: false, reason: "commit-failure", message: firstLine(status.stderr) };
+  }
 
   // The pool's own lease marker is not the agent's work, and neither is
   // anything park-shaped: the real mailbox was ingested and removed before
@@ -979,7 +982,7 @@ async function commit(
     ["add", "-A", "--", ".", `:!${LEASE_MARKER}`, ":!NIGHTORDERS-*"],
     { cwd: worktree },
   );
-  if (add.code !== 0) return { ok: false, reason: "git", message: firstLine(add.stderr) };
+  if (add.code !== 0) return { ok: false, reason: "commit-failure", message: firstLine(add.stderr) };
 
   // The subject comes from the agreed goal, not from the agent's own prose.
   // An agent asked for a summary writes a report, and its first line is a
@@ -999,7 +1002,7 @@ async function commit(
     // repair, never blanket-reset. The tree is left exactly as it is.
     return {
       ok: false,
-      reason: "git",
+      reason: "commit-failure",
       message: `${firstLine(made.stderr)} — the work is preserved in ${worktree}`,
     };
   }

@@ -616,7 +616,7 @@ describe("what the builder does afterwards", () => {
       return { ...OK };
     });
 
-    expect(result).toMatchObject({ ok: false, reason: "git" });
+    expect(result).toMatchObject({ ok: false, reason: "commit-failure" });
     if (!result.ok) expect(result.message).toContain("preserved");
     expect(gitCalls.some(args => args.includes("reset") || args.includes("clean"))).toBe(false);
   });

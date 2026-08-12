@@ -60,8 +60,10 @@ import {
   acquire,
   acquireIfReady,
   completeFenced,
+  finalizeFailureFenced,
   finalizeMalformedFenced,
   finalizeParkFenced,
+  type FailureClass,
   heartbeat,
   release,
   reap,
@@ -1177,7 +1179,9 @@ async function tickCommand(
       });
       if (sealed.ok) {
         // A park is the system working: the agent refused to guess, the
-        // question is in the attention surface, the pass moves on.
+        // question is in the attention surface, the pass moves on — and it
+        // ends any failure streak: refusing to guess is not failing.
+        store.resetStrikes(ref.id);
         dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}`, worktree: leased.worktree.path });
         parked++;
       } else {
@@ -1200,6 +1204,8 @@ async function tickCommand(
           committed: result.committed,
           now: clock(),
         });
+        // A concluded success ends the failure streak and its backoff.
+        store.resetStrikes(ref.id);
         dispatched.push({
           id,
           outcome: "built",
@@ -1275,31 +1281,46 @@ async function tickCommand(
       result.reason === "agent-reported" ||
       result.reason === "no-op" ||
       result.reason === "moved-head" ||
+      result.reason === "moved-branch" ||
       result.reason === "timeout" ||
-      result.reason === "git"
+      result.reason === "git" ||
+      result.reason === "commit-failure"
     ) {
-      // The attempt itself broke. The terminal state and the release are one
-      // step, so the task is never simultaneously free and unfinished — and
-      // even that write can be fenced, in which case the failure is recorded
-      // but the task belongs to whoever took it. The run record is canonical
-      // and the report repeats it verbatim: a summary that said "agent"
-      // where the record says "fenced" would send a notification about the
-      // wrong incident.
-      const sealed = completeFenced(store, lease, "failed", clock());
-      const canonical = sealed.ok ? result.reason : "fenced";
-      store.transact(() => {
-        store.finishRun(runId, { outcome: "failed", reason: canonical, now: clock() });
-        store.enqueueNotification(
-          {
-            dedupeKey: `run:${runId}:failed`,
-            kind: "build-failed",
-            subject: `${id}: build failed (${canonical})`,
-            body: `${result.message}\nWorktree: ${leased.worktree.path}`,
-          },
-          clock(),
-        );
+      // The attempt itself broke. One fenced transaction decides what that
+      // means — a strike and a doubling backoff, a stall after three, or a
+      // commit-failure incident guarding the preserved worktree — and the
+      // run record is canonical over anything this summary says. The
+      // classification trusts only what the machine itself observed
+      // (finding 19): a timeout is retryable infrastructure, protocol
+      // violations are the agent's, commit-stage breakage is its own thing,
+      // and every other nonzero exit is 'unknown' with bounded retry.
+      const failureClass: FailureClass =
+        result.reason === "agent-reported"
+          ? "agent-reported"
+          : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
+            ? "no-op"
+            : result.reason === "timeout" || result.reason === "git"
+              ? "retryable-infra"
+              : result.reason === "commit-failure"
+                ? "commit-failure"
+                : "unknown";
+      const sealed = finalizeFailureFenced(store, {
+        leaseId: lease,
+        runId,
+        taskId: id,
+        failureClass,
+        message: result.message,
+        worktree: leased.worktree.path,
+        now: clock(),
       });
-      dispatched.push({ id, outcome: "failed", reason: canonical, worktree: leased.worktree.path });
+      dispatched.push({
+        id,
+        outcome: "failed",
+        reason: sealed.ok
+          ? `${failureClass}${sealed.disposition === "backoff" ? ` — retry ${sealed.strikes}/3` : sealed.disposition === "stalled" ? " — stalled" : ""}`
+          : "fenced",
+        worktree: leased.worktree.path,
+      });
       broke++;
       continue;
     }
@@ -1652,6 +1673,9 @@ async function briefCommand(
   // make the stall silent — which is the one thing an incident exists to
   // prevent.
   const incidents = store.openIncidents();
+  // Nor on stranded work: a queued task behind a terminally failed blocker
+  // never becomes ready, silently, forever — unless it is said here.
+  const stranded = store.strandedTasks();
 
   let review:
     | { state: "read"; pulls: { number: number; title: string }[] }
@@ -1686,6 +1710,7 @@ async function briefCommand(
           outboxPending: pending.length,
           decide: decisions,
           incidents,
+          stranded,
         },
         null,
         2,
@@ -1750,6 +1775,13 @@ async function briefCommand(
     }
   } else {
     lines.push("  ▸ DECIDE     nothing waits on you");
+  }
+
+  if (stranded.length > 0) {
+    lines.push(`  ▸ STRANDED   ${stranded.length} task(s) behind failed blockers — they will never become ready on their own`);
+    for (const one of stranded) {
+      lines.push(`      ${one.id.padEnd(20)} waits on ${one.blockedBy.join(", ")} — \`nightorders task requeue ${one.blockedBy[0]}\``);
+    }
   }
 
   if (incidents.length > 0) {
@@ -1952,6 +1984,42 @@ async function serveCommand(
     process.once("SIGTERM", stop);
   });
   return EXIT.ok;
+}
+
+/**
+ * `nightorders task requeue <id>` — the authenticated way back from a stall.
+ * Resolves the task's open incidents (their holds lift with them), clears
+ * strikes and backoff, and returns the task to the queue in one
+ * transaction. Nothing else moves a stalled task: retrying by hand-editing
+ * state would leave the incident claiming the task is stopped.
+ */
+function requeueTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, clock } = context;
+  const [id] = positional;
+  if (id === undefined) {
+    return fail(write, json, "task requeue", "usage", "`nightorders task requeue <id> --as <you> --token <t>`", EXIT.usage);
+  }
+  const asWho = text(flags, "as");
+  const token = text(flags, "token");
+  if (asWho === undefined || token === undefined) {
+    return fail(write, json, "task requeue", "usage", "requeueing takes `--as <you> --token <t>` — who overrode the stall is recorded, not asserted", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, asWho, token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task requeue", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
+  }
+
+  const result = store.requeueTask(id, asWho, clock());
+  if (!result.ok) {
+    return fail(write, json, "task requeue", result.reason, `no task ${id}`, EXIT.refused);
+  }
+  return succeed(write, json, "task requeue", { id, resolvedIncidents: result.resolvedIncidents }, () => [
+    `${id} is queued again${result.resolvedIncidents > 0 ? `, ${result.resolvedIncidents} incident(s) resolved` : ""}. Strikes cleared; the next pass may take it.`,
+  ]);
 }
 
 /**
@@ -2451,6 +2519,8 @@ function taskCommand(
       return unholdTask(rest, flags, context);
     case "require":
       return requireTask(rest, flags, context);
+    case "requeue":
+      return requeueTask(rest, flags, context);
     default:
       return fail(
         context.write,

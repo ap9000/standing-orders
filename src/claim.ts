@@ -668,6 +668,160 @@ export function finalizeMalformedFenced(
   });
 }
 
+/** How a failed attempt is classified, per gnhf. Decides retry, backoff, or stall. */
+export type FailureClass =
+  | "agent-reported"
+  | "retryable-infra"
+  | "no-op"
+  | "commit-failure"
+  | "unknown";
+
+/** 1m, 2m, 4m, 8m, 16m — doubling, capped. Indexed by strikes-1. */
+const BACKOFF_MS = [60_000, 120_000, 240_000, 480_000, 960_000];
+export const MAX_STRIKES = 3;
+
+export type FailureDisposition =
+  | { ok: true; disposition: "backoff"; strikes: number; until: string }
+  | { ok: true; disposition: "stalled"; strikes: number; incidentId: number }
+  | { ok: true; disposition: "commit-incident"; incidentId: number }
+  | { ok: false; reason: "fenced" | "unknown" };
+
+/**
+ * Seal a failed attempt: one fenced transaction for the release, the run,
+ * the strike, the hold, and the page (§6, gnhf adopted rather than
+ * reinvented).
+ *
+ * Strikes count only top-level builder attempts; built, no-change, and
+ * parked reset them elsewhere; refusals, fenced attempts, and repair
+ * children never reach this function. Under three strikes the task
+ * requeues behind a doubling backoff hold the failure owns; at three it
+ * stalls — an 'attempts-exhausted' incident, the task marked failed, held,
+ * and paged once — because a fourth identical attempt at 3am is a token
+ * bonfire, not persistence. A commit-stage failure takes neither road: the
+ * worktree holds unpreserved work, ordinary re-pooling would refuse it as
+ * dirty forever, so it is an immediate incident naming the checkout.
+ */
+export function finalizeFailureFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    failureClass: FailureClass;
+    message: string;
+    worktree: string;
+    now: Date;
+  },
+): FailureDisposition {
+  const { leaseId, runId, taskId, failureClass, message, now } = args;
+  const db = store.handle;
+
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a failure seals exactly one`);
+    }
+    if (run.role !== "builder") {
+      throw new Error(`run ${runId} is a ${run.role} run — only top-level builder attempts take strikes`);
+    }
+
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'released'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+
+    store.finishRun(runId, { outcome: "failed", reason: failureClass, now });
+
+    if (failureClass === "commit-failure") {
+      // The work exists and is uncommitted; nothing times its way out of
+      // that. A person (or an explicit repair) proves the checkout.
+      const incidentId = store.createIncident({ run: runId, kind: "commit-failure" }, now);
+      store.holdOwned(
+        {
+          taskRef: run.taskRef,
+          ownerKind: "incident",
+          ownerId: String(incidentId),
+          reason: `commit-failure — uncommitted work preserved in ${args.worktree}`,
+          until: null,
+        },
+        now,
+      );
+      store.enqueueNotification(
+        {
+          dedupeKey: `commit-failure:${runId}`,
+          kind: "commit-failure",
+          subject: `${taskId}: the commit itself failed`,
+          body: `${oneLine(message, 200)}\nThe work is preserved, uncommitted, in ${args.worktree}. Prove it and \`nightorders task requeue ${taskId}\`.`,
+        },
+        now,
+      );
+      return { ok: true as const, disposition: "commit-incident" as const, incidentId };
+    }
+
+    const strikes = store.addStrike(run.taskRef);
+
+    if (strikes >= MAX_STRIKES) {
+      const incidentId = store.createIncident({ run: runId, kind: "attempts-exhausted" }, now);
+      store.holdOwned(
+        {
+          taskRef: run.taskRef,
+          ownerKind: "incident",
+          ownerId: String(incidentId),
+          reason: `attempts-exhausted — ${strikes} consecutive failures, last: ${failureClass}`,
+          until: null,
+        },
+        now,
+      );
+      db.prepare("UPDATE task SET state = 'failed', updated_at = ? WHERE id = ?").run(
+        now.toISOString(),
+        taskId,
+      );
+      store.enqueueNotification(
+        {
+          dedupeKey: `stalled:${run.taskRef}`,
+          kind: "attempts-exhausted",
+          subject: `${taskId} stalled after ${strikes} straight failures`,
+          body: `Last failure (${failureClass}): ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`nightorders task requeue ${taskId}\`.`,
+        },
+        now,
+      );
+      return { ok: true as const, disposition: "stalled" as const, strikes, incidentId };
+    }
+
+    // Under the limit: requeue behind a doubling pause the failure owns.
+    // Replacing the previous backoff hold is correct — this attempt's strike
+    // already reflects the whole streak.
+    const wait = BACKOFF_MS[Math.min(strikes, BACKOFF_MS.length) - 1] as number;
+    const until = new Date(now.getTime() + wait);
+    store.holdOwned(
+      {
+        taskRef: run.taskRef,
+        ownerKind: "backoff",
+        ownerId: String(run.taskRef),
+        reason: `retry ${strikes}/${MAX_STRIKES} after ${failureClass} — backing off ${Math.round(wait / 60_000)}m`,
+        until,
+      },
+      now,
+    );
+    store.enqueueNotification(
+      {
+        dedupeKey: `run:${runId}:failed`,
+        kind: "build-failed",
+        subject: `${taskId}: attempt failed (${failureClass}), retry ${strikes}/${MAX_STRIKES}`,
+        body: `${oneLine(message, 200)}\nNext attempt no earlier than ${until.toISOString()}.`,
+      },
+      now,
+    );
+    return { ok: true as const, disposition: "backoff" as const, strikes, until: until.toISOString() };
+  });
+}
+
 /** Untrusted text on its way into a subject line: one line, bounded. */
 function oneLine(text: string, cap: number): string {
   const flat = text.replace(/\s+/g, " ").trim();

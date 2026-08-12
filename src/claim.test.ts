@@ -4,8 +4,10 @@ import {
   acquire,
   acquireIfReady,
   completeFenced,
+  finalizeFailureFenced,
   finalizeMalformedFenced,
   finalizeParkFenced,
+  type FailureClass,
   heartbeat,
   release,
   reap,
@@ -981,5 +983,123 @@ describe("the resume and the attention budget", () => {
     const third = openRun("lease-3", later(4_000));
     store.finishRun(third, { outcome: "refused", reason: "fenced", now: later(5_000) });
     expect(store.refForId(task)?.parkRate).toBe(0.5);
+  });
+});
+
+describe("the failure taxonomy, fenced", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  const attempt = (leaseId: string, at: Date) => {
+    acquire(store, task, "runner-a", { now: at, ttlMs: 60 * 60_000, newLeaseId: () => leaseId });
+    return store.startRun({
+      taskRef: task, leaseId, runner: "runner-a", branch: "b", worktree: "/w", now: at,
+    });
+  };
+
+  const failIt = (leaseId: string, runId: number, at: Date, failureClass: FailureClass = "unknown") =>
+    finalizeFailureFenced(store, {
+      leaseId, runId, taskId: "t-1", failureClass, message: "boom", worktree: "/w", now: at,
+    });
+
+  test("one failure: a strike, a doubling backoff, the task still queued", () => {
+    const run = attempt("lease-1", T0);
+    const sealed = failIt("lease-1", run, later(1_000));
+
+    expect(sealed).toMatchObject({ ok: true, disposition: "backoff", strikes: 1 });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+    expect(store.getRun(run)).toMatchObject({ outcome: "failed", reason: "unknown" });
+    const hold = store.activeHolds(task, later(2_000))[0];
+    expect(hold).toMatchObject({ ownerKind: "backoff" });
+    // One minute, then eligible again.
+    expect(store.listReady(later(30_000))).toHaveLength(0);
+    expect(store.listReady(later(62_000)).map(r => r.externalId)).toEqual(["t-1"]);
+  });
+
+  test("the second backoff doubles", () => {
+    const first = attempt("lease-1", T0);
+    failIt("lease-1", first, later(1_000));
+    const second = attempt("lease-2", later(70_000));
+    const sealed = failIt("lease-2", second, later(71_000));
+
+    expect(sealed).toMatchObject({ ok: true, disposition: "backoff", strikes: 2 });
+    if (!sealed.ok || sealed.disposition !== "backoff") return;
+    expect(Date.parse(sealed.until) - later(71_000).getTime()).toBe(120_000);
+  });
+
+  test("three strikes stall: incident, failed, held, paged once — and requeue undoes it all", () => {
+    const first = attempt("lease-1", T0);
+    failIt("lease-1", first, later(1_000));
+    const second = attempt("lease-2", later(70_000));
+    failIt("lease-2", second, later(71_000));
+    const third = attempt("lease-3", later(200_000));
+    const sealed = failIt("lease-3", third, later(201_000));
+
+    expect(sealed).toMatchObject({ ok: true, disposition: "stalled", strikes: 3 });
+    expect(store.getTask("t-1")?.state).toBe("failed");
+    expect(store.openIncidents()).toMatchObject([{ kind: "attempts-exhausted", taskId: "t-1" }]);
+    expect(store.listNotifications("pending").map(n => n.dedupeKey)).toContain(`stalled:${task}`);
+
+    const back = store.requeueTask("t-1", "alex", later(300_000));
+    expect(back).toMatchObject({ ok: true, resolvedIncidents: 1 });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+    expect(store.refForId(task)?.strikes).toBe(0);
+    expect(store.openIncidents()).toHaveLength(0);
+    expect(store.listReady(later(301_000)).map(r => r.externalId)).toEqual(["t-1"]);
+  });
+
+  test("a success resets the streak", () => {
+    const first = attempt("lease-1", T0);
+    failIt("lease-1", first, later(1_000));
+    expect(store.refForId(task)?.strikes).toBe(1);
+
+    store.resetStrikes(task);
+    expect(store.refForId(task)?.strikes).toBe(0);
+    expect(store.activeHolds(task, later(2_000))).toHaveLength(0);
+  });
+
+  test("a commit failure takes neither road: an incident guards the worktree, no strike", () => {
+    const run = attempt("lease-1", T0);
+    const sealed = failIt("lease-1", run, later(1_000), "commit-failure");
+
+    expect(sealed).toMatchObject({ ok: true, disposition: "commit-incident" });
+    expect(store.refForId(task)?.strikes).toBe(0);
+    expect(store.getTask("t-1")?.state).toBe("queued");
+    expect(store.openIncidents()).toMatchObject([{ kind: "commit-failure" }]);
+    const note = store.listNotifications("pending").find(n => n.dedupeKey === `commit-failure:${run}`);
+    expect(note?.body).toContain("/w");
+  });
+
+  test("a superseded lease's failure seals nothing but the fenced run", () => {
+    acquire(store, task, "runner-a", { now: T0, ttlMs: 60_000, newLeaseId: () => "lease-1" });
+    const run = store.startRun({
+      taskRef: task, leaseId: "lease-1", runner: "runner-a", branch: "b", worktree: "/w", now: T0,
+    });
+    acquire(store, task, "runner-b", { now: later(120_000) });
+
+    const sealed = failIt("lease-1", run, later(121_000));
+    expect(sealed).toMatchObject({ ok: false, reason: "fenced" });
+    expect(store.refForId(task)?.strikes).toBe(0);
+    expect(store.activeHolds(task, later(122_000))).toHaveLength(0);
+    expect(store.getRun(run)).toMatchObject({ outcome: "refused", reason: "fenced" });
+  });
+
+  test("stranded work is derived, named, and freed by requeueing the blocker", () => {
+    store.createTask({ id: "t-2", title: "dependent" }, T0);
+    store.addEdge("t-2", "t-1");
+    store.setTaskState("t-1", "failed", later(1_000));
+
+    expect(store.strandedTasks()).toEqual([{ id: "t-2", blockedBy: ["t-1"] }]);
+
+    store.requeueTask("t-1", "alex", later(2_000));
+    expect(store.strandedTasks()).toEqual([]);
   });
 });

@@ -73,6 +73,8 @@ export type TaskRef = {
   zones: string[];
   capabilityRequirements: string[];
   parkRate: number;
+  /** Consecutive concluded failures. Three stalls the task; any success resets. */
+  strikes: number;
   /** Recorded, not asserted: what the grant's selector is checked against. */
   origin: TaskOrigin;
 };
@@ -1906,6 +1908,83 @@ export class Store {
     });
   }
 
+  /**
+   * The operator's answer to a stall: one transaction that resolves the
+   * task's open incidents (lifting their holds), clears strikes and any
+   * backoff, and returns the task to the queue. The authenticated act that
+   * un-decides "this stopped being worth retrying".
+   */
+  requeueTask(
+    taskId: string,
+    by: string,
+    now: Date,
+  ): { ok: true; resolvedIncidents: number } | { ok: false; reason: "unknown-task" } {
+    return this.transact(() => {
+      const ref = this.db
+        .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+        .get(BUILT_IN, taskId);
+      if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
+      const taskRef = Number(ref["id"]);
+
+      const incidents = this.db
+        .prepare(
+          `SELECT incident.id FROM incident
+           JOIN run ON run.id = incident.run
+           WHERE run.task_ref = ? AND incident.resolved_at IS NULL`,
+        )
+        .all(taskRef)
+        .map(row => Number(row["id"]));
+      for (const incident of incidents) this.resolveIncident(incident, by, now);
+
+      this.resetStrikes(taskRef);
+      this.db
+        .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state IN ('failed','queued')")
+        .run(now.toISOString(), taskId);
+      // The stall's page is answered by the act itself.
+      this.resolveEpisode(`stalled:${taskRef}`, now);
+      return { ok: true as const, resolvedIncidents: incidents.length };
+    });
+  }
+
+  /**
+   * Tasks stranded behind a terminally failed or cancelled blocker — work
+   * that will never become ready, silently, unless somebody looks. Derived,
+   * never stored; edges are preserved, and `task requeue <blocker>` is the
+   * way out.
+   */
+  strandedTasks(): { id: string; blockedBy: string[] }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT task_edge.blocked AS id, task_edge.blocker AS blocker FROM task_edge
+         JOIN task AS dependent ON dependent.id = task_edge.blocked AND dependent.state = 'queued'
+         JOIN task AS blocker ON blocker.id = task_edge.blocker AND blocker.state IN ('failed','cancelled')
+         ORDER BY task_edge.blocked, task_edge.blocker`,
+      )
+      .all();
+    const grouped = new Map<string, string[]>();
+    for (const row of rows) {
+      const id = String(row["id"]);
+      grouped.set(id, [...(grouped.get(id) ?? []), String(row["blocker"])]);
+    }
+    return [...grouped.entries()].map(([id, blockedBy]) => ({ id, blockedBy }));
+  }
+
+  /** One more consecutive failure. Returns the new count. */
+  addStrike(taskRef: number): number {
+    this.db.prepare("UPDATE task_ref SET strikes = strikes + 1 WHERE id = ?").run(taskRef);
+    const row = this.db.prepare("SELECT strikes FROM task_ref WHERE id = ?").get(taskRef);
+    return Number(row?.["strikes"] ?? 0);
+  }
+
+  /**
+   * A concluded success — built, no-change, or parked — ends the streak and
+   * lifts any backoff still standing from it.
+   */
+  resetStrikes(taskRef: number): void {
+    this.db.prepare("UPDATE task_ref SET strikes = 0 WHERE id = ?").run(taskRef);
+    this.releaseOwnedHold("backoff", String(taskRef));
+  }
+
   /** Say which repository a task's work lives in. */
   placeTask(taskRef: number, repo: string, mutation: Mutation = {}): boolean {
     return this.once(mutation, "placeTask", () => {
@@ -3089,6 +3168,7 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     zones: readJsonArray(row["zones"]),
     capabilityRequirements: readJsonArray(row["capability_requirements"]),
     parkRate: Number(row["park_rate"]),
+    strikes: Number(row["strikes"] ?? 0),
     origin: String(row["origin"]) === "ours" ? "ours" : "theirs",
   };
 }
