@@ -968,6 +968,22 @@ describe("migration from an M3 database", () => {
       expect(answered).toMatchObject({ ok: true });
       expect(store.getDecision(2)?.answeredVia).toBe("telegram");
 
+      // The v4 CHECK widenings are real on this database too.
+      store.finishRun(2, { outcome: "no-change", reason: "handoff", now: new Date("2026-08-12T06:00:00.000Z") });
+      expect(store.getRun(2)?.outcome).toBe("no-change");
+      store.holdOwned(
+        { taskRef: 1, ownerKind: "backoff", ownerId: "1", reason: "retry in 2m", until: null },
+        new Date("2026-08-12T06:00:00.000Z"),
+      );
+      expect(store.activeHolds(1, new Date("2026-08-12T06:01:00.000Z"))[0]?.ownerKind).toBe("backoff");
+      store.releaseOwnedHold("backoff", "1");
+      const stallRun = store.startRun({
+        taskRef: 1, leaseId: "l-stall", runner: "b", branch: "br", worktree: "/w",
+        now: new Date("2026-08-12T06:00:00.000Z"),
+      });
+      const stall = store.createIncident({ run: stallRun, kind: "attempts-exhausted" }, new Date("2026-08-12T06:00:00.000Z"));
+      expect(store.openIncidents().find(one => one.id === stall)?.kind).toBe("attempts-exhausted");
+
       // New decisions keep counting from where the old table left off.
       const run3 = store.startRun({
         taskRef: 1, leaseId: "l-3", runner: "b", branch: "br", worktree: "/w",

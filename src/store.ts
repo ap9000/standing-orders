@@ -34,7 +34,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -78,7 +78,7 @@ export type TaskRef = {
 };
 
 /** Who placed a hold — and therefore who alone may lift it. */
-export type HoldOwner = "operator" | "decision" | "incident";
+export type HoldOwner = "operator" | "decision" | "incident" | "backoff";
 
 export type Hold = {
   id: number;
@@ -159,11 +159,20 @@ export type Run = {
   branch: string;
   worktree: string;
   model: string | null;
-  outcome: "built" | "failed" | "refused" | "parked" | null;
+  outcome: "built" | "failed" | "refused" | "parked" | "no-change" | null;
   reason: string | null;
   committed: boolean | null;
   startedAt: string;
   finishedAt: string | null;
+  /** Stamped by the invocation gateway just before the provider spawns. */
+  providerStartedAt: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  costUsd: number | null;
+  /** HEAD after the agent, as accepted — what a publication may push. */
+  headRevision: string | null;
+  /** The validated terminal handoff's conclusion. */
+  handoff: string | null;
 };
 
 /** One option of a decision. `reversible` is a field so a scheduler can refuse to auto-apply. */
@@ -244,7 +253,7 @@ export type TelegramAction = {
 export type Incident = {
   id: number;
   run: number;
-  kind: "malformed-decision";
+  kind: "malformed-decision" | "attempts-exhausted" | "commit-failure";
   createdAt: string;
   resolvedAt: string | null;
   resolvedBy: string | null;
@@ -321,7 +330,7 @@ CREATE TABLE IF NOT EXISTS task_ref (
 CREATE TABLE IF NOT EXISTS hold (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
-  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident')),
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff')),
   owner_id   TEXT NOT NULL,
   reason     TEXT NOT NULL,
   until      TEXT,
@@ -413,11 +422,29 @@ CREATE TABLE IF NOT EXISTS run (
   branch        TEXT NOT NULL,
   worktree      TEXT NOT NULL,
   model         TEXT,
-  outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked')),
+  outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change')),
   reason        TEXT,
   committed     INTEGER,
   started_at    TEXT NOT NULL,
-  finished_at   TEXT
+  finished_at   TEXT,
+  -- Stamped by the invocation gateway the instant before the provider
+  -- process spawns. A run without it never paid anything; the zero-token
+  -- invariant is "provider spawns == runs carrying this stamp".
+  provider_started_at TEXT,
+  tokens_in     INTEGER,
+  tokens_out    INTEGER,
+  cost_usd      REAL,
+  -- The provider's own usage object, bounded, for when the parsed columns
+  -- above turn out to have missed something. NULL = unmeasured, and the
+  -- brief says so rather than summing a lie.
+  usage_json    TEXT,
+  -- HEAD after the agent, as accepted. The builder owns commits; an agent
+  -- that moved HEAD itself is refused, so this names the exact commit any
+  -- publication may push.
+  head_revision TEXT,
+  -- The validated terminal handoff's conclusion — bounded, typed at
+  -- ingestion, and the only agent prose a PR body may quote.
+  handoff       TEXT
 );
 
 -- The decision record (§7): the judgement call an agent refused to guess at,
@@ -494,7 +521,7 @@ CREATE TABLE IF NOT EXISTS run_decision (
 CREATE TABLE IF NOT EXISTS incident (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
-  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision')),
+  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure')),
   created_at  TEXT NOT NULL,
   resolved_at TEXT,
   resolved_by TEXT
@@ -784,8 +811,152 @@ function migrate(db: Database): void {
   addColumn(db, "notification", "claim_owner", "TEXT");
   addColumn(db, "notification", "claim_expires_at", "TEXT");
   addColumn(db, "approver", "generation", "INTEGER NOT NULL DEFAULT 1");
+  // v4 additive: failure strikes and the watch incarnation a claim was
+  // dispatched under.
+  addColumn(db, "task_ref", "strikes", "INTEGER NOT NULL DEFAULT 0");
+  addColumn(db, "claim", "incarnation", "TEXT");
   rebuild(db);
   rebuildDecisionVia(db);
+  // v4 CHECK widenings, each a copy-rename against an exactly recognized
+  // predecessor. Order matters only in that they follow the older rebuilds:
+  // an M2 database reaches the v4 shapes through rebuild() directly.
+  rebuildForV4(
+    db,
+    "run",
+    "'built','failed','refused','parked'",
+    "'no-change'",
+    V4_RUN_DDL("run_next"),
+    V4_RUN_COLUMNS,
+  );
+  rebuildForV4(
+    db,
+    "hold",
+    "'operator','decision','incident'",
+    "'backoff'",
+    `CREATE TABLE hold_next (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+       owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff')),
+       owner_id   TEXT NOT NULL,
+       reason     TEXT NOT NULL,
+       until      TEXT,
+       held_at    TEXT NOT NULL,
+       UNIQUE (owner_kind, owner_id)
+     )`,
+    ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
+  );
+  rebuildForV4(
+    db,
+    "incident",
+    "'malformed-decision'",
+    "'attempts-exhausted'",
+    `CREATE TABLE incident_next (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+       kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure')),
+       created_at  TEXT NOT NULL,
+       resolved_at TEXT,
+       resolved_by TEXT
+     )`,
+    ["id", "run", "kind", "created_at", "resolved_at", "resolved_by"],
+  );
+  // Columns the v4 run shape carries; idempotent for any table that arrived
+  // here by a path that already has them.
+  addColumn(db, "run", "provider_started_at", "TEXT");
+  addColumn(db, "run", "tokens_in", "INTEGER");
+  addColumn(db, "run", "tokens_out", "INTEGER");
+  addColumn(db, "run", "cost_usd", "REAL");
+  addColumn(db, "run", "usage_json", "TEXT");
+  addColumn(db, "run", "head_revision", "TEXT");
+  addColumn(db, "run", "handoff", "TEXT");
+}
+
+/** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
+function V4_RUN_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+    lease_id      TEXT NOT NULL,
+    runner        TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
+    parent_run    INTEGER REFERENCES run(id),
+    session_id    TEXT,
+    base_revision TEXT,
+    branch        TEXT NOT NULL,
+    worktree      TEXT NOT NULL,
+    model         TEXT,
+    outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change')),
+    reason        TEXT,
+    committed     INTEGER,
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT,
+    provider_started_at TEXT,
+    tokens_in     INTEGER,
+    tokens_out    INTEGER,
+    cost_usd      REAL,
+    usage_json    TEXT,
+    head_revision TEXT,
+    handoff       TEXT
+  )`;
+}
+
+const V4_RUN_COLUMNS = [
+  "id", "task_ref", "lease_id", "runner", "role", "parent_run", "session_id",
+  "base_revision", "branch", "worktree", "model", "outcome", "reason",
+  "committed", "started_at", "finished_at", "provider_started_at", "tokens_in",
+  "tokens_out", "cost_usd", "usage_json", "head_revision", "handoff",
+];
+
+/**
+ * One v4 CHECK widening: recognized exactly, refused otherwise. The copy
+ * moves the intersection of the target's columns and the columns actually
+ * present, so an interrupted earlier migration cannot lose data.
+ */
+function rebuildForV4(
+  db: Database,
+  table: string,
+  oldFragment: string,
+  newFragment: string,
+  targetDDL: string,
+  targetColumns: readonly string[],
+): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table);
+  if (row === undefined) return;
+  const ddl = String(row["sql"]);
+  if (ddl.includes(newFragment)) return;
+  if (!ddl.includes(oldFragment)) {
+    throw new Error(`the ${table} table's DDL is not a shape this migration knows — refusing to rebuild it`);
+  }
+
+  const present = new Set(
+    db.prepare(`PRAGMA table_info(${table})`).all().map(one => String(one["name"])),
+  );
+  const carried = targetColumns.filter(column => present.has(column));
+  const names = carried.join(", ");
+
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(targetDDL);
+      db.exec(`INSERT INTO ${table}_next (${names}) SELECT ${names} FROM ${table}`);
+      db.exec(`DROP TABLE ${table}`);
+      db.exec(`ALTER TABLE ${table}_next RENAME TO ${table}`);
+      if (table === "hold") db.exec("CREATE INDEX IF NOT EXISTS hold_by_task ON hold (task_ref)");
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) {
+        throw new Error(`${table} rebuild left ${broken.length} dangling foreign key(s)`);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 /**
@@ -887,7 +1058,7 @@ function rebuild(db: Database): void {
           `CREATE TABLE hold_next (
              id         INTEGER PRIMARY KEY AUTOINCREMENT,
              task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
-             owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident')),
+             owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff')),
              owner_id   TEXT NOT NULL,
              reason     TEXT NOT NULL,
              until      TEXT,
@@ -905,26 +1076,9 @@ function rebuild(db: Database): void {
         db.exec("CREATE INDEX IF NOT EXISTS hold_by_task ON hold (task_ref)");
       }
       if (oldRun) {
-        db.exec(
-          `CREATE TABLE run_next (
-             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-             task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
-             lease_id      TEXT NOT NULL,
-             runner        TEXT NOT NULL,
-             role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
-             parent_run    INTEGER REFERENCES run(id),
-             session_id    TEXT,
-             base_revision TEXT,
-             branch        TEXT NOT NULL,
-             worktree      TEXT NOT NULL,
-             model         TEXT,
-             outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked')),
-             reason        TEXT,
-             committed     INTEGER,
-             started_at    TEXT NOT NULL,
-             finished_at   TEXT
-           )`,
-        );
+        // Straight to the newest shape: an M2 database does not stop at v3
+        // on its way here.
+        db.exec(V4_RUN_DDL("run_next"));
         db.exec(
           `INSERT INTO run_next (id, task_ref, lease_id, runner, branch, worktree, model,
                                  outcome, reason, committed, started_at, finished_at)
@@ -1898,7 +2052,7 @@ export class Store {
   finishRun(
     id: number,
     result: {
-      outcome: "built" | "failed" | "refused" | "parked";
+      outcome: "built" | "failed" | "refused" | "parked" | "no-change";
       reason?: string;
       committed?: boolean;
       now: Date;
@@ -1917,7 +2071,7 @@ export class Store {
     // and maintained where attempts conclude, because the attention budget's
     // gate reads it inside a claim transaction and must never trust a number
     // something else remembered to update.
-    if (result.outcome === "parked" || result.outcome === "built") {
+    if (result.outcome === "parked" || result.outcome === "built" || result.outcome === "no-change") {
       this.db
         .prepare(
           `UPDATE task_ref SET park_rate = COALESCE((
@@ -1925,7 +2079,7 @@ export class Store {
                FROM run
               WHERE run.task_ref = task_ref.id
                 AND run.role = 'builder'
-                AND run.outcome IN ('built', 'parked')
+                AND run.outcome IN ('built', 'parked', 'no-change')
            ), 0)
            WHERE id = (SELECT task_ref FROM run
                         WHERE run.id = ? AND run.role = 'builder')`,
@@ -2729,6 +2883,18 @@ function readRun(row: Record<string, unknown>): Run {
     committed: row["committed"] === null ? null : Number(row["committed"]) === 1,
     startedAt: String(row["started_at"]),
     finishedAt: row["finished_at"] === null ? null : String(row["finished_at"]),
+    providerStartedAt:
+      row["provider_started_at"] === null || row["provider_started_at"] === undefined
+        ? null
+        : String(row["provider_started_at"]),
+    tokensIn: row["tokens_in"] === null || row["tokens_in"] === undefined ? null : Number(row["tokens_in"]),
+    tokensOut: row["tokens_out"] === null || row["tokens_out"] === undefined ? null : Number(row["tokens_out"]),
+    costUsd: row["cost_usd"] === null || row["cost_usd"] === undefined ? null : Number(row["cost_usd"]),
+    headRevision:
+      row["head_revision"] === null || row["head_revision"] === undefined
+        ? null
+        : String(row["head_revision"]),
+    handoff: row["handoff"] === null || row["handoff"] === undefined ? null : String(row["handoff"]),
   };
 }
 
