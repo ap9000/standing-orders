@@ -32,9 +32,14 @@ import {
   databasePath,
   BUILT_IN,
   DEFAULT_ACTOR,
+  parseCapabilityKey,
+  type Capability,
   type Store,
   type TaskState,
 } from "./store.js";
+import { probeRepo, isVerified } from "./probe.js";
+
+type CapabilityKind = Capability["kind"];
 import {
   acquire,
   acquireIfReady,
@@ -128,6 +133,16 @@ export const OPERATE_HELP = `nightorders — operating the queue
                                         or forget orphaned worktrees. Run it
                                         before tick.
 
+Capabilities — what the work needs, recorded and probed, never valued
+  nightorders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>]
+                                        env kind synthesizes test -n "$NAME"
+  nightorders cap list [--repo <path>]
+  nightorders cap probe [<kind:name>…]  ask the environment; exit 0 all
+                                        verified, 3 any gap
+  nightorders task require <id> --cap <kind:name>[,…]
+                                        nothing dispatches it until every
+                                        one is verified (--cap none clears)
+
 Runners — the machines that may be given work
   nightorders runner register <name> [--capacity <n>]
                                         mints a token, shown once
@@ -169,7 +184,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
-    "max",
+    "max", "cap", "probe", "kind", "expires",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -275,6 +290,8 @@ async function dispatch(
       return tickCommand(flags, context);
     case "reconcile":
       return reconcileCommand(flags, context);
+    case "cap":
+      return capCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -1302,6 +1319,8 @@ function taskCommand(
       return holdTask(rest, flags, context);
     case "unhold":
       return unholdTask(rest, flags, context);
+    case "require":
+      return requireTask(rest, flags, context);
     default:
       return fail(
         context.write,
@@ -1367,9 +1386,180 @@ async function addTask(
   if (!outcome.ok) {
     return fail(write, json, "task add", "exists", `\`${id}\` already exists`, EXIT.refused);
   }
-  return succeed(write, json, "task add", { task: outcome.task }, () => [
+
+  // Placement is explicit, never inferred from where the command happened to
+  // run: a task filed from the wrong directory would silently bind to it.
+  const placedIn = text(flags, "repo");
+  if (placedIn !== undefined) {
+    store.placeTask(store.refFor(BUILT_IN, id).id, resolve(placedIn));
+  }
+
+  return succeed(write, json, "task add", { task: outcome.task, repo: placedIn === undefined ? null : resolve(placedIn) }, () => [
     `Queued ${outcome.task.id} — ${outcome.task.title}`,
   ]);
+}
+
+/**
+ * Say what a task needs before it may run: capability keys, `kind:name`.
+ *
+ * Keys are qualified because names are not identities — `env:supabase` and
+ * `mcp:supabase` are different facts about a machine, and a requirement that
+ * names only "supabase" would verify against whichever one answered first.
+ * The given list replaces the old one; requirements are a statement, not a
+ * pile of appends.
+ */
+function requireTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, now } = context;
+  const id = positional[0];
+  const given = text(flags, "cap");
+  if (id === undefined || given === undefined) {
+    return fail(write, json, "task require", "usage", "`nightorders task require <id> --cap <kind:name>[,<kind:name>]` — or --cap none to clear", EXIT.usage);
+  }
+  if (store.getTask(id) === null) {
+    return fail(write, json, "task require", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  }
+
+  const keys = given === "none" ? [] : given.split(",").map(one => one.trim()).filter(Boolean);
+  for (const key of keys) {
+    if (parseCapabilityKey(key) === null) {
+      return fail(write, json, "task require", "usage", `\`${key}\` is not a capability key — say kind:name, like env:SUPABASE_KEY or cli:gh`, EXIT.usage);
+    }
+  }
+
+  store.setRequirements(store.refFor(BUILT_IN, id).id, keys, mutationFrom(flags, now));
+
+  return succeed(write, json, "task require", { id, requirements: keys }, () => [
+    keys.length === 0
+      ? `${id} requires nothing.`
+      : `${id} now requires: ${keys.join(", ")}. Nothing dispatches it until every one is verified.`,
+  ]);
+}
+
+// ---- capabilities ---------------------------------------------------------
+
+/**
+ * What a repo's work needs from the machine it runs on — recorded, probed,
+ * and never valued. `cap add` stores an operator-authored probe; `cap probe`
+ * asks the environment; verification is a stamped claim about this machine
+ * at that moment. There is deliberately no `cap verify --yes`: presence is
+ * not enough and an assertion is even less, so a capability nothing can
+ * probe stays a visible gap instead of becoming a quiet lie.
+ */
+async function capCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [action, name] = positional;
+  const repo = repoFrom(flags);
+
+  if (action === "add") {
+    if (name === undefined) {
+      return fail(write, json, "cap add", "usage", "`nightorders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>] [--expires <iso>]`", EXIT.usage);
+    }
+    const kind = (text(flags, "kind") ?? "env") as CapabilityKind;
+    if (!["env", "cli", "mcp", "ci", "other"].includes(kind)) {
+      return fail(write, json, "cap add", "usage", "--kind takes env, cli, mcp, ci or other", EXIT.usage);
+    }
+
+    // An env capability can have its probe synthesized from a fixed template
+    // — but only over a validated identifier, because the name lands inside
+    // a shell line. Anything else the operator writes explicitly.
+    let probe = text(flags, "probe") ?? null;
+    if (probe === null && kind === "env") {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        return fail(write, json, "cap add", "usage", `\`${name}\` is not an environment variable name — give --probe explicitly`, EXIT.usage);
+      }
+      probe = `test -n "$${name}"`;
+    }
+
+    const expires = text(flags, "expires") ?? null;
+    store.saveCapability(
+      {
+        repo,
+        kind,
+        name,
+        probe,
+        status: "unprobed",
+        addedBy: `operator@${hostname()}`,
+        createdAt: clock().toISOString(),
+        lastVerifiedAt: null,
+        verifiedBy: null,
+        lastResult: null,
+        expiresAt: expires,
+      },
+      mutationFrom(flags, clock()),
+    );
+    return succeed(write, json, "cap add", { repo, kind, name, probe }, () => [
+      `Recorded ${kind}:${name} for ${repo}.`,
+      probe === null
+        ? "No probe — nothing can verify it, so it will stand as a gap until it has one."
+        : `Probe: ${probe}`,
+      "Nothing is verified yet: `nightorders cap probe`.",
+    ]);
+  }
+
+  if (action === "list" || action === undefined) {
+    const capabilities = store.listCapabilities(repo);
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "cap list", repo, capabilities }, null, 2));
+      return EXIT.ok;
+    }
+    if (capabilities.length === 0) {
+      write(`No capabilities recorded for ${repo}. \`nightorders cap add\` or \`cap scan\`.`);
+      return EXIT.ok;
+    }
+    for (const one of capabilities) {
+      const state = describeCapability(one, clock());
+      write(`  ${`${one.kind}:${one.name}`.padEnd(32)} ${state}`);
+    }
+    return EXIT.ok;
+  }
+
+  if (action === "probe") {
+    const only = positional.slice(1);
+    for (const key of only) {
+      if (parseCapabilityKey(key) === null) {
+        return fail(write, json, "cap probe", "usage", `\`${key}\` is not a capability key — say kind:name`, EXIT.usage);
+      }
+    }
+    const outcomes = await probeRepo(store, repo, `operator@${hostname()}`, clock(), {
+      ...(only.length === 0 ? {} : { only: new Set(only) }),
+    });
+    if (outcomes.length === 0) {
+      return fail(write, json, "cap probe", "empty", `nothing to probe for ${repo}`, EXIT.refused);
+    }
+
+    const unverified = outcomes.filter(one => one.status !== "verified");
+    const lines = () =>
+      outcomes.map(one =>
+        `  ${`${one.kind}:${one.name}`.padEnd(32)} ${one.status}${one.detail === undefined ? "" : `  ${one.detail}`}`,
+      );
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "cap probe", repo, outcomes }, null, 2));
+    } else {
+      write(lines().join("\n"));
+    }
+    // All yes is 0; any no is 3 — a caller scripting "probe, then tick" needs
+    // to branch on the answer without parsing prose.
+    return unverified.length === 0 ? EXIT.ok : EXIT.refused;
+  }
+
+  return fail(write, json, "cap", "usage", `unknown \`cap ${action}\` — try add, list, probe`, EXIT.usage);
+}
+
+function describeCapability(capability: Capability, now: Date): string {
+  if (isVerified(capability, now)) {
+    return `verified ${capability.lastVerifiedAt} by ${capability.verifiedBy ?? "unknown"}`;
+  }
+  if (capability.status === "verified") return `verified, but expired ${capability.expiresAt}`;
+  if (capability.status === "failed") return `failed  ${capability.lastResult ?? ""}`.trimEnd();
+  return capability.probe === null ? "unprobed — no probe, nothing can vouch" : "unprobed";
 }
 
 function listTasks(flags: Map<string, string | true>, context: Context): number {

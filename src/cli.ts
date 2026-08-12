@@ -172,6 +172,7 @@ const OPERATE_COMMANDS = new Set([
   "approver",
   "build",
   "tick",
+  "cap",
   "reconcile",
 ]);
 

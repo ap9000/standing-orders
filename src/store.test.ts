@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { openStore, BUILT_IN, type Store } from "./store.js";
+import { openStore, BUILT_IN, type Capability, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -322,6 +322,100 @@ describe("a task and its reference are created together", () => {
     store.createTask({ id: "t-1", title: "ours" }, T0);
 
     expect(store.originOf(BUILT_IN, "t-1")).toBe("ours");
+    store.close();
+  });
+});
+
+describe("capabilities", () => {
+  const T0 = new Date("2026-08-11T22:00:00.000Z");
+
+  const one = (over: Partial<Capability> = {}): Capability => ({
+    repo: "/code/thing",
+    kind: "env",
+    name: "SUPABASE_KEY",
+    probe: 'test -n "$SUPABASE_KEY"',
+    status: "unprobed",
+    addedBy: "alex",
+    createdAt: T0.toISOString(),
+    lastVerifiedAt: null,
+    verifiedBy: null,
+    lastResult: null,
+    expiresAt: null,
+    ...over,
+  });
+
+  test("records metadata and only metadata — there is no value column", () => {
+    const store = openStore(":memory:");
+    store.saveCapability(one());
+
+    expect(store.capabilityNamed("/code/thing", "SUPABASE_KEY")).toMatchObject({
+      status: "unprobed",
+      probe: 'test -n "$SUPABASE_KEY"',
+    });
+    // The schema itself must have nowhere to put a secret.
+    const columns = store.handle
+      .prepare("PRAGMA table_info(capability)")
+      .all()
+      .map(row => String(row["name"]));
+    expect(columns).not.toContain("value");
+    store.close();
+  });
+
+  test("verification carries the moment it happened", () => {
+    const store = openStore(":memory:");
+    store.saveCapability(one());
+
+    store.markCapability("/code/thing", "env", "SUPABASE_KEY", { status: "verified", by: "builder-1" }, T0);
+
+    expect(store.capabilityNamed("/code/thing", "SUPABASE_KEY")).toMatchObject({
+      status: "verified",
+      lastVerifiedAt: T0.toISOString(),
+      verifiedBy: "builder-1",
+    });
+    store.close();
+  });
+
+  test("a failed probe clears the verification stamp", () => {
+    const store = openStore(":memory:");
+    store.saveCapability(one());
+    store.markCapability("/code/thing", "env", "SUPABASE_KEY", { status: "verified", by: "builder-1" }, T0);
+
+    store.markCapability(
+      "/code/thing", "env", "SUPABASE_KEY",
+      { status: "failed", by: "builder-1", detail: "exit 1" },
+      new Date(T0.getTime() + 1_000),
+    );
+
+    expect(store.capabilityNamed("/code/thing", "SUPABASE_KEY")).toMatchObject({
+      status: "failed",
+      lastVerifiedAt: null,
+      lastResult: "exit 1",
+    });
+    store.close();
+  });
+
+  test("requirements replace what a task needed before", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    const ref = store.refFor(BUILT_IN, "t-1").id;
+
+    store.setRequirements(ref, ["env:SUPABASE_KEY", "cli:gh"]);
+    expect(store.refFor(BUILT_IN, "t-1").capabilityRequirements).toEqual(["env:SUPABASE_KEY", "cli:gh"]);
+
+    store.setRequirements(ref, ["cli:gh"]);
+    expect(store.refFor(BUILT_IN, "t-1").capabilityRequirements).toEqual(["cli:gh"]);
+    store.close();
+  });
+
+  test("a task can be placed in a repository, and starts placed nowhere", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    const ref = store.refFor(BUILT_IN, "t-1");
+    expect(ref.repo).toBeNull();
+
+    store.placeTask(ref.id, "/code/thing");
+
+    expect(store.refFor(BUILT_IN, "t-1").repo).toBe("/code/thing");
     store.close();
   });
 });

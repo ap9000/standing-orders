@@ -24,6 +24,12 @@ export type RunOptions = {
   cwd?: string;
   timeoutMs?: number;
   maxBuffer?: number;
+  /**
+   * Extra environment, merged over the process's own. A capability probe is a
+   * question about an environment, and a test has to be able to construct the
+   * environment the question is about.
+   */
+  env?: Record<string, string>;
 };
 
 /** Conventions from the shell and from coreutils `timeout(1)`. */
@@ -44,13 +50,21 @@ type ExecError = Error & {
 };
 
 export function run(file: string, args: readonly string[], options: RunOptions = {}): Promise<ExecResult> {
-  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER } = options;
+  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER, env } = options;
 
   return new Promise(resolve => {
     execFile(
       file,
       [...args],
-      { cwd, timeout: timeoutMs, maxBuffer, encoding: "utf8", shell: false, windowsHide: true },
+      {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer,
+        encoding: "utf8",
+        shell: false,
+        windowsHide: true,
+        ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
+      },
       (error, stdout, stderr) => {
         if (error === null) {
           resolve({ code: 0, stdout, stderr, timedOut: false, notFound: false });

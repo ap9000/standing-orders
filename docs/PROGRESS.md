@@ -69,6 +69,25 @@ reconstructed state is leased-until-verified. There is no external
 treehouse installation to drive, so an adapter would adapt to nothing.
 Recorded here rather than silently reinterpreted.
 
+## M2 — fill one gap, three tasks start
+
+Ships when: one supplied capability lets several blocked tasks dispatch.
+Plan Codex-reviewed 2026-08-11; its findings reshaped the identity model
+(tasks carry a repo; requirements are qualified `kind:name` keys;
+verification is stamped with whose environment answered, and tick trusts
+only what it re-proves where it stands).
+
+| Item | State | Proof |
+|---|---|---|
+| Capability records + probes | **done** | `capability` table (a test asserts there is nowhere to put a value), `cap add/list/probe`, sh-probes with the probe's own words kept on failure, no manual verify — an assertion is less than a probe |
+| Task placement + qualified requirements | **done** | `task_ref.repo`, `task add --repo`, `task require --cap kind:name` |
+| Detection from disk (`cap scan`) | not started | .env.example · .mcp.json · supabase/config.toml · workflow env; ci secrets are ci capabilities, not local env |
+| Dispatch gate: unverified does not run | not started | inside the claim transaction *and* the builder, not a tick prefilter |
+| `gaps` ranked by what they unblock | not started | blocks_count counts only genuinely startable tasks |
+| Morning briefing | not started | run aggregation since a moment; REVIEW distinguishes "not read" from "zero" |
+| Notification outbox | not started | durable, deduped by episode, receipts recorded |
+| Exit-code cleanup (deferred here from M1) | not started | standalone `build` maps agent/timeout/git to 3; contract says 1 |
+
 ## Deliberately deferred (and to where)
 
 | Gap | Why it waits | Lands with |

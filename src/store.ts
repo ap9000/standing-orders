@@ -67,6 +67,8 @@ export type TaskRef = {
   id: number;
   backend: string;
   externalId: string;
+  /** Where the work lives, when known. null dispatches anywhere; no gap claims it. */
+  repo: string | null;
   zones: string[];
   capabilityRequirements: string[];
   parkRate: number;
@@ -75,6 +77,40 @@ export type TaskRef = {
 };
 
 export type Hold = { taskRef: number; reason: string; until: string | null; heldAt: string };
+
+/** Something a repo's work needs. Metadata only; the value lives on the runner. */
+export type Capability = {
+  repo: string;
+  kind: "env" | "cli" | "mcp" | "ci" | "other";
+  name: string;
+  /** A command whose exit 0 means "present and alive". null: nothing can vouch. */
+  probe: string | null;
+  status: "unprobed" | "verified" | "failed";
+  addedBy: string;
+  createdAt: string;
+  lastVerifiedAt: string | null;
+  /** Whose environment answered the probe. Verification is a claim about one machine. */
+  verifiedBy: string | null;
+  /** What the probe said when it said no. */
+  lastResult: string | null;
+  expiresAt: string | null;
+};
+
+/** `kind:name`, the unambiguous way a requirement names a capability. */
+export function capabilityKey(capability: Pick<Capability, "kind" | "name">): string {
+  return `${capability.kind}:${capability.name}`;
+}
+
+/** Parse `kind:name`; a bare name is refused rather than guessed at. */
+export function parseCapabilityKey(
+  key: string,
+): { kind: Capability["kind"]; name: string } | null {
+  const split = key.indexOf(":");
+  if (split <= 0 || split === key.length - 1) return null;
+  const kind = key.slice(0, split);
+  if (!["env", "cli", "mcp", "ci", "other"].includes(kind)) return null;
+  return { kind: kind as Capability["kind"], name: key.slice(split + 1) };
+}
 
 /** One build attempt. `outcome` null means it never finished — also an answer. */
 export type Run = {
@@ -139,6 +175,11 @@ CREATE TABLE IF NOT EXISTS task_ref (
   id                      INTEGER PRIMARY KEY AUTOINCREMENT,
   backend                 TEXT NOT NULL,
   external_id             TEXT NOT NULL,
+  -- Which repository the work belongs to, when that is known. Capabilities
+  -- are repo-scoped, so a gap can only count the tasks it blocks if tasks
+  -- say where they live. NULL is honest for a task nobody has placed yet —
+  -- it dispatches anywhere, and no gap claims it.
+  repo                    TEXT,
   zones                   TEXT NOT NULL DEFAULT '[]',
   capability_requirements TEXT NOT NULL DEFAULT '[]',
   park_rate               REAL NOT NULL DEFAULT 0,
@@ -183,6 +224,33 @@ CREATE TABLE IF NOT EXISTS claim (
   -- would accept work the reclaim already disowned.
   released_by      TEXT,
   UNIQUE (task_ref, lease_generation)
+);
+
+-- A capability: something a repo's work needs that this machine either has
+-- or does not — a credential in the environment, a CLI that is logged in, an
+-- MCP server that answers. Metadata only, and the absence of a value column
+-- is load-bearing (§3): the control plane records "present, verified at T",
+-- and the value itself lives on the runner, in a keychain or a gitignored
+-- .env, where a database dump cannot leak it.
+CREATE TABLE IF NOT EXISTS capability (
+  repo             TEXT NOT NULL,
+  kind             TEXT NOT NULL CHECK (kind IN ('env','cli','mcp','ci','other')),
+  name             TEXT NOT NULL,
+  probe            TEXT,
+  status           TEXT NOT NULL DEFAULT 'unprobed' CHECK (status IN ('unprobed','verified','failed')),
+  added_by         TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  last_verified_at TEXT,
+  -- Who ran the probe that produced this status. Verification is a claim
+  -- about one environment: the machine whose shell answered. Another runner
+  -- trusts it only by re-proving it where it stands, which is what tick does.
+  verified_by      TEXT,
+  -- The probe's own words when it said no — "exit 1", "timed out", "sh not
+  -- found". Collapsing those into one bit would discard exactly the detail
+  -- that tells an operator whether to paste a key or fix a PATH.
+  last_result      TEXT,
+  expires_at       TEXT,
+  PRIMARY KEY (repo, kind, name)
 );
 
 -- One build attempt, durable. The in-memory BuildResult evaporates with the
@@ -378,6 +446,7 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
  */
 function migrate(db: Database): void {
   addColumn(db, "task_ref", "origin", "TEXT NOT NULL DEFAULT 'theirs'");
+  addColumn(db, "task_ref", "repo", "TEXT");
   addColumn(db, "claim", "released_by", "TEXT");
 }
 
@@ -967,6 +1036,110 @@ export class Store {
     return held;
   }
 
+  // ---- capabilities -------------------------------------------------------
+
+  saveCapability(capability: Capability, mutation: Mutation = {}): void {
+    this.once(mutation, "saveCapability", () => {
+      this.db
+        .prepare(
+          `INSERT INTO capability (repo, kind, name, probe, status, added_by, created_at, last_verified_at, verified_by, last_result, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (repo, kind, name) DO UPDATE SET
+             probe = excluded.probe, status = excluded.status,
+             last_verified_at = excluded.last_verified_at,
+             verified_by = excluded.verified_by, last_result = excluded.last_result,
+             expires_at = excluded.expires_at`,
+        )
+        .run(
+          capability.repo,
+          capability.kind,
+          capability.name,
+          capability.probe,
+          capability.status,
+          capability.addedBy,
+          capability.createdAt,
+          capability.lastVerifiedAt,
+          capability.verifiedBy,
+          capability.lastResult,
+          capability.expiresAt,
+        );
+      return null;
+    });
+  }
+
+  getCapability(repo: string, kind: string, name: string): Capability | null {
+    const row = this.db
+      .prepare("SELECT * FROM capability WHERE repo = ? AND kind = ? AND name = ?")
+      .get(repo, kind, name);
+    return row === undefined ? null : readCapability(row);
+  }
+
+  /** By name alone, any kind — how a task requirement refers to one. */
+  capabilityNamed(repo: string, name: string): Capability | null {
+    const row = this.db
+      .prepare("SELECT * FROM capability WHERE repo = ? AND name = ? ORDER BY kind LIMIT 1")
+      .get(repo, name);
+    return row === undefined ? null : readCapability(row);
+  }
+
+  listCapabilities(repo: string): Capability[] {
+    return this.db
+      .prepare("SELECT * FROM capability WHERE repo = ? ORDER BY kind, name")
+      .all(repo)
+      .map(readCapability);
+  }
+
+  /**
+   * Record a probe's answer. Verification carries the moment it happened,
+   * because "verified" is always a claim about a time (§3: presence is not
+   * enough, and neither is a stale yes).
+   */
+  markCapability(
+    repo: string,
+    kind: string,
+    name: string,
+    outcome: { status: "verified" | "failed"; by: string; detail?: string },
+    now: Date,
+    expiresAt: string | null = null,
+  ): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE capability SET status = ?, last_verified_at = ?, verified_by = ?, last_result = ?, expires_at = COALESCE(?, expires_at)
+          WHERE repo = ? AND kind = ? AND name = ?`,
+      )
+      .run(
+        outcome.status,
+        outcome.status === "verified" ? now.toISOString() : null,
+        outcome.by,
+        outcome.detail ?? null,
+        expiresAt,
+        repo,
+        kind,
+        name,
+      );
+    return Number(changes) > 0;
+  }
+
+  /** Set what a task needs, as `kind:name` keys, replacing what it needed before. */
+  setRequirements(taskRef: number, keys: readonly string[], mutation: Mutation = {}): boolean {
+    return this.once(mutation, "setRequirements", () => {
+      const { changes } = this.db
+        .prepare("UPDATE task_ref SET capability_requirements = ? WHERE id = ?")
+        .run(JSON.stringify([...keys]), taskRef);
+      return Number(changes) > 0;
+    });
+  }
+
+  /** Say which repository a task's work lives in. */
+  placeTask(taskRef: number, repo: string, mutation: Mutation = {}): boolean {
+    return this.once(mutation, "placeTask", () => {
+      const { changes } = this.db
+        .prepare("UPDATE task_ref SET repo = ? WHERE id = ?")
+        .run(repo, taskRef);
+      return Number(changes) > 0;
+    });
+  }
+
   // ---- runs ---------------------------------------------------------------
 
   /**
@@ -1096,6 +1269,22 @@ export class Store {
   }
 }
 
+function readCapability(row: Record<string, unknown>): Capability {
+  return {
+    repo: String(row["repo"]),
+    kind: String(row["kind"]) as Capability["kind"],
+    name: String(row["name"]),
+    probe: row["probe"] === null ? null : String(row["probe"]),
+    status: String(row["status"]) as Capability["status"],
+    addedBy: String(row["added_by"]),
+    createdAt: String(row["created_at"]),
+    lastVerifiedAt: row["last_verified_at"] === null ? null : String(row["last_verified_at"]),
+    verifiedBy: row["verified_by"] === null ? null : String(row["verified_by"]),
+    lastResult: row["last_result"] === null ? null : String(row["last_result"]),
+    expiresAt: row["expires_at"] === null ? null : String(row["expires_at"]),
+  };
+}
+
 function readTask(row: Record<string, unknown>): Task {
   return {
     id: String(row["id"]),
@@ -1111,6 +1300,7 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     id: Number(row["id"]),
     backend: String(row["backend"]),
     externalId: String(row["external_id"]),
+    repo: row["repo"] === null || row["repo"] === undefined ? null : String(row["repo"]),
     zones: readJsonArray(row["zones"]),
     capabilityRequirements: readJsonArray(row["capability_requirements"]),
     parkRate: Number(row["park_rate"]),
