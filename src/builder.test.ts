@@ -1197,3 +1197,224 @@ describe("the park", () => {
     expect(result.problems?.[0]?.reason).toBe("no-run-record");
   });
 });
+
+describe("bounded repair", () => {
+  let store: Store;
+  let approverToken: string;
+  let taskRef: number;
+  let worktree: string;
+  let evidence: string;
+  let runId: number;
+
+  const { mkdtempSync, rmSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+
+  const git: Runner = async (_file, args) => {
+    if (args.includes("--abbrev-ref")) return { ...OK, stdout: "feat/a\n" };
+    if (args.includes("symbolic-ref")) {
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
+    if (args.includes("rev-parse")) return { ...OK, stdout: "abc123def\n" };
+    if (args.includes("diff")) return { ...OK, stdout: "diff --git a/x b/x\n" };
+    if (args.includes("status")) return { ...OK, stdout: " M x\n" };
+    return { ...OK };
+  };
+
+  const valid = {
+    urgency: "blocking",
+    recap: "The guard needs a policy call.",
+    question: "Fail open or fail closed?",
+    options: [
+      { id: "open", label: "Fail open", consequence: "Bad payouts slip through.", reversible: true },
+      { id: "closed", label: "Fail closed", consequence: "Payouts pause.", reversible: true },
+    ],
+    recommendation: "closed",
+  };
+  const invalid = { ...valid, recommendation: "ghost" };
+
+  const mailboxFrom = (args: readonly string[]): string => {
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    const name = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    if (name === undefined) throw new Error("no mailbox named in the prompt");
+    return name;
+  };
+
+  /**
+   * First call parks the first payload; each --resume call parks the next.
+   * Records every invocation so the tests can read what was resumed.
+   */
+  const staged = (payloads: unknown[], sessions: string[] = ["sess-1"]) => {
+    const calls: string[][] = [];
+    let turn = 0;
+    const agent: Runner = async (_file, args, options) => {
+      calls.push([...args]);
+      const cwd = options?.cwd ?? worktree;
+      const payload = payloads[turn];
+      if (payload !== undefined) {
+        writeFileSync(
+          join(cwd, mailboxFrom(args)),
+          typeof payload === "string" ? payload : JSON.stringify(payload),
+        );
+      }
+      const session = sessions[Math.min(turn, sessions.length - 1)];
+      turn++;
+      return { ...OK, stdout: JSON.stringify({ result: "spoke", session_id: session }) };
+    };
+    return { agent, calls };
+  };
+
+  const request = (over: Record<string, unknown> = {}) => ({
+    taskId: "t-1",
+    taskRef,
+    runner: "builder-1",
+    leaseId: currentClaim(store, taskRef, T0)!.leaseId,
+    worktree,
+    branch: "feat/a",
+    now: T0,
+    runId,
+    evidenceRoot: evidence,
+    git,
+    ...over,
+  });
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", now: T0 });
+    worktree = mkdtempSync(join(tmpdir(), "nightorders-repair-wt-"));
+    evidence = mkdtempSync(join(tmpdir(), "nightorders-repair-ev-"));
+    store.saveWorktree({
+      path: worktree,
+      repo: "/code/thing",
+      branch: "feat/a",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    runId = store.startRun({
+      taskRef,
+      leaseId: currentClaim(store, taskRef, T0)!.leaseId,
+      runner: "builder-1",
+      branch: "feat/a",
+      worktree,
+      now: T0,
+    });
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(evidence, { recursive: true, force: true });
+  });
+
+  test("one repair turn mends the payload, resumed in the same session", async () => {
+    const { agent, calls } = staged([invalid, valid]);
+
+    const result = await build(store, request({ agent }));
+
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok || result.parked === undefined) throw new Error("expected a park");
+
+    // The repair was resumed, not restarted, and told exactly what failed.
+    const repair = calls[1] ?? [];
+    expect(repair).toContain("--resume");
+    expect(repair[repair.indexOf("--resume") + 1]).toBe("sess-1");
+    const prompt = repair[repair.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("does not match any option id");
+    expect(prompt).toContain("Rewrite");
+
+    // The mending is its own run: role repair, parented, its cost countable.
+    const runs = store.runsFor(taskRef);
+    const child = runs.find(r => r.role === "repair");
+    expect(child).toMatchObject({ parentRun: runId, outcome: "built", reason: "repaired-park" });
+    // The main run keeps the session that was stamped when the agent spoke.
+    expect(store.getRun(runId)?.sessionId).toBe("sess-1");
+    // Both payloads survive as evidence: the broken one and the mended one.
+    const payloads = store.artifactsFor(runId).filter(a => a.kind === "park-payload");
+    expect(payloads).toHaveLength(2);
+  });
+
+  test("two failed repairs exhaust the bound, and the last problems are the answer", async () => {
+    const { agent, calls } = staged([invalid, invalid, { ...valid, options: [] }]);
+
+    const result = await build(store, request({ agent }));
+
+    expect(result).toMatchObject({ ok: false, reason: "malformed-decision" });
+    if (result.ok) throw new Error("expected malformed");
+    // Main turn + exactly two repairs, no more.
+    expect(calls).toHaveLength(3);
+    expect(result.problems?.map(problem => problem.reason)).toContain("too-few-options");
+
+    const repairs = store.runsFor(taskRef).filter(r => r.role === "repair");
+    expect(repairs).toHaveLength(2);
+    expect(repairs.every(r => r.outcome === "failed" && r.reason === "malformed-decision")).toBe(true);
+  });
+
+  test("each repair resumes the newest session — resuming forks a fresh id", async () => {
+    const { agent, calls } = staged([invalid, invalid, invalid], ["sess-1", "sess-2", "sess-3"]);
+
+    await build(store, request({ agent }));
+
+    const second = calls[2] ?? [];
+    expect(second[second.indexOf("--resume") + 1]).toBe("sess-2");
+  });
+
+  test("a broken repair turn spends one of the two attempts", async () => {
+    let turn = 0;
+    const agent: Runner = async (_file, args, options) => {
+      const cwd = options?.cwd ?? worktree;
+      if (turn === 0) writeFileSync(join(cwd, mailboxFrom(args)), JSON.stringify(invalid));
+      turn++;
+      if (turn === 2) return { ...OK, code: 1, stderr: "the model fell over" };
+      if (turn === 3) {
+        writeFileSync(join(cwd, mailboxFrom(args)), JSON.stringify(valid));
+        return { ...OK, stdout: JSON.stringify({ result: "ok", session_id: "sess-1" }) };
+      }
+      return { ...OK, stdout: JSON.stringify({ result: "ok", session_id: "sess-1" }) };
+    };
+
+    const result = await build(store, request({ agent }));
+
+    // Turn 2 broke; turn 3 mended. The bound is on total spend, not successes.
+    expect(result).toMatchObject({ ok: true });
+    const repairs = store.runsFor(taskRef).filter(r => r.role === "repair");
+    expect(repairs.map(r => r.outcome).sort()).toEqual(["built", "failed"]);
+  });
+
+  test("repair turns run on the repair model when one is routed", async () => {
+    const { agent, calls } = staged([invalid, valid]);
+
+    await build(store, request({ agent, model: "opus", repairModel: "haiku" }));
+
+    const main = calls[0] ?? [];
+    const repair = calls[1] ?? [];
+    expect(main[main.indexOf("--model") + 1]).toBe("opus");
+    expect(repair[repair.indexOf("--model") + 1]).toBe("haiku");
+    const child = store.runsFor(taskRef).find(r => r.role === "repair");
+    expect(child?.model).toBe("haiku");
+  });
+
+  test("an agent whose envelope names no session gets no repair — straight to the problems", async () => {
+    const calls: string[][] = [];
+    const agent: Runner = async (_file, args, options) => {
+      calls.push([...args]);
+      writeFileSync(join(options?.cwd ?? worktree, mailboxFrom(args)), JSON.stringify(invalid));
+      return { ...OK, stdout: JSON.stringify({ result: "no session here" }) };
+    };
+
+    const result = await build(store, request({ agent }));
+
+    expect(result).toMatchObject({ ok: false, reason: "malformed-decision" });
+    expect(calls).toHaveLength(1);
+    expect(store.runsFor(taskRef).filter(r => r.role === "repair")).toHaveLength(0);
+  });
+});

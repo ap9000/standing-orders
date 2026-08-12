@@ -201,7 +201,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
-    "max", "cap", "probe", "kind", "expires", "cmd", "since",
+    "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -802,6 +802,7 @@ async function buildCommand(
     now,
     clock: context.clock,
     ...(text(flags, "model") === undefined ? {} : { model: text(flags, "model") as string }),
+    ...(text(flags, "repair-model") === undefined ? {} : { repairModel: text(flags, "repair-model") as string }),
     ...(text(flags, "turns") === undefined ? {} : { maxTurns: Number(text(flags, "turns")) }),
     ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
     ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
@@ -956,6 +957,7 @@ async function tickCommand(
   const repo = repoFrom(flags);
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
   const model = text(flags, "model");
+  const repairModel = text(flags, "repair-model");
   const turns = text(flags, "turns");
   const timeoutMs = DEFAULT_BUILD_TIMEOUT_MS;
   // The ordinary lease is enough: the build's own pulse extends it while the
@@ -1098,6 +1100,7 @@ async function tickCommand(
       clock,
       timeoutMs,
       ...(model === undefined ? {} : { model }),
+      ...(repairModel === undefined ? {} : { repairModel }),
       ...(turns === undefined ? {} : { maxTurns: Number(turns) }),
       ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
       ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),

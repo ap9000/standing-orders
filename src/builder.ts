@@ -36,7 +36,7 @@ import type { Store } from "./store.js";
 import { approvalOf, type Scope } from "./scope.js";
 import { currentClaim, heartbeat, missingCapability } from "./claim.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
-import { parseDecision, type ParsedDecision, type Problem } from "./decision.js";
+import { parseDecision, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
 import {
   MAILBOX_PREFIX,
   captureParkEvidence,
@@ -90,6 +90,12 @@ export type BuildRequest = {
   /** Named honestly, never the default, and only ever set by a person. */
   skipPermissions?: boolean;
   model?: string;
+  /**
+   * The model repair turns run on. Repair is a few-k, one-job resumption —
+   * the §9 economics argument in miniature — so it may run cheaper than the
+   * builder. Defaults to the builder's model.
+   */
+  repairModel?: string;
   maxTurns?: number;
   timeoutMs?: number;
   agent?: Runner;
@@ -130,6 +136,15 @@ export type BuildRefusal =
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_MAX_TURNS = 40;
+/**
+ * Bounded repair (§6): a malformed park gets the same session back, twice,
+ * with a compact error naming exactly what failed — then it is an incident.
+ * The turns are short and narrow because the job is narrow: re-emit one
+ * file. Sandcastle's mechanism, sized to sandcastle's numbers.
+ */
+export const REPAIR_TURNS = 2;
+export const REPAIR_MAX_TURNS = 4;
+export const REPAIR_TIMEOUT_MS = 5 * 60_000;
 /**
  * How often a running build says "still here" — extending its lease and its
  * runner's liveness in one beat. A minute against a three-minute liveness
@@ -430,8 +445,29 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // progress stays in the worktree, preserved for the resume — and this
   // function only assembles the package. Sealing it against the lease is
   // `finalizeParkFenced`, one transaction, in the caller's hands.
-  const parked = await ingestPark(store, request, git, worktree, mailbox, baseRevision, root);
+  const said = envelope(result.stdout);
+  if (request.runId !== undefined && said.sessionId !== undefined) {
+    store.stampRun(request.runId, { sessionId: said.sessionId });
+  }
+  const parked = await ingestPark({
+    store,
+    request,
+    agent,
+    git,
+    worktree,
+    mailbox,
+    baseRevision,
+    root,
+    sessionId: said.sessionId,
+  });
   if (parked !== null) {
+    if ("fenced" in parked) {
+      return {
+        ok: false,
+        reason: "fenced",
+        message: `${taskId}'s lease did not survive its repair turns — the park is not this lease's to seal`,
+      };
+    }
     if (parked.ok) return { ok: true, parked: parked.park, branch };
     return {
       ok: false,
@@ -457,7 +493,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     };
   }
 
-  return commit(git, worktree, branch, taskId, scope as Scope, summarise(result.stdout));
+  return commit(git, worktree, branch, taskId, scope as Scope, said.summary);
 }
 
 /**
@@ -469,19 +505,23 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
  * bytes leave the worktree either way — ingested once, then removed, so no
  * later attempt can mistake them for its own agent's voice.
  */
-async function ingestPark(
-  store: Store,
-  request: BuildRequest,
-  git: Runner,
-  worktree: string,
-  mailbox: string,
-  baseRevision: string | null,
-  root: string,
-): Promise<
+async function ingestPark(args: {
+  store: Store;
+  request: BuildRequest;
+  agent: Runner;
+  git: Runner;
+  worktree: string;
+  mailbox: string;
+  baseRevision: string | null;
+  root: string;
+  sessionId: string | undefined;
+}): Promise<
   | { ok: true; park: ParkPackage }
   | { ok: false; problems: Problem[] }
+  | { fenced: true }
   | null
 > {
+  const { store, request, agent, git, worktree, mailbox, baseRevision, root } = args;
   const path = join(worktree, mailbox);
   const read = readMailbox(path);
   if (!read.ok && read.missing) return null;
@@ -509,36 +549,149 @@ async function ingestPark(
   }
   const runId = request.runId;
 
-  if (!read.ok) {
-    // A symlink, a FIFO, something oversized: hostile or broken, and either
-    // way not readable as a decision. Removed unread.
+  const ingest = (name: string): { raw: Buffer } | { problems: Problem[] } | null => {
+    const attempt = readMailbox(path);
+    if (!attempt.ok && attempt.missing) return null;
+    if (!attempt.ok) {
+      // A symlink, a FIFO, something oversized: hostile or broken, and
+      // either way not readable as a decision. Removed unread.
+      try {
+        unlinkSync(path);
+      } catch {
+        // Unremovable is survivable: the commit path excludes park-shaped names.
+      }
+      return { problems: [{ reason: "unreadable-mailbox", message: attempt.problem }] };
+    }
+    storeEvidence(store, root, runId, "park-payload", name, attempt.raw, `mailbox ${mailbox}`, clock());
     try {
       unlinkSync(path);
     } catch {
-      // Unremovable is survivable: the commit path excludes park-shaped names.
+      // The bytes are already in evidence; the worktree copy is now surplus.
     }
-    return { ok: false, problems: [{ reason: "unreadable-mailbox", message: read.problem }] };
-  }
-
-  storeEvidence(store, root, runId, "park-payload", "park.json", read.raw, `mailbox ${mailbox}`, clock());
-  try {
-    unlinkSync(path);
-  } catch {
-    // The bytes are already in evidence; the worktree copy is now surplus.
-  }
-
-  const parsed = parseDecision(read.raw.toString("utf8"));
-  if (!parsed.ok) return { ok: false, problems: parsed.problems };
-
-  const evidence = await captureParkEvidence(store, git, worktree, baseRevision, root, runId, clock());
-  const payload = store.artifactsFor(runId).find(artifact => artifact.kind === "park-payload");
-  return {
-    ok: true,
-    park: {
-      decision: parsed.decision,
-      artifactIds: [...(payload === undefined ? [] : [payload.id]), ...evidence],
-    },
+    return { raw: attempt.raw };
   };
+
+  const accept = async (decision: ParsedDecision): Promise<{ ok: true; park: ParkPackage }> => {
+    const evidence = await captureParkEvidence(store, git, worktree, baseRevision, root, runId, clock());
+    const payload = store.artifactsFor(runId).find(artifact => artifact.kind === "park-payload");
+    return {
+      ok: true,
+      park: {
+        decision,
+        artifactIds: [...(payload === undefined ? [] : [payload.id]), ...evidence],
+      },
+    };
+  };
+
+  const first = ingest("park.json");
+  if (first === null) return null;
+
+  let problems: Problem[];
+  if ("raw" in first) {
+    const parsed = parseDecision(first.raw.toString("utf8"));
+    if (parsed.ok) return accept(parsed.decision);
+    problems = parsed.problems;
+  } else {
+    problems = first.problems;
+  }
+
+  // Bounded repair (§6): the same session, a compact error naming exactly
+  // what failed, the instruction to re-emit only the file — twice, then it
+  // is an incident. Each turn is its own run row: role 'repair', parented
+  // to the build it mends, so the morning can see what the mending cost.
+  // Deliberately not 'driver' — the design's driver is the event-woken gate
+  // role that first exists at M4, and cost data that conflated the two
+  // would mean two things forever.
+  let sessionId = args.sessionId;
+  for (let turn = 0; turn < REPAIR_TURNS && sessionId !== undefined; turn++) {
+    // The lease is re-proved around every repair turn: extended going in,
+    // proved again coming out. A repair racing a reclaim must lose.
+    if (request.leaseId !== undefined) {
+      const alive = heartbeat(store, request.leaseId, clock());
+      if (!alive.ok) return { fenced: true };
+    }
+
+    const repairRun = store.startRun({
+      taskRef: request.taskRef,
+      leaseId: request.leaseId ?? "unclaimed",
+      runner: request.runner,
+      branch: request.branch,
+      worktree,
+      ...((request.repairModel ?? request.model) === undefined
+        ? {}
+        : { model: (request.repairModel ?? request.model) as string }),
+      role: "repair",
+      parentRun: runId,
+      sessionId,
+      now: clock(),
+    });
+
+    const spoken = await agent(
+      CLAUDE,
+      [
+        "-p",
+        repairPrompt(problems, mailbox),
+        "--resume",
+        sessionId,
+        "--output-format",
+        "json",
+        "--max-turns",
+        String(REPAIR_MAX_TURNS),
+        ...(request.skipPermissions
+          ? ["--dangerously-skip-permissions"]
+          : ["--permission-mode", request.permissionMode ?? "acceptEdits"]),
+        ...((request.repairModel ?? request.model) === undefined
+          ? []
+          : ["--model", (request.repairModel ?? request.model) as string]),
+      ],
+      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS },
+    );
+
+    if (request.leaseId !== undefined) {
+      const still = heartbeat(store, request.leaseId, clock());
+      if (!still.ok) {
+        store.finishRun(repairRun, { outcome: "refused", reason: "fenced", now: clock() });
+        return { fenced: true };
+      }
+    }
+
+    if (spoken.timedOut || spoken.code !== 0) {
+      // A broken repair turn spends one of the two attempts: the bound is on
+      // total spend, not on successful tries.
+      store.finishRun(repairRun, {
+        outcome: "failed",
+        reason: spoken.timedOut ? "timeout" : "agent",
+        now: clock(),
+      });
+      continue;
+    }
+
+    // Resuming forks a fresh session id; the next turn resumes the newest.
+    const resumed = envelope(spoken.stdout);
+    if (resumed.sessionId !== undefined) sessionId = resumed.sessionId;
+
+    const rewritten = ingest(`park-repair-${turn + 1}.json`);
+    if (rewritten === null) {
+      problems = [
+        { reason: "missing-mailbox", message: `the repair turn wrote no ${mailbox} — the payload was never re-emitted` },
+      ];
+      store.finishRun(repairRun, { outcome: "failed", reason: "malformed-decision", now: clock() });
+      continue;
+    }
+    if ("raw" in rewritten) {
+      const parsed = parseDecision(rewritten.raw.toString("utf8"));
+      if (parsed.ok) {
+        store.finishRun(repairRun, { outcome: "built", reason: "repaired-park", now: clock() });
+        return accept(parsed.decision);
+      }
+      problems = parsed.problems;
+    } else {
+      problems = rewritten.problems;
+    }
+    store.finishRun(repairRun, { outcome: "failed", reason: "malformed-decision", now: clock() });
+  }
+
+  return { ok: false, problems };
 }
 
 /**
@@ -671,17 +824,28 @@ async function commit(
   return { ok: true, committed: true, branch, summary };
 }
 
-/** `claude --output-format json` returns an envelope; the result is what we want. */
-function summarise(stdout: string): string {
+/**
+ * `claude --output-format json` returns an envelope: the result is the
+ * summary, and the session id is what lets a malformed park be repaired by
+ * resuming the conversation that produced it instead of paying for a new one.
+ */
+function envelope(stdout: string): { summary: string; sessionId?: string } {
   try {
-    const parsed = JSON.parse(stdout) as { result?: unknown };
-    if (typeof parsed.result === "string" && parsed.result.trim() !== "") {
-      return parsed.result.trim();
-    }
+    const parsed = JSON.parse(stdout) as { result?: unknown; session_id?: unknown };
+    return {
+      summary:
+        typeof parsed.result === "string" && parsed.result.trim() !== ""
+          ? parsed.result.trim()
+          : "unattended build",
+      ...(typeof parsed.session_id === "string" && parsed.session_id !== ""
+        ? { sessionId: parsed.session_id }
+        : {}),
+    };
   } catch {
-    // Fall through: an agent that printed something unparseable still did work.
+    // An agent that printed something unparseable still did work — and a
+    // session nobody can name simply cannot be resumed.
+    return { summary: "unattended build" };
   }
-  return "unattended build";
 }
 
 function firstLine(text: string): string {
