@@ -1628,6 +1628,32 @@ describe("watch — the loop, zero tokens idle", () => {
     expect(payload().task.state).toBe("done");
   });
 
+  test("a watch is an episode, and the brief can bound itself to exactly one night", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await approved("t-1", approverToken);
+
+    await run([
+      "watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
+      "--for", "2500", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
+      "--json",
+    ]);
+
+    const store = openStore(db);
+    const episode = store.latestWatchEpisode(realpathSync(repo));
+    store.close();
+    expect(episode).not.toBeNull();
+    expect(episode?.endedAt).not.toBeNull();
+    expect(episode?.runner).toBe("builder-1");
+    expect(episode?.built).toBeGreaterThanOrEqual(1);
+
+    // The brief, bounded to that night — its runs, its window, said so.
+    const code = await run(["brief", "--latest-watch", "--local", "--repo", repo, "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload().episode).toMatchObject({ id: episode?.id, runner: "builder-1" });
+    expect(payload().since).toBe(episode?.startedAt);
+    expect(payload().overnight.built.length).toBeGreaterThanOrEqual(1);
+  });
+
   test("watch + watch is a loud refusal; the lease names the holder", async () => {
     const { runnerToken } = await setup();
     const store = openStore(db);

@@ -8,6 +8,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import {
   bodyHashOf,
+  observeChecks,
   publicationBody,
   permitsPublication,
   publishPass,
@@ -212,5 +213,114 @@ describe("publication", () => {
     const idle = scripted();
     await publishPass(store, { repo: REPO, clock: () => T0, exec: idle.exec });
     expect(idle.calls).toHaveLength(0);
+  });
+});
+
+describe("watching CI on opened PRs", () => {
+  let store: Store;
+  let taskRef: number;
+  let runId: number;
+
+  const opened = () => {
+    const id = store.createPublicationIntent(
+      {
+        run: runId,
+        taskRef,
+        githubRepo: "alex/thing",
+        remote: "origin",
+        base: "main",
+        head: "nightorders/t-1",
+        headSha: "abc123",
+        bodyHash: "x",
+        draft: true,
+      },
+      T0,
+    );
+    store.markPublicationPushed(id, T0);
+    store.markPublicationOpened(id, 9, "https://github.com/alex/thing/pull/9", T0);
+    return id;
+  };
+
+  const ghSaying = (payload: unknown) =>
+    scripted({ "gh pr": { code: 0, stdout: JSON.stringify(payload) } });
+
+  const ciRows = () =>
+    store
+      .listNotifications("all")
+      .filter(one => one.dedupeKey.startsWith("ci:"))
+      .map(one => ({ key: one.dedupeKey, resolved: one.resolvedAt !== null }));
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    runId = store.startRun({
+      taskRef,
+      leaseId: "lease-1",
+      runner: "builder-1",
+      branch: "nightorders/t-1",
+      worktree: "/pool/t-1",
+      now: T0,
+    });
+    opened();
+  });
+
+  afterEach(() => store.close());
+
+  test("a red head pages once, keyed by PR and exact commit", async () => {
+    const red = ghSaying({ headRefOid: "oid-1", statusCheckRollup: [{ conclusion: "FAILURE" }] });
+
+    await observeChecks(store, { clock: () => T0, exec: red.exec });
+    await observeChecks(store, { clock: () => T0, exec: red.exec });
+
+    expect(ciRows()).toEqual([{ key: "ci:9:oid-1", resolved: false }]);
+    const page = store.listNotifications("pending").find(one => one.kind === "ci-failing");
+    expect(page?.subject).toContain("t-1");
+    expect(page?.body).toContain("oid-1");
+  });
+
+  test("the same head turning green resolves the episode; a new head buries the old one", async () => {
+    await observeChecks(store, {
+      clock: () => T0,
+      exec: ghSaying({ headRefOid: "oid-1", statusCheckRollup: [{ conclusion: "FAILURE" }] }).exec,
+    });
+
+    // Someone pushed a fix: the failing commit is gone, its page resolves
+    // even though the new head is still running — running is not green.
+    await observeChecks(store, {
+      clock: () => T0,
+      exec: ghSaying({ headRefOid: "oid-2", statusCheckRollup: [{ status: "IN_PROGRESS" }] }).exec,
+    });
+    expect(ciRows()).toEqual([{ key: "ci:9:oid-1", resolved: true }]);
+
+    // The new head fails too: a fresh page, its own key.
+    await observeChecks(store, {
+      clock: () => T0,
+      exec: ghSaying({ headRefOid: "oid-2", statusCheckRollup: [{ conclusion: "FAILURE" }] }).exec,
+    });
+    expect(ciRows()).toEqual([
+      { key: "ci:9:oid-1", resolved: true },
+      { key: "ci:9:oid-2", resolved: false },
+    ]);
+
+    // And green closes it.
+    await observeChecks(store, {
+      clock: () => T0,
+      exec: ghSaying({ headRefOid: "oid-2", statusCheckRollup: [{ conclusion: "SUCCESS" }] }).exec,
+    });
+    expect(ciRows().every(row => row.resolved)).toBe(true);
+  });
+
+  test("a rollup that could not be read neither pages nor resolves — and says so", async () => {
+    await observeChecks(store, {
+      clock: () => T0,
+      exec: ghSaying({ headRefOid: "oid-1", statusCheckRollup: [{ conclusion: "FAILURE" }] }).exec,
+    });
+
+    const dead = scripted({ "gh pr": { code: 1, stderr: "api.github.com refused" } });
+    const report = await observeChecks(store, { clock: () => T0, exec: dead.exec });
+
+    expect(report.problems[0]).toContain("not read");
+    expect(ciRows()).toEqual([{ key: "ci:9:oid-1", resolved: false }]);
   });
 });

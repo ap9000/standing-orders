@@ -25,6 +25,7 @@ import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run as execRun, type ExecResult, type RunOptions } from "./exec.js";
+import { summarizeChecks } from "./pulls.js";
 import type { Publication, PublicationGrant, Store } from "./store.js";
 
 export const BODY_TEMPLATE_VERSION = 1;
@@ -269,6 +270,92 @@ async function openOrAdopt(
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+export type CheckReport = {
+  observed: number;
+  failing: number;
+  resolved: number;
+  problems: string[];
+};
+
+/**
+ * Read CI for every PR this control plane opened — structured rollup and the
+ * exact head OID, never a command's exit status (finding 18). Episodes are
+ * keyed `ci:<pr>:<headOid>`: a red head pages once; the episode resolves
+ * when that exact head turns green or a newer commit supersedes it. `none`,
+ * `running`, and not-read are never called green — an unread rollup neither
+ * pages nor resolves anything.
+ */
+export async function observeChecks(
+  store: Store,
+  options: { clock?: () => Date; exec?: PublishExec },
+): Promise<CheckReport> {
+  const clock = options.clock ?? (() => new Date());
+  const exec = options.exec ?? execRun;
+  const report: CheckReport = { observed: 0, failing: 0, resolved: 0, problems: [] };
+
+  for (const publication of store.openedPublications()) {
+    if (publication.prNumber === null) continue;
+    const viewed = await exec(
+      "gh",
+      [
+        "pr", "view", String(publication.prNumber),
+        "--repo", publication.githubRepo,
+        "--json", "statusCheckRollup,headRefOid,state",
+      ],
+      { timeoutMs: EXEC_TIMEOUT_MS },
+    );
+    if (viewed.code !== 0) {
+      report.problems.push(
+        `PR #${publication.prNumber}: not read — ${viewed.notFound ? "gh is not on PATH" : firstLine(viewed.stderr) || `exit ${viewed.code}`}`,
+      );
+      continue;
+    }
+    let payload: { statusCheckRollup?: unknown; headRefOid?: unknown };
+    try {
+      payload = JSON.parse(viewed.stdout) as typeof payload;
+    } catch {
+      report.problems.push(`PR #${publication.prNumber}: not read — gh said something that is not JSON`);
+      continue;
+    }
+    const headOid = typeof payload.headRefOid === "string" ? payload.headRefOid : null;
+    if (headOid === null) {
+      report.problems.push(`PR #${publication.prNumber}: not read — no head OID in the answer`);
+      continue;
+    }
+
+    report.observed++;
+    const state = summarizeChecks(payload.statusCheckRollup);
+    const key = `ci:${publication.prNumber}:${headOid}`;
+    const taskId = store.externalIdFor(publication.taskRef) ?? publication.head;
+
+    if (state === "failing") {
+      report.failing++;
+      store.transact(() => {
+        // Older heads' episodes die with their commits; this head's opens once.
+        store.resolveCiEpisodes(publication.prNumber as number, key, clock());
+        store.enqueueNotification(
+          {
+            dedupeKey: key,
+            kind: "ci-failing",
+            subject: `CI failing: ${taskId} (PR #${publication.prNumber})`,
+            body: `${publication.prUrl ?? publication.githubRepo} — head ${headOid.slice(0, 12)} is red.`,
+          },
+          clock(),
+        );
+      });
+    } else if (state === "passing") {
+      report.resolved += store.resolveCiEpisodes(publication.prNumber, null, clock());
+    } else {
+      // running / none: not good news, not bad news — old episodes for
+      // *other* heads still resolve (their commit is gone), this head's
+      // verdict stays open.
+      store.resolveCiEpisodes(publication.prNumber, key, clock());
+    }
+  }
+
+  return report;
 }
 
 /** Retries are over; say so durably and page a person — silence is the one failure mode ruled out. */

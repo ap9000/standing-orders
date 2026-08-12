@@ -756,6 +756,22 @@ CREATE TABLE IF NOT EXISTS quota (
   PRIMARY KEY (runner, provider, scope)
 );
 
+-- One watch, as an episode with edges (§6): the night is a row, not "the
+-- last 24 hours", so the morning briefing can bound itself to exactly what
+-- one watch did — runs and publications attribute by runner and window.
+-- ended_at NULL means it is still running, or died and never said. v5.
+CREATE TABLE IF NOT EXISTS watch_episode (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo        TEXT NOT NULL,
+  runner      TEXT NOT NULL,
+  incarnation TEXT NOT NULL UNIQUE,
+  started_at  TEXT NOT NULL,
+  ended_at    TEXT,
+  ticks       INTEGER NOT NULL DEFAULT 0,
+  built       INTEGER NOT NULL DEFAULT 0,
+  broke       INTEGER NOT NULL DEFAULT 0
+);
+
 -- Standing permission to publish built work: git push and PR creation are
 -- two different external writes, so they are two named capabilities under
 -- one grant whose every term — exact GitHub repository, remote, allowed
@@ -3308,6 +3324,82 @@ export class Store {
     this.db
       .prepare("UPDATE publication SET state = 'failed', updated_at = ? WHERE id = ? AND state IN ('intended','pushed')")
       .run(now.toISOString(), id);
+  }
+
+  /** PRs this control plane opened and should keep watching. */
+  openedPublications(): Publication[] {
+    return this.db
+      .prepare("SELECT * FROM publication WHERE state = 'opened' ORDER BY id")
+      .all()
+      .map(readPublication);
+  }
+
+  /**
+   * Resolve CI episodes for a PR whose failing head is gone — a new commit
+   * superseded it, or the same head turned green. Episodes are keyed
+   * `ci:<pr>:<headOid>`; only the surviving key (if any) stays open.
+   */
+  resolveCiEpisodes(prNumber: number, exceptKey: string | null, now: Date): number {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE notification SET resolved_at = ?
+          WHERE dedupe_key LIKE ? AND resolved_at IS NULL AND dedupe_key != COALESCE(?, '')`,
+      )
+      .run(now.toISOString(), `ci:${prNumber}:%`, exceptKey);
+    return Number(changes);
+  }
+
+  // ---- the watch episode ---------------------------------------------------
+
+  /** The night begins: one row per watch, keyed by its incarnation. */
+  startWatchEpisode(episode: { repo: string; runner: string; incarnation: string }, now: Date): number {
+    const inserted = this.db
+      .prepare(
+        "INSERT INTO watch_episode (repo, runner, incarnation, started_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(episode.repo, episode.runner, episode.incarnation, now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /** The night ends, with its own numbers. A crash never writes this — and that absence is data. */
+  endWatchEpisode(
+    incarnation: string,
+    totals: { ticks: number; built: number; broke: number },
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        "UPDATE watch_episode SET ended_at = ?, ticks = ?, built = ?, broke = ? WHERE incarnation = ?",
+      )
+      .run(now.toISOString(), totals.ticks, totals.built, totals.broke, incarnation);
+  }
+
+  latestWatchEpisode(repo: string): {
+    id: number;
+    repo: string;
+    runner: string;
+    incarnation: string;
+    startedAt: string;
+    endedAt: string | null;
+    ticks: number;
+    built: number;
+    broke: number;
+  } | null {
+    const row = this.db
+      .prepare("SELECT * FROM watch_episode WHERE repo = ? ORDER BY id DESC LIMIT 1")
+      .get(repo);
+    if (row === undefined) return null;
+    return {
+      id: Number(row["id"]),
+      repo: String(row["repo"]),
+      runner: String(row["runner"]),
+      incarnation: String(row["incarnation"]),
+      startedAt: String(row["started_at"]),
+      endedAt: row["ended_at"] === null ? null : String(row["ended_at"]),
+      ticks: Number(row["ticks"]),
+      built: Number(row["built"]),
+      broke: Number(row["broke"]),
+    };
   }
 
   // ---- the wake sequence ---------------------------------------------------

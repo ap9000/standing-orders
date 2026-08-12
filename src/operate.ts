@@ -70,6 +70,7 @@ import { overnight, spendLine } from "./summary.js";
 import {
   bodyHashOf,
   describePublicationGrant,
+  observeChecks,
   publicationBody,
   publishPass,
   type PublishExec,
@@ -1619,10 +1620,27 @@ async function briefCommand(
 ): Promise<number> {
   const { store, write, json, clock } = context;
   const repo = repoFrom(flags);
-  const since =
-    text(flags, "since") ?? new Date(clock().getTime() - 24 * 60 * 60_000).toISOString();
 
-  const runs = store.runsSince(since);
+  // --latest-watch bounds the morning to one night's actual edges (§6): the
+  // last watch episode's window and runner, instead of "the last 24 hours" —
+  // which can mix two nights, or none.
+  const episode = flags.has("latest-watch") ? store.latestWatchEpisode(repo) : null;
+  if (flags.has("latest-watch") && episode === null) {
+    return fail(write, json, "brief", "no-watch", "no watch episode recorded for this repo yet — run `nightorders watch` first", EXIT.refused);
+  }
+  const since =
+    episode?.startedAt ??
+    text(flags, "since") ??
+    new Date(clock().getTime() - 24 * 60 * 60_000).toISOString();
+
+  let runs = store.runsSince(since);
+  if (episode !== null) {
+    runs = runs.filter(
+      one =>
+        one.runner === episode.runner &&
+        (episode.endedAt === null || one.startedAt <= episode.endedAt),
+    );
+  }
   // One arithmetic, shared with the console — see summary.ts for why the
   // measured/invoked distinction exists.
   const { built, failed, refused, cutDown, invoked, measured, spend, tokens } = overnight(runs);
@@ -1664,6 +1682,7 @@ async function briefCommand(
           command: "brief",
           repo,
           since,
+          episode,
           overnight: { built, failed, refused, cutDown },
           economics: {
             invocations: invoked.length,
@@ -1686,6 +1705,13 @@ async function briefCommand(
   }
 
   const lines: string[] = [`nightorders — good morning ─ ${repo}`];
+  if (episode !== null) {
+    lines.push(
+      `  episode      watch #${episode.id} on ${episode.runner} · ${episode.startedAt} → ${
+        episode.endedAt ?? "never ended — it is running, or it died without saying"
+      }`,
+    );
+  }
   lines.push(
     `  overnight    ${built.length} built · ${failed.length} failed · ${refused.length} refused${
       cutDown.length > 0 ? ` · ${cutDown.length} cut down mid-flight` : ""
@@ -2269,6 +2295,11 @@ async function watchCommand(
     }
   }
 
+  // The night is a row, not "the last 24 hours": everything this watch does
+  // attributes to this episode by runner and window, and `brief
+  // --latest-watch` bounds itself to exactly it.
+  store.startWatchEpisode({ repo, runner, incarnation }, new Date());
+
   let stopping = false;
   const followController = new AbortController();
   const stop = () => {
@@ -2343,6 +2374,14 @@ async function watchCommand(
         lastReconcile = now;
         quiet.length = 0;
         await reconcileCommand(passFlags(), quietContext);
+        // CI on the same slow cadence: red heads page once, superseded and
+        // greened heads resolve their episodes, unread rollups say so.
+        if (store.openedPublications().length > 0) {
+          const checks = await observeChecks(store, {
+            ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
+          });
+          if (checks.failing > 0) write(`watch: CI is red on ${checks.failing} published PR(s) — the outbox has it`);
+        }
       }
 
       // The tick pass runs whenever the loop spins — and the loop only
@@ -2420,6 +2459,7 @@ async function watchCommand(
     if (follower !== null) await follower;
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
+    store.endWatchEpisode(incarnation, { ticks, built, broke: brokeCount }, new Date());
     store.releaseWatchLease(runner, repo, incarnation, new Date());
   }
 
