@@ -153,7 +153,9 @@ GraphBackend
 
 Every record carries `workspace_id` and `actor_id`; every mutation takes an `idempotency_key`.
 
-**`Claim` is the one that matters.** Dispatch is a compare-and-swap on `(task, lease_generation)`; completion is rejected if the generation moved. A runner that dies holding a lease is reclaimed on expiry and its late completion fenced out. Without it there is no scheduler, only a race. No existing graph backend provides this — which is precisely why it is ours.
+**`Claim` is the one that matters.** Dispatch is a compare-and-swap on `(task, lease_generation)`; a completion is *accepted* only if the generation has not moved. A runner that dies holding a lease is reclaimed on expiry and its late completion fenced out. Without it there is no scheduler, only a race. No existing graph backend provides this — which is precisely why it is ours.
+
+The distinction between accepting a completion and replaying one is load-bearing, and M1's duplicate-completion reconciliation lives in the gap. A lease that never released and has been superseded is fenced: its work was never accepted and must not be. A lease that *did* release and was superseded afterwards is a different thing — its work was accepted at the time — so a retry of that same completion is idempotent rather than refused. Answering "fenced" there would tell an honest runner its work never counted, which is false.
 
 Evidence lives on the runner; the control plane stores a reference and serves it through a signed, short-lived runner proxy.
 

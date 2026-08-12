@@ -25,7 +25,7 @@
  * **Nothing ever prompts.** There is no terminal on the other end at 3am.
  */
 
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { resolve } from "node:path";
 import { openStore, databasePath, BUILT_IN, type Store, type TaskState } from "./store.js";
 import { acquire, heartbeat, release, reap, currentClaim, DEFAULT_LEASE_MS } from "./claim.js";
@@ -39,6 +39,13 @@ import {
   type MutationClass,
 } from "./grant.js";
 import { builtIn, guarded, type GraphBackend } from "./backend.js";
+import {
+  register,
+  authenticate,
+  heartbeat as heartbeatRunner,
+  isAlive,
+  recoverDead,
+} from "./runner.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 
@@ -78,6 +85,14 @@ export const OPERATE_HELP = `nightorders — operating the queue
   nightorders release <lease>           done with it; fenced if superseded
   nightorders reap                      release every lease that ran out
 
+Runners — the machines that may be given work
+  nightorders runner register <name> [--capacity <n>]
+                                        mints a token, shown once
+  nightorders runner list               who is registered, and answering
+  nightorders runner heartbeat <name> --token <token>
+  nightorders runner reap               take back what a dead runner held
+  nightorders runner retire <name>
+
 Write access — discovery stays read-only until you grant it
   nightorders enroll [repo] --backend <name> --paths <p>[,<p>]
                                         show what it would grant; --yes agrees
@@ -109,7 +124,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   const flags = new Map<string, string | true>();
   const wantsValue = new Set([
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
-    "allow", "selector", "paths", "credentials", "repo",
+    "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -183,6 +198,8 @@ async function dispatch(
       return leaseCommand("release", positional, flags, context);
     case "reap":
       return reapCommand(context);
+    case "runner":
+      return runnerCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -314,8 +331,22 @@ function claimCommand(
   const id = positional[0];
   const runner = text(flags, "runner");
 
-  if (id === undefined) return fail(write, json, "claim", "usage", "which task? `nightorders claim <id> --runner <name>`", EXIT.usage);
+  if (id === undefined) return fail(write, json, "claim", "usage", "which task? `nightorders claim <id> --runner <name> --token <token>`", EXIT.usage);
   if (runner === undefined) return fail(write, json, "claim", "usage", "--runner names who is taking it", EXIT.usage);
+
+  // Taking work requires proving who you are. Accepting a runner *name* alone
+  // would make the credential decorative: anyone who could reach the queue
+  // could mint leases under somebody else's identity, and the fencing that
+  // protects those leases would be protecting the wrong thing. This is what
+  // "auth from the first commit" is for — it is only cheap now.
+  const token = text(flags, "token");
+  if (token === undefined) {
+    return fail(write, json, "claim", "usage", "--token proves the runner is who it says", EXIT.usage);
+  }
+  const auth = authenticate(store, runner, token);
+  if (!auth.ok) {
+    return fail(write, json, "claim", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
+  }
 
   const backend = text(flags, "backend") ?? BUILT_IN;
   if (backend === BUILT_IN && store.getTask(id) === null) {
@@ -437,6 +468,144 @@ function reapCommand(context: Context): number {
   write(`Released ${reaped.length}:`);
   for (const claim of reaped) write(`  ${claim.leaseId}  held by ${claim.runner}`);
   return EXIT.ok;
+}
+
+// ---- runners --------------------------------------------------------------
+
+/**
+ * Registering, checking in, and taking back what a dead machine was holding.
+ *
+ * The token is printed once and never again — there is no command that
+ * recovers it, because a control plane able to hand back a runner's credential
+ * is one whose database is worth stealing.
+ */
+function runnerCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, now } = context;
+  const [action, name] = positional;
+
+  if (action === "list" || action === undefined) {
+    const runners = store.listRunners().map(one => ({ ...one, alive: isAlive(one, now) }));
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "runner list", count: runners.length, runners }, null, 2));
+      return EXIT.ok;
+    }
+    if (runners.length === 0) {
+      write("No runners registered.");
+      write("  nightorders runner register <name>");
+      return EXIT.ok;
+    }
+    for (const one of runners) {
+      write(`  ${one.name}  ${one.alive ? "alive" : "not answering"}  last heard ${one.heartbeatAt}`);
+    }
+    return EXIT.ok;
+  }
+
+  if (action === "register") {
+    if (name === undefined) {
+      return fail(write, json, "runner register", "usage", "a runner needs a name", EXIT.usage);
+    }
+    const capacity = Number(text(flags, "capacity") ?? "1");
+    if (!Number.isInteger(capacity) || capacity < 1) {
+      return fail(write, json, "runner register", "usage", "--capacity is a whole number of tasks", EXIT.usage);
+    }
+
+    const { runner, token, reclaimed } = register(store, {
+      name,
+      host: hostname(),
+      capacity,
+      now,
+      mutation: mutationFrom(flags, now),
+    });
+
+    return succeed(write, json, "runner register", { runner, token, reclaimed }, () => [
+      `Registered ${runner.name} on ${runner.host}, capacity ${runner.capacity}.`,
+      "",
+      `  token  ${token}`,
+      "",
+      "That token is shown once and is not stored — only a hash of it is.",
+      "If it is lost, register again to mint a new one.",
+      // Taking work back from the previous holder of this name is a side
+      // effect somebody should hear about, not one they discover later from a
+      // task that mysteriously requeued itself.
+      ...(reclaimed === null
+        ? []
+        : [
+            "",
+            `A previous ${runner.name} was still holding work; it has been taken back:`,
+            ...reclaimed.claims.map(lease => `  claim     ${lease}`),
+            ...reclaimed.worktrees.map(path => `  worktree  ${path} (unverified)`),
+          ]),
+    ]);
+  }
+
+  if (action === "heartbeat") {
+    const token = text(flags, "token");
+    if (name === undefined || token === undefined) {
+      return fail(write, json, "runner heartbeat", "usage", "`runner heartbeat <name> --token <token>`", EXIT.usage);
+    }
+
+    const result = heartbeatRunner(store, name, token, now);
+    if (!result.ok) {
+      return fail(write, json, "runner heartbeat", result.reason, describeAuth(result.reason, name), EXIT.refused);
+    }
+    return succeed(write, json, "runner heartbeat", { runner: result.runner }, () => [
+      `${name} checked in.`,
+    ]);
+  }
+
+  if (action === "reap") {
+    // Claims and worktrees together: they are two halves of one fact, and
+    // recovering only one leaves a task dispatchable with its working copy
+    // still checked out to a process that no longer exists.
+    const recovered = recoverDead(store, now).filter(
+      one => one.claims.length > 0 || one.worktrees.length > 0,
+    );
+
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "runner reap", recovered }, null, 2));
+      return EXIT.ok;
+    }
+    if (recovered.length === 0) {
+      write("Every runner is answering, or held nothing.");
+      return EXIT.ok;
+    }
+    for (const one of recovered) {
+      write(`${one.runner} is not answering — took back:`);
+      for (const lease of one.claims) write(`  claim     ${lease}`);
+      for (const path of one.worktrees) write(`  worktree  ${path} (unverified)`);
+    }
+    return EXIT.ok;
+  }
+
+  if (action === "retire") {
+    if (name === undefined) {
+      return fail(write, json, "runner retire", "usage", "which runner?", EXIT.usage);
+    }
+    const retired = store.retireRunner(name, now, mutationFrom(flags, now));
+    if (!retired) {
+      return fail(write, json, "runner retire", "unknown", `no runner \`${name}\``, EXIT.refused);
+    }
+    return succeed(write, json, "runner retire", { name }, () => [`${name} is retired.`]);
+  }
+
+  return fail(
+    write,
+    json,
+    "runner",
+    "usage",
+    `unknown \`runner ${action}\` — try list, register, heartbeat, reap, retire`,
+    EXIT.usage,
+  );
+}
+
+function describeAuth(reason: string, name: string): string {
+  if (reason === "unknown") return `no runner \`${name}\` — register it first`;
+  if (reason === "retired") return `${name} has been retired`;
+  return "that token does not match";
 }
 
 // ---- write access ---------------------------------------------------------

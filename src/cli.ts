@@ -165,6 +165,7 @@ const OPERATE_COMMANDS = new Set([
   "enroll",
   "grants",
   "revoke",
+  "runner",
 ]);
 
 /** binSource exists so tests can exercise linking without depending on a build. */

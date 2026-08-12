@@ -217,12 +217,18 @@ describe("claim", () => {
     expect(rows.map(row => Number(row["lease_generation"]))).toEqual([1, 2, 3]);
   });
 
-  test("refuses a second completion on the same lease", () => {
-    // A retry without an idempotency key must not read as a fresh completion.
+  test("treats a second completion on the same lease as the same completion", () => {
+    // Reported twice because the first acknowledgement was lost, not because
+    // anything changed hands. M1 asks for duplicate completion to be
+    // reconciled rather than refused — see the `duplicate completion` suite
+    // below for the line between this and a genuine fence.
     acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
     release(store, "lease-a", later(1_000));
 
-    expect(release(store, "lease-a", later(2_000))).toEqual({ ok: false, reason: "fenced" });
+    const again = release(store, "lease-a", later(2_000));
+
+    expect(again.ok).toBe(true);
+    if (again.ok) expect(again.duplicate).toBe(true);
   });
 
   test("frees the task as soon as it is released, without waiting for expiry", () => {
@@ -312,5 +318,77 @@ describe("reap", () => {
     reap(store, later(120_000));
 
     expect(reap(store, later(180_000))).toEqual([]);
+  });
+});
+
+describe("duplicate completion", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("accepts the same lease reporting done twice", () => {
+    // Nobody took the task away; the runner said so twice because its first
+    // acknowledgement was lost. Telling it "superseded" would send an honest
+    // runner off to stop when it should carry on.
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+
+    const first = release(store, "lease-a", later(1_000));
+    const again = release(store, "lease-a", later(2_000));
+
+    expect(first.ok).toBe(true);
+    expect(again.ok).toBe(true);
+    if (again.ok) expect(again.duplicate).toBe(true);
+  });
+
+  test("still fences a lease that never finished", () => {
+    // The distinction that makes the above safe. A repeat of a completion is
+    // idempotent; a lease that was taken away before it ever completed is
+    // refused. What separates them is whether it released, not whether the
+    // world moved on afterwards — see the suite below.
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
+
+    expect(release(store, "lease-a", later(62_000))).toEqual({ ok: false, reason: "fenced" });
+  });
+});
+
+describe("a completion that happened, retried late", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("is still a duplicate after somebody else has taken the task", () => {
+    // It completed; its work was accepted at the time. Answering "fenced"
+    // would tell an honest runner its work never counted, which is a
+    // different and false claim. Fencing is for a lease that never finished.
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    release(store, "lease-a", later(1_000));
+    acquire(store, task, "runner-b", { now: later(2_000), newLeaseId: ids("lease-b") });
+
+    const retry = release(store, "lease-a", later(3_000));
+
+    expect(retry.ok).toBe(true);
+    if (retry.ok) expect(retry.duplicate).toBe(true);
+  });
+
+  test("but a lease that never finished is still fenced", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
+
+    expect(release(store, "lease-a", later(62_000))).toEqual({ ok: false, reason: "fenced" });
   });
 });

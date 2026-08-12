@@ -30,6 +30,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
+import type { Runner } from "./runner.js";
 
 export const SCHEMA_VERSION = 1;
 
@@ -173,6 +174,42 @@ CREATE TABLE IF NOT EXISTS backend_grant (
   granted_at       TEXT NOT NULL,
   granted_by       TEXT NOT NULL,
   PRIMARY KEY (repo, backend)
+);
+
+-- A machine that may be given work.
+--
+-- credential_hash, never the credential: the token is shown to the operator
+-- once at registration and then exists only as a hash here. A control plane
+-- that can hand back a runner's token is one whose database is worth stealing.
+CREATE TABLE IF NOT EXISTS runner (
+  name            TEXT PRIMARY KEY,
+  host            TEXT NOT NULL,
+  credential_hash TEXT NOT NULL,
+  capacity        INTEGER NOT NULL,
+  repos           TEXT NOT NULL DEFAULT '[]',
+  agents          TEXT NOT NULL DEFAULT '[]',
+  registered_at   TEXT NOT NULL,
+  heartbeat_at    TEXT NOT NULL,
+  retired_at      TEXT
+);
+
+-- A checked-out working copy, leased to one runner at a time.
+--
+-- Its lease is deliberately the same shape as a task claim: a runner that dies
+-- holding a worktree has to be recoverable the same way, and two mechanisms
+-- for one idea is how the second one ends up subtly wrong.
+CREATE TABLE IF NOT EXISTS worktree (
+  path          TEXT PRIMARY KEY,
+  repo          TEXT NOT NULL,
+  branch        TEXT NOT NULL,
+  runner        TEXT REFERENCES runner(name) ON DELETE SET NULL,
+  task_ref      INTEGER REFERENCES task_ref(id) ON DELETE SET NULL,
+  created_at    TEXT NOT NULL,
+  leased_at     TEXT,
+  released_at   TEXT,
+  -- Reconstructed state is trusted only after it has been checked; see
+  -- treehouse's rule about state you did not watch being created.
+  verified      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS mutation (
@@ -590,6 +627,168 @@ export class Store {
     );
   }
 
+  // ---- runners ------------------------------------------------------------
+
+  saveRunner(runner: Runner, credentialHash: string, mutation: Mutation = {}): void {
+    this.once(mutation, "saveRunner", () => {
+      this.db
+        .prepare(
+          `INSERT INTO runner
+             (name, host, credential_hash, capacity, repos, agents, registered_at, heartbeat_at, retired_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           ON CONFLICT (name) DO UPDATE SET
+             host = excluded.host, credential_hash = excluded.credential_hash,
+             capacity = excluded.capacity, repos = excluded.repos, agents = excluded.agents,
+             registered_at = excluded.registered_at, heartbeat_at = excluded.heartbeat_at,
+             retired_at = NULL`,
+        )
+        .run(
+          runner.name,
+          runner.host,
+          credentialHash,
+          runner.capacity,
+          JSON.stringify(runner.repos),
+          JSON.stringify(runner.agents),
+          runner.registeredAt,
+          runner.heartbeatAt,
+        );
+      return null;
+    });
+  }
+
+  /** The hash comes back with it; the token it was made from does not exist here. */
+  getRunner(name: string): { runner: Runner; credentialHash: string } | null {
+    const row = this.db.prepare("SELECT * FROM runner WHERE name = ?").get(name);
+    if (row === undefined) return null;
+    return { runner: readRunner(row), credentialHash: String(row["credential_hash"]) };
+  }
+
+  listRunners(): Runner[] {
+    return this.db.prepare("SELECT * FROM runner ORDER BY name").all().map(readRunner);
+  }
+
+  touchRunner(name: string, now: Date): void {
+    this.db
+      .prepare("UPDATE runner SET heartbeat_at = ? WHERE name = ? AND retired_at IS NULL")
+      .run(now.toISOString(), name);
+  }
+
+  retireRunner(name: string, now: Date, mutation: Mutation = {}): boolean {
+    return this.once(
+      mutation,
+      "retireRunner",
+      () => {
+        const { changes } = this.db
+          .prepare("UPDATE runner SET retired_at = ? WHERE name = ? AND retired_at IS NULL")
+          .run(now.toISOString(), name);
+        return Number(changes) > 0;
+      },
+      retired => retired,
+    );
+  }
+
+  /**
+   * Release every live claim a runner holds, and say which.
+   *
+   * Not a fenced release: this is the control plane taking a lease back from a
+   * machine that is gone, not that machine handing it in. The generation is
+   * untouched, so if the runner ever wakes up its completion is still fenced
+   * out by the next acquire — which is exactly the behaviour that made the
+   * fence worth having.
+   */
+  releaseClaimsOf(runner: string, now: Date): string[] {
+    const held = this.db
+      .prepare("SELECT lease_id, task_ref FROM claim WHERE runner = ? AND released_at IS NULL")
+      .all(runner);
+    if (held.length === 0) return [];
+
+    this.db
+      .prepare("UPDATE claim SET released_at = ? WHERE runner = ? AND released_at IS NULL")
+      .run(now.toISOString(), runner);
+
+    // Releasing the lease is only half of it. Claiming a task moves it to
+    // `running`, and the ready query asks for `queued` — so a lease taken back
+    // from a dead machine without this leaves the task stranded in `running`
+    // forever: not claimed by anybody, and never offered to anybody either.
+    // The most expensive kind of bug, because nothing anywhere reports it.
+    //
+    // Matched on backend as well as id. Claims are backend-agnostic and ids
+    // are only unique within a backend, so requeuing by id alone would let a
+    // dead runner's GitHub issue #17 reset a built-in task that happens to be
+    // called `17`. Somebody else's work, moved by a coincidence of naming.
+    for (const row of held) {
+      const ref = this.db
+        .prepare("SELECT backend, external_id FROM task_ref WHERE id = ?")
+        .get(Number(row["task_ref"]));
+      if (ref === undefined || String(ref["backend"]) !== BUILT_IN) continue;
+
+      this.db
+        .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
+        .run(now.toISOString(), String(ref["external_id"]));
+    }
+
+    return held.map(row => String(row["lease_id"]));
+  }
+
+  // ---- worktrees ----------------------------------------------------------
+
+  saveWorktree(worktree: WorktreeRow, mutation: Mutation = {}): void {
+    this.once(mutation, "saveWorktree", () => {
+      this.db
+        .prepare(
+          `INSERT INTO worktree (path, repo, branch, runner, task_ref, created_at, leased_at, released_at, verified)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (path) DO UPDATE SET
+             repo = excluded.repo, branch = excluded.branch, runner = excluded.runner,
+             task_ref = excluded.task_ref, leased_at = excluded.leased_at,
+             released_at = excluded.released_at, verified = excluded.verified`,
+        )
+        .run(
+          worktree.path,
+          worktree.repo,
+          worktree.branch,
+          worktree.runner,
+          worktree.taskRef,
+          worktree.createdAt,
+          worktree.leasedAt,
+          worktree.releasedAt,
+          worktree.verified ? 1 : 0,
+        );
+      return null;
+    });
+  }
+
+  getWorktree(path: string): WorktreeRow | null {
+    const row = this.db.prepare("SELECT * FROM worktree WHERE path = ?").get(path);
+    return row === undefined ? null : readWorktree(row);
+  }
+
+  listWorktrees(): WorktreeRow[] {
+    return this.db.prepare("SELECT * FROM worktree ORDER BY path").all().map(readWorktree);
+  }
+
+  /**
+   * Hand back every worktree a dead runner held, unverified.
+   *
+   * Nobody watched what its process was doing when it stopped, so what is on
+   * disk describes the past rather than the present. Marking these verified
+   * would be asserting something we did not check.
+   */
+  releaseWorktreesOf(runner: string, now: Date): string[] {
+    const held = this.db
+      .prepare("SELECT path FROM worktree WHERE runner = ? AND released_at IS NULL")
+      .all(runner)
+      .map(row => String(row["path"]));
+    if (held.length === 0) return [];
+
+    this.db
+      .prepare(
+        "UPDATE worktree SET released_at = ?, verified = 0 WHERE runner = ? AND released_at IS NULL",
+      )
+      .run(now.toISOString(), runner);
+    return held;
+  }
+
   // ---- idempotency --------------------------------------------------------
 
   /**
@@ -664,6 +863,46 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     capabilityRequirements: readJsonArray(row["capability_requirements"]),
     parkRate: Number(row["park_rate"]),
     origin: String(row["origin"]) === "ours" ? "ours" : "theirs",
+  };
+}
+
+export type WorktreeRow = {
+  path: string;
+  repo: string;
+  branch: string;
+  runner: string | null;
+  taskRef: number | null;
+  createdAt: string;
+  leasedAt: string | null;
+  releasedAt: string | null;
+  /** Whether the state on disk has been checked since it was last let go. */
+  verified: boolean;
+};
+
+function readRunner(row: Record<string, unknown>): Runner {
+  return {
+    name: String(row["name"]),
+    host: String(row["host"]),
+    capacity: Number(row["capacity"]),
+    repos: readJsonArray(row["repos"]),
+    agents: readJsonArray(row["agents"]),
+    registeredAt: String(row["registered_at"]),
+    heartbeatAt: String(row["heartbeat_at"]),
+    retiredAt: row["retired_at"] === null ? null : String(row["retired_at"]),
+  };
+}
+
+function readWorktree(row: Record<string, unknown>): WorktreeRow {
+  return {
+    path: String(row["path"]),
+    repo: String(row["repo"]),
+    branch: String(row["branch"]),
+    runner: row["runner"] === null ? null : String(row["runner"]),
+    taskRef: row["task_ref"] === null ? null : Number(row["task_ref"]),
+    createdAt: String(row["created_at"]),
+    leasedAt: row["leased_at"] === null ? null : String(row["leased_at"]),
+    releasedAt: row["released_at"] === null ? null : String(row["released_at"]),
+    verified: Number(row["verified"]) === 1,
   };
 }
 

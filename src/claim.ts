@@ -48,7 +48,9 @@ export type AcquireResult =
   | { ok: false; reason: "held"; by: string; until: string };
 
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
-export type FenceResult = { ok: true; claim: Claim } | { ok: false; reason: "fenced" | "unknown" };
+export type FenceResult =
+  | { ok: true; claim: Claim; duplicate?: boolean }
+  | { ok: false; reason: "fenced" | "unknown" };
 
 export type AcquireOptions = {
   now: Date;
@@ -232,7 +234,26 @@ export function release(store: Store, leaseId: string, now: Date): FenceResult {
       )
       .run(now.toISOString(), leaseId);
 
-    if (Number(changes) === 0) return refusal(db, leaseId);
+    if (Number(changes) === 0) {
+      // A repeat of a completion this same lease already made is not a fence —
+      // nobody took the task away, the runner simply said so twice because its
+      // first acknowledgement was lost. M1 asks for duplicate completion to be
+      // reconciled rather than refused, and telling an honest runner it was
+      // superseded would send it to stop when it should carry on.
+      //
+      // Deliberately not filtered by supersession. A lease that released and
+      // was then reacquired by somebody else still *completed*: its work was
+      // accepted at the time, and the honest answer to a late retry is "you
+      // already did this", not "you were fenced" — which would say its work
+      // never counted. Fencing is for a lease that never finished.
+      const duplicate = db
+        .prepare("SELECT * FROM claim WHERE lease_id = ? AND released_at IS NOT NULL")
+        .get(leaseId);
+      if (duplicate !== undefined) {
+        return { ok: true as const, claim: readClaim(duplicate), duplicate: true };
+      }
+      return refusal(db, leaseId);
+    }
 
     const row = db.prepare("SELECT * FROM claim WHERE lease_id = ?").get(leaseId);
     return { ok: true as const, claim: readClaim(row as Record<string, unknown>) };
