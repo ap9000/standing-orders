@@ -76,6 +76,7 @@ import {
   type Runner as CommandRunner,
 } from "./builder.js";
 import { run } from "./exec.js";
+import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 
@@ -146,6 +147,11 @@ Capabilities — what the work needs, recorded and probed, never valued
   nightorders gaps [--repo <path>]      what is missing, ranked by how many
                                         tasks filling it would start
 
+  nightorders brief [--repo <path>] [--local] [--since <iso>]
+                                        the morning: overnight runs, gaps,
+                                        PRs (--local skips the network and
+                                        says REVIEW was not read)
+
 The outbox — facts that want a person, durably
   nightorders outbox list [--all]
   nightorders outbox deliver --cmd <c>  runs once per pending row, reading
@@ -193,7 +199,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
-    "max", "cap", "probe", "kind", "expires", "cmd",
+    "max", "cap", "probe", "kind", "expires", "cmd", "since",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -305,6 +311,8 @@ async function dispatch(
       return gapsCommand(flags, context);
     case "outbox":
       return outboxCommand(positional, flags, context);
+    case "brief":
+      return briefCommand(flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -765,8 +773,11 @@ async function buildCommand(
     worktree: leased.worktree.path,
     branch,
     now,
+    clock: context.clock,
     ...(text(flags, "model") === undefined ? {} : { model: text(flags, "model") as string }),
     ...(text(flags, "turns") === undefined ? {} : { maxTurns: Number(text(flags, "turns")) }),
+    ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+    ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
   });
 
   // Handed back either way. A tree with work still in it comes back
@@ -774,7 +785,12 @@ async function buildCommand(
   const handedBack = await worktrees.release(leased.worktree.path, now);
 
   if (!result.ok) {
-    return fail(write, json, "build", result.reason, result.message, EXIT.refused, {
+    // The exit-code contract separates "no" from "broken", and a build whose
+    // agent crashed or timed out *broke* — 3 here taught callers that a dead
+    // model and an unapproved scope were the same kind of news. Refusals —
+    // the gates saying no — stay 3, which is them working.
+    const broke = result.reason === "agent" || result.reason === "timeout" || result.reason === "git";
+    return fail(write, json, "build", result.reason, result.message, broke ? EXIT.failed : EXIT.refused, {
       worktree: leased.worktree.path,
     });
   }
@@ -1380,6 +1396,115 @@ function gapsCommand(flags: Map<string, string | true>, context: Context): numbe
     write(`    ${gap.instructions}`);
   }
   return EXIT.refused;
+}
+
+// ---- the morning ----------------------------------------------------------
+
+/**
+ * `nightorders brief` — one ritual (§6). The overnight from the run table,
+ * the blocked gaps ranked by what filling them frees, the PRs waiting on a
+ * person, and where decisions will go when M3 gives them a shape.
+ *
+ * REVIEW is a live network read through `gh`, so it distinguishes three
+ * states a lazy version would collapse: read and empty, read and full, and
+ * *not read* — offline (--local) or failed — because "no PRs" and "could
+ * not look" send the morning in different directions. Token and dollar
+ * figures wait until run records carry usage (M4's economics); a briefing
+ * that printed $0.00 it never measured would be lying with precision.
+ */
+async function briefCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const repo = repoFrom(flags);
+  const since =
+    text(flags, "since") ?? new Date(clock().getTime() - 24 * 60 * 60_000).toISOString();
+
+  const runs = store.runsSince(since);
+  const built = runs.filter(one => one.outcome === "built");
+  const failed = runs.filter(one => one.outcome === "failed");
+  const refused = runs.filter(one => one.outcome === "refused");
+  const cutDown = runs.filter(one => one.outcome === null);
+
+  const gaps = computeGaps(store, repo, clock());
+  const pending = store.listNotifications("pending");
+
+  let review:
+    | { state: "read"; pulls: { number: number; title: string }[] }
+    | { state: "not-read"; why: string };
+  if (flags.has("local")) {
+    review = { state: "not-read", why: "--local, the network was not asked" };
+  } else {
+    const read = await readPulls(repo);
+    review =
+      read.problems.length > 0 && read.pulls.length === 0
+        ? { state: "not-read", why: read.problems[0] ?? "unreadable" }
+        : { state: "read", pulls: read.pulls.map(one => ({ number: one.number, title: one.title })) };
+  }
+
+  if (json) {
+    write(
+      JSON.stringify(
+        {
+          ok: true,
+          command: "brief",
+          repo,
+          since,
+          overnight: { built, failed, refused, cutDown },
+          gaps,
+          review,
+          outboxPending: pending.length,
+          decide: "decisions arrive at M3",
+        },
+        null,
+        2,
+      ),
+    );
+    return EXIT.ok;
+  }
+
+  const lines: string[] = [`nightorders — good morning ─ ${repo}`];
+  lines.push(
+    `  overnight    ${built.length} built · ${failed.length} failed · ${refused.length} refused${
+      cutDown.length > 0 ? ` · ${cutDown.length} cut down mid-flight` : ""
+    }`,
+  );
+  for (const one of built) {
+    lines.push(`      ${one.taskId.padEnd(20)} ${one.committed === true ? `committed to ${one.branch}` : "changed nothing, which is a real answer"}`);
+  }
+  for (const one of failed) {
+    lines.push(`      ${one.taskId.padEnd(20)} failed: ${one.reason ?? "?"} — work kept in ${one.worktree}`);
+  }
+  for (const one of cutDown) {
+    lines.push(`      ${one.taskId.padEnd(20)} never finished — the process died with it; \`task show ${one.taskId}\``);
+  }
+
+  if (gaps.length > 0) {
+    const best = gaps[0] as Gap;
+    lines.push(`  ▸ BLOCKED    ${gaps.length} gap(s)${best.unblocks.length > 0 ? ` — filling ${best.key} starts ${best.unblocks.length} task(s)` : ""}`);
+    for (const gap of gaps) {
+      lines.push(`      ${gap.key.padEnd(28)} ${gap.state}`);
+    }
+    lines.push(`      → nightorders gaps --repo ${repo}`);
+  }
+
+  lines.push(
+    review.state === "read"
+      ? `  ▸ REVIEW     ${review.pulls.length} PR(s)${review.pulls.length > 0 ? "" : " — nothing waits"}`
+      : `  ▸ REVIEW     not read — ${review.why}`,
+  );
+  if (review.state === "read") {
+    for (const pull of review.pulls) lines.push(`      #${pull.number}  ${pull.title}`);
+  }
+
+  if (pending.length > 0) {
+    lines.push(`  ▸ OUTBOX     ${pending.length} undelivered — nightorders outbox deliver --cmd …`);
+  }
+  lines.push("  ▸ DECIDE     decisions arrive at M3");
+
+  write(lines.join("\n"));
+  return EXIT.ok;
 }
 
 // ---- the outbox -----------------------------------------------------------

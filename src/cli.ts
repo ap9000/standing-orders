@@ -175,6 +175,7 @@ const OPERATE_COMMANDS = new Set([
   "cap",
   "gaps",
   "outbox",
+  "brief",
   "reconcile",
 ]);
 

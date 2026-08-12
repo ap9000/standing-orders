@@ -683,3 +683,102 @@ describe("the outbox", () => {
     });
   });
 });
+
+describe("the morning briefing", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+
+  const agent: Runner = async (_file, _args, options) => {
+    await writeFile(join(options?.cwd ?? "", "guard.ts"), "export const guarded = true;\n");
+    return { ...OK, stdout: AGENT_SAID };
+  };
+  const broken: Runner = async () => ({ ...OK, code: 1, stderr: "the model refused" });
+
+  const run = (argv: string[], runner: Runner = agent) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), {
+      databaseFile: db,
+      now: T0,
+      agentRunner: runner,
+    });
+  };
+
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-brief-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
+    await exec("git", ["config", "user.email", "t@e.com"], { cwd: repo });
+    await exec("git", ["config", "user.name", "T"], { cwd: repo });
+    await writeFile(join(repo, "README.md"), "x\n");
+    await exec("git", ["add", "."], { cwd: repo });
+    await exec("git", ["commit", "-qm", "first"], { cwd: repo });
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const setup = async () => {
+    await run(["runner", "register", "builder-1", "--json"]);
+    const token = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approver = payload().token as string;
+    return { token, approver };
+  };
+
+  const approvedTask = async (id: string, approver: string) => {
+    await run(["task", "add", "the work", "--id", id, "--repo", repo]);
+    await run(["task", "scope", id, "--goal", "add a guard"]);
+    await run(["task", "approve", id, "--json"]);
+    const digest = payload().scope.digest as string;
+    await run(["task", "approve", id, "--yes", "--digest", digest, "--as", "alex", "--token", approver]);
+  };
+
+  test("reports the overnight from the run table, offline, honestly", async () => {
+    const { token, approver } = await setup();
+    await approvedTask("t-good", approver);
+    await approvedTask("t-bad", approver);
+
+    // t-good builds; t-bad fails — two ticks so each outcome lands.
+    await run(["tick", "--runner", "builder-1", "--token", token, "--repo", repo, "--pool", pool, "--json"]);
+    await run(["tick", "--runner", "builder-1", "--token", token, "--repo", repo, "--pool", pool, "--json"], broken);
+
+    const code = await run(["brief", "--repo", repo, "--local", "--json"]);
+
+    expect(code).toBe(EXIT.ok);
+    const report = payload();
+    // Both tasks share a frozen creation instant, so which ran first is not
+    // promised — one built, one failed, and both are on the record.
+    expect(report.overnight.built).toHaveLength(1);
+    expect(report.overnight.built[0]).toMatchObject({ committed: true });
+    expect(report.overnight.failed).toHaveLength(1);
+    expect(report.overnight.failed[0]).toMatchObject({ reason: "agent" });
+    const seen = [report.overnight.built[0].taskId, report.overnight.failed[0].taskId].sort();
+    expect(seen).toEqual(["t-bad", "t-good"]);
+    // REVIEW was not read, and says so — not "zero PRs".
+    expect(report.review).toEqual({ state: "not-read", why: "--local, the network was not asked" });
+    // The failed build's notification is waiting.
+    expect(report.outboxPending).toBe(1);
+  });
+
+  test("the blocked section is the gaps view, ranked", async () => {
+    const { approver } = await setup();
+    await run(["cap", "add", "MISSING_KEY", "--repo", repo]);
+    await approvedTask("t-1", approver);
+    await run(["task", "require", "t-1", "--cap", "env:MISSING_KEY"]);
+
+    await run(["brief", "--repo", repo, "--local", "--json"]);
+
+    expect(payload().gaps).toHaveLength(1);
+    expect(payload().gaps[0]).toMatchObject({ key: "env:MISSING_KEY", unblocks: ["t-1"] });
+  });
+});

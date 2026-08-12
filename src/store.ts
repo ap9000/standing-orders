@@ -1297,25 +1297,24 @@ export class Store {
       );
   }
 
+  /** Every attempt since a moment, task ids attached — the overnight, as data. */
+  runsSince(since: string): (Run & { taskId: string })[] {
+    return this.db
+      .prepare(
+        `SELECT run.*, task_ref.external_id AS task_id FROM run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE run.started_at >= ? ORDER BY run.id`,
+      )
+      .all(since)
+      .map(row => ({ ...readRun(row), taskId: String(row["task_id"]) }));
+  }
+
   /** Newest first, because the question is almost always "what just happened". */
   runsFor(taskRef: number): Run[] {
     return this.db
       .prepare("SELECT * FROM run WHERE task_ref = ? ORDER BY id DESC")
       .all(taskRef)
-      .map(row => ({
-        id: Number(row["id"]),
-        taskRef: Number(row["task_ref"]),
-        leaseId: String(row["lease_id"]),
-        runner: String(row["runner"]),
-        branch: String(row["branch"]),
-        worktree: String(row["worktree"]),
-        model: row["model"] === null ? null : String(row["model"]),
-        outcome: row["outcome"] === null ? null : (String(row["outcome"]) as Run["outcome"]),
-        reason: row["reason"] === null ? null : String(row["reason"]),
-        committed: row["committed"] === null ? null : Number(row["committed"]) === 1,
-        startedAt: String(row["started_at"]),
-        finishedAt: row["finished_at"] === null ? null : String(row["finished_at"]),
-      }));
+      .map(readRun);
   }
 
   // ---- idempotency --------------------------------------------------------
@@ -1371,6 +1370,23 @@ export class Store {
       .run(idempotencyKey, operation, JSON.stringify(result ?? null), actor, at.toISOString());
     return result;
   }
+}
+
+function readRun(row: Record<string, unknown>): Run {
+  return {
+    id: Number(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    leaseId: String(row["lease_id"]),
+    runner: String(row["runner"]),
+    branch: String(row["branch"]),
+    worktree: String(row["worktree"]),
+    model: row["model"] === null ? null : String(row["model"]),
+    outcome: row["outcome"] === null ? null : (String(row["outcome"]) as Run["outcome"]),
+    reason: row["reason"] === null ? null : String(row["reason"]),
+    committed: row["committed"] === null ? null : Number(row["committed"]) === 1,
+    startedAt: String(row["started_at"]),
+    finishedAt: row["finished_at"] === null ? null : String(row["finished_at"]),
+  };
 }
 
 function readNotification(row: Record<string, unknown>): Notification {

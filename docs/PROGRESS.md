@@ -69,13 +69,20 @@ reconstructed state is leased-until-verified. There is no external
 treehouse installation to drive, so an adapter would adapt to nothing.
 Recorded here rather than silently reinterpreted.
 
-## M2 — fill one gap, three tasks start
+## M2 — fill one gap, three tasks start — **complete 2026-08-11**
 
-Ships when: one supplied capability lets several blocked tasks dispatch.
-Plan Codex-reviewed 2026-08-11; its findings reshaped the identity model
-(tasks carry a repo; requirements are qualified `kind:name` keys;
-verification is stamped with whose environment answered, and tick trusts
-only what it re-proves where it stands).
+Ships when: one supplied capability lets several blocked tasks dispatch —
+and it does, executably: three tasks skipped naming their gap, the
+capability supplied with the probe untouched, all three built on the next
+pass (`tick.test.ts`). Plan Codex-reviewed 2026-08-11; its findings
+reshaped the identity model (tasks carry a repo; requirements are
+qualified `kind:name` keys; verification is stamped with whose
+environment answered, and tick trusts only what it re-proves where it
+stands) and scoped the outbox to episodes with receipts.
+
+The morning shape: `nightorders reconcile && nightorders tick`, then
+`nightorders brief` with coffee, and `outbox deliver` pointed at
+whatever pings your phone.
 
 | Item | State | Proof |
 |---|---|---|
@@ -85,9 +92,9 @@ only what it re-proves where it stands).
 | Dispatch gate: unverified does not run | **done** | inside the claim transaction (a key that expired between survey and take is caught) *and* the builder (`nightorders build` cannot bypass it); tick probes at its own checkpoint and reports each gap by name |
 | Fill one gap, three tasks start | **done** | executable in `tick.test.ts`: three tasks skipped naming the gap, the capability supplied with the probe untouched, all three built on the next pass |
 | `gaps` ranked by what they unblock | **done** | derived view; a task waiting on two gaps counts toward neither's `unblocks` and both's `alsoBlocks`, so the ranking sends the operator to the right gap first |
-| Morning briefing | not started | run aggregation since a moment; REVIEW distinguishes "not read" from "zero" |
+| Morning briefing | **done** | `nightorders brief`: the overnight from the run table (cut-down attempts surfaced by name), BLOCKED = the gaps view, REVIEW distinguishes read-and-empty from *not read* (`--local` or a failed `gh`), OUTBOX count, DECIDE points at M3. No token/dollar line until something measures one |
 | Notification outbox | **done** | durable rows enqueued in the same transaction as the run record they describe; dedupe keys are episode identities (a gap re-nags after it fills and recurs); delivery passes text as environment, never into the command line; receipts and failed attempts recorded. Quiet hours, escalation, deep links → M4 with the loop |
-| Exit-code cleanup (deferred here from M1) | not started | standalone `build` maps agent/timeout/git to 3; contract says 1 |
+| Exit-code cleanup (deferred here from M1) | **done** | standalone `build` now exits 1 when the attempt broke (agent/timeout/git) and 3 only when a gate said no |
 
 ## Deliberately deferred (and to where)
 
@@ -100,6 +107,13 @@ only what it re-proves where it stands).
 | `tick` loops / daemonizes | a pass is the M1 shape; the loop and its economics are the product | M4 |
 
 ## History
+
+- **2026-08-11 (M2)** — M2 completes in one sitting: capabilities +
+  probes (`65f0381`), the gate in the claim transaction and the builder
+  with the acceptance sentence executable (`b699b56`), gaps (`f0ff397`),
+  cap scan (`a055a2d`), the outbox (`d0f07a3`), the briefing and the
+  build exit-code cleanup. Plan Codex-reviewed before implementation;
+  its identity/authority findings drove the schema. Suite 503.
 
 - **2026-08-11 (later)** — M1 completes. Release provenance + atomic
   dead-runner recovery (`5cb9357`); the pulse, post-agent rechecks, run
