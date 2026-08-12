@@ -45,6 +45,8 @@ import {
   acquire,
   acquireIfReady,
   completeFenced,
+  finalizeMalformedFenced,
+  finalizeParkFenced,
   heartbeat,
   release,
   reap,
@@ -256,6 +258,11 @@ export async function runOperate(
       json,
       now,
       clock,
+      // Evidence lives beside the database for the same reason the database
+      // lives beside repos.json: somebody will want to back it up, sync it,
+      // or delete it, and files hidden somewhere clever cannot be found when
+      // it matters.
+      evidenceRoot: join(dirname(file), "evidence"),
       ...(options.agentRunner === undefined ? {} : { agentRunner: options.agentRunner }),
       ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
     });
@@ -272,6 +279,7 @@ type Context = {
   json: boolean;
   now: Date;
   clock: () => Date;
+  evidenceRoot: string;
   agentRunner?: CommandRunner;
   gitRunner?: CommandRunner;
 };
@@ -766,10 +774,29 @@ async function buildCommand(
     return fail(write, json, "build", leased.reason, leased.message, EXIT.refused);
   }
 
+  // The standalone road records its attempt and carries its exact lease the
+  // same as tick's — a park sealed here goes through the same fenced
+  // transaction, because a gate one road bypasses is a suggestion. No claim
+  // yet is fine: build() refuses no-claim itself, and the run row records
+  // that the attempt was made.
+  const held = currentClaim(store, ref.id, now);
+  const runId = store.startRun({
+    taskRef: ref.id,
+    leaseId: held?.leaseId ?? "unclaimed",
+    runner,
+    branch,
+    worktree: leased.worktree.path,
+    ...(text(flags, "model") === undefined ? {} : { model: text(flags, "model") as string }),
+    now,
+  });
+
   const result = await build(store, {
     taskId: id,
     taskRef: ref.id,
     runner,
+    ...(held === null ? {} : { leaseId: held.leaseId }),
+    runId,
+    evidenceRoot: context.evidenceRoot,
     worktree: leased.worktree.path,
     branch,
     now,
@@ -784,17 +811,67 @@ async function buildCommand(
   // unverified and is reported rather than cleaned.
   const handedBack = await worktrees.release(leased.worktree.path, now);
 
+  if (result.ok && result.parked !== undefined) {
+    const sealed =
+      held === null
+        ? null
+        : finalizeParkFenced(store, {
+            leaseId: held.leaseId,
+            runId,
+            taskId: id,
+            decision: result.parked.decision,
+            artifactIds: result.parked.artifactIds,
+            now: context.clock(),
+          });
+    if (sealed === null || !sealed.ok) {
+      return fail(write, json, "build", "fenced", `${id} parked, but the lease was gone before the decision could be sealed`, EXIT.refused, {
+        worktree: leased.worktree.path,
+      });
+    }
+    return succeed(
+      write,
+      json,
+      "build",
+      { parked: true, decision: sealed.decisionId, worktree: leased.worktree.path },
+      () => [
+        `${id} parked a decision instead of guessing.`,
+        `  decision  ${sealed.decisionId} — \`nightorders decide ${sealed.decisionId}\``,
+        `  worktree  ${leased.worktree.path} (work in progress preserved)`,
+      ],
+    );
+  }
+
   if (!result.ok) {
+    if (result.reason === "malformed-decision" && held !== null) {
+      finalizeMalformedFenced(store, {
+        leaseId: held.leaseId,
+        runId,
+        taskId: id,
+        problems: result.problems ?? [],
+        now: context.clock(),
+      });
+    } else {
+      store.finishRun(runId, {
+        outcome: result.reason === "agent" || result.reason === "timeout" || result.reason === "git" ? "failed" : "refused",
+        reason: result.reason,
+        now: context.clock(),
+      });
+    }
     // The exit-code contract separates "no" from "broken", and a build whose
     // agent crashed or timed out *broke* — 3 here taught callers that a dead
     // model and an unapproved scope were the same kind of news. Refusals —
     // the gates saying no — stay 3, which is them working.
-    const broke = result.reason === "agent" || result.reason === "timeout" || result.reason === "git";
+    const broke =
+      result.reason === "agent" ||
+      result.reason === "timeout" ||
+      result.reason === "git" ||
+      result.reason === "malformed-decision";
     return fail(write, json, "build", result.reason, result.message, broke ? EXIT.failed : EXIT.refused, {
       worktree: leased.worktree.path,
     });
   }
 
+  store.finishRun(runId, { outcome: "built", committed: result.committed, now: context.clock() });
   return succeed(
     write,
     json,
@@ -818,7 +895,7 @@ async function buildCommand(
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "skipped" | "failed";
+  outcome: "built" | "parked" | "skipped" | "failed";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -915,6 +992,7 @@ async function tickCommand(
   const considered = ready.length;
   const dispatched: TickOutcome[] = [];
   let built = 0;
+  let parked = 0;
   let broke = 0;
 
   for (const ref of ready) {
@@ -1012,6 +1090,8 @@ async function tickCommand(
       taskRef: ref.id,
       runner,
       leaseId: lease,
+      runId,
+      evidenceRoot: context.evidenceRoot,
       worktree: leased.worktree.path,
       branch,
       now: clock(),
@@ -1026,6 +1106,30 @@ async function tickCommand(
     // Handed back either way; a tree with somebody's work in it comes back
     // unverified rather than cleaned, same as `build`.
     await worktrees.release(leased.worktree.path, clock());
+
+    if (result.ok && result.parked !== undefined) {
+      // The seal is one fenced transaction: decision, hold, run outcome, and
+      // outbox row exist together or — if the lease was superseded between
+      // the builder's last proof and this write — not at all.
+      const sealed = finalizeParkFenced(store, {
+        leaseId: lease,
+        runId,
+        taskId: id,
+        decision: result.parked.decision,
+        artifactIds: result.parked.artifactIds,
+        now: clock(),
+      });
+      if (sealed.ok) {
+        // A park is the system working: the agent refused to guess, the
+        // question is in the attention surface, the pass moves on.
+        dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}`, worktree: leased.worktree.path });
+        parked++;
+      } else {
+        dispatched.push({ id, outcome: "failed", reason: "fenced", worktree: leased.worktree.path });
+        broke++;
+      }
+      continue;
+    }
 
     if (result.ok) {
       // The completion has to be *accepted*, not assumed. A fence here means
@@ -1083,6 +1187,28 @@ async function tickCommand(
       continue;
     }
 
+    if (result.reason === "malformed-decision") {
+      // The agent tried to park and could not say what, twice over. The
+      // fenced transaction records the incident, holds the task so the next
+      // pass does not spend the same tokens on the same wall, and pages a
+      // person — atomically, so a crash cannot leave the stall silent.
+      const sealed = finalizeMalformedFenced(store, {
+        leaseId: lease,
+        runId,
+        taskId: id,
+        problems: result.problems ?? [],
+        now: clock(),
+      });
+      dispatched.push({
+        id,
+        outcome: "failed",
+        reason: sealed.ok ? "malformed-decision" : "fenced",
+        worktree: leased.worktree.path,
+      });
+      broke++;
+      continue;
+    }
+
     if (result.reason === "agent" || result.reason === "timeout" || result.reason === "git") {
       // The attempt itself broke. The terminal state and the release are one
       // step, so the task is never simultaneously free and unfinished — and
@@ -1120,18 +1246,23 @@ async function tickCommand(
   }
 
   const summary = () => {
-    const lines = [`Considered ${considered}, built ${built}, broke ${broke}.`];
+    const lines = [`Considered ${considered}, built ${built}, parked ${parked}, broke ${broke}.`];
     for (const entry of dispatched) {
       const detail =
         entry.outcome === "built"
           ? entry.committed === true
             ? `committed to ${entry.branch}`
             : "the agent changed nothing, which is a real answer"
-          : entry.reason ?? "";
+          : entry.outcome === "parked"
+            ? `${entry.reason} — \`nightorders decide\``
+            : entry.reason ?? "";
       lines.push(`  ${entry.id.padEnd(24)} ${entry.outcome}  ${detail}`.trimEnd());
     }
     if (built > 0) {
       lines.push("", "Nothing has been pushed. Look at the branches before they go anywhere.");
+    }
+    if (parked > 0) {
+      lines.push("", `${parked} decision${parked === 1 ? "" : "s"} waiting — \`nightorders decide\`, or the morning brief.`);
     }
     return lines;
   };
@@ -1144,7 +1275,10 @@ async function tickCommand(
       dispatched,
     });
   }
-  if (built > 0) {
+  // A pass whose only events were parks exits 0: nothing broke, nothing
+  // needs code — the questions are in the attention surface where they
+  // belong, which is the system working.
+  if (built > 0 || parked > 0) {
     return succeed(write, json, "tick", { considered, dispatched }, summary);
   }
   if (considered === 0) {

@@ -36,6 +36,7 @@ import {
   type Mutation,
   type TaskState,
 } from "./store.js";
+import type { ParsedDecision, Problem } from "./decision.js";
 
 export type Claim = {
   taskRef: number;
@@ -484,6 +485,170 @@ export function completeFenced(
 
     return { ok: true as const, claim };
   });
+}
+
+/**
+ * Seal a park, fenced at the write (§7).
+ *
+ * The builder proved its lease after the agent ran; this transaction proves
+ * it again *in the same statement that releases it*, because everything a
+ * park creates — the decision, its hold, the outbox row — is only true if
+ * this lease still spoke for the task at the moment of sealing. A superseded
+ * lease creates none of it: no decision, no hold, no notification, and the
+ * run is finalized as the fenced refusal it was. A crash anywhere inside
+ * rolls all of it back together; there is no instant at which a decision
+ * exists without its hold.
+ *
+ * `released_by = 'parked'` so a late retry from this lease is answered with
+ * the fence, not "duplicate": a park hands the task to a person, and nothing
+ * the runner says afterwards is that person's answer.
+ */
+export function finalizeParkFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    decision: ParsedDecision;
+    artifactIds: readonly number[];
+    now: Date;
+  },
+): { ok: true; decisionId: number } | { ok: false; reason: "fenced" | "unknown" } {
+  const { leaseId, runId, taskId, decision, artifactIds, now } = args;
+  const db = store.handle;
+
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      // A run that names another lease or is already finished cannot be
+      // sealed by this call — that is a caller defect, not a race to absorb.
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a park seals exactly one`);
+    }
+
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'parked'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+
+    const decisionId = store.saveDecision(
+      {
+        run: runId,
+        urgency: decision.urgency,
+        recap: decision.recap,
+        question: decision.question,
+        options: decision.options,
+        recommendation: decision.recommendation,
+        ...(decision.assignee === null ? {} : { assignee: decision.assignee }),
+        ...(decision.deadline === null ? {} : { deadline: decision.deadline }),
+      },
+      now,
+    );
+    for (const artifact of artifactIds) store.linkEvidence(decisionId, artifact);
+
+    // The hold is indefinite by construction. The decision's deadline is
+    // attention metadata; wiring it into `until` would dispatch the task,
+    // unanswered, the moment the deadline passed — expiry never chooses.
+    store.holdOwned(
+      {
+        taskRef: run.taskRef,
+        ownerKind: "decision",
+        ownerId: String(decisionId),
+        reason: `decision:${decisionId} — ${oneLine(decision.question, 80)}`,
+        until: null,
+      },
+      now,
+    );
+    store.finishRun(runId, { outcome: "parked", reason: `decision:${decisionId}`, now });
+    store.enqueueNotification(
+      {
+        dedupeKey: `decision:${decisionId}`,
+        kind: "decision",
+        subject: `${taskId} parked a decision`,
+        body: `${oneLine(decision.question, 200)}\n\`nightorders decide ${decisionId}\``,
+      },
+      now,
+    );
+    return { ok: true as const, decisionId };
+  });
+}
+
+/**
+ * Seal a park whose payload never became a decision (§6's bounded repair ran
+ * out). Same fence, same atomicity, different record: an incident that stays
+ * in every brief until a person resolves it, holding the task so the next
+ * pass does not spend the same tokens hitting the same wall nightly. The
+ * malformed payload is preserved as evidence — a person may still be able to
+ * read what the agent meant.
+ */
+export function finalizeMalformedFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    problems: readonly Problem[];
+    now: Date;
+  },
+): { ok: true; incidentId: number } | { ok: false; reason: "fenced" | "unknown" } {
+  const { leaseId, runId, taskId, problems, now } = args;
+  const db = store.handle;
+
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a park seals exactly one`);
+    }
+
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'parked'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+
+    const incidentId = store.createIncident({ run: runId, kind: "malformed-decision" }, now);
+    store.holdOwned(
+      {
+        taskRef: run.taskRef,
+        ownerKind: "incident",
+        ownerId: String(incidentId),
+        reason: `malformed-decision — the agent tried to park ${taskId} and could not say what`,
+        until: null,
+      },
+      now,
+    );
+    store.finishRun(runId, { outcome: "failed", reason: "malformed-decision", now });
+    store.enqueueNotification(
+      {
+        dedupeKey: `malformed:${runId}`,
+        kind: "malformed-decision",
+        subject: `${taskId}: the agent parked but could not say what`,
+        body: [
+          `Repair ran out. The task is held until somebody looks.`,
+          ...problems.slice(0, 5).map(problem => `- ${oneLine(problem.message, 120)}`),
+          `The raw payload is preserved in run ${runId}'s evidence.`,
+        ].join("\n"),
+      },
+      now,
+    );
+    return { ok: true as const, incidentId };
+  });
+}
+
+/** Untrusted text on its way into a subject line: one line, bounded. */
+function oneLine(text: string, cap: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= cap ? flat : `${flat.slice(0, cap)}…`;
 }
 
 /** The live claim on a task, if there is one. */

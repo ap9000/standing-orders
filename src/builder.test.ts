@@ -375,7 +375,10 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("do not touch the billing model");
     expect(prompt).toContain("src/payouts.ts");
     expect(prompt).toContain("never commit to main");
-    expect(prompt).toContain("stop and say so");
+    // The judgement-call escape hatch is the park protocol, not prose: the
+    // brief names this attempt's own mailbox, nonce and all.
+    expect(prompt).toMatch(/Park it:[\s\S]*NIGHTORDERS-PARK-[0-9a-f]{16}\.json/);
+    expect(prompt).toContain('"reversible": true or false');
   });
 
   test("does not skip permission checks unless a person asked for it", async () => {
@@ -995,5 +998,202 @@ describe("the pulse", () => {
     const claim = currentClaim(store, taskRef, new Date());
     expect(claim).not.toBeNull();
     expect(Date.parse(claim!.expiresAt)).toBeGreaterThan(T0.getTime() + 60_000);
+  });
+});
+
+describe("the park", () => {
+  let store: Store;
+  let approverToken: string;
+  let taskRef: number;
+  let worktree: string;
+  let evidence: string;
+  let runId: number;
+  const gitCalls: string[][] = [];
+
+  const { mkdtempSync, rmSync, writeFileSync, symlinkSync, existsSync, readdirSync, readFileSync } =
+    require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+
+  /** Real git answers, stubbed: on-branch, a base revision, a small diff. */
+  const git: Runner = async (_file, args) => {
+    gitCalls.push([...args]);
+    if (args.includes("--abbrev-ref")) return { ...OK, stdout: "feat/a\n" };
+    if (args.includes("symbolic-ref")) {
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
+    if (args.includes("rev-parse")) return { ...OK, stdout: "abc123def\n" };
+    if (args.includes("diff")) return { ...OK, stdout: "diff --git a/src/x.ts b/src/x.ts\n+guard\n" };
+    if (args.includes("status")) return { ...OK, stdout: " M src/x.ts\n" };
+    return { ...OK };
+  };
+
+  /** An agent that parks: it reads its mailbox's name from the brief. */
+  const parkingAgent =
+    (payload: unknown, shape: "file" | "symlink" = "file"): Runner =>
+    async (_file, args, options) => {
+      const prompt = args[args.indexOf("-p") + 1] ?? "";
+      const name = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      if (name === undefined) throw new Error("the brief named no mailbox");
+      const cwd = options?.cwd ?? worktree;
+      if (shape === "symlink") {
+        symlinkSync(join(cwd, "..", "outside-secret"), join(cwd, name));
+      } else {
+        writeFileSync(join(cwd, name), typeof payload === "string" ? payload : JSON.stringify(payload));
+      }
+      return { ...OK, stdout: JSON.stringify({ result: "parked it" }) };
+    };
+
+  const decision = {
+    urgency: "blocking",
+    recap: "The guard needs a policy call: the payout path can fail open or fail closed.",
+    question: "Fail open or fail closed on timeout?",
+    options: [
+      { id: "open", label: "Fail open", consequence: "Payouts continue; bad ones slip through.", reversible: true },
+      { id: "closed", label: "Fail closed", consequence: "Payouts pause; support tickets.", reversible: true },
+    ],
+    recommendation: "closed",
+  };
+
+  const request = (over: Record<string, unknown> = {}) => ({
+    taskId: "t-1",
+    taskRef,
+    runner: "builder-1",
+    worktree,
+    branch: "feat/a",
+    now: T0,
+    runId,
+    evidenceRoot: evidence,
+    git,
+    ...over,
+  });
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", now: T0 });
+    worktree = mkdtempSync(join(tmpdir(), "nightorders-park-wt-"));
+    evidence = mkdtempSync(join(tmpdir(), "nightorders-park-ev-"));
+    store.saveWorktree({
+      path: worktree,
+      repo: "/code/thing",
+      branch: "feat/a",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    runId = store.startRun({
+      taskRef,
+      leaseId: currentClaim(store, taskRef, T0)!.leaseId,
+      runner: "builder-1",
+      branch: "feat/a",
+      worktree,
+      now: T0,
+    });
+    gitCalls.length = 0;
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(evidence, { recursive: true, force: true });
+  });
+
+  test("a valid park comes back as a package, and nothing commits", async () => {
+    const result = await build(store, request({ agent: parkingAgent(decision) }));
+
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok || result.parked === undefined) throw new Error("expected a park");
+    expect(result.parked.decision.question).toBe("Fail open or fail closed on timeout?");
+
+    // The mailbox left the worktree — ingested once, then gone.
+    expect(readdirSync(worktree).filter(name => name.startsWith("NIGHTORDERS-PARK-"))).toHaveLength(0);
+    // Machine-captured evidence: the payload, the diff, the inventory.
+    const kinds = store.artifactsFor(runId).map(artifact => artifact.kind).sort();
+    expect(kinds).toEqual(["diff", "park-payload", "status"]);
+    expect(result.parked.artifactIds).toHaveLength(3);
+    // A park never commits: whatever is in flight stays preserved.
+    expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
+    // And the base revision was stamped before the agent spent anything.
+    expect(store.getRun(runId)?.baseRevision).toBe("abc123def");
+  });
+
+  test("evidence records how it was captured, and against what", async () => {
+    await build(store, request({ agent: parkingAgent(decision) }));
+
+    const diff = store.artifactsFor(runId).find(artifact => artifact.kind === "diff");
+    expect(diff?.capture).toContain("abc123def");
+    expect(diff?.capture).toContain("(exit 0)");
+    expect(diff?.truncated).toBe(false);
+    expect(diff?.sha256).toMatch(/^[0-9a-f]{64}$/);
+    // The file itself lives under the evidence root, keyed by run.
+    expect(existsSync(join(evidence, String(runId), "diff.patch"))).toBe(true);
+  });
+
+  test("an invalid payload is malformed, and the payload is preserved as evidence", async () => {
+    const broken = { ...decision, recommendation: "ghost" };
+    const result = await build(store, request({ agent: parkingAgent(broken) }));
+
+    expect(result).toMatchObject({ ok: false, reason: "malformed-decision" });
+    if (result.ok) throw new Error("expected malformed");
+    expect(result.problems?.map(problem => problem.reason)).toContain("bad-recommendation");
+
+    // The person can still read what the agent meant.
+    const payload = store.artifactsFor(runId).find(artifact => artifact.kind === "park-payload");
+    expect(payload).toBeDefined();
+    const kept = readFileSync(join(evidence, payload!.key), "utf8");
+    expect(kept).toContain("ghost");
+  });
+
+  test("a symlink mailbox is refused unread", async () => {
+    writeFileSync(join(worktree, "..", "outside-secret"), "the operator's private file");
+
+    const result = await build(store, request({ agent: parkingAgent(null, "symlink") }));
+
+    expect(result).toMatchObject({ ok: false, reason: "malformed-decision" });
+    if (result.ok) throw new Error("expected malformed");
+    expect(result.problems?.[0]?.reason).toBe("unreadable-mailbox");
+    // Nothing read: no artifact carries the target's contents.
+    for (const artifact of store.artifactsFor(runId)) {
+      const stored = readFileSync(join(evidence, artifact.key), "utf8");
+      expect(stored).not.toContain("private file");
+    }
+  });
+
+  test("stale park-shaped files are swept to quarantine, never ingested, never committed", async () => {
+    // A mailbox a cut-down attempt left behind. Whatever it says, the lease
+    // that could have vouched for it is gone.
+    writeFileSync(join(worktree, "NIGHTORDERS-PARK-00000000deadbeef.json"), JSON.stringify(decision));
+
+    const agent: Runner = async () => ({ ...OK, stdout: AGENT_SAID });
+    const result = await build(store, request({ agent }));
+
+    // The stale park did not become a decision — the build ran normally.
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(existsSync(join(worktree, "NIGHTORDERS-PARK-00000000deadbeef.json"))).toBe(false);
+    // Its bytes survive in quarantine under this run's evidence.
+    const quarantined = readdirSync(join(evidence, String(runId))).filter(name =>
+      name.startsWith("quarantine-"),
+    );
+    expect(quarantined).toHaveLength(1);
+    // And the commit staged around park-shaped names either way.
+    const add = gitCalls.find(args => args.includes("add"));
+    expect(add?.some(arg => arg.includes("NIGHTORDERS-PARK-"))).toBe(true);
+  });
+
+  test("a park with no run record is refused with its own reason", async () => {
+    const result = await build(store, request({ agent: parkingAgent(decision), runId: undefined }));
+
+    expect(result).toMatchObject({ ok: false, reason: "malformed-decision" });
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.problems?.[0]?.reason).toBe("no-run-record");
   });
 });

@@ -4,6 +4,8 @@ import {
   acquire,
   acquireIfReady,
   completeFenced,
+  finalizeMalformedFenced,
+  finalizeParkFenced,
   heartbeat,
   release,
   reap,
@@ -675,5 +677,165 @@ describe("the capability gate in acquireIfReady", () => {
     const result = acquireIfReady(store, free, "runner-a", { now: T0, newLeaseId: ids("lease-f") });
 
     expect(result).toMatchObject({ ok: true });
+  });
+});
+
+describe("sealing a park", () => {
+  let store: Store;
+  let task: number;
+
+  const decision = {
+    urgency: "blocking" as const,
+    recap: "The payout guard can fail open or fail closed on timeout.",
+    question: "Fail open or fail closed?",
+    options: [
+      { id: "open", label: "Fail open", consequence: "Bad payouts slip through.", reversible: true },
+      { id: "closed", label: "Fail closed", consequence: "Payouts pause.", reversible: true },
+    ],
+    recommendation: "closed",
+    assignee: null,
+    deadline: null,
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  const openRun = (leaseId: string) =>
+    store.startRun({
+      taskRef: task,
+      leaseId,
+      runner: "runner-a",
+      branch: "nightorders/t-1",
+      worktree: "/pool/t-1",
+      now: T0,
+    });
+
+  test("one transaction: decision, hold, run outcome, outbox — or none of it", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = openRun("lease-a");
+
+    const sealed = finalizeParkFenced(store, {
+      leaseId: "lease-a",
+      runId,
+      taskId: "t-1",
+      decision,
+      artifactIds: [],
+      now: later(1_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: true });
+    if (!sealed.ok) return;
+
+    // The decision exists, open, owned by exactly this run.
+    expect(store.getDecision(sealed.decisionId)).toMatchObject({ run: runId, state: "open" });
+    // Its hold keeps the task out of every ready set, indefinitely.
+    const holds = store.activeHolds(task, later(9e8));
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({ ownerKind: "decision", ownerId: String(sealed.decisionId) });
+    expect(store.listReady(later(9e8))).toHaveLength(0);
+    // The run says parked, canonically.
+    expect(store.getRun(runId)).toMatchObject({ outcome: "parked", reason: `decision:${sealed.decisionId}` });
+    // The outbox knows, in the same transaction.
+    expect(store.listNotifications("pending").map(n => n.dedupeKey)).toContain(`decision:${sealed.decisionId}`);
+    // And the lease's provenance says a person owns the task now.
+    expect(currentClaim(store, task, later(2_000))).toBeNull();
+  });
+
+  test("a superseded lease seals nothing — no decision, no hold, no page", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    const runId = openRun("lease-a");
+    // The lease expires and the task is retaken: the world moved on.
+    acquire(store, task, "runner-b", { now: later(120_000), newLeaseId: ids("lease-b") });
+
+    const sealed = finalizeParkFenced(store, {
+      leaseId: "lease-a",
+      runId,
+      taskId: "t-1",
+      decision,
+      artifactIds: [],
+      now: later(121_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: false, reason: "fenced" });
+    expect(store.listDecisions("all")).toHaveLength(0);
+    expect(store.activeHolds(task, later(9e8))).toHaveLength(0);
+    expect(store.listNotifications("pending")).toHaveLength(0);
+    // The run records the refusal it was.
+    expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "fenced" });
+    // And runner-b's live claim was never touched.
+    expect(currentClaim(store, task, later(121_000))?.leaseId).toBe("lease-b");
+  });
+
+  test("a park's late release retry is fenced, never a duplicate", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = openRun("lease-a");
+    finalizeParkFenced(store, {
+      leaseId: "lease-a", runId, taskId: "t-1", decision, artifactIds: [], now: later(1_000),
+    });
+
+    // The runner retries its release after the park already sealed. The task
+    // is a person's now; nothing the runner says afterwards is theirs to say.
+    expect(release(store, "lease-a", later(2_000))).toMatchObject({ ok: false, reason: "fenced" });
+  });
+
+  test("a run that names another lease cannot be sealed", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = openRun("some-other-lease");
+
+    expect(() =>
+      finalizeParkFenced(store, {
+        leaseId: "lease-a", runId, taskId: "t-1", decision, artifactIds: [], now: later(1_000),
+      }),
+    ).toThrow(/open attempt/);
+  });
+
+  test("exhausted repair seals an incident the same fenced way", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = openRun("lease-a");
+
+    const sealed = finalizeMalformedFenced(store, {
+      leaseId: "lease-a",
+      runId,
+      taskId: "t-1",
+      problems: [{ reason: "missing-recap", message: "recap is required" }],
+      now: later(1_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: true });
+    if (!sealed.ok) return;
+    expect(store.openIncidents()[0]).toMatchObject({ id: sealed.incidentId, taskId: "t-1" });
+    expect(store.activeHolds(task, later(9e8))[0]).toMatchObject({
+      ownerKind: "incident",
+      ownerId: String(sealed.incidentId),
+    });
+    expect(store.getRun(runId)).toMatchObject({ outcome: "failed", reason: "malformed-decision" });
+    expect(store.listNotifications("pending").map(n => n.dedupeKey)).toContain(`malformed:${runId}`);
+    // Resolving the incident is what frees the task — nothing else does.
+    expect(store.listReady(later(9e8))).toHaveLength(0);
+    store.resolveIncident(sealed.incidentId, "alex", later(2_000));
+    expect(store.listReady(later(9e8)).map(r => r.externalId)).toEqual(["t-1"]);
+  });
+
+  test("a superseded lease's malformed park also seals nothing", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    const runId = openRun("lease-a");
+    acquire(store, task, "runner-b", { now: later(120_000), newLeaseId: ids("lease-b") });
+
+    const sealed = finalizeMalformedFenced(store, {
+      leaseId: "lease-a",
+      runId,
+      taskId: "t-1",
+      problems: [],
+      now: later(121_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: false, reason: "fenced" });
+    expect(store.openIncidents()).toHaveLength(0);
+    expect(store.activeHolds(task, later(9e8))).toHaveLength(0);
   });
 });

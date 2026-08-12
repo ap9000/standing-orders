@@ -782,3 +782,199 @@ describe("the morning briefing", () => {
     expect(payload().gaps[0]).toMatchObject({ key: "env:MISSING_KEY", unblocks: ["t-1"] });
   });
 });
+
+describe("the park, end to end — a judgement call survives the night", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+
+  /** Parks instead of guessing: reads its mailbox's name from its own brief. */
+  const parkingAgent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    if (mailbox === undefined) throw new Error("the brief named no mailbox");
+    // Work in progress first — the park must preserve it, uncommitted.
+    await writeFile(join(cwd, "half-done.ts"), "// the part before the question\n");
+    await writeFile(
+      join(cwd, mailbox),
+      JSON.stringify({
+        urgency: "blocking",
+        recap: "The guard can fail open or fail closed on timeout, and the scope does not say.",
+        question: "Fail open or fail closed?",
+        options: [
+          { id: "open", label: "Fail open", consequence: "Bad payouts slip through.", reversible: true },
+          { id: "closed", label: "Fail closed", consequence: "Payouts pause until retried.", reversible: true },
+        ],
+        recommendation: "closed",
+      }),
+    );
+    return { ...OK, stdout: JSON.stringify({ result: "parked" }) };
+  };
+
+  /** Tries to park and cannot say what, in exactly the same words twice. */
+  const babblingAgent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    if (mailbox !== undefined) {
+      await writeFile(join(cwd, mailbox), JSON.stringify({ urgency: "blocking", recap: "er" }));
+    }
+    return { ...OK, stdout: JSON.stringify({ result: "tried" }) };
+  };
+
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+
+  const run = (argv: string[], runner: Runner = parkingAgent, now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), {
+      databaseFile: db,
+      now,
+      agentRunner: runner,
+    });
+  };
+
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), "nightorders-park-e2e-"));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const setup = async () => {
+    await run(["runner", "register", "builder-1", "--json"]);
+    const runnerToken = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "approve", "t-1", "--json"]);
+    const digest = payload().scope.digest as string;
+    await run([
+      "task", "approve", "t-1", "--yes",
+      "--digest", digest, "--as", "alex", "--token", approverToken,
+    ]);
+    return { runnerToken, approverToken };
+  };
+
+  const tick = (runnerToken: string, runner: Runner = parkingAgent) =>
+    run(
+      ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"],
+      runner,
+    );
+
+  test("a park is a pass that exits 0, holds the task, and pages once", async () => {
+    const { runnerToken } = await setup();
+
+    const code = await tick(runnerToken);
+
+    // The pass succeeded: nothing broke, the question is where it belongs.
+    expect(code).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({
+      ok: true,
+      command: "tick",
+      dispatched: [{ id: "t-1", outcome: "parked", reason: "decision:1" }],
+    });
+
+    // The decision is real, open, and carries the machine's own evidence.
+    const store = openStore(db);
+    try {
+      const decision = store.getDecision(1);
+      expect(decision).toMatchObject({ state: "open", recommendation: "closed" });
+      const evidence = store.evidenceFor(1);
+      expect(evidence.map(artifact => artifact.kind).sort()).toEqual(["diff", "park-payload", "status"]);
+      // The task is held by the decision, out of every ready set.
+      const holds = store.activeHolds(store.refFor("built-in", "t-1").id, new Date(T0.getTime() + 9e8));
+      expect(holds).toHaveLength(1);
+      expect(holds[0]).toMatchObject({ ownerKind: "decision" });
+      // The run record is canonical: parked, not built, not failed.
+      expect(store.getRun(1)).toMatchObject({ outcome: "parked", reason: "decision:1", role: "builder" });
+      // Exactly one page, episode-keyed to the decision.
+      const pending = store.listNotifications("pending");
+      expect(pending.map(notification => notification.dedupeKey)).toEqual(["decision:1"]);
+    } finally {
+      store.close();
+    }
+
+    // main never moved, and no commit landed on the task branch.
+    const main = await git(["log", "--oneline", "main"]);
+    expect(main.stdout.trim().split("\n")).toHaveLength(1);
+    const branch = await git(["log", "--oneline", "nightorders/t-1"]);
+    expect(branch.stdout.trim().split("\n")).toHaveLength(1);
+  });
+
+  test("the work in progress survives the park, uncommitted, where the resume will find it", async () => {
+    const { runnerToken } = await setup();
+    await tick(runnerToken);
+
+    const store = openStore(db);
+    const worktree = store.getRun(1)?.worktree;
+    store.close();
+    expect(worktree).toBeDefined();
+
+    const status = await exec("git", ["status", "--porcelain"], { cwd: worktree as string });
+    expect(status.stdout).toContain("half-done.ts");
+    // And the mailbox is gone — ingested once, not left to confuse anyone.
+    expect(status.stdout).not.toContain("NIGHTORDERS-PARK-");
+  });
+
+  test("a second pass does not double-park: the held task is simply not ready", async () => {
+    const { runnerToken } = await setup();
+    await tick(runnerToken);
+
+    const code = await tick(runnerToken);
+
+    expect(code).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "empty" });
+
+    const store = openStore(db);
+    try {
+      expect(store.listDecisions("all")).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("a payload that never becomes a decision becomes an incident, holding the task", async () => {
+    const { runnerToken } = await setup();
+
+    const code = await tick(runnerToken, babblingAgent);
+
+    // The attempt broke and the pass says so.
+    expect(code).toBe(EXIT.failed);
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "failed", reason: "malformed-decision" }]);
+
+    const store = openStore(db);
+    try {
+      // No decision — an incident, held by it, paged once.
+      expect(store.listDecisions("all")).toHaveLength(0);
+      expect(store.openIncidents()).toMatchObject([{ kind: "malformed-decision", taskId: "t-1" }]);
+      const holds = store.activeHolds(store.refFor("built-in", "t-1").id, new Date(T0.getTime() + 9e8));
+      expect(holds[0]).toMatchObject({ ownerKind: "incident" });
+      expect(store.getRun(1)).toMatchObject({ outcome: "failed", reason: "malformed-decision" });
+      expect(store.listNotifications("pending").map(notification => notification.dedupeKey)).toEqual([
+        "malformed:1",
+      ]);
+      // The malformed payload is preserved for a person to read.
+      expect(store.artifactsFor(1).map(artifact => artifact.kind)).toContain("park-payload");
+    } finally {
+      store.close();
+    }
+  });
+});

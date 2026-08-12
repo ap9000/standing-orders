@@ -108,9 +108,9 @@ kept the driver role honestly unshipped until M4.
 | Schema: rebuild migration (run CHECK + role, owned holds) | **done** | first versioned table-rebuild; proved against a real M2 fixture, not just fresh databases; `PRAGMA foreign_key_check` before commit |
 | Decision / artifact / incident records | **done** | decision's identity is its run (UNIQUE, joined — never denormalized); evidence links refuse to cross runs in the INSERT itself; incidents never age out of a brief |
 | `parseDecision` — the 422 rule as a library | **done** | fail-closed, every problem reported at once with stable reasons; reversibility stated or invalid, never defaulted; caps + C0/C1 rejection on every string, because payloads reach terminals, web pages, and later briefs |
-| Park path (mailbox, finalizeParkFenced) | not started | — |
-| Bounded repair → incident | not started | — |
-| Evidence capture (machine-collected) | not started | — |
+| Park path (mailbox, finalizeParkFenced) | **done** | the brief's prose escape hatch is now a protocol: a nonce-named mailbox, ingested once through O_NOFOLLOW, quarantined when stale or cut down, never committed; the seal is one fenced transaction — decision, hold, run outcome, and outbox row exist together or, if the lease was superseded, not at all; a parked pass exits 0; E2E against real git |
+| Bounded repair → incident | in progress | the exhausted path ships first: a payload that never becomes a decision becomes an incident that holds the task and pages once, atomically; the two resume-repair turns land next |
+| Evidence capture (machine-collected) | **done** | base revision stamped before the agent spends; diff (ext-diff and textconv disabled) + porcelain inventory captured at park, hashed, bounded, with the capture command and exit recorded; a truncated or failed capture says so; files 0600 outside the worktree, keys relative to the evidence root beside the database |
 | `decide` + brief DECIDE, authenticated answers | not started | — |
 | Resume (run_decision causation, attention budget) | not started | — |
 | Web decision view (`serve`) | not started | — |
