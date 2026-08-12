@@ -1,0 +1,300 @@
+/**
+ * The decision payload, validated (§7).
+ *
+ * The convention agents drift from in prose is a schema here, and the schema
+ * is fail-closed: a payload missing anything a person would need on a phone
+ * screen at 7am is not a decision, it is a malformed one — and the caller's
+ * next move is bounded repair, not a guess at what the agent meant.
+ *
+ * Everything in the payload is written by an agent, which means everything in
+ * it is untrusted twice over: it will be rendered into a web page, printed
+ * into terminals, and — after the operator answers — quoted back into another
+ * agent's brief. The caps and the control-character rejection here are the
+ * first line of that defence; the escaping at each sink is the second. The
+ * caps also keep one screen one screen: an option list that needs scrolling
+ * has already failed the milestone sentence.
+ */
+
+export type ParsedOption = {
+  id: string;
+  label: string;
+  consequence: string;
+  reversible: boolean;
+};
+
+export type ParsedDecision = {
+  urgency: "blocking";
+  recap: string;
+  question: string;
+  options: ParsedOption[];
+  recommendation: string;
+  assignee: string | null;
+  /** Normalized to toISOString(), like every timestamp in the store. */
+  deadline: string | null;
+};
+
+export type Problem = { reason: string; message: string };
+
+export type ParseResult =
+  | { ok: true; decision: ParsedDecision }
+  | { ok: false; problems: Problem[] };
+
+/** One screen's worth, enforced rather than hoped for. */
+export const LIMITS = {
+  /** Bytes, before parsing. Applied by the reader too; this is the backstop. */
+  payload: 64 * 1024,
+  recap: 2_000,
+  question: 2_000,
+  consequence: 500,
+  label: 120,
+  optionId: 40,
+  assignee: 120,
+  options: 6,
+} as const;
+
+/** Option ids travel in URLs, CLI arguments, and CAS updates — they are identifiers, not prose. */
+const OPTION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/**
+ * Multi-line prose may contain newlines and tabs; nothing anywhere in a
+ * decision may contain the rest of C0/C1 — those are how text stops being
+ * text and starts being terminal escape sequences.
+ */
+// eslint-disable-next-line no-control-regex
+const FORBIDDEN_MULTILINE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/;
+// eslint-disable-next-line no-control-regex
+const FORBIDDEN_SINGLE_LINE = /[\u0000-\u001F\u007F-\u009F]/;
+
+export function parseDecision(raw: string): ParseResult {
+  if (Buffer.byteLength(raw, "utf8") > LIMITS.payload) {
+    return refuse("too-large", `the payload is over ${LIMITS.payload} bytes — one screen does not need that`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return refuse("not-json", `the payload is not JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return refuse("not-an-object", "the payload must be one JSON object");
+  }
+
+  const body = parsed as Record<string, unknown>;
+  const problems: Problem[] = [];
+
+  // Urgency is required rather than defaulted: an agent that did not say
+  // whether the loop can continue has not composed a decision. Only
+  // 'blocking' exists in M3 — advisory needs a commit-and-complete lifecycle
+  // this park-before-commit path does not have.
+  if (body["urgency"] !== "blocking") {
+    problems.push({
+      reason: "bad-urgency",
+      message: `urgency must be the string "blocking" (got ${describe(body["urgency"])})`,
+    });
+  }
+
+  const recap = prose(body["recap"], "recap", LIMITS.recap, problems);
+  const question = prose(body["question"], "question", LIMITS.question, problems);
+  const options = parseOptions(body["options"], problems);
+
+  let recommendation: string | null = null;
+  if (typeof body["recommendation"] !== "string" || body["recommendation"] === "") {
+    problems.push({
+      reason: "missing-recommendation",
+      message: "recommendation is required and must be an option id — a decision without one is a shrug",
+    });
+  } else if (options !== null && !options.some(option => option.id === body["recommendation"])) {
+    problems.push({
+      reason: "bad-recommendation",
+      message: `recommendation "${truncate(String(body["recommendation"]), 60)}" does not match any option id`,
+    });
+  } else {
+    recommendation = body["recommendation"];
+  }
+
+  let assignee: string | null = null;
+  if (body["assignee"] !== undefined && body["assignee"] !== null) {
+    const line = singleLine(body["assignee"], "assignee", LIMITS.assignee, problems);
+    if (line !== null) assignee = line;
+  }
+
+  let deadline: string | null = null;
+  if (body["deadline"] !== undefined && body["deadline"] !== null) {
+    const stamp = typeof body["deadline"] === "string" ? Date.parse(body["deadline"]) : NaN;
+    if (Number.isNaN(stamp)) {
+      problems.push({
+        reason: "bad-deadline",
+        message: `deadline must be an ISO 8601 timestamp (got ${describe(body["deadline"])})`,
+      });
+    } else {
+      // Normalized so the store's lexicographic-comparison invariant holds.
+      deadline = new Date(stamp).toISOString();
+    }
+  }
+
+  if (problems.length > 0) return { ok: false, problems };
+  return {
+    ok: true,
+    decision: {
+      urgency: "blocking",
+      recap: recap as string,
+      question: question as string,
+      options: options as ParsedOption[],
+      recommendation: recommendation as string,
+      assignee,
+      deadline,
+    },
+  };
+}
+
+function parseOptions(value: unknown, problems: Problem[]): ParsedOption[] | null {
+  if (!Array.isArray(value)) {
+    problems.push({ reason: "no-options", message: "options must be an array" });
+    return null;
+  }
+  if (value.length < 2) {
+    // One option is not a decision, it is a notification wearing one's
+    // clothes — and the operator's real alternative ("do neither") deserves
+    // to be an option with a stated consequence, not an implied one.
+    problems.push({ reason: "too-few-options", message: "a decision needs at least 2 options" });
+    return null;
+  }
+  if (value.length > LIMITS.options) {
+    problems.push({
+      reason: "too-many-options",
+      message: `at most ${LIMITS.options} options fit on one screen (got ${value.length})`,
+    });
+    return null;
+  }
+
+  const options: ParsedOption[] = [];
+  const seen = new Set<string>();
+  let sound = true;
+
+  value.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      problems.push({ reason: "bad-option", message: `option ${index} must be an object` });
+      sound = false;
+      return;
+    }
+    const option = entry as Record<string, unknown>;
+
+    const id = option["id"];
+    if (typeof id !== "string" || !OPTION_ID.test(id) || id.length > LIMITS.optionId) {
+      problems.push({
+        reason: "bad-option-id",
+        message: `option ${index} needs an id of 1-${LIMITS.optionId} letters, digits, - or _ (got ${describe(id)})`,
+      });
+      sound = false;
+    } else if (seen.has(id)) {
+      problems.push({ reason: "duplicate-option-id", message: `option id "${id}" appears twice` });
+      sound = false;
+    } else {
+      seen.add(id);
+    }
+
+    const label = singleLine(option["label"], `option ${index} label`, LIMITS.label, problems);
+    const consequence = prose(option["consequence"], `option ${index} consequence`, LIMITS.consequence, problems);
+
+    // Absent is invalid, never defaulted: a defaulted reversibility is a
+    // guess wearing a schema, and reversible=false is the field the
+    // scheduler's refusal to auto-apply rests on.
+    if (typeof option["reversible"] !== "boolean") {
+      problems.push({
+        reason: "missing-reversible",
+        message: `option ${index} must say reversible: true or false — unstated is not reversible, it is unstated`,
+      });
+      sound = false;
+    }
+
+    if (label === null || consequence === null) {
+      sound = false;
+      return;
+    }
+    if (sound) {
+      options.push({
+        id: id as string,
+        label,
+        consequence,
+        reversible: option["reversible"] as boolean,
+      });
+    }
+  });
+
+  return sound && options.length === value.length ? options : null;
+}
+
+function prose(value: unknown, field: string, cap: number, problems: Problem[]): string | null {
+  if (typeof value !== "string" || value.trim() === "") {
+    problems.push({ reason: `missing-${slug(field)}`, message: `${field} is required` });
+    return null;
+  }
+  if (value.length > cap) {
+    problems.push({ reason: `${slug(field)}-too-long`, message: `${field} is over ${cap} characters` });
+    return null;
+  }
+  if (FORBIDDEN_MULTILINE.test(value)) {
+    problems.push({
+      reason: `${slug(field)}-control-characters`,
+      message: `${field} contains control characters — text only`,
+    });
+    return null;
+  }
+  return value.trim();
+}
+
+function singleLine(value: unknown, field: string, cap: number, problems: Problem[]): string | null {
+  if (typeof value !== "string" || value.trim() === "") {
+    problems.push({ reason: `missing-${slug(field)}`, message: `${field} is required` });
+    return null;
+  }
+  if (value.length > cap) {
+    problems.push({ reason: `${slug(field)}-too-long`, message: `${field} is over ${cap} characters` });
+    return null;
+  }
+  if (FORBIDDEN_SINGLE_LINE.test(value)) {
+    problems.push({
+      reason: `${slug(field)}-control-characters`,
+      message: `${field} must be one line with no control characters`,
+    });
+    return null;
+  }
+  return value.trim();
+}
+
+function refuse(reason: string, message: string): ParseResult {
+  return { ok: false, problems: [{ reason, message }] };
+}
+
+function slug(field: string): string {
+  return field.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+}
+
+function describe(value: unknown): string {
+  if (value === undefined) return "nothing";
+  if (typeof value === "string") return `"${truncate(value, 40)}"`;
+  return typeof value;
+}
+
+function truncate(text: string, at: number): string {
+  return text.length <= at ? text : `${text.slice(0, at)}…`;
+}
+
+/**
+ * The compact error a repair turn is resumed with: every problem by name,
+ * then the one instruction. Written for an agent that already holds the
+ * context — it needs the list of what failed, not the theory of why.
+ */
+export function repairPrompt(problems: readonly Problem[], mailbox: string): string {
+  return [
+    `Your parked decision in ${mailbox} failed validation:`,
+    ...problems.map(problem => `- ${problem.message} (${problem.reason})`),
+    "",
+    `Rewrite ${mailbox} only — change no other file, run no commands, and do not`,
+    "reconsider the decision itself. Re-emit the same judgement call as valid",
+    "JSON: { urgency: \"blocking\", recap, question, options: [{ id, label,",
+    "consequence, reversible }], recommendation } — at least two options, every",
+    "option's reversible stated explicitly, recommendation naming an option id.",
+  ].join("\n");
+}

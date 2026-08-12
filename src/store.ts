@@ -33,7 +33,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -76,7 +76,18 @@ export type TaskRef = {
   origin: TaskOrigin;
 };
 
-export type Hold = { taskRef: number; reason: string; until: string | null; heldAt: string };
+/** Who placed a hold — and therefore who alone may lift it. */
+export type HoldOwner = "operator" | "decision" | "incident";
+
+export type Hold = {
+  id: number;
+  taskRef: number;
+  ownerKind: HoldOwner;
+  ownerId: string;
+  reason: string;
+  until: string | null;
+  heldAt: string;
+};
 
 /** Something a repo's work needs. Metadata only; the value lives on the runner. */
 export type Capability = {
@@ -125,6 +136,12 @@ export type Notification = {
   lastError: string | null;
   deliveredAt: string | null;
   receipt: string | null;
+  /**
+   * When the fact stopped wanting a person — a decision answered, an incident
+   * resolved. Distinct from delivery, and it never deletes the row: receipts
+   * are the audit trail of what was actually sent.
+   */
+  resolvedAt: string | null;
 };
 
 /** One build attempt. `outcome` null means it never finished — also an answer. */
@@ -133,14 +150,75 @@ export type Run = {
   taskRef: number;
   leaseId: string;
   runner: string;
+  /** 'repair' = a resumed session mending its own park payload. Never 'driver'; see the DDL. */
+  role: "builder" | "repair";
+  parentRun: number | null;
+  sessionId: string | null;
+  baseRevision: string | null;
   branch: string;
   worktree: string;
   model: string | null;
-  outcome: "built" | "failed" | "refused" | null;
+  outcome: "built" | "failed" | "refused" | "parked" | null;
   reason: string | null;
   committed: boolean | null;
   startedAt: string;
   finishedAt: string | null;
+};
+
+/** One option of a decision. `reversible` is a field so a scheduler can refuse to auto-apply. */
+export type DecisionOption = {
+  id: string;
+  label: string;
+  consequence: string;
+  reversible: boolean;
+};
+
+/** The judgement call an agent refused to guess at (§7). Identity = its run. */
+export type Decision = {
+  id: number;
+  run: number;
+  urgency: "blocking";
+  state: "open" | "expired" | "answered";
+  recap: string;
+  question: string;
+  options: DecisionOption[];
+  /** An option id. */
+  recommendation: string;
+  assignee: string | null;
+  /** Attention metadata only — never a hold expiry. */
+  deadline: string | null;
+  createdAt: string;
+  answeredAt: string | null;
+  answeredBy: string | null;
+  answeredVia: "cli" | "web" | null;
+  choice: string | null;
+  note: string | null;
+};
+
+/** Evidence, by reference. `key` is relative to the evidence root, never absolute. */
+export type Artifact = {
+  id: number;
+  run: number;
+  kind: "diff" | "status" | "park-payload";
+  key: string;
+  bytesOriginal: number;
+  bytesStored: number;
+  truncated: boolean;
+  sha256: string;
+  /** The command that produced it, and how that command exited. */
+  capture: string;
+  createdAt: string;
+  redacted: boolean;
+};
+
+/** A park that never became a decision. Stays in every brief until resolved. */
+export type Incident = {
+  id: number;
+  run: number;
+  kind: "malformed-decision";
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
 };
 
 /** Every mutation takes one. A repeat returns the first answer, unchanged. */
@@ -204,11 +282,22 @@ CREATE TABLE IF NOT EXISTS task_ref (
 
 -- A hold is an operational pause, not a claim about the work's structure,
 -- which is why it may live out here while dependency edges may not.
+--
+-- Every hold has an owner, because "lift the hold" is only safe when the
+-- lifter and the placer are the same authority. One row per task let a
+-- decision's answer delete an operator's unrelated pause — or a later manual
+-- hold silently replace the one keeping a parked task off the ready set.
+-- UNIQUE (owner_kind, owner_id) keeps each owner to one hold; readiness
+-- rejects on ANY active row, so two owners holding one task both count.
 CREATE TABLE IF NOT EXISTS hold (
-  task_ref INTEGER PRIMARY KEY REFERENCES task_ref(id) ON DELETE CASCADE,
-  reason   TEXT NOT NULL,
-  until    TEXT,
-  held_at  TEXT NOT NULL
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident')),
+  owner_id   TEXT NOT NULL,
+  reason     TEXT NOT NULL,
+  until      TEXT,
+  held_at    TEXT NOT NULL,
+  UNIQUE (owner_kind, owner_id)
 );
 
 -- One row per lease, not per task: the claim log is append-only.
@@ -274,18 +363,112 @@ CREATE TABLE IF NOT EXISTS capability (
 -- the agent runs and finalized after — outcome NULL means the attempt was
 -- cut down mid-flight, which is itself worth knowing.
 CREATE TABLE IF NOT EXISTS run (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  lease_id      TEXT NOT NULL,
+  runner        TEXT NOT NULL,
+  -- 'repair' is a resumed session mending its own malformed park payload.
+  -- Deliberately NOT 'driver': the design's driver is the event-woken gate
+  -- role that first exists at M4, and recording repair under that name now
+  -- would make the two indistinguishable in every cost report afterwards.
+  role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
+  parent_run    INTEGER REFERENCES run(id),
+  -- The agent session, kept so a malformed park can be repaired by resuming
+  -- the conversation that produced it instead of paying for a fresh one.
+  session_id    TEXT,
+  -- HEAD before the agent spent anything. Evidence is a diff against this,
+  -- not against whatever the index looked like when the agent stopped: an
+  -- agent that staged or committed before parking would otherwise show a
+  -- clean diff over material changes.
+  base_revision TEXT,
+  branch        TEXT NOT NULL,
+  worktree      TEXT NOT NULL,
+  model         TEXT,
+  outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked')),
+  reason        TEXT,
+  committed     INTEGER,
+  started_at    TEXT NOT NULL,
+  finished_at   TEXT
+);
+
+-- The decision record (§7): the judgement call an agent refused to guess at,
+-- typed so it renders identically every time and fits on a phone. "run" is
+-- UNIQUE and is the decision's whole identity — task, repo, branch, and lease
+-- are reached by joining through it, never stored again here, because two
+-- copies of an identity is how a decision ends up holding one task while
+-- showing another task's evidence.
+CREATE TABLE IF NOT EXISTS decision (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  run            INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+  urgency        TEXT NOT NULL CHECK (urgency IN ('blocking')),
+  state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','expired','answered')),
+  recap          TEXT NOT NULL,
+  question       TEXT NOT NULL,
+  options        TEXT NOT NULL,
+  recommendation TEXT NOT NULL,
+  assignee       TEXT,
+  -- Attention metadata only. A deadline is never a hold expiry: a blocking
+  -- decision that goes overdue becomes 'expired' and MORE visible, not a
+  -- task that quietly dispatches itself unanswered.
+  deadline       TEXT,
+  created_at     TEXT NOT NULL,
+  answered_at    TEXT,
+  answered_by    TEXT,
+  answered_via   TEXT CHECK (answered_via IN ('cli','web')),
+  choice         TEXT,
+  note           TEXT
+);
+
+-- Evidence, by reference (§4): the file lives on the runner under the
+-- evidence root, and "key" is relative to that root — never an absolute path
+-- a row could point anywhere with. The capture columns record how the file
+-- was made and whether it is complete, because a truncated diff presented as
+-- the whole story is worse than no diff.
+CREATE TABLE IF NOT EXISTS artifact (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload')),
+  key            TEXT NOT NULL,
+  bytes_original INTEGER NOT NULL,
+  bytes_stored   INTEGER NOT NULL,
+  truncated      INTEGER NOT NULL DEFAULT 0,
+  sha256         TEXT NOT NULL,
+  capture        TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  redacted       INTEGER NOT NULL DEFAULT 0
+);
+
+-- Which artifacts a decision shows. A relation rather than JSON ids in the
+-- decision row, so "artifact.run = decision.run" can be enforced at insert —
+-- the agent's own payload never chooses what counts as evidence.
+CREATE TABLE IF NOT EXISTS decision_artifact (
+  decision INTEGER NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+  artifact INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+  PRIMARY KEY (decision, artifact)
+);
+
+-- Which answers a resume run was actually given, snapshot included — causal
+-- provenance, not timestamps. "The run after the answer" stops being true the
+-- moment a resume fails and a second decision is answered in between.
+CREATE TABLE IF NOT EXISTS run_decision (
+  run      INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  decision INTEGER NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+  choice   TEXT NOT NULL,
+  note     TEXT,
+  PRIMARY KEY (run, decision)
+);
+
+-- A durable attention record for the parks that never became decisions: the
+-- agent tried to park, repair ran out, and the task is now held with nothing
+-- in DECIDE to show for it. Unlike a failed run, an incident cannot age out
+-- of a briefing window — it stays in every brief until somebody resolves it.
+CREATE TABLE IF NOT EXISTS incident (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_ref    INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
-  lease_id    TEXT NOT NULL,
-  runner      TEXT NOT NULL,
-  branch      TEXT NOT NULL,
-  worktree    TEXT NOT NULL,
-  model       TEXT,
-  outcome     TEXT CHECK (outcome IN ('built','failed','refused')),
-  reason      TEXT,
-  committed   INTEGER,
-  started_at  TEXT NOT NULL,
-  finished_at TEXT
+  run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision')),
+  created_at  TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_by TEXT
 );
 
 -- The durable outbox (§6). A notification is a fact that something wants a
@@ -399,6 +582,7 @@ CREATE TABLE IF NOT EXISTS mutation (
 CREATE INDEX IF NOT EXISTS task_by_state ON task (state);
 CREATE INDEX IF NOT EXISTS edge_by_blocker ON task_edge (blocker);
 CREATE INDEX IF NOT EXISTS claim_by_task ON claim (task_ref, lease_generation DESC);
+CREATE INDEX IF NOT EXISTS hold_by_task ON hold (task_ref);
 `;
 
 /**
@@ -450,6 +634,10 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
     db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
+  } else if (Number(version["version"]) < SCHEMA_VERSION) {
+    // migrate() has already done the work by the time this runs; the row is
+    // bookkeeping about it, not the trigger for it.
+    db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);
   }
 
   return new Store(db);
@@ -484,15 +672,118 @@ function migrate(db: Database): void {
   addColumn(db, "task_ref", "origin", "TEXT NOT NULL DEFAULT 'theirs'");
   addColumn(db, "task_ref", "repo", "TEXT");
   addColumn(db, "claim", "released_by", "TEXT");
+  addColumn(db, "notification", "resolved_at", "TEXT");
+  rebuild(db);
 }
 
-function addColumn(db: Database, table: string, column: string, definition: string): void {
-  const present = db
+/**
+ * The tables whose shape changed, not merely grew.
+ *
+ * `run`'s outcome CHECK had to admit 'parked' and `hold` had to move its
+ * primary key, and SQLite's ALTER can do neither — so this is the manual's
+ * copy-rename recipe: build the new table, move the rows, drop the old, take
+ * its name. Detected by column presence, like `addColumn`, so it runs once
+ * per database ever and is a no-op on a fresh file whose SCHEMA already has
+ * the new shape.
+ *
+ * Every fresh-`:memory:` test passes without this function existing; the
+ * first park against a real M2 database is what it exists for.
+ */
+function rebuild(db: Database): void {
+  const oldHold = tableExists(db, "hold") && !hasColumn(db, "hold", "owner_kind");
+  const oldRun = tableExists(db, "run") && !hasColumn(db, "run", "role");
+  if (!oldHold && !oldRun) return;
+
+  // Foreign keys off so `run` can be dropped while decision/artifact rows
+  // name it — and a PRAGMA is a no-op inside a transaction, so it brackets
+  // one rather than living in it. The check at the end proves the swap left
+  // every reference intact before anything commits.
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (oldHold) {
+        db.exec(
+          `CREATE TABLE hold_next (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+             owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident')),
+             owner_id   TEXT NOT NULL,
+             reason     TEXT NOT NULL,
+             until      TEXT,
+             held_at    TEXT NOT NULL,
+             UNIQUE (owner_kind, owner_id)
+           )`,
+        );
+        // Every pre-M3 hold was placed by a person; ownership records that.
+        db.exec(
+          `INSERT INTO hold_next (task_ref, owner_kind, owner_id, reason, until, held_at)
+           SELECT task_ref, 'operator', CAST(task_ref AS TEXT), reason, until, held_at FROM hold`,
+        );
+        db.exec("DROP TABLE hold");
+        db.exec("ALTER TABLE hold_next RENAME TO hold");
+        db.exec("CREATE INDEX IF NOT EXISTS hold_by_task ON hold (task_ref)");
+      }
+      if (oldRun) {
+        db.exec(
+          `CREATE TABLE run_next (
+             id            INTEGER PRIMARY KEY AUTOINCREMENT,
+             task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+             lease_id      TEXT NOT NULL,
+             runner        TEXT NOT NULL,
+             role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
+             parent_run    INTEGER REFERENCES run(id),
+             session_id    TEXT,
+             base_revision TEXT,
+             branch        TEXT NOT NULL,
+             worktree      TEXT NOT NULL,
+             model         TEXT,
+             outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked')),
+             reason        TEXT,
+             committed     INTEGER,
+             started_at    TEXT NOT NULL,
+             finished_at   TEXT
+           )`,
+        );
+        db.exec(
+          `INSERT INTO run_next (id, task_ref, lease_id, runner, branch, worktree, model,
+                                 outcome, reason, committed, started_at, finished_at)
+           SELECT id, task_ref, lease_id, runner, branch, worktree, model,
+                  outcome, reason, committed, started_at, finished_at FROM run`,
+        );
+        db.exec("DROP TABLE run");
+        db.exec("ALTER TABLE run_next RENAME TO run");
+      }
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) {
+        throw new Error(`schema rebuild left ${broken.length} dangling foreign key(s)`);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+function tableExists(db: Database, table: string): boolean {
+  return (
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !==
+    undefined
+  );
+}
+
+function hasColumn(db: Database, table: string, column: string): boolean {
+  return db
     .prepare(`PRAGMA table_info(${table})`)
     .all()
     .some(row => String(row["name"]) === column);
-  if (present) return;
+}
 
+function addColumn(db: Database, table: string, column: string, definition: string): void {
+  if (hasColumn(db, table, column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
@@ -736,44 +1027,92 @@ export class Store {
     return row !== undefined && String(row["origin"]) === "ours" ? "ours" : "theirs";
   }
 
+  /**
+   * The operator's hold — the CLI's pause button. One per task, replaced on
+   * repeat. Decision and incident holds go through `holdOwned`, and lifting
+   * this one never touches theirs.
+   */
   hold(taskRef: number, reason: string, until: Date | null, now: Date, mutation: Mutation = {}): void {
     this.once(mutation, "hold", () => {
-      this.db
-        .prepare(
-          `INSERT INTO hold (task_ref, reason, until, held_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT (task_ref) DO UPDATE SET reason = excluded.reason,
-                                                until = excluded.until,
-                                                held_at = excluded.held_at`,
-        )
-        .run(taskRef, reason, until === null ? null : until.toISOString(), now.toISOString());
+      this.holdOwned(
+        { taskRef, ownerKind: "operator", ownerId: String(taskRef), reason, until },
+        now,
+      );
       return null;
     });
   }
 
+  /** Place a hold on behalf of its owner. One hold per owner, replaced on repeat. */
+  holdOwned(
+    hold: {
+      taskRef: number;
+      ownerKind: HoldOwner;
+      ownerId: string;
+      reason: string;
+      until: Date | null;
+    },
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO hold (task_ref, owner_kind, owner_id, reason, until, held_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (owner_kind, owner_id) DO UPDATE SET task_ref = excluded.task_ref,
+                                                          reason = excluded.reason,
+                                                          until = excluded.until,
+                                                          held_at = excluded.held_at`,
+      )
+      .run(
+        hold.taskRef,
+        hold.ownerKind,
+        hold.ownerId,
+        hold.reason,
+        hold.until === null ? null : hold.until.toISOString(),
+        now.toISOString(),
+      );
+  }
+
+  /**
+   * The CLI's unhold lifts only the operator's own hold. A task still held by
+   * an open decision stays held — the way out of that hold is answering it.
+   */
   unhold(taskRef: number, mutation: Mutation = {}): boolean {
     return this.once(
       mutation,
       "unhold",
       () => {
-        const { changes } = this.db.prepare("DELETE FROM hold WHERE task_ref = ?").run(taskRef);
+        const { changes } = this.db
+          .prepare("DELETE FROM hold WHERE task_ref = ? AND owner_kind = 'operator'")
+          .run(taskRef);
         return Number(changes) > 0;
       },
       lifted => lifted,
     );
   }
 
+  /** Lift exactly one owner's hold, whoever else may still be holding. */
+  releaseOwnedHold(ownerKind: HoldOwner, ownerId: string): boolean {
+    const { changes } = this.db
+      .prepare("DELETE FROM hold WHERE owner_kind = ? AND owner_id = ?")
+      .run(ownerKind, ownerId);
+    return Number(changes) > 0;
+  }
+
   /** The hold in force right now, if any. An elapsed `until` is not one. */
   activeHold(taskRef: number, now: Date): Hold | null {
-    const row = this.db
-      .prepare("SELECT * FROM hold WHERE task_ref = ? AND (until IS NULL OR until > ?)")
-      .get(taskRef, now.toISOString());
-    if (row === undefined) return null;
-    return {
-      taskRef: Number(row["task_ref"]),
-      reason: String(row["reason"]),
-      until: row["until"] === null ? null : String(row["until"]),
-      heldAt: String(row["held_at"]),
-    };
+    const [first = null] = this.activeHolds(taskRef, now);
+    return first;
+  }
+
+  /** Every hold in force — a task can be held by more than one owner at once. */
+  activeHolds(taskRef: number, now: Date): Hold[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM hold WHERE task_ref = ? AND (until IS NULL OR until > ?)
+         ORDER BY held_at, id`,
+      )
+      .all(taskRef, now.toISOString())
+      .map(readHold);
   }
 
   // ---- grants -------------------------------------------------------------
@@ -1204,7 +1543,10 @@ export class Store {
   }
 
   listNotifications(only: "pending" | "all" = "pending"): Notification[] {
-    const where = only === "pending" ? "WHERE delivered_at IS NULL" : "";
+    // Resolved-but-undelivered is not pending: a decision answered before the
+    // outbox ran is a fact that stopped wanting a person, and paging someone
+    // about it anyway would teach them to ignore the pager.
+    const where = only === "pending" ? "WHERE delivered_at IS NULL AND resolved_at IS NULL" : "";
     return this.db
       .prepare(`SELECT * FROM notification ${where} ORDER BY id`)
       .all()
@@ -1244,6 +1586,18 @@ export class Store {
       .run(`gap:${repo}:${kind}:${name}`);
   }
 
+  /**
+   * The other way an episode ends: the fact stopped wanting a person. Unlike
+   * a gap — which is deleted so a recurrence can speak again — a resolved
+   * decision or incident never recurs under the same key, so the row stays,
+   * receipts and all.
+   */
+  resolveEpisode(dedupeKey: string, now: Date): void {
+    this.db
+      .prepare("UPDATE notification SET resolved_at = ? WHERE dedupe_key = ? AND resolved_at IS NULL")
+      .run(now.toISOString(), dedupeKey);
+  }
+
   // ---- runs ---------------------------------------------------------------
 
   /**
@@ -1258,12 +1612,15 @@ export class Store {
     branch: string;
     worktree: string;
     model?: string;
+    role?: "builder" | "repair";
+    parentRun?: number;
+    sessionId?: string;
     now: Date;
   }): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, parent_run, session_id, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.taskRef,
@@ -1272,15 +1629,34 @@ export class Store {
         run.branch,
         run.worktree,
         run.model ?? null,
+        run.role ?? "builder",
+        run.parentRun ?? null,
+        run.sessionId ?? null,
         run.now.toISOString(),
       );
     return Number(inserted.lastInsertRowid);
   }
 
+  /**
+   * Facts learned after the row was opened: the base revision is read just
+   * before the agent spends, and the session id only exists once the agent's
+   * envelope comes back. COALESCE, never overwrite — the first stamp is the
+   * true one.
+   */
+  stampRun(id: number, facts: { baseRevision?: string; sessionId?: string }): void {
+    this.db
+      .prepare(
+        `UPDATE run SET base_revision = COALESCE(base_revision, ?),
+                        session_id = COALESCE(session_id, ?)
+          WHERE id = ?`,
+      )
+      .run(facts.baseRevision ?? null, facts.sessionId ?? null, id);
+  }
+
   finishRun(
     id: number,
     result: {
-      outcome: "built" | "failed" | "refused";
+      outcome: "built" | "failed" | "refused" | "parked";
       reason?: string;
       committed?: boolean;
       now: Date;
@@ -1295,6 +1671,11 @@ export class Store {
         result.now.toISOString(),
         id,
       );
+  }
+
+  getRun(id: number): Run | null {
+    const row = this.db.prepare("SELECT * FROM run WHERE id = ?").get(id);
+    return row === undefined ? null : readRun(row);
   }
 
   /** Every attempt since a moment, task ids attached — the overnight, as data. */
@@ -1315,6 +1696,214 @@ export class Store {
       .prepare("SELECT * FROM run WHERE task_ref = ? ORDER BY id DESC")
       .all(taskRef)
       .map(readRun);
+  }
+
+  // ---- decisions -----------------------------------------------------------
+
+  /**
+   * Insert a decision. Callers hand this a payload `parseDecision` already
+   * validated and run it inside the park's fenced transaction — this method
+   * is the write, not the policy.
+   */
+  saveDecision(
+    decision: {
+      run: number;
+      urgency: "blocking";
+      recap: string;
+      question: string;
+      options: DecisionOption[];
+      recommendation: string;
+      assignee?: string;
+      deadline?: string;
+    },
+    now: Date,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO decision (run, urgency, recap, question, options, recommendation, assignee, deadline, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        decision.run,
+        decision.urgency,
+        decision.recap,
+        decision.question,
+        JSON.stringify(decision.options),
+        decision.recommendation,
+        decision.assignee ?? null,
+        decision.deadline ?? null,
+        now.toISOString(),
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  getDecision(id: number): Decision | null {
+    const row = this.db.prepare("SELECT * FROM decision WHERE id = ?").get(id);
+    return row === undefined ? null : readDecision(row);
+  }
+
+  decisionForRun(run: number): Decision | null {
+    const row = this.db.prepare("SELECT * FROM decision WHERE run = ?").get(run);
+    return row === undefined ? null : readDecision(row);
+  }
+
+  /**
+   * Decisions with their task attached, oldest first — the attention surface
+   * reads in the order the questions arrived. "unanswered" is open + expired:
+   * expiry makes a decision louder, never gone.
+   */
+  listDecisions(only: "open" | "unanswered" | "all" = "unanswered"): (Decision & { taskId: string })[] {
+    const where =
+      only === "open"
+        ? "WHERE decision.state = 'open'"
+        : only === "unanswered"
+          ? "WHERE decision.state IN ('open','expired')"
+          : "";
+    return this.db
+      .prepare(
+        `SELECT decision.*, task_ref.external_id AS task_id FROM decision
+         JOIN run ON run.id = decision.run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         ${where} ORDER BY decision.id`,
+      )
+      .all()
+      .map(row => ({ ...readDecision(row), taskId: String(row["task_id"]) }));
+  }
+
+  /**
+   * The lazy deadline sweep, run at every entry point that shows or answers
+   * decisions. Expiry changes what a decision looks like, never what happens
+   * to its task: the hold stays, and nothing chooses.
+   */
+  expireOverdueDecisions(now: Date): number {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE decision SET state = 'expired'
+          WHERE state = 'open' AND deadline IS NOT NULL AND deadline <= ?`,
+      )
+      .run(now.toISOString());
+    return Number(changes);
+  }
+
+  countUnanswered(): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM decision WHERE state IN ('open','expired')")
+      .get();
+    return Number(row?.["n"] ?? 0);
+  }
+
+  // ---- evidence ------------------------------------------------------------
+
+  saveArtifact(
+    artifact: {
+      run: number;
+      kind: Artifact["kind"];
+      key: string;
+      bytesOriginal: number;
+      bytesStored: number;
+      truncated: boolean;
+      sha256: string;
+      capture: string;
+    },
+    now: Date,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, truncated, sha256, capture, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        artifact.run,
+        artifact.kind,
+        artifact.key,
+        artifact.bytesOriginal,
+        artifact.bytesStored,
+        artifact.truncated ? 1 : 0,
+        artifact.sha256,
+        artifact.capture,
+        now.toISOString(),
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  getArtifact(id: number): Artifact | null {
+    const row = this.db.prepare("SELECT * FROM artifact WHERE id = ?").get(id);
+    return row === undefined ? null : readArtifact(row);
+  }
+
+  artifactsFor(run: number): Artifact[] {
+    return this.db
+      .prepare("SELECT * FROM artifact WHERE run = ? ORDER BY id")
+      .all(run)
+      .map(readArtifact);
+  }
+
+  /**
+   * Attach evidence to a decision — refused unless both belong to the same
+   * run. The guard is in the INSERT itself rather than checked first, so
+   * nothing can slip between the check and the write.
+   */
+  linkEvidence(decision: number, artifact: number): void {
+    const { changes } = this.db
+      .prepare(
+        `INSERT INTO decision_artifact (decision, artifact)
+         SELECT d.id, a.id FROM decision AS d JOIN artifact AS a
+          WHERE d.id = ? AND a.id = ? AND a.run = d.run`,
+      )
+      .run(decision, artifact);
+    if (Number(changes) === 0) {
+      throw new Error(
+        `artifact ${artifact} does not belong to decision ${decision}'s run — evidence never crosses runs`,
+      );
+    }
+  }
+
+  evidenceFor(decision: number): Artifact[] {
+    return this.db
+      .prepare(
+        `SELECT artifact.* FROM artifact
+         JOIN decision_artifact ON decision_artifact.artifact = artifact.id
+         WHERE decision_artifact.decision = ? ORDER BY artifact.id`,
+      )
+      .all(decision)
+      .map(readArtifact);
+  }
+
+  // ---- incidents -----------------------------------------------------------
+
+  createIncident(incident: { run: number; kind: Incident["kind"] }, now: Date): number {
+    const inserted = this.db
+      .prepare("INSERT INTO incident (run, kind, created_at) VALUES (?, ?, ?)")
+      .run(incident.run, incident.kind, now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  incidentForRun(run: number): Incident | null {
+    const row = this.db.prepare("SELECT * FROM incident WHERE run = ?").get(run);
+    return row === undefined ? null : readIncident(row);
+  }
+
+  /** Unresolved, task attached, oldest first. No time window: these do not age out. */
+  openIncidents(): (Incident & { taskId: string })[] {
+    return this.db
+      .prepare(
+        `SELECT incident.*, task_ref.external_id AS task_id FROM incident
+         JOIN run ON run.id = incident.run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE incident.resolved_at IS NULL ORDER BY incident.id`,
+      )
+      .all()
+      .map(row => ({ ...readIncident(row), taskId: String(row["task_id"]) }));
+  }
+
+  /** Resolving also lifts the incident's hold — one act, atomically the caller's transaction. */
+  resolveIncident(id: number, by: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE incident SET resolved_at = ?, resolved_by = ? WHERE id = ? AND resolved_at IS NULL")
+      .run(now.toISOString(), by, id);
+    if (Number(changes) === 0) return false;
+    this.releaseOwnedHold("incident", String(id));
+    return true;
   }
 
   // ---- idempotency --------------------------------------------------------
@@ -1378,6 +1967,13 @@ function readRun(row: Record<string, unknown>): Run {
     taskRef: Number(row["task_ref"]),
     leaseId: String(row["lease_id"]),
     runner: String(row["runner"]),
+    role: String(row["role"] ?? "builder") as Run["role"],
+    parentRun: row["parent_run"] === null || row["parent_run"] === undefined ? null : Number(row["parent_run"]),
+    sessionId: row["session_id"] === null || row["session_id"] === undefined ? null : String(row["session_id"]),
+    baseRevision:
+      row["base_revision"] === null || row["base_revision"] === undefined
+        ? null
+        : String(row["base_revision"]),
     branch: String(row["branch"]),
     worktree: String(row["worktree"]),
     model: row["model"] === null ? null : String(row["model"]),
@@ -1386,6 +1982,18 @@ function readRun(row: Record<string, unknown>): Run {
     committed: row["committed"] === null ? null : Number(row["committed"]) === 1,
     startedAt: String(row["started_at"]),
     finishedAt: row["finished_at"] === null ? null : String(row["finished_at"]),
+  };
+}
+
+function readHold(row: Record<string, unknown>): Hold {
+  return {
+    id: Number(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    ownerKind: String(row["owner_kind"]) as HoldOwner,
+    ownerId: String(row["owner_id"]),
+    reason: String(row["reason"]),
+    until: row["until"] === null ? null : String(row["until"]),
+    heldAt: String(row["held_at"]),
   };
 }
 
@@ -1402,6 +2010,58 @@ function readNotification(row: Record<string, unknown>): Notification {
     lastError: row["last_error"] === null ? null : String(row["last_error"]),
     deliveredAt: row["delivered_at"] === null ? null : String(row["delivered_at"]),
     receipt: row["receipt"] === null ? null : String(row["receipt"]),
+    resolvedAt:
+      row["resolved_at"] === null || row["resolved_at"] === undefined
+        ? null
+        : String(row["resolved_at"]),
+  };
+}
+
+function readDecision(row: Record<string, unknown>): Decision {
+  return {
+    id: Number(row["id"]),
+    run: Number(row["run"]),
+    urgency: String(row["urgency"]) as Decision["urgency"],
+    state: String(row["state"]) as Decision["state"],
+    recap: String(row["recap"]),
+    question: String(row["question"]),
+    options: JSON.parse(String(row["options"])) as DecisionOption[],
+    recommendation: String(row["recommendation"]),
+    assignee: row["assignee"] === null ? null : String(row["assignee"]),
+    deadline: row["deadline"] === null ? null : String(row["deadline"]),
+    createdAt: String(row["created_at"]),
+    answeredAt: row["answered_at"] === null ? null : String(row["answered_at"]),
+    answeredBy: row["answered_by"] === null ? null : String(row["answered_by"]),
+    answeredVia: row["answered_via"] === null ? null : (String(row["answered_via"]) as "cli" | "web"),
+    choice: row["choice"] === null ? null : String(row["choice"]),
+    note: row["note"] === null ? null : String(row["note"]),
+  };
+}
+
+function readArtifact(row: Record<string, unknown>): Artifact {
+  return {
+    id: Number(row["id"]),
+    run: Number(row["run"]),
+    kind: String(row["kind"]) as Artifact["kind"],
+    key: String(row["key"]),
+    bytesOriginal: Number(row["bytes_original"]),
+    bytesStored: Number(row["bytes_stored"]),
+    truncated: Number(row["truncated"]) === 1,
+    sha256: String(row["sha256"]),
+    capture: String(row["capture"]),
+    createdAt: String(row["created_at"]),
+    redacted: Number(row["redacted"]) === 1,
+  };
+}
+
+function readIncident(row: Record<string, unknown>): Incident {
+  return {
+    id: Number(row["id"]),
+    run: Number(row["run"]),
+    kind: String(row["kind"]) as Incident["kind"],
+    createdAt: String(row["created_at"]),
+    resolvedAt: row["resolved_at"] === null ? null : String(row["resolved_at"]),
+    resolvedBy: row["resolved_by"] === null ? null : String(row["resolved_by"]),
   };
 }
 

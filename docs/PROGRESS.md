@@ -96,6 +96,26 @@ whatever pings your phone.
 | Notification outbox | **done** | durable rows enqueued in the same transaction as the run record they describe; dedupe keys are episode identities (a gap re-nags after it fills and recurs); delivery passes text as environment, never into the command line; receipts and failed attempts recorded. Quiet hours, escalation, deep links → M4 with the loop |
 | Exit-code cleanup (deferred here from M1) | **done** | standalone `build` now exits 1 when the attempt broke (agent/timeout/git) and 3 only when a gate said no |
 
+## M3 — a park renders as one screen, answerable on a phone — in progress
+
+Ships when: exactly that, executably. Plan Codex-reviewed 2026-08-11 (16
+findings, 11 HIGH); the findings reshaped the park lifecycle into fenced
+transactions, gave holds owners, made decision identity the run alone, and
+kept the driver role honestly unshipped until M4.
+
+| Item | State | Proof |
+|---|---|---|
+| Schema: rebuild migration (run CHECK + role, owned holds) | **done** | first versioned table-rebuild; proved against a real M2 fixture, not just fresh databases; `PRAGMA foreign_key_check` before commit |
+| Decision / artifact / incident records | **done** | decision's identity is its run (UNIQUE, joined — never denormalized); evidence links refuse to cross runs in the INSERT itself; incidents never age out of a brief |
+| `parseDecision` — the 422 rule as a library | **done** | fail-closed, every problem reported at once with stable reasons; reversibility stated or invalid, never defaulted; caps + C0/C1 rejection on every string, because payloads reach terminals, web pages, and later briefs |
+| Park path (mailbox, finalizeParkFenced) | not started | — |
+| Bounded repair → incident | not started | — |
+| Evidence capture (machine-collected) | not started | — |
+| `decide` + brief DECIDE, authenticated answers | not started | — |
+| Resume (run_decision causation, attention budget) | not started | — |
+| Web decision view (`serve`) | not started | — |
+| Driver role | **deferred to M4** | the design's driver is the event-woken gate agent, which first exists with the loop; repair turns are recorded as `role='repair'` with parentage, because calling them a driver would make M4's cost data mean two things |
+
 ## Deliberately deferred (and to where)
 
 | Gap | Why it waits | Lands with |
