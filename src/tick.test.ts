@@ -32,7 +32,8 @@ const concludeDone = async (
 ): Promise<void> => {
   const prompt = args[args.indexOf("-p") + 1] ?? "";
   const name = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
-  if (name !== undefined) {
+  // An empty cwd would write into the checkout running the tests.
+  if (name !== undefined && cwd !== "") {
     await writeFile(join(cwd, name), JSON.stringify({ version: 1, status, conclusion }));
   }
 };
