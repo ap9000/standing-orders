@@ -157,7 +157,9 @@ authority and transactions before templates. Landed so far:
 |---|---|---|
 | Session lifecycle | **done** | idle (12h) and absolute (7d) expiry re-proved per request; approver-generation check — credential rotation kills cookies the way it kills Telegram bindings; `POST /logout` |
 | Transactional console mutations | **done** | `cancelTask` refuses under a live claim (a runner's completion can no longer overwrite a cancellation); `requeueTask` re-proves stalled-and-unclaimed server-side (a stale button erases nothing); `createConsoleTask` — atomic create+place+scope, backlog admission cap, caps and control rules on every string it will later render; `resolveIncident` owns its transaction |
-| Read model, run-evidence helper, routes, step-up approval | next | per the review: shared bounded queries, descriptor-safe artifact sending, then pages; scope approval will require token re-entry (step-up), never the session alone |
+| Bounded read model | **done** | `listRunsBefore` — cursor pagination, newest first, safe-integer or nothing, page size clamped in the store; `decisionsForTask`/`incidentsForTask` (resolved included: history, not attention); `computeGaps` extracted to `gaps.ts` so CLI and console rank gaps with the same function |
+| Descriptor-safe evidence reads | **done** | `readVerifiedArtifact` in evidence.ts — key shape validated, realpath containment, `O_NOFOLLOW` open, fstat on the same descriptor, size == record, bounded read, SHA-256 verified before a byte leaves; serve's decision-evidence route now goes through it; `artifactForRun` enforces membership in the lookup, not route choreography |
+| Routes, pages, step-up approval | next | per the review: console home / tasks / task / runs / run / caps; centralized `authorizeMutation`; scope approval requires token re-entry (step-up), never the session alone; `encodeURIComponent` on every id in an href; GET stops mutating (decision expiry off the GET path); table-driven inert-render sweep |
 
 ## Toward M4 — the Telegram bridge (shipped early, 2026-08-11)
 

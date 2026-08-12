@@ -2402,6 +2402,26 @@ export class Store {
       .map(readRun);
   }
 
+  /**
+   * One page of runs, newest first, strictly before the cursor — id order,
+   * because ids are the one monotonic thing a page can key on without a row
+   * ever repeating or vanishing between requests. `null` means "from the
+   * top". The limit is clamped here, not trusted from the caller: a page is
+   * bounded by construction or it is not a page.
+   */
+  listRunsBefore(cursor: number | null, limit: number): (Run & { taskId: string })[] {
+    if (cursor !== null && (!Number.isSafeInteger(cursor) || cursor <= 0)) return [];
+    const page = Math.max(1, Math.min(Math.floor(limit), 200));
+    return this.db
+      .prepare(
+        `SELECT run.*, task_ref.external_id AS task_id FROM run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE (? IS NULL OR run.id < ?) ORDER BY run.id DESC LIMIT ?`,
+      )
+      .all(cursor, cursor, page)
+      .map(row => ({ ...readRun(row), taskId: String(row["task_id"]) }));
+  }
+
   // ---- decisions -----------------------------------------------------------
 
   /**
@@ -2487,6 +2507,18 @@ export class Store {
       )
       .run(now.toISOString());
     return Number(changes);
+  }
+
+  /** Every decision this task's runs ever raised, newest first — one task page's worth. */
+  decisionsForTask(taskRef: number): Decision[] {
+    return this.db
+      .prepare(
+        `SELECT decision.* FROM decision
+         JOIN run ON run.id = decision.run
+         WHERE run.task_ref = ? ORDER BY decision.id DESC`,
+      )
+      .all(taskRef)
+      .map(readDecision);
   }
 
   countUnanswered(): number {
@@ -2657,6 +2689,18 @@ export class Store {
     return row === undefined ? null : readArtifact(row);
   }
 
+  /**
+   * The artifact only if it belongs to this run — membership enforced by
+   * the lookup itself, never by route choreography around two lookups. A
+   * mismatched pair is simply not found, whatever the URL claimed.
+   */
+  artifactForRun(runId: number, artifactId: number): Artifact | null {
+    const row = this.db
+      .prepare("SELECT * FROM artifact WHERE run = ? AND id = ?")
+      .get(runId, artifactId);
+    return row === undefined ? null : readArtifact(row);
+  }
+
   artifactsFor(run: number): Artifact[] {
     return this.db
       .prepare("SELECT * FROM artifact WHERE run = ? ORDER BY id")
@@ -2720,6 +2764,18 @@ export class Store {
       )
       .all()
       .map(row => ({ ...readIncident(row), taskId: String(row["task_id"]) }));
+  }
+
+  /** Every incident this task's runs ever raised, newest first, resolved or not. */
+  incidentsForTask(taskRef: number): Incident[] {
+    return this.db
+      .prepare(
+        `SELECT incident.* FROM incident
+         JOIN run ON run.id = incident.run
+         WHERE run.task_ref = ? ORDER BY incident.id DESC`,
+      )
+      .all(taskRef)
+      .map(readIncident);
   }
 
   /** Resolving also lifts the incident's hold — one act, one transaction, owned here. */

@@ -23,10 +23,11 @@ import {
   openSync,
   readdirSync,
   readSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { LIMITS } from "./decision.js";
 import type { Artifact, Store } from "./store.js";
 import type { ExecResult } from "./exec.js";
@@ -148,6 +149,80 @@ export function storeEvidence(
     },
     now,
   );
+}
+
+/**
+ * Read an artifact's bytes back, believing nothing until it is proved on the
+ * descriptor actually read (§7's honesty, applied to serving). The record's
+ * key must be a normalized relative path; the resolved path must live under
+ * the root; the open refuses symlinks; the size and hash checks run against
+ * the same descriptor the bytes come from — so a pathname swapped between a
+ * check and the read buys an attacker nothing. Only a buffer whose SHA-256
+ * matches the row is ever returned: unverified bytes never leave this
+ * function, which is what lets a caller stream with a clear conscience.
+ */
+export function readVerifiedArtifact(
+  root: string,
+  artifact: Artifact,
+): { ok: true; content: Buffer } | { ok: false; problem: string } {
+  const segments = artifact.key.split("/");
+  const wellFormed =
+    segments.length > 0 &&
+    segments.every(
+      segment =>
+        segment.length > 0 &&
+        segment !== "." &&
+        segment !== ".." &&
+        !segment.includes("\\") &&
+        // eslint-disable-next-line no-control-regex
+        !/[\u0000-\u001f\u007f:]/.test(segment),
+    );
+  if (!wellFormed) return { ok: false, problem: "the key is not a normalized relative path" };
+
+  const cap = EVIDENCE_CAPS[artifact.kind];
+  if (artifact.bytesStored > cap) {
+    return { ok: false, problem: "the record claims more bytes than its kind may store" };
+  }
+
+  let resolved: string;
+  try {
+    resolved = realpathSync(join(root, ...segments));
+    const rootReal = realpathSync(root);
+    if (!resolved.startsWith(rootReal + sep)) {
+      return { ok: false, problem: "the file resolves outside the evidence root" };
+    }
+  } catch {
+    return { ok: false, problem: "the file is gone or unresolvable" };
+  }
+
+  let fd: number;
+  try {
+    fd = openSync(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return { ok: false, problem: "cannot open the file without following a link" };
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return { ok: false, problem: "not a regular file" };
+    if (Number(stat.size) !== artifact.bytesStored) {
+      return { ok: false, problem: "the file's size no longer matches its record" };
+    }
+    const buffer = Buffer.alloc(artifact.bytesStored);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read <= 0) break;
+      offset += read;
+    }
+    if (offset !== buffer.length) return { ok: false, problem: "the file ended early" };
+    const digest = createHash("sha256").update(buffer).digest("hex");
+    if (digest !== artifact.sha256) {
+      return { ok: false, problem: "the file no longer hashes to its record" };
+    }
+    return { ok: true, content: buffer };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** The file alone, no row — quarantines use this; they belong to no live run. */

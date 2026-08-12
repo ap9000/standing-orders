@@ -1188,3 +1188,111 @@ describe("console mutation semantics, re-proved server-side", () => {
     expect(store.activeHolds(ref, later(2_000))).toHaveLength(0);
   });
 });
+
+describe("the console read model, bounded by construction", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+  });
+
+  afterEach(() => store.close());
+
+  const refOf = (id: string) => {
+    store.createTask({ id, title: id }, T0);
+    return store.refFor(BUILT_IN, id).id;
+  };
+
+  const runOn = (ref: number, n: number) =>
+    store.startRun({
+      taskRef: ref,
+      leaseId: `lease-${n}`,
+      runner: "builder-1",
+      branch: `nightorders/t-${n}`,
+      worktree: `/pool/t-${n}`,
+      now: T0,
+    });
+
+  test("runs page newest-first, the cursor strictly exclusive, the task attached", () => {
+    const a = refOf("t-a");
+    const b = refOf("t-b");
+    const runs = [runOn(a, 1), runOn(b, 2), runOn(a, 3), runOn(b, 4), runOn(a, 5)];
+
+    const first = store.listRunsBefore(null, 2);
+    expect(first.map(one => one.id)).toEqual([runs[4], runs[3]]);
+    expect(first[0]?.taskId).toBe("t-a");
+
+    // The next page starts strictly below the last row seen — no repeats,
+    // no skips, whatever was inserted in between.
+    const next = store.listRunsBefore(first[1]!.id, 2);
+    expect(next.map(one => one.id)).toEqual([runs[2], runs[1]]);
+
+    const last = store.listRunsBefore(next[1]!.id, 2);
+    expect(last.map(one => one.id)).toEqual([runs[0]]);
+    expect(store.listRunsBefore(runs[0]!, 2)).toEqual([]);
+  });
+
+  test("the page size is clamped and an unsafe cursor is nothing, not everything", () => {
+    const a = refOf("t-a");
+    runOn(a, 1);
+    runOn(a, 2);
+
+    expect(store.listRunsBefore(null, 0)).toHaveLength(1);
+    expect(store.listRunsBefore(null, -5)).toHaveLength(1);
+    expect(store.listRunsBefore(null, 1e9)).toHaveLength(2);
+    // 2^53 is where integers stop being exact — a cursor there could silently
+    // alias another row, so it matches none.
+    expect(store.listRunsBefore(2 ** 53, 10)).toEqual([]);
+    expect(store.listRunsBefore(0, 10)).toEqual([]);
+    expect(store.listRunsBefore(-1, 10)).toEqual([]);
+  });
+
+  test("a task's decisions and incidents are its own, newest first, resolved included", () => {
+    const a = refOf("t-a");
+    const b = refOf("t-b");
+    const mine = runOn(a, 1);
+    const alsoMine = runOn(a, 2);
+    const foreign = runOn(b, 3);
+
+    const option = { id: "x", label: "x", consequence: "c", reversible: true };
+    const early = store.saveDecision(
+      { run: mine, urgency: "blocking", recap: "r", question: "q", options: [option], recommendation: "x" },
+      T0,
+    );
+    const late = store.saveDecision(
+      { run: alsoMine, urgency: "blocking", recap: "r", question: "q", options: [option], recommendation: "x" },
+      T0,
+    );
+    store.saveDecision(
+      { run: foreign, urgency: "blocking", recap: "r", question: "q", options: [option], recommendation: "x" },
+      T0,
+    );
+
+    expect(store.decisionsForTask(a).map(one => one.id)).toEqual([late, early]);
+
+    const incident = store.createIncident({ run: mine, kind: "attempts-exhausted" }, T0);
+    store.createIncident({ run: foreign, kind: "malformed-decision" }, T0);
+    store.resolveIncident(incident, "alex", later(1_000));
+
+    // Resolved incidents stay on the task's page: history, not attention.
+    expect(store.incidentsForTask(a).map(one => one.id)).toEqual([incident]);
+    expect(store.incidentsForTask(a)[0]?.resolvedAt).not.toBeNull();
+  });
+
+  test("an artifact is found only through its own run", () => {
+    const a = refOf("t-a");
+    const b = refOf("t-b");
+    const mine = runOn(a, 1);
+    const foreign = runOn(b, 2);
+
+    const artifact = store.saveArtifact(
+      { run: mine, kind: "diff", key: "1/diff.patch", bytesOriginal: 4, bytesStored: 4, truncated: false, sha256: "h", capture: "git diff (exit 0)" },
+      T0,
+    );
+
+    expect(store.artifactForRun(mine, artifact)?.id).toBe(artifact);
+    // A mismatched pair is not an error to explain — it is simply not found.
+    expect(store.artifactForRun(foreign, artifact)).toBeNull();
+    expect(store.artifactForRun(mine, artifact + 99)).toBeNull();
+  });
+});

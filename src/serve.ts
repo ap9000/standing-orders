@@ -32,8 +32,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { join, sep } from "node:path";
+import { readVerifiedArtifact } from "./evidence.js";
 import type { Artifact, Decision, Store } from "./store.js";
 import { authenticateApprover } from "./scope.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
@@ -297,20 +296,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (linked === undefined) {
       return respond(response, 404, "text/plain; charset=utf-8", "no such evidence");
     }
-    let content: Buffer;
-    try {
-      const path = join(evidenceRoot, linked.key);
-      const resolved = realpathSync(path);
-      const root = realpathSync(evidenceRoot);
-      if (!resolved.startsWith(root + sep)) throw new Error("outside the root");
-      if (!lstatSync(resolved).isFile()) throw new Error("not a file");
-      content = readFileSync(resolved);
-      const digest = createHash("sha256").update(content).digest("hex");
-      // A file that no longer hashes to its record is not the evidence the
-      // decision showed — serving it would put unrecorded bytes under a
-      // recorded name.
-      if (digest !== linked.sha256) throw new Error("hash moved");
-    } catch {
+    // Verified on the very descriptor the bytes come from — a file that no
+    // longer hashes to its record is not the evidence the decision showed,
+    // and serving it would put unrecorded bytes under a recorded name.
+    const read = readVerifiedArtifact(evidenceRoot, linked);
+    if (!read.ok) {
       return respond(response, 410, "text/plain; charset=utf-8", "the evidence no longer matches its record");
     }
     response.writeHead(200, {
@@ -318,7 +308,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       "Content-Type": "text/plain; charset=utf-8",
       "Content-Disposition": `attachment; filename="evidence-${linked.id}.txt"`,
     });
-    response.end(content);
+    response.end(read.content);
   }
 
   return server;
