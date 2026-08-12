@@ -270,6 +270,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         200,
         homePage({
+          taskCount: store.listTasks().length,
+          repo: options.repo ?? null,
           summary: overnight(store.runsSince(since)),
           decisions: store.listDecisions("unanswered"),
           incidents: store.openIncidents(),
@@ -296,6 +298,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           wanted as TaskState | null,
           csrf,
           null,
+          options.repo ?? null,
         ),
       );
     }
@@ -443,7 +446,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
       if (!made.ok) {
         const csrf = who.via === "cookie" ? who.session.csrf : "";
-        return page(response, made.reason === "backlog-full" ? 429 : 400, tasksPage(store.listTasks(), null, csrf, made.reason));
+        return page(response, made.reason === "backlog-full" ? 429 : 400, tasksPage(store.listTasks(), null, csrf, made.reason, options.repo ?? null));
       }
       return redirect(response, taskHref(id));
     }
@@ -1058,6 +1061,8 @@ function loginPage(problem: string | null): string {
 }
 
 function homePage(data: {
+  taskCount: number;
+  repo: string | null;
   summary: ReturnType<typeof overnight<Run & { taskId: string }>>;
   decisions: (Decision & { taskId: string })[];
   incidents: (Incident & { taskId: string })[];
@@ -1128,8 +1133,25 @@ function homePage(data: {
 
   const footer = data.settings ? `<p class="meta"><a href="/settings">settings</a></p>` : "";
 
+  const startHere =
+    data.taskCount === 0
+      ? [
+          `<div class="card">`,
+          `<p><strong>Nothing is queued yet — here is the whole loop:</strong></p>`,
+          `<p>1. <a href="/tasks">Add a task</a> — plain words for work you want done${data.repo === null ? "" : ` in <span class="mono">${escape(data.repo)}</span>`}.</p>`,
+          `<p>2. Open it and write its scope — the goal, and what it must not become. Approve exactly that.</p>`,
+          `<p>3. Leave <code>nightorders watch</code> (or the daemon) running. Approved tasks build overnight, each on its own branch.</p>`,
+          `<p class="meta">When an agent is unsure it stops and asks — those questions land here, under \u201cwaiting on you\u201d.</p>`,
+          `</div>`,
+        ].join("\n")
+      : "";
+
   return shell("night orders", [
     `<h1>the morning</h1>`,
+    data.repo === null
+      ? ""
+      : `<p class="meta">the overnight queue for <span class="mono">${escape(data.repo)}</span> \u2014 what got built, what broke, what waits on you</p>`,
+    startHere,
     ledger,
     `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
     data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} pending delivery</p>` : "",
@@ -1142,13 +1164,23 @@ function homePage(data: {
   ].join("\n"));
 }
 
-function tasksPage(tasks: Task[], state: TaskState | null, csrf: string, problem: string | null): string {
+function tasksPage(
+  tasks: Task[],
+  state: TaskState | null,
+  csrf: string,
+  problem: string | null,
+  repo: string | null = null,
+): string {
   const filters = TASK_STATES.map(
     one => (one === state ? `<strong>${one}</strong>` : `<a href="/tasks?state=${one}">${one}</a>`),
   ).join(" · ");
   const rows =
     tasks.length === 0
-      ? `<p>${state === null ? "The queue is empty." : `Nothing is ${escape(state)}.`}</p>`
+      ? `<p class="meta">${
+          state === null
+            ? "The queue is empty \u2014 add the first task below. It builds once you approve its scope."
+            : `Nothing is ${escape(state)}.`
+        }</p>`
       : tasks
           .map(
             task =>
@@ -1158,6 +1190,7 @@ function tasksPage(tasks: Task[], state: TaskState | null, csrf: string, problem
           .join("\n");
   return shell("tasks", [
     "<h1>tasks</h1>",
+    `<p class="meta">work you want done${repo === null ? "" : ` in <span class="mono">${escape(repo)}</span>`} \u2014 a task builds overnight only after its scope is approved; open one to write or approve its scope</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
     rows,
@@ -1356,7 +1389,7 @@ function taskPage(data: {
 function runsPage(rows: (Run & { taskId: string })[], nextCursor: number | null): string {
   const list =
     rows.length === 0
-      ? "<p>No runs yet.</p>"
+      ? `<p class="meta">No runs yet \u2014 a run is one overnight build attempt; they appear once the watch dispatches an approved task.</p>`
       : rows
           .map(
             run =>

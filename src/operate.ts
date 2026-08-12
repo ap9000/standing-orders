@@ -66,6 +66,7 @@ import {
 } from "./telegram.js";
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
+import { ask, askHidden, confirm, interactive } from "./prompt.js";
 import { overnight, spendLine } from "./summary.js";
 import {
   bodyHashOf,
@@ -1799,11 +1800,11 @@ async function briefCommand(
  * Expiry runs first and never chooses: an overdue decision gets louder, and
  * stays answerable.
  */
-function decideCommand(
+async function decideCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, clock } = context;
   store.expireOverdueDecisions(clock());
 
@@ -1878,9 +1879,8 @@ function decideCommand(
     return EXIT.ok;
   }
 
-  const asWho = text(flags, "as");
-  const token = text(flags, "token");
-  if (asWho === undefined || token === undefined) {
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
     return fail(
       write,
       json,
@@ -1890,6 +1890,7 @@ function decideCommand(
       EXIT.usage,
     );
   }
+  const { name: asWho, token } = acting;
   const authenticated = authenticateApprover(store, asWho, token);
   if (!authenticated.ok) {
     return fail(write, json, "decide", authenticated.reason, describeApproveFailure(authenticated.reason, String(id)), EXIT.refused);
@@ -1983,21 +1984,21 @@ async function serveCommand(
  * transaction. Nothing else moves a stalled task: retrying by hand-editing
  * state would leave the incident claiming the task is stopped.
  */
-function requeueTask(
+async function requeueTask(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, clock } = context;
   const [id] = positional;
   if (id === undefined) {
     return fail(write, json, "task requeue", "usage", "`nightorders task requeue <id> --as <you> --token <t>`", EXIT.usage);
   }
-  const asWho = text(flags, "as");
-  const token = text(flags, "token");
-  if (asWho === undefined || token === undefined) {
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
     return fail(write, json, "task requeue", "usage", "requeueing takes `--as <you> --token <t>` — who overrode the stall is recorded, not asserted", EXIT.usage);
   }
+  const { name: asWho, token } = acting;
   const authenticated = authenticateApprover(store, asWho, token);
   if (!authenticated.ok) {
     return fail(write, json, "task requeue", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
@@ -2019,11 +2020,11 @@ function requeueTask(
  * incident's hold: `task unhold` deliberately cannot, because an operator
  * pause and a broken park are different facts owned by different acts.
  */
-function incidentCommand(
+async function incidentCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, clock } = context;
   const [action, idText] = positional;
 
@@ -2052,11 +2053,11 @@ function incidentCommand(
   if (!Number.isInteger(id) || id <= 0) {
     return fail(write, json, "incident resolve", "usage", "`nightorders incident resolve <id> --as <you> --token <t>`", EXIT.usage);
   }
-  const asWho = text(flags, "as");
-  const token = text(flags, "token");
-  if (asWho === undefined || token === undefined) {
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
     return fail(write, json, "incident resolve", "usage", "resolving takes `--as <you> --token <t>` — who looked is recorded, not asserted", EXIT.usage);
   }
+  const { name: asWho, token } = acting;
   const authenticated = authenticateApprover(store, asWho, token);
   if (!authenticated.ok) {
     return fail(write, json, "incident resolve", authenticated.reason, describeApproveFailure(authenticated.reason, String(id)), EXIT.refused);
@@ -2555,11 +2556,11 @@ async function bridgeCommand(
   }
 
   if (action === "pair" || action === "unpair") {
-    const asWho = text(flags, "as");
-    const token = text(flags, "token");
-    if (asWho === undefined || token === undefined) {
-      return fail(write, json, `bridge ${action}`, "usage", "`--as <you> --token <approver-token>` — pairing hands your authority to a chat, so it takes your credential", EXIT.usage);
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, `bridge ${action}`, "usage", "`--as <you> --token <your password>` — pairing hands your authority to a chat, so it takes your credential", EXIT.usage);
     }
+    const { name: asWho, token } = acting;
     const authenticated = authenticateApprover(store, asWho, token);
     if (!authenticated.ok) {
       return fail(write, json, `bridge ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, asWho), EXIT.refused);
@@ -2722,11 +2723,11 @@ async function publishCommand(
       ]);
     }
 
-    const asWho = text(flags, "as");
-    const token = text(flags, "token");
-    if (asWho === undefined || token === undefined) {
-      return fail(write, json, "publish grant", "usage", "granting takes --as <you> --token <approver-token> — pushing your repos is a person's yes", EXIT.usage);
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "publish grant", "usage", "granting takes --as <you> --token <your password> — pushing your repos is a person's yes", EXIT.usage);
     }
+    const { name: asWho, token } = acting;
     const authenticated = authenticateApprover(store, asWho, token);
     if (!authenticated.ok) {
       return fail(write, json, "publish grant", authenticated.reason, describeApproveFailure(authenticated.reason, asWho), EXIT.refused);
@@ -2741,11 +2742,11 @@ async function publishCommand(
   }
 
   if (action === "revoke") {
-    const asWho = text(flags, "as");
-    const token = text(flags, "token");
-    if (asWho === undefined || token === undefined) {
-      return fail(write, json, "publish revoke", "usage", "`--as <you> --token <approver-token>`", EXIT.usage);
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "publish revoke", "usage", "`--as <you> --token <your password>`", EXIT.usage);
     }
+    const { name: asWho, token } = acting;
     const authenticated = authenticateApprover(store, asWho, token);
     if (!authenticated.ok) {
       return fail(write, json, "publish revoke", authenticated.reason, describeApproveFailure(authenticated.reason, asWho), EXIT.refused);
@@ -3518,11 +3519,11 @@ function scopeTask(
  * a command that did it as a side effect of being run would be the wrong shape
  * entirely.
  */
-function approveTask(
+async function approveTask(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, now } = context;
   const id = positional[0];
   if (id === undefined) {
@@ -3534,11 +3535,38 @@ function approveTask(
     return fail(write, json, "task approve", "no-scope", `${id} has no scope to approve — write one first`, EXIT.refused);
   }
 
-  const saw = text(flags, "digest");
-  const asWho = text(flags, "as");
-  const token = text(flags, "token");
+  let saw = text(flags, "digest");
+  let asWho = text(flags, "as");
+  let token = text(flags, "token");
 
-  if (!flags.has("yes") || saw === undefined || asWho === undefined || token === undefined) {
+  let confirmedAloud = false;
+  // At a terminal, approval is a conversation, not flag assembly: the scope
+  // prints, a person says yes to exactly what printed, and the digest that
+  // binds the yes is the one this very process just displayed — approve()
+  // still re-proves it transactionally, so a scope swapped mid-read refuses.
+  if ((!flags.has("yes") || saw === undefined || asWho === undefined || token === undefined) &&
+      interactive() && !json) {
+    write(`Approving lets a builder work on ${id}, within exactly this:`);
+    write("");
+    for (const line of describeScope(scope)) write(line);
+    write("");
+    const agreed = await confirm("Approve exactly this?");
+    if (!agreed) {
+      write("Nothing approved.");
+      return EXIT.refused;
+    }
+    saw ??= scope.digest;
+    const acting = await askCredentials(flags, context);
+    if (acting === null) return fail(write, json, "task approve", "usage", "approval needs who is agreeing", EXIT.usage);
+    asWho = acting.name;
+    token = acting.token;
+    confirmedAloud = true;
+  }
+
+  const armed =
+    (flags.has("yes") || confirmedAloud) &&
+    saw !== undefined && asWho !== undefined && token !== undefined;
+  if (!armed) {
     if (json) {
       write(JSON.stringify({ ok: false, command: "task approve", reason: "unconfirmed", scope }, null, 2));
       return EXIT.refused;
@@ -3548,8 +3576,11 @@ function approveTask(
     for (const line of describeScope(scope)) write(line);
     write("");
     write("Nothing has been approved. Agree to this exact scope with:");
-    write(`  nightorders task approve ${id} --yes --digest ${scope.digest} --as <you> --token <token>`);
+    write(`  nightorders task approve ${id} --yes --digest ${scope.digest} --as <you> --token <your password>`);
     return EXIT.ok;
+  }
+  if (saw === undefined || asWho === undefined || token === undefined) {
+    return fail(write, json, "task approve", "usage", "approving non-interactively takes --yes --digest <d> --as <you> --token <t>", EXIT.usage);
   }
 
   // The digest is named rather than assumed, so an operator who read one scope
@@ -3584,11 +3615,31 @@ function describeApproveFailure(reason: string, id: string): string {
  * approver credential agrees to it. One token that did both would collapse the
  * gate into a formality the moment an agent held it.
  */
-function approverCommand(
+/**
+ * Who is acting, from flags — or from a person at the terminal. Scripts and
+ * agents pass --as/--token and never see a prompt; a human who left them off
+ * is simply asked, with the password hidden. Under --json (or any non-TTY)
+ * missing credentials stay a usage refusal, exactly as before.
+ */
+async function askCredentials(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<{ name: string; token: string } | null> {
+  let name = text(flags, "as");
+  let token = text(flags, "token");
+  if ((name === undefined || token === undefined) && interactive() && !context.json) {
+    name ??= await ask("username: ");
+    token ??= await askHidden("password: ");
+  }
+  if (name === undefined || token === undefined || name === "" || token === "") return null;
+  return { name, token };
+}
+
+async function approverCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, now } = context;
   const [action, name] = positional;
 
@@ -3611,10 +3662,23 @@ function approverCommand(
     if (name === undefined) {
       return fail(write, json, "approver add", "usage", "an approver needs a name", EXIT.usage);
     }
-    const asWho = text(flags, "as");
-    const token = text(flags, "token");
-    const by = asWho === undefined || token === undefined ? undefined : { name: asWho, token };
-    const password = text(flags, "password");
+    let password = text(flags, "password");
+    const bootstrap = store.listApprovers().length === 0;
+    let by: { name: string; token: string } | undefined;
+    if (!bootstrap) {
+      const vouched = await askCredentials(flags, context);
+      if (vouched !== null) by = vouched;
+    }
+    if (password === undefined && interactive() && !json) {
+      const chosen = await askHidden(`password for ${name} (enter to auto-generate): `);
+      if (chosen !== "") {
+        const again = await askHidden("again: ");
+        if (again !== chosen) {
+          return fail(write, json, "approver add", "mismatch", "the two passwords did not match", EXIT.refused);
+        }
+        password = chosen;
+      }
+    }
 
     const added = addApprover(store, name, now, by, undefined, mutationFrom(flags, now), password);
     if (!added.ok) {
