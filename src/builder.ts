@@ -199,7 +199,28 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   }
   const actual = head.stdout.trim();
 
-  if (PROTECTED.has(actual) || PROTECTED.has(branch)) {
+  // The well-known names are necessary but not sufficient: a repository whose
+  // default branch is `production` or `stable` is exactly as unprotectable by
+  // a hardcoded list as it is worth protecting. So the repository is asked
+  // what its default actually is — origin's HEAD — and that answer joins the
+  // list. A repo with no origin falls back to the list alone, which refuses
+  // too much rather than too little.
+  const defaultRef = await git(
+    GIT,
+    ["--no-optional-locks", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    { cwd: worktree },
+  );
+  const defaultBranch =
+    defaultRef.code === 0 && defaultRef.stdout.trim() !== ""
+      ? defaultRef.stdout.trim().replace(/^refs\/remotes\/origin\//, "")
+      : null;
+
+  if (
+    PROTECTED.has(actual) ||
+    PROTECTED.has(branch) ||
+    actual === defaultBranch ||
+    branch === defaultBranch
+  ) {
     return {
       ok: false,
       reason: "protected-branch",

@@ -47,7 +47,7 @@ real git with only the agent stubbed (2026-08-11).
 | Reconciliation: orphaned worktree | in progress | pool `orphans()`/`adopt()` exist; no CLI wires them, no E2E test |
 | `tick` — the unattended pass | **done** | `d088ef8` — atomic ready-check claim, fenced completion, sorted refusals |
 | Heartbeat *during* a build | in progress | a 30-min build outlives the 3-min liveness window; lease TTL margin covers the claim, nothing covers the runner |
-| Default-branch protection by discovery | in progress | hardcoded main/master/trunk/develop/release; a custom default branch is unprotected |
+| Default-branch protection by discovery | **done** | origin's HEAD joins the hardcoded list; a repo with no origin falls back to the list, refusing too much rather than too little |
 | Durable run records | in progress | build outcomes evaporate with the process; M2's briefing needs them recorded at the source |
 
 **Scope note — "treehouse adapter".** The milestone named an adapter; what

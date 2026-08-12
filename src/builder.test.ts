@@ -139,6 +139,40 @@ describe("the builder's gates", () => {
     expect(agentCalls).toHaveLength(0);
   });
 
+  test("refuses the repo's own default branch, even under a custom name", async () => {
+    // `production` is on no hardcoded list, but origin says it is HEAD — and
+    // the default branch by any name is the one an autonomous loop must not
+    // touch. The worktree is (wrongly) checked out on it.
+    claimIt();
+    approveScope();
+    const askOrigin: Runner = async (_file, args) => {
+      if (args.includes("symbolic-ref")) {
+        return { ...OK, stdout: "refs/remotes/origin/production\n" };
+      }
+      if (args.includes("rev-parse")) return { ...OK, stdout: "production\n" };
+      return { ...OK };
+    };
+    store.saveWorktree({
+      path: "/pool/thing/production",
+      repo: "/code/thing",
+      branch: "production",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+
+    const result = await build(
+      store,
+      request({ git: askOrigin, worktree: "/pool/thing/production", branch: "production" }),
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: "protected-branch" });
+    expect(agentCalls).toHaveLength(0);
+  });
+
   test("refuses every protected branch, whatever it was told", async () => {
     // A pull request is always the terminus; an autonomous loop with commit
     // rights to main has no safe failure mode.
