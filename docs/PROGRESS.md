@@ -84,7 +84,7 @@ only what it re-proves where it stands).
 | Detection from disk (`cap scan`) | not started | .env.example · .mcp.json · supabase/config.toml · workflow env; ci secrets are ci capabilities, not local env |
 | Dispatch gate: unverified does not run | **done** | inside the claim transaction (a key that expired between survey and take is caught) *and* the builder (`nightorders build` cannot bypass it); tick probes at its own checkpoint and reports each gap by name |
 | Fill one gap, three tasks start | **done** | executable in `tick.test.ts`: three tasks skipped naming the gap, the capability supplied with the probe untouched, all three built on the next pass |
-| `gaps` ranked by what they unblock | not started | blocks_count counts only genuinely startable tasks |
+| `gaps` ranked by what they unblock | **done** | derived view; a task waiting on two gaps counts toward neither's `unblocks` and both's `alsoBlocks`, so the ranking sends the operator to the right gap first |
 | Morning briefing | not started | run aggregation since a moment; REVIEW distinguishes "not read" from "zero" |
 | Notification outbox | not started | durable, deduped by episode, receipts recorded |
 | Exit-code cleanup (deferred here from M1) | not started | standalone `build` maps agent/timeout/git to 3; contract says 1 |

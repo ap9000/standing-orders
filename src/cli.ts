@@ -173,6 +173,7 @@ const OPERATE_COMMANDS = new Set([
   "build",
   "tick",
   "cap",
+  "gaps",
   "reconcile",
 ]);
 

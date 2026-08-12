@@ -476,3 +476,87 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
     expect(main.stdout.trim().split("\n")).toHaveLength(1);
   });
 });
+
+describe("gaps", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let lines: string[] = [];
+
+  const run = (argv: string[]) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now: T0 });
+  };
+
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-gaps-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    await mkdir(repo, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const approvedTask = async (id: string, approverToken: string, caps: string) => {
+    await run(["task", "add", "the work", "--id", id, "--repo", repo]);
+    await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
+    await run(["task", "approve", id, "--json"]);
+    const digest = payload().scope.digest as string;
+    await run([
+      "task", "approve", id, "--yes",
+      "--digest", digest, "--as", "alex", "--token", approverToken,
+    ]);
+    await run(["task", "require", id, "--cap", caps]);
+  };
+
+  test("ranks by what filling would actually free, and counts honestly", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["cap", "add", "ALPHA", "--repo", repo]);
+    await run(["cap", "add", "BETA", "--repo", repo]);
+
+    // Three tasks held by ALPHA alone; one held by ALPHA and BETA together —
+    // that one starts only when both fill, so it must not inflate either.
+    await approvedTask("t-1", approverToken, "env:ALPHA");
+    await approvedTask("t-2", approverToken, "env:ALPHA");
+    await approvedTask("t-3", approverToken, "env:ALPHA");
+    await approvedTask("t-4", approverToken, "env:ALPHA,env:BETA");
+
+    const code = await run(["gaps", "--repo", repo, "--json"]);
+
+    expect(code).toBe(EXIT.refused);
+    const { gaps } = payload();
+    expect(gaps[0]).toMatchObject({
+      key: "env:ALPHA",
+      unblocks: ["t-1", "t-2", "t-3"],
+      alsoBlocks: ["t-4"],
+    });
+    expect(gaps[1]).toMatchObject({ key: "env:BETA", unblocks: [], alsoBlocks: ["t-4"] });
+  });
+
+  test("a requirement nobody recorded is a gap the moment a task names it", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await approvedTask("t-1", approverToken, "mcp:supabase");
+
+    await run(["gaps", "--repo", repo, "--json"]);
+
+    expect(payload().gaps[0]).toMatchObject({
+      key: "mcp:supabase",
+      state: `unrecorded for ${repo}`,
+      unblocks: ["t-1"],
+    });
+  });
+
+  test("no gaps is exit 0 and says so", async () => {
+    const code = await run(["gaps", "--repo", repo, "--json"]);
+
+    expect(code).toBe(EXIT.ok);
+    expect(payload().gaps).toEqual([]);
+  });
+});

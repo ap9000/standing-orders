@@ -142,6 +142,8 @@ Capabilities — what the work needs, recorded and probed, never valued
   nightorders task require <id> --cap <kind:name>[,…]
                                         nothing dispatches it until every
                                         one is verified (--cap none clears)
+  nightorders gaps [--repo <path>]      what is missing, ranked by how many
+                                        tasks filling it would start
 
 Runners — the machines that may be given work
   nightorders runner register <name> [--capacity <n>]
@@ -292,6 +294,8 @@ async function dispatch(
       return reconcileCommand(flags, context);
     case "cap":
       return capCommand(positional, flags, context);
+    case "gaps":
+      return gapsCommand(flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -1162,6 +1166,140 @@ async function reconcileCommand(
             ...adoption.forgotten.map(path => `Forgot ${path} — its directory is gone.`),
           ],
   );
+}
+
+// ---- gaps -----------------------------------------------------------------
+
+/** One thing the machine lacks, and what filling it would actually free. */
+type Gap = {
+  key: string;
+  repo: string;
+  /** Why it is a gap, in the capability's own words. */
+  state: string;
+  /** Tasks this gap alone is holding back — fill it and they start. */
+  unblocks: string[];
+  /** Tasks waiting on this *and* something else — filling this is not enough. */
+  alsoBlocks: string[];
+  /** How to prove it filled. */
+  verify: string;
+  instructions: string;
+};
+
+/**
+ * What is missing, ranked by how many tasks it unblocks — never
+ * alphabetically (§6). The count is honest in the way that matters at 9am:
+ * a task waiting on two gaps starts when *both* fill, so it counts toward
+ * neither gap's `unblocks` and both gaps' `alsoBlocks`. A ranking that
+ * counted it twice would send the operator to fill the wrong gap first.
+ *
+ * Derived, not stored: every field here is a join over capabilities and the
+ * ready set, and a stored copy would only learn to disagree with them.
+ */
+function computeGaps(store: Store, repo: string, now: Date): Gap[] {
+  const gaps = new Map<string, Gap>();
+
+  const claim = (key: string, state: string, verify: string, kind: string): Gap => {
+    const existing = gaps.get(key);
+    if (existing !== undefined) return existing;
+    const made: Gap = {
+      key,
+      repo,
+      state,
+      unblocks: [],
+      alsoBlocks: [],
+      verify,
+      instructions: adviceFor(kind),
+    };
+    gaps.set(key, made);
+    return made;
+  };
+
+  // Unverified capabilities are gaps even before anything requires them —
+  // visible early is the point. Requirements referencing capabilities nobody
+  // recorded become gaps the moment a task names them.
+  for (const capability of store.listCapabilities(repo)) {
+    if (isVerified(capability, now)) continue;
+    claim(
+      `${capability.kind}:${capability.name}`,
+      describeCapability(capability, now),
+      capability.probe ?? "no probe recorded — nothing can verify it",
+      capability.kind,
+    );
+  }
+
+  for (const ref of store.listReady(now)) {
+    if (ref.repo !== null && ref.repo !== repo) continue;
+    if (!approvalOf(store.getScope(ref.externalId)).approved) continue;
+    if (ref.capabilityRequirements.length === 0) continue;
+
+    const unmet: string[] = [];
+    for (const key of ref.capabilityRequirements) {
+      const parsed = parseCapabilityKey(key);
+      if (parsed === null) continue;
+      const taskRepo = ref.repo ?? repo;
+      const capability = store.getCapability(taskRepo, parsed.kind, parsed.name);
+      if (capability === null) {
+        unmet.push(key);
+        claim(key, `unrecorded for ${taskRepo}`, "nightorders cap add, then cap probe", parsed.kind);
+      } else if (!isVerified(capability, now)) {
+        unmet.push(key);
+      }
+    }
+
+    for (const key of unmet) {
+      const gap = gaps.get(key);
+      if (gap === undefined) continue;
+      (unmet.length === 1 ? gap.unblocks : gap.alsoBlocks).push(ref.externalId);
+    }
+  }
+
+  return [...gaps.values()].sort(
+    (a, b) => b.unblocks.length - a.unblocks.length || a.key.localeCompare(b.key),
+  );
+}
+
+function adviceFor(kind: string): string {
+  switch (kind) {
+    case "env":
+      return "supply the value in the runner's environment — shell profile or keychain; values never enter the control plane";
+    case "cli":
+      return "install it or log it in, then re-probe";
+    case "mcp":
+      return "start or configure the server, then re-probe";
+    case "ci":
+      return "this lives in CI; supply a local equivalent only if local tasks need it";
+    default:
+      return "supply it where the runner can see it, then re-probe";
+  }
+}
+
+/** `nightorders gaps` — the BLOCKED section of the morning, standalone. */
+function gapsCommand(flags: Map<string, string | true>, context: Context): number {
+  const { store, write, json, clock } = context;
+  const repo = repoFrom(flags);
+  const gaps = computeGaps(store, repo, clock());
+
+  if (json) {
+    write(JSON.stringify({ ok: true, command: "gaps", repo, gaps }, null, 2));
+    return gaps.length === 0 ? EXIT.ok : EXIT.refused;
+  }
+  if (gaps.length === 0) {
+    write(`No gaps for ${repo}. Everything recorded is verified.`);
+    return EXIT.ok;
+  }
+  for (const gap of gaps) {
+    const freed =
+      gap.unblocks.length > 0
+        ? `fills → ${gap.unblocks.length} task(s) start: ${gap.unblocks.join(", ")}`
+        : gap.alsoBlocks.length > 0
+          ? `part of what holds: ${gap.alsoBlocks.join(", ")}`
+          : "nothing queued needs it yet";
+    write(`  ${gap.key.padEnd(28)} ${gap.state}`);
+    write(`    ${freed}`);
+    write(`    verify: ${gap.verify}`);
+    write(`    ${gap.instructions}`);
+  }
+  return EXIT.refused;
 }
 
 // ---- write access ---------------------------------------------------------
