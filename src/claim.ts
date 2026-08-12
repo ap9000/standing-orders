@@ -309,13 +309,13 @@ export function release(store: Store, leaseId: string, now: Date): FenceResult {
   return inTransaction(store, () => {
     const { changes } = db
       .prepare(
-        `UPDATE claim SET released_at = ?
+        `UPDATE claim SET released_at = ?, released_by = 'released'
           WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
       )
       .run(now.toISOString(), leaseId);
 
     if (Number(changes) === 0) {
-      // A repeat of a completion this same lease already made is not a fence —
+      // A repeat of a hand-back this same lease already made is not a fence —
       // nobody took the task away, the runner simply said so twice because its
       // first acknowledgement was lost. M1 asks for duplicate completion to be
       // reconciled rather than refused, and telling an honest runner it was
@@ -326,18 +326,39 @@ export function release(store: Store, leaseId: string, now: Date): FenceResult {
       // accepted at the time, and the honest answer to a late retry is "you
       // already did this", not "you were fenced" — which would say its work
       // never counted. Fencing is for a lease that never finished.
-      const duplicate = db
-        .prepare("SELECT * FROM claim WHERE lease_id = ? AND released_at IS NOT NULL")
-        .get(leaseId);
-      if (duplicate !== undefined) {
-        return { ok: true as const, claim: readClaim(duplicate), duplicate: true };
-      }
-      return refusal(db, leaseId);
+      //
+      // But *how* the lease came to be released decides everything. Only a
+      // release the runner itself made counts as "you already did this". A
+      // lease the reaper or dead-runner recovery took back was never handed
+      // in by anybody — the world moved on without it, and the answer to its
+      // late retry is the fence.
+      return duplicateOrRefusal(db, leaseId, ["released", "completed"]);
     }
 
     const row = db.prepare("SELECT * FROM claim WHERE lease_id = ?").get(leaseId);
     return { ok: true as const, claim: readClaim(row as Record<string, unknown>) };
   });
+}
+
+/**
+ * Whether an already-released lease was released in a way the caller may
+ * treat as its own doing. Anything else — reaped, recovered, or provenance
+ * unknown — is the fence, because accepting it would let a reclaimed lease's
+ * late retry pass as an ordinary duplicate.
+ */
+function duplicateOrRefusal(
+  db: Store["handle"],
+  leaseId: string,
+  own: readonly string[],
+): FenceResult {
+  const released = db
+    .prepare("SELECT * FROM claim WHERE lease_id = ? AND released_at IS NOT NULL")
+    .get(leaseId);
+  if (released !== undefined && own.includes(String(released["released_by"] ?? ""))) {
+    return { ok: true as const, claim: readClaim(released), duplicate: true };
+  }
+  if (released !== undefined) return { ok: false as const, reason: "fenced" as const };
+  return refusal(db, leaseId);
 }
 
 /**
@@ -366,21 +387,18 @@ export function completeFenced(
   return inTransaction(store, () => {
     const { changes } = db
       .prepare(
-        `UPDATE claim SET released_at = ?
+        `UPDATE claim SET released_at = ?, released_by = 'completed'
           WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
       )
       .run(now.toISOString(), leaseId);
 
     if (Number(changes) === 0) {
-      // Same reconciliation as `release`: a lease that already completed is
-      // told "you already did this", not "you were fenced".
-      const duplicate = db
-        .prepare("SELECT * FROM claim WHERE lease_id = ? AND released_at IS NOT NULL")
-        .get(leaseId);
-      if (duplicate !== undefined) {
-        return { ok: true as const, claim: readClaim(duplicate), duplicate: true };
-      }
-      return refusal(db, leaseId);
+      // Only a completion this same lease already made reads as a duplicate.
+      // A lease the reaper or recovery released was never *accepted* — its
+      // machine went quiet and the system took the task back — and a late
+      // completion arriving afterwards is exactly the stale commit the fence
+      // exists to keep out.
+      return duplicateOrRefusal(db, leaseId, ["completed"]);
     }
 
     const row = db.prepare("SELECT * FROM claim WHERE lease_id = ?").get(leaseId);
@@ -424,16 +442,19 @@ export function reap(store: Store, now: Date): Claim[] {
   const stamp = now.toISOString();
   const db = store.handle;
 
-  const expired = db
-    .prepare("SELECT * FROM claim WHERE released_at IS NULL AND expires_at <= ?")
-    .all(stamp);
-  if (expired.length === 0) return [];
+  // One transaction, so the list returned is exactly the list released — a
+  // lease expiring between the read and the write belongs to the next reap.
+  return inTransaction(store, () => {
+    const expired = db
+      .prepare("SELECT * FROM claim WHERE released_at IS NULL AND expires_at <= ?")
+      .all(stamp);
+    if (expired.length === 0) return [];
 
-  db.prepare("UPDATE claim SET released_at = ? WHERE released_at IS NULL AND expires_at <= ?").run(
-    stamp,
-    stamp,
-  );
-  return expired.map(readClaim);
+    db.prepare(
+      "UPDATE claim SET released_at = ?, released_by = 'reaped' WHERE released_at IS NULL AND expires_at <= ?",
+    ).run(stamp, stamp);
+    return expired.map(readClaim);
+  });
 }
 
 function isLive(row: Record<string, unknown>, stamp: string): boolean {

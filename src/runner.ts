@@ -188,11 +188,27 @@ export function recoverDead(
   now: Date,
   livenessMs = DEFAULT_LIVENESS_MS,
 ): Recovery[] {
-  return deadRunners(store, now, livenessMs).map(runner => ({
-    runner: runner.name,
-    claims: store.releaseClaimsOf(runner.name, now),
-    worktrees: store.releaseWorktreesOf(runner.name, now),
-  }));
+  const recovered: Recovery[] = [];
+
+  for (const candidate of deadRunners(store, now, livenessMs)) {
+    // Death is re-proved inside the transaction that acts on it. The snapshot
+    // above is a survey of a moving world: a runner whose pulse lands between
+    // the survey and the release is alive, and releasing its claims anyway
+    // would take work from a machine that just said "still here" — the exact
+    // loss the heartbeat exists to prevent.
+    const recovery = store.transact(() => {
+      const fresh = store.getRunner(candidate.name);
+      if (fresh === null || isAlive(fresh.runner, now, livenessMs)) return null;
+      return {
+        runner: candidate.name,
+        claims: store.releaseClaimsOf(candidate.name, now),
+        worktrees: store.releaseWorktreesOf(candidate.name, now),
+      };
+    });
+    if (recovery !== null) recovered.push(recovery);
+  }
+
+  return recovered;
 }
 
 /** 32 bytes of randomness, urlsafe, so it survives being pasted anywhere. */

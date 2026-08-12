@@ -515,3 +515,68 @@ describe("completeFenced", () => {
     expect(second).toEqual({ ok: false, reason: "not-ready", message: "state is done, not queued" });
   });
 });
+
+describe("release provenance", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("a completion arriving after the reaper took the lease is fenced", () => {
+    // The stale-commit case: the machine slept, the lease expired, the reaper
+    // released it. The build finishing afterwards was never accepted, and
+    // answering "duplicate" here would let its commit pass as success.
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    reap(store, later(61_000));
+
+    const late = completeFenced(store, "lease-a", "done", later(120_000));
+
+    expect(late).toEqual({ ok: false, reason: "fenced" });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+  });
+
+  test("a completion arriving after dead-runner recovery is fenced", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    store.releaseClaimsOf("runner-a", later(1_000));
+
+    const late = completeFenced(store, "lease-a", "done", later(2_000));
+
+    expect(late).toEqual({ ok: false, reason: "fenced" });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+  });
+
+  test("a release retried after the reaper took the lease is fenced, not duplicate", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    reap(store, later(61_000));
+
+    expect(release(store, "lease-a", later(62_000))).toEqual({ ok: false, reason: "fenced" });
+  });
+
+  test("a completion retried after a genuine completion is still a duplicate", () => {
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    completeFenced(store, "lease-a", "done", later(1_000));
+
+    const retry = completeFenced(store, "lease-a", "done", later(2_000));
+
+    expect(retry).toMatchObject({ ok: true, duplicate: true });
+  });
+
+  test("a plain release does not let a later completion claim acceptance", () => {
+    // Handing a task back and having a completion accepted are different
+    // events. A runner that released and then tries to complete is reporting
+    // work on a lease it already gave up.
+    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    release(store, "lease-a", later(1_000));
+
+    const late = completeFenced(store, "lease-a", "done", later(2_000));
+
+    expect(late).toEqual({ ok: false, reason: "fenced" });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+  });
+});

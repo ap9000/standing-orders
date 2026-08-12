@@ -159,6 +159,13 @@ CREATE TABLE IF NOT EXISTS claim (
   expires_at       TEXT NOT NULL,
   heartbeat_at     TEXT NOT NULL,
   released_at      TEXT,
+  -- Who let go, because "released" alone conflates four different events:
+  -- the runner handing it back ('released'), a completion being accepted
+  -- ('completed'), expiry reap ('reaped'), and dead-runner recovery
+  -- ('recovered'). A retry that finds its lease released must know which:
+  -- answering "duplicate" to a runner whose lease was in fact reclaimed
+  -- would accept work the reclaim already disowned.
+  released_by      TEXT,
   UNIQUE (task_ref, lease_generation)
 );
 
@@ -335,6 +342,7 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
  */
 function migrate(db: Database): void {
   addColumn(db, "task_ref", "origin", "TEXT NOT NULL DEFAULT 'theirs'");
+  addColumn(db, "claim", "released_by", "TEXT");
 }
 
 function addColumn(db: Database, table: string, column: string, definition: string): void {
@@ -830,7 +838,9 @@ export class Store {
     if (held.length === 0) return [];
 
     this.db
-      .prepare("UPDATE claim SET released_at = ? WHERE runner = ? AND released_at IS NULL")
+      .prepare(
+        "UPDATE claim SET released_at = ?, released_by = 'recovered' WHERE runner = ? AND released_at IS NULL",
+      )
       .run(now.toISOString(), runner);
 
     // Releasing the lease is only half of it. Claiming a task moves it to
