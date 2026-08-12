@@ -1,8 +1,8 @@
 /**
- * The web decision view (§7): a park renders as one screen, answerable on a
- * phone. `nightorders serve` — node:http, no dependencies, no JavaScript in
- * the page. TLS is a proxy's job and the docs say so; what is not delegated
- * is everything else:
+ * The web console (§7, grown per the console review): the whole built-in
+ * queue, visible and operable from a phone. `nightorders serve` — node:http,
+ * no dependencies, no JavaScript in the page. TLS is a proxy's job and the
+ * docs say so; what is not delegated is everything else:
  *
  * **Authentication is required on every bind, localhost included.** The
  * credential is the approver's — the same name-and-token that approves a
@@ -13,28 +13,58 @@
  * token never travels in a URL, where it would land in history and logs.
  *
  * **Every request proves its Host** against the names this server was told
- * it answers as — a DNS-rebound page resolves to us with the attacker's
- * hostname in the Host header, and that request must die before routing.
- * Cookie-authenticated mutations additionally prove an allowed Origin and a
- * per-session CSRF nonce; Bearer mutations carry no cookie for a hostile
- * page to ride, so they skip the ceremony.
+ * it answers as. Cookie-authenticated mutations additionally pass one
+ * centralized gate — `authorizeMutation` — that proves content type, an
+ * allowed Origin, and the per-session CSRF nonce, and refuses duplicated
+ * security fields; a mutation route cannot forget a check it never wrote.
+ * Bearer mutations carry no cookie for a hostile page to ride, so they skip
+ * the cookie ceremony and nothing else.
  *
- * **Everything rendered is escaped at the sink.** Decision text was
- * validated at park time (caps, control characters), but "printable" is not
- * "inert": an option label is still free to contain <script>. The CSP is
- * belt to that suspenders — no scripts, no frames, no external anything.
+ * **Approval is step-up.** A session alone never approves a scope: the
+ * approval form restates the goal, the exclusions, and the touches — the
+ * three fields the digest binds — and requires the approver token typed
+ * again, plus (for browsers) a single-use nonce minted when the form was
+ * rendered, bound server-side to who saw which digest of which task. A
+ * stolen cookie can read; it cannot agree to work.
  *
- * **Evidence is streamed only through the decision's own artifact rows**,
- * after proving the file still lives under the evidence root, is a regular
- * file, and still hashes to what was recorded — and it is served as a
- * plain-text attachment, never sniffable inline content.
+ * **GET never mutates.** Overdue-ness is derived at render time from the
+ * deadline on the row; the durable expiry sweep belongs to the CLI's
+ * surfaces and the loop, not to a crawler hitting a page.
+ *
+ * **Everything rendered is escaped at the sink**, and every identifier in an
+ * href is URL-encoded first — HTML escaping does not make `a/b?x=1` a valid
+ * path segment. The CSP is belt to those suspenders.
+ *
+ * **Evidence goes through one verified reader** (`readVerifiedArtifact`) and
+ * membership is enforced by the lookup — a decision serves only its linked
+ * artifacts, a run only its own rows, and when this server was scoped to a
+ * repo, only runs whose task belongs to that repo (or to no repo yet).
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readVerifiedArtifact } from "./evidence.js";
-import type { Artifact, Decision, Store } from "./store.js";
-import { authenticateApprover } from "./scope.js";
+import {
+  type Artifact,
+  type Capability,
+  type Decision,
+  type Hold,
+  type Incident,
+  type Run,
+  type Store,
+  type Task,
+  type TaskState,
+} from "./store.js";
+import {
+  approvalOf,
+  approve as approveScope,
+  authenticateApprover,
+  proposeGuarded,
+  type Scope,
+} from "./scope.js";
+import { hasForbiddenControls } from "./decision.js";
+import { computeGaps, describeCapability, type Gap } from "./gaps.js";
+import { overnight, spendLine } from "./summary.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -48,6 +78,12 @@ export type ServeOptions = {
    * settings card renders; absent = no settings surface at all.
    */
   telegramTokenFile?: string;
+  /**
+   * The repo this console serves. Scopes run evidence to that repo's tasks
+   * (and unplaced ones) and turns on the gaps and capabilities views —
+   * without it those pages say so instead of guessing.
+   */
+  repo?: string;
 };
 
 const SESSION_COOKIE = "nightorders_session";
@@ -55,6 +91,12 @@ const BODY_CAP = 16 * 1024;
 /** A cookie idles out after half a day and dies outright after a week. */
 const SESSION_IDLE_MS = 12 * 60 * 60_000;
 const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60_000;
+/** An approval nonce is a rendered form, not a standing right — it ages out fast. */
+const NONCE_TTL_MS = 15 * 60_000;
+const NONCE_CAP = 500;
+const RUNS_PAGE = 50;
+
+const TASK_STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
 
 type Session = {
   name: string;
@@ -65,10 +107,21 @@ type Session = {
   lastSeen: number;
 };
 
+/** One rendered approval form: who saw which digest of which task, once. */
+type ApprovalNonce = {
+  name: string;
+  taskId: string;
+  digest: string;
+  expiresAt: number;
+};
+
+type Who = { name: string; via: "cookie"; session: Session } | { name: string; via: "bearer" };
+
 export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
   const clock = options.clock ?? (() => new Date());
   const sessions = new Map<string, Session>();
+  const approvalNonces = new Map<string, ApprovalNonce>();
 
   const server = createServer((request, response) => {
     void handle(request, response).catch(() => {
@@ -90,6 +143,61 @@ export function createDecisionServer(options: ServeOptions): Server {
     return [...locals, ...(options.allowedHosts ?? [])].includes(host);
   };
 
+  /**
+   * The one gate every POST passes — parse elsewhere, authorize here. A
+   * refusal names its status; null means proceed. Duplicated security fields
+   * are refused outright: two `csrf` values in one body is not a preference,
+   * it is a smuggling attempt.
+   */
+  function authorizeMutation(
+    request: IncomingMessage,
+    who: Who,
+    body: URLSearchParams,
+  ): { status: number; message: string } | null {
+    const type = request.headers["content-type"] ?? "";
+    if (!type.startsWith("application/x-www-form-urlencoded")) {
+      return { status: 415, message: "forms only" };
+    }
+    for (const field of ["csrf", "token", "digest", "nonce", "confirm"]) {
+      if (body.getAll(field).length > 1) {
+        return { status: 400, message: `duplicated ${field} field` };
+      }
+    }
+    if (who.via === "cookie") {
+      const origin = request.headers.origin;
+      if (typeof origin !== "string" || !allowedHost(origin.replace(/^https?:\/\//, ""))) {
+        return { status: 403, message: "origin not allowed" };
+      }
+      if (body.get("csrf") !== who.session.csrf) {
+        return { status: 403, message: "stale form — reload and try again" };
+      }
+    }
+    return null;
+  }
+
+  function mintApprovalNonce(name: string, taskId: string, digest: string): string {
+    const nonce = randomBytes(16).toString("hex");
+    if (approvalNonces.size >= NONCE_CAP) {
+      const oldest = approvalNonces.keys().next().value;
+      if (oldest !== undefined) approvalNonces.delete(oldest);
+    }
+    approvalNonces.set(nonce, { name, taskId, digest, expiresAt: Date.now() + NONCE_TTL_MS });
+    return nonce;
+  }
+
+  /** Single use, bound to who saw which digest of which task, and young. */
+  function consumeApprovalNonce(nonce: string, name: string, taskId: string, digest: string): boolean {
+    const held = approvalNonces.get(nonce);
+    if (held === undefined) return false;
+    approvalNonces.delete(nonce);
+    return (
+      held.name === name &&
+      held.taskId === taskId &&
+      held.digest === digest &&
+      held.expiresAt >= Date.now()
+    );
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!allowedHost(request.headers.host)) {
       return respond(response, 421, "text/plain; charset=utf-8", "wrong host");
@@ -102,8 +210,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       return respond(response, 400, "text/plain; charset=utf-8", "credentials never travel in URLs");
     }
 
-    store.expireOverdueDecisions(clock());
-
     const method = request.method ?? "GET";
     const who = identify(request);
 
@@ -112,8 +218,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     if (url.pathname === "/login" && method === "POST") {
       const body = await form(request);
-      const name = first(body, "name");
-      const token = first(body, "token");
+      const name = body.get("name");
+      const token = body.get("token");
       const authenticated =
         name !== null && token !== null ? authenticateApprover(store, name, token) : null;
       if (authenticated === null || !authenticated.ok) {
@@ -148,36 +254,174 @@ export function createDecisionServer(options: ServeOptions): Server {
         : respond(response, 401, "text/plain; charset=utf-8", "authenticate first");
     }
 
-    if (url.pathname === "/" && method === "GET") {
+    if (method === "GET") return handleGet(url, who, response);
+    if (method === "POST") return handlePost(url, who, request, response);
+    return respond(response, 405, "text/plain; charset=utf-8", "no such method here");
+  }
+
+  // ---- reads ---------------------------------------------------------------
+
+  function handleGet(url: URL, who: Who, response: ServerResponse): void {
+    const now = clock();
+
+    if (url.pathname === "/") {
+      const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       return page(
         response,
         200,
-        listPage(store.listDecisions("unanswered"), options.telegramTokenFile !== undefined),
+        homePage({
+          summary: overnight(store.runsSince(since)),
+          decisions: store.listDecisions("unanswered"),
+          incidents: store.openIncidents(),
+          stranded: store.strandedTasks(),
+          gaps: options.repo === undefined ? null : computeGaps(store, options.repo, now),
+          outboxPending: store.listNotifications("pending").length,
+          settings: options.telegramTokenFile !== undefined,
+          now,
+        }),
       );
     }
 
-    // The settings card: the Telegram bot token, settable from a phone. The
-    // token is written to the same 0600 file the CLI writes — never echoed
-    // back in full, never a database column, and POST-only behind the same
-    // session + Origin + CSRF discipline as answering.
-    if (url.pathname === "/settings" && method === "GET" && options.telegramTokenFile !== undefined) {
+    if (url.pathname === "/tasks") {
+      const wanted = url.searchParams.get("state");
+      if (wanted !== null && !TASK_STATES.includes(wanted as TaskState)) {
+        return respond(response, 400, "text/plain; charset=utf-8", "no such state");
+      }
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      return page(
+        response,
+        200,
+        tasksPage(
+          store.listTasks(wanted === null ? undefined : (wanted as TaskState)),
+          wanted as TaskState | null,
+          csrf,
+          null,
+        ),
+      );
+    }
+
+    const task = matchTaskPath(url.pathname, "");
+    if (task !== null) {
+      return taskScreen(response, who, task.taskId, null, 200);
+    }
+
+    if (url.pathname === "/runs") {
+      const raw = url.searchParams.get("before");
+      let before: number | null = null;
+      if (raw !== null) {
+        if (!/^[1-9][0-9]{0,14}$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+          return respond(response, 400, "text/plain; charset=utf-8", "bad cursor");
+        }
+        before = Number(raw);
+      }
+      const rows = store.listRunsBefore(before, RUNS_PAGE);
+      return page(response, 200, runsPage(rows, rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
+    }
+
+    const run = /^\/r\/([0-9]{1,15})$/.exec(url.pathname);
+    if (run !== null) {
+      const found = store.getRun(Number(run[1]));
+      if (found === null || !runVisible(found)) {
+        return respond(response, 404, "text/plain; charset=utf-8", "no such run");
+      }
+      const taskId = store.externalIdFor(found.taskRef) ?? "?";
+      return page(response, 200, runPage(found, taskId, store.artifactsFor(found.id)));
+    }
+
+    const runArtifact = /^\/r\/([0-9]{1,15})\/evidence\/([0-9]{1,15})$/.exec(url.pathname);
+    if (runArtifact !== null) {
+      return runEvidence(response, Number(runArtifact[1]), Number(runArtifact[2]));
+    }
+
+    if (url.pathname === "/caps") {
+      if (options.repo === undefined) {
+        return page(response, 200, capsPage(null, [], ""));
+      }
+      return page(
+        response,
+        200,
+        capsPage(store.listCapabilities(options.repo), computeGaps(store, options.repo, now), options.repo, now),
+      );
+    }
+
+    if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
       const existing = loadBotToken({}, options.telegramTokenFile);
       const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       return page(response, 200, settingsPage(existing, hasEnv, csrf, null));
     }
-    if (url.pathname === "/settings/telegram-token" && method === "POST" && options.telegramTokenFile !== undefined) {
-      if (who.via === "cookie") {
-        const origin = request.headers.origin;
-        if (typeof origin !== "string" || !allowedHost(origin.replace(/^https?:\/\//, ""))) {
-          return respond(response, 403, "text/plain; charset=utf-8", "origin not allowed");
-        }
-      }
-      const body = await form(request);
-      if (who.via === "cookie" && first(body, "csrf") !== who.session.csrf) {
-        return respond(response, 403, "text/plain; charset=utf-8", "stale form — reload and try again");
-      }
-      const value = first(body, "token") ?? "";
+
+    const one = /^\/d\/([0-9]{1,15})$/.exec(url.pathname);
+    if (one !== null) {
+      const decision = store.getDecision(Number(one[1]));
+      if (decision === null) return respond(response, 404, "text/plain; charset=utf-8", "no such decision");
+      const taskId = taskOf(store, decision);
+      return page(response, 200, decisionPage(decision, taskId, store.evidenceFor(decision.id), who, now));
+    }
+
+    const artifact = /^\/d\/([0-9]{1,15})\/evidence\/([0-9]{1,15})$/.exec(url.pathname);
+    if (artifact !== null) {
+      return decisionEvidence(response, Number(artifact[1]), Number(artifact[2]));
+    }
+
+    return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+  }
+
+  /** The task screen, shared by the GET and by every refusal that re-renders it. */
+  function taskScreen(
+    response: ServerResponse,
+    who: Who,
+    taskId: string,
+    problem: string | null,
+    status: number,
+  ): void {
+    const found = store.getTask(taskId);
+    if (found === null) return respond(response, 404, "text/plain; charset=utf-8", "no such task");
+    const ref = store.lookupRef(taskId);
+    const now = clock();
+    const scope = store.getScope(taskId);
+    // The nonce is minted at render, per viewer, bound to the digest being
+    // shown — the browser approval flow starts here and nowhere else.
+    const nonce =
+      who.via === "cookie" && scope !== null && !approvalOf(scope).approved
+        ? mintApprovalNonce(who.name, taskId, scope.digest)
+        : "";
+    return page(
+      response,
+      status,
+      taskPage({
+        task: found,
+        strikes: ref?.strikes ?? 0,
+        repo: ref?.repo ?? null,
+        holds: ref === null ? [] : store.activeHolds(ref.id, now),
+        claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
+        scope,
+        runs: ref === null ? [] : store.runsFor(ref.id),
+        decisions: ref === null ? [] : store.decisionsForTask(ref.id),
+        incidents: ref === null ? [] : store.incidentsForTask(ref.id),
+        csrf: who.via === "cookie" ? who.session.csrf : "",
+        nonce,
+        problem,
+        now,
+      }),
+    );
+  }
+
+  // ---- mutations -----------------------------------------------------------
+
+  async function handlePost(
+    url: URL,
+    who: Who,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = await form(request);
+    const denied = authorizeMutation(request, who, body);
+    if (denied !== null) return respond(response, denied.status, "text/plain; charset=utf-8", denied.message);
+    const now = clock();
+
+    if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {
+      const value = body.get("token") ?? "";
       const saved = saveBotToken(options.telegramTokenFile, value);
       if (!saved.ok) {
         const existing = loadBotToken({}, options.telegramTokenFile);
@@ -188,41 +432,36 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, "/settings");
     }
 
-    const one = /^\/d\/(\d+)$/.exec(url.pathname);
-    if (one !== null && method === "GET") {
-      const decision = store.getDecision(Number(one[1]));
-      if (decision === null) return respond(response, 404, "text/plain; charset=utf-8", "no such decision");
-      const taskId = taskOf(store, decision);
-      return page(response, 200, decisionPage(decision, taskId, store.evidenceFor(decision.id), who));
+    if (url.pathname === "/tasks/add") {
+      const id = (body.get("id") ?? "").trim();
+      const title = body.get("title") ?? "";
+      const repo = (body.get("repo") ?? "").trim();
+      const goal = (body.get("goal") ?? "").trim();
+      const made = store.createConsoleTask(
+        { id, title, ...(repo === "" ? {} : { repo }), ...(goal === "" ? {} : { goal }) },
+        now,
+      );
+      if (!made.ok) {
+        const csrf = who.via === "cookie" ? who.session.csrf : "";
+        return page(response, made.reason === "backlog-full" ? 429 : 400, tasksPage(store.listTasks(), null, csrf, made.reason));
+      }
+      return redirect(response, taskHref(id));
     }
 
-    const answer = /^\/d\/(\d+)\/answer$/.exec(url.pathname);
-    if (answer !== null && method === "POST") {
-      // Cookie sessions prove Origin + nonce; Bearer requests carry no
-      // cookie a hostile page could ride, so the ceremony proves nothing.
-      if (who.via === "cookie") {
-        const origin = request.headers.origin;
-        if (typeof origin !== "string" || !allowedHost(origin.replace(/^https?:\/\//, ""))) {
-          return respond(response, 403, "text/plain; charset=utf-8", "origin not allowed");
-        }
-      }
-      const body = await form(request);
-      if (who.via === "cookie" && first(body, "csrf") !== who.session.csrf) {
-        return respond(response, 403, "text/plain; charset=utf-8", "stale form — reload and try again");
-      }
-
+    const answer = /^\/d\/([0-9]{1,15})\/answer$/.exec(url.pathname);
+    if (answer !== null) {
       const id = Number(answer[1]);
       const decision = store.getDecision(id);
       if (decision === null) return respond(response, 404, "text/plain; charset=utf-8", "no such decision");
-      const choice = first(body, "choice") ?? "";
+      const choice = body.get("choice") ?? "";
       const chosen = decision.options.find(option => option.id === choice);
       // Irreversible options never ride one accidental tap: the form arms
       // them behind an explicit confirmation field, and the server checks —
       // the client rendering is convenience, this is the rule.
-      if (chosen !== undefined && !chosen.reversible && first(body, "confirm") !== "yes") {
+      if (chosen !== undefined && !chosen.reversible && body.get("confirm") !== "yes") {
         return respond(response, 400, "text/plain; charset=utf-8", "an irreversible choice must be confirmed");
       }
-      const note = first(body, "note");
+      const note = body.get("note");
       const answered = store.answerDecision(
         {
           id,
@@ -231,7 +470,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           via: "web",
           ...(note === null || note === "" ? {} : { note }),
         },
-        clock(),
+        now,
       );
       if (!answered.ok) {
         const status = answered.reason === "bad-option" || answered.reason === "bad-note" ? 400 : 409;
@@ -240,17 +479,121 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/d/${id}`);
     }
 
-    const artifact = /^\/d\/(\d+)\/evidence\/(\d+)$/.exec(url.pathname);
-    if (artifact !== null && method === "GET") {
-      return evidence(response, Number(artifact[1]), Number(artifact[2]));
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve)$");
+    if (act !== null) {
+      return taskMutation(response, who, act.taskId, act.verb, body, now);
+    }
+
+    const resolve = /^\/i\/([0-9]{1,15})\/resolve$/.exec(url.pathname);
+    if (resolve !== null) {
+      const id = Number(resolve[1]);
+      const resolved = store.resolveIncident(id, who.name, now);
+      if (!resolved) return respond(response, 409, "text/plain; charset=utf-8", "already resolved, or never open");
+      return redirect(response, incidentHome(id));
     }
 
     return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
   }
 
-  function identify(
-    request: IncomingMessage,
-  ): { name: string; via: "cookie"; session: Session } | { name: string; via: "bearer" } | null {
+  function taskMutation(
+    response: ServerResponse,
+    who: Who,
+    taskId: string,
+    verb: string,
+    body: URLSearchParams,
+    now: Date,
+  ): void {
+    const ref = store.lookupRef(taskId);
+    if (ref === null || store.getTask(taskId) === null) {
+      return respond(response, 404, "text/plain; charset=utf-8", "no such task");
+    }
+
+    switch (verb) {
+      case "hold": {
+        const reason = (body.get("reason") ?? "").trim() || "held from the console";
+        if (reason.length > 200 || hasForbiddenControls(reason)) {
+          return taskScreen(response, who, taskId, "that reason will not render, so it will not store", 400);
+        }
+        // Operator-owned only, always: the form supplies a reason, never an
+        // owner. Decision, incident, and backoff holds are not reachable
+        // from here, whatever a request claims.
+        store.hold(ref.id, reason, null, now);
+        return redirect(response, taskHref(taskId));
+      }
+      case "unhold": {
+        store.unhold(ref.id);
+        return redirect(response, taskHref(taskId));
+      }
+      case "requeue": {
+        const requeued = store.requeueTask(taskId, who.name, now);
+        if (!requeued.ok) {
+          return taskScreen(response, who, taskId, `not requeued: ${requeued.reason}`, 409);
+        }
+        return redirect(response, taskHref(taskId));
+      }
+      case "cancel": {
+        const cancelled = store.cancelTask(taskId, now);
+        if (!cancelled.ok) {
+          return taskScreen(response, who, taskId, `not cancelled: ${cancelled.reason}`, 409);
+        }
+        return redirect(response, taskHref(taskId));
+      }
+      case "scope": {
+        const sawDigest = body.get("sawDigest");
+        const proposed = proposeGuarded(store, {
+          taskId,
+          goal: body.get("goal") ?? "",
+          outOfScope: body.get("not") ?? null,
+          touches: (body.get("touches") ?? "").split(/[\n,]/),
+          sawDigest: sawDigest === null || sawDigest === "" ? null : sawDigest,
+          taskRef: ref.id,
+          now,
+        });
+        if (!proposed.ok) {
+          const status = proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400;
+          return taskScreen(response, who, taskId, `scope not saved: ${proposed.reason}`, status);
+        }
+        return redirect(response, taskHref(taskId));
+      }
+      case "approve": {
+        // Step-up: the session got you here; only the token agrees. The
+        // digest names what was seen; the nonce proves this exact form was
+        // rendered to this approver and is spent either way.
+        const digest = body.get("digest") ?? "";
+        const token = body.get("token") ?? "";
+        if (who.via === "cookie") {
+          const nonce = body.get("nonce") ?? "";
+          if (!consumeApprovalNonce(nonce, who.name, taskId, digest)) {
+            return taskScreen(response, who, taskId, "that approval form is stale — read it again", 409);
+          }
+        }
+        if (token === "") {
+          return taskScreen(response, who, taskId, "approval requires your token, typed again", 400);
+        }
+        const approved = approveScope(store, taskId, who.name, now, digest, token);
+        if (!approved.ok) {
+          const status = approved.reason === "changed" ? 409 : 403;
+          return taskScreen(response, who, taskId, `not approved: ${approved.reason}`, status);
+        }
+        return redirect(response, taskHref(taskId));
+      }
+      default:
+        return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+    }
+  }
+
+  /** Where to land after resolving an incident: its task, if it still resolves to one. */
+  function incidentHome(incidentId: number): string {
+    const incident = store
+      .openIncidents()
+      .find(one => one.id === incidentId);
+    if (incident !== undefined) return taskHref(incident.taskId);
+    return "/";
+  }
+
+  // ---- identity ------------------------------------------------------------
+
+  function identify(request: IncomingMessage): Who | null {
     const bearer = /^Bearer (.+):(.+)$/.exec(request.headers.authorization ?? "");
     if (bearer !== null) {
       const authenticated = authenticateApprover(store, bearer[1] as string, bearer[2] as string);
@@ -289,16 +632,44 @@ export function createDecisionServer(options: ServeOptions): Server {
     return null;
   }
 
-  function evidence(response: ServerResponse, decisionId: number, artifactId: number): void {
+  // ---- evidence ------------------------------------------------------------
+
+  function decisionEvidence(response: ServerResponse, decisionId: number, artifactId: number): void {
     // Only through the decision's own relation — an artifact id from another
     // run simply is not in this list, whatever the URL claims.
     const linked = store.evidenceFor(decisionId).find(one => one.id === artifactId);
     if (linked === undefined) {
       return respond(response, 404, "text/plain; charset=utf-8", "no such evidence");
     }
-    // Verified on the very descriptor the bytes come from — a file that no
-    // longer hashes to its record is not the evidence the decision showed,
-    // and serving it would put unrecorded bytes under a recorded name.
+    return sendArtifact(response, linked);
+  }
+
+  function runEvidence(response: ServerResponse, runId: number, artifactId: number): void {
+    const run = store.getRun(runId);
+    if (run === null || !runVisible(run)) {
+      return respond(response, 404, "text/plain; charset=utf-8", "no such run");
+    }
+    // Membership is the lookup's own predicate — there is no way to check
+    // the run and fetch the artifact as two separate acts here.
+    const linked = store.artifactForRun(runId, artifactId);
+    if (linked === null) {
+      return respond(response, 404, "text/plain; charset=utf-8", "no such evidence");
+    }
+    return sendArtifact(response, linked);
+  }
+
+  /**
+   * When this server is scoped to a repo, a run whose task belongs to a
+   * different repo does not exist here — its evidence may hold that other
+   * repo's diffs, and one console instance is one trust domain.
+   */
+  function runVisible(run: Run): boolean {
+    if (options.repo === undefined) return true;
+    const ref = store.refForId(run.taskRef);
+    return ref === null || ref.repo === null || ref.repo === options.repo;
+  }
+
+  function sendArtifact(response: ServerResponse, linked: Artifact): void {
     const read = readVerifiedArtifact(evidenceRoot, linked);
     if (!read.ok) {
       return respond(response, 410, "text/plain; charset=utf-8", "the evidence no longer matches its record");
@@ -312,6 +683,38 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   return server;
+}
+
+// ---- path plumbing ---------------------------------------------------------
+
+/**
+ * Match `/t/<id>` (suffix "") or `/t/<id>/<verb>` — the id percent-decoded
+ * exactly once, refused when it does not decode, is oversized, or carries
+ * control characters. Legacy CLI-created ids are free-form; the URL is not.
+ */
+function matchTaskPath(pathname: string, suffixPattern: string): { taskId: string; verb: string } | null {
+  const match = new RegExp(`^/t/([^/]+)${suffixPattern === "" ? "$" : suffixPattern}`).exec(pathname);
+  if (match === null) return null;
+  let taskId: string;
+  try {
+    taskId = decodeURIComponent(match[1] as string);
+  } catch {
+    return null;
+  }
+  if (taskId.length === 0 || taskId.length > 64 || hasForbiddenControls(taskId)) return null;
+  return { taskId, verb: match[2] ?? "" };
+}
+
+function taskHref(taskId: string): string {
+  return `/t/${encodeURIComponent(taskId)}`;
+}
+
+/** Overdue is derived at render — display never writes. */
+function isOverdue(decision: Decision, now: Date): boolean {
+  if (decision.state === "expired") return true;
+  return (
+    decision.state === "open" && decision.deadline !== null && decision.deadline <= now.toISOString()
+  );
 }
 
 // ---- rendering -------------------------------------------------------------
@@ -353,6 +756,7 @@ const STYLE = `
   body { font: 17px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 1rem;
          max-width: 40rem; margin-inline: auto; }
   h1 { font-size: 1.1rem; margin: 0 0 .25rem; }
+  h2 { font-size: .95rem; margin: 1.25rem 0 .25rem; opacity: .85; }
   .recap { opacity: .85; margin: .75rem 0; white-space: pre-wrap; }
   .question { font-size: 1.25rem; font-weight: 650; margin: 1rem 0; white-space: pre-wrap; }
   form.option { margin: .6rem 0; }
@@ -364,10 +768,17 @@ const STYLE = `
   summary { padding: .4rem; cursor: pointer; font-weight: 600; }
   .evidence { margin-top: 1.25rem; font-size: .9rem; }
   .evidence a { display: block; padding: .35rem 0; }
-  input[type=text], input[type=password] { width: 100%; padding: .6rem; font-size: 1rem;
+  input[type=text], input[type=password], textarea { width: 100%; padding: .6rem; font-size: 1rem;
            margin: .3rem 0 .8rem; box-sizing: border-box; }
   .meta { font-size: .85rem; opacity: .7; }
   .answered { border: 1px solid #4a7; border-radius: .75rem; padding: .75rem; margin: 1rem 0; }
+  .card { border: 1px solid #8883; border-radius: .75rem; padding: .75rem; margin: .6rem 0; }
+  .problem { border: 1px solid #b66; border-radius: .75rem; padding: .6rem .75rem; margin: .6rem 0; }
+  .row { padding: .35rem 0; border-bottom: 1px solid #8882; }
+  .inline { display: inline-block; width: auto; }
+  .inline button { width: auto; display: inline-block; padding: .5rem .9rem; font-size: .95rem; }
+  nav { font-size: .9rem; margin: .5rem 0 1rem; }
+  nav a { margin-right: .8rem; }
 `;
 
 function shell(title: string, body: string): string {
@@ -381,6 +792,8 @@ function shell(title: string, body: string): string {
   ].join("\n");
 }
 
+const NAV = `<nav><a href="/">home</a><a href="/tasks">tasks</a><a href="/runs">runs</a><a href="/caps">caps</a></nav>`;
+
 function loginPage(problem: string | null): string {
   return shell("night orders", [
     "<h1>night orders</h1>",
@@ -393,19 +806,394 @@ function loginPage(problem: string | null): string {
   ].join("\n"));
 }
 
-function listPage(decisions: (Decision & { taskId: string })[], settings: boolean): string {
-  const rows =
-    decisions.length === 0
+function homePage(data: {
+  summary: ReturnType<typeof overnight<Run & { taskId: string }>>;
+  decisions: (Decision & { taskId: string })[];
+  incidents: (Incident & { taskId: string })[];
+  stranded: { id: string; blockedBy: string[] }[];
+  gaps: Gap[] | null;
+  outboxPending: number;
+  settings: boolean;
+  now: Date;
+}): string {
+  const { summary } = data;
+  const counts =
+    `${summary.built.length} built · ${summary.failed.length} failed · ${summary.refused.length} refused` +
+    (summary.cutDown.length > 0 ? ` · ${summary.cutDown.length} cut down mid-flight` : "");
+
+  const decide =
+    data.decisions.length === 0
       ? "<p>Nothing waits on you. The night parked no decisions.</p>"
-      : decisions
+      : data.decisions
           .map(
             decision =>
               `<p><a href="/d/${decision.id}">${escape(decision.taskId)} — ${escape(decision.question)}</a>` +
-              `${decision.state === "expired" ? ' <strong>overdue</strong>' : ""}</p>`,
+              `${isOverdue(decision, data.now) ? " <strong>overdue</strong>" : ""}</p>`,
           )
           .join("\n");
-  const footer = settings ? `<p class="meta"><a href="/settings">settings</a></p>` : "";
-  return shell("decisions", `<h1>waiting on you</h1>\n${rows}\n${footer}`);
+
+  const incidents =
+    data.incidents.length === 0
+      ? ""
+      : `<h2>incidents</h2>` +
+        data.incidents
+          .map(
+            one =>
+              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> — ${escape(one.kind)}</p>`,
+          )
+          .join("\n");
+
+  const stranded =
+    data.stranded.length === 0
+      ? ""
+      : `<h2>stranded</h2>` +
+        data.stranded
+          .map(
+            one =>
+              `<p class="row"><a href="${taskHref(one.id)}">${escape(one.id)}</a> waits on ${one.blockedBy
+                .map(blocker => escape(blocker))
+                .join(", ")}</p>`,
+          )
+          .join("\n");
+
+  const gaps =
+    data.gaps === null
+      ? ""
+      : data.gaps.length === 0
+        ? `<h2>blocked</h2><p class="meta">no gaps — everything recorded is verified</p>`
+        : `<h2>blocked</h2>` +
+          data.gaps
+            .map(gap => `<p class="row">${escape(gap.key)} — ${escape(gap.state)}</p>`)
+            .join("\n") +
+          `<p class="meta"><a href="/caps">capabilities</a></p>`;
+
+  const footer = data.settings ? `<p class="meta"><a href="/settings">settings</a></p>` : "";
+
+  return shell("night orders", [
+    "<h1>night orders</h1>",
+    NAV,
+    `<p class="meta">overnight: ${escape(counts)}</p>`,
+    `<p class="meta">spend: ${escape(spendLine(summary))}</p>`,
+    data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} pending delivery</p>` : "",
+    "<h2>waiting on you</h2>",
+    decide,
+    incidents,
+    stranded,
+    gaps,
+    footer,
+  ].join("\n"));
+}
+
+function tasksPage(tasks: Task[], state: TaskState | null, csrf: string, problem: string | null): string {
+  const filters = TASK_STATES.map(
+    one => (one === state ? `<strong>${one}</strong>` : `<a href="/tasks?state=${one}">${one}</a>`),
+  ).join(" · ");
+  const rows =
+    tasks.length === 0
+      ? `<p>${state === null ? "The queue is empty." : `Nothing is ${escape(state)}.`}</p>`
+      : tasks
+          .map(
+            task =>
+              `<p class="row"><a href="${taskHref(task.id)}">${escape(task.id)}</a> ` +
+              `${escape(task.title)} <span class="meta">${escape(task.state)}</span></p>`,
+          )
+          .join("\n");
+  return shell("tasks", [
+    "<h1>tasks</h1>",
+    NAV,
+    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
+    `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
+    rows,
+    `<h2>add a task</h2>`,
+    `<form method="post" action="/tasks/add" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<label>id<input type="text" name="id" placeholder="fix-payout-guard"></label>`,
+    `<label>title<input type="text" name="title"></label>`,
+    `<label>repo <span class="meta">(optional)</span><input type="text" name="repo"></label>`,
+    `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3"></textarea></label>`,
+    `<button type="submit">add</button>`,
+    `</form>`,
+  ].join("\n"));
+}
+
+function taskPage(data: {
+  task: Task;
+  strikes: number;
+  repo: string | null;
+  holds: Hold[];
+  claimed: boolean;
+  scope: Scope | null;
+  runs: Run[];
+  decisions: Decision[];
+  incidents: Incident[];
+  csrf: string;
+  nonce: string;
+  problem: string | null;
+  now: Date;
+}): string {
+  const { task, scope } = data;
+  const act = (verb: string, label: string, extra = ""): string =>
+    [
+      `<form method="post" action="${taskHref(task.id)}/${verb}" class="inline">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      extra,
+      `<button type="submit">${escape(label)}</button>`,
+      `</form>`,
+    ].join("");
+
+  const holds =
+    data.holds.length === 0
+      ? ""
+      : `<h2>holds</h2>` +
+        data.holds
+          .map(
+            hold =>
+              `<p class="row">${escape(hold.ownerKind)} — ${escape(hold.reason)}` +
+              `${hold.until === null ? "" : ` <span class="meta">until ${escape(hold.until)}</span>`}</p>`,
+          )
+          .join("\n") +
+        `<p class="meta">only the operator hold lifts from here; decisions, incidents, and backoff lift themselves</p>`;
+
+  const approval = approvalOf(scope);
+  const scopeCard =
+    scope === null
+      ? `<p class="meta">no scope proposed — nothing builds this until one is approved</p>`
+      : [
+          `<div class="card">`,
+          `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
+          scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
+          scope.touches.length === 0 ? "" : `<p><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          `<p class="meta">digest ${escape(scope.digest)}</p>`,
+          approval.approved
+            ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
+            : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
+          `</div>`,
+        ].join("\n");
+
+  // The approval form restates every field the digest binds — an operator
+  // approves what is on this form, not what is elsewhere on the page — and
+  // requires the token typed again. The session got you here; only the
+  // token agrees.
+  const approveForm =
+    scope === null || approval.approved
+      ? ""
+      : [
+          `<form method="post" action="${taskHref(task.id)}/approve" class="card">`,
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+          `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
+          `<input type="hidden" name="digest" value="${escape(scope.digest)}">`,
+          `<p><strong>approve exactly this:</strong></p>`,
+          `<p class="recap">${escape(scope.goal)}</p>`,
+          `<p class="recap">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
+          `<p class="meta">touches: ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          `<label>your approver token, again<input type="password" name="token" autocomplete="off"></label>`,
+          `<button type="submit">approve this scope</button>`,
+          `</form>`,
+        ].join("\n");
+
+  const scopeForm = [
+    `<details><summary>${scope === null ? "propose a scope" : "edit the scope"}${
+      approval.approved ? " (editing voids the approval)" : ""
+    }</summary>`,
+    `<form method="post" action="${taskHref(task.id)}/scope">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<input type="hidden" name="sawDigest" value="${escape(scope?.digest ?? "")}">`,
+    `<label>goal<textarea name="goal" rows="3">${escape(scope?.goal ?? "")}</textarea></label>`,
+    `<label>not this<textarea name="not" rows="2">${escape(scope?.outOfScope ?? "")}</textarea></label>`,
+    `<label>touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
+      (scope?.touches ?? []).join("\n"),
+    )}</textarea></label>`,
+    `<button type="submit">save scope</button>`,
+    `</form></details>`,
+  ].join("\n");
+
+  const runs =
+    data.runs.length === 0
+      ? ""
+      : `<h2>runs</h2>` +
+        data.runs
+          .map(
+            run =>
+              `<p class="row"><a href="/r/${run.id}">#${run.id}</a> ${escape(run.role)} — ` +
+              `${escape(run.outcome ?? "never finished")}` +
+              `${run.reason === null ? "" : ` <span class="meta">${escape(run.reason)}</span>`}</p>`,
+          )
+          .join("\n");
+
+  const decisions =
+    data.decisions.length === 0
+      ? ""
+      : `<h2>decisions</h2>` +
+        data.decisions
+          .map(
+            decision =>
+              `<p class="row"><a href="/d/${decision.id}">${escape(decision.question)}</a> ` +
+              `<span class="meta">${escape(decision.state)}${isOverdue(decision, data.now) ? " · overdue" : ""}</span></p>`,
+          )
+          .join("\n");
+
+  const incidents =
+    data.incidents.length === 0
+      ? ""
+      : `<h2>incidents</h2>` +
+        data.incidents
+          .map(one =>
+            one.resolvedAt === null
+              ? `<p class="row">${escape(one.kind)} ` +
+                `<form method="post" action="/i/${one.id}/resolve" class="inline">` +
+                `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+                `<button type="submit">resolve</button></form></p>`
+              : `<p class="row meta">${escape(one.kind)} — resolved by ${escape(one.resolvedBy ?? "?")}</p>`,
+          )
+          .join("\n");
+
+  const stalled =
+    task.state === "failed" || data.incidents.some(one => one.resolvedAt === null);
+
+  const acts = [
+    `<h2>acts</h2>`,
+    data.claimed
+      ? `<p class="meta">a runner holds a live claim right now — holds prevent the <em>next</em> dispatch; cancel and requeue wait for the claim</p>`
+      : "",
+    `<div class="card">`,
+    act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" style="width:12rem">`),
+    data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
+    stalled ? act("requeue", "requeue — resolve incidents, reset strikes, back in the queue") : "",
+    task.state === "queued" || task.state === "running" || task.state === "failed"
+      ? act("cancel", "cancel")
+      : "",
+    `</div>`,
+  ].join("\n");
+
+  return shell(task.id, [
+    `<h1>${escape(task.id)} <span class="meta">${escape(task.state)}` +
+      `${data.strikes > 0 ? ` · ${data.strikes} strike(s)` : ""}` +
+      `${data.repo === null ? "" : ` · ${escape(data.repo)}`}</span></h1>`,
+    NAV,
+    `<p>${escape(task.title)}</p>`,
+    data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
+    "<h2>scope</h2>",
+    scopeCard,
+    approveForm,
+    scopeForm,
+    holds,
+    acts,
+    runs,
+    decisions,
+    incidents,
+    `<p class="meta"><a href="/tasks">← all tasks</a></p>`,
+  ].join("\n"));
+}
+
+function runsPage(rows: (Run & { taskId: string })[], nextCursor: number | null): string {
+  const list =
+    rows.length === 0
+      ? "<p>No runs yet.</p>"
+      : rows
+          .map(
+            run =>
+              `<p class="row"><a href="/r/${run.id}">#${run.id}</a> ` +
+              `<a href="${taskHref(run.taskId)}">${escape(run.taskId)}</a> ` +
+              `${escape(run.role)} — ${escape(run.outcome ?? "never finished")}` +
+              `${run.costUsd === null ? "" : ` <span class="meta">$${run.costUsd.toFixed(4)}</span>`}</p>`,
+          )
+          .join("\n");
+  const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
+  return shell("runs", ["<h1>runs</h1>", NAV, list, older].join("\n"));
+}
+
+function runPage(run: Run, taskId: string, artifacts: Artifact[]): string {
+  const facts: [string, string | null][] = [
+    ["task", taskId],
+    ["role", run.role],
+    ["outcome", run.outcome ?? "never finished"],
+    ["reason", run.reason],
+    ["runner", run.runner],
+    ["branch", run.branch],
+    ["model", run.model],
+    ["base", run.baseRevision],
+    ["head", run.headRevision],
+    ["started", run.startedAt],
+    ["finished", run.finishedAt],
+    ["provider started", run.providerStartedAt],
+    ["tokens in", run.tokensIn === null ? null : String(run.tokensIn)],
+    ["tokens out", run.tokensOut === null ? null : String(run.tokensOut)],
+    ["cost", run.costUsd === null ? null : `$${run.costUsd.toFixed(4)}`],
+  ];
+  const rows = facts
+    .filter((fact): fact is [string, string] => fact[1] !== null)
+    .map(([label, value]) => `<p class="row"><span class="meta">${escape(label)}</span> ${escape(value)}</p>`)
+    .join("\n");
+  const handoff =
+    run.handoff === null
+      ? ""
+      : `<h2>conclusion</h2><p class="recap">${escape(run.handoff)}</p>`;
+  const evidence =
+    artifacts.length === 0
+      ? ""
+      : `<div class="evidence"><strong>evidence</strong>` +
+        artifacts
+          .map(
+            artifact =>
+              `<a href="/r/${run.id}/evidence/${artifact.id}">${escape(artifact.kind)}` +
+              `${artifact.truncated ? " (truncated)" : ""} · ${artifact.bytesStored} bytes</a>`,
+          )
+          .join("\n") +
+        "</div>";
+  return shell(`run #${run.id}`, [
+    `<h1>run #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
+    NAV,
+    rows,
+    handoff,
+    evidence,
+    `<p class="meta"><a href="/runs">← runs</a></p>`,
+  ].join("\n"));
+}
+
+function capsPage(caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): string {
+  if (caps === null) {
+    return shell("capabilities", [
+      "<h1>capabilities</h1>",
+      NAV,
+      `<p class="meta">this console was started without a repo scope — <code>nightorders serve --repo &lt;path&gt;</code> turns this page on</p>`,
+    ].join("\n"));
+  }
+  const list =
+    caps.length === 0
+      ? "<p>Nothing recorded.</p>"
+      : caps
+          .map(
+            capability =>
+              `<p class="row">${escape(capability.kind)}:${escape(capability.name)} — ` +
+              `${escape(describeCapability(capability, now ?? new Date()))}</p>`,
+          )
+          .join("\n");
+  const blocked =
+    gaps.length === 0
+      ? `<p class="meta">no gaps — everything recorded is verified</p>`
+      : gaps
+          .map(
+            gap =>
+              `<div class="card"><p>${escape(gap.key)} — ${escape(gap.state)}</p>` +
+              `<p class="meta">${
+                gap.unblocks.length > 0
+                  ? `fills → ${gap.unblocks.length} task(s) start: ${gap.unblocks.map(one => escape(one)).join(", ")}`
+                  : gap.alsoBlocks.length > 0
+                    ? `part of what holds: ${gap.alsoBlocks.map(one => escape(one)).join(", ")}`
+                    : "nothing queued needs it yet"
+              }</p>` +
+              `<p class="meta">verify: ${escape(gap.verify)}</p>` +
+              `<p class="meta">${escape(gap.instructions)}</p></div>`,
+          )
+          .join("\n");
+  return shell("capabilities", [
+    `<h1>capabilities <span class="meta">${escape(repo)}</span></h1>`,
+    NAV,
+    list,
+    "<h2>gaps, ranked by what filling them frees</h2>",
+    blocked,
+    `<p class="meta">read-only: probes are operator-authored shell, and a web button that runs shell is a different review</p>`,
+  ].join("\n"));
 }
 
 function settingsPage(
@@ -422,6 +1210,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return shell("settings", [
     "<h1>settings</h1>",
+    NAV,
     "<h2>telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,
     problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,
@@ -440,9 +1229,10 @@ function decisionPage(
   decision: Decision,
   taskId: string,
   artifacts: Artifact[],
-  who: { via: "cookie"; session: Session } | { via: "bearer" } | { name: string; via: string },
+  who: Who,
+  now: Date,
 ): string {
-  const csrf = "session" in who ? (who as { session: Session }).session.csrf : "";
+  const csrf = who.via === "cookie" ? who.session.csrf : "";
   const options = decision.options
     .map(option => {
       const marks = [
@@ -491,7 +1281,7 @@ function decisionPage(
         "</div>";
 
   return shell(`${taskId}`, [
-    `<h1>${escape(taskId)} <span class="meta">${escape(decision.state)}${
+    `<h1>${escape(taskId)} <span class="meta">${escape(decision.state)}${isOverdue(decision, now) ? " · overdue" : ""}${
       decision.deadline === null ? "" : ` · deadline ${escape(decision.deadline)}`
     }</span></h1>`,
     `<div class="recap">${escape(decision.recap)}</div>`,
@@ -518,8 +1308,4 @@ async function form(request: IncomingMessage): Promise<URLSearchParams> {
     chunks.push(chunk as Buffer);
   }
   return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
-}
-
-function first(body: URLSearchParams, name: string): string | null {
-  return body.get(name);
 }

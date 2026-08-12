@@ -25,6 +25,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { hasForbiddenControls } from "./decision.js";
 import type { Store, Mutation } from "./store.js";
 
 /** Same shape as a runner's credential, for the same reasons. */
@@ -122,6 +123,53 @@ export function propose(store: Store, input: ScopeInput): Scope {
   return scope;
 }
 
+export type GuardedProposeResult =
+  | { ok: true; scope: Scope }
+  | {
+      ok: false;
+      reason: "changed" | "claimed" | "bad-goal" | "bad-out-of-scope" | "bad-touches";
+    };
+
+/**
+ * A scope edit from a surface where the editor might be stale — two browser
+ * tabs, a form submitted after the world moved. `sawDigest` names the version
+ * the editor was looking at (null: they saw no scope at all); a mismatch is a
+ * refusal, never a silent overwrite of somebody else's words. Edits are also
+ * refused while a live claim holds the task: the running build read its scope
+ * at start, and rewording the agreement under it would make the digest lie
+ * about what the work was agreed to. Field caps and control-character rules
+ * live here because every one of these strings will later be rendered.
+ */
+export function proposeGuarded(
+  store: Store,
+  input: ScopeInput & { sawDigest: string | null; taskRef: number | null },
+): GuardedProposeResult {
+  const goal = input.goal.trim();
+  if (goal === "" || goal.length > 2_000 || hasForbiddenControls(goal)) {
+    return { ok: false, reason: "bad-goal" };
+  }
+  const outOfScope = input.outOfScope?.trim() || null;
+  if (outOfScope !== null && (outOfScope.length > 2_000 || hasForbiddenControls(outOfScope))) {
+    return { ok: false, reason: "bad-out-of-scope" };
+  }
+  const touches = [...(input.touches ?? [])].map(one => one.trim()).filter(one => one !== "");
+  if (touches.length > 50 || touches.some(one => one.length > 200 || hasForbiddenControls(one))) {
+    return { ok: false, reason: "bad-touches" };
+  }
+
+  return store.transact(() => {
+    if (input.taskRef !== null && store.hasLiveClaim(input.taskRef, input.now)) {
+      return { ok: false as const, reason: "claimed" as const };
+    }
+    const previous = store.getScope(input.taskId);
+    if ((previous?.digest ?? null) !== input.sawDigest) {
+      return { ok: false as const, reason: "changed" as const };
+    }
+    const scope = propose(store, { ...input, goal, outOfScope, touches });
+    return { ok: true as const, scope };
+  });
+}
+
 /**
  * A person says yes.
  *
@@ -207,14 +255,16 @@ export function approve(
   token: string,
   mutation: Mutation = {},
 ): ApproveResult {
-  const authenticated = authenticateApprover(store, by, token);
-  if (!authenticated.ok) return authenticated;
-
-  // Read and write in one transaction, re-reading inside it. Apart, a scope
-  // rewritten between the read and the write is overwritten by this approval —
-  // which would resurrect the old wording *and* mark it agreed, the precise
-  // opposite of what the digest is for.
+  // Read and write in one transaction, re-reading inside it — the credential
+  // check included, so a token rotated between authentication and the write
+  // cannot leave an approval signed by an authority that no longer exists.
+  // Apart, a scope rewritten between the read and the write is overwritten by
+  // this approval — which would resurrect the old wording *and* mark it
+  // agreed, the precise opposite of what the digest is for.
   return store.transact(() => {
+    const authenticated = authenticateApprover(store, by, token);
+    if (!authenticated.ok) return authenticated;
+
     const scope = store.getScope(taskId);
     if (scope === null) return { ok: false as const, reason: "no-scope" as const };
 

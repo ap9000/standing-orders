@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
+import { acquire } from "./claim.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
 
@@ -439,5 +440,425 @@ describe("the settings card", () => {
       body: new URLSearchParams({ token: "777000:AAExampleExampleExample123" }),
     });
     expect(write.status).toBe(401);
+  });
+});
+
+describe("the operations console", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const csrfFrom = async (cookie: string, path = "/tasks"): Promise<string> => {
+    const html = await (await fetch(url(path), { headers: { cookie } })).text();
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf on the page");
+    return match[1] as string;
+  };
+
+  const post = (path: string, cookie: string, fields: Record<string, string>) =>
+    fetch(url(path), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams(fields),
+      redirect: "manual",
+    });
+
+  const seedRun = (taskRef: number, n: number) =>
+    store.startRun({
+      taskRef,
+      leaseId: `lease-${n}`,
+      runner: "builder-1",
+      branch: `nightorders/x-${n}`,
+      worktree: `/pool/x-${n}`,
+      now: T0,
+    });
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-console-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => new Date(),
+      repo: "/repo/main",
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the home page is the brief, live — measured spend, incidents, stranded work", async () => {
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    const ref = store.refFor("built-in", "t-1").id;
+    const run = seedRun(ref, 1);
+    store.stampProviderStart(run, T0);
+    store.recordUsage(run, { tokensIn: 100, tokensOut: 50, costUsd: 1.25 });
+    store.finishRun(run, { outcome: "built", reason: "clean", now: T0 });
+    const incidentRun = seedRun(ref, 2);
+    store.createIncident({ run: incidentRun, kind: "attempts-exhausted" }, T0);
+    store.createTask({ id: "t-blocked", title: "waits" }, T0);
+    store.createTask({ id: "t-dead", title: "gone" }, T0);
+    store.addEdge("t-blocked", "t-dead");
+    store.setTaskState("t-dead", "failed", T0);
+
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+
+    expect(home).toContain("1 built");
+    expect(home).toContain("$1.2500");
+    expect(home).toContain("attempts-exhausted");
+    expect(home).toContain("t-blocked");
+    expect(home).toContain("t-dead");
+  });
+
+  test("tasks: list, validated filter, and atomic add from the console", async () => {
+    store.createTask({ id: "t-1", title: "already here" }, T0);
+    const cookie = await login();
+
+    const list = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
+    expect(list).toContain("already here");
+
+    expect((await fetch(url("/tasks?state=bogus"), { headers: { cookie } })).status).toBe(400);
+
+    const csrf = await csrfFrom(cookie);
+    const added = await post("/tasks/add", cookie, {
+      csrf,
+      id: "from-web",
+      title: "console-born",
+      goal: "one clear goal",
+    });
+    expect(added.status).toBe(303);
+    expect(added.headers.get("location")).toBe("/t/from-web");
+    expect(store.getTask("from-web")?.title).toBe("console-born");
+    expect(store.getScope("from-web")?.goal).toBe("one clear goal");
+
+    const rejected = await post("/tasks/add", cookie, { csrf, id: "bad id!", title: "x" });
+    expect(rejected.status).toBe(400);
+  });
+
+  test("scope edits carry what they saw; a stale edit is refused, an edit voids approval", async () => {
+    store.createTask({ id: "t-s", title: "scoped" }, T0);
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    // First proposal: saw nothing, creates the scope.
+    const first = await post("/t/t-s/scope", cookie, { csrf, sawDigest: "", goal: "narrow goal", not: "", touches: "" });
+    expect(first.status).toBe(303);
+    const digest = store.getScope("t-s")?.digest ?? "";
+    expect(digest).not.toBe("");
+
+    // A second tab still holding the empty form is refused, not merged.
+    const stale = await post("/t/t-s/scope", cookie, { csrf, sawDigest: "", goal: "rival goal", not: "", touches: "" });
+    expect(stale.status).toBe(409);
+    expect(store.getScope("t-s")?.goal).toBe("narrow goal");
+
+    // Approve, then edit with the right digest: approval visibly voids.
+    const page = await (await fetch(url("/t/t-s"), { headers: { cookie } })).text();
+    const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(page)?.[1] ?? "";
+    const approved = await post("/t/t-s/approve", cookie, { csrf, nonce, digest, token: approverToken });
+    expect(approved.status).toBe(303);
+
+    const edited = await post("/t/t-s/scope", cookie, { csrf, sawDigest: digest, goal: "wider goal", not: "", touches: "" });
+    expect(edited.status).toBe(303);
+    const after = await (await fetch(url("/t/t-s"), { headers: { cookie } })).text();
+    expect(after).toContain("approved once, then rewritten");
+  });
+
+  test("approval is step-up: the session alone never approves", async () => {
+    store.createTask({ id: "t-a", title: "approve me" }, T0);
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await post("/t/t-a/scope", cookie, { csrf, sawDigest: "", goal: "the goal", not: "", touches: "" });
+    const digest = store.getScope("t-a")?.digest ?? "";
+
+    const readNonce = async (): Promise<string> => {
+      const html = await (await fetch(url("/t/t-a"), { headers: { cookie } })).text();
+      return /name="nonce" value="([0-9a-f]{32})"/.exec(html)?.[1] ?? "";
+    };
+
+    // No token: refused, whatever the session says.
+    const tokenless = await post("/t/t-a/approve", cookie, { csrf, nonce: await readNonce(), digest, token: "" });
+    expect(tokenless.status).toBe(400);
+
+    // Wrong token: refused by authentication, inside the transaction.
+    const wrong = await post("/t/t-a/approve", cookie, { csrf, nonce: await readNonce(), digest, token: "not-it" });
+    expect(wrong.status).toBe(403);
+
+    // No nonce (a form nobody rendered): refused.
+    const unrendered = await post("/t/t-a/approve", cookie, { csrf, nonce: "", digest, token: approverToken });
+    expect(unrendered.status).toBe(409);
+
+    // The real thing works — once.
+    const nonce = await readNonce();
+    const approved = await post("/t/t-a/approve", cookie, { csrf, nonce, digest, token: approverToken });
+    expect(approved.status).toBe(303);
+    expect(store.getScope("t-a")?.approvedBy).toBe("alex");
+
+    // The spent nonce buys nothing a second time.
+    const replay = await post("/t/t-a/approve", cookie, { csrf, nonce, digest, token: approverToken });
+    expect(replay.status).toBe(409);
+  });
+
+  test("a bearer caller approves with its credential re-stated, no nonce ceremony", async () => {
+    store.createTask({ id: "t-b", title: "api approve" }, T0);
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await post("/t/t-b/scope", cookie, { csrf, sawDigest: "", goal: "the goal", not: "", touches: "" });
+    const digest = store.getScope("t-b")?.digest ?? "";
+
+    const approved = await fetch(url("/t/t-b/approve"), {
+      method: "POST",
+      headers: { authorization: `Bearer alex:${approverToken}` },
+      body: new URLSearchParams({ digest, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(approved.status).toBe(303);
+    expect(store.getScope("t-b")?.approvedBy).toBe("alex");
+  });
+
+  test("hold and unhold touch only the operator's hold — a decision's survives", async () => {
+    store.createTask({ id: "t-h", title: "held" }, T0);
+    const ref = store.refFor("built-in", "t-h").id;
+    store.holdOwned({ taskRef: ref, ownerKind: "decision", ownerId: "9", reason: "decision:9", until: null }, T0);
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    const held = await post("/t/t-h/hold", cookie, { csrf, reason: "operator pause" });
+    expect(held.status).toBe(303);
+    expect(store.activeHolds(ref, new Date())).toHaveLength(2);
+
+    const lifted = await post("/t/t-h/unhold", cookie, { csrf });
+    expect(lifted.status).toBe(303);
+    const rest = store.activeHolds(ref, new Date());
+    expect(rest).toHaveLength(1);
+    expect(rest[0]?.ownerKind).toBe("decision");
+  });
+
+  test("requeue and cancel are re-proved server-side, stale buttons refused", async () => {
+    store.createTask({ id: "t-r", title: "stalled" }, T0);
+    store.setTaskState("t-r", "failed", T0);
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    const requeued = await post("/t/t-r/requeue", cookie, { csrf });
+    expect(requeued.status).toBe(303);
+    expect(store.getTask("t-r")?.state).toBe("queued");
+
+    // Not stalled anymore: the same button now refuses.
+    const again = await post("/t/t-r/requeue", cookie, { csrf });
+    expect(again.status).toBe(409);
+
+    // A live claim refuses cancellation rather than being overwritten later.
+    const ref = store.refFor("built-in", "t-r").id;
+    acquire(store, ref, "builder-1", { now: new Date(), ttlMs: 60 * 60_000 });
+    const blocked = await post("/t/t-r/cancel", cookie, { csrf });
+    expect(blocked.status).toBe(409);
+    expect(store.getTask("t-r")?.state).not.toBe("cancelled");
+  });
+
+  test("runs paginate by cursor and a run page shows the money and the conclusion", async () => {
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    const ref = store.refFor("built-in", "t-1").id;
+    const run = seedRun(ref, 1);
+    store.stampProviderStart(run, T0);
+    store.recordUsage(run, { tokensIn: 10, tokensOut: 5, costUsd: 0.42 });
+    store.recordOutcomeFacts(run, { handoff: "Wired the guard; tests added." });
+    store.finishRun(run, { outcome: "built", reason: "clean", now: T0 });
+    const cookie = await login();
+
+    const list = await (await fetch(url("/runs"), { headers: { cookie } })).text();
+    expect(list).toContain(`/r/${run}`);
+
+    expect((await fetch(url("/runs?before=abc"), { headers: { cookie } })).status).toBe(400);
+    expect((await fetch(url("/runs?before=9007199254740993"), { headers: { cookie } })).status).toBe(400);
+
+    const screen = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
+    expect(screen).toContain("$0.4200");
+    expect(screen).toContain("Wired the guard; tests added.");
+  });
+
+  test("run evidence: own artifacts serve, foreign artifacts and foreign repos are not found", async () => {
+    store.createTask({ id: "t-1", title: "ours" }, T0);
+    const ours = store.refFor("built-in", "t-1").id;
+    store.placeTask(ours, "/repo/main");
+    store.createTask({ id: "t-2", title: "theirs" }, T0);
+    const theirs = store.refFor("built-in", "t-2").id;
+    store.placeTask(theirs, "/repo/other");
+
+    const mine = seedRun(ours, 1);
+    const foreign = seedRun(theirs, 2);
+    mkdirSync(join(evidenceRoot, String(mine)), { recursive: true });
+    const content = Buffer.from("diff --git a/y b/y\n", "utf8");
+    writeFileSync(join(evidenceRoot, String(mine), "diff.patch"), content);
+    const artifact = store.saveArtifact(
+      {
+        run: mine,
+        kind: "diff",
+        key: `${mine}/diff.patch`,
+        bytesOriginal: content.length,
+        bytesStored: content.length,
+        truncated: false,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        capture: "git diff (exit 0)",
+      },
+      T0,
+    );
+    const cookie = await login();
+
+    const served = await fetch(url(`/r/${mine}/evidence/${artifact}`), { headers: { cookie } });
+    expect(served.status).toBe(200);
+    expect(await served.text()).toContain("diff --git");
+
+    // The same artifact through the wrong run: not found, not explained.
+    expect((await fetch(url(`/r/${foreign}/evidence/${artifact}`), { headers: { cookie } })).status).toBe(404);
+    // A run of another repo's task does not exist on this console at all.
+    expect((await fetch(url(`/r/${foreign}`), { headers: { cookie } })).status).toBe(404);
+  });
+
+  test("GET never mutates: an overdue decision reads as overdue while the row stays open", async () => {
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    const ref = store.refFor("built-in", "t-1").id;
+    const run = seedRun(ref, 1);
+    store.saveDecision(
+      {
+        run,
+        urgency: "blocking",
+        recap: "r",
+        question: "past due?",
+        options: [{ id: "a", label: "a", consequence: "c", reversible: true }],
+        recommendation: "a",
+        deadline: new Date(Date.now() - 60_000).toISOString(),
+      },
+      T0,
+    );
+    const cookie = await login();
+
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(home).toContain("overdue");
+    // The page derived it; nothing wrote it.
+    expect(store.listDecisions("open")).toHaveLength(1);
+  });
+
+  test("one gate for every mutation: content type, origin, csrf, and no duplicated fields", async () => {
+    store.createTask({ id: "t-g", title: "gated" }, T0);
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    // Wrong content type.
+    const typed = await fetch(url("/t/t-g/hold"), {
+      method: "POST",
+      headers: { cookie, origin: base, "content-type": "text/plain" },
+      body: "reason=x",
+      redirect: "manual",
+    });
+    expect(typed.status).toBe(415);
+
+    // Foreign origin.
+    const foreign = await fetch(url("/t/t-g/hold"), {
+      method: "POST",
+      headers: { cookie, origin: "http://evil.example" },
+      body: new URLSearchParams({ csrf, reason: "x" }),
+      redirect: "manual",
+    });
+    expect(foreign.status).toBe(403);
+
+    // Missing csrf.
+    const bare = await fetch(url("/t/t-g/hold"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ reason: "x" }),
+      redirect: "manual",
+    });
+    expect(bare.status).toBe(403);
+
+    // A smuggled second csrf value.
+    const doubled = await fetch(url("/t/t-g/hold"), {
+      method: "POST",
+      headers: { cookie, origin: base, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf=${csrf}&csrf=${csrf}&reason=x`,
+      redirect: "manual",
+    });
+    expect(doubled.status).toBe(400);
+
+    expect(store.activeHolds(store.refFor("built-in", "t-g").id, new Date())).toHaveLength(0);
+  });
+
+  test("every database-derived string renders inert, table-driven", async () => {
+    const probe = `<script>alert(1)</script><img src=x onerror=alert(2)>`;
+    store.createTask({ id: "t-x", title: `title ${probe}` }, T0);
+    const ref = store.refFor("built-in", "t-x").id;
+    store.hold(ref, `hold ${probe}`, null, T0);
+    const run = seedRun(ref, 1);
+    store.recordOutcomeFacts(run, { handoff: `conclusion ${probe}` });
+    store.finishRun(run, { outcome: "failed", reason: `reason ${probe}`, now: T0 });
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await post("/t/t-x/scope", cookie, { csrf, sawDigest: "", goal: `goal ${probe}`, not: `not ${probe}`, touches: `touch-${probe}` });
+
+    for (const path of ["/", "/tasks", "/t/t-x", "/runs", `/r/${run}`]) {
+      const html = await (await fetch(url(path), { headers: { cookie } })).text();
+      expect(html, path).not.toContain("<script>alert(1)");
+      expect(html, path).not.toContain("<img src=x");
+    }
+  });
+
+  test("a task id that is hostile as a URL is linked encoded and resolved decoded", async () => {
+    // Legacy CLI ids are free-form; the console must not let one break a path.
+    store.createTask({ id: "a b?c=1", title: "awkward id" }, T0);
+    const cookie = await login();
+
+    const list = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
+    expect(list).toContain(`/t/a%20b%3Fc%3D1`);
+
+    const screen = await fetch(url("/t/a%20b%3Fc%3D1"), { headers: { cookie } });
+    expect(screen.status).toBe(200);
+    expect(await screen.text()).toContain("awkward id");
+  });
+
+  test("caps reads the same gaps the brief computes, and admits being read-only", async () => {
+    store.saveCapability({
+      repo: "/repo/main",
+      kind: "cli",
+      name: "gh",
+      probe: "gh auth status",
+      status: "unprobed",
+      addedBy: "alex",
+      createdAt: T0.toISOString(),
+      lastVerifiedAt: null,
+      verifiedBy: null,
+      lastResult: null,
+      expiresAt: null,
+    });
+    const cookie = await login();
+
+    const caps = await (await fetch(url("/caps"), { headers: { cookie } })).text();
+    expect(caps).toContain("cli:gh");
+    expect(caps).toContain("unprobed");
+    expect(caps).toContain("read-only");
   });
 });

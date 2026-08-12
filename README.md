@@ -162,6 +162,29 @@ confirmation tap. Rotating your approver credential strands the chat and
 every outstanding button, and the bot token itself is stripped from every
 agent's environment.
 
+## The console
+
+`nightorders serve --repo <path>` is no longer just the decision view — it
+is the whole built-in queue, operable from a phone: the morning brief live
+on the home page (overnight counts, measured spend, decisions, incidents,
+stranded work, gaps), every task with its scope, holds, runs, decisions and
+incidents on one screen, run pages with the economics and the agent's
+concluding words, and read-only capabilities. Adding a task, holding,
+requeuing, cancelling, and editing a scope all happen from the page — each
+re-proved server-side, so a stale tab never erases what the world did in
+the meantime, and a task a runner is building right now refuses to be
+cancelled out from under it.
+
+Approving a scope is deliberately heavier than a click: the form restates
+the goal, the exclusions, and the touched paths — exactly the fields the
+approval digest binds — and requires your approver token typed again. A
+logged-in session alone can read everything and approve nothing.
+
+Plain HTTP, so keep it on localhost or a tailnet and put TLS in front for
+anything else. External-backend tasks (GitHub Issues and friends) appear
+here when external dispatch ships; today this is the built-in queue's
+console, and says so.
+
 ## Writing to a tracker you already have
 
 Detection tells you what is there; a grant is what lets anything be written to it.

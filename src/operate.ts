@@ -64,6 +64,7 @@ import {
 } from "./telegram.js";
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
+import { overnight, spendLine } from "./summary.js";
 
 type CapabilityKind = Capability["kind"];
 import {
@@ -1565,21 +1566,9 @@ async function briefCommand(
     text(flags, "since") ?? new Date(clock().getTime() - 24 * 60 * 60_000).toISOString();
 
   const runs = store.runsSince(since);
-  const built = runs.filter(one => one.outcome === "built" || one.outcome === "no-change");
-  const failed = runs.filter(one => one.outcome === "failed");
-  const refused = runs.filter(one => one.outcome === "refused");
-  const cutDown = runs.filter(one => one.outcome === null);
-
-  // Economics, measured — never asserted. Every provider spawn stamps its
-  // run before spending, so "invocations" is the complete population; the
-  // measured subset is what the envelopes actually reported, and the gap is
-  // named instead of summed as zero.
-  const invoked = runs.filter(one => one.providerStartedAt !== null);
-  const measured = invoked.filter(one => one.costUsd !== null);
-  const spend = measured.reduce((sum, one) => sum + (one.costUsd ?? 0), 0);
-  const tokens = invoked
-    .filter(one => one.tokensOut !== null)
-    .reduce((sum, one) => sum + (one.tokensOut ?? 0) + (one.tokensIn ?? 0), 0);
+  // One arithmetic, shared with the console — see summary.ts for why the
+  // measured/invoked distinction exists.
+  const { built, failed, refused, cutDown, invoked, measured, spend, tokens } = overnight(runs);
 
   const gaps = computeGaps(store, repo, clock());
   const pending = store.listNotifications("pending");
@@ -1655,13 +1644,7 @@ async function briefCommand(
     lines.push(`      ${one.taskId.padEnd(20)} never finished — the process died with it; \`task show ${one.taskId}\``);
   }
 
-  lines.push(
-    invoked.length === 0
-      ? "  spend        nothing — no provider was invoked"
-      : measured.length === invoked.length
-        ? `  spend        $${spend.toFixed(4)} · ${tokens.toLocaleString()} tokens, measured across all ${invoked.length} invocation(s)`
-        : `  spend        $${spend.toFixed(4)} measured across ${measured.length}/${invoked.length} invocation(s) — ${invoked.length - measured.length} unmeasured`,
-  );
+  lines.push(`  spend        ${spendLine({ built, failed, refused, cutDown, invoked, measured, spend, tokens })}`);
 
   if (gaps.length > 0) {
     const best = gaps[0] as Gap;
@@ -1872,6 +1855,9 @@ async function serveCommand(
   const port = Number(text(flags, "port") ?? 4180);
   const host = text(flags, "host") ?? "127.0.0.1";
   const allow = text(flags, "allow-host");
+  // --repo turns on the gaps and capabilities views and scopes run evidence
+  // to that repo's tasks; without it those pages say so instead of guessing.
+  const repo = text(flags, "repo");
 
   const server = createDecisionServer({
     store,
@@ -1879,6 +1865,7 @@ async function serveCommand(
     clock: context.clock,
     telegramTokenFile: context.telegramTokenFile,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
+    ...(repo === undefined ? {} : { repo }),
   });
 
   await new Promise<void>((resolve, reject) => {

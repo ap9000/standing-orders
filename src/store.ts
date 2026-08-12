@@ -1422,6 +1422,14 @@ export class Store {
     return readTaskRef(created as Record<string, unknown>);
   }
 
+  /** The reference if it exists — a read that never creates, for surfaces that only look. */
+  lookupRef(taskId: string): TaskRef | null {
+    const row = this.db
+      .prepare("SELECT * FROM task_ref WHERE backend = ? AND external_id = ?")
+      .get(BUILT_IN, taskId);
+    return row === undefined ? null : readTaskRef(row);
+  }
+
   /** Whether this task is one we created, as recorded — not as asserted. */
   originOf(backend: string, externalId: string): TaskOrigin {
     const row = this.db
@@ -1967,6 +1975,26 @@ export class Store {
    * after the world moved gets a refusal, never a silent erase of somebody
    * else's incident and backoff state.
    */
+  /**
+   * Whether a still-current, unexpired claim holds this task right now — the
+   * one predicate cancel, requeue, and scope edits all defer to, because a
+   * console act that ignored a live runner would be overwritten by that
+   * runner's completion minutes later.
+   */
+  hasLiveClaim(taskRef: number, now: Date): boolean {
+    const live = this.db
+      .prepare(
+        `SELECT 1 AS hit FROM claim
+          WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?
+            AND lease_generation = (
+              SELECT MAX(newest.lease_generation) FROM claim AS newest
+              WHERE newest.task_ref = claim.task_ref
+            )`,
+      )
+      .get(taskRef, now.toISOString());
+    return live !== undefined;
+  }
+
   requeueTask(
     taskId: string,
     by: string,
@@ -1982,17 +2010,7 @@ export class Store {
       const taskRef = Number(ref["id"]);
 
       const stamp = now.toISOString();
-      const live = this.db
-        .prepare(
-          `SELECT 1 AS hit FROM claim
-            WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?
-              AND lease_generation = (
-                SELECT MAX(newest.lease_generation) FROM claim AS newest
-                WHERE newest.task_ref = claim.task_ref
-              )`,
-        )
-        .get(taskRef, stamp);
-      if (live !== undefined) return { ok: false as const, reason: "claimed" as const };
+      if (this.hasLiveClaim(taskRef, now)) return { ok: false as const, reason: "claimed" as const };
 
       const incidents = this.db
         .prepare(
@@ -2037,17 +2055,7 @@ export class Store {
       if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
 
       const stamp = now.toISOString();
-      const live = this.db
-        .prepare(
-          `SELECT 1 AS hit FROM claim
-            WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?
-              AND lease_generation = (
-                SELECT MAX(newest.lease_generation) FROM claim AS newest
-                WHERE newest.task_ref = claim.task_ref
-              )`,
-        )
-        .get(Number(ref["id"]), stamp);
-      if (live !== undefined) return { ok: false as const, reason: "claimed" as const };
+      if (this.hasLiveClaim(Number(ref["id"]), now)) return { ok: false as const, reason: "claimed" as const };
 
       const { changes } = this.db
         .prepare(
