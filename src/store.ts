@@ -29,6 +29,7 @@
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { hasForbiddenControls } from "./decision.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
@@ -1790,6 +1791,68 @@ export class Store {
       .prepare("SELECT COUNT(*) AS n FROM decision WHERE state IN ('open','expired')")
       .get();
     return Number(row?.["n"] ?? 0);
+  }
+
+  /**
+   * Answer a decision: one transaction for the CAS, the hold, and the outbox
+   * episode, because a crash between any two of them leaves a lie — answered
+   * but still held, or free but still paging.
+   *
+   * `by` is an identity the CALLER authenticated; this method records, it
+   * does not vouch. A decision is answered once: the same choice replayed is
+   * the stored answer handed back, a different choice is refused — "done"
+   * is not negotiable, and neither is "decided".
+   */
+  answerDecision(
+    answer: { id: number; choice: string; by: string; via: "cli" | "web"; note?: string },
+    now: Date,
+    mutation: Mutation = {},
+  ):
+    | { ok: true; decision: Decision; duplicate?: boolean }
+    | { ok: false; reason: "unknown-decision" | "bad-option" | "already-answered" | "bad-note" } {
+    return this.once(
+      mutation,
+      "answerDecision",
+      () =>
+        this.transact(() => {
+          const existing = this.getDecision(answer.id);
+          if (existing === null) return { ok: false as const, reason: "unknown-decision" as const };
+          if (!existing.options.some(option => option.id === answer.choice)) {
+            return { ok: false as const, reason: "bad-option" as const };
+          }
+          // The note reaches web pages, terminals, and — quoted — a later
+          // agent's brief. Same discipline as everything else that travels.
+          if (answer.note !== undefined && (answer.note.length > 500 || hasForbiddenControls(answer.note))) {
+            return { ok: false as const, reason: "bad-note" as const };
+          }
+
+          const { changes } = this.db
+            .prepare(
+              `UPDATE decision SET state = 'answered', answered_at = ?, answered_by = ?,
+                                   answered_via = ?, choice = ?, note = ?
+                WHERE id = ? AND state IN ('open','expired')`,
+            )
+            .run(
+              now.toISOString(),
+              answer.by,
+              answer.via,
+              answer.choice,
+              answer.note ?? null,
+              answer.id,
+            );
+          if (Number(changes) === 0) {
+            const settled = this.getDecision(answer.id) as Decision;
+            return settled.choice === answer.choice
+              ? { ok: true as const, decision: settled, duplicate: true }
+              : { ok: false as const, reason: "already-answered" as const };
+          }
+
+          this.releaseOwnedHold("decision", String(answer.id));
+          this.resolveEpisode(`decision:${answer.id}`, now);
+          return { ok: true as const, decision: this.getDecision(answer.id) as Decision };
+        }),
+      result => result.ok,
+    );
   }
 
   // ---- evidence ------------------------------------------------------------

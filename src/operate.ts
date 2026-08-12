@@ -70,7 +70,7 @@ import {
   isAlive,
   recoverDead,
 } from "./runner.js";
-import { propose, approve, addApprover, describeScope, approvalOf } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf } from "./scope.js";
 import { WorktreePool } from "./worktree.js";
 import {
   build,
@@ -202,6 +202,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
+    "choose", "note",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -321,6 +322,10 @@ async function dispatch(
       return outboxCommand(positional, flags, context);
     case "brief":
       return briefCommand(flags, context);
+    case "decide":
+      return decideCommand(positional, flags, context);
+    case "incident":
+      return incidentCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -1567,6 +1572,16 @@ async function briefCommand(
   const gaps = computeGaps(store, repo, clock());
   const pending = store.listNotifications("pending");
 
+  // Deadlines are swept wherever decisions are shown, so "overdue" is a fact
+  // the brief computes rather than one it hopes somebody else computed.
+  store.expireOverdueDecisions(clock());
+  const decisions = store.listDecisions("unanswered");
+  // No time window on incidents: a task held by a malformed park last
+  // Tuesday is still held, and a brief that let it age out of view would
+  // make the stall silent — which is the one thing an incident exists to
+  // prevent.
+  const incidents = store.openIncidents();
+
   let review:
     | { state: "read"; pulls: { number: number; title: string }[] }
     | { state: "not-read"; why: string };
@@ -1592,7 +1607,8 @@ async function briefCommand(
           gaps,
           review,
           outboxPending: pending.length,
-          decide: "decisions arrive at M3",
+          decide: decisions,
+          incidents,
         },
         null,
         2,
@@ -1638,10 +1654,229 @@ async function briefCommand(
   if (pending.length > 0) {
     lines.push(`  ▸ OUTBOX     ${pending.length} undelivered — nightorders outbox deliver --cmd …`);
   }
-  lines.push("  ▸ DECIDE     decisions arrive at M3");
+
+  if (decisions.length > 0) {
+    const overdue = decisions.filter(one => one.state === "expired").length;
+    lines.push(
+      `  ▸ DECIDE     ${decisions.length} waiting${overdue > 0 ? ` (${overdue} overdue)` : ""} — nightorders decide`,
+    );
+    for (const one of decisions) {
+      lines.push(`      ${String(one.id).padEnd(4)} ${one.taskId.padEnd(20)} ${one.question}`);
+    }
+  } else {
+    lines.push("  ▸ DECIDE     nothing waits on you");
+  }
+
+  if (incidents.length > 0) {
+    lines.push(`  ▸ INCIDENTS  ${incidents.length} unresolved — these do not age out`);
+    for (const incident of incidents) {
+      lines.push(
+        `      ${incident.taskId.padEnd(20)} ${incident.kind} since ${incident.createdAt} — read run ${incident.run}'s evidence, then \`nightorders incident resolve ${incident.id}\``,
+      );
+    }
+  }
 
   write(lines.join("\n"));
   return EXIT.ok;
+}
+
+// ---- decisions ------------------------------------------------------------
+
+/**
+ * `nightorders decide` — the attention surface, in the terminal.
+ *
+ *   decide                          what waits, oldest first
+ *   decide <id>                     one decision, whole, with its evidence
+ *   decide <id> --choose <option> --as <you> --token <t> [--note …] [--key …]
+ *
+ * Who decided is recorded, never asserted: answering takes the same
+ * authenticated identity as approving a scope, because "the operator chose
+ * this" is exactly the sentence a later agent will act on — an agent or any
+ * local process typing `--by operator` must not be able to write it.
+ * Expiry runs first and never chooses: an overdue decision gets louder, and
+ * stays answerable.
+ */
+function decideCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, clock } = context;
+  store.expireOverdueDecisions(clock());
+
+  const [idText] = positional;
+  if (idText === undefined) {
+    const waiting = store.listDecisions("unanswered");
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "decide", waiting }, null, 2));
+      return waiting.length === 0 ? EXIT.ok : EXIT.refused;
+    }
+    if (waiting.length === 0) {
+      write("Nothing waits on you. The night parked no decisions.");
+      return EXIT.ok;
+    }
+    for (const one of waiting) {
+      const overdue = one.state === "expired" ? "  OVERDUE" : "";
+      write(`  ${String(one.id).padEnd(4)} ${one.taskId.padEnd(20)} ${one.question}${overdue}`);
+      write(`       options: ${one.options.map(option => option.id).join(" · ")}   recommended: ${one.recommendation}`);
+    }
+    write("");
+    write("  → nightorders decide <id>       the whole screen");
+    write("  → nightorders decide <id> --choose <option> --as <you> --token <t>");
+    return EXIT.refused;
+  }
+
+  const id = Number(idText);
+  if (!Number.isInteger(id) || id <= 0) {
+    return fail(write, json, "decide", "usage", "`nightorders decide [<id>] [--choose <option>]`", EXIT.usage);
+  }
+  const decision = store.getDecision(id);
+  if (decision === null) {
+    return fail(write, json, "decide", "unknown-decision", `no decision ${id}`, EXIT.refused);
+  }
+
+  const choice = text(flags, "choose");
+  if (choice === undefined) {
+    const evidence = store.evidenceFor(id);
+    const run = store.getRun(decision.run);
+    const taskId = run === null ? "?" : store.externalIdFor(run.taskRef) ?? "?";
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "decide", decision, taskId, evidence }, null, 2));
+      return EXIT.ok;
+    }
+    write(`${taskId} — ${decision.state.toUpperCase()}${decision.deadline === null ? "" : ` · deadline ${decision.deadline}`}`);
+    write("");
+    write(`  ${decision.recap}`);
+    write("");
+    write(`  ${decision.question}`);
+    write("");
+    for (const option of decision.options) {
+      const marks = [
+        option.id === decision.recommendation ? "recommended" : "",
+        option.reversible ? "reversible" : "IRREVERSIBLE",
+      ]
+        .filter(mark => mark !== "")
+        .join(" · ");
+      write(`  [${option.id}] ${option.label}  (${marks})`);
+      write(`      ${option.consequence}`);
+    }
+    if (decision.state === "answered") {
+      write("");
+      write(`  answered: ${decision.choice} by ${decision.answeredBy} at ${decision.answeredAt}${decision.note === null ? "" : ` — ${decision.note}`}`);
+    }
+    if (evidence.length > 0) {
+      write("");
+      for (const artifact of evidence) {
+        write(`  evidence  ${artifact.kind.padEnd(14)} ${artifact.key}${artifact.truncated ? "  (truncated)" : ""}`);
+      }
+    }
+    write("");
+    write(`  → nightorders decide ${id} --choose <option> --as <you> --token <t>`);
+    return EXIT.ok;
+  }
+
+  const asWho = text(flags, "as");
+  const token = text(flags, "token");
+  if (asWho === undefined || token === undefined) {
+    return fail(
+      write,
+      json,
+      "decide",
+      "usage",
+      "answering takes `--as <you> --token <t>` — who decided is recorded, not asserted",
+      EXIT.usage,
+    );
+  }
+  const authenticated = authenticateApprover(store, asWho, token);
+  if (!authenticated.ok) {
+    return fail(write, json, "decide", authenticated.reason, describeApproveFailure(authenticated.reason, String(id)), EXIT.refused);
+  }
+
+  const note = text(flags, "note");
+  const answered = store.answerDecision(
+    { id, choice, by: asWho, via: "cli", ...(note === undefined ? {} : { note }) },
+    clock(),
+    mutationFrom(flags, clock()),
+  );
+  if (!answered.ok) {
+    const why =
+      answered.reason === "bad-option"
+        ? `"${choice}" is not one of this decision's options — \`nightorders decide ${id}\` shows them`
+        : answered.reason === "already-answered"
+          ? `decision ${id} was already answered differently — "decided" is not negotiable; park a new task if the answer must change`
+          : answered.reason === "bad-note"
+            ? "the note is too long or carries control characters"
+            : `no decision ${id}`;
+    return fail(write, json, "decide", answered.reason, why, EXIT.refused);
+  }
+
+  return succeed(write, json, "decide", { decision: answered.decision, duplicate: answered.duplicate === true }, () =>
+    answered.duplicate === true
+      ? [`Decision ${id} was already answered with ${choice} — nothing changed.`]
+      : [
+          `Decided: ${choice} for decision ${id}, as ${asWho}.`,
+          "The task returns to the ready set; the next tick resumes it with your answer in hand.",
+        ],
+  );
+}
+
+/**
+ * `nightorders incident list|resolve <id>` — the parks that never became
+ * decisions. Resolving is an authenticated human act, the same credential as
+ * approving and deciding, and it is the only thing that lifts the
+ * incident's hold: `task unhold` deliberately cannot, because an operator
+ * pause and a broken park are different facts owned by different acts.
+ */
+function incidentCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, clock } = context;
+  const [action, idText] = positional;
+
+  if (action === undefined || action === "list") {
+    const incidents = store.openIncidents();
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "incident list", incidents }, null, 2));
+      return incidents.length === 0 ? EXIT.ok : EXIT.refused;
+    }
+    if (incidents.length === 0) {
+      write("No unresolved incidents.");
+      return EXIT.ok;
+    }
+    for (const incident of incidents) {
+      write(`  ${String(incident.id).padEnd(4)} ${incident.taskId.padEnd(20)} ${incident.kind}  since ${incident.createdAt}  run ${incident.run}`);
+    }
+    write("");
+    write("  → nightorders incident resolve <id> --as <you> --token <t>");
+    return EXIT.refused;
+  }
+
+  if (action !== "resolve") {
+    return fail(write, json, "incident", "usage", "`nightorders incident [list|resolve <id>]`", EXIT.usage);
+  }
+  const id = Number(idText);
+  if (!Number.isInteger(id) || id <= 0) {
+    return fail(write, json, "incident resolve", "usage", "`nightorders incident resolve <id> --as <you> --token <t>`", EXIT.usage);
+  }
+  const asWho = text(flags, "as");
+  const token = text(flags, "token");
+  if (asWho === undefined || token === undefined) {
+    return fail(write, json, "incident resolve", "usage", "resolving takes `--as <you> --token <t>` — who looked is recorded, not asserted", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, asWho, token);
+  if (!authenticated.ok) {
+    return fail(write, json, "incident resolve", authenticated.reason, describeApproveFailure(authenticated.reason, String(id)), EXIT.refused);
+  }
+
+  const resolved = store.resolveIncident(id, asWho, clock());
+  if (!resolved) {
+    return fail(write, json, "incident resolve", "unknown-or-resolved", `no unresolved incident ${id}`, EXIT.refused);
+  }
+  return succeed(write, json, "incident resolve", { id, by: asWho }, () => [
+    `Resolved incident ${id}, as ${asWho}. The task's hold is lifted; the next tick may take it.`,
+  ]);
 }
 
 // ---- the outbox -----------------------------------------------------------

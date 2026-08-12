@@ -176,6 +176,8 @@ const OPERATE_COMMANDS = new Set([
   "gaps",
   "outbox",
   "brief",
+  "decide",
+  "incident",
   "reconcile",
 ]);
 

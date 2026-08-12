@@ -177,6 +177,27 @@ export type ApproveResult =
   | { ok: true; scope: Scope }
   | { ok: false; reason: "no-scope" | "changed" | "no-approvers" | "not-an-approver" };
 
+/**
+ * Whether this name-and-token pair is a person the store knows. Shared by
+ * every act that requires a human's authority — approving a scope, answering
+ * a decision — because "who said yes" must never be a string the caller
+ * typed. Fails closed: with no approver registered there is nobody who can
+ * agree to anything, and treating that as "authority is not required here"
+ * would make the gate optional — which is the same as not having one.
+ */
+export function authenticateApprover(
+  store: Store,
+  by: string,
+  token: string,
+): { ok: true } | { ok: false; reason: "no-approvers" | "not-an-approver" } {
+  if (store.listApprovers().length === 0) return { ok: false, reason: "no-approvers" };
+  const known = store.approverHash(by);
+  if (known === null || !sameDigest(known, hashToken(token))) {
+    return { ok: false, reason: "not-an-approver" };
+  }
+  return { ok: true };
+}
+
 export function approve(
   store: Store,
   taskId: string,
@@ -186,14 +207,8 @@ export function approve(
   token: string,
   mutation: Mutation = {},
 ): ApproveResult {
-  // Fails closed. With no approver registered there is nobody who can agree to
-  // anything, and treating that as "approval is not required here" would make
-  // the gate optional — which is the same as not having one.
-  const known = store.approverHash(by);
-  if (store.listApprovers().length === 0) return { ok: false, reason: "no-approvers" };
-  if (known === null || !sameDigest(known, hashToken(token))) {
-    return { ok: false, reason: "not-an-approver" };
-  }
+  const authenticated = authenticateApprover(store, by, token);
+  if (!authenticated.ok) return authenticated;
 
   // Read and write in one transaction, re-reading inside it. Apart, a scope
   // rewritten between the read and the write is overwritten by this approval —

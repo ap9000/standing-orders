@@ -65,6 +65,11 @@ const FORBIDDEN_MULTILINE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/;
 // eslint-disable-next-line no-control-regex
 const FORBIDDEN_SINGLE_LINE = /[\u0000-\u001F\u007F-\u009F]/;
 
+/** Whether text carries controls that could become escapes at a sink. Newlines and tabs pass. */
+export function hasForbiddenControls(text: string): boolean {
+  return FORBIDDEN_MULTILINE.test(text);
+}
+
 export function parseDecision(raw: string): ParseResult {
   if (Buffer.byteLength(raw, "utf8") > LIMITS.payload) {
     return refuse("too-large", `the payload is over ${LIMITS.payload} bytes — one screen does not need that`);

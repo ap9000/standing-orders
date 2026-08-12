@@ -978,3 +978,171 @@ describe("the park, end to end — a judgement call survives the night", () => {
     }
   });
 });
+
+describe("decide, end to end — the morning answers and the machine hears it", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+
+  const parkingAgent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    if (mailbox === undefined) throw new Error("the brief named no mailbox");
+    await writeFile(
+      join(cwd, mailbox),
+      JSON.stringify({
+        urgency: "blocking",
+        recap: "The guard can fail open or fail closed on timeout.",
+        question: "Fail open or fail closed?",
+        options: [
+          { id: "open", label: "Fail open", consequence: "Bad payouts slip through.", reversible: true },
+          { id: "closed", label: "Fail closed", consequence: "Payouts pause.", reversible: true },
+        ],
+        recommendation: "closed",
+      }),
+    );
+    return { ...OK, stdout: JSON.stringify({ result: "parked" }) };
+  };
+
+  const buildingAgent: Runner = async (_file, _args, options) => {
+    const cwd = options?.cwd ?? "";
+    await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    return { ...OK, stdout: AGENT_SAID };
+  };
+
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+
+  const run = (argv: string[], runner: Runner = parkingAgent, now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), {
+      databaseFile: db,
+      now,
+      agentRunner: runner,
+    });
+  };
+
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), "nightorders-decide-e2e-"));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const setup = async () => {
+    await run(["runner", "register", "builder-1", "--json"]);
+    const runnerToken = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "approve", "t-1", "--json"]);
+    const digest = payload().scope.digest as string;
+    await run([
+      "task", "approve", "t-1", "--yes",
+      "--digest", digest, "--as", "alex", "--token", approverToken,
+    ]);
+    return { runnerToken, approverToken };
+  };
+
+  const tick = (runnerToken: string, runner: Runner) =>
+    run(
+      ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"],
+      runner,
+    );
+
+  test("park → decide → the task is ready again, and the answer is on the record", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await tick(runnerToken, parkingAgent);
+
+    // The list shows the question; exit 3 says attention is wanted.
+    let code = await run(["decide", "--json"]);
+    expect(code).toBe(EXIT.refused);
+    expect(payload().waiting).toMatchObject([{ id: 1, taskId: "t-1", question: "Fail open or fail closed?" }]);
+
+    // The single view carries the whole screen: recap, options, evidence.
+    await run(["decide", "1", "--json"]);
+    expect(payload().decision).toMatchObject({ recommendation: "closed", state: "open" });
+    expect(payload().evidence.map((a: { kind: string }) => a.kind).sort()).toEqual(["diff", "park-payload", "status"]);
+
+    // Answering without authority is refused — an agent cannot decide for you.
+    code = await run(["decide", "1", "--choose", "closed", "--as", "alex", "--token", "not-the-token", "--json"]);
+    expect(code).toBe(EXIT.refused);
+    expect(payload().reason).toBe("not-an-approver");
+
+    // Answering with authority works once.
+    code = await run(["decide", "1", "--choose", "closed", "--as", "alex", "--token", approverToken, "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload().decision).toMatchObject({ state: "answered", choice: "closed", answeredBy: "alex" });
+
+    // A different answer afterwards is refused — decided is not negotiable.
+    code = await run(["decide", "1", "--choose", "open", "--as", "alex", "--token", approverToken, "--json"]);
+    expect(code).toBe(EXIT.refused);
+    expect(payload().reason).toBe("already-answered");
+
+    // The hold is gone: the next pass takes the task again.
+    code = await tick(runnerToken, buildingAgent);
+    expect(code).toBe(EXIT.ok);
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built", committed: true }]);
+  });
+
+  test("the brief carries DECIDE while a decision waits, and stops when it is answered", async () => {
+    const { runnerToken, approverToken } = await setup();
+    await tick(runnerToken, parkingAgent);
+
+    await run(["brief", "--repo", repo, "--local", "--json"]);
+    expect(payload().decide).toMatchObject([{ id: 1, taskId: "t-1" }]);
+
+    await run(["decide", "1", "--choose", "closed", "--as", "alex", "--token", approverToken]);
+    await run(["brief", "--repo", repo, "--local", "--json"]);
+    expect(payload().decide).toEqual([]);
+    // The outbox no longer pages about it either: resolved, receipts kept.
+    expect(payload().outboxPending).toBe(0);
+  });
+
+  test("an incident outlives the briefing window and only an authenticated resolve frees the task", async () => {
+    const { runnerToken, approverToken } = await setup();
+    const babbling: Runner = async (_file, args, options) => {
+      const cwd = options?.cwd ?? "";
+      const prompt = args[args.indexOf("-p") + 1] ?? "";
+      const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      if (mailbox !== undefined) await writeFile(join(cwd, mailbox), "not even json");
+      return { ...OK, stdout: JSON.stringify({ result: "tried" }) };
+    };
+    await tick(runnerToken, babbling);
+
+    // A week later, the incident is still in the brief — no window hides it.
+    const aWeekOn = new Date(T0.getTime() + 7 * 24 * 60 * 60_000);
+    await run(["brief", "--repo", repo, "--local", "--json"], parkingAgent, aWeekOn);
+    expect(payload().incidents).toMatchObject([{ id: 1, taskId: "t-1", kind: "malformed-decision" }]);
+
+    // task unhold cannot lift it: the hold belongs to the incident.
+    await run(["task", "unhold", "t-1", "--json"]);
+    await run(["ready", "--json"]);
+    expect(payload().tasks ?? []).toEqual([]);
+
+    // An authenticated resolve can.
+    const code = await run(["incident", "resolve", "1", "--as", "alex", "--token", approverToken, "--json"]);
+    expect(code).toBe(EXIT.ok);
+    await run(["brief", "--repo", repo, "--local", "--json"]);
+    expect(payload().incidents).toEqual([]);
+    await run(["ready", "--json"]);
+    expect((payload().tasks ?? []).map((t: { id: string }) => t.id)).toEqual(["t-1"]);
+  });
+});

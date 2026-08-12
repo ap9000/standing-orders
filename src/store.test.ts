@@ -747,3 +747,129 @@ describe("migration from an M2 database", () => {
     }
   });
 });
+
+describe("answering a decision", () => {
+  let store: Store;
+  let ref: number;
+  let decisionId: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    ref = store.refFor(BUILT_IN, "t-1").id;
+    const run = store.startRun({
+      taskRef: ref,
+      leaseId: "lease-1",
+      runner: "builder-1",
+      branch: "nightorders/t-1",
+      worktree: "/pool/t-1",
+      now: T0,
+    });
+    decisionId = store.saveDecision(
+      {
+        run,
+        urgency: "blocking",
+        recap: "r",
+        question: "q",
+        options: [
+          { id: "keep", label: "Keep", consequence: "fine", reversible: true },
+          { id: "drop", label: "Drop", consequence: "gone", reversible: false },
+        ],
+        recommendation: "keep",
+      },
+      T0,
+    );
+    store.holdOwned(
+      { taskRef: ref, ownerKind: "decision", ownerId: String(decisionId), reason: "decision", until: null },
+      T0,
+    );
+    store.enqueueNotification(
+      { dedupeKey: `decision:${decisionId}`, kind: "decision", subject: "s", body: "b" },
+      T0,
+    );
+  });
+
+  afterEach(() => store.close());
+
+  test("one act: the answer, the hold, and the outbox episode", () => {
+    const answered = store.answerDecision(
+      { id: decisionId, choice: "keep", by: "alex", via: "cli", note: "backfill tonight" },
+      later(1_000),
+    );
+
+    expect(answered).toMatchObject({ ok: true });
+    if (!answered.ok) return;
+    expect(answered.decision).toMatchObject({
+      state: "answered",
+      choice: "keep",
+      answeredBy: "alex",
+      answeredVia: "cli",
+      note: "backfill tonight",
+    });
+    // The hold is gone and the task is dispatchable again.
+    expect(store.activeHolds(ref, later(2_000))).toHaveLength(0);
+    expect(store.listReady(later(2_000)).map(r => r.externalId)).toEqual(["t-1"]);
+    // The episode is resolved, not deleted — receipts survive.
+    expect(store.listNotifications("pending")).toHaveLength(0);
+    expect(store.listNotifications("all")[0]?.resolvedAt).toBe(later(1_000).toISOString());
+  });
+
+  test("a decision is answered once: same choice replays, different choice refuses", () => {
+    store.answerDecision({ id: decisionId, choice: "keep", by: "alex", via: "cli" }, later(1_000));
+
+    const replay = store.answerDecision({ id: decisionId, choice: "keep", by: "alex", via: "web" }, later(2_000));
+    expect(replay).toMatchObject({ ok: true, duplicate: true });
+    if (replay.ok) expect(replay.decision.answeredVia).toBe("cli");
+
+    const contradiction = store.answerDecision({ id: decisionId, choice: "drop", by: "sam", via: "cli" }, later(3_000));
+    expect(contradiction).toMatchObject({ ok: false, reason: "already-answered" });
+    expect(store.getDecision(decisionId)?.choice).toBe("keep");
+  });
+
+  test("an expired decision is still answerable — expiry never chooses", () => {
+    store.handle
+      .prepare("UPDATE decision SET state = 'expired' WHERE id = ?")
+      .run(decisionId);
+
+    const answered = store.answerDecision({ id: decisionId, choice: "drop", by: "alex", via: "cli" }, later(1_000));
+    expect(answered).toMatchObject({ ok: true });
+    expect(store.getDecision(decisionId)?.state).toBe("answered");
+  });
+
+  test("refusals: an option that is not there, a hostile note, a ghost id", () => {
+    expect(store.answerDecision({ id: decisionId, choice: "ship-it", by: "alex", via: "cli" }, T0)).toMatchObject({
+      ok: false,
+      reason: "bad-option",
+    });
+    expect(
+      store.answerDecision(
+        { id: decisionId, choice: "keep", by: "alex", via: "cli", note: "ok\u001b]0;pwn" },
+        T0,
+      ),
+    ).toMatchObject({ ok: false, reason: "bad-note" });
+    expect(store.answerDecision({ id: 999, choice: "keep", by: "alex", via: "cli" }, T0)).toMatchObject({
+      ok: false,
+      reason: "unknown-decision",
+    });
+    // Nothing above lifted the hold.
+    expect(store.activeHolds(ref, later(1_000))).toHaveLength(1);
+  });
+
+  test("an idempotency key replays the first answer", () => {
+    const first = store.answerDecision(
+      { id: decisionId, choice: "keep", by: "alex", via: "cli" },
+      later(1_000),
+      { idempotencyKey: "answer-1" },
+    );
+    const replay = store.answerDecision(
+      { id: decisionId, choice: "keep", by: "alex", via: "cli" },
+      later(60_000),
+      { idempotencyKey: "answer-1" },
+    );
+    expect(first).toMatchObject({ ok: true });
+    expect(replay).toMatchObject({ ok: true });
+    if (first.ok && replay.ok) {
+      expect(replay.decision.answeredAt).toBe(first.decision.answeredAt);
+    }
+  });
+});
