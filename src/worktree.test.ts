@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -83,7 +83,9 @@ describe("the pool, against a stubbed git", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
-    root = mkdtempSync(join(tmpdir(), "nightorders-stub-"));
+    // Real path up front: adoption compares real paths, and a fabricated
+    // candidate under a symlinked root would never match itself.
+    root = realpathSync(mkdtempSync(join(tmpdir(), "nightorders-stub-")));
     calls.length = 0;
     // A worktree can only be leased to a runner the control plane knows.
     for (const name of ["builder-1", "builder-2"]) {
@@ -265,12 +267,11 @@ describe("the pool, against a stubbed git", () => {
         : {},
     );
 
-    const { untracked, missing } = await it.orphans("/code/thing");
+    const found = await it.orphans("/code/thing");
 
     // Somebody else's worktree is named, not adopted, and the repo itself is
     // not mistaken for one of ours.
-    expect(untracked).toEqual(["/elsewhere/stray"]);
-    expect(missing).toEqual([]);
+    expect(found).toEqual({ ok: true, untracked: ["/elsewhere/stray"], missing: [] });
   });
 
   test("names its own worktrees that are no longer on disk", async () => {
@@ -286,11 +287,54 @@ describe("the pool, against a stubbed git", () => {
       verified: false,
     });
 
-    const { missing } = await pool(args =>
+    const found = await pool(args =>
       args.includes("list") ? { stdout: "worktree /code/thing\n" } : {},
     ).orphans("/code/thing");
 
-    expect(missing).toEqual(["/pool/thing/gone"]);
+    expect(found).toMatchObject({ ok: true, missing: ["/pool/thing/gone"] });
+  });
+
+  test("a failed listing is an error, not an empty answer", async () => {
+    // The difference is everything downstream: empty means every stored row
+    // is missing and may be forgotten; failed means nothing is knowable.
+    store.saveWorktree({
+      path: "/pool/thing/real",
+      repo: "/code/thing",
+      branch: "real",
+      runner: null,
+      taskRef: null,
+      createdAt: T0.toISOString(),
+      leasedAt: null,
+      releasedAt: null,
+      verified: true,
+    });
+    const broken = pool(args =>
+      args.includes("list") ? { code: 128, stderr: "fatal: not a git repository" } : {},
+    );
+
+    expect(await broken.orphans("/code/thing")).toMatchObject({ ok: false });
+
+    const adopted = await broken.adopt("/code/thing", T0);
+    expect(adopted).toMatchObject({ ok: false });
+    // And the row a working listing would have confirmed is still there.
+    expect(store.getWorktree("/pool/thing/real")).not.toBeNull();
+  });
+
+  test("adopts only what lives under its own root", async () => {
+    // The operator's hand-made worktree is named by orphans() and left alone;
+    // only a directory inside the pool becomes the pool's responsibility.
+    const crashed = join(root, "thing", "crashed");
+    const it = pool(args =>
+      args.includes("list")
+        ? { stdout: `worktree /code/thing\nworktree ${crashed}\nworktree /home/alex/mine\n` }
+        : {},
+    );
+
+    const adopted = await it.adopt("/code/thing", T0);
+
+    expect(adopted).toMatchObject({ ok: true, adopted: [crashed] });
+    expect(store.getWorktree(crashed)).toMatchObject({ verified: false, releasedAt: T0.toISOString() });
+    expect(store.getWorktree("/home/alex/mine")).toBeNull();
   });
 });
 

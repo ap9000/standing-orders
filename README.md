@@ -2,7 +2,7 @@
 
 **Standing orders for your agents. Wake me only for these.**
 
-> **Status: M1 in progress.** Discovery works today and is worth running. One task can now go queued → branch → commit unattended: `nightorders tick` runs a single scheduling pass — claim what is ready and approved, build it in a leased worktree, commit to a branch, never push. Nothing is published to npm. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.5); what has actually shipped, item by item, lives in [`docs/PROGRESS.md`](docs/PROGRESS.md).
+> **Status: M1 complete.** Discovery works today and is worth running, and one task goes queued → branch → commit unattended: `nightorders reconcile && nightorders tick` from cron is the nightly shape — the sweep recovers what the last night left behind, the pass builds what is ready and approved in a leased worktree with a heartbeating lease, and it never pushes. Nothing is published to npm yet. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.5); what has actually shipped, item by item, lives in [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 A captain's night orders are the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product.
 

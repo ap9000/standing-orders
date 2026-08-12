@@ -30,10 +30,18 @@ M0 is functionally complete except publishing. Publishing is deliberately
 parked until M1 settles, so the first published version is one whose
 unattended loop can be trusted.
 
-## M1 — one task goes queued → branch → commit unattended
+## M1 — one task goes queued → branch → commit unattended — **complete 2026-08-11**
 
 Ships when: exactly that, and it did — `src/tick.test.ts` proves it against
-real git with only the agent stubbed (2026-08-11).
+real git with only the agent stubbed. Every item below is done and tested;
+the closing hardening round was driven by a Codex review of the finishing
+plan, which found the mid-build liveness hole was really three holes
+(provenance, fencing, and completion acceptance) and prescribed the shape
+of the fixes.
+
+The nightly shape: `nightorders reconcile && nightorders tick` from cron.
+The sweep recovers what the last night left behind; the pass builds what is
+ready and approved; a pull request stays a person's decision.
 
 | Item | State | Proof |
 |---|---|---|
@@ -44,7 +52,7 @@ real git with only the agent stubbed (2026-08-11).
 | Builder fenced to the exact lease | **done** | `d088ef8` |
 | Reconciliation: dead runner | **done** | `c8d582b` — `runner reap` |
 | Reconciliation: duplicate completion | **done** | `62aaf26` — reconciled, not refused |
-| Reconciliation: orphaned worktree | in progress | pool `orphans()`/`adopt()` exist; no CLI wires them, no E2E test |
+| Reconciliation: orphaned worktree | **done** | `nightorders reconcile` — fail-closed discovery (a failed git listing is an error, not an empty answer), adoption scoped to the pool root, E2E against real git |
 | `tick` — the unattended pass | **done** | `d088ef8` — atomic ready-check claim, fenced completion, sorted refusals |
 | Release provenance (`released_by`) | **done** | `5cb9357` — a reclaimed lease's late completion is fenced, not accepted as a duplicate |
 | Atomic dead-runner recovery | **done** | `5cb9357` — death re-proved inside the transaction that acts on it |
@@ -73,6 +81,11 @@ Recorded here rather than silently reinterpreted.
 
 ## History
 
+- **2026-08-11 (later)** — M1 completes. Release provenance + atomic
+  dead-runner recovery (`5cb9357`); the pulse, post-agent rechecks, run
+  records, and tick honoring completion fences (`5aab47d`); fail-closed
+  default-branch naming (`d97a468`); `reconcile` with fail-closed orphan
+  adoption. Both plans Codex-reviewed before implementation. Suite 468.
 - **2026-08-11** — M1 unattended pass ships: `tick`, `acquireIfReady`,
   `completeFenced`, exact-lease fencing in the builder (`d088ef8`). Plan
   reviewed by Codex before implementation; its findings drove the

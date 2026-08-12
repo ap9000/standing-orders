@@ -80,6 +80,7 @@ Operating the queue — see \`nightorders task\` for the whole surface
   nightorders heartbeat <lease> / release <lease> / reap
   nightorders tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
+  nightorders reconcile        recover what the night left behind
 
 With nothing connected it reports everything it can find below the working
 directory. Once you connect repositories it reports those instead.
@@ -171,6 +172,7 @@ const OPERATE_COMMANDS = new Set([
   "approver",
   "build",
   "tick",
+  "reconcile",
 ]);
 
 /** binSource exists so tests can exercise linking without depending on a build. */

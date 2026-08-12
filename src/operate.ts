@@ -123,6 +123,10 @@ export const OPERATE_HELP = `nightorders — operating the queue
                                         [--max <n>] tasks (default 1),
                                         [--base <ref>] for first attempts.
                                         Never pushes.
+  nightorders reconcile --repo <path>   the morning sweep: recover dead
+                                        runners, reap expired leases, adopt
+                                        or forget orphaned worktrees. Run it
+                                        before tick.
 
 Runners — the machines that may be given work
   nightorders runner register <name> [--capacity <n>]
@@ -269,6 +273,8 @@ async function dispatch(
       return buildCommand(positional, flags, context);
     case "tick":
       return tickCommand(flags, context);
+    case "reconcile":
+      return reconcileCommand(flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -1045,6 +1051,79 @@ async function tickCommand(
     "everything ready is waiting on a person or held by somebody else",
     EXIT.refused,
     { considered, dispatched },
+  );
+}
+
+/**
+ * The morning sweep: everything the night may have left behind, in one pass.
+ *
+ * Three recoveries, in an order that matters. Dead runners first, because
+ * recovery is the only path that *requeues* the tasks they held — reaping an
+ * expired claim first would release it quietly and leave its task stranded
+ * in `running`, unclaimable and unoffered, which is the most expensive kind
+ * of bug because nothing anywhere reports it. Then expired leases. Then the
+ * worktrees: rows whose directory is gone are dropped, and directories the
+ * pool made but never recorded — a crash between `git worktree add` and the
+ * row — are adopted, released and unverified, so they stop being invisible.
+ *
+ * Adoption fails closed: a git listing that errored is not a listing that
+ * came back empty, and nothing is written or forgotten on its word. Run it
+ * from cron before `tick`; a pass that trips over an orphan it could have
+ * adopted is a dead loop at 3am.
+ */
+async function reconcileCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const repo = repoFrom(flags);
+  const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
+
+  const recovered = recoverDead(store, clock());
+  const reaped = reap(store, clock());
+
+  const worktrees = new WorktreePool(store, {
+    root: pool,
+    ...(context.gitRunner === undefined ? {} : { runner: context.gitRunner }),
+  });
+  const adoption = await worktrees.adopt(repo, clock());
+  if (!adoption.ok) {
+    // The claim and lease work above is real and stands; only the worktree
+    // half could not be trusted, and the exit code says the sweep is not done.
+    return fail(write, json, "reconcile", "git", adoption.message, EXIT.failed, {
+      recovered,
+      reaped: reaped.map(claim => claim.leaseId),
+    });
+  }
+
+  const nothing =
+    recovered.length === 0 &&
+    reaped.length === 0 &&
+    adoption.adopted.length === 0 &&
+    adoption.forgotten.length === 0;
+
+  return succeed(
+    write,
+    json,
+    "reconcile",
+    {
+      recovered,
+      reaped: reaped.map(claim => claim.leaseId),
+      adopted: adoption.adopted,
+      forgotten: adoption.forgotten,
+    },
+    () =>
+      nothing
+        ? ["Nothing to reconcile. The night left everything where it should be."]
+        : [
+            ...recovered.map(
+              one =>
+                `Recovered ${one.runner}: ${one.claims.length} claim(s) requeued, ${one.worktrees.length} worktree(s) handed back unverified.`,
+            ),
+            ...(reaped.length === 0 ? [] : [`Reaped ${reaped.length} expired lease(s).`]),
+            ...adoption.adopted.map(path => `Adopted ${path} — released, unverified, somebody should look.`),
+            ...adoption.forgotten.map(path => `Forgot ${path} — its directory is gone.`),
+          ],
   );
 }
 
