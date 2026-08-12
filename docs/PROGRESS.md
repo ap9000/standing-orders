@@ -148,6 +148,17 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Twelve-task E2E | planned | — |
 | Packaging (Node >=22.13 floor) + operator publish | planned | — |
 
+## Toward the operations console (2026-08-12, Codex-reviewed: 21 findings)
+
+The user asked for a web UI over all the work. The review's verdict:
+authority and transactions before templates. Landed so far:
+
+| Item | State | Proof |
+|---|---|---|
+| Session lifecycle | **done** | idle (12h) and absolute (7d) expiry re-proved per request; approver-generation check — credential rotation kills cookies the way it kills Telegram bindings; `POST /logout` |
+| Transactional console mutations | **done** | `cancelTask` refuses under a live claim (a runner's completion can no longer overwrite a cancellation); `requeueTask` re-proves stalled-and-unclaimed server-side (a stale button erases nothing); `createConsoleTask` — atomic create+place+scope, backlog admission cap, caps and control rules on every string it will later render; `resolveIncident` owns its transaction |
+| Read model, run-evidence helper, routes, step-up approval | next | per the review: shared bounded queries, descriptor-safe artifact sending, then pages; scope approval will require token re-entry (step-up), never the session alone |
+
 ## Toward M4 — the Telegram bridge (shipped early, 2026-08-11)
 
 The operator asked for the back-and-forth channel before M4: decisions to a

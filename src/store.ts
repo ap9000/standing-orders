@@ -30,6 +30,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls } from "./decision.js";
+import { digestOf } from "./scope.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
@@ -1959,18 +1960,39 @@ export class Store {
    * task's open incidents (lifting their holds), clears strikes and any
    * backoff, and returns the task to the queue. The authenticated act that
    * un-decides "this stopped being worth retrying".
+   *
+   * Requeueability is re-proved HERE, not by whoever rendered the button: a
+   * task is requeueable when it is failed or carries an unresolved
+   * incident, and nothing holds a live claim on it. A stale form submitted
+   * after the world moved gets a refusal, never a silent erase of somebody
+   * else's incident and backoff state.
    */
   requeueTask(
     taskId: string,
     by: string,
     now: Date,
-  ): { ok: true; resolvedIncidents: number } | { ok: false; reason: "unknown-task" } {
+  ):
+    | { ok: true; resolvedIncidents: number }
+    | { ok: false; reason: "unknown-task" | "not-stalled" | "claimed" } {
     return this.transact(() => {
       const ref = this.db
         .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
         .get(BUILT_IN, taskId);
       if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
       const taskRef = Number(ref["id"]);
+
+      const stamp = now.toISOString();
+      const live = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM claim
+            WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?
+              AND lease_generation = (
+                SELECT MAX(newest.lease_generation) FROM claim AS newest
+                WHERE newest.task_ref = claim.task_ref
+              )`,
+        )
+        .get(taskRef, stamp);
+      if (live !== undefined) return { ok: false as const, reason: "claimed" as const };
 
       const incidents = this.db
         .prepare(
@@ -1980,16 +2002,112 @@ export class Store {
         )
         .all(taskRef)
         .map(row => Number(row["id"]));
-      for (const incident of incidents) this.resolveIncident(incident, by, now);
+      const state = this.db.prepare("SELECT state FROM task WHERE id = ?").get(taskId);
+      if (incidents.length === 0 && String(state?.["state"]) !== "failed") {
+        return { ok: false as const, reason: "not-stalled" as const };
+      }
+
+      for (const incident of incidents) this.resolveIncidentLocked(incident, by, now);
 
       this.resetStrikes(taskRef);
       this.db
         .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state IN ('failed','queued')")
-        .run(now.toISOString(), taskId);
+        .run(stamp, taskId);
       // The stall's page is answered by the act itself.
       this.resolveEpisode(`stalled:${taskRef}`, now);
       this.bumpWake();
       return { ok: true as const, resolvedIncidents: incidents.length };
+    });
+  }
+
+  /**
+   * Cancel, aware of who might be building right now. A live claim wins:
+   * cancelling under a runner would let its completion overwrite the
+   * cancellation minutes later, so the answer is a refusal that names the
+   * holder — stop the claim first (or let it lapse), then cancel.
+   */
+  cancelTask(
+    taskId: string,
+    now: Date,
+  ): { ok: true } | { ok: false; reason: "unknown-task" | "claimed" | "already-terminal" } {
+    return this.transact(() => {
+      const ref = this.db
+        .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+        .get(BUILT_IN, taskId);
+      if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
+
+      const stamp = now.toISOString();
+      const live = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM claim
+            WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?
+              AND lease_generation = (
+                SELECT MAX(newest.lease_generation) FROM claim AS newest
+                WHERE newest.task_ref = claim.task_ref
+              )`,
+        )
+        .get(Number(ref["id"]), stamp);
+      if (live !== undefined) return { ok: false as const, reason: "claimed" as const };
+
+      const { changes } = this.db
+        .prepare(
+          "UPDATE task SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','failed','running')",
+        )
+        .run(stamp, taskId);
+      if (Number(changes) === 0) return { ok: false as const, reason: "already-terminal" as const };
+      this.bumpWake();
+      return { ok: true as const };
+    });
+  }
+
+  /**
+   * The console's task creation: admission control and atomicity the CLI's
+   * local-trust path does not need. One transaction checks the active
+   * backlog (queued + running below the cap), validates the writable
+   * fields' caps and control rules — these strings will be rendered to
+   * every surface — and creates the task, its placement, and its optional
+   * scope together or not at all.
+   */
+  createConsoleTask(
+    spec: { id: string; title: string; repo?: string; goal?: string },
+    now: Date,
+    cap = 500,
+  ):
+    | { ok: true }
+    | { ok: false; reason: "backlog-full" | "bad-id" | "bad-title" | "bad-goal" | "duplicate" } {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(spec.id)) {
+      return { ok: false, reason: "bad-id" };
+    }
+    if (spec.title.trim() === "" || spec.title.length > 200 || hasForbiddenControls(spec.title)) {
+      return { ok: false, reason: "bad-title" };
+    }
+    if (spec.goal !== undefined && (spec.goal.trim() === "" || spec.goal.length > 2_000 || hasForbiddenControls(spec.goal))) {
+      return { ok: false, reason: "bad-goal" };
+    }
+    return this.transact(() => {
+      const backlog = this.db
+        .prepare("SELECT COUNT(*) AS n FROM task WHERE state IN ('queued','running')")
+        .get();
+      if (Number(backlog?.["n"] ?? 0) >= cap) return { ok: false as const, reason: "backlog-full" as const };
+      const exists = this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(spec.id);
+      if (exists !== undefined) return { ok: false as const, reason: "duplicate" as const };
+
+      this.createTask({ id: spec.id, title: spec.title.trim() }, now);
+      const ref = this.refFor(BUILT_IN, spec.id, "ours");
+      if (spec.repo !== undefined && spec.repo !== "") this.placeTask(ref.id, spec.repo);
+      if (spec.goal !== undefined) {
+        const draft = { goal: spec.goal.trim(), outOfScope: null, touches: [] as string[] };
+        this.saveScope({
+          taskId: spec.id,
+          ...draft,
+          proposedAt: now.toISOString(),
+          digest: digestOf(draft),
+          approvedAt: null,
+          approvedBy: null,
+          approvedDigest: null,
+        });
+      }
+      return { ok: true as const };
     });
   }
 
@@ -2604,8 +2722,13 @@ export class Store {
       .map(row => ({ ...readIncident(row), taskId: String(row["task_id"]) }));
   }
 
-  /** Resolving also lifts the incident's hold — one act, atomically the caller's transaction. */
+  /** Resolving also lifts the incident's hold — one act, one transaction, owned here. */
   resolveIncident(id: number, by: string, now: Date): boolean {
+    return this.transact(() => this.resolveIncidentLocked(id, by, now));
+  }
+
+  /** The body, for callers already holding the transaction (requeueTask). */
+  private resolveIncidentLocked(id: number, by: string, now: Date): boolean {
     const { changes } = this.db
       .prepare("UPDATE incident SET resolved_at = ?, resolved_by = ? WHERE id = ? AND resolved_at IS NULL")
       .run(now.toISOString(), by, id);

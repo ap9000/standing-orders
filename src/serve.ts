@@ -53,8 +53,18 @@ export type ServeOptions = {
 
 const SESSION_COOKIE = "nightorders_session";
 const BODY_CAP = 16 * 1024;
+/** A cookie idles out after half a day and dies outright after a week. */
+const SESSION_IDLE_MS = 12 * 60 * 60_000;
+const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60_000;
 
-type Session = { name: string; csrf: string };
+type Session = {
+  name: string;
+  csrf: string;
+  /** The approver generation at login: credential rotation kills the cookie. */
+  generation: number;
+  createdAt: number;
+  lastSeen: number;
+};
 
 export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
@@ -111,12 +121,26 @@ export function createDecisionServer(options: ServeOptions): Server {
         return page(response, 403, loginPage("that is not an approver, or the token does not match"));
       }
       const id = randomBytes(32).toString("hex");
-      sessions.set(id, { name: name as string, csrf: randomBytes(32).toString("hex") });
+      sessions.set(id, {
+        name: name as string,
+        csrf: randomBytes(32).toString("hex"),
+        generation: store.approverGeneration(name as string) ?? 1,
+        createdAt: Date.now(),
+        lastSeen: Date.now(),
+      });
       response.setHeader(
         "Set-Cookie",
         `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/`,
       );
       return redirect(response, "/");
+    }
+
+    if (url.pathname === "/logout" && method === "POST") {
+      const cookies = request.headers.cookie ?? "";
+      const match = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{64})`).exec(cookies);
+      if (match !== null) sessions.delete(match[1] as string);
+      response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+      return redirect(response, "/login");
     }
 
     if (who === null) {
@@ -240,12 +264,28 @@ export function createDecisionServer(options: ServeOptions): Server {
     return session === null ? null : { name: session.name, via: "cookie", session };
   }
 
-  /** Constant-time against the session table, small as it is. */
+  /**
+   * Constant-time against the session table, small as it is — and every hit
+   * is re-proved against time and the approver's credential generation. A
+   * rotated credential kills its cookies the same way it kills its Telegram
+   * bindings: authority derived from the old secret does not outlive it.
+   */
   function lookupSession(candidate: string): Session | null {
     const bytes = Buffer.from(candidate, "utf8");
     for (const [id, session] of sessions) {
       const stored = Buffer.from(id, "utf8");
-      if (stored.length === bytes.length && timingSafeEqual(stored, bytes)) return session;
+      if (stored.length !== bytes.length || !timingSafeEqual(stored, bytes)) continue;
+      const now = Date.now();
+      if (now - session.lastSeen > SESSION_IDLE_MS || now - session.createdAt > SESSION_ABSOLUTE_MS) {
+        sessions.delete(id);
+        return null;
+      }
+      if (store.approverGeneration(session.name) !== session.generation) {
+        sessions.delete(id);
+        return null;
+      }
+      session.lastSeen = now;
+      return session;
     }
     return null;
   }

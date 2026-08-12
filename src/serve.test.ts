@@ -321,6 +321,32 @@ describe("the web decision view", () => {
     const response = await fetch(url(`/d/${decisionId}/evidence/${foreign}`), { headers: { cookie } });
     expect(response.status).toBe(404);
   });
+
+
+  test("logout kills the cookie, and credential rotation kills every session it minted", async () => {
+    const cookie = await login();
+
+    // Logged in: the console answers.
+    expect((await fetch(url("/"), { headers: { cookie } })).status).toBe(200);
+
+    // Rotation: the approver re-registers; the old session's generation is
+    // stale and the cookie stops working — same rule as Telegram bindings.
+    const rotated = addApprover(store, "alex", new Date(), { name: "alex", token: approverToken });
+    expect(rotated.ok).toBe(true);
+    const after = await fetch(url("/"), { redirect: "manual", headers: { cookie } });
+    expect(after.status).toBe(303);
+    expect(after.headers.get("location")).toBe("/login");
+  });
+
+  test("logout is a real verb", async () => {
+    const cookie = await login();
+    const out = await fetch(url("/logout"), { method: "POST", headers: { cookie }, redirect: "manual" });
+    expect(out.status).toBe(303);
+    const back = await fetch(url("/"), { redirect: "manual", headers: { cookie } });
+    expect(back.status).toBe(303);
+  });
+
+
 });
 
 describe("the settings card", () => {

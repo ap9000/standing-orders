@@ -1107,3 +1107,84 @@ describe("the watch foundations", () => {
     expect(live?.["released_at"]).toBeNull();
   });
 });
+
+describe("console mutation semantics, re-proved server-side", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+  });
+
+  afterEach(() => store.close());
+
+  test("cancel refuses while a live claim holds the task", () => {
+    const ref = store.refFor(BUILT_IN, "t-1").id;
+    acquire(store, ref, "runner-a", { now: T0, ttlMs: 60 * 60_000 });
+
+    expect(store.cancelTask("t-1", later(1_000))).toMatchObject({ ok: false, reason: "claimed" });
+    expect(store.getTask("t-1")?.state).toBe("queued");
+
+    // Claim lapsed: cancellation lands, and twice is already-terminal.
+    expect(store.cancelTask("t-1", later(2 * 60 * 60_000))).toMatchObject({ ok: true });
+    expect(store.getTask("t-1")?.state).toBe("cancelled");
+    expect(store.cancelTask("t-1", later(2 * 60 * 60_000 + 1_000))).toMatchObject({
+      ok: false,
+      reason: "already-terminal",
+    });
+  });
+
+  test("requeue refuses a healthy task and a claimed one — a stale button erases nothing", () => {
+    expect(store.requeueTask("t-1", "alex", T0)).toMatchObject({ ok: false, reason: "not-stalled" });
+
+    const ref = store.refFor(BUILT_IN, "t-1").id;
+    store.setTaskState("t-1", "failed", T0);
+    acquire(store, ref, "runner-a", { now: later(1_000), ttlMs: 60 * 60_000 });
+    expect(store.requeueTask("t-1", "alex", later(2_000))).toMatchObject({ ok: false, reason: "claimed" });
+  });
+
+  test("console task creation is atomic, capped, and validates what it will later render", () => {
+    expect(store.createConsoleTask({ id: "../evil", title: "x" }, T0)).toMatchObject({ ok: false, reason: "bad-id" });
+    expect(
+      store.createConsoleTask({ id: "ok", title: "x".repeat(300) }, T0),
+    ).toMatchObject({ ok: false, reason: "bad-title" });
+    expect(store.createConsoleTask({ id: "t-1", title: "dupe" }, T0)).toMatchObject({
+      ok: false,
+      reason: "duplicate",
+    });
+
+    const made = store.createConsoleTask(
+      { id: "t-2", title: "wire the API", repo: "/code/thing", goal: "wire it end to end" },
+      T0,
+    );
+    expect(made).toMatchObject({ ok: true });
+    expect(store.refFor(BUILT_IN, "t-2").repo).toBe("/code/thing");
+    expect(store.getScope("t-2")?.goal).toBe("wire it end to end");
+    // Scope created through the console is proposed, never approved.
+    expect(store.getScope("t-2")?.approvedDigest).toBeNull();
+
+    // The admission cap counts the active backlog only.
+    expect(store.createConsoleTask({ id: "t-3", title: "x" }, T0, 3)).toMatchObject({ ok: true });
+    expect(store.createConsoleTask({ id: "t-4", title: "x" }, T0, 3)).toMatchObject({
+      ok: false,
+      reason: "backlog-full",
+    });
+    store.setTaskState("t-1", "done", later(1_000));
+    expect(store.createConsoleTask({ id: "t-4", title: "x" }, later(2_000), 3)).toMatchObject({ ok: true });
+  });
+
+  test("resolveIncident owns its transaction now — no caller can half-do it", () => {
+    const ref = store.refFor(BUILT_IN, "t-1").id;
+    const run = store.startRun({
+      taskRef: ref, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0,
+    });
+    const incident = store.createIncident({ run, kind: "attempts-exhausted" }, T0);
+    store.holdOwned(
+      { taskRef: ref, ownerKind: "incident", ownerId: String(incident), reason: "stall", until: null },
+      T0,
+    );
+
+    expect(store.resolveIncident(incident, "alex", later(1_000))).toBe(true);
+    expect(store.activeHolds(ref, later(2_000))).toHaveLength(0);
+  });
+});
