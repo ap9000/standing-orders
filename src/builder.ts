@@ -31,7 +31,7 @@
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Store } from "./store.js";
 import { approvalOf, type Scope } from "./scope.js";
-import { currentClaim } from "./claim.js";
+import { currentClaim, heartbeat } from "./claim.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 
 export type Runner = (
@@ -51,6 +51,14 @@ export type BuildRequest = {
    * the same runner started earlier.
    */
   leaseId?: string;
+  /**
+   * Real time, read repeatedly. `now` is one instant and a build is not: a
+   * lease heartbeated with the timestamp the build started at is a lease that
+   * stopped being extended the moment it began.
+   */
+  clock?: () => Date;
+  /** How often the pulse beats while the agent runs. 0 disables it. */
+  pulseMs?: number;
   worktree: string;
   branch: string;
   now: Date;
@@ -78,6 +86,7 @@ export type BuildRefusal =
   | "protected-branch"
   | "wrong-branch"
   | "moved-branch"
+  | "fenced"
   | "agent"
   | "timeout"
   | "git";
@@ -85,6 +94,12 @@ export type BuildRefusal =
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_MAX_TURNS = 40;
+/**
+ * How often a running build says "still here" — extending its lease and its
+ * runner's liveness in one beat. A minute against a three-minute liveness
+ * window means two beats can be lost to load before anything looks dead.
+ */
+export const DEFAULT_PULSE_MS = 60_000;
 
 /** Branches an unattended agent may never commit to, whatever it was asked. */
 export const PROTECTED = new Set(["main", "master", "trunk", "develop", "release"]);
@@ -235,20 +250,53 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     };
   }
 
-  const result = await agent(
-    CLAUDE,
-    [
-      "-p",
-      brief(scope as Scope, branch),
-      "--output-format",
-      "json",
-      "--max-turns",
-      String(maxTurns),
-      ...(skipPermissions ? ["--dangerously-skip-permissions"] : ["--permission-mode", permissionMode]),
-      ...(model === undefined ? [] : ["--model", model]),
-    ],
-    { cwd: worktree, timeoutMs },
-  );
+  // The pulse: while the agent runs, the lease is extended and the runner
+  // touched on every beat, so a healthy build never looks dead to a reaper on
+  // the same database. A beat that comes back fenced — or throws — latches:
+  // the world has moved past this lease, the agent's spend is bounded by its
+  // timeout either way, and nothing it produces will be committed.
+  const clock = request.clock ?? (() => now);
+  const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
+  let fencedMidBuild = false;
+  let pulseTimer: ReturnType<typeof setInterval> | undefined;
+
+  if (request.leaseId !== undefined && pulseMs > 0) {
+    const leaseId = request.leaseId;
+    const beat = () => {
+      try {
+        const answer = heartbeat(store, leaseId, clock());
+        store.touchRunner(runner, clock());
+        if (!answer.ok) fencedMidBuild = true;
+      } catch {
+        // A pulse that cannot reach the database proves nothing about the
+        // lease — but a build that cannot prove its lease must not commit.
+        fencedMidBuild = true;
+      }
+      if (fencedMidBuild && pulseTimer !== undefined) clearInterval(pulseTimer);
+    };
+    pulseTimer = setInterval(beat, pulseMs);
+    pulseTimer.unref?.();
+  }
+
+  let result: ExecResult;
+  try {
+    result = await agent(
+      CLAUDE,
+      [
+        "-p",
+        brief(scope as Scope, branch),
+        "--output-format",
+        "json",
+        "--max-turns",
+        String(maxTurns),
+        ...(skipPermissions ? ["--dangerously-skip-permissions"] : ["--permission-mode", permissionMode]),
+        ...(model === undefined ? [] : ["--model", model]),
+      ],
+      { cwd: worktree, timeoutMs },
+    );
+  } finally {
+    if (pulseTimer !== undefined) clearInterval(pulseTimer);
+  }
 
   if (result.timedOut) {
     return {
@@ -259,6 +307,53 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   }
   if (result.code !== 0) {
     return { ok: false, reason: "agent", message: firstLine(result.stderr) || `exit ${result.code}` };
+  }
+
+  // The claim is re-proved *after* the agent, synchronously, whatever the
+  // pulse said. An interval that fired cleanly a moment ago is a fact about
+  // a moment ago; the commit below is about now. For a leased build the
+  // final beat also extends the lease across the commit itself.
+  if (fencedMidBuild) {
+    return {
+      ok: false,
+      reason: "fenced",
+      message: `${taskId}'s lease was superseded while the agent ran — the work is still in ${worktree}, and it is not this lease's to commit`,
+    };
+  }
+  if (request.leaseId !== undefined) {
+    const final = heartbeat(store, request.leaseId, clock());
+    if (!final.ok) {
+      return {
+        ok: false,
+        reason: "fenced",
+        message: `${taskId}'s lease did not survive the build — the work is still in ${worktree}, and it is not this lease's to commit`,
+      };
+    }
+  } else {
+    const still = currentClaim(store, taskRef, clock());
+    if (still === null || still.runner !== runner) {
+      return {
+        ok: false,
+        reason: "fenced",
+        message: `${taskId} is no longer claimed by ${runner} — the work is still in ${worktree}`,
+      };
+    }
+  }
+
+  // And the branch is re-read, because the agent had half an hour alone with
+  // a git checkout and its word about staying put is not evidence either.
+  const after = await git(GIT, ["--no-optional-locks", "rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: worktree,
+  });
+  if (after.code !== 0) {
+    return { ok: false, reason: "git", message: `could not re-read the branch in ${worktree}` };
+  }
+  if (after.stdout.trim() !== branch) {
+    return {
+      ok: false,
+      reason: "moved-branch",
+      message: `${worktree} was on ${branch} and is now on ${after.stdout.trim()} — nothing commits from a branch the agent moved to`,
+    };
   }
 
   return commit(git, worktree, branch, taskId, scope as Scope, summarise(result.stdout));

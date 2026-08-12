@@ -127,6 +127,16 @@ describe("tick, against real git", () => {
     // The ledger agrees: done, and the lease is not still held.
     await run(["task", "show", "t-1", "--json"]);
     expect(payload().task.state).toBe("done");
+
+    // And the attempt survived as a record, not just as an exit code.
+    expect(payload().runs).toHaveLength(1);
+    expect(payload().runs[0]).toMatchObject({
+      outcome: "built",
+      committed: true,
+      branch: "nightorders/t-1",
+      runner: "builder-1",
+    });
+    expect(payload().runs[0].finishedAt).not.toBeNull();
   });
 
   test("an empty queue is exit 3, not an error", async () => {
@@ -184,6 +194,10 @@ describe("tick, against real git", () => {
 
     await run(["task", "show", "t-1", "--json"]);
     expect(payload().task.state).toBe("failed");
+
+    // The broken attempt is on the record too, with its reason.
+    expect(payload().runs).toHaveLength(1);
+    expect(payload().runs[0]).toMatchObject({ outcome: "failed", reason: "agent" });
   });
 
   test("a second pass finds nothing left to do", async () => {

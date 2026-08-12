@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
-import { acquire, reap } from "./claim.js";
+import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover } from "./scope.js";
 import { build, PROTECTED, type Runner } from "./builder.js";
 
@@ -15,6 +15,12 @@ function bootstrapApprover(store: Store): string {
   return added.token;
 }
 const AGENT_SAID = JSON.stringify({ result: "Added the guard and a test for it." });
+
+/** Lease ids are opaque; naming them makes a fencing failure readable. */
+const ids = (...names: string[]) => {
+  let index = 0;
+  return () => names[index++] ?? `extra-${index}`;
+};
 
 describe("the builder's gates", () => {
   let store: Store;
@@ -717,5 +723,160 @@ describe("the commit message", () => {
     const kept = subject.replace(/^t-1: /, "").replace(/…$/, "");
     expect(goal.startsWith(kept)).toBe(true);
     expect(goal[kept.length]).toBe(" ");
+  });
+});
+
+describe("the pulse", () => {
+  let store: Store;
+  let approverToken: string;
+  let taskRef: number;
+  const gitCalls: string[][] = [];
+
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  /** Answers like the shared stub, and records every git invocation. */
+  const git: Runner = async (_file, args) => {
+    gitCalls.push([...args]);
+    if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+    return args.includes("status") ? { ...OK, stdout: " M src/index.ts\n" } : { ...OK };
+  };
+
+  const committed = () => gitCalls.some(args => args.includes("commit"));
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", now: T0 });
+    register(store, { name: "builder-2", host: "h", now: T0 });
+    store.saveWorktree({
+      path: "/pool/thing/feat-a",
+      repo: "/code/thing",
+      branch: "feat/a",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    gitCalls.length = 0;
+  });
+
+  afterEach(() => store.close());
+
+  const request = (leaseId: string, over: Record<string, unknown> = {}) => ({
+    taskId: "t-1",
+    taskRef,
+    runner: "builder-1",
+    leaseId,
+    worktree: "/pool/thing/feat-a",
+    branch: "feat/a",
+    now: T0,
+    clock: () => new Date(),
+    pulseMs: 5,
+    git,
+    ...over,
+  });
+
+  /** Expires builder-1's lease and grants the task to builder-2. */
+  const supersede = () =>
+    acquire(store, taskRef, "builder-2", {
+      now: new Date(T0.getTime() + 24 * 60 * 60_000),
+      newLeaseId: ids("lease-b"),
+    });
+
+  test("a build fenced while the agent runs commits nothing", async () => {
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    const agent: Runner = async () => {
+      supersede();
+      await sleep(40); // several beats — the pulse must notice and latch
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+    const result = await build(store, request("lease-a", { agent }));
+
+    expect(result).toMatchObject({ ok: false, reason: "fenced" });
+    expect(committed()).toBe(false);
+  });
+
+  test("the final check alone catches a fence, with the pulse disabled", async () => {
+    // pulseMs 0: nothing beats during the run, so only the mandatory
+    // synchronous re-proof after the agent stands between a superseded lease
+    // and a stale commit.
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    const agent: Runner = async () => {
+      supersede();
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+    const result = await build(store, request("lease-a", { agent, pulseMs: 0 }));
+
+    expect(result).toMatchObject({ ok: false, reason: "fenced" });
+    expect(committed()).toBe(false);
+  });
+
+  test("a pulse that throws latches to fenced rather than vanishing", async () => {
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
+    // The database refusing mid-flight proves nothing about the lease — and a
+    // build that cannot prove its lease must not commit.
+    const broken = Object.create(store) as Store;
+    Object.defineProperty(broken, "touchRunner", {
+      value: () => {
+        throw new Error("database is on fire");
+      },
+    });
+    const agent: Runner = async () => {
+      await sleep(40);
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+    const result = await build(broken, request("lease-a", { agent }));
+
+    expect(result).toMatchObject({ ok: false, reason: "fenced" });
+    expect(committed()).toBe(false);
+  });
+
+  test("the pulse stops when the build does", async () => {
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
+    let beats = 0;
+    const counting = Object.create(store) as Store;
+    Object.defineProperty(counting, "touchRunner", {
+      value: (name: string, at: Date) => {
+        beats++;
+        store.touchRunner(name, at);
+      },
+    });
+    const agent: Runner = async () => {
+      await sleep(25);
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+    const result = await build(counting, request("lease-a", { agent }));
+    expect(result).toMatchObject({ ok: true });
+
+    const seen = beats;
+    await sleep(30); // three more would-be beats
+    expect(beats).toBe(seen);
+  });
+
+  test("a healthy pulse keeps the lease alive past its original expiry", async () => {
+    // The point of the whole mechanism: a lease shorter than the build, kept
+    // alive by the build being alive.
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    const agent: Runner = async () => {
+      await sleep(25);
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+    const result = await build(store, request("lease-a", { agent }));
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    const claim = currentClaim(store, taskRef, new Date());
+    expect(claim).not.toBeNull();
+    expect(Date.parse(claim!.expiresAt)).toBeGreaterThan(T0.getTime() + 60_000);
   });
 });

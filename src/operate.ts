@@ -827,8 +827,11 @@ async function tickCommand(
   const model = text(flags, "model");
   const turns = text(flags, "turns");
   const timeoutMs = DEFAULT_BUILD_TIMEOUT_MS;
-  // The margin is what keeps "still building" and "lease ran out" disjoint.
-  const leaseTtlMs = timeoutMs + 5 * 60_000;
+  // The ordinary lease is enough: the build's own pulse extends it while the
+  // agent runs, which is the correct causality — the lease stays alive
+  // because the build is alive. A fat TTL would only mask a dead pulse and
+  // delay recovery by exactly its margin.
+  const leaseTtlMs = DEFAULT_LEASE_MS;
 
   const git = context.gitRunner ?? run;
   const worktrees = new WorktreePool(store, {
@@ -901,6 +904,18 @@ async function tickCommand(
       continue;
     }
 
+    // The record opens before the money is spent, so a crash mid-agent leaves
+    // a row with no outcome — an attempt that vanished, visible by morning.
+    const runId = store.startRun({
+      taskRef: ref.id,
+      leaseId: lease,
+      runner,
+      branch,
+      worktree: leased.worktree.path,
+      ...(model === undefined ? {} : { model }),
+      now: clock(),
+    });
+
     const result = await build(store, {
       taskId: id,
       taskRef: ref.id,
@@ -909,6 +924,7 @@ async function tickCommand(
       worktree: leased.worktree.path,
       branch,
       now: clock(),
+      clock,
       timeoutMs,
       ...(model === undefined ? {} : { model }),
       ...(turns === undefined ? {} : { maxTurns: Number(turns) }),
@@ -921,15 +937,26 @@ async function tickCommand(
     await worktrees.release(leased.worktree.path, clock());
 
     if (result.ok) {
-      completeFenced(store, lease, "done", clock());
-      dispatched.push({
-        id,
-        outcome: "built",
-        committed: result.committed,
-        branch,
-        worktree: leased.worktree.path,
-      });
-      built++;
+      // The completion has to be *accepted*, not assumed. A fence here means
+      // the world moved past this lease between the builder's final check and
+      // now; the commit exists on the branch, but the task is not ours to
+      // close, and reporting "built" would count work the fence disowned.
+      const sealed = completeFenced(store, lease, "done", clock());
+      if (sealed.ok) {
+        store.finishRun(runId, { outcome: "built", committed: result.committed, now: clock() });
+        dispatched.push({
+          id,
+          outcome: "built",
+          committed: result.committed,
+          branch,
+          worktree: leased.worktree.path,
+        });
+        built++;
+      } else {
+        store.finishRun(runId, { outcome: "failed", reason: "fenced", committed: result.committed, now: clock() });
+        dispatched.push({ id, outcome: "failed", reason: "fenced", branch, worktree: leased.worktree.path });
+        broke++;
+      }
       continue;
     }
 
@@ -937,14 +964,31 @@ async function tickCommand(
       // Approval drifted between our prefilter and the builder's own gate.
       // That is a person's pending decision, not a fault.
       release(store, lease, clock());
+      store.finishRun(runId, { outcome: "refused", reason: result.reason, now: clock() });
       dispatched.push({ id, outcome: "skipped", reason: result.reason });
+      continue;
+    }
+
+    if (result.reason === "fenced") {
+      // The lease did not survive the build. Nothing is ours to release or to
+      // mark; the work sits in the worktree for whoever holds the task now.
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now: clock() });
+      dispatched.push({ id, outcome: "failed", reason: "fenced", worktree: leased.worktree.path });
+      broke++;
       continue;
     }
 
     if (result.reason === "agent" || result.reason === "timeout" || result.reason === "git") {
       // The attempt itself broke. The terminal state and the release are one
-      // step, so the task is never simultaneously free and unfinished.
-      completeFenced(store, lease, "failed", clock());
+      // step, so the task is never simultaneously free and unfinished — and
+      // even that write can be fenced, in which case the failure is recorded
+      // but the task belongs to whoever took it.
+      const sealed = completeFenced(store, lease, "failed", clock());
+      store.finishRun(runId, {
+        outcome: "failed",
+        reason: sealed.ok ? result.reason : "fenced",
+        now: clock(),
+      });
       dispatched.push({ id, outcome: "failed", reason: result.reason, worktree: leased.worktree.path });
       broke++;
       continue;
@@ -954,6 +998,7 @@ async function tickCommand(
     // moved-branch: invariants this dispatcher was supposed to uphold. The
     // task is left queued for a correct pass; this one admits it broke.
     release(store, lease, clock());
+    store.finishRun(runId, { outcome: "refused", reason: result.reason, now: clock() });
     dispatched.push({ id, outcome: "failed", reason: result.reason });
     broke++;
   }
@@ -1292,6 +1337,7 @@ function showTask(positional: readonly string[], context: Context): number {
     claim: currentClaim(store, ref.id, now),
     scope,
     approval: approvalOf(scope),
+    runs: store.runsFor(ref.id),
   };
 
   return succeed(write, json, "task show", detail, () => [

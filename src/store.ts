@@ -76,6 +76,22 @@ export type TaskRef = {
 
 export type Hold = { taskRef: number; reason: string; until: string | null; heldAt: string };
 
+/** One build attempt. `outcome` null means it never finished — also an answer. */
+export type Run = {
+  id: number;
+  taskRef: number;
+  leaseId: string;
+  runner: string;
+  branch: string;
+  worktree: string;
+  model: string | null;
+  outcome: "built" | "failed" | "refused" | null;
+  reason: string | null;
+  committed: boolean | null;
+  startedAt: string;
+  finishedAt: string | null;
+};
+
 /** Every mutation takes one. A repeat returns the first answer, unchanged. */
 export type Mutation = {
   idempotencyKey?: string;
@@ -167,6 +183,26 @@ CREATE TABLE IF NOT EXISTS claim (
   -- would accept work the reclaim already disowned.
   released_by      TEXT,
   UNIQUE (task_ref, lease_generation)
+);
+
+-- One build attempt, durable. The in-memory BuildResult evaporates with the
+-- process; the morning briefing, and anybody asking "what happened to t-1
+-- overnight", need the answer to survive a crash. A row is written before
+-- the agent runs and finalized after — outcome NULL means the attempt was
+-- cut down mid-flight, which is itself worth knowing.
+CREATE TABLE IF NOT EXISTS run (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref    INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  lease_id    TEXT NOT NULL,
+  runner      TEXT NOT NULL,
+  branch      TEXT NOT NULL,
+  worktree    TEXT NOT NULL,
+  model       TEXT,
+  outcome     TEXT CHECK (outcome IN ('built','failed','refused')),
+  reason      TEXT,
+  committed   INTEGER,
+  started_at  TEXT NOT NULL,
+  finished_at TEXT
 );
 
 -- Permission to write to a tracker, one row per repository and backend.
@@ -266,7 +302,7 @@ CREATE INDEX IF NOT EXISTS claim_by_task ON claim (task_ref, lease_generation DE
  * is not written against an `any` and so a test can substitute a handle.
  */
 export type Statement = {
-  run(...params: unknown[]): { changes: number | bigint };
+  run(...params: unknown[]): { changes: number | bigint; lastInsertRowid?: number | bigint };
   get(...params: unknown[]): Record<string, unknown> | undefined;
   all(...params: unknown[]): Record<string, unknown>[];
 };
@@ -929,6 +965,80 @@ export class Store {
       )
       .run(now.toISOString(), runner);
     return held;
+  }
+
+  // ---- runs ---------------------------------------------------------------
+
+  /**
+   * Open the record before the money is spent. If the process dies with the
+   * agent, the row survives with outcome NULL — an attempt that was cut down
+   * mid-flight, visible the next morning instead of vanished.
+   */
+  startRun(run: {
+    taskRef: number;
+    leaseId: string;
+    runner: string;
+    branch: string;
+    worktree: string;
+    model?: string;
+    now: Date;
+  }): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        run.taskRef,
+        run.leaseId,
+        run.runner,
+        run.branch,
+        run.worktree,
+        run.model ?? null,
+        run.now.toISOString(),
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  finishRun(
+    id: number,
+    result: {
+      outcome: "built" | "failed" | "refused";
+      reason?: string;
+      committed?: boolean;
+      now: Date;
+    },
+  ): void {
+    this.db
+      .prepare("UPDATE run SET outcome = ?, reason = ?, committed = ?, finished_at = ? WHERE id = ?")
+      .run(
+        result.outcome,
+        result.reason ?? null,
+        result.committed === undefined ? null : result.committed ? 1 : 0,
+        result.now.toISOString(),
+        id,
+      );
+  }
+
+  /** Newest first, because the question is almost always "what just happened". */
+  runsFor(taskRef: number): Run[] {
+    return this.db
+      .prepare("SELECT * FROM run WHERE task_ref = ? ORDER BY id DESC")
+      .all(taskRef)
+      .map(row => ({
+        id: Number(row["id"]),
+        taskRef: Number(row["task_ref"]),
+        leaseId: String(row["lease_id"]),
+        runner: String(row["runner"]),
+        branch: String(row["branch"]),
+        worktree: String(row["worktree"]),
+        model: row["model"] === null ? null : String(row["model"]),
+        outcome: row["outcome"] === null ? null : (String(row["outcome"]) as Run["outcome"]),
+        reason: row["reason"] === null ? null : String(row["reason"]),
+        committed: row["committed"] === null ? null : Number(row["committed"]) === 1,
+        startedAt: String(row["started_at"]),
+        finishedAt: row["finished_at"] === null ? null : String(row["finished_at"]),
+      }));
   }
 
   // ---- idempotency --------------------------------------------------------

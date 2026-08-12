@@ -46,9 +46,12 @@ real git with only the agent stubbed (2026-08-11).
 | Reconciliation: duplicate completion | **done** | `62aaf26` — reconciled, not refused |
 | Reconciliation: orphaned worktree | in progress | pool `orphans()`/`adopt()` exist; no CLI wires them, no E2E test |
 | `tick` — the unattended pass | **done** | `d088ef8` — atomic ready-check claim, fenced completion, sorted refusals |
-| Heartbeat *during* a build | in progress | a 30-min build outlives the 3-min liveness window; lease TTL margin covers the claim, nothing covers the runner |
+| Release provenance (`released_by`) | **done** | `5cb9357` — a reclaimed lease's late completion is fenced, not accepted as a duplicate |
+| Atomic dead-runner recovery | **done** | `5cb9357` — death re-proved inside the transaction that acts on it |
+| Heartbeat *during* a build | **done** | the pulse: lease extended + runner touched every beat, error latch, mandatory synchronous re-proof after the agent, post-agent branch recheck (`moved-branch` finally returned) |
 | Default-branch protection by discovery | **done** | origin's HEAD joins the hardcoded list; a repo with no origin falls back to the list, refusing too much rather than too little |
-| Durable run records | in progress | build outcomes evaporate with the process; M2's briefing needs them recorded at the source |
+| Durable run records | **done** | `run` table opened before the agent spends, finalized after; outcome NULL = cut down mid-flight; `task show` reports them |
+| `tick` honors completion fences | **done** | a completion `completeFenced` refuses is reported `fenced`, never `built` |
 
 **Scope note — "treehouse adapter".** The milestone named an adapter; what
 shipped is the pool itself with treehouse's semantics copied wholesale, as
