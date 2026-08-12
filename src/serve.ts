@@ -751,59 +751,214 @@ function escape(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * shadcn/ui's design system — its zinc palette, radii, and component
+ * shapes — as pure CSS on server-rendered HTML. Deliberately not the React
+ * library: the console ships zero dependencies and zero page JavaScript
+ * under a CSP that forbids scripts, and a look is not worth that posture.
+ * Dark mode follows the device (`prefers-color-scheme`), tokens redefined
+ * wholesale, exactly as shadcn's own theme variables do.
+ */
 const STYLE = `
-  :root { color-scheme: light dark; }
-  body { font: 17px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 1rem;
-         max-width: 40rem; margin-inline: auto; }
-  h1 { font-size: 1.1rem; margin: 0 0 .25rem; }
-  h2 { font-size: .95rem; margin: 1.25rem 0 .25rem; opacity: .85; }
-  .recap { opacity: .85; margin: .75rem 0; white-space: pre-wrap; }
-  .question { font-size: 1.25rem; font-weight: 650; margin: 1rem 0; white-space: pre-wrap; }
-  form.option { margin: .6rem 0; }
-  button { display: block; width: 100%; padding: .9rem 1rem; font-size: 1.05rem;
-           border-radius: .75rem; border: 1px solid #8884; cursor: pointer; text-align: left; }
-  .recommended button { border: 2px solid #4a7; }
-  .consequence { font-size: .9rem; opacity: .8; margin: .25rem 0 0; white-space: pre-wrap; }
-  details { margin: .6rem 0; border: 1px dashed #b66; border-radius: .75rem; padding: .5rem; }
-  summary { padding: .4rem; cursor: pointer; font-weight: 600; }
-  .evidence { margin-top: 1.25rem; font-size: .9rem; }
-  .evidence a { display: block; padding: .35rem 0; }
-  input[type=text], input[type=password], textarea { width: 100%; padding: .6rem; font-size: 1rem;
-           margin: .3rem 0 .8rem; box-sizing: border-box; }
-  .meta { font-size: .85rem; opacity: .7; }
-  .answered { border: 1px solid #4a7; border-radius: .75rem; padding: .75rem; margin: 1rem 0; }
-  .card { border: 1px solid #8883; border-radius: .75rem; padding: .75rem; margin: .6rem 0; }
-  .problem { border: 1px solid #b66; border-radius: .75rem; padding: .6rem .75rem; margin: .6rem 0; }
-  .row { padding: .35rem 0; border-bottom: 1px solid #8882; }
-  .inline { display: inline-block; width: auto; }
-  .inline button { width: auto; display: inline-block; padding: .5rem .9rem; font-size: .95rem; }
-  nav { font-size: .9rem; margin: .5rem 0 1rem; }
-  nav a { margin-right: .8rem; }
+  :root {
+    color-scheme: light dark;
+    --background: hsl(0 0% 100%);
+    --foreground: hsl(240 10% 3.9%);
+    --card: hsl(0 0% 100%);
+    --muted: hsl(240 4.8% 95.9%);
+    --muted-foreground: hsl(240 3.8% 46.1%);
+    --border: hsl(240 5.9% 90%);
+    --input: hsl(240 5.9% 90%);
+    --primary: hsl(240 5.9% 10%);
+    --primary-foreground: hsl(0 0% 98%);
+    --secondary: hsl(240 4.8% 95.9%);
+    --secondary-foreground: hsl(240 5.9% 10%);
+    --accent: hsl(240 4.8% 95.9%);
+    --destructive: hsl(0 84.2% 60.2%);
+    --destructive-soft: hsl(0 86% 97%);
+    --success: hsl(142 76% 36%);
+    --success-soft: hsl(141 84% 93%);
+    --warning: hsl(38 92% 40%);
+    --warning-soft: hsl(48 96% 89%);
+    --ring: hsl(240 5% 64.9%);
+    --radius: 0.625rem;
+    --shadow: 0 1px 2px 0 hsl(240 10% 3.9% / 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: hsl(240 10% 3.9%);
+      --foreground: hsl(0 0% 98%);
+      --card: hsl(240 8% 6%);
+      --muted: hsl(240 3.7% 15.9%);
+      --muted-foreground: hsl(240 5% 64.9%);
+      --border: hsl(240 3.7% 15.9%);
+      --input: hsl(240 3.7% 17%);
+      --primary: hsl(0 0% 98%);
+      --primary-foreground: hsl(240 5.9% 10%);
+      --secondary: hsl(240 3.7% 15.9%);
+      --secondary-foreground: hsl(0 0% 98%);
+      --accent: hsl(240 3.7% 15.9%);
+      --destructive: hsl(0 72% 51%);
+      --destructive-soft: hsl(0 63% 12%);
+      --success: hsl(142 69% 58%);
+      --success-soft: hsl(144 61% 10%);
+      --warning: hsl(48 96% 53%);
+      --warning-soft: hsl(36 64% 10%);
+      --ring: hsl(240 4.9% 40%);
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--background); color: var(--foreground);
+    font: 400 0.9375rem/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  .topbar { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--background) 92%, transparent); }
+  .topbar-inner {
+    max-width: 44rem; margin-inline: auto; padding: 0 1.25rem; height: 3.25rem;
+    display: flex; align-items: center; gap: 1.25rem;
+  }
+  .brand { font-weight: 650; font-size: .95rem; letter-spacing: -0.01em; color: var(--foreground); text-decoration: none; }
+  .brand .dot { color: var(--muted-foreground); }
+  .topbar nav { display: flex; gap: 1rem; margin-left: auto; }
+  .topbar nav a {
+    color: var(--muted-foreground); text-decoration: none; font-size: .875rem; font-weight: 500;
+    padding: .25rem 0; transition: color .15s;
+  }
+  .topbar nav a:hover { color: var(--foreground); }
+  main { max-width: 44rem; margin-inline: auto; padding: 1.5rem 1.25rem 4rem; }
+  h1 { font-size: 1.375rem; font-weight: 650; letter-spacing: -0.025em; margin: 0 0 .25rem; }
+  h1 .meta { font-weight: 400; letter-spacing: 0; }
+  h2 {
+    font-size: .8125rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted-foreground); margin: 2rem 0 .5rem;
+  }
+  a { color: var(--foreground); text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--muted-foreground); }
+  p { margin: .4rem 0; }
+  code { background: var(--muted); border-radius: .3rem; padding: .1rem .35rem; font-size: .85em; }
+
+  .meta { font-size: .8125rem; color: var(--muted-foreground); }
+  .meta a { color: var(--muted-foreground); }
+  .badge {
+    display: inline-block; border: 1px solid var(--border); border-radius: 9999px;
+    padding: .1rem .625rem; font-size: .75rem; font-weight: 500; line-height: 1.4;
+    background: var(--secondary); color: var(--secondary-foreground); vertical-align: middle;
+  }
+  .badge-done, .badge-answered, .badge-verified, .badge-built { background: var(--success-soft); color: var(--success); border-color: transparent; }
+  .badge-failed, .badge-cancelled, .badge-overdue { background: var(--destructive-soft); color: var(--destructive); border-color: transparent; }
+  .badge-running, .badge-open, .badge-parked { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+
+  .card {
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    padding: 1rem 1.125rem; margin: .75rem 0; box-shadow: var(--shadow);
+  }
+  .problem {
+    border: 1px solid color-mix(in srgb, var(--destructive) 35%, transparent);
+    background: var(--destructive-soft); color: var(--destructive);
+    border-radius: var(--radius); padding: .625rem .875rem; margin: .75rem 0; font-size: .875rem;
+  }
+  .row {
+    display: block; padding: .55rem .125rem; border-bottom: 1px solid var(--border);
+    margin: 0; font-size: .9rem;
+  }
+  .row:last-of-type { border-bottom: none; }
+
+  button {
+    font: 500 .875rem/1.4 inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid var(--border); background: var(--background); color: var(--foreground);
+    padding: .5rem .875rem; box-shadow: var(--shadow); transition: background .15s, border-color .15s;
+  }
+  button:hover { background: var(--accent); }
+  button.primary, form > button[type=submit]:only-of-type { }
+  .btn-primary, .approve-form button[type=submit] {
+    background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
+  }
+  .approve-form button[type=submit]:hover { background: color-mix(in srgb, var(--primary) 88%, var(--background)); }
+
+  label { display: block; font-size: .8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
+  input[type=text], input[type=password], textarea {
+    width: 100%; margin: .35rem 0 0; padding: .5rem .75rem; font: 400 .9rem/1.4 inherit;
+    color: var(--foreground); background: transparent;
+    border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px); box-shadow: var(--shadow);
+  }
+  input:focus-visible, textarea:focus-visible, button:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 1px;
+  }
+  ::placeholder { color: var(--muted-foreground); }
+
+  .inline { display: inline-block; width: auto; margin: 0 .375rem .375rem 0; vertical-align: middle; }
+  .inline input[type=text] { display: inline-block; width: auto; margin: 0 .375rem 0 0; vertical-align: middle; }
+  .inline button { width: auto; }
+
+  form.option { margin: .75rem 0; }
+  form.option button {
+    display: block; width: 100%; text-align: left; padding: .875rem 1rem; font-size: .95rem;
+    border-radius: var(--radius); background: var(--card);
+  }
+  form.option button:hover { background: var(--accent); border-color: var(--ring); }
+  .recommended button { border-color: var(--foreground); box-shadow: 0 0 0 1px var(--foreground); }
+  .consequence { font-size: .8125rem; color: var(--muted-foreground); margin: .375rem 0 .5rem; white-space: pre-wrap; }
+  form.option input[type=text] { font-size: .8125rem; }
+
+  .recap { color: var(--muted-foreground); margin: .75rem 0; white-space: pre-wrap; font-size: .9rem; }
+  .question { font-size: 1.15rem; font-weight: 650; letter-spacing: -0.015em; margin: 1rem 0; white-space: pre-wrap; }
+  .answered {
+    border: 1px solid color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft);
+    border-radius: var(--radius); padding: .875rem 1rem; margin: 1rem 0;
+  }
+  details {
+    margin: .75rem 0; border: 1px solid var(--border); border-radius: var(--radius);
+    padding: .25rem .875rem; background: var(--card);
+  }
+  details[open] { padding-bottom: .875rem; }
+  summary { padding: .5rem 0; cursor: pointer; font-weight: 500; font-size: .875rem; color: var(--muted-foreground); }
+  summary:hover { color: var(--foreground); }
+  .evidence { margin-top: 1.5rem; font-size: .875rem; }
+  .evidence a { display: block; padding: .4rem 0; border-bottom: 1px solid var(--border); text-decoration: none; }
+  .evidence a:hover { color: var(--muted-foreground); }
+  .evidence strong { display: block; font-size: .8125rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted-foreground); }
+
+  .stat { display: flex; gap: .5rem; align-items: baseline; padding: .25rem 0; }
+  .login-shell { max-width: 22rem; margin: 14vh auto 0; padding: 0 1.25rem; }
+  .login-shell h1 { text-align: center; margin-bottom: 1rem; }
+  .login-shell button { width: 100%; margin-top: 1rem; background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
 `;
 
-function shell(title: string, body: string): string {
+function shell(title: string, body: string, options: { nav?: boolean } = {}): string {
+  const bar =
+    options.nav === false
+      ? ""
+      : `<div class="topbar"><div class="topbar-inner">` +
+        `<a class="brand" href="/">night<span class="dot">·</span>orders</a>` +
+        `<nav><a href="/">home</a><a href="/tasks">tasks</a><a href="/runs">runs</a><a href="/caps">caps</a></nav>` +
+        `</div></div>`;
   return [
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8">`,
     `<meta name="viewport" content="width=device-width, initial-scale=1">`,
     `<title>${escape(title)}</title><style>${STYLE}</style></head><body>`,
+    bar,
+    `<main>`,
     body,
-    "</body></html>",
+    `</main></body></html>`,
   ].join("\n");
 }
 
-const NAV = `<nav><a href="/">home</a><a href="/tasks">tasks</a><a href="/runs">runs</a><a href="/caps">caps</a></nav>`;
 
 function loginPage(problem: string | null): string {
   return shell("night orders", [
-    "<h1>night orders</h1>",
-    problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,
+    `<div class="login-shell">`,
+    `<h1>night<span class="dot">\u00b7</span>orders</h1>`,
+    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
     `<label>who are you<input type="text" name="name" autocomplete="username"></label>`,
     `<label>approver token<input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">sign in</button>`,
     "</form>",
-  ].join("\n"));
+    `</div>`,
+  ].join("\n"), { nav: false });
 }
 
 function homePage(data: {
@@ -870,8 +1025,7 @@ function homePage(data: {
   const footer = data.settings ? `<p class="meta"><a href="/settings">settings</a></p>` : "";
 
   return shell("night orders", [
-    "<h1>night orders</h1>",
-    NAV,
+    `<h1>the morning</h1>`,
     `<p class="meta">overnight: ${escape(counts)}</p>`,
     `<p class="meta">spend: ${escape(spendLine(summary))}</p>`,
     data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} pending delivery</p>` : "",
@@ -895,12 +1049,11 @@ function tasksPage(tasks: Task[], state: TaskState | null, csrf: string, problem
           .map(
             task =>
               `<p class="row"><a href="${taskHref(task.id)}">${escape(task.id)}</a> ` +
-              `${escape(task.title)} <span class="meta">${escape(task.state)}</span></p>`,
+              `${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></p>`,
           )
           .join("\n");
   return shell("tasks", [
     "<h1>tasks</h1>",
-    NAV,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
     rows,
@@ -978,7 +1131,7 @@ function taskPage(data: {
     scope === null || approval.approved
       ? ""
       : [
-          `<form method="post" action="${taskHref(task.id)}/approve" class="card">`,
+          `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(scope.digest)}">`,
@@ -1066,10 +1219,9 @@ function taskPage(data: {
   ].join("\n");
 
   return shell(task.id, [
-    `<h1>${escape(task.id)} <span class="meta">${escape(task.state)}` +
-      `${data.strikes > 0 ? ` · ${data.strikes} strike(s)` : ""}` +
+    `<h1>${escape(task.id)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span>` +
+      `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} strike(s)` : ""}` +
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}</span></h1>`,
-    NAV,
     `<p>${escape(task.title)}</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     "<h2>scope</h2>",
@@ -1094,12 +1246,13 @@ function runsPage(rows: (Run & { taskId: string })[], nextCursor: number | null)
             run =>
               `<p class="row"><a href="/r/${run.id}">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}">${escape(run.taskId)}</a> ` +
-              `${escape(run.role)} — ${escape(run.outcome ?? "never finished")}` +
+              `<span class="meta">${escape(run.role)}</span> ` +
+              `<span class="badge badge-${escape(run.outcome ?? "cancelled")}">${escape(run.outcome ?? "never finished")}</span>` +
               `${run.costUsd === null ? "" : ` <span class="meta">$${run.costUsd.toFixed(4)}</span>`}</p>`,
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
-  return shell("runs", ["<h1>runs</h1>", NAV, list, older].join("\n"));
+  return shell("runs", ["<h1>runs</h1>", list, older].join("\n"));
 }
 
 function runPage(run: Run, taskId: string, artifacts: Artifact[]): string {
@@ -1142,7 +1295,6 @@ function runPage(run: Run, taskId: string, artifacts: Artifact[]): string {
         "</div>";
   return shell(`run #${run.id}`, [
     `<h1>run #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
-    NAV,
     rows,
     handoff,
     evidence,
@@ -1154,7 +1306,6 @@ function capsPage(caps: Capability[] | null, gaps: Gap[], repo: string, now?: Da
   if (caps === null) {
     return shell("capabilities", [
       "<h1>capabilities</h1>",
-      NAV,
       `<p class="meta">this console was started without a repo scope — <code>nightorders serve --repo &lt;path&gt;</code> turns this page on</p>`,
     ].join("\n"));
   }
@@ -1188,7 +1339,6 @@ function capsPage(caps: Capability[] | null, gaps: Gap[], repo: string, now?: Da
           .join("\n");
   return shell("capabilities", [
     `<h1>capabilities <span class="meta">${escape(repo)}</span></h1>`,
-    NAV,
     list,
     "<h2>gaps, ranked by what filling them frees</h2>",
     blocked,
@@ -1210,7 +1360,6 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return shell("settings", [
     "<h1>settings</h1>",
-    NAV,
     "<h2>telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,
     problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,
@@ -1281,9 +1430,9 @@ function decisionPage(
         "</div>";
 
   return shell(`${taskId}`, [
-    `<h1>${escape(taskId)} <span class="meta">${escape(decision.state)}${isOverdue(decision, now) ? " · overdue" : ""}${
-      decision.deadline === null ? "" : ` · deadline ${escape(decision.deadline)}`
-    }</span></h1>`,
+    `<h1>${escape(taskId)} <span class="badge badge-${escape(decision.state)}">${escape(decision.state)}</span>${
+      isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""
+    }${decision.deadline === null ? "" : ` <span class="meta">deadline ${escape(decision.deadline)}</span>`}</h1>`,
     `<div class="recap">${escape(decision.recap)}</div>`,
     `<div class="question">${escape(decision.question)}</div>`,
     decision.state === "answered" ? answered : options,
