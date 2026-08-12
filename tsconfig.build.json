@@ -1,0 +1,9 @@
+{
+  // The published build: same compiler, no source maps — the tarball ships
+  // dist JavaScript and declarations only (see the files allowlist).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "sourceMap": false,
+    "declarationMap": false
+  }
+}
