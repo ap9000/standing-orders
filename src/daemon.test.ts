@@ -1,0 +1,150 @@
+/**
+ * The daemon manager: unit generation asserted byte-for-byte where it
+ * matters, supervisor calls scripted — no test touches the machine's real
+ * launchd or systemd.
+ */
+
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  daemonStatus,
+  installDaemon,
+  labelFor,
+  planDaemon,
+  uninstallDaemon,
+  type DaemonPlan,
+} from "./daemon.js";
+
+const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+
+function scripted(answers: Record<string, { code?: number; stdout?: string }> = {}) {
+  const calls: { file: string; args: string[] }[] = [];
+  const run = async (file: string, args: readonly string[]) => {
+    calls.push({ file, args: [...args] });
+    const key = `${file} ${args.join(" ")}`;
+    const match = Object.entries(answers).find(([prefix]) => key.startsWith(prefix));
+    return { ...OK, ...(match?.[1] ?? {}) };
+  };
+  return { run, calls };
+}
+
+describe("the daemon plan", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "nightorders-daemon-"));
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (platform: NodeJS.Platform = "darwin"): DaemonPlan => {
+    const made = planDaemon({
+      platform,
+      bin: "/usr/local/bin/nightorders",
+      binArgs: [],
+      runner: "builder-1",
+      repo: "/Users/alex/code/thing",
+      configDir: dir,
+      watchFlags: ["--tick-every", "60000"],
+      home: dir,
+    });
+    if ("error" in made) throw new Error(made.error);
+    return made;
+  };
+
+  test("labels are one per repo, and never collide on punctuation", () => {
+    expect(labelFor("/Users/alex/code/thing")).toBe("com.nightorders.watch.users-alex-code-thing");
+    expect(labelFor("/Users/alex/code thing!")).not.toContain(" ");
+    expect(labelFor("/a")).not.toBe(labelFor("/b"));
+  });
+
+  test("the launchd unit runs watch with a token file — never the token", () => {
+    const made = plan("darwin");
+
+    expect(made.unitPath).toContain("Library/LaunchAgents");
+    expect(made.unitContent).toContain("<string>watch</string>");
+    expect(made.unitContent).toContain("<string>--token-file</string>");
+    expect(made.unitContent).toContain(join(dir, "runner-token"));
+    expect(made.unitContent).not.toContain("--token<");
+    // Crash-only KeepAlive: a clean exit (uninstall, operator stop) stays down.
+    expect(made.unitContent).toContain("<key>Crashed</key>");
+    expect(made.unitContent).toContain("<key>ThrottleInterval</key>");
+  });
+
+  test("the systemd unit says restart-on-failure and appends to its log", () => {
+    const made = plan("linux");
+
+    expect(made.unitPath).toContain(".config/systemd/user");
+    expect(made.unitContent).toContain("Restart=on-failure");
+    expect(made.unitContent).toContain("--token-file");
+    expect(made.unitContent).toContain(`append:${made.logPath}`);
+  });
+
+  test("an unsupported platform refuses with instructions, not a broken unit", () => {
+    const made = planDaemon({
+      platform: "win32",
+      bin: "x",
+      binArgs: [],
+      runner: "r",
+      repo: "/r",
+      configDir: dir,
+      watchFlags: [],
+    });
+    expect("error" in made).toBe(true);
+  });
+
+  test("install writes the token 0600, the unit, and hands it to launchd", async () => {
+    const made = plan("darwin");
+    const script = scripted({ launchctl: { code: 0 } });
+
+    const installed = await installDaemon(made, "secret-token", script.run);
+
+    expect(installed).toMatchObject({ ok: true });
+    expect(statSync(made.tokenFile).mode & 0o777).toBe(0o600);
+    expect(readFileSync(made.tokenFile, "utf8").trim()).toBe("secret-token");
+    expect(readFileSync(made.unitPath, "utf8")).toContain("watch");
+    expect(script.calls[0]?.file).toBe("launchctl");
+    expect(script.calls[0]?.args[0]).toBe("bootstrap");
+  });
+
+  test("modern launchctl failing falls back to the legacy verb", async () => {
+    const made = plan("darwin");
+    const script = scripted({
+      "launchctl bootstrap": { code: 1 },
+      "launchctl load": { code: 0 },
+    });
+
+    const installed = await installDaemon(made, "secret-token", script.run);
+
+    expect(installed).toMatchObject({ ok: true });
+    expect(script.calls.map(call => call.args[0])).toEqual(["bootstrap", "load"]);
+  });
+
+  test("status reads launchd's answer into running / loaded / not-installed", async () => {
+    const made = plan("darwin");
+
+    const running = scripted({ "launchctl print": { code: 0, stdout: "state = running\n\tpid = 4242\n" } });
+    expect(await daemonStatus(made, running.run)).toMatchObject({ state: "running", pid: 4242 });
+
+    const loaded = scripted({ "launchctl print": { code: 0, stdout: "state = waiting\n" } });
+    expect(await daemonStatus(made, loaded.run)).toMatchObject({ state: "loaded", pid: null });
+
+    const missing = scripted({ "launchctl print": { code: 113 } });
+    expect(await daemonStatus(made, missing.run)).toMatchObject({ state: "not-installed" });
+  });
+
+  test("uninstall boots the service out and removes the unit", async () => {
+    const made = plan("darwin");
+    const script = scripted({ launchctl: { code: 0 } });
+    await installDaemon(made, "secret-token", script.run);
+
+    const removed = await uninstallDaemon(made, script.run);
+
+    expect(removed).toMatchObject({ ok: true, existed: true });
+    expect(() => statSync(made.unitPath)).toThrow();
+    // The token file survives — it is the database's neighbor, not the unit's.
+    expect(statSync(made.tokenFile).mode & 0o777).toBe(0o600);
+  });
+});

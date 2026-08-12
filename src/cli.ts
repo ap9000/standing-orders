@@ -180,6 +180,7 @@ const OPERATE_COMMANDS = new Set([
   "incident",
   "serve",
   "watch",
+  "daemon",
   "bridge",
   "reconcile",
 ]);

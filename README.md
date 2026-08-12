@@ -90,6 +90,29 @@ One pass: take the ready set, skip what nobody approved, claim what is left — 
 
 It is deliberately a pass and not a daemon: point cron at it and the fences make repetition safe — a second pass finds the first's work done and converges to `empty` (exit 3) instead of building anything twice. A broken build marks its task `failed` and the pass exits 1 even if other tasks succeeded, because exit 0 has to mean "nothing needs you". Refusals that are really a person's pending decision — a scope nobody approved, or one that changed after approval — leave the task queued and untouched.
 
+## No crontab required
+
+The loop manages itself as an OS service — launchd on macOS, systemd on
+Linux — so "set it running" is one command, and reboots and crashes are the
+supervisor's problem:
+
+```sh
+nightorders daemon install --runner builder-1 --token <runner-token> --repo ~/code/thing
+nightorders daemon status      # running, as which pid, logs where
+nightorders daemon logs        # the file to tail
+nightorders daemon uninstall   # take it back off
+```
+
+Under the hood it runs `nightorders watch`: a work-conserving loop that
+composes the same passes cron would call — but wakes on events (a decision
+answered from your phone dispatches the next build in seconds), recovers
+its own predecessor's mid-flight work after a crash, and spends zero tokens
+while idle. The runner token lives in a 0600 file beside the database; the
+service unit never carries it. Cron remains first-class if you prefer it —
+`reconcile && tick ; bridge telegram` on a schedule does the same jobs at
+cron's cadence, and a stray cron tick alongside a watch is safe (ordinary
+claims settle the race), it just is not needed.
+
 ## The phone, both directions
 
 The Telegram bridge closes the loop without a terminal: a parked decision

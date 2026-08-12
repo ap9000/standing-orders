@@ -38,9 +38,17 @@ import {
   type TaskState,
 } from "./store.js";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { probeRepo, isVerified } from "./probe.js";
 import { PROVIDER_BINARY } from "./invoke.js";
 import { createDecisionServer } from "./serve.js";
+import {
+  daemonStatus,
+  installDaemon,
+  planDaemon,
+  uninstallDaemon,
+  type SupervisorRunner,
+} from "./daemon.js";
 import {
   bridgePass,
   clearBotToken,
@@ -224,6 +232,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
     "choose", "note", "max-open-decisions", "port", "host", "allow-host",
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
+    "token-file", "bin",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -356,6 +365,8 @@ async function dispatch(
       return serveCommand(flags, context);
     case "watch":
       return watchCommand(flags, context);
+    case "daemon":
+      return daemonCommand(positional, flags, context);
     case "bridge":
       return bridgeCommand(positional, flags, context);
     case "enroll":
@@ -2090,6 +2101,157 @@ function incidentCommand(
   ]);
 }
 
+/** A credential from a 0600 file, for units that must not carry it inline. */
+function readTokenFile(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined;
+  try {
+    const raw = readFileSync(path, "utf8").trim();
+    return raw === "" ? undefined : raw;
+  } catch {
+    return undefined;
+  }
+}
+
+// ---- the daemon ------------------------------------------------------------
+
+/**
+ * `nightorders daemon install|status|uninstall|logs` — the loop as a
+ * service, no crontab. Writes the platform's own supervision unit (launchd
+ * on macOS, systemd --user on Linux) pointed at `nightorders watch`, with
+ * the runner token in a 0600 file beside the database rather than inside
+ * the unit. The OS restarts it across crashes and reboots, and watch's
+ * incarnation recovery is what makes those restarts safe.
+ */
+async function daemonCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const [action = "status"] = positional;
+  const repo = repoFrom(flags);
+  const configDir = dirname(context.telegramTokenFile);
+  const supervise: SupervisorRunner = context.gitRunner ?? run;
+
+  const binFlag = text(flags, "bin");
+  const resolveBin = async (): Promise<{ bin: string; binArgs: string[] } | null> => {
+    if (binFlag !== undefined) return { bin: binFlag, binArgs: [] };
+    const found = await supervise("sh", ["-lc", "command -v nightorders"]);
+    if (found.code === 0 && found.stdout.trim() !== "") {
+      return { bin: found.stdout.trim(), binArgs: [] };
+    }
+    return null;
+  };
+
+  if (action === "install") {
+    const runnerName = text(flags, "runner");
+    const token = text(flags, "token");
+    if (runnerName === undefined || token === undefined) {
+      return fail(write, json, "daemon install", "usage", "`nightorders daemon install --runner <name> --token <t> --repo <path>` (plus any watch flags to bake in)", EXIT.usage);
+    }
+    const auth = authenticate(store, runnerName, token);
+    if (!auth.ok) {
+      return fail(write, json, "daemon install", auth.reason, describeAuth(auth.reason, runnerName), EXIT.refused);
+    }
+    const located = await resolveBin();
+    if (located === null) {
+      return fail(
+        write,
+        json,
+        "daemon install",
+        "no-bin",
+        "`nightorders` is not on the PATH the service would use — run `nightorders link` first, or pass --bin <absolute path>",
+        EXIT.refused,
+      );
+    }
+
+    const watchFlags: string[] = [];
+    for (const name of ["pool", "model", "repair-model", "max", "turns", "tick-every", "bridge-every", "reconcile-every", "max-open-decisions"]) {
+      const value = text(flags, name);
+      if (value !== undefined) watchFlags.push(`--${name}`, value);
+    }
+
+    const plan = planDaemon({
+      platform: process.platform,
+      bin: located.bin,
+      binArgs: located.binArgs,
+      runner: runnerName,
+      repo,
+      configDir,
+      watchFlags,
+    });
+    if ("error" in plan) return fail(write, json, "daemon install", "unsupported", plan.error, EXIT.refused);
+
+    if (flags.has("dry-run")) {
+      if (json) {
+        write(JSON.stringify({ ok: true, command: "daemon install", dryRun: true, plan }, null, 2));
+        return EXIT.ok;
+      }
+      write(`Would write ${plan.unitPath}:`);
+      write("");
+      write(plan.unitContent);
+      write(`Token (0600): ${plan.tokenFile} · logs: ${plan.logPath}`);
+      write("Nothing was written. Re-run without --dry-run to install.");
+      return EXIT.ok;
+    }
+
+    const installed = await installDaemon(plan, token, supervise);
+    if (!installed.ok) {
+      return fail(write, json, "daemon install", "supervisor", installed.message, EXIT.failed);
+    }
+    return succeed(write, json, "daemon install", { label: plan.label, unit: plan.unitPath, logs: plan.logPath }, () => [
+      `Installed and started ${plan.label}.`,
+      `  unit    ${plan.unitPath}`,
+      `  token   ${plan.tokenFile} (0600 — the unit never carries it)`,
+      `  logs    ${plan.logPath}`,
+      "",
+      "It survives reboots and restarts itself after crashes; watch's",
+      "incarnation recovery makes those restarts safe. `nightorders daemon",
+      "status` to check on it, `daemon uninstall` to take it back off.",
+    ]);
+  }
+
+  // status / uninstall / logs share the computed plan; the bin is cosmetic there.
+  const plan = planDaemon({
+    platform: process.platform,
+    bin: binFlag ?? "nightorders",
+    binArgs: [],
+    runner: text(flags, "runner") ?? "runner",
+    repo,
+    configDir,
+    watchFlags: [],
+  });
+  if ("error" in plan) return fail(write, json, `daemon ${action}`, "unsupported", plan.error, EXIT.refused);
+
+  if (action === "status") {
+    const state = await daemonStatus(plan, supervise);
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "daemon status", ...state, label: plan.label, logs: plan.logPath }, null, 2));
+      return state.state === "running" ? EXIT.ok : EXIT.refused;
+    }
+    write(`${plan.label}: ${state.detail}`);
+    write(`  logs  ${plan.logPath}`);
+    if (state.state === "not-installed") write("  → nightorders daemon install --runner <name> --token <t> --repo <path>");
+    return state.state === "running" ? EXIT.ok : EXIT.refused;
+  }
+
+  if (action === "uninstall") {
+    const gone = await uninstallDaemon(plan, supervise);
+    return succeed(write, json, "daemon uninstall", { removed: gone.existed }, () => [
+      gone.existed ? `Stopped and removed ${plan.label}.` : `${plan.label} was not installed; nothing to remove.`,
+    ]);
+  }
+
+  if (action === "logs") {
+    return succeed(write, json, "daemon logs", { logs: plan.logPath }, () => [
+      plan.logPath,
+      `  → tail -f ${plan.logPath}`,
+    ]);
+  }
+
+  return fail(write, json, "daemon", "usage", "`nightorders daemon [install|status|uninstall|logs]`", EXIT.usage);
+}
+
 // ---- the watch loop --------------------------------------------------------
 
 const WATCH_LEASE_MS = 90_000;
@@ -2127,10 +2289,12 @@ async function watchCommand(
 ): Promise<number> {
   const { store, write, json } = context;
   const runner = text(flags, "runner");
-  const token = text(flags, "token");
+  const token = text(flags, "token") ?? readTokenFile(text(flags, "token-file"));
   if (runner === undefined || token === undefined) {
-    return fail(write, json, "watch", "usage", "`nightorders watch --runner <name> --token <t> --repo <path> [--for <ms>]`", EXIT.usage);
+    return fail(write, json, "watch", "usage", "`nightorders watch --runner <name> --token <t>|--token-file <path> --repo <path> [--for <ms>]`", EXIT.usage);
   }
+  // Passes built from these flags authenticate with the resolved token.
+  flags.set("token", token);
   const auth = authenticate(store, runner, token);
   if (!auth.ok) {
     return fail(write, json, "watch", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
