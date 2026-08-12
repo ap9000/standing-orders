@@ -38,6 +38,7 @@ import {
   type TaskState,
 } from "./store.js";
 import { probeRepo, isVerified } from "./probe.js";
+import { scanRepo } from "./capscan.js";
 
 type CapabilityKind = Capability["kind"];
 import {
@@ -1679,6 +1680,47 @@ async function capCommand(
     return EXIT.ok;
   }
 
+  if (action === "scan") {
+    const report = scanRepo(repo);
+    let recorded = 0;
+    for (const one of report.found) {
+      // Scan proposes; it never overwrites. A capability the operator wrote
+      // — or a probe they tuned — outranks anything a file implies.
+      if (store.getCapability(repo, one.kind, one.name) !== null) continue;
+      store.saveCapability({
+        repo,
+        kind: one.kind,
+        name: one.name,
+        probe: one.probe,
+        status: "unprobed",
+        addedBy: `scan:${one.source}`,
+        createdAt: clock().toISOString(),
+        lastVerifiedAt: null,
+        verifiedBy: null,
+        lastResult: null,
+        expiresAt: null,
+      });
+      recorded++;
+    }
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "cap scan", repo, recorded, ...report }, null, 2));
+      return EXIT.ok;
+    }
+    if (report.found.length === 0) {
+      write(`Nothing detected in ${repo}. Detection reads .env.example, .mcp.json, supabase/config.toml and workflow files.`);
+      return EXIT.ok;
+    }
+    for (const one of report.found) {
+      write(`  ${`${one.kind}:${one.name}`.padEnd(32)} ${one.source}${one.probe === null ? "  (no probe)" : ""}`);
+    }
+    for (const bad of report.rejected) {
+      write(`  rejected ${bad.name} from ${bad.source} — not a valid identifier`);
+    }
+    write("");
+    write(`${recorded} new, ${report.found.length - recorded} already recorded. Nothing is verified: \`nightorders cap probe\`.`);
+    return EXIT.ok;
+  }
+
   if (action === "probe") {
     const only = positional.slice(1);
     for (const key of only) {
@@ -1708,7 +1750,7 @@ async function capCommand(
     return unverified.length === 0 ? EXIT.ok : EXIT.refused;
   }
 
-  return fail(write, json, "cap", "usage", `unknown \`cap ${action}\` — try add, list, probe`, EXIT.usage);
+  return fail(write, json, "cap", "usage", `unknown \`cap ${action}\` — try add, list, scan, probe`, EXIT.usage);
 }
 
 function describeCapability(capability: Capability, now: Date): string {
