@@ -22,6 +22,13 @@ const ids = (...names: string[]) => {
   return () => names[index++] ?? `extra-${index}`;
 };
 
+/**
+ * How most tests mean the default-branch questions to be answered: there is
+ * no origin, and the parent checkout stands on `main`.
+ */
+const symref = (args: readonly string[]) =>
+  args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+
 describe("the builder's gates", () => {
   let store: Store;
   let approverToken: string;
@@ -37,6 +44,10 @@ describe("the builder's gates", () => {
   /** Reports the leased branch, one modified file, and commits it happily. */
   const git: Runner = async (_file, args) => {
     if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+    if (args.includes("symbolic-ref")) {
+      // No origin; the parent checkout is on main.
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
     return args.includes("status") ? { ...OK, stdout: " M src/index.ts\n" } : { ...OK };
   };
 
@@ -179,6 +190,58 @@ describe("the builder's gates", () => {
     expect(agentCalls).toHaveLength(0);
   });
 
+  test("with no origin, the parent checkout's branch is the protected one", async () => {
+    // A local-only repo whose operator lives on `production`: origin cannot
+    // answer, so the branch the parent repo is standing on is the default.
+    claimIt();
+    approveScope();
+    const localOnly: Runner = async (_file, args) => {
+      if (args.includes("symbolic-ref")) {
+        return args.includes("refs/remotes/origin/HEAD")
+          ? { ...OK, code: 1 }
+          : { ...OK, stdout: "production\n" };
+      }
+      if (args.includes("rev-parse")) return { ...OK, stdout: "production\n" };
+      return { ...OK };
+    };
+    store.saveWorktree({
+      path: "/pool/thing/production",
+      repo: "/code/thing",
+      branch: "production",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+
+    const result = await build(
+      store,
+      request({ git: localOnly, worktree: "/pool/thing/production", branch: "production" }),
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: "protected-branch" });
+    expect(agentCalls).toHaveLength(0);
+  });
+
+  test("refuses to build at all when the default branch cannot be named", async () => {
+    // No origin and a detached parent HEAD: a gate that cannot name the
+    // branch it protects is not a gate, so nothing builds.
+    claimIt();
+    approveScope();
+    const blind: Runner = async (_file, args) => {
+      if (args.includes("symbolic-ref")) return { ...OK, code: 1 };
+      if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+      return { ...OK };
+    };
+
+    const result = await build(store, request({ git: blind }));
+
+    expect(result).toMatchObject({ ok: false, reason: "protected-branch" });
+    expect(agentCalls).toHaveLength(0);
+  });
+
   test("refuses every protected branch, whatever it was told", async () => {
     // A pull request is always the terminus; an autonomous loop with commit
     // rights to main has no safe failure mode.
@@ -213,8 +276,13 @@ describe("what the builder tells the agent", () => {
     asked = [...args];
     return { ...OK, stdout: AGENT_SAID };
   };
-  const git: Runner = async (_file, args) =>
-    args.includes("rev-parse") ? { ...OK, stdout: "feat/a\n" } : { ...OK, stdout: "" };
+  const git: Runner = async (_file, args) => {
+    if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+    if (args.includes("symbolic-ref")) {
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
+    return { ...OK, stdout: "" };
+  };
 
   beforeEach(() => {
     store = openStore(":memory:");
@@ -361,6 +429,7 @@ describe("what the builder does afterwards", () => {
     // done its job. Failing here would teach the loop to prefer writing.
     const result = await withGit(async (_f, args) => {
       gitCalls.push([...args]);
+      if (args.includes("symbolic-ref")) return symref(args);
       if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
       return { ...OK, stdout: "" };
     });
@@ -383,6 +452,7 @@ describe("what the builder does afterwards", () => {
     // have been repairable.
     const result = await withGit(async (_f, args) => {
       gitCalls.push([...args]);
+      if (args.includes("symbolic-ref")) return symref(args);
       if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
       if (args.includes("status")) return { ...OK, stdout: " M x\n" };
       if (args.includes("commit")) return { ...OK, code: 1, stderr: "nothing staged, somehow" };
@@ -403,8 +473,10 @@ describe("what the builder does afterwards", () => {
       branch: "feat/a",
       now: T0,
       agent: async () => ({ ...OK, code: 124, timedOut: true }),
-      git: async (_f, args) =>
-        args.includes("rev-parse") ? { ...OK, stdout: "feat/a\n" } : { ...OK },
+      git: async (_f, args) => {
+        if (args.includes("symbolic-ref")) return symref(args);
+        return args.includes("rev-parse") ? { ...OK, stdout: "feat/a\n" } : { ...OK };
+      },
     });
 
     expect(result).toMatchObject({ ok: false, reason: "timeout" });
@@ -460,8 +532,10 @@ describe("the gates cannot be talked around", () => {
       branch: "feat/a",
       now: T0,
       agent,
-      git: async (_f, args) =>
-        args.includes("rev-parse") ? { ...OK, stdout: `${head}\n` } : { ...OK },
+      git: async (_f, args) => {
+        if (args.includes("symbolic-ref")) return symref(args);
+        return args.includes("rev-parse") ? { ...OK, stdout: `${head}\n` } : { ...OK };
+      },
       ...over,
     });
 
@@ -559,8 +633,10 @@ describe("scope text is data, not instructions", () => {
         prompt = args[args.indexOf("-p") + 1] ?? "";
         return { ...OK, stdout: AGENT_SAID };
       },
-      git: async (_f, args) =>
-        args.includes("rev-parse") ? { ...OK, stdout: "feat/a\n" } : { ...OK },
+      git: async (_f, args) => {
+        if (args.includes("symbolic-ref")) return symref(args);
+        return args.includes("rev-parse") ? { ...OK, stdout: "feat/a\n" } : { ...OK };
+      },
     });
 
     // The injected text survives as words, on one fenced line, and the real
@@ -613,6 +689,7 @@ describe("the lease marker never reaches a commit", () => {
       agent: async () => ({ ...OK, stdout: AGENT_SAID }),
       git: async (_f, args) => {
         gitCalls.push([...args]);
+        if (args.includes("symbolic-ref")) return symref(args);
         if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
         if (args.includes("status")) return { ...OK, stdout };
         return { ...OK };
@@ -677,6 +754,7 @@ describe("the commit message", () => {
       now: T0,
       agent: async () => ({ ...OK, stdout: JSON.stringify({ result: agentSaid }) }),
       git: async (_f, args) => {
+        if (args.includes("symbolic-ref")) return symref(args);
         if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
         if (args.includes("status")) return { ...OK, stdout: " M src/x.ts\n" };
         if (args.includes("commit")) {
@@ -738,6 +816,9 @@ describe("the pulse", () => {
   const git: Runner = async (_file, args) => {
     gitCalls.push([...args]);
     if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+    if (args.includes("symbolic-ref")) {
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
     return args.includes("status") ? { ...OK, stdout: " M src/index.ts\n" } : { ...OK };
   };
 

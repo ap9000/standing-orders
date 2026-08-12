@@ -217,18 +217,32 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // The well-known names are necessary but not sufficient: a repository whose
   // default branch is `production` or `stable` is exactly as unprotectable by
   // a hardcoded list as it is worth protecting. So the repository is asked
-  // what its default actually is — origin's HEAD — and that answer joins the
-  // list. A repo with no origin falls back to the list alone, which refuses
-  // too much rather than too little.
+  // what its default actually is — origin's HEAD first, and failing that the
+  // branch the parent checkout is standing on, which is what an operator with
+  // no origin means by "the default". If neither answers, nothing builds:
+  // a gate that cannot name the branch it protects is not a gate.
   const defaultRef = await git(
     GIT,
     ["--no-optional-locks", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
     { cwd: worktree },
   );
-  const defaultBranch =
+  let defaultBranch =
     defaultRef.code === 0 && defaultRef.stdout.trim() !== ""
       ? defaultRef.stdout.trim().replace(/^refs\/remotes\/origin\//, "")
       : null;
+  if (defaultBranch === null) {
+    const parent = await git(GIT, ["--no-optional-locks", "symbolic-ref", "--short", "-q", "HEAD"], {
+      cwd: leased.repo,
+    });
+    defaultBranch = parent.code === 0 && parent.stdout.trim() !== "" ? parent.stdout.trim() : null;
+  }
+  if (defaultBranch === null) {
+    return {
+      ok: false,
+      reason: "protected-branch",
+      message: `${leased.repo} has no origin HEAD and no branch checked out — the default branch cannot be named, so nothing may be protected from this build, so nothing builds`,
+    };
+  }
 
   if (
     PROTECTED.has(actual) ||

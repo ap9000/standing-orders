@@ -49,7 +49,7 @@ real git with only the agent stubbed (2026-08-11).
 | Release provenance (`released_by`) | **done** | `5cb9357` — a reclaimed lease's late completion is fenced, not accepted as a duplicate |
 | Atomic dead-runner recovery | **done** | `5cb9357` — death re-proved inside the transaction that acts on it |
 | Heartbeat *during* a build | **done** | the pulse: lease extended + runner touched every beat, error latch, mandatory synchronous re-proof after the agent, post-agent branch recheck (`moved-branch` finally returned) |
-| Default-branch protection by discovery | **done** | origin's HEAD joins the hardcoded list; a repo with no origin falls back to the list, refusing too much rather than too little |
+| Default-branch protection by discovery | **done** | origin's HEAD, else the parent checkout's branch; if neither can be named, nothing builds — a gate that cannot name the branch it protects is not a gate |
 | Durable run records | **done** | `run` table opened before the agent spends, finalized after; outcome NULL = cut down mid-flight; `task show` reports them |
 | `tick` honors completion fences | **done** | a completion `completeFenced` refuses is reported `fenced`, never `built` |
 
