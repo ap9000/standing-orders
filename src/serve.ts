@@ -569,7 +569,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           }
         }
         if (token === "") {
-          return taskScreen(response, who, taskId, "approval requires your token, typed again", 400);
+          return taskScreen(response, who, taskId, "approval requires your password, typed again", 400);
         }
         const approved = approveScope(store, taskId, who.name, now, digest, token);
         if (!approved.ok) {
@@ -1046,11 +1046,11 @@ function loginPage(problem: string | null): string {
   return shell("night orders", [
     `<div class="login-shell">`,
     `<h1>night<span class="dot">\u00b7</span>orders</h1>`,
-    `<p class="meta hint">an approver signs in \u2014 mint a credential with <code>nightorders approver add &lt;you&gt;</code></p>`,
+    `<p class="meta hint">users are added on the server: <code>nightorders approver add &lt;name&gt; --password &hellip;</code></p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
-    `<label>who are you<input type="text" name="name" autocomplete="username"></label>`,
-    `<label>approver token<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<label>username<input type="text" name="name" autocomplete="username"></label>`,
+    `<label>password<input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">sign in</button>`,
     "</form>",
     `</div>`,
@@ -1243,7 +1243,7 @@ function taskPage(data: {
           `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
-          `<label>your approver token, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="off"></label>`,
+          `<label>your password, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>`,
           `<button type="submit">approve this scope</button>`,
           `</form>`,
         ].join("\n");

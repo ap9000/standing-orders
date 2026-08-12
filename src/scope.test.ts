@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { propose, approve, addApprover, approvalOf, digestOf, describeScope } from "./scope.js";
+import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope } from "./scope.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -207,5 +207,54 @@ describe("who is allowed to say yes", () => {
       ok: false,
       reason: "not-an-approver",
     });
+  });
+});
+
+describe("a chosen password is a first-class credential", () => {
+  test("add with --password: scrypt-stored, verifies, wrong is wrong, short refused", () => {
+    const store = openStore(":memory:");
+    try {
+      const weak = addApprover(store, "alex", T0, undefined, undefined, {}, "short");
+      expect(weak).toMatchObject({ ok: false, reason: "weak-password" });
+
+      const added = addApprover(store, "alex", T0, undefined, undefined, {}, "hunter2hunter2");
+      expect(added).toMatchObject({ ok: true, chosen: true });
+      // Stored salted and stretched — never the bare digest of the password.
+      expect(store.approverHash("alex")).toMatch(/^scrypt\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
+
+      expect(authenticateApprover(store, "alex", "hunter2hunter2")).toMatchObject({ ok: true });
+      expect(authenticateApprover(store, "alex", "hunter2hunter3")).toMatchObject({ ok: false });
+    } finally {
+      store.close();
+    }
+  });
+
+  test("minted tokens and chosen passwords vouch and rotate interchangeably", () => {
+    const store = openStore(":memory:");
+    try {
+      const first = addApprover(store, "alex", T0);
+      if (!first.ok) throw new Error("bootstrap failed");
+
+      // A minted-token approver vouches in a password approver…
+      const second = addApprover(
+        store, "sam", T0, { name: "alex", token: first.token }, undefined, {}, "correct-horse-battery",
+      );
+      expect(second).toMatchObject({ ok: true, chosen: true });
+
+      // …and the password approver's credential vouches the other way.
+      const third = addApprover(store, "kim", T0, { name: "sam", token: "correct-horse-battery" });
+      expect(third).toMatchObject({ ok: true, chosen: false });
+
+      // Rotating alex to a chosen password (self-vouched) still authenticates,
+      // and the old minted token dies with the rotation.
+      const rotated = addApprover(
+        store, "alex", T0, { name: "alex", token: first.token }, undefined, {}, "a-new-chosen-one",
+      );
+      expect(rotated).toMatchObject({ ok: true, chosen: true });
+      expect(authenticateApprover(store, "alex", "a-new-chosen-one")).toMatchObject({ ok: true });
+      expect(authenticateApprover(store, "alex", first.token)).toMatchObject({ ok: false });
+    } finally {
+      store.close();
+    }
   });
 });

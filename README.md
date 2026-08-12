@@ -135,8 +135,10 @@ Setup, once:
 2. `nightorders bridge telegram token <that-token>` — stored in a 0600 file
    beside the database (or set `NIGHTORDERS_TELEGRAM_TOKEN`, which wins;
    or paste it into `serve`'s settings card from your phone).
-3. `nightorders approver add you` if you have no approver credential yet —
-   the token prints once; keep it.
+3. `nightorders approver add you --password <yours>` if you have no
+   sign-in yet — that name and password are the login for the console and
+   every approving act. (Omit `--password` and a high-entropy one is
+   minted and printed once instead — better for API/bearer use.)
 4. `nightorders bridge telegram pair --as you --token <approver-token>` —
    prints a one-time code, good for ten minutes.
 5. From your phone, open your bot's chat, press Start, send

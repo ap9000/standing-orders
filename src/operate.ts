@@ -245,7 +245,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
     "choose", "note", "max-open-decisions", "port", "host", "allow-host",
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
-    "token-file", "bin", "poll", "github", "remote", "head-prefix",
+    "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -3614,27 +3614,33 @@ function approverCommand(
     const asWho = text(flags, "as");
     const token = text(flags, "token");
     const by = asWho === undefined || token === undefined ? undefined : { name: asWho, token };
+    const password = text(flags, "password");
 
-    const added = addApprover(store, name, now, by, undefined, mutationFrom(flags, now));
+    const added = addApprover(store, name, now, by, undefined, mutationFrom(flags, now), password);
     if (!added.ok) {
       return fail(
         write,
         json,
         "approver add",
         added.reason,
-        "only an existing approver can add another — `--as <you> --token <token>`",
+        added.reason === "weak-password"
+          ? "a password needs at least 8 characters"
+          : "only an existing approver can add another — `--as <you> --token <your password>`",
         EXIT.refused,
       );
     }
 
-    return succeed(write, json, "approver add", added, () => [
-      `${added.name} may now approve scopes.`,
+    return succeed(write, json, "approver add", { ...added, ...(added.chosen ? { token: "(chosen)" } : {}) }, () => [
+      `${added.name} may now sign in and approve scopes.`,
       "",
-      `  token  ${added.token}`,
-      "",
-      "Shown once, stored only as a hash. Keep it somewhere an agent cannot read:",
-      "it is the difference between a person agreeing to the work and the work",
-      "agreeing to itself.",
+      ...(added.chosen
+        ? ["Password set — stored salted and stretched, never readable again."]
+        : [
+            `  password  ${added.token}`,
+            "",
+            "Shown once, stored only as a hash. Keep it somewhere an agent cannot read",
+            "(or choose your own next time: `approver add <name> --password <yours>`).",
+          ]),
       ...(added.bootstrap
         ? [
             "",

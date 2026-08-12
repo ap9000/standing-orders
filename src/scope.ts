@@ -24,7 +24,7 @@
  * glance is the whole safety property.
  */
 
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { hasForbiddenControls } from "./decision.js";
 import type { Store, Mutation } from "./store.js";
 
@@ -35,6 +35,31 @@ function mintToken(): string {
 
 export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+/**
+ * A person's chosen password gets a real KDF. Bare sha256 is fine for the
+ * minted 256-bit tokens — nothing brute-forces that space — but a password a
+ * human picked lives in a much smaller one, so it is salted and stretched
+ * (scrypt), and the stored string names its own scheme so both generations
+ * of credential verify side by side.
+ */
+export function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const hash = scryptSync(password, salt, 32).toString("hex");
+  return `scrypt$${salt}$${hash}`;
+}
+
+/** Verify a presented secret against a stored hash of either scheme. */
+export function verifyCredential(stored: string, presented: string): boolean {
+  if (stored.startsWith("scrypt$")) {
+    const [, salt, hex] = stored.split("$");
+    if (salt === undefined || hex === undefined) return false;
+    const known = Buffer.from(hex, "hex");
+    const candidate = scryptSync(presented, salt, 32);
+    return known.length === candidate.length && timingSafeEqual(known, candidate);
+  }
+  return sameDigest(stored, hashToken(presented));
 }
 
 function sameDigest(left: string, right: string): boolean {
@@ -186,8 +211,8 @@ export function proposeGuarded(
  * was never given is what keeps "a person agreed to this" true.
  */
 export type AddApproverResult =
-  | { ok: true; name: string; token: string; bootstrap: boolean }
-  | { ok: false; reason: "not-an-approver" };
+  | { ok: true; name: string; token: string; bootstrap: boolean; chosen: boolean }
+  | { ok: false; reason: "not-an-approver" | "weak-password" };
 
 export function addApprover(
   store: Store,
@@ -196,7 +221,12 @@ export function addApprover(
   by?: { name: string; token: string },
   newToken: () => string = mintToken,
   mutation: Mutation = {},
+  /** A password the person chose. Absent, a token is minted and shown once. */
+  password?: string,
 ): AddApproverResult {
+  if (password !== undefined && password.length < 8) {
+    return { ok: false, reason: "weak-password" };
+  }
   // The first one bootstraps, because somebody has to be able to create the
   // first one and there is nobody to ask yet. Every one after it has to be
   // vouched for by an existing approver.
@@ -211,14 +241,18 @@ export function addApprover(
 
   if (!bootstrap) {
     const vouching = by === undefined ? null : store.approverHash(by.name);
-    if (vouching === null || !sameDigest(vouching, hashToken(by?.token ?? ""))) {
+    if (vouching === null || !verifyCredential(vouching, by?.token ?? "")) {
       return { ok: false, reason: "not-an-approver" };
     }
   }
 
+  if (password !== undefined) {
+    store.saveApprover(name, hashPassword(password), now, mutation);
+    return { ok: true, name, token: password, bootstrap, chosen: true };
+  }
   const token = newToken();
   store.saveApprover(name, hashToken(token), now, mutation);
-  return { ok: true, name, token, bootstrap };
+  return { ok: true, name, token, bootstrap, chosen: false };
 }
 
 export type ApproveResult =
@@ -240,7 +274,7 @@ export function authenticateApprover(
 ): { ok: true } | { ok: false; reason: "no-approvers" | "not-an-approver" } {
   if (store.listApprovers().length === 0) return { ok: false, reason: "no-approvers" };
   const known = store.approverHash(by);
-  if (known === null || !sameDigest(known, hashToken(token))) {
+  if (known === null || !verifyCredential(known, token)) {
     return { ok: false, reason: "not-an-approver" };
   }
   return { ok: true };
