@@ -2,7 +2,7 @@
 
 **Standing orders for your agents. Wake me only for these.**
 
-> **Status: M0 in progress.** Discovery works today and is worth running. No agents run yet, and nothing is published to npm. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.5).
+> **Status: M1 in progress.** Discovery works today and is worth running. One task can now go queued → branch → commit unattended: `nightorders tick` runs a single scheduling pass — claim what is ready and approved, build it in a leased worktree, commit to a branch, never push. Nothing is published to npm. The architecture lives in [`docs/DESIGN.md`](docs/DESIGN.md) (v0.5).
 
 A captain's night orders are the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product.
 
@@ -77,6 +77,18 @@ Four properties make that loop safe to run unattended.
 **Every mutation takes `--key`.** An agent whose command succeeded but whose output was lost *will* retry. With a key that retry returns the first answer instead of queueing a second task or taking a second lease. Mutations that changed nothing are never recorded, so a refusal never becomes a permanent no.
 
 **`fenced` means stop.** A runner whose machine slept, whose lease expired, and whose task was reclaimed will be told exactly that at its next heartbeat — long before it finishes work nobody will accept. Dispatch is a compare-and-swap on `(task, lease_generation)`, enforced by the database rather than by anything the caller remembers to check.
+
+## The unattended pass
+
+`nightorders tick` is the loop above with nobody typing it, once per invocation:
+
+```sh
+nightorders tick --runner builder-1 --token <t> --repo ~/code/thing --max 1
+```
+
+One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `nightorders/<task-id>`, and commit. **It never pushes**, and it cannot touch the default branch; a pull request is always the terminus, and opening one stays a person's decision at this milestone.
+
+It is deliberately a pass and not a daemon: point cron at it and the fences make repetition safe — a second pass finds the first's work done and converges to `empty` (exit 3) instead of building anything twice. A broken build marks its task `failed` and the pass exits 1 even if other tasks succeeded, because exit 0 has to mean "nothing needs you". Refusals that are really a person's pending decision — a scope nobody approved, or one that changed after approval — leave the task queued and untouched.
 
 ## Writing to a tracker you already have
 
