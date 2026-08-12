@@ -103,16 +103,26 @@ export function scrub(text: string, token: string): string {
 
 // ---- the transport ---------------------------------------------------------
 
-/** One Bot API call. Injectable, so the suite scripts Telegram instead of dialing it. */
+/**
+ * One Bot API call. Injectable, so the suite scripts Telegram instead of
+ * dialing it. The optional signal lets a follower cancel a long poll the
+ * moment it is told to stop, instead of waiting the poll window out.
+ */
 export type TelegramTransport = (
   method: string,
   params: Record<string, unknown>,
+  signal?: AbortSignal,
 ) => Promise<{ ok: boolean; result?: unknown; description?: string }>;
 
 export function createTransport(token: string, timeoutMs = 30_000): TelegramTransport {
-  return async (method, params) => {
+  return async (method, params, signal) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+    if (signal !== undefined) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
     try {
       const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
         method: "POST",
@@ -134,6 +144,7 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
       };
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
     }
   };
 }
@@ -204,6 +215,132 @@ export async function bridgePass(
   }
 
   return { ok: true, report };
+}
+
+// ---- the follower ----------------------------------------------------------
+
+/**
+ * The longest long poll the follower may ask for. `createTransport`'s HTTP
+ * timeout is 30s and must outlive the poll window, or the client would abort
+ * a poll Telegram is still honestly holding open.
+ */
+export const MAX_POLL_SECONDS = 25;
+/** Reconnect backoff: starts here, doubles per consecutive failure, capped. */
+const FOLLOW_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+/** A cycle that returned instantly with nothing is padded to this — a scripted or broken server must not spin the loop hot. */
+const FOLLOW_IDLE_FLOOR_MS = 1_000;
+
+export type FollowReport = {
+  cycles: number;
+  sent: number;
+  answered: number;
+  paired: number;
+  ignored: number;
+  problems: string[];
+};
+
+/**
+ * The follower (§M4): one actor that holds the poll lease and stays on the
+ * wire, so an answer tapped on a phone reaches the store in seconds, not at
+ * the next cron firing. `bridge telegram --follow` runs it standalone;
+ * watch embeds the same actor — the poll lease guarantees only one is
+ * live, and a cron pass overlapping it simply loses the lease race.
+ *
+ * Each cycle re-acquires the lease under the same owner — that is the
+ * fenced renewal: same generation while held, and if the lease lapsed
+ * mid-poll (a stall longer than the TTL), the re-acquire takes the next
+ * generation and the cursor rides it, so nothing this follower stamped
+ * with the old generation can move state afterwards. Transport failures
+ * back off exponentially and are counted, not hidden; cancellation aborts
+ * the in-flight long poll instead of waiting it out.
+ */
+export async function followBridge(
+  store: Store,
+  options: {
+    botId: string;
+    transport: TelegramTransport;
+    signal: AbortSignal;
+    clock?: () => Date;
+    owner?: string;
+    pollSeconds?: number;
+    /** One line per cycle that did something — the follower's narration hook. */
+    onCycle?: (report: BridgeReport) => void;
+    /** Injectable for tests; the default resolves early on abort. */
+    sleep?: (ms: number) => Promise<void>;
+  },
+): Promise<FollowReport> {
+  const clock = options.clock ?? (() => new Date());
+  const owner = options.owner ?? `follow-${randomBytes(8).toString("hex")}`;
+  const { botId, transport, signal } = options;
+  const pollSeconds = Math.max(1, Math.min(options.pollSeconds ?? MAX_POLL_SECONDS, MAX_POLL_SECONDS));
+
+  const wait =
+    options.sleep ??
+    ((ms: number) =>
+      new Promise<void>(resolve => {
+        const timer = setTimeout(finish, ms);
+        function finish(): void {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", finish);
+          resolve();
+        }
+        signal.addEventListener("abort", finish, { once: true });
+      }));
+
+  const total: FollowReport = { cycles: 0, sent: 0, answered: 0, paired: 0, ignored: 0, problems: [] };
+  let failures = 0;
+
+  try {
+    while (!signal.aborted) {
+      const lease = store.acquireBridgeLease(botId, owner, BRIDGE_LEASE_MS, clock());
+      if (!lease.ok) {
+        // A cron pass (or a rival follower) holds the poll. Not an error —
+        // wait our turn and try again.
+        await wait(FOLLOW_BACKOFF_MS[Math.min(failures, FOLLOW_BACKOFF_MS.length - 1)] as number);
+        failures = Math.min(failures + 1, FOLLOW_BACKOFF_MS.length - 1);
+        continue;
+      }
+
+      const startedAt = Date.now();
+      const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
+      await deliverOutbox(store, botId, transport, owner, clock, report);
+      await drainUpdates(
+        store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal,
+      );
+
+      total.cycles++;
+      total.sent += report.sent;
+      total.answered += report.answered;
+      total.paired += report.paired;
+      total.ignored += report.ignored;
+      total.problems.push(...report.problems);
+      if (report.sent > 0 || report.answered > 0 || report.paired > 0 || report.problems.length > 0) {
+        options.onCycle?.(report);
+      }
+
+      if (report.problems.length > 0 && report.sent === 0 && report.answered === 0) {
+        // The wire is down. Back off; the counter resets on the first clean cycle.
+        if (!signal.aborted) {
+          await wait(FOLLOW_BACKOFF_MS[Math.min(failures, FOLLOW_BACKOFF_MS.length - 1)] as number);
+        }
+        failures = Math.min(failures + 1, FOLLOW_BACKOFF_MS.length - 1);
+        continue;
+      }
+      failures = 0;
+
+      // A healthy cycle's wait IS the long poll. A cycle that came back
+      // instantly and empty (scripted transport, misbehaving server) gets
+      // padded so the loop cannot spin hot.
+      const took = Date.now() - startedAt;
+      if (!signal.aborted && report.sent === 0 && report.answered === 0 && took < FOLLOW_IDLE_FLOOR_MS) {
+        await wait(FOLLOW_IDLE_FLOOR_MS - took);
+      }
+    }
+  } finally {
+    store.releaseBridgeLease(botId, owner, clock());
+  }
+
+  return total;
 }
 
 // ---- outbound --------------------------------------------------------------
@@ -397,16 +534,23 @@ async function drainUpdates(
   cursor: number,
   clock: () => Date,
   report: BridgeReport,
+  pollSeconds = 0,
+  signal?: AbortSignal,
 ): Promise<void> {
   const context: Context = { store, botId, transport, clock, report };
   let offset = cursor + 1;
 
   for (let page = 0; page < PAGE_BUDGET; page++) {
-    const answer = await transport("getUpdates", {
-      offset,
-      timeout: 0,
-      allowed_updates: ["message", "callback_query"],
-    });
+    const answer = await transport(
+      "getUpdates",
+      {
+        offset,
+        // Only the first page long-polls; a backlog drains at full speed.
+        timeout: page === 0 ? pollSeconds : 0,
+        allowed_updates: ["message", "callback_query"],
+      },
+      signal,
+    );
     if (!answer.ok) {
       report.problems.push(`getUpdates: ${answer.description ?? "failed"}`);
       return;

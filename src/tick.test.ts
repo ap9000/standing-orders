@@ -1422,6 +1422,68 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     expect(code).toBe(EXIT.ok);
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built", committed: true }]);
   });
+
+  test("--follow applies a waiting tap without a second invocation", async () => {
+    // Credentials, an approved task, a park, and a delivered keyboard —
+    // the same road as the E2E above, compressed.
+    await run(["runner", "register", "builder-1", "--json"]);
+    const runnerToken = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "approve", "t-1", "--json"]);
+    const digest = payload().scope.digest as string;
+    await run(["task", "approve", "t-1", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
+    await run(["bridge", "telegram", "token", BOT_TOKEN, "--json"]);
+    await run(["bridge", "telegram", "pair", "--as", "alex", "--token", approverToken, "--json"]);
+    const pairCode = payload().code as string;
+    script.updates.push([
+      {
+        update_id: 1,
+        message: { message_id: 1, text: `/pair ${pairCode}`, chat: { id: 4242, type: "private" }, from: { id: 31337 } },
+      },
+    ]);
+    await run(["bridge", "telegram", "--json"]);
+    await run(
+      ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"],
+      parkingAgent,
+    );
+    await run(["bridge", "telegram", "--json"]);
+    const keyboarded = script.calls.filter(
+      call => call.method === "sendMessage" && call.params["reply_markup"] !== undefined,
+    );
+    const buttons = (
+      keyboarded[keyboarded.length - 1]?.params["reply_markup"] as {
+        inline_keyboard: { text: string; callback_data: string }[][];
+      }
+    ).inline_keyboard.flat();
+    const closed = buttons.find(button => button.text.includes("Fail closed"));
+    const before = openStore(db);
+    const placedOn = before.getTelegramAction(closed!.callback_data)?.messageId;
+    before.close();
+
+    // The tap waits on Telegram's side; the follower picks it up inside
+    // its trial window — no second cron firing anywhere.
+    script.updates.push([
+      {
+        update_id: 2,
+        callback_query: {
+          id: "cb-1",
+          data: closed!.callback_data,
+          from: { id: 31337 },
+          message: { message_id: Number(placedOn), chat: { id: 4242 } },
+        },
+      },
+    ]);
+    const code = await run(["bridge", "telegram", "--follow", "--for", "1500", "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload().report).toMatchObject({ answered: 1 });
+
+    const after = openStore(db);
+    expect(after.getDecision(1)?.state).toBe("answered");
+    after.close();
+  });
 });
 
 describe("watch — the loop, zero tokens idle", () => {

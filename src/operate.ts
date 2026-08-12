@@ -53,6 +53,7 @@ import {
   bridgePass,
   clearBotToken,
   createTransport,
+  followBridge,
   hashPairingCode,
   loadBotToken,
   mintPairingCode,
@@ -60,6 +61,7 @@ import {
   saveBotToken,
   PAIRING_TTL_MS,
   TOKEN_ENV,
+  type FollowReport,
   type TelegramTransport,
 } from "./telegram.js";
 import { scanRepo } from "./capscan.js";
@@ -234,7 +236,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
     "choose", "note", "max-open-decisions", "port", "host", "allow-host",
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
-    "token-file", "bin",
+    "token-file", "bin", "poll",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -2213,8 +2215,12 @@ async function watchCommand(
   }
 
   let stopping = false;
+  const followController = new AbortController();
   const stop = () => {
     stopping = true;
+    // First signal: stop admitting work AND abort the in-flight long poll,
+    // so shutdown is not held hostage by a poll Telegram is still holding.
+    followController.abort();
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -2223,6 +2229,31 @@ async function watchCommand(
     store.heartbeatWatchLease(runner, repo, incarnation, WATCH_LEASE_MS, new Date());
   }, WATCH_HEARTBEAT_MS);
   heartbeat.unref?.();
+
+  // The follower rides along when Telegram is configured: taps apply the
+  // moment they arrive, and answering bumps the wake sequence, so the very
+  // loop below wakes and resumes the freed task — phone to build, seconds.
+  // The poll lease keeps this the only live poller; a cron `bridge
+  // telegram` overlapping it loses the lease race and reports busy.
+  let follower: Promise<FollowReport | null> | null = null;
+  const followSource = loadBotToken(process.env, context.telegramTokenFile);
+  if (followSource !== null) {
+    const transport = context.telegramTransport ?? createTransport(followSource.token);
+    follower = followBridge(store, {
+      botId: followSource.botId,
+      transport,
+      signal: followController.signal,
+      onCycle: cycle => {
+        write(
+          `watch: bridge sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
+            (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
+        );
+      },
+    }).catch(error => {
+      write(`watch: the telegram follower died — ${describe(error)}; taps wait for the next watch`);
+      return null;
+    });
+  }
 
   // Passes reuse the tested commands with a quiet sink; watch narrates one
   // line per pass that did something instead of streaming their reports.
@@ -2280,7 +2311,9 @@ async function watchCommand(
         }
       }
 
-      if (now - lastBridge >= bridgeEveryMs) {
+      // The embedded follower owns the wire while it lives; the timer-driven
+      // pass is the fallback shape for a watch started before a token existed.
+      if (follower === null && now - lastBridge >= bridgeEveryMs) {
         lastBridge = now;
         const source = loadBotToken(process.env, context.telegramTokenFile);
         if (source !== null) {
@@ -2313,6 +2346,8 @@ async function watchCommand(
     }
   } finally {
     clearInterval(heartbeat);
+    followController.abort();
+    if (follower !== null) await follower;
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     store.releaseWatchLease(runner, repo, incarnation, new Date());
@@ -2331,6 +2366,7 @@ async function watchCommand(
  * the path.
  *
  *   bridge telegram                      one pass: send pending, apply taps
+ *   bridge telegram --follow             stay on the wire: long poll, apply as they arrive
  *   bridge telegram pair --as <you> --token <approver-token>
  *   bridge telegram unpair --as <you> --token <approver-token>
  *   bridge telegram token [<bot-token>|--clear]   set the credential file
@@ -2462,6 +2498,47 @@ async function bridgeCommand(
     );
   }
   const transport = context.telegramTransport ?? createTransport(source.token);
+
+  // --follow: stay on the wire. One long-poll actor holds the poll lease;
+  // an answer tapped on a phone lands in seconds instead of at the next
+  // cron firing. Ctrl-C (or --for, for trials) stops it cleanly — the
+  // in-flight long poll is aborted, not waited out.
+  if (flags.has("follow")) {
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    const runFor = text(flags, "for");
+    const timer = runFor === undefined ? null : setTimeout(() => controller.abort(), Number(runFor));
+    timer?.unref?.();
+    if (!json) write(`Following bot ${source.botId} — taps apply as they arrive. Ctrl-C stops it.`);
+    try {
+      const report = await followBridge(store, {
+        botId: source.botId,
+        transport,
+        signal: controller.signal,
+        clock,
+        ...(text(flags, "poll") === undefined ? {} : { pollSeconds: Number(text(flags, "poll")) }),
+        onCycle: cycle => {
+          if (!json) {
+            write(
+              `bridge: sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
+                (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
+            );
+          }
+        },
+      });
+      return succeed(write, json, "bridge follow", { report }, () => [
+        `Followed for ${report.cycles} cycle(s): sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}.`,
+        ...report.problems.slice(-5).map(problem => `  problem: ${problem}`),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+    }
+  }
+
   const passed = await bridgePass(store, { botId: source.botId, transport, clock });
   if (!passed.ok) {
     return fail(write, json, "bridge", passed.reason, passed.message, EXIT.refused);

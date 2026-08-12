@@ -13,11 +13,13 @@ import { openStore, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import {
   bridgePass,
+  followBridge,
   hashPairingCode,
   loadBotToken,
   mintPairingCode,
   saveBotToken,
   scrub,
+  MAX_POLL_SECONDS,
   PAIRING_TTL_MS,
   TOKEN_ENV,
   type TelegramTransport,
@@ -497,5 +499,165 @@ describe("the bot token's homes", () => {
     const error = `getUpdates https://api.telegram.org/bot${token}/getUpdates timed out`;
     expect(scrub(error, token)).not.toContain(token);
     expect(scrub(error, token)).toContain("…e123");
+  });
+});
+
+describe("the follower — on the wire until told to stop", () => {
+  let store: Store;
+  let taskRef: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  /** The opaque tokens the last keyboard carried. */
+  const keyboardTokensOf = (script: ReturnType<typeof scriptedTransport>): string[] => {
+    const withKeyboards = script.calls.filter(
+      call =>
+        (call.method === "sendMessage" || call.method === "editMessageText") &&
+        call.params["reply_markup"] !== undefined,
+    );
+    const last = withKeyboards[withKeyboards.length - 1];
+    if (last === undefined) return [];
+    const keyboard = (last.params["reply_markup"] as { inline_keyboard: { callback_data: string }[][] })
+      .inline_keyboard;
+    return keyboard.flat().map(button => button.callback_data);
+  };
+
+  const pairDirectly = async (script: ReturnType<typeof scriptedTransport>) => {
+    const code = mintPairingCode();
+    store.createTelegramPairing(
+      { codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS },
+      T0,
+    );
+    script.updates.push([privatePair(1, code)]);
+    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(1_000) });
+    expect(passed).toMatchObject({ ok: true, report: { paired: 1 } });
+  };
+
+  const parkedDecision = (): number => {
+    const run = store.startRun({
+      taskRef,
+      leaseId: `lease-${Math.random()}`,
+      runner: "builder-1",
+      branch: "nightorders/t-1",
+      worktree: "/pool/t-1",
+      now: T0,
+    });
+    const id = store.saveDecision(
+      {
+        run,
+        urgency: "blocking",
+        recap: "The payout guard needs a policy call.",
+        question: "Fail open or fail closed?",
+        options: [
+          { id: "open", label: "Fail open", consequence: "slips", reversible: true },
+          { id: "closed", label: "Fail closed", consequence: "pauses", reversible: true },
+        ],
+        recommendation: "closed",
+      },
+      T0,
+    );
+    store.holdOwned(
+      { taskRef, ownerKind: "decision", ownerId: String(id), reason: `decision:${id}`, until: null },
+      T0,
+    );
+    store.enqueueNotification(
+      { dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" },
+      T0,
+    );
+    return id;
+  };
+
+  test("delivers, long-polls, applies the tap that arrives, and stops on abort", async () => {
+    const script = scriptedTransport();
+    await pairDirectly(script);
+    const decision = parkedDecision();
+
+    const controller = new AbortController();
+    const report = await followBridge(store, {
+      botId: BOT,
+      transport: script.transport,
+      signal: controller.signal,
+      clock: () => later(5_000),
+      sleep: () => Promise.resolve(),
+      onCycle: cycle => {
+        if (cycle.sent > 0) {
+          // The keyboard just went out — the phone taps back for the next poll.
+          const token = keyboardTokensOf(script)[0] ?? "";
+          const messageId = Number(store.getTelegramAction(token)?.messageId ?? 0);
+          script.updates.push([tap(10, token, messageId)]);
+        }
+        if (cycle.answered > 0) controller.abort();
+      },
+    });
+
+    expect(report.sent).toBe(1);
+    expect(report.answered).toBe(1);
+    expect(store.getDecision(decision)?.state).toBe("answered");
+    expect(store.getDecision(decision)?.answeredVia).toBe("telegram");
+    // The task is dispatchable again — the loop's wake was bumped by the answer.
+    expect(store.activeHolds(taskRef, later(10_000))).toHaveLength(0);
+
+    // The follower's polls asked Telegram to hold the line (the pairing
+    // pass's earlier getUpdates used 0 — that is the cron shape).
+    const polls = script.calls.filter(call => call.method === "getUpdates");
+    expect(polls.some(call => call.params["timeout"] === MAX_POLL_SECONDS)).toBe(true);
+  });
+
+  test("a held poll lease is waited out, never raced", async () => {
+    const script = scriptedTransport();
+    store.acquireBridgeLease(BOT, "cron-pass", 60_000, later(0));
+
+    const controller = new AbortController();
+    const sleeps: number[] = [];
+    const report = await followBridge(store, {
+      botId: BOT,
+      transport: script.transport,
+      signal: controller.signal,
+      clock: () => later(1_000),
+      sleep: ms => {
+        sleeps.push(ms);
+        if (sleeps.length >= 3) controller.abort();
+        return Promise.resolve();
+      },
+    });
+
+    expect(report.cycles).toBe(0);
+    expect(script.calls).toHaveLength(0);
+    expect(sleeps.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("a dead wire backs off exponentially instead of spinning", async () => {
+    const failing: TelegramTransport = async method => {
+      if (method === "getUpdates") return { ok: false, description: "connect ETIMEDOUT" };
+      return { ok: true, result: true };
+    };
+
+    const controller = new AbortController();
+    const sleeps: number[] = [];
+    const report = await followBridge(store, {
+      botId: BOT,
+      transport: failing,
+      signal: controller.signal,
+      clock: () => later(1_000),
+      sleep: ms => {
+        sleeps.push(ms);
+        if (sleeps.length >= 3) controller.abort();
+        return Promise.resolve();
+      },
+    });
+
+    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
+    expect(report.problems.length).toBeGreaterThanOrEqual(3);
+    // The lease went back on the way out; a cron pass can take over now.
+    const lease = store.acquireBridgeLease(BOT, "cron-pass", 60_000, later(2_000));
+    expect(lease).toMatchObject({ ok: true });
   });
 });

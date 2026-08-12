@@ -150,8 +150,13 @@ nightorders bridge telegram        # sends pending, applies taps, exits
 ```
 
 `bridge telegram status` shows the token source, the binding, and what is
-waiting. Answer latency is your cron interval — the always-on `--follow`
-mode arrives with M4's loop.
+waiting. For answers in seconds instead of at the next cron firing,
+`nightorders bridge telegram --follow` stays on the wire — one long-poll
+actor holding the same poll lease, so a cron pass overlapping it simply
+loses the race. `nightorders watch` embeds the same follower automatically
+when a bot token is configured: a tap on your phone answers the decision,
+the answer wakes the loop, and the freed task resumes — phone to build,
+no timer in between.
 
 A chat is not a person: pairing binds one private chat and one immutable
 Telegram user id to one approver credential. Buttons carry opaque one-time
