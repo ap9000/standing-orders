@@ -298,3 +298,30 @@ describe("opening a database that already exists", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("a task and its reference are created together", () => {
+  test("a failure partway leaves neither behind", () => {
+    // Found in a real database. A schema change made the reference insert
+    // fail, the task insert had already committed, and the result was a task
+    // the ready query could not see and nothing could claim — which something
+    // else later gave a reference to, with the wrong origin. The invariant was
+    // written in a comment and not enforced.
+    const store = openStore(":memory:");
+    store.handle.exec("DROP TABLE task_ref");
+
+    expect(() => store.createTask({ id: "t-1", title: "doomed" }, T0)).toThrow();
+
+    // The task row must not have survived its own half-finished creation.
+    const rows = store.handle.prepare("SELECT count(*) AS n FROM task").get();
+    expect(Number(rows?.["n"])).toBe(0);
+    store.close();
+  });
+
+  test("a task nightorders created is recorded as ours", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "ours" }, T0);
+
+    expect(store.originOf(BUILT_IN, "t-1")).toBe("ours");
+    store.close();
+  });
+});

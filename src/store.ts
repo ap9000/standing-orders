@@ -375,7 +375,16 @@ export class Store {
    * control plane can see and never act on.
    */
   createTask(spec: { id: string; title: string }, now: Date, mutation: Mutation = {}): Task {
-    return this.once(mutation, "createTask", () => {
+    return this.once(mutation, "createTask", () =>
+      // Both rows or neither, and the comment above is why: this used to be
+      // two unwrapped statements, and the first real database caught it. A
+      // schema change made the second one fail, the first had already
+      // committed, and the result was a task with no reference — invisible to
+      // the ready query, unclaimable, and silently given a reference later by
+      // something else, with the wrong origin. Exactly the state this
+      // invariant exists to rule out, arrived at by the invariant not being
+      // enforced.
+      this.transact(() => {
       const stamp = now.toISOString();
       this.db
         .prepare(
@@ -391,7 +400,8 @@ export class Store {
         createdAt: stamp,
         updatedAt: stamp,
       };
-    });
+      }),
+    );
   }
 
   getTask(id: string): Task | null {
