@@ -287,6 +287,67 @@ function truncate(text: string, at: number): string {
 }
 
 /**
+ * The terminal handoff: how every non-parking attempt says how it ended.
+ *
+ * gnhf's lesson, typed: "the agent seemed to finish" is not an outcome. A
+ * clean tree is a success only when the agent SAID no-change; changes are
+ * committed only when it said completed; and a missing, malformed, or
+ * contradictory handoff is a protocol failure that earns a strike rather
+ * than a guess that earns a commit.
+ */
+export type ParsedHandoff = {
+  status: "completed" | "no-change" | "failed";
+  conclusion: string;
+};
+
+export const HANDOFF_VERSION = 1;
+const HANDOFF_CONCLUSION_CAP = 2_000;
+const HANDOFF_PAYLOAD_CAP = 16 * 1024;
+
+export function parseHandoff(
+  raw: string,
+): { ok: true; handoff: ParsedHandoff } | { ok: false; problems: Problem[] } {
+  if (Buffer.byteLength(raw, "utf8") > HANDOFF_PAYLOAD_CAP) {
+    return { ok: false, problems: [{ reason: "too-large", message: `the handoff is over ${HANDOFF_PAYLOAD_CAP} bytes` }] };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return {
+      ok: false,
+      problems: [{ reason: "not-json", message: `the handoff is not JSON: ${error instanceof Error ? error.message : String(error)}` }],
+    };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, problems: [{ reason: "not-an-object", message: "the handoff must be one JSON object" }] };
+  }
+  const body = parsed as Record<string, unknown>;
+  const problems: Problem[] = [];
+
+  if (body["version"] !== HANDOFF_VERSION) {
+    problems.push({
+      reason: "bad-version",
+      message: `version must be the number ${HANDOFF_VERSION} (got ${describe(body["version"])})`,
+    });
+  }
+  const status = body["status"];
+  if (status !== "completed" && status !== "no-change" && status !== "failed") {
+    problems.push({
+      reason: "bad-status",
+      message: `status must be "completed", "no-change", or "failed" (got ${describe(status)})`,
+    });
+  }
+  const conclusion = prose(body["conclusion"], "conclusion", HANDOFF_CONCLUSION_CAP, problems);
+
+  if (problems.length > 0) return { ok: false, problems };
+  return {
+    ok: true,
+    handoff: { status: status as ParsedHandoff["status"], conclusion: conclusion as string },
+  };
+}
+
+/**
  * The compact error a repair turn is resumed with: every problem by name,
  * then the one instruction. Written for an agent that already holds the
  * context — it needs the list of what failed, not the theory of why.

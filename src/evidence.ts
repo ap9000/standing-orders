@@ -33,6 +33,8 @@ import type { ExecResult } from "./exec.js";
 
 /** The park mailbox pattern. Each run's actual name carries a nonce; see `mailboxName`. */
 export const MAILBOX_PREFIX = "NIGHTORDERS-PARK-";
+/** The terminal handoff: how every non-parking attempt says how it ended. */
+export const HANDOFF_PREFIX = "NIGHTORDERS-DONE-";
 export const MAILBOX_SUFFIX = ".json";
 
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
@@ -57,6 +59,18 @@ export function mailboxName(): string {
 
 export function looksLikeMailbox(name: string): boolean {
   return name.startsWith(MAILBOX_PREFIX) && name.endsWith(MAILBOX_SUFFIX);
+}
+
+/** Every protocol file the sweep must never let an old attempt leave behind. */
+export function looksLikeProtocolFile(name: string): boolean {
+  return (
+    (name.startsWith(MAILBOX_PREFIX) || name.startsWith(HANDOFF_PREFIX)) &&
+    name.endsWith(MAILBOX_SUFFIX)
+  );
+}
+
+export function handoffName(): string {
+  return `${HANDOFF_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 /**
@@ -167,7 +181,7 @@ export function quarantineMailboxes(
 
   const swept: string[] = [];
   for (const name of entries) {
-    if (!looksLikeMailbox(name)) continue;
+    if (!looksLikeProtocolFile(name)) continue;
     const path = join(worktree, name);
     if (root !== null && runId !== null) {
       const read = readMailbox(path);

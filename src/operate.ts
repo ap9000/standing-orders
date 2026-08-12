@@ -883,8 +883,15 @@ async function buildCommand(
         now: context.clock(),
       });
     } else {
+      const brokeish =
+        result.reason === "agent" ||
+        result.reason === "agent-reported" ||
+        result.reason === "no-op" ||
+        result.reason === "moved-head" ||
+        result.reason === "timeout" ||
+        result.reason === "git";
       store.finishRun(runId, {
-        outcome: result.reason === "agent" || result.reason === "timeout" || result.reason === "git" ? "failed" : "refused",
+        outcome: brokeish ? "failed" : "refused",
         reason: result.reason,
         now: context.clock(),
       });
@@ -895,6 +902,9 @@ async function buildCommand(
     // the gates saying no — stay 3, which is them working.
     const broke =
       result.reason === "agent" ||
+      result.reason === "agent-reported" ||
+      result.reason === "no-op" ||
+      result.reason === "moved-head" ||
       result.reason === "timeout" ||
       result.reason === "git" ||
       result.reason === "malformed-decision";
@@ -903,7 +913,12 @@ async function buildCommand(
     });
   }
 
-  store.finishRun(runId, { outcome: "built", committed: result.committed, now: context.clock() });
+  store.finishRun(runId, {
+    outcome: result.noChange === true ? "no-change" : "built",
+    ...(result.noChange === true ? { reason: "handoff" } : {}),
+    committed: result.committed,
+    now: context.clock(),
+  });
   return succeed(
     write,
     json,
@@ -912,7 +927,7 @@ async function buildCommand(
     () => [
       result.committed
         ? `Built ${id} and committed to ${branch}.`
-        : `Built ${id}; the agent changed nothing, which is a real answer.`,
+        : `${id}: no change needed — the agent said so and the tree agrees.`,
       `  worktree  ${leased.worktree.path}`,
       "",
       result.summary,
@@ -1179,7 +1194,12 @@ async function tickCommand(
       // close, and reporting "built" would count work the fence disowned.
       const sealed = completeFenced(store, lease, "done", clock());
       if (sealed.ok) {
-        store.finishRun(runId, { outcome: "built", committed: result.committed, now: clock() });
+        store.finishRun(runId, {
+          outcome: result.noChange === true ? "no-change" : "built",
+          ...(result.noChange === true ? { reason: "handoff" } : {}),
+          committed: result.committed,
+          now: clock(),
+        });
         dispatched.push({
           id,
           outcome: "built",
@@ -1250,7 +1270,14 @@ async function tickCommand(
       continue;
     }
 
-    if (result.reason === "agent" || result.reason === "timeout" || result.reason === "git") {
+    if (
+      result.reason === "agent" ||
+      result.reason === "agent-reported" ||
+      result.reason === "no-op" ||
+      result.reason === "moved-head" ||
+      result.reason === "timeout" ||
+      result.reason === "git"
+    ) {
       // The attempt itself broke. The terminal state and the release are one
       // step, so the task is never simultaneously free and unfinished — and
       // even that write can be fenced, in which case the failure is recorded
@@ -1293,7 +1320,7 @@ async function tickCommand(
         entry.outcome === "built"
           ? entry.committed === true
             ? `committed to ${entry.branch}`
-            : "the agent changed nothing, which is a real answer"
+            : "no-change, stated and verified"
           : entry.outcome === "parked"
             ? `${entry.reason} — \`nightorders decide\``
             : entry.reason ?? "";
@@ -1597,10 +1624,21 @@ async function briefCommand(
     text(flags, "since") ?? new Date(clock().getTime() - 24 * 60 * 60_000).toISOString();
 
   const runs = store.runsSince(since);
-  const built = runs.filter(one => one.outcome === "built");
+  const built = runs.filter(one => one.outcome === "built" || one.outcome === "no-change");
   const failed = runs.filter(one => one.outcome === "failed");
   const refused = runs.filter(one => one.outcome === "refused");
   const cutDown = runs.filter(one => one.outcome === null);
+
+  // Economics, measured — never asserted. Every provider spawn stamps its
+  // run before spending, so "invocations" is the complete population; the
+  // measured subset is what the envelopes actually reported, and the gap is
+  // named instead of summed as zero.
+  const invoked = runs.filter(one => one.providerStartedAt !== null);
+  const measured = invoked.filter(one => one.costUsd !== null);
+  const spend = measured.reduce((sum, one) => sum + (one.costUsd ?? 0), 0);
+  const tokens = invoked
+    .filter(one => one.tokensOut !== null)
+    .reduce((sum, one) => sum + (one.tokensOut ?? 0) + (one.tokensIn ?? 0), 0);
 
   const gaps = computeGaps(store, repo, clock());
   const pending = store.listNotifications("pending");
@@ -1637,6 +1675,12 @@ async function briefCommand(
           repo,
           since,
           overnight: { built, failed, refused, cutDown },
+          economics: {
+            invocations: invoked.length,
+            measured: measured.length,
+            costUsd: spend,
+            tokens,
+          },
           gaps,
           review,
           outboxPending: pending.length,
@@ -1665,6 +1709,14 @@ async function briefCommand(
   for (const one of cutDown) {
     lines.push(`      ${one.taskId.padEnd(20)} never finished — the process died with it; \`task show ${one.taskId}\``);
   }
+
+  lines.push(
+    invoked.length === 0
+      ? "  spend        nothing — no provider was invoked"
+      : measured.length === invoked.length
+        ? `  spend        $${spend.toFixed(4)} · ${tokens.toLocaleString()} tokens, measured across all ${invoked.length} invocation(s)`
+        : `  spend        $${spend.toFixed(4)} measured across ${measured.length}/${invoked.length} invocation(s) — ${invoked.length - measured.length} unmeasured`,
+  );
 
   if (gaps.length > 0) {
     const best = gaps[0] as Gap;

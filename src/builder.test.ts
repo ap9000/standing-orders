@@ -16,6 +16,32 @@ function bootstrapApprover(store: Store): string {
 }
 const AGENT_SAID = JSON.stringify({ result: "Added the guard and a test for it." });
 
+import { mkdtempSync, writeFileSync as writeSync2 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join2 } from "node:path";
+
+/** The worktree the current test's build runs in — a real directory, because
+ * the protocol files (park mailbox, terminal handoff) live on a real disk. */
+let wt = "";
+/** The open run record the current test's build writes to. */
+let runId = 0;
+
+const freshWorktree = (): string => mkdtempSync(join2(tmpdir2(), "no-wt-"));
+
+/** The agent's side of the terminal handoff: read the DONE name from the brief, write the file. */
+const conclude = (
+  args: readonly string[],
+  options: { cwd?: string } | undefined,
+  status: "completed" | "no-change" | "failed" = "completed",
+  conclusion = "Added the guard and a test for it.",
+): void => {
+  const prompt = args[args.indexOf("-p") + 1] ?? "";
+  const name = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+  if (name !== undefined && options?.cwd !== undefined) {
+    writeSync2(join2(options.cwd, name), JSON.stringify({ version: 1, status, conclusion }));
+  }
+};
+
 /** Lease ids are opaque; naming them makes a fencing failure readable. */
 const ids = (...names: string[]) => {
   let index = 0;
@@ -36,8 +62,9 @@ describe("the builder's gates", () => {
   const agentCalls: string[][] = [];
 
   /** Records what the agent was asked, and answers as a clean success. */
-  const agent: Runner = async (_file, args) => {
+  const agent: Runner = async (_file, args, options) => {
     agentCalls.push([...args]);
+    conclude(args, options);
     return { ...OK, stdout: AGENT_SAID };
   };
 
@@ -55,7 +82,11 @@ describe("the builder's gates", () => {
     taskId: "t-1",
     taskRef,
     runner: "builder-1",
-    worktree: "/pool/thing/feat-a",
+    worktree: wt,
+    runId: store.startRun({
+      taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+    }),
+    evidenceRoot: join2(wt, ".evidence"),
     branch: "feat/a",
     now: T0,
     agent,
@@ -71,7 +102,7 @@ describe("the builder's gates", () => {
     register(store, { name: "builder-1", host: "h", now: T0 });
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -329,7 +360,7 @@ describe("what the builder tells the agent", () => {
     acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -357,7 +388,11 @@ describe("what the builder tells the agent", () => {
       taskId: "t-1",
       taskRef,
       runner: "builder-1",
-      worktree: "/pool/thing/feat-a",
+      worktree: wt,
+      runId: store.startRun({
+        taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      }),
+      evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
       now: T0,
       agent,
@@ -413,7 +448,7 @@ describe("what the builder tells the agent", () => {
       }) as Runner,
     });
 
-    expect(cwd).toBe("/pool/thing/feat-a");
+    expect(cwd).toBe(wt);
   });
 });
 
@@ -423,7 +458,10 @@ describe("what the builder does afterwards", () => {
   let taskRef: number;
   const gitCalls: string[][] = [];
 
-  const agent: Runner = async () => ({ ...OK, stdout: AGENT_SAID });
+  const agent: Runner = async (_file, args, options) => {
+    conclude(args, options);
+    return { ...OK, stdout: AGENT_SAID };
+  };
 
   beforeEach(() => {
     store = openStore(":memory:");
@@ -434,7 +472,7 @@ describe("what the builder does afterwards", () => {
     acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -451,30 +489,110 @@ describe("what the builder does afterwards", () => {
 
   afterEach(() => store.close());
 
-  const withGit = (git: Runner) =>
+  const withGit = (git: Runner, speaker: Runner = agent) =>
     build(store, {
       taskId: "t-1",
       taskRef,
       runner: "builder-1",
-      worktree: "/pool/thing/feat-a",
+      worktree: wt,
+      runId: store.startRun({
+        taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      }),
+      evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
       now: T0,
-      agent,
+      agent: speaker,
       git,
     });
 
-  test("treats an empty diff as a success, not a failure", async () => {
+  test("a stated no-change with a clean tree is a success, not a failure", async () => {
     // An agent that read the code and concluded nothing needed changing has
-    // done its job. Failing here would teach the loop to prefer writing.
+    // done its job — and under the handoff protocol it must SAY so. The
+    // conclusion and the evidence agree; the machine records both.
+    const noChange: Runner = async (_file, args, options) => {
+      conclude(args, options, "no-change", "The guard already exists at src/payouts.ts:40.");
+      return { ...OK, stdout: AGENT_SAID };
+    };
     const result = await withGit(async (_f, args) => {
       gitCalls.push([...args]);
       if (args.includes("symbolic-ref")) return symref(args);
       if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
       return { ...OK, stdout: "" };
+    }, noChange);
+
+    expect(result).toMatchObject({ ok: true, committed: false, noChange: true });
+    expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
+  });
+
+  test("a claimed completion with a clean tree is the no-op gnhf warns about", async () => {
+    // "I did the work" with no work is the failure mode that teaches a loop
+    // to trust words over trees. A strike, not a commit.
+    const result = await withGit(async (_f, args) => {
+      if (args.includes("symbolic-ref")) return symref(args);
+      if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+      return { ...OK, stdout: "" };
     });
 
-    expect(result).toMatchObject({ ok: true, committed: false });
-    expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
+    expect(result).toMatchObject({ ok: false, reason: "no-op" });
+  });
+
+  test("a stated no-change with a dirty tree is a contradiction, refused", async () => {
+    const lying: Runner = async (_file, args, options) => {
+      conclude(args, options, "no-change", "Nothing needed.");
+      return { ...OK, stdout: AGENT_SAID };
+    };
+    const result = await withGit(async (_f, args) => {
+      if (args.includes("symbolic-ref")) return symref(args);
+      if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+      if (args.includes("status")) return { ...OK, stdout: " M src/index.ts\n" };
+      return { ...OK };
+    }, lying);
+
+    expect(result).toMatchObject({ ok: false, reason: "no-op" });
+  });
+
+  test("an agent-reported failure carries the agent's own words", async () => {
+    const candid: Runner = async (_file, args, options) => {
+      conclude(args, options, "failed", "The test suite does not run on this machine: vitest is missing.");
+      return { ...OK, stdout: AGENT_SAID };
+    };
+    const result = await withGit(async (_f, args) => {
+      if (args.includes("symbolic-ref")) return symref(args);
+      if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+      return { ...OK, stdout: "" };
+    }, candid);
+
+    expect(result).toMatchObject({ ok: false, reason: "agent-reported" });
+    if (!result.ok) expect(result.message).toContain("vitest is missing");
+  });
+
+  test("a missing handoff is a protocol failure, never a guess", async () => {
+    const silent: Runner = async () => ({ ...OK, stdout: AGENT_SAID });
+    const result = await withGit(async (_f, args) => {
+      if (args.includes("symbolic-ref")) return symref(args);
+      if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+      if (args.includes("status")) return { ...OK, stdout: " M src/index.ts\n" };
+      return { ...OK };
+    }, silent);
+
+    expect(result).toMatchObject({ ok: false, reason: "no-op" });
+    if (!result.ok) expect(result.message).toContain("without writing its handoff");
+  });
+
+  test("an agent that commits for itself is refused — the machine commits", async () => {
+    let asked = 0;
+    const result = await withGit(async (_f, args) => {
+      if (args.includes("symbolic-ref")) return symref(args);
+      if (args.includes("--abbrev-ref")) return { ...OK, stdout: "feat/a\n" };
+      if (args.includes("rev-parse")) {
+        // Base reads one sha; the post-agent recheck reads another.
+        asked++;
+        return { ...OK, stdout: asked > 1 ? "def456\n" : "abc123\n" };
+      }
+      return { ...OK, stdout: "" };
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "moved-head" });
   });
 
   test("never pushes", async () => {
@@ -508,7 +626,11 @@ describe("what the builder does afterwards", () => {
       taskId: "t-1",
       taskRef,
       runner: "builder-1",
-      worktree: "/pool/thing/feat-a",
+      worktree: wt,
+      runId: store.startRun({
+        taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      }),
+      evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
       now: T0,
       agent: async () => ({ ...OK, code: 124, timedOut: true }),
@@ -519,7 +641,7 @@ describe("what the builder does afterwards", () => {
     });
 
     expect(result).toMatchObject({ ok: false, reason: "timeout" });
-    if (!result.ok) expect(result.message).toContain("/pool/thing/feat-a");
+    if (!result.ok) expect(result.message).toContain(wt);
   });
 });
 
@@ -529,8 +651,9 @@ describe("the gates cannot be talked around", () => {
   let taskRef: number;
   const agentCalls: string[][] = [];
 
-  const agent: Runner = async (_file, args) => {
+  const agent: Runner = async (_file, args, options) => {
     agentCalls.push([...args]);
+    conclude(args, options);
     return { ...OK, stdout: AGENT_SAID };
   };
 
@@ -550,7 +673,7 @@ describe("the gates cannot be talked around", () => {
 
   const lease = (over: Record<string, unknown> = {}) =>
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -567,7 +690,11 @@ describe("the gates cannot be talked around", () => {
       taskId: "t-1",
       taskRef,
       runner: "builder-1",
-      worktree: "/pool/thing/feat-a",
+      worktree: wt,
+      runId: store.startRun({
+        taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      }),
+      evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
       now: T0,
       agent,
@@ -636,7 +763,7 @@ describe("scope text is data, not instructions", () => {
     register(store, { name: "builder-1", host: "h", now: T0 });
     acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -665,7 +792,11 @@ describe("scope text is data, not instructions", () => {
       taskId: "t-1",
       taskRef,
       runner: "builder-1",
-      worktree: "/pool/thing/feat-a",
+      worktree: wt,
+      runId: store.startRun({
+        taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      }),
+      evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
       now: T0,
       agent: async (_f, args) => {
@@ -700,7 +831,7 @@ describe("the lease marker never reaches a commit", () => {
     register(store, { name: "builder-1", host: "h", now: T0 });
     acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -717,15 +848,22 @@ describe("the lease marker never reaches a commit", () => {
 
   afterEach(() => store.close());
 
-  const withStatus = (stdout: string) =>
+  const withStatus = (stdout: string, said: "completed" | "no-change" = "completed") =>
     build(store, {
       taskId: "t-1",
       taskRef,
       runner: "builder-1",
-      worktree: "/pool/thing/feat-a",
+      worktree: wt,
+      runId: store.startRun({
+        taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      }),
+      evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
       now: T0,
-      agent: async () => ({ ...OK, stdout: AGENT_SAID }),
+      agent: (async (_file: string, args: readonly string[], options?: { cwd?: string }) => {
+        conclude(args, options, said);
+        return { ...OK, stdout: AGENT_SAID };
+      }) as Runner,
       git: async (_f, args) => {
         gitCalls.push([...args]);
         if (args.includes("symbolic-ref")) return symref(args);
@@ -744,10 +882,11 @@ describe("the lease marker never reaches a commit", () => {
   });
 
   test("does not count as a change on its own", async () => {
-    // Otherwise every build reports a commit it did not make.
-    const result = await withStatus("?? .nightorders-lease\n");
+    // Otherwise every build reports a commit it did not make — and an agent
+    // honestly saying no-change would be contradicted by our own marker.
+    const result = await withStatus("?? .nightorders-lease\n", "no-change");
 
-    expect(result).toMatchObject({ ok: true, committed: false });
+    expect(result).toMatchObject({ ok: true, committed: false, noChange: true });
     expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
   });
 });
@@ -766,7 +905,7 @@ describe("the commit message", () => {
     register(store, { name: "builder-1", host: "h", now: T0 });
     acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -788,10 +927,17 @@ describe("the commit message", () => {
       taskId: "t-1",
       taskRef,
       runner: "builder-1",
-      worktree: "/pool/thing/feat-a",
+      worktree: wt,
+      runId: store.startRun({
+        taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      }),
+      evidenceRoot: join2(wt, ".evidence"),
       branch: "feat/a",
       now: T0,
-      agent: async () => ({ ...OK, stdout: JSON.stringify({ result: agentSaid }) }),
+      agent: (async (_file: string, args: readonly string[], options?: { cwd?: string }) => {
+        conclude(args, options, "completed", agentSaid);
+        return { ...OK, stdout: JSON.stringify({ result: agentSaid }) };
+      }) as Runner,
       git: async (_f, args) => {
         if (args.includes("symbolic-ref")) return symref(args);
         if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
@@ -871,7 +1017,7 @@ describe("the pulse", () => {
     register(store, { name: "builder-1", host: "h", now: T0 });
     register(store, { name: "builder-2", host: "h", now: T0 });
     store.saveWorktree({
-      path: "/pool/thing/feat-a",
+      path: wt,
       repo: "/code/thing",
       branch: "feat/a",
       runner: "builder-1",
@@ -893,7 +1039,11 @@ describe("the pulse", () => {
     taskRef,
     runner: "builder-1",
     leaseId,
-    worktree: "/pool/thing/feat-a",
+    worktree: wt,
+    runId: store.startRun({
+      taskRef, leaseId, runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+    }),
+    evidenceRoot: join2(wt, ".evidence"),
     branch: "feat/a",
     now: T0,
     clock: () => new Date(),
@@ -970,8 +1120,9 @@ describe("the pulse", () => {
         store.touchRunner(name, at);
       },
     });
-    const agent: Runner = async () => {
+    const agent: Runner = async (_file, args, options) => {
       await sleep(25);
+      conclude(args, options);
       return { ...OK, stdout: AGENT_SAID };
     };
 
@@ -987,8 +1138,9 @@ describe("the pulse", () => {
     // The point of the whole mechanism: a lease shorter than the build, kept
     // alive by the build being alive.
     acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
-    const agent: Runner = async () => {
+    const agent: Runner = async (_file, args, options) => {
       await sleep(25);
+      conclude(args, options);
       return { ...OK, stdout: AGENT_SAID };
     };
 
@@ -1173,7 +1325,10 @@ describe("the park", () => {
     // that could have vouched for it is gone.
     writeFileSync(join(worktree, "NIGHTORDERS-PARK-00000000deadbeef.json"), JSON.stringify(decision));
 
-    const agent: Runner = async () => ({ ...OK, stdout: AGENT_SAID });
+    const agent: Runner = async (_file, args, options) => {
+    conclude(args, options);
+    return { ...OK, stdout: AGENT_SAID };
+  };
     const result = await build(store, request({ agent }));
 
     // The stale park did not become a decision — the build ran normally.
@@ -1184,17 +1339,18 @@ describe("the park", () => {
       name.startsWith("quarantine-"),
     );
     expect(quarantined).toHaveLength(1);
-    // And the commit staged around park-shaped names either way.
+    // And the commit staged around every protocol-shaped name either way.
     const add = gitCalls.find(args => args.includes("add"));
-    expect(add?.some(arg => arg.includes("NIGHTORDERS-PARK-"))).toBe(true);
+    expect(add?.some(arg => arg.includes("NIGHTORDERS-"))).toBe(true);
   });
 
-  test("a park with no run record is refused with its own reason", async () => {
-    const result = await build(store, request({ agent: parkingAgent(decision), runId: undefined }));
-
-    expect(result).toMatchObject({ ok: false, reason: "malformed-decision" });
-    if (result.ok) throw new Error("expected refusal");
-    expect(result.problems?.[0]?.reason).toBe("no-run-record");
+  test("a build without an open run cannot spend at all", async () => {
+    // The invocation gateway is the only door to the provider, and it
+    // refuses a run that is missing or finished — nothing spends without a
+    // record that will outlive it.
+    await expect(
+      build(store, request({ agent: parkingAgent(decision), runId: 999_999 })),
+    ).rejects.toThrow(/not an open attempt/);
   });
 });
 

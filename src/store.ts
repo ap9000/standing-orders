@@ -2093,6 +2093,51 @@ export class Store {
     return row === undefined ? null : readRun(row);
   }
 
+  /**
+   * The instant before the provider process spawns, stamped by the gateway
+   * and nothing else. First stamp wins: a run either paid once or it did
+   * not, and "provider spawns == runs carrying this stamp" is the
+   * zero-token invariant's testable half.
+   */
+  stampProviderStart(id: number, now: Date): void {
+    this.db
+      .prepare("UPDATE run SET provider_started_at = COALESCE(provider_started_at, ?) WHERE id = ?")
+      .run(now.toISOString(), id);
+  }
+
+  /** What the provider said it cost. NULL columns stay NULL — unmeasured, and said so. */
+  recordUsage(
+    id: number,
+    usage: { tokensIn?: number; tokensOut?: number; costUsd?: number; usageJson?: string },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE run SET tokens_in = COALESCE(?, tokens_in),
+                        tokens_out = COALESCE(?, tokens_out),
+                        cost_usd = COALESCE(?, cost_usd),
+                        usage_json = COALESCE(?, usage_json)
+          WHERE id = ?`,
+      )
+      .run(
+        usage.tokensIn ?? null,
+        usage.tokensOut ?? null,
+        usage.costUsd ?? null,
+        usage.usageJson ?? null,
+        id,
+      );
+  }
+
+  /** The accepted head and the validated conclusion, once known. */
+  recordOutcomeFacts(id: number, facts: { headRevision?: string; handoff?: string }): void {
+    this.db
+      .prepare(
+        `UPDATE run SET head_revision = COALESCE(?, head_revision),
+                        handoff = COALESCE(?, handoff)
+          WHERE id = ?`,
+      )
+      .run(facts.headRevision ?? null, facts.handoff ?? null, id);
+  }
+
   /** Every attempt since a moment, task ids attached — the overnight, as data. */
   runsSince(since: string): (Run & { taskId: string })[] {
     return this.db

@@ -23,6 +23,20 @@ const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false }
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const AGENT_SAID = JSON.stringify({ result: "Added the guard and a test for it." });
 
+/** The agent's half of the terminal handoff protocol. */
+const concludeDone = async (
+  cwd: string,
+  args: readonly string[],
+  status: "completed" | "no-change" | "failed" = "completed",
+  conclusion = "Added the guard and a test for it.",
+): Promise<void> => {
+  const prompt = args[args.indexOf("-p") + 1] ?? "";
+  const name = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+  if (name !== undefined) {
+    await writeFile(join(cwd, name), JSON.stringify({ version: 1, status, conclusion }));
+  }
+};
+
 describe("tick, against real git", () => {
   let base: string;
   let repo: string;
@@ -34,10 +48,11 @@ describe("tick, against real git", () => {
   let agentRan: string[] = [];
 
   /** Stands where `claude` would: does real work in the worktree it was given. */
-  const agent: Runner = async (_file, _args, options) => {
+  const agent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     agentRan.push(cwd);
     await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    await concludeDone(cwd, args);
     return { ...OK, stdout: AGENT_SAID };
   };
 
@@ -109,6 +124,7 @@ describe("tick, against real git", () => {
 
     const code = await tick(runnerToken);
 
+    if (payload().ok !== true) console.error("TICK SAID:", JSON.stringify(payload(), null, 2));
     expect(payload()).toMatchObject({
       ok: true,
       command: "tick",
@@ -368,10 +384,11 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
   let lines: string[] = [];
   let agentRan: string[] = [];
 
-  const agent: Runner = async (_file, _args, options) => {
+  const agent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     agentRan.push(cwd);
     await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    await concludeDone(cwd, args);
     return { ...OK, stdout: AGENT_SAID };
   };
 
@@ -691,8 +708,10 @@ describe("the morning briefing", () => {
   let pool: string;
   let lines: string[] = [];
 
-  const agent: Runner = async (_file, _args, options) => {
-    await writeFile(join(options?.cwd ?? "", "guard.ts"), "export const guarded = true;\n");
+  const agent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    await concludeDone(cwd, args);
     return { ...OK, stdout: AGENT_SAID };
   };
   const broken: Runner = async () => ({ ...OK, code: 1, stderr: "the model refused" });
@@ -1007,9 +1026,10 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     return { ...OK, stdout: JSON.stringify({ result: "parked" }) };
   };
 
-  const buildingAgent: Runner = async (_file, _args, options) => {
+  const buildingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    await concludeDone(cwd, args);
     return { ...OK, stdout: AGENT_SAID };
   };
 
@@ -1113,6 +1133,7 @@ describe("decide, end to end — the morning answers and the machine hears it", 
       prompt = args[args.indexOf("-p") + 1] ?? "";
       const cwd = options?.cwd ?? "";
       await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+      await concludeDone(cwd, args);
       return { ...OK, stdout: AGENT_SAID };
     };
     const code = await tick(runnerToken, capturing);
@@ -1216,9 +1237,10 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     return { ...OK, stdout: JSON.stringify({ result: "parked" }) };
   };
 
-  const buildingAgent: Runner = async (_file, _args, options) => {
+  const buildingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    await concludeDone(cwd, args);
     return { ...OK, stdout: AGENT_SAID };
   };
 

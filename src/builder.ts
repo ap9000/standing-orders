@@ -36,13 +36,14 @@ import type { Decision, Store } from "./store.js";
 import { approvalOf, type Scope } from "./scope.js";
 import { currentClaim, heartbeat, missingCapability } from "./claim.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
-import { parseDecision, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
+import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
+import { invokeAgent } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import {
-  MAILBOX_PREFIX,
   captureParkEvidence,
   evidenceRoot,
-  looksLikeMailbox,
+  handoffName,
+  looksLikeProtocolFile,
   mailboxName,
   quarantineMailboxes,
   readMailbox,
@@ -78,12 +79,11 @@ export type BuildRequest = {
   branch: string;
   now: Date;
   /**
-   * The open run record this attempt writes its facts to — the base revision
-   * before the agent spends, the park's evidence after. Optional only for a
-   * person driving `build` by hand through a caller that opened none; a park
-   * cannot be sealed without one, and says so.
+   * The open run record this attempt writes its facts to. Required: nothing
+   * spends without a record that will outlive it, and the invocation
+   * gateway refuses a paid call whose run is missing or already finished.
    */
-  runId?: number;
+  runId: number;
   /** Where evidence files live. Defaults to ~/.nightorders/evidence. */
   evidenceRoot?: string;
   /** Defaults to the safe one; see the note on permissions above. */
@@ -114,7 +114,15 @@ export type ParkPackage = {
 };
 
 export type BuildResult =
-  | { ok: true; parked?: undefined; committed: boolean; branch: string; summary: string }
+  | {
+      ok: true;
+      parked?: undefined;
+      committed: boolean;
+      /** The agent said no-change and the tree proves it: done, nothing to publish. */
+      noChange?: boolean;
+      branch: string;
+      summary: string;
+    }
   | { ok: true; parked: ParkPackage; branch: string }
   | { ok: false; reason: BuildRefusal; message: string; problems?: Problem[] };
 
@@ -130,6 +138,9 @@ export type BuildRefusal =
   | "moved-branch"
   | "fenced"
   | "agent"
+  | "agent-reported"
+  | "no-op"
+  | "moved-head"
   | "timeout"
   | "git"
   | "malformed-decision";
@@ -156,7 +167,6 @@ export const DEFAULT_PULSE_MS = 60_000;
 /** Branches an unattended agent may never commit to, whatever it was asked. */
 export const PROTECTED = new Set(["main", "master", "trunk", "develop", "release"]);
 
-const CLAUDE = "claude";
 const GIT = "git";
 
 /**
@@ -343,32 +353,33 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // idempotently: the run_decision row is the durable record of which
   // answers this run was actually given, and it is written here — where
   // every road to an agent passes — rather than trusted to the caller.
-  const answers =
-    request.runId === undefined
-      ? []
-      : store.attachAnswers(request.runId, taskRef).map(answered => ({
-          decision: answered,
-          choice: answered.choice ?? "",
-          note: answered.note,
-        }));
+  const answers = store.attachAnswers(request.runId, taskRef).map(answered => ({
+    decision: answered,
+    choice: answered.choice ?? "",
+    note: answered.note,
+  }));
 
-  // The base revision, stamped before the agent spends anything. Park
-  // evidence is a diff against this — not against whatever the index looks
-  // like when the agent stops, which the agent controls.
+  // The base revision, stamped before the agent spends anything. It anchors
+  // park evidence, and after the agent it is the law: the builder owns
+  // commits, so post-agent HEAD must still equal this or nothing is
+  // accepted. A worktree whose HEAD cannot be read cannot be built in.
   const revision = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
-  const baseRevision = revision.code === 0 ? revision.stdout.trim() : null;
-  if (request.runId !== undefined && baseRevision !== null) {
-    store.stampRun(request.runId, { baseRevision });
+  if (revision.code !== 0) {
+    return { ok: false, reason: "git", message: `could not read the base revision in ${worktree}` };
   }
+  const baseRevision = revision.stdout.trim();
+  store.stampRun(request.runId, { baseRevision });
 
-  // The mailbox: how the agent parks a judgement call. The name carries a
-  // nonce this attempt alone knows, and anything park-shaped already in the
-  // worktree is swept to quarantine first — a mailbox left by a cut-down
-  // attempt is never ingested, because the lease that could have vouched for
-  // it is gone. Its bytes are kept; its authority is not.
+  // The protocol files: the park mailbox and the terminal handoff. Both
+  // names carry nonces this attempt alone knows, and anything
+  // protocol-shaped already in the worktree is swept to quarantine first —
+  // a file left by a cut-down attempt is never ingested, because the lease
+  // that could have vouched for it is gone. Its bytes are kept; its
+  // authority is not.
   const root = request.evidenceRoot ?? evidenceRoot(homedir());
   const mailbox = mailboxName();
-  quarantineMailboxes(worktree, request.runId === undefined ? null : root, request.runId ?? null);
+  const done = handoffName();
+  quarantineMailboxes(worktree, root, request.runId);
 
   // The pulse: while the agent runs, the lease is extended and the runner
   // touched on every beat, so a healthy build never looks dead to a reaper on
@@ -400,11 +411,12 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
 
   let result: ExecResult;
   try {
-    result = await agent(
-      CLAUDE,
+    result = await invokeAgent(
+      store,
+      request.runId,
       [
         "-p",
-        brief(scope as Scope, branch, mailbox, answers),
+        brief(scope as Scope, branch, mailbox, done, answers),
         "--output-format",
         "json",
         "--max-turns",
@@ -412,7 +424,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         ...(skipPermissions ? ["--dangerously-skip-permissions"] : ["--permission-mode", permissionMode]),
         ...(model === undefined ? [] : ["--model", model]),
       ],
-      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST },
+      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, runner: agent, clock },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
@@ -421,7 +433,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   if (result.timedOut) {
     // A mailbox cut down mid-write is quarantined, never ingested: whatever
     // half-sentence it holds, no lease vouches for it as a decision.
-    quarantineMailboxes(worktree, request.runId === undefined ? null : root, request.runId ?? null);
+    quarantineMailboxes(worktree, root, request.runId);
     return {
       ok: false,
       reason: "timeout",
@@ -469,7 +481,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // function only assembles the package. Sealing it against the lease is
   // `finalizeParkFenced`, one transaction, in the caller's hands.
   const said = envelope(result.stdout);
-  if (request.runId !== undefined && said.sessionId !== undefined) {
+  if (said.sessionId !== undefined) {
     store.stampRun(request.runId, { sessionId: said.sessionId });
   }
   const parked = await ingestPark({
@@ -516,7 +528,104 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     };
   }
 
-  return commit(git, worktree, branch, taskId, scope as Scope, said.summary);
+  // The HEAD law: the builder owns commits, so after the agent HEAD must
+  // still be the base revision. An agent that committed for itself may have
+  // committed anything under any message — its work is preserved on disk,
+  // and none of it is accepted from here.
+  const headNow = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+  if (headNow.code !== 0) {
+    return { ok: false, reason: "git", message: `could not re-read HEAD in ${worktree}` };
+  }
+  if (headNow.stdout.trim() !== baseRevision) {
+    return {
+      ok: false,
+      reason: "moved-head",
+      message: `${worktree}'s HEAD moved from ${baseRevision.slice(0, 12)} to ${headNow.stdout.trim().slice(0, 12)} — the machine commits, the agent does not; the work is preserved`,
+    };
+  }
+
+  // The terminal handoff: how this attempt says it ended, or fails to. A
+  // clean tree is a success only when the agent said no-change; changes are
+  // committed only when it said completed; anything else is a protocol
+  // failure that earns a strike, never a guess that earns a commit.
+  const spoken = readMailbox(join(worktree, done));
+  try {
+    unlinkSync(join(worktree, done));
+  } catch {
+    // Missing or unremovable — either way the sweep and the commit-path
+    // exclusions keep it out of anybody's repository.
+  }
+  if (!spoken.ok) {
+    return {
+      ok: false,
+      reason: "no-op",
+      message: spoken.missing
+        ? `the agent finished without writing its handoff ${done} — an attempt that cannot say how it ended did not end well`
+        : `the handoff could not be read: ${spoken.problem}`,
+    };
+  }
+  const parsedHandoff = parseHandoff(spoken.raw.toString("utf8"));
+  if (!parsedHandoff.ok) {
+    return {
+      ok: false,
+      reason: "no-op",
+      message: `the handoff failed validation: ${parsedHandoff.problems.map(problem => problem.reason).join(", ")}`,
+      problems: parsedHandoff.problems,
+    };
+  }
+  const handoff = parsedHandoff.handoff;
+
+  if (handoff.status === "failed") {
+    // The model's own verdict, in its own words — gnhf's agent-reported
+    // failure, distinct from infrastructure breaking.
+    store.recordOutcomeFacts(request.runId, { handoff: handoff.conclusion });
+    return { ok: false, reason: "agent-reported", message: handoff.conclusion };
+  }
+
+  const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
+  if (status.code !== 0) {
+    return { ok: false, reason: "git", message: firstLine(status.stderr) };
+  }
+  const dirty = status.stdout
+    .split("\n")
+    .filter(
+      line =>
+        line.trim() !== "" &&
+        !line.trimEnd().endsWith(LEASE_MARKER) &&
+        !looksLikeProtocolFile(line.trim().split("/").pop() ?? line.trim()),
+    );
+
+  if (handoff.status === "no-change") {
+    if (dirty.length > 0) {
+      return {
+        ok: false,
+        reason: "no-op",
+        message: `the handoff said no-change but the tree has ${dirty.length} changed path(s) — a conclusion the evidence contradicts is not a conclusion`,
+      };
+    }
+    store.recordOutcomeFacts(request.runId, { headRevision: baseRevision, handoff: handoff.conclusion });
+    return { ok: true, committed: false, noChange: true, branch, summary: handoff.conclusion };
+  }
+
+  // completed
+  if (dirty.length === 0) {
+    return {
+      ok: false,
+      reason: "no-op",
+      message: "the handoff said completed but nothing changed — a claim of work with no work is the no-op gnhf warns about",
+    };
+  }
+  const made = await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion);
+  if (made.ok && made.parked === undefined && made.committed) {
+    const newHead = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
+    if (newHead.code === 0) {
+      store.recordOutcomeFacts(request.runId, {
+        headRevision: newHead.stdout.trim(),
+        handoff: handoff.conclusion,
+      });
+    }
+  }
+  return made;
 }
 
 /**
@@ -649,8 +758,9 @@ async function ingestPark(args: {
       now: clock(),
     });
 
-    const spoken = await agent(
-      CLAUDE,
+    const spoken = await invokeAgent(
+      store,
+      repairRun,
       [
         "-p",
         repairPrompt(problems, mailbox),
@@ -667,7 +777,7 @@ async function ingestPark(args: {
           ? []
           : ["--model", (request.repairModel ?? request.model) as string]),
       ],
-      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST },
+      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST, runner: agent, clock },
     );
 
     if (request.leaseId !== undefined) {
@@ -728,6 +838,7 @@ function brief(
   scope: Scope,
   branch: string,
   mailbox: string,
+  done: string,
   answers: readonly { decision: Decision; choice: string; note: string | null }[] = [],
 ): string {
   return [
@@ -787,7 +898,17 @@ function brief(
     "  Write it to a temporary name first, then rename it into place. State",
     "  every option's reversible field explicitly. Then stop — leave any work",
     "  in progress uncommitted.",
-    "- Leave the work committed or leave it uncommitted, but do not reset or discard it.",
+    "- Do NOT commit, and do not touch git history. Leave every change",
+    "  uncommitted in the working tree; committing is the machine's job, and",
+    "  a moved HEAD is refused outright. Never reset or discard work.",
+    "- When you finish — and you must always end explicitly, unless you",
+    `  parked — write ONE file named exactly ${done} in the worktree root:`,
+    '    { "version": 1, "status": "completed" | "no-change" | "failed",',
+    '      "conclusion": "<one paragraph: what you did, or why nothing was',
+    '      needed, or what stopped you>" }',
+    "  completed = you made the changes; no-change = the goal needs no change",
+    "  and the conclusion says why; failed = you could not do it. Write to a",
+    "  temporary name first, then rename it into place.",
     ...(answers.length === 0
       ? []
       : [
@@ -847,7 +968,7 @@ async function commit(
       line =>
         line.trim() !== "" &&
         !line.trimEnd().endsWith(LEASE_MARKER) &&
-        !line.includes(MAILBOX_PREFIX),
+        !line.includes("NIGHTORDERS-"),
     );
   if (changed.length === 0) {
     return { ok: true, committed: false, branch, summary };
@@ -855,7 +976,7 @@ async function commit(
 
   const add = await git(
     GIT,
-    ["add", "-A", "--", ".", `:!${LEASE_MARKER}`, `:!${MAILBOX_PREFIX}*`],
+    ["add", "-A", "--", ".", `:!${LEASE_MARKER}`, ":!NIGHTORDERS-*"],
     { cwd: worktree },
   );
   if (add.code !== 0) return { ok: false, reason: "git", message: firstLine(add.stderr) };

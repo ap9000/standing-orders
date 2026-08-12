@@ -124,6 +124,29 @@ parks that could not say what they wanted.
 | Web decision view (`serve`) | **done** | node:http, zero dependencies, no page JavaScript; approver credential required on every bind, localhost included (cookie session HttpOnly SameSite=Strict, or Bearer name:token — never a URL); Host proved before routing, Origin + CSRF on cookie mutations; every string escaped at the sink under a default-src 'none' CSP; irreversible options confirm-armed and server-checked; evidence streamed only through the decision's relation, hash re-proved, as a plain-text attachment. The milestone sentence is `serve.test.ts`'s first test |
 | Driver role | **deferred to M4** | the design's driver is the event-woken gate agent, which first exists with the loop; repair turns are recorded as `role='repair'` with parentage, because calling them a driver would make M4's cost data mean two things |
 
+## M4 — the loop — in progress (2026-08-12)
+
+Plan Codex-reviewed (37 findings, 24 HIGH; the findings are the spec).
+Executed as M4a (accounting, failure semantics, capacity, watch recovery)
+then M4b (publication, CI, briefing, packaging). Deferred post-M4, in
+writing: quiet hours, unanswered-decision escalation, deep links,
+multi-chat routing, the CI-repair driver, external-backend dispatch.
+
+| Item | State | Proof |
+|---|---|---|
+| Schema v4 | **done** | 'no-change' outcome, 'backoff' hold owner, stall/commit-failure incidents, strikes, claim incarnations, economics columns; one generic exact-DDL rebuild that refuses unknown shapes; proved on M2 and M3 fixtures |
+| Invocation gateway | **done** | `invokeAgent` is the only door to the provider binary — an architecture test fails any new direct call; runs are stamped before the spawn (provider spawns == stamped runs, crash-honest); usage read off every completed process, nonzero exits included; unmeasured stays NULL, never $0.00 |
+| Terminal handoff; the builder owns commits | **done** | agents no longer commit — post-agent HEAD must equal the base or it is `moved-head`, work preserved; every attempt ends with a typed handoff (completed / no-change / failed) or it is a `no-op` protocol failure; a stated no-change with a clean tree is a first-class successful outcome; agent-reported failure carries the agent's own words |
+| Measured economics in the brief | **done** | dollars and tokens summed from run records, reported as "measured across M/N invocations" with the gap named — no unqualified totals |
+| Fenced failure finalizer, backoff, strikes, stalls | next | — |
+| Capacity + quota gates | planned | — |
+| watch (lease, incarnations, single-flight, graceful stop) | planned | — |
+| Telegram follower + event wake | planned | — |
+| Publication grant + durable push/PR intent | planned | — |
+| CI observation + watch-episode briefing | planned | — |
+| Twelve-task E2E | planned | — |
+| Packaging (Node >=22.13 floor) + operator publish | planned | — |
+
 ## Toward M4 — the Telegram bridge (shipped early, 2026-08-11)
 
 The operator asked for the back-and-forth channel before M4: decisions to a
