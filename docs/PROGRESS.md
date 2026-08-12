@@ -82,7 +82,8 @@ only what it re-proves where it stands).
 | Capability records + probes | **done** | `capability` table (a test asserts there is nowhere to put a value), `cap add/list/probe`, sh-probes with the probe's own words kept on failure, no manual verify — an assertion is less than a probe |
 | Task placement + qualified requirements | **done** | `task_ref.repo`, `task add --repo`, `task require --cap kind:name` |
 | Detection from disk (`cap scan`) | not started | .env.example · .mcp.json · supabase/config.toml · workflow env; ci secrets are ci capabilities, not local env |
-| Dispatch gate: unverified does not run | not started | inside the claim transaction *and* the builder, not a tick prefilter |
+| Dispatch gate: unverified does not run | **done** | inside the claim transaction (a key that expired between survey and take is caught) *and* the builder (`nightorders build` cannot bypass it); tick probes at its own checkpoint and reports each gap by name |
+| Fill one gap, three tasks start | **done** | executable in `tick.test.ts`: three tasks skipped naming the gap, the capability supplied with the probe untouched, all three built on the next pass |
 | `gaps` ranked by what they unblock | not started | blocks_count counts only genuinely startable tasks |
 | Morning briefing | not started | run aggregation since a moment; REVIEW distinguishes "not read" from "zero" |
 | Notification outbox | not started | durable, deduped by episode, receipts recorded |

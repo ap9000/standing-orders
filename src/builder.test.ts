@@ -156,6 +156,42 @@ describe("the builder's gates", () => {
     expect(agentCalls).toHaveLength(0);
   });
 
+  test("will not build a task whose requirement nobody verified", async () => {
+    // tick's gate is one road here; `nightorders build` is another, and a
+    // gate one road bypasses is a suggestion.
+    claimIt();
+    approveScope();
+    store.setRequirements(taskRef, ["env:SUPABASE_KEY"]);
+
+    const result = await build(store, request());
+
+    expect(result).toMatchObject({ ok: false, reason: "capability" });
+    expect(agentCalls).toHaveLength(0);
+  });
+
+  test("builds once the requirement is verified for the worktree's repo", async () => {
+    claimIt();
+    approveScope();
+    store.setRequirements(taskRef, ["env:SUPABASE_KEY"]);
+    store.saveCapability({
+      repo: "/code/thing",
+      kind: "env",
+      name: "SUPABASE_KEY",
+      probe: 'test -n "$SUPABASE_KEY"',
+      status: "verified",
+      addedBy: "alex",
+      createdAt: T0.toISOString(),
+      lastVerifiedAt: T0.toISOString(),
+      verifiedBy: "builder-1",
+      lastResult: null,
+      expiresAt: null,
+    });
+
+    const result = await build(store, request());
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+  });
+
   test("refuses the repo's own default branch, even under a custom name", async () => {
     // `production` is on no hardcoded list, but origin says it is HEAD — and
     // the default branch by any name is the one an autonomous loop must not

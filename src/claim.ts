@@ -29,7 +29,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { BUILT_IN, type Store, type Mutation, type TaskState } from "./store.js";
+import {
+  BUILT_IN,
+  parseCapabilityKey,
+  type Store,
+  type Mutation,
+  type TaskState,
+} from "./store.js";
 
 export type Claim = {
   taskRef: number;
@@ -172,8 +178,12 @@ function latest(db: Store["handle"], taskRef: number): Record<string, unknown> |
     .get(taskRef);
 }
 
-/** Why `acquireIfReady` said no before the race was even run. */
-export type NotReady = { ok: false; reason: "not-ready"; message: string };
+/**
+ * Why `acquireIfReady` said no before the race was even run. `not-ready` is
+ * about the task's own state; `capability` is about the machine's — a gap a
+ * person can fill, named so the caller can say which.
+ */
+export type NotReady = { ok: false; reason: "not-ready" | "capability"; message: string };
 
 /**
  * Take the task, if it is free *and still worth taking*.
@@ -193,13 +203,67 @@ export function acquireIfReady(
   store: Store,
   taskRef: number,
   runner: string,
-  options: AcquireOptions,
+  options: AcquireOptions & { repo?: string },
 ): AcquireResult | NotReady {
   return inTransaction(store, () => {
     const why = notReady(store, taskRef, options.now);
     if (why !== null) return { ok: false as const, reason: "not-ready" as const, message: why };
+    // Capabilities are re-read inside the same transaction as the CAS, like
+    // every other readiness fact: a key that expired between the survey and
+    // the take must not be dispatched on the survey's answer.
+    const gap = missingCapability(store, taskRef, options.repo ?? null, options.now);
+    if (gap !== null) return { ok: false as const, reason: "capability" as const, message: gap };
     return acquireLocked(store, taskRef, runner, options);
   });
+}
+
+/**
+ * The first requirement this task fails, in words, or null. A requirement
+ * whose capability was never recorded fails too — fail closed is the only
+ * honest reading of "a task whose capabilities are not verified does not
+ * dispatch" when nobody has even written the capability down.
+ */
+export function missingCapability(
+  store: Store,
+  taskRef: number,
+  dispatchRepo: string | null,
+  now: Date,
+): string | null {
+  const db = store.handle;
+  const row = db
+    .prepare("SELECT repo, capability_requirements FROM task_ref WHERE id = ?")
+    .get(taskRef);
+  if (row === undefined) return "no such task reference";
+
+  let keys: string[];
+  try {
+    keys = JSON.parse(String(row["capability_requirements"] ?? "[]")) as string[];
+  } catch {
+    keys = [];
+  }
+  if (keys.length === 0) return null;
+
+  // The task's own placement wins; a task placed nowhere is judged against
+  // the repo this dispatch is for.
+  const repo = row["repo"] === null || row["repo"] === undefined ? dispatchRepo : String(row["repo"]);
+  if (repo === null) return `requires ${keys[0]} but is placed in no repository`;
+
+  const stamp = now.toISOString();
+  for (const key of keys) {
+    const parsed = parseCapabilityKey(key);
+    if (parsed === null) return `requirement \`${key}\` is not a capability key`;
+    const found = db
+      .prepare(
+        `SELECT status, expires_at FROM capability
+          WHERE repo = ? AND kind = ? AND name = ?`,
+      )
+      .get(repo, parsed.kind, parsed.name);
+    if (found === undefined) return `needs ${key} — unrecorded for ${repo}`;
+    if (String(found["status"]) !== "verified") return `needs ${key} — not verified`;
+    const expires = found["expires_at"];
+    if (expires !== null && String(expires) <= stamp) return `needs ${key} — verification expired`;
+  }
+  return null;
 }
 
 /** The first readiness condition this reference fails, in words, or null. */

@@ -580,3 +580,100 @@ describe("release provenance", () => {
     expect(store.getTask("t-1")?.state).toBe("queued");
   });
 });
+
+describe("the capability gate in acquireIfReady", () => {
+  let store: Store;
+  let task: number;
+
+  const cap = (over: Record<string, unknown> = {}) => ({
+    repo: "/code/thing",
+    kind: "env" as const,
+    name: "SUPABASE_KEY",
+    probe: 'test -n "$SUPABASE_KEY"',
+    status: "unprobed" as const,
+    addedBy: "alex",
+    createdAt: T0.toISOString(),
+    lastVerifiedAt: null,
+    verifiedBy: null,
+    lastResult: null,
+    expiresAt: null,
+    ...over,
+  });
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    task = store.refFor("built-in", "t-1").id;
+    store.setRequirements(task, ["env:SUPABASE_KEY"]);
+  });
+
+  afterEach(() => store.close());
+
+  test("an unrecorded requirement fails closed, and says so", () => {
+    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "capability",
+      message: "needs env:SUPABASE_KEY — unrecorded for /code/thing",
+    });
+  });
+
+  test("a recorded but unverified requirement does not dispatch", () => {
+    store.saveCapability(cap({ status: "failed" }));
+
+    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+
+    expect(result).toMatchObject({ ok: false, reason: "capability" });
+  });
+
+  test("a verified requirement lets the claim through", () => {
+    store.saveCapability(cap({ status: "verified" }));
+
+    const result = acquireIfReady(store, task, "runner-a", {
+      now: T0,
+      repo: "/code/thing",
+      newLeaseId: ids("lease-a"),
+    });
+
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  test("a verification that expired stopped counting", () => {
+    store.saveCapability(
+      cap({ status: "verified", expiresAt: new Date(T0.getTime() - 1_000).toISOString() }),
+    );
+
+    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "capability",
+      message: "needs env:SUPABASE_KEY — verification expired",
+    });
+  });
+
+  test("the task's own placement outranks the dispatcher's repo", () => {
+    // Verified where the dispatch is running, but the task lives elsewhere,
+    // and elsewhere has nothing recorded — the task's placement is the truth.
+    store.saveCapability(cap({ status: "verified" }));
+    store.placeTask(task, "/code/other");
+
+    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "capability",
+      message: "needs env:SUPABASE_KEY — unrecorded for /code/other",
+    });
+  });
+
+  test("a task requiring nothing is untouched by all of this", () => {
+    store.createTask({ id: "t-2", title: "free" }, T0);
+    const free = store.refFor("built-in", "t-2").id;
+
+    const result = acquireIfReady(store, free, "runner-a", { now: T0, newLeaseId: ids("lease-f") });
+
+    expect(result).toMatchObject({ ok: true });
+  });
+});

@@ -31,7 +31,7 @@
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Store } from "./store.js";
 import { approvalOf, type Scope } from "./scope.js";
-import { currentClaim, heartbeat } from "./claim.js";
+import { currentClaim, heartbeat, missingCapability } from "./claim.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 
 export type Runner = (
@@ -80,6 +80,7 @@ export type BuildResult =
 export type BuildRefusal =
   | "unapproved"
   | "scope-changed"
+  | "capability"
   | "no-claim"
   | "not-yours"
   | "not-leased"
@@ -201,6 +202,20 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ok: false,
       reason: "not-leased",
       message: `${worktree} was leased for another task — each build gets its own checkout`,
+    };
+  }
+
+  // What the task needs, the machine must verifiably have — checked here as
+  // well as at dispatch, because `nightorders build` reaches this function
+  // without passing through tick's gate, and a gate one road bypasses is a
+  // suggestion. Recorded statuses only: probes ran at the checkpoint, and a
+  // requirement nobody recorded fails closed.
+  const requirement = missingCapability(store, taskRef, leased.repo, now);
+  if (requirement !== null) {
+    return {
+      ok: false,
+      reason: "capability",
+      message: `${taskId} ${requirement} — \`nightorders cap probe\` after supplying it`,
     };
   }
 

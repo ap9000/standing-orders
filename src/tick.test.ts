@@ -359,3 +359,120 @@ describe("reconcile, against real git", () => {
     expect(row?.releasedAt).not.toBeNull();
   });
 });
+
+describe("fill one gap, three tasks start — the M2 sentence, executable", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+  let agentRan: string[] = [];
+
+  const agent: Runner = async (_file, _args, options) => {
+    const cwd = options?.cwd ?? "";
+    agentRan.push(cwd);
+    await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    return { ...OK, stdout: AGENT_SAID };
+  };
+
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+
+  const run = (argv: string[]) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), {
+      databaseFile: db,
+      now: T0,
+      agentRunner: agent,
+    });
+  };
+
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-m2-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    agentRan = [];
+
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("three blocked tasks dispatch the moment their one gap is supplied", async () => {
+    // -- Setup: a runner, an approver, and one capability the machine lacks.
+    await run(["runner", "register", "builder-1", "--json"]);
+    const runnerToken = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+
+    // The probe is written once and never edited again: supplying the
+    // capability, not redefining it, is what must open the gate.
+    await run([
+      "cap", "add", "granted", "--kind", "other",
+      "--probe", "test -f granted.txt", "--repo", repo,
+    ]);
+
+    for (const id of ["t-1", "t-2", "t-3"]) {
+      await run(["task", "add", "the work", "--id", id, "--repo", repo]);
+      await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
+      await run(["task", "approve", id, "--json"]);
+      const digest = payload().scope.digest as string;
+      await run([
+        "task", "approve", id, "--yes",
+        "--digest", digest, "--as", "alex", "--token", approverToken,
+      ]);
+      await run(["task", "require", id, "--cap", "other:granted"]);
+    }
+
+    const tick = () =>
+      run([
+        "tick", "--runner", "builder-1", "--token", runnerToken,
+        "--repo", repo, "--pool", pool, "--max", "3", "--json",
+      ]);
+
+    // -- Night one: the machine lacks the capability. Nothing runs, nothing
+    // is claimed, and every skip names the gap.
+    const blocked = await tick();
+    expect(blocked).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "nothing-dispatched", considered: 3 });
+    expect(payload().dispatched).toEqual([
+      { id: "t-1", outcome: "skipped", reason: "capability", detail: "needs other:granted — not verified" },
+      { id: "t-2", outcome: "skipped", reason: "capability", detail: "needs other:granted — not verified" },
+      { id: "t-3", outcome: "skipped", reason: "capability", detail: "needs other:granted — not verified" },
+    ]);
+    expect(agentRan).toHaveLength(0);
+
+    // -- The operator fills the gap. The probe is untouched; the world now
+    // satisfies it. (In life this is pasting a key; here it is a file.)
+    await writeFile(join(repo, "granted.txt"), "supplied\n");
+
+    // -- Night two: tick re-probes at its own checkpoint and all three start.
+    const opened = await tick();
+    expect(opened).toBe(EXIT.ok);
+    const report = payload();
+    expect(report.ok).toBe(true);
+    expect(report.dispatched).toHaveLength(3);
+    for (const entry of report.dispatched) expect(entry.outcome).toBe("built");
+    expect(agentRan).toHaveLength(3);
+
+    // Three real branches, three real commits, and main never moved.
+    for (const id of ["t-1", "t-2", "t-3"]) {
+      const shown = await git(["show", "--stat", "--oneline", `nightorders/${id}`]);
+      expect(shown.code).toBe(0);
+      expect(shown.stdout).toContain("guard.ts");
+    }
+    const main = await git(["log", "--oneline", "main"]);
+    expect(main.stdout.trim().split("\n")).toHaveLength(1);
+  });
+});

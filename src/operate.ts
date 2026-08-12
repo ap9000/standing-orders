@@ -792,6 +792,8 @@ type TickOutcome = {
   outcome: "built" | "skipped" | "failed";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
+  /** The gap's own words, when the reason is a capability. */
+  detail?: string;
   committed?: boolean;
   branch?: string;
   worktree?: string;
@@ -874,6 +876,12 @@ async function tickCommand(
     base = head.stdout.trim();
   }
 
+  // Probes run at every checkpoint (§3): a key revoked overnight is caught
+  // here, before any claim exists — not by the agent, forty thousand tokens
+  // in. Statuses land in the store; the gate inside the claim transaction is
+  // what acts on them.
+  await probeRepo(store, repo, runner, clock());
+
   const ready = store.listReady(clock());
   const considered = ready.length;
   const dispatched: TickOutcome[] = [];
@@ -884,6 +892,12 @@ async function tickCommand(
     if (built >= max) break;
     const id = ref.externalId;
 
+    // A task placed in another repository is not this pass's to build.
+    if (ref.repo !== null && ref.repo !== repo) {
+      dispatched.push({ id, outcome: "skipped", reason: "other-repo" });
+      continue;
+    }
+
     // Skip, not refuse: an unapproved task in the ready set is a person's
     // pending decision, and the pass reports it rather than spending on it.
     if (!approvalOf(store.getScope(id)).approved) {
@@ -891,11 +905,17 @@ async function tickCommand(
       continue;
     }
 
-    const claimed = acquireIfReady(store, ref.id, runner, { now: clock(), ttlMs: leaseTtlMs });
+    const claimed = acquireIfReady(store, ref.id, runner, { now: clock(), ttlMs: leaseTtlMs, repo });
     if (!claimed.ok) {
-      // Losing a race and finding the task no longer ready are both the
-      // system working. Neither fails the pass.
-      dispatched.push({ id, outcome: "skipped", reason: claimed.reason });
+      // Losing a race, finding the task no longer ready, and a machine that
+      // lacks what the task needs are all the system working. None fails the
+      // pass; a capability gap names itself so the gaps report can too.
+      dispatched.push({
+        id,
+        outcome: "skipped",
+        reason: claimed.reason,
+        ...("message" in claimed && claimed.reason === "capability" ? { detail: claimed.message } : {}),
+      });
       continue;
     }
     const lease = claimed.claim.leaseId;
