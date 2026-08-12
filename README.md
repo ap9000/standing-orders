@@ -93,8 +93,9 @@ It is deliberately a pass and not a daemon: point cron at it and the fences make
 ## No crontab required
 
 The loop manages itself as an OS service — launchd on macOS, systemd on
-Linux — so "set it running" is one command, and reboots and crashes are the
-supervisor's problem:
+Linux, Task Scheduler on Windows, chosen automatically — so "set it
+running" is one command, and reboots and crashes are the supervisor's
+problem:
 
 ```sh
 nightorders daemon install --runner builder-1 --token <runner-token> --repo ~/code/thing
@@ -112,6 +113,12 @@ service unit never carries it. Cron remains first-class if you prefer it —
 `reconcile && tick ; bridge telegram` on a schedule does the same jobs at
 cron's cadence, and a stray cron tick alongside a watch is safe (ordinary
 claims settle the race), it just is not needed.
+
+An honesty note for Windows: the scheduled-task definition follows the Task
+Scheduler XML schema and every `schtasks` interaction is covered by scripted
+tests, but it has not yet been exercised on a physical Windows machine —
+if you are the first, `daemon install --dry-run` shows exactly what it
+would register, and an issue report is very welcome.
 
 ## The phone, both directions
 

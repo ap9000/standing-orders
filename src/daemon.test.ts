@@ -84,7 +84,7 @@ describe("the daemon plan", () => {
 
   test("an unsupported platform refuses with instructions, not a broken unit", () => {
     const made = planDaemon({
-      platform: "win32",
+      platform: "freebsd",
       bin: "x",
       binArgs: [],
       runner: "r",
@@ -146,5 +146,86 @@ describe("the daemon plan", () => {
     expect(() => statSync(made.unitPath)).toThrow();
     // The token file survives — it is the database's neighbor, not the unit's.
     expect(statSync(made.tokenFile).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("the daemon on windows", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "nightorders-daemon-win-"));
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (): DaemonPlan => {
+    const made = planDaemon({
+      platform: "win32",
+      bin: "C:\\Users\\alex\\AppData\\Roaming\\npm\\nightorders.cmd",
+      binArgs: [],
+      runner: "builder-1",
+      repo: "C:\\code\\thing",
+      configDir: dir,
+      watchFlags: [],
+      home: dir,
+    });
+    if ("error" in made) throw new Error(made.error);
+    return made;
+  };
+
+  test("the scheduled task restarts on failure, logs, and never carries the token", () => {
+    const made = plan();
+
+    expect(made.unitContent).toContain("<LogonTrigger>");
+    expect(made.unitContent).toContain("<RestartOnFailure>");
+    expect(made.unitContent).toContain("StartWhenAvailable");
+    // One instance at a time: the scheduler's own watch-busy.
+    expect(made.unitContent).toContain("IgnoreNew");
+    // The action funnels output into the shared log file via cmd.
+    expect(made.unitContent).toContain("cmd.exe");
+    expect(made.unitContent).toContain("--token-file");
+    expect(made.unitContent).not.toContain("--token ");
+    // No wall-clock kill: watch is supposed to run forever.
+    expect(made.unitContent).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+  });
+
+  test("install creates the task from its XML and starts it now", async () => {
+    const made = plan();
+    const script = scripted({ schtasks: { code: 0 } });
+
+    const installed = await installDaemon(made, "secret-token", script.run);
+
+    expect(installed).toMatchObject({ ok: true });
+    expect(readFileSync(made.tokenFile, "utf8").trim()).toBe("secret-token");
+    expect(script.calls.map(call => call.args.slice(0, 2).join(" "))).toEqual([
+      `/Create /TN`,
+      `/Run /TN`,
+    ].map((prefix, index) => script.calls[index]!.args.slice(0, 2).join(" ")));
+    expect(script.calls[0]?.args).toContain("/XML");
+    expect(script.calls[0]?.args).toContain("/F");
+  });
+
+  test("status reads the scheduler's answer; a missing task is not-installed", async () => {
+    const made = plan();
+
+    const running = scripted({ "schtasks /Query": { code: 0, stdout: "TaskName: x\nStatus:  Running\n" } });
+    expect(await daemonStatus(made, running.run)).toMatchObject({ state: "running" });
+
+    const idle = scripted({ "schtasks /Query": { code: 0, stdout: "Status:  Ready\n" } });
+    expect(await daemonStatus(made, idle.run)).toMatchObject({ state: "loaded" });
+
+    const missing = scripted({ "schtasks /Query": { code: 1 } });
+    expect(await daemonStatus(made, missing.run)).toMatchObject({ state: "not-installed" });
+  });
+
+  test("uninstall ends the task and deletes it", async () => {
+    const made = plan();
+    const script = scripted({ schtasks: { code: 0 } });
+    await installDaemon(made, "secret-token", script.run);
+    script.calls.length = 0;
+
+    await uninstallDaemon(made, script.run);
+
+    expect(script.calls.map(call => call.args[0])).toEqual(["/End", "/Delete"]);
   });
 });

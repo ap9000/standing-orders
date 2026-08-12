@@ -2,7 +2,8 @@
  * The daemon manager: the loop as a service, with no crontab in sight.
  *
  * `nightorders daemon install` writes the platform's own supervision unit —
- * a launchd LaunchAgent on macOS, a systemd user unit on Linux — pointed at
+ * a launchd LaunchAgent on macOS, a systemd user unit on Linux, a Task
+ * Scheduler task on Windows, chosen by process.platform — pointed at
  * `nightorders watch`, and loads it. The OS keeps it alive across crashes
  * and reboots; watch's incarnation recovery is what makes those restarts
  * safe, so the two halves were built for each other.
@@ -31,7 +32,7 @@ export type SupervisorRunner = (
 ) => Promise<ExecResult>;
 
 export type DaemonPlan = {
-  platform: "darwin" | "linux";
+  platform: "darwin" | "linux" | "win32";
   label: string;
   unitPath: string;
   unitContent: string;
@@ -65,7 +66,7 @@ export function planDaemon(args: {
 }): DaemonPlan | { error: string } {
   const { platform, bin, binArgs, runner, repo, configDir, watchFlags } = args;
   const home = args.home ?? homedir();
-  if (platform !== "darwin" && platform !== "linux") {
+  if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
     return {
       error: `no supervisor template for ${platform} — run \`nightorders watch\` under your own service manager`,
     };
@@ -129,6 +130,55 @@ ${escaped}
     };
   }
 
+  if (platform === "win32") {
+    // Task Scheduler is Windows' launchd: a logon-triggered task, restarted
+    // on failure, created from an XML definition — no admin, no Service
+    // wrapper. schtasks does not redirect output, so the action runs
+    // through cmd with an append redirection into the same log file the
+    // other platforms use.
+    const inner = [quoteWin(bin), ...binArgs.map(quoteWin), "watch",
+      "--runner", quoteWin(runner), "--token-file", quoteWin(tokenFile),
+      "--repo", quoteWin(repo), ...watchFlags.map(quoteWin)].join(" ");
+    const cmdArguments = `/c "${inner} >> ${quoteWin(logPath)} 2>&1"`;
+    const unitContent = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>nightorders watch — ${xml(repo)}</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>${xml(cmdArguments)}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
+    return {
+      platform,
+      label,
+      unitPath: join(configDir, "daemon", `${label}.xml`),
+      unitContent,
+      logPath,
+      tokenFile,
+    };
+  }
+
   const unitContent = `[Unit]
 Description=nightorders watch — ${repo}
 
@@ -178,6 +228,20 @@ export async function installDaemon(
     };
   }
 
+  if (plan.platform === "win32") {
+    // /F replaces an existing definition, so re-install is idempotent; the
+    // task starts immediately rather than waiting for the next logon.
+    const created = await run("schtasks", ["/Create", "/TN", plan.label, "/XML", plan.unitPath, "/F"]);
+    if (created.code !== 0) {
+      return { ok: false, message: `schtasks /Create failed: ${firstLine(created.stderr) || `exit ${created.code}`}` };
+    }
+    const started = await run("schtasks", ["/Run", "/TN", plan.label]);
+    if (started.code !== 0) {
+      return { ok: false, message: `created, but schtasks /Run failed: ${firstLine(started.stderr)}` };
+    }
+    return { ok: true };
+  }
+
   const reload = await run("systemctl", ["--user", "daemon-reload"]);
   if (reload.code !== 0) {
     return { ok: false, message: `systemctl daemon-reload failed: ${firstLine(reload.stderr)}` };
@@ -197,6 +261,9 @@ export async function uninstallDaemon(
     const uid = typeof process.getuid === "function" ? process.getuid() : 501;
     const modern = await run("launchctl", ["bootout", `gui/${uid}/${plan.label}`]);
     if (modern.code !== 0) await run("launchctl", ["unload", plan.unitPath]);
+  } else if (plan.platform === "win32") {
+    await run("schtasks", ["/End", "/TN", plan.label]);
+    await run("schtasks", ["/Delete", "/TN", plan.label, "/F"]);
   } else {
     await run("systemctl", ["--user", "disable", "--now", plan.label]);
   }
@@ -222,6 +289,17 @@ export async function daemonStatus(
       ? { state: "loaded", pid: null, detail: "loaded, not currently running" }
       : { state: "running", pid: Number(pid), detail: `running as pid ${pid}` };
   }
+  if (plan.platform === "win32") {
+    const answer = await run("schtasks", ["/Query", "/TN", plan.label, "/FO", "LIST", "/V"]);
+    if (answer.code !== 0) {
+      return { state: "not-installed", pid: null, detail: "the scheduler does not know the task" };
+    }
+    const running = /Status:\s*Running/i.test(answer.stdout);
+    return running
+      ? { state: "running", pid: null, detail: "running (Task Scheduler does not expose the pid)" }
+      : { state: "loaded", pid: null, detail: "installed, not currently running" };
+  }
+
   const answer = await run("systemctl", ["--user", "is-active", plan.label]);
   const active = answer.stdout.trim() === "active";
   if (answer.code !== 0 && !active) {
@@ -236,6 +314,11 @@ export async function daemonStatus(
 
 function xml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** cmd.exe quoting: wrap anything with spaces; embedded quotes are not survivable in cmd — refuse them upstream by construction (paths and flags here never carry them). */
+function quoteWin(part: string): string {
+  return /[\s&|<>^]/.test(part) ? `"${part}"` : part;
 }
 
 function systemdEscape(part: string): string {
