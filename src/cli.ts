@@ -178,6 +178,7 @@ const OPERATE_COMMANDS = new Set([
   "brief",
   "decide",
   "incident",
+  "serve",
   "reconcile",
 ]);
 

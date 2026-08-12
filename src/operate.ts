@@ -38,6 +38,7 @@ import {
   type TaskState,
 } from "./store.js";
 import { probeRepo, isVerified } from "./probe.js";
+import { createDecisionServer } from "./serve.js";
 import { scanRepo } from "./capscan.js";
 
 type CapabilityKind = Capability["kind"];
@@ -202,7 +203,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
     "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
-    "choose", "note", "max-open-decisions",
+    "choose", "note", "max-open-decisions", "port", "host", "allow-host",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -326,6 +327,8 @@ async function dispatch(
       return decideCommand(positional, flags, context);
     case "incident":
       return incidentCommand(positional, flags, context);
+    case "serve":
+      return serveCommand(flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -1825,6 +1828,54 @@ function decideCommand(
           "The task returns to the ready set; the next tick resumes it with your answer in hand.",
         ],
   );
+}
+
+/**
+ * `nightorders serve [--port N] [--host H] [--allow-host name:port …]` —
+ * the decision view, on a phone. Signing in takes the approver credential;
+ * there is no unauthenticated bind, localhost included. Plain HTTP: put a
+ * TLS proxy in front for anything beyond a trusted network — Tailscale is
+ * the intended road, with its name passed via --allow-host.
+ */
+async function serveCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const port = Number(text(flags, "port") ?? 4180);
+  const host = text(flags, "host") ?? "127.0.0.1";
+  const allow = text(flags, "allow-host");
+
+  const server = createDecisionServer({
+    store,
+    evidenceRoot: context.evidenceRoot,
+    clock: context.clock,
+    ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => resolve());
+  }).catch(error => {
+    throw new Error(`could not listen on ${host}:${port} — ${describe(error)}`);
+  });
+
+  const bound = server.address();
+  const actual = typeof bound === "object" && bound !== null ? bound.port : port;
+  if (json) {
+    write(JSON.stringify({ ok: true, command: "serve", host, port: actual }, null, 2));
+  } else {
+    write(`Decisions at http://${host}:${actual}/ — sign in with your approver name and token.`);
+    write("Plain HTTP: keep it on localhost or a tailnet, and put TLS in front for anything else.");
+    write("Ctrl-C stops it.");
+  }
+
+  await new Promise<void>(resolve => {
+    const stop = () => server.close(() => resolve());
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+  return EXIT.ok;
 }
 
 /**
