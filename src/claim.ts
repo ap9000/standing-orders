@@ -37,6 +37,7 @@ import {
   type TaskState,
 } from "./store.js";
 import type { ParsedDecision, Problem } from "./decision.js";
+import { PROVIDER_BINARY } from "./invoke.js";
 
 export type Claim = {
   taskRef: number;
@@ -186,7 +187,7 @@ function latest(db: Store["handle"], taskRef: number): Record<string, unknown> |
  */
 export type NotReady = {
   ok: false;
-  reason: "not-ready" | "capability" | "attention-budget";
+  reason: "not-ready" | "capability" | "attention-budget" | "capacity" | "quota";
   message: string;
 };
 
@@ -211,7 +212,12 @@ export function acquireIfReady(
   store: Store,
   taskRef: number,
   runner: string,
-  options: AcquireOptions & { repo?: string; maxOpenDecisions?: number },
+  options: AcquireOptions & {
+    repo?: string;
+    maxOpenDecisions?: number;
+    /** The model this dispatch would run — the quota scope. */
+    model?: string;
+  },
 ): AcquireResult | NotReady {
   return inTransaction(store, () => {
     const why = notReady(store, taskRef, options.now);
@@ -221,6 +227,38 @@ export function acquireIfReady(
     // the take must not be dispatched on the survey's answer.
     const gap = missingCapability(store, taskRef, options.repo ?? null, options.now);
     if (gap !== null) return { ok: false as const, reason: "capability" as const, message: gap };
+
+    // Capacity (§8 gate 3), counted where the claim lands — two overlapping
+    // passes cannot both see a free slot that only exists once. Enforced for
+    // registered runners; a runner the store has never met is a test driving
+    // the API directly, and the CLI always registers.
+    const registered = store.getRunner(runner);
+    if (registered !== null) {
+      const held = store.liveClaimCount(runner, options.now);
+      if (held >= registered.runner.capacity) {
+        return {
+          ok: false as const,
+          reason: "capacity" as const,
+          message: `${runner} holds ${held} of ${registered.runner.capacity} slot(s) — a free CPU against a full ledger is not capacity`,
+        };
+      }
+    }
+
+    // Quota, same gate: an exhausted credential refuses; a half-open one
+    // admits exactly this dispatch as its probe, consumed here so a racing
+    // pass cannot also treat it as open.
+    const scope = options.model ?? "";
+    const quota = store.quotaState(runner, PROVIDER_BINARY, scope, options.now);
+    if (quota !== null) {
+      if (quota.state === "exhausted") {
+        return {
+          ok: false as const,
+          reason: "quota" as const,
+          message: `${runner}'s provider quota is exhausted (${quota.reason})${quota.resetAt === null ? "" : ` until ${quota.resetAt}`} — a free slot against an exhausted quota is not capacity`,
+        };
+      }
+      store.consumeHalfOpen(runner, PROVIDER_BINARY, scope, options.now);
+    }
     // The attention budget (§8, gate 6), proved where every other readiness
     // fact is proved. A phone with thirty open questions answers none of
     // them; above the budget, tasks with a *measured* habit of parking step

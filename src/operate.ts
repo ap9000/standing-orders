@@ -39,6 +39,7 @@ import {
 } from "./store.js";
 import { randomUUID } from "node:crypto";
 import { probeRepo, isVerified } from "./probe.js";
+import { PROVIDER_BINARY } from "./invoke.js";
 import { createDecisionServer } from "./serve.js";
 import {
   bridgePass,
@@ -1066,6 +1067,7 @@ async function tickCommand(
       now: clock(),
       ttlMs: leaseTtlMs,
       repo,
+      ...(model === undefined ? {} : { model }),
       ...(text(flags, "max-open-decisions") === undefined
         ? {}
         : { maxOpenDecisions: Number(text(flags, "max-open-decisions")) }),
@@ -1204,8 +1206,11 @@ async function tickCommand(
           committed: result.committed,
           now: clock(),
         });
-        // A concluded success ends the failure streak and its backoff.
+        // A concluded success ends the failure streak and its backoff —
+        // and proves the credential, clearing any quota stamp it was
+        // dispatched through as a half-open probe.
         store.resetStrikes(ref.id);
+        store.clearQuota(runner, PROVIDER_BINARY, model ?? "");
         dispatched.push({
           id,
           outcome: "built",

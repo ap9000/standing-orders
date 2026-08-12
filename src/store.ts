@@ -670,6 +670,23 @@ CREATE TABLE IF NOT EXISTS bridge_lease (
   heartbeat_at TEXT NOT NULL
 );
 
+-- Provider quota, keyed to what actually exhausts: one runner's credential
+-- against one provider and scope — never the whole runner (§8 gate 3). A
+-- free CPU slot against an exhausted quota is not capacity. 'half-open'
+-- admits exactly one real dispatch after the reset; its success clears the
+-- row, the same structured signal re-stamps it. Nothing stamps this from
+-- stderr prose — only structured signals or an operator.
+CREATE TABLE IF NOT EXISTS quota (
+  runner      TEXT NOT NULL,
+  provider    TEXT NOT NULL,
+  scope       TEXT NOT NULL DEFAULT '',
+  state       TEXT NOT NULL CHECK (state IN ('exhausted','half-open')),
+  reason      TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  reset_at    TEXT,
+  PRIMARY KEY (runner, provider, scope)
+);
+
 -- A machine that may be given work.
 --
 -- credential_hash, never the credential: the token is shown to the operator
@@ -2839,6 +2856,100 @@ export class Store {
     this.db
       .prepare("UPDATE bridge_lease SET expires_at = ? WHERE bot_id = ? AND owner = ?")
       .run(now.toISOString(), botId, owner);
+  }
+
+  // ---- quota ---------------------------------------------------------------
+
+  /** Record that a credential ran dry — from a structured signal or an operator, never prose. */
+  stampQuota(
+    quota: { runner: string; provider: string; scope?: string; reason: string; resetAt?: Date },
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO quota (runner, provider, scope, state, reason, observed_at, reset_at)
+         VALUES (?, ?, ?, 'exhausted', ?, ?, ?)
+         ON CONFLICT (runner, provider, scope) DO UPDATE SET
+           state = 'exhausted', reason = excluded.reason,
+           observed_at = excluded.observed_at, reset_at = excluded.reset_at`,
+      )
+      .run(
+        quota.runner,
+        quota.provider,
+        quota.scope ?? "",
+        quota.reason,
+        now.toISOString(),
+        quota.resetAt === undefined ? null : quota.resetAt.toISOString(),
+      );
+  }
+
+  /**
+   * The quota gate's answer, with the lazy exhausted→half-open transition at
+   * the known reset. Null means no recorded constraint.
+   */
+  quotaState(
+    runner: string,
+    provider: string,
+    scope: string,
+    now: Date,
+  ): { state: "exhausted" | "half-open"; reason: string; resetAt: string | null } | null {
+    const stamp = now.toISOString();
+    this.db
+      .prepare(
+        `UPDATE quota SET state = 'half-open'
+          WHERE runner = ? AND provider = ? AND scope = ? AND state = 'exhausted'
+            AND reset_at IS NOT NULL AND reset_at <= ?`,
+      )
+      .run(runner, provider, scope, stamp);
+    const row = this.db
+      .prepare("SELECT state, reason, reset_at FROM quota WHERE runner = ? AND provider = ? AND scope = ?")
+      .get(runner, provider, scope);
+    if (row === undefined) return null;
+    return {
+      state: String(row["state"]) as "exhausted" | "half-open",
+      reason: String(row["reason"]),
+      resetAt: row["reset_at"] === null ? null : String(row["reset_at"]),
+    };
+  }
+
+  /**
+   * Take the half-open slot: exactly one dispatch probes a recovered quota.
+   * The conditional update is what makes it exactly one — and it re-arms
+   * the exhausted state for a short window so racing passes stay refused
+   * while the probe flies. The probe's success clears the row; the same
+   * structured signal that stamped it re-stamps on failure.
+   */
+  consumeHalfOpen(runner: string, provider: string, scope: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE quota SET state = 'exhausted', reset_at = ?
+          WHERE runner = ? AND provider = ? AND scope = ? AND state = 'half-open'`,
+      )
+      .run(new Date(now.getTime() + 5 * 60_000).toISOString(), runner, provider, scope);
+    return Number(changes) > 0;
+  }
+
+  /** A structured all-clear (or an operator's), by name. */
+  clearQuota(runner: string, provider: string, scope: string): boolean {
+    const { changes } = this.db
+      .prepare("DELETE FROM quota WHERE runner = ? AND provider = ? AND scope = ?")
+      .run(runner, provider, scope);
+    return Number(changes) > 0;
+  }
+
+  /** Live claims this runner holds right now — the occupied slots of §8's capacity gate. */
+  liveClaimCount(runner: string, now: Date): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM claim
+          WHERE runner = ? AND released_at IS NULL AND expires_at > ?
+            AND lease_generation = (
+              SELECT MAX(newest.lease_generation) FROM claim AS newest
+              WHERE newest.task_ref = claim.task_ref
+            )`,
+      )
+      .get(runner, now.toISOString());
+    return Number(row?.["n"] ?? 0);
   }
 
   /** Forward only, and only under the live generation. A stale poller moves nothing. */

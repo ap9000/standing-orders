@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
+import { register } from "./runner.js";
 import {
   acquire,
   acquireIfReady,
@@ -1101,5 +1102,85 @@ describe("the failure taxonomy, fenced", () => {
 
     store.requeueTask("t-1", "alex", later(2_000));
     expect(store.strandedTasks()).toEqual([]);
+  });
+});
+
+describe("capacity and quota, at the claim", () => {
+  let store: Store;
+  let a: number;
+  let b: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.createTask({ id: "t-a", title: "a" }, T0);
+    store.createTask({ id: "t-b", title: "b" }, T0);
+    a = store.refFor("built-in", "t-a").id;
+    b = store.refFor("built-in", "t-b").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("a full runner is refused its second claim, and freed by releasing", () => {
+    register(store, { name: "small", host: "h", now: T0, capacity: 1 });
+
+    const first = acquireIfReady(store, a, "small", { now: T0, newLeaseId: ids("lease-a") });
+    expect(first).toMatchObject({ ok: true });
+
+    const second = acquireIfReady(store, b, "small", { now: later(1_000) });
+    expect(second).toMatchObject({ ok: false, reason: "capacity" });
+
+    release(store, "lease-a", later(2_000));
+    expect(acquireIfReady(store, b, "small", { now: later(3_000) })).toMatchObject({ ok: true });
+  });
+
+  test("an unregistered runner is not capacity-gated — the CLI always registers", () => {
+    expect(acquireIfReady(store, a, "ghost", { now: T0 })).toMatchObject({ ok: true });
+  });
+
+  test("an exhausted quota refuses dispatch until its reset, then admits one probe", () => {
+    register(store, { name: "r", host: "h", now: T0, capacity: 4 });
+    store.stampQuota(
+      { runner: "r", provider: "claude", reason: "credit exhausted", resetAt: later(60_000) },
+      T0,
+    );
+
+    const refused = acquireIfReady(store, a, "r", { now: later(1_000) });
+    expect(refused).toMatchObject({ ok: false, reason: "quota" });
+    if (refused.ok === false && refused.reason === "quota") {
+      expect(refused.message).toContain("credit exhausted");
+    }
+
+    // Past the reset: half-open admits exactly one dispatch as the probe…
+    const probe = acquireIfReady(store, a, "r", { now: later(61_000) });
+    expect(probe).toMatchObject({ ok: true });
+    // …and re-arms while the probe flies, so a racing pass stays out.
+    const racing = acquireIfReady(store, b, "r", { now: later(61_500) });
+    expect(racing).toMatchObject({ ok: false, reason: "quota" });
+
+    // The probe's success clears the stamp; everything flows again.
+    store.clearQuota("r", "claude", "");
+    expect(acquireIfReady(store, b, "r", { now: later(62_000) })).toMatchObject({ ok: true });
+  });
+
+  test("quota is scoped: another model's credential is not this one's exhaustion", () => {
+    register(store, { name: "r", host: "h", now: T0, capacity: 4 });
+    store.stampQuota({ runner: "r", provider: "claude", scope: "opus", reason: "quota" }, T0);
+
+    expect(acquireIfReady(store, a, "r", { now: later(1_000), model: "opus" })).toMatchObject({
+      ok: false,
+      reason: "quota",
+    });
+    expect(acquireIfReady(store, a, "r", { now: later(2_000), model: "haiku" })).toMatchObject({
+      ok: true,
+    });
+  });
+
+  test("no reset time means exhausted until somebody says otherwise", () => {
+    register(store, { name: "r", host: "h", now: T0, capacity: 4 });
+    store.stampQuota({ runner: "r", provider: "claude", reason: "auth revoked" }, T0);
+
+    expect(acquireIfReady(store, a, "r", { now: later(9e9) })).toMatchObject({ ok: false, reason: "quota" });
+    store.clearQuota("r", "claude", "");
+    expect(acquireIfReady(store, a, "r", { now: later(9e9 + 1_000) })).toMatchObject({ ok: true });
   });
 });
