@@ -477,6 +477,9 @@ describe("the operations console", () => {
       redirect: "manual",
     });
 
+  // Recent, not T0: the home page windows "the last 24 hours" against the
+  // real clock, and a fixed seed instant would make this suite fail at a
+  // particular time of day.
   const seedRun = (taskRef: number, n: number) =>
     store.startRun({
       taskRef,
@@ -484,7 +487,7 @@ describe("the operations console", () => {
       runner: "builder-1",
       branch: `nightorders/x-${n}`,
       worktree: `/pool/x-${n}`,
-      now: T0,
+      now: new Date(Date.now() - n * 60_000),
     });
 
   beforeEach(async () => {
@@ -516,7 +519,7 @@ describe("the operations console", () => {
     store.createTask({ id: "t-1", title: "the work" }, T0);
     const ref = store.refFor("built-in", "t-1").id;
     const run = seedRun(ref, 1);
-    store.stampProviderStart(run, T0);
+    store.stampProviderStart(run, new Date());
     store.recordUsage(run, { tokensIn: 100, tokensOut: 50, costUsd: 1.25 });
     store.finishRun(run, { outcome: "built", reason: "clean", now: T0 });
     const incidentRun = seedRun(ref, 2);
@@ -529,8 +532,8 @@ describe("the operations console", () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
 
-    expect(home).toContain("1 built");
-    expect(home).toContain("$1.2500");
+    expect(home).toContain("<b>1</b> built");
+    expect(home).toContain("$1.25");
     expect(home).toContain("attempts-exhausted");
     expect(home).toContain("t-blocked");
     expect(home).toContain("t-dead");
@@ -698,7 +701,7 @@ describe("the operations console", () => {
     expect((await fetch(url("/runs?before=9007199254740993"), { headers: { cookie } })).status).toBe(400);
 
     const screen = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
-    expect(screen).toContain("$0.4200");
+    expect(screen).toContain("$0.42");
     expect(screen).toContain("Wired the guard; tests added.");
   });
 

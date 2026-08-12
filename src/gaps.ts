@@ -118,6 +118,6 @@ export function describeCapability(capability: Capability, now: Date): string {
     return `verified ${capability.lastVerifiedAt} by ${capability.verifiedBy ?? "unknown"}`;
   }
   if (capability.status === "verified") return `verified, but expired ${capability.expiresAt}`;
-  if (capability.status === "failed") return `failed  ${capability.lastResult ?? ""}`.trimEnd();
+  if (capability.status === "failed") return `failed ${capability.lastResult ?? ""}`.trimEnd();
   return capability.probe === null ? "unprobed — no probe, nothing can vouch" : "unprobed";
 }

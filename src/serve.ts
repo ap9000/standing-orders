@@ -285,7 +285,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/tasks") {
       const wanted = url.searchParams.get("state");
       if (wanted !== null && !TASK_STATES.includes(wanted as TaskState)) {
-        return respond(response, 400, "text/plain; charset=utf-8", "no such state");
+        return refuse(response, who, 400, "no such state", "/tasks");
       }
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       return page(
@@ -310,7 +310,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       let before: number | null = null;
       if (raw !== null) {
         if (!/^[1-9][0-9]{0,14}$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
-          return respond(response, 400, "text/plain; charset=utf-8", "bad cursor");
+          return refuse(response, who, 400, "that cursor is not a page", "/runs");
         }
         before = Number(raw);
       }
@@ -322,7 +322,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (run !== null) {
       const found = store.getRun(Number(run[1]));
       if (found === null || !runVisible(found)) {
-        return respond(response, 404, "text/plain; charset=utf-8", "no such run");
+        return refuse(response, who, 404, "no such run", "/runs");
       }
       const taskId = store.externalIdFor(found.taskRef) ?? "?";
       return page(response, 200, runPage(found, taskId, store.artifactsFor(found.id)));
@@ -354,7 +354,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const one = /^\/d\/([0-9]{1,15})$/.exec(url.pathname);
     if (one !== null) {
       const decision = store.getDecision(Number(one[1]));
-      if (decision === null) return respond(response, 404, "text/plain; charset=utf-8", "no such decision");
+      if (decision === null) return refuse(response, who, 404, "no such decision");
       const taskId = taskOf(store, decision);
       return page(response, 200, decisionPage(decision, taskId, store.evidenceFor(decision.id), who, now));
     }
@@ -417,7 +417,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   ): Promise<void> {
     const body = await form(request);
     const denied = authorizeMutation(request, who, body);
-    if (denied !== null) return respond(response, denied.status, "text/plain; charset=utf-8", denied.message);
+    if (denied !== null) return refuse(response, who, denied.status, denied.message);
     const now = clock();
 
     if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {
@@ -452,14 +452,14 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (answer !== null) {
       const id = Number(answer[1]);
       const decision = store.getDecision(id);
-      if (decision === null) return respond(response, 404, "text/plain; charset=utf-8", "no such decision");
+      if (decision === null) return refuse(response, who, 404, "no such decision");
       const choice = body.get("choice") ?? "";
       const chosen = decision.options.find(option => option.id === choice);
       // Irreversible options never ride one accidental tap: the form arms
       // them behind an explicit confirmation field, and the server checks —
       // the client rendering is convenience, this is the rule.
       if (chosen !== undefined && !chosen.reversible && body.get("confirm") !== "yes") {
-        return respond(response, 400, "text/plain; charset=utf-8", "an irreversible choice must be confirmed");
+        return refuse(response, who, 400, "an irreversible choice must be confirmed", `/d/${id}`);
       }
       const note = body.get("note");
       const answered = store.answerDecision(
@@ -474,7 +474,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
       if (!answered.ok) {
         const status = answered.reason === "bad-option" || answered.reason === "bad-note" ? 400 : 409;
-        return respond(response, status, "text/plain; charset=utf-8", answered.reason);
+        const why = answered.reason === "already-answered" ? "already answered — somebody got there first" : answered.reason;
+        return refuse(response, who, status, why, `/d/${id}`);
       }
       return redirect(response, `/d/${id}`);
     }
@@ -488,7 +489,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (resolve !== null) {
       const id = Number(resolve[1]);
       const resolved = store.resolveIncident(id, who.name, now);
-      if (!resolved) return respond(response, 409, "text/plain; charset=utf-8", "already resolved, or never open");
+      if (!resolved) return refuse(response, who, 409, "already resolved, or never open");
       return redirect(response, incidentHome(id));
     }
 
@@ -505,7 +506,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   ): void {
     const ref = store.lookupRef(taskId);
     if (ref === null || store.getTask(taskId) === null) {
-      return respond(response, 404, "text/plain; charset=utf-8", "no such task");
+      return refuse(response, who, 404, "no such task", "/tasks");
     }
 
     switch (verb) {
@@ -709,6 +710,19 @@ function taskHref(taskId: string): string {
   return `/t/${encodeURIComponent(taskId)}`;
 }
 
+/** The spend line for a 7am reader: whole cents, "runs", the gap still named. */
+function consoleSpend(summary: ReturnType<typeof overnight<Run & { taskId: string }>>): string {
+  if (summary.invoked.length === 0) return "nothing — no provider was invoked";
+  const dollars = `$${summary.spend.toFixed(2)}`;
+  const gap = summary.invoked.length - summary.measured.length;
+  return `${dollars} across ${summary.invoked.length} run(s)${gap > 0 ? ` — ${gap} unmeasured` : ""}`;
+}
+
+/** ISO to the minute — "2026-08-12 17:56" — for anywhere a person reads a time. */
+function when(iso: string | null): string {
+  return iso === null ? "" : iso.slice(0, 16).replace("T", " ");
+}
+
 /** Overdue is derived at render — display never writes. */
 function isOverdue(decision: Decision, now: Date): boolean {
   if (decision.state === "expired") return true;
@@ -741,6 +755,32 @@ function redirect(response: ServerResponse, to: string): void {
   response.end();
 }
 
+/**
+ * A refusal that stays inside the console: same shell, a problem banner, and
+ * a way back — the error path is the one place a console must not stop
+ * being a console. Bearer callers still get plain text; they parse, not read.
+ */
+function refuse(
+  response: ServerResponse,
+  who: Who | null,
+  status: number,
+  message: string,
+  backHref = "/",
+): void {
+  if (who === null || who.via === "bearer") {
+    return respond(response, status, "text/plain; charset=utf-8", message);
+  }
+  return page(
+    response,
+    status,
+    shell("refused", [
+      `<h1>that did not happen</h1>`,
+      `<div class="problem">${escape(message)}</div>`,
+      `<p class="meta"><a href="${escape(backHref)}">\u2190 back</a></p>`,
+    ].join("\n")),
+  );
+}
+
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
   return text
@@ -766,7 +806,7 @@ const STYLE = `
     --foreground: hsl(240 10% 3.9%);
     --card: hsl(0 0% 100%);
     --muted: hsl(240 4.8% 95.9%);
-    --muted-foreground: hsl(240 3.8% 46.1%);
+    --muted-foreground: hsl(240 3.8% 42%);
     --border: hsl(240 5.9% 90%);
     --input: hsl(240 5.9% 90%);
     --primary: hsl(240 5.9% 10%);
@@ -774,15 +814,17 @@ const STYLE = `
     --secondary: hsl(240 4.8% 95.9%);
     --secondary-foreground: hsl(240 5.9% 10%);
     --accent: hsl(240 4.8% 95.9%);
-    --destructive: hsl(0 84.2% 60.2%);
+    --destructive: hsl(0 72% 38%);
+    --destructive-strong: hsl(0 74% 42%);
     --destructive-soft: hsl(0 86% 97%);
-    --success: hsl(142 76% 36%);
+    --success: hsl(142 76% 26%);
     --success-soft: hsl(141 84% 93%);
-    --warning: hsl(38 92% 40%);
+    --warning: hsl(35 92% 28%);
     --warning-soft: hsl(48 96% 89%);
     --ring: hsl(240 5% 64.9%);
     --radius: 0.625rem;
     --shadow: 0 1px 2px 0 hsl(240 10% 3.9% / 0.05);
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -798,57 +840,76 @@ const STYLE = `
       --secondary: hsl(240 3.7% 15.9%);
       --secondary-foreground: hsl(0 0% 98%);
       --accent: hsl(240 3.7% 15.9%);
-      --destructive: hsl(0 72% 51%);
-      --destructive-soft: hsl(0 63% 12%);
-      --success: hsl(142 69% 58%);
-      --success-soft: hsl(144 61% 10%);
-      --warning: hsl(48 96% 53%);
-      --warning-soft: hsl(36 64% 10%);
-      --ring: hsl(240 4.9% 40%);
+      --destructive: hsl(0 84% 68%);
+      --destructive-strong: hsl(0 72% 51%);
+      --destructive-soft: hsl(0 50% 13%);
+      --success: hsl(142 62% 62%);
+      --success-soft: hsl(144 61% 11%);
+      --warning: hsl(45 92% 60%);
+      --warning-soft: hsl(36 50% 12%);
+      --ring: hsl(240 4.9% 45%);
       --shadow: none;
     }
   }
   * { box-sizing: border-box; }
+  ::selection { background: color-mix(in srgb, var(--foreground) 18%, transparent); }
   body {
     margin: 0; background: var(--background); color: var(--foreground);
+    caret-color: var(--foreground);
     font: 400 0.9375rem/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  .topbar { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--background) 92%, transparent); }
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--background) 86%, transparent);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
   .topbar-inner {
     max-width: 44rem; margin-inline: auto; padding: 0 1.25rem; height: 3.25rem;
     display: flex; align-items: center; gap: 1.25rem;
   }
-  .brand { font-weight: 650; font-size: .95rem; letter-spacing: -0.01em; color: var(--foreground); text-decoration: none; }
+  .brand { font-weight: 650; letter-spacing: -0.01em; color: var(--foreground); text-decoration: none;
+           display: flex; align-items: center; height: 100%; }
   .brand .dot { color: var(--muted-foreground); }
-  .topbar nav { display: flex; gap: 1rem; margin-left: auto; }
+  .topbar nav { display: flex; gap: .25rem; margin-left: auto; height: 100%; }
   .topbar nav a {
-    color: var(--muted-foreground); text-decoration: none; font-size: .875rem; font-weight: 500;
-    padding: .25rem 0; transition: color .15s;
+    color: var(--muted-foreground); text-decoration: none; font-size: 0.8125rem; font-weight: 500;
+    display: flex; align-items: center; padding: 0 .625rem; transition: color .15s;
   }
   .topbar nav a:hover { color: var(--foreground); }
-  main { max-width: 44rem; margin-inline: auto; padding: 1.5rem 1.25rem 4rem; }
+  main { max-width: 44rem; margin-inline: auto; padding: 1.75rem 1.25rem 4rem; }
   h1 { font-size: 1.375rem; font-weight: 650; letter-spacing: -0.025em; margin: 0 0 .25rem; }
   h1 .meta { font-weight: 400; letter-spacing: 0; }
   h2 {
-    font-size: .8125rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
-    color: var(--muted-foreground); margin: 2rem 0 .5rem;
+    font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted-foreground); margin: 2.25rem 0 .625rem;
   }
   a { color: var(--foreground); text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
   a:hover { text-decoration-color: var(--muted-foreground); }
   p { margin: .4rem 0; }
-  code { background: var(--muted); border-radius: .3rem; padding: .1rem .35rem; font-size: .85em; }
+  code { background: var(--muted); border-radius: .3rem; padding: .1rem .35rem; font-family: var(--font-mono); font-size: .8125rem; }
+  .mono { font-family: var(--font-mono); font-size: .8125rem; font-variant-numeric: tabular-nums; }
 
-  .meta { font-size: .8125rem; color: var(--muted-foreground); }
+  .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
   .meta a { color: var(--muted-foreground); }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* The morning ledger: the night's harvest as strong figures in a sentence,
+     not a metric-card grid. */
+  .ledger { font-size: 0.9375rem; color: var(--muted-foreground); margin: .875rem 0 0; line-height: 1.9; }
+  .ledger b { font-weight: 650; font-size: 1.25rem; color: var(--foreground); font-variant-numeric: tabular-nums; padding-right: .1rem; }
+  .ledger .good b { color: var(--success); }
+  .ledger .bad b { color: var(--destructive); }
+
   .badge {
     display: inline-block; border: 1px solid var(--border); border-radius: 9999px;
-    padding: .1rem .625rem; font-size: .75rem; font-weight: 500; line-height: 1.4;
+    padding: .125rem .625rem; font-size: 0.75rem; font-weight: 500; line-height: 1.4;
     background: var(--secondary); color: var(--secondary-foreground); vertical-align: middle;
   }
   .badge-done, .badge-answered, .badge-verified, .badge-built { background: var(--success-soft); color: var(--success); border-color: transparent; }
   .badge-failed, .badge-cancelled, .badge-overdue { background: var(--destructive-soft); color: var(--destructive); border-color: transparent; }
-  .badge-running, .badge-open, .badge-parked { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+  .badge-running, .badge-open, .badge-parked, .badge-cut { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
 
   .card {
     border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
@@ -857,33 +918,49 @@ const STYLE = `
   .problem {
     border: 1px solid color-mix(in srgb, var(--destructive) 35%, transparent);
     background: var(--destructive-soft); color: var(--destructive);
-    border-radius: var(--radius); padding: .625rem .875rem; margin: .75rem 0; font-size: .875rem;
+    border-radius: var(--radius); padding: .625rem .875rem; margin: .75rem 0; font-size: 0.8125rem;
   }
   .row {
-    display: block; padding: .55rem .125rem; border-bottom: 1px solid var(--border);
-    margin: 0; font-size: .9rem;
+    display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap;
+    padding: .625rem .125rem; border-bottom: 1px solid var(--border);
+    margin: 0;
   }
   .row:last-of-type { border-bottom: none; }
+  .row .right { margin-left: auto; }
+  a.row { text-decoration: none; }
+  a.row:hover { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+  /* A parked decision is the page's reason to exist: it gets a card, a
+     question in full weight, and the whole card is the tap target. */
+  .decide-card {
+    display: block; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); padding: .875rem 1.125rem; margin: .625rem 0;
+    text-decoration: none; box-shadow: var(--shadow); transition: border-color .15s;
+  }
+  .decide-card:hover { border-color: var(--ring); }
+  .decide-card .q { font-weight: 600; margin: 0 0 .25rem; }
 
   button {
-    font: 500 .875rem/1.4 inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
+    font: 500 0.9375rem/1.4 inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
     border: 1px solid var(--border); background: var(--background); color: var(--foreground);
-    padding: .5rem .875rem; box-shadow: var(--shadow); transition: background .15s, border-color .15s;
+    padding: .5rem .875rem; min-height: 2.5rem; box-shadow: var(--shadow);
+    transition: background .15s, border-color .15s;
   }
   button:hover { background: var(--accent); }
-  button.primary, form > button[type=submit]:only-of-type { }
-  .btn-primary, .approve-form button[type=submit] {
+  .approve-form button[type=submit] {
     background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
   }
   .approve-form button[type=submit]:hover { background: color-mix(in srgb, var(--primary) 88%, var(--background)); }
+  button.danger { color: var(--destructive-strong); border-color: color-mix(in srgb, var(--destructive-strong) 40%, transparent); }
+  button.danger:hover { background: var(--destructive-soft); }
 
-  label { display: block; font-size: .8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
+  label { display: block; font-size: 0.8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
   input[type=text], input[type=password], textarea {
-    width: 100%; margin: .35rem 0 0; padding: .5rem .75rem; font: 400 .9rem/1.4 inherit;
-    color: var(--foreground); background: transparent;
+    width: 100%; margin: .35rem 0 0; padding: .5rem .75rem; font: 400 0.9375rem/1.4 inherit;
+    color: var(--foreground); background: transparent; min-height: 2.5rem;
     border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px); box-shadow: var(--shadow);
   }
-  input:focus-visible, textarea:focus-visible, button:focus-visible {
+  input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible {
     outline: 2px solid var(--ring); outline-offset: 1px;
   }
   ::placeholder { color: var(--muted-foreground); }
@@ -892,18 +969,21 @@ const STYLE = `
   .inline input[type=text] { display: inline-block; width: auto; margin: 0 .375rem 0 0; vertical-align: middle; }
   .inline button { width: auto; }
 
-  form.option { margin: .75rem 0; }
-  form.option button {
-    display: block; width: 100%; text-align: left; padding: .875rem 1rem; font-size: .95rem;
-    border-radius: var(--radius); background: var(--card);
+  /* One option = one container: consequence first, then the act. */
+  form.option {
+    margin: .75rem 0; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); padding: .875rem 1rem; box-shadow: var(--shadow);
   }
-  form.option button:hover { background: var(--accent); border-color: var(--ring); }
-  .recommended button { border-color: var(--foreground); box-shadow: 0 0 0 1px var(--foreground); }
-  .consequence { font-size: .8125rem; color: var(--muted-foreground); margin: .375rem 0 .5rem; white-space: pre-wrap; }
-  form.option input[type=text] { font-size: .8125rem; }
+  form.option button {
+    display: block; width: 100%; text-align: left; font-size: 0.9375rem; font-weight: 600;
+    min-height: 2.75rem;
+  }
+  form.option.recommended { border-color: var(--foreground); box-shadow: 0 0 0 1px var(--foreground); }
+  .consequence { font-size: 0.8125rem; color: var(--muted-foreground); margin: 0 0 .625rem; white-space: pre-wrap; }
+  form.option input[type=text] { font-size: 0.8125rem; margin-top: .5rem; min-height: 2.25rem; }
 
-  .recap { color: var(--muted-foreground); margin: .75rem 0; white-space: pre-wrap; font-size: .9rem; }
-  .question { font-size: 1.15rem; font-weight: 650; letter-spacing: -0.015em; margin: 1rem 0; white-space: pre-wrap; }
+  .recap { color: var(--muted-foreground); margin: .75rem 0; white-space: pre-wrap; }
+  .question { font-size: 1.125rem; font-weight: 650; letter-spacing: -0.015em; margin: 1rem 0; white-space: pre-wrap; }
   .answered {
     border: 1px solid color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft);
     border-radius: var(--radius); padding: .875rem 1rem; margin: 1rem 0;
@@ -913,17 +993,32 @@ const STYLE = `
     padding: .25rem .875rem; background: var(--card);
   }
   details[open] { padding-bottom: .875rem; }
-  summary { padding: .5rem 0; cursor: pointer; font-weight: 500; font-size: .875rem; color: var(--muted-foreground); }
+  details.arm-danger { border-color: color-mix(in srgb, var(--destructive-strong) 30%, transparent); }
+  summary { padding: .625rem 0; cursor: pointer; font-weight: 500; font-size: 0.8125rem; color: var(--muted-foreground); min-height: 2.25rem; }
   summary:hover { color: var(--foreground); }
-  .evidence { margin-top: 1.5rem; font-size: .875rem; }
-  .evidence a { display: block; padding: .4rem 0; border-bottom: 1px solid var(--border); text-decoration: none; }
+  details form.option { border: none; box-shadow: none; padding: .25rem 0 0; margin: 0; }
+  .evidence { margin-top: 1.5rem; font-size: 0.8125rem; }
+  .evidence a { display: block; padding: .55rem 0; border-bottom: 1px solid var(--border); text-decoration: none; }
   .evidence a:hover { color: var(--muted-foreground); }
-  .evidence strong { display: block; font-size: .8125rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted-foreground); }
+  .evidence strong { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground); }
 
-  .stat { display: flex; gap: .5rem; align-items: baseline; padding: .25rem 0; }
+  .filters { font-size: 0.8125rem; color: var(--muted-foreground); }
+  .filters a, .filters strong {
+    display: inline-block; padding: .25rem .625rem; border-radius: 9999px; text-decoration: none;
+    color: var(--muted-foreground); font-weight: 500;
+  }
+  .filters strong { background: var(--secondary); color: var(--secondary-foreground); }
+  .filters a:hover { color: var(--foreground); }
+
   .login-shell { max-width: 22rem; margin: 14vh auto 0; padding: 0 1.25rem; }
-  .login-shell h1 { text-align: center; margin-bottom: 1rem; }
+  .login-shell h1 { text-align: center; margin-bottom: .25rem; }
+  .login-shell .hint { text-align: center; margin-bottom: 1rem; }
   .login-shell button { width: 100%; margin-top: 1rem; background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+
+  @media (max-width: 640px) {
+    button, form.option button { min-height: 2.75rem; }
+    .topbar nav a { padding: 0 .5rem; }
+  }
 `;
 
 function shell(title: string, body: string, options: { nav?: boolean } = {}): string {
@@ -951,6 +1046,7 @@ function loginPage(problem: string | null): string {
   return shell("night orders", [
     `<div class="login-shell">`,
     `<h1>night<span class="dot">\u00b7</span>orders</h1>`,
+    `<p class="meta hint">an approver signs in \u2014 mint a credential with <code>nightorders approver add &lt;you&gt;</code></p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
     `<label>who are you<input type="text" name="name" autocomplete="username"></label>`,
@@ -972,18 +1068,26 @@ function homePage(data: {
   now: Date;
 }): string {
   const { summary } = data;
-  const counts =
-    `${summary.built.length} built · ${summary.failed.length} failed · ${summary.refused.length} refused` +
-    (summary.cutDown.length > 0 ? ` · ${summary.cutDown.length} cut down mid-flight` : "");
+  // The night's harvest is the page's reason to exist — strong figures in a
+  // sentence, colored by what they mean, never a metric-card grid.
+  const ledger =
+    `<p class="ledger"><span class="good"><b>${summary.built.length}</b> built</span> · ` +
+    `<span${summary.failed.length > 0 ? ' class="bad"' : ""}><b>${summary.failed.length}</b> failed</span> · ` +
+    `<b>${summary.refused.length}</b> refused` +
+    (summary.cutDown.length > 0 ? ` · <span class="bad"><b>${summary.cutDown.length}</b> cut down mid-flight</span>` : "") +
+    `</p>`;
 
   const decide =
     data.decisions.length === 0
-      ? "<p>Nothing waits on you. The night parked no decisions.</p>"
+      ? `<p class="meta">Nothing waits on you. The night parked no decisions.</p>`
       : data.decisions
           .map(
             decision =>
-              `<p><a href="/d/${decision.id}">${escape(decision.taskId)} — ${escape(decision.question)}</a>` +
-              `${isOverdue(decision, data.now) ? " <strong>overdue</strong>" : ""}</p>`,
+              `<a class="decide-card" href="/d/${decision.id}">` +
+              `<p class="q">${escape(decision.question)}</p>` +
+              `<span class="mono meta">${escape(decision.taskId)}</span>` +
+              `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
+              `</a>`,
           )
           .join("\n");
 
@@ -1015,8 +1119,8 @@ function homePage(data: {
     data.gaps === null
       ? ""
       : data.gaps.length === 0
-        ? `<h2>blocked</h2><p class="meta">no gaps — everything recorded is verified</p>`
-        : `<h2>blocked</h2>` +
+        ? `<h2>gaps</h2><p class="meta">none — everything recorded is verified</p>`
+        : `<h2>gaps</h2>` +
           data.gaps
             .map(gap => `<p class="row">${escape(gap.key)} — ${escape(gap.state)}</p>`)
             .join("\n") +
@@ -1026,8 +1130,8 @@ function homePage(data: {
 
   return shell("night orders", [
     `<h1>the morning</h1>`,
-    `<p class="meta">overnight: ${escape(counts)}</p>`,
-    `<p class="meta">spend: ${escape(spendLine(summary))}</p>`,
+    ledger,
+    `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
     data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} pending delivery</p>` : "",
     "<h2>waiting on you</h2>",
     decide,
@@ -1048,8 +1152,8 @@ function tasksPage(tasks: Task[], state: TaskState | null, csrf: string, problem
       : tasks
           .map(
             task =>
-              `<p class="row"><a href="${taskHref(task.id)}">${escape(task.id)}</a> ` +
-              `${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></p>`,
+              `<a class="row" href="${taskHref(task.id)}"><span class="mono">${escape(task.id)}</span> ` +
+              `${escape(task.title)} <span class="right badge badge-${escape(task.state)}">${escape(task.state)}</span></a>`,
           )
           .join("\n");
   return shell("tasks", [
@@ -1065,7 +1169,7 @@ function tasksPage(tasks: Task[], state: TaskState | null, csrf: string, problem
     `<label>repo <span class="meta">(optional)</span><input type="text" name="repo"></label>`,
     `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3"></textarea></label>`,
     `<button type="submit">add</button>`,
-    `</form>`,
+    `</form></details>`,
   ].join("\n"));
 }
 
@@ -1102,7 +1206,7 @@ function taskPage(data: {
           .map(
             hold =>
               `<p class="row">${escape(hold.ownerKind)} — ${escape(hold.reason)}` +
-              `${hold.until === null ? "" : ` <span class="meta">until ${escape(hold.until)}</span>`}</p>`,
+              `${hold.until === null ? "" : ` <span class="meta">until ${escape(when(hold.until))}</span>`}</p>`,
           )
           .join("\n") +
         `<p class="meta">only the operator hold lifts from here; decisions, incidents, and backoff lift themselves</p>`;
@@ -1116,7 +1220,7 @@ function taskPage(data: {
           `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
           scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
           scope.touches.length === 0 ? "" : `<p><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
-          `<p class="meta">digest ${escape(scope.digest)}</p>`,
+          `<p class="meta">digest <span class="mono">${escape(scope.digest)}</span></p>`,
           approval.approved
             ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
             : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
@@ -1136,10 +1240,10 @@ function taskPage(data: {
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(scope.digest)}">`,
           `<p><strong>approve exactly this:</strong></p>`,
-          `<p class="recap">${escape(scope.goal)}</p>`,
-          `<p class="recap">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
-          `<p class="meta">touches: ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
-          `<label>your approver token, again<input type="password" name="token" autocomplete="off"></label>`,
+          `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
+          `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
+          `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          `<label>your approver token, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="off"></label>`,
           `<button type="submit">approve this scope</button>`,
           `</form>`,
         ].join("\n");
@@ -1167,9 +1271,10 @@ function taskPage(data: {
         data.runs
           .map(
             run =>
-              `<p class="row"><a href="/r/${run.id}">#${run.id}</a> ${escape(run.role)} — ` +
-              `${escape(run.outcome ?? "never finished")}` +
-              `${run.reason === null ? "" : ` <span class="meta">${escape(run.reason)}</span>`}</p>`,
+              `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
+              `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
+              `${run.reason === null ? "" : ` <span class="meta">${escape(run.reason)}</span>`}` +
+              `<span class="right meta mono">${escape(when(run.startedAt))}</span></p>`,
           )
           .join("\n");
 
@@ -1209,16 +1314,27 @@ function taskPage(data: {
       ? `<p class="meta">a runner holds a live claim right now — holds prevent the <em>next</em> dispatch; cancel and requeue wait for the claim</p>`
       : "",
     `<div class="card">`,
-    act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" style="width:12rem">`),
+    act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" aria-label="hold reason" style="width:12rem">`),
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
-    stalled ? act("requeue", "requeue — resolve incidents, reset strikes, back in the queue") : "",
-    task.state === "queued" || task.state === "running" || task.state === "failed"
-      ? act("cancel", "cancel")
+    stalled ? act("requeue", "requeue") : "",
+    stalled
+      ? `<p class="meta">requeue resolves the incidents, resets the strikes, and puts the task back in the queue</p>`
       : "",
     `</div>`,
+    // Cancel gets the same ceremony as an irreversible answer: armed behind
+    // one deliberate tap, styled as the destructive act it is.
+    task.state === "queued" || task.state === "running" || task.state === "failed"
+      ? [
+          `<details class="arm-danger"><summary>cancel this task — tap to arm</summary>`,
+          `<form method="post" action="${taskHref(task.id)}/cancel">`,
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+          `<button type="submit" class="danger">cancel ${escape(task.id)}</button>`,
+          `</form></details>`,
+        ].join("")
+      : "",
   ].join("\n");
 
-  return shell(task.id, [
+  return shell(`task \u00b7 ${task.id}`, [
     `<h1>${escape(task.id)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span>` +
       `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} strike(s)` : ""}` +
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}</span></h1>`,
@@ -1244,11 +1360,11 @@ function runsPage(rows: (Run & { taskId: string })[], nextCursor: number | null)
       : rows
           .map(
             run =>
-              `<p class="row"><a href="/r/${run.id}">#${run.id}</a> ` +
-              `<a href="${taskHref(run.taskId)}">${escape(run.taskId)}</a> ` +
-              `<span class="meta">${escape(run.role)}</span> ` +
-              `<span class="badge badge-${escape(run.outcome ?? "cancelled")}">${escape(run.outcome ?? "never finished")}</span>` +
-              `${run.costUsd === null ? "" : ` <span class="meta">$${run.costUsd.toFixed(4)}</span>`}</p>`,
+              `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
+              `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
+              `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
+              `<span class="right meta mono">${escape(when(run.startedAt))}` +
+              `${run.costUsd === null ? "" : ` \u00b7 $${run.costUsd.toFixed(2)}`}</span></p>`,
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
@@ -1256,26 +1372,31 @@ function runsPage(rows: (Run & { taskId: string })[], nextCursor: number | null)
 }
 
 function runPage(run: Run, taskId: string, artifacts: Artifact[]): string {
-  const facts: [string, string | null][] = [
-    ["task", taskId],
+  // [label, value, mono?] — identifiers and figures read in the data face.
+  const facts: [string, string | null, boolean?][] = [
+    ["task", taskId, true],
     ["role", run.role],
     ["outcome", run.outcome ?? "never finished"],
     ["reason", run.reason],
-    ["runner", run.runner],
-    ["branch", run.branch],
-    ["model", run.model],
-    ["base", run.baseRevision],
-    ["head", run.headRevision],
-    ["started", run.startedAt],
-    ["finished", run.finishedAt],
-    ["provider started", run.providerStartedAt],
-    ["tokens in", run.tokensIn === null ? null : String(run.tokensIn)],
-    ["tokens out", run.tokensOut === null ? null : String(run.tokensOut)],
-    ["cost", run.costUsd === null ? null : `$${run.costUsd.toFixed(4)}`],
+    ["runner", run.runner, true],
+    ["branch", run.branch, true],
+    ["model", run.model, true],
+    ["base", run.baseRevision, true],
+    ["head", run.headRevision, true],
+    ["started", when(run.startedAt), true],
+    ["finished", when(run.finishedAt), true],
+    ["provider started", when(run.providerStartedAt), true],
+    ["tokens in", run.tokensIn === null ? null : run.tokensIn.toLocaleString(), true],
+    ["tokens out", run.tokensOut === null ? null : run.tokensOut.toLocaleString(), true],
+    ["cost", run.costUsd === null ? null : `$${run.costUsd.toFixed(2)}`, true],
   ];
   const rows = facts
-    .filter((fact): fact is [string, string] => fact[1] !== null)
-    .map(([label, value]) => `<p class="row"><span class="meta">${escape(label)}</span> ${escape(value)}</p>`)
+    .filter((fact): fact is [string, string, boolean?] => fact[1] !== null && fact[1] !== "")
+    .map(
+      ([label, value, mono]) =>
+        `<p class="row"><span class="meta" style="min-width:8.5rem">${escape(label)}</span> ` +
+        `<span${mono === true ? ` class="mono"` : ""}>${escape(value)}</span></p>`,
+    )
     .join("\n");
   const handoff =
     run.handoff === null
@@ -1384,20 +1505,19 @@ function decisionPage(
   const csrf = who.via === "cookie" ? who.session.csrf : "";
   const options = decision.options
     .map(option => {
-      const marks = [
-        option.id === decision.recommendation ? "recommended" : "",
-        option.reversible ? "" : "irreversible",
-      ]
-        .filter(mark => mark !== "")
-        .join(" · ");
+      const recommended = option.id === decision.recommendation;
+      // The consequence reads BEFORE the button that buys it, and the
+      // recommendation is a visible ring, not a parenthetical — a thumb at
+      // 7am finds the default without reading every card.
       const inner = [
-        `<form class="option" method="post" action="/d/${decision.id}/answer">`,
+        `<form class="option${recommended ? " recommended" : ""}" method="post" action="/d/${decision.id}/answer">`,
         `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
         `<input type="hidden" name="choice" value="${escape(option.id)}">`,
         ...(option.reversible ? [] : [`<input type="hidden" name="confirm" value="yes">`]),
-        `<button type="submit">${escape(option.label)}${marks === "" ? "" : ` <span class="meta">(${escape(marks)})</span>`}</button>`,
+        recommended ? `<p class="meta" style="margin:0 0 .375rem"><span class="badge">recommended</span></p>` : "",
         `<p class="consequence">${escape(option.consequence)}</p>`,
-        `<input type="text" name="note" placeholder="optional note — travels with this answer">`,
+        `<button type="submit">${escape(option.label)}${option.reversible ? "" : ` <span class="badge badge-overdue">irreversible</span>`}</button>`,
+        `<input type="text" name="note" placeholder="optional note — travels with this answer" aria-label="optional note">`,
         `</form>`,
       ].join("\n");
       // An irreversible option hides its button behind one deliberate extra
@@ -1405,7 +1525,7 @@ function decisionPage(
       // the confirm field either way.
       return option.reversible
         ? inner
-        : `<details><summary>${escape(option.label)} — irreversible, tap to arm</summary>${inner}</details>`;
+        : `<details class="arm-danger"><summary>${escape(option.label)} — irreversible, tap to arm</summary>${inner}</details>`;
     })
     .join("\n");
 
@@ -1429,7 +1549,7 @@ function decisionPage(
           .join("\n") +
         "</div>";
 
-  return shell(`${taskId}`, [
+  return shell(`decide \u00b7 ${taskId}`, [
     `<h1>${escape(taskId)} <span class="badge badge-${escape(decision.state)}">${escape(decision.state)}</span>${
       isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""
     }${decision.deadline === null ? "" : ` <span class="meta">deadline ${escape(decision.deadline)}</span>`}</h1>`,
