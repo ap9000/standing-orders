@@ -86,7 +86,7 @@ only what it re-proves where it stands).
 | Fill one gap, three tasks start | **done** | executable in `tick.test.ts`: three tasks skipped naming the gap, the capability supplied with the probe untouched, all three built on the next pass |
 | `gaps` ranked by what they unblock | **done** | derived view; a task waiting on two gaps counts toward neither's `unblocks` and both's `alsoBlocks`, so the ranking sends the operator to the right gap first |
 | Morning briefing | not started | run aggregation since a moment; REVIEW distinguishes "not read" from "zero" |
-| Notification outbox | not started | durable, deduped by episode, receipts recorded |
+| Notification outbox | **done** | durable rows enqueued in the same transaction as the run record they describe; dedupe keys are episode identities (a gap re-nags after it fills and recurs); delivery passes text as environment, never into the command line; receipts and failed attempts recorded. Quiet hours, escalation, deep links → M4 with the loop |
 | Exit-code cleanup (deferred here from M1) | not started | standalone `build` maps agent/timeout/git to 3; contract says 1 |
 
 ## Deliberately deferred (and to where)

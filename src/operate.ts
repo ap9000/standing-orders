@@ -146,6 +146,12 @@ Capabilities — what the work needs, recorded and probed, never valued
   nightorders gaps [--repo <path>]      what is missing, ranked by how many
                                         tasks filling it would start
 
+The outbox — facts that want a person, durably
+  nightorders outbox list [--all]
+  nightorders outbox deliver --cmd <c>  runs once per pending row, reading
+                                        $NIGHTORDERS_KIND / _SUBJECT / _BODY;
+                                        exit 0 delivered receipts, 1 any fail
+
 Runners — the machines that may be given work
   nightorders runner register <name> [--capacity <n>]
                                         mints a token, shown once
@@ -187,7 +193,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
     "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
-    "max", "cap", "probe", "kind", "expires",
+    "max", "cap", "probe", "kind", "expires", "cmd",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -297,6 +303,8 @@ async function dispatch(
       return capCommand(positional, flags, context);
     case "gaps":
       return gapsCommand(flags, context);
+    case "outbox":
+      return outboxCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -915,6 +923,25 @@ async function tickCommand(
       // Losing a race, finding the task no longer ready, and a machine that
       // lacks what the task needs are all the system working. None fails the
       // pass; a capability gap names itself so the gaps report can too.
+      if (claimed.reason === "capability" && "message" in claimed) {
+        // A gap is a fact that wants a person. One notification per episode:
+        // the dedupe key holds until the capability verifies, then the next
+        // failure is a new fact and says so again.
+        const key = /needs (\S+)/.exec(claimed.message)?.[1];
+        const parsed = key === undefined ? null : parseCapabilityKey(key);
+        if (parsed !== null) {
+          const home = ref.repo ?? repo;
+          store.enqueueNotification(
+            {
+              dedupeKey: `gap:${home}:${parsed.kind}:${parsed.name}`,
+              kind: "gap",
+              subject: `${key} blocks work in ${home}`,
+              body: `${id} (and possibly others) cannot dispatch: ${claimed.message}. \`nightorders gaps --repo ${home}\``,
+            },
+            clock(),
+          );
+        }
+      }
       dispatched.push({
         id,
         outcome: "skipped",
@@ -1001,7 +1028,21 @@ async function tickCommand(
         });
         built++;
       } else {
-        store.finishRun(runId, { outcome: "failed", reason: "fenced", committed: result.committed, now: clock() });
+        // The run record is canonical; the report and any notification say
+        // exactly what it says, in one transaction, so a crash between them
+        // cannot leave a failure nobody hears about.
+        store.transact(() => {
+          store.finishRun(runId, { outcome: "failed", reason: "fenced", committed: result.committed, now: clock() });
+          store.enqueueNotification(
+            {
+              dedupeKey: `run:${runId}:fenced`,
+              kind: "build-fenced",
+              subject: `${id}: completed, but the lease was gone`,
+              body: `The commit exists on ${branch}, but the world moved past this lease before the completion was accepted. Look before anything reuses it.`,
+            },
+            clock(),
+          );
+        });
         dispatched.push({ id, outcome: "failed", reason: "fenced", branch, worktree: leased.worktree.path });
         broke++;
       }
@@ -1030,14 +1071,25 @@ async function tickCommand(
       // The attempt itself broke. The terminal state and the release are one
       // step, so the task is never simultaneously free and unfinished — and
       // even that write can be fenced, in which case the failure is recorded
-      // but the task belongs to whoever took it.
+      // but the task belongs to whoever took it. The run record is canonical
+      // and the report repeats it verbatim: a summary that said "agent"
+      // where the record says "fenced" would send a notification about the
+      // wrong incident.
       const sealed = completeFenced(store, lease, "failed", clock());
-      store.finishRun(runId, {
-        outcome: "failed",
-        reason: sealed.ok ? result.reason : "fenced",
-        now: clock(),
+      const canonical = sealed.ok ? result.reason : "fenced";
+      store.transact(() => {
+        store.finishRun(runId, { outcome: "failed", reason: canonical, now: clock() });
+        store.enqueueNotification(
+          {
+            dedupeKey: `run:${runId}:failed`,
+            kind: "build-failed",
+            subject: `${id}: build failed (${canonical})`,
+            body: `${result.message}\nWorktree: ${leased.worktree.path}`,
+          },
+          clock(),
+        );
       });
-      dispatched.push({ id, outcome: "failed", reason: result.reason, worktree: leased.worktree.path });
+      dispatched.push({ id, outcome: "failed", reason: canonical, worktree: leased.worktree.path });
       broke++;
       continue;
     }
@@ -1122,6 +1174,20 @@ async function reconcileCommand(
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
 
   const recovered = recoverDead(store, clock());
+  for (const one of recovered) {
+    for (const leaseId of one.claims) {
+      // Lease ids are unique forever, so each recovery is its own episode.
+      store.enqueueNotification(
+        {
+          dedupeKey: `recover:${leaseId}`,
+          kind: "runner-recovered",
+          subject: `${one.runner} went dead holding work`,
+          body: `Its claims were requeued and its worktrees handed back unverified. Lease ${leaseId}.`,
+        },
+        clock(),
+      );
+    }
+  }
   const reaped = reap(store, clock());
 
   const worktrees = new WorktreePool(store, {
@@ -1129,6 +1195,19 @@ async function reconcileCommand(
     ...(context.gitRunner === undefined ? {} : { runner: context.gitRunner }),
   });
   const adoption = await worktrees.adopt(repo, clock());
+  if (adoption.ok) {
+    for (const path of adoption.adopted) {
+      store.enqueueNotification(
+        {
+          dedupeKey: `adopt:${path}:${clock().toISOString()}`,
+          kind: "worktree-adopted",
+          subject: `Adopted an unrecorded worktree`,
+          body: `${path} existed in the pool with no row — a crash between creation and record. It is released and unverified; somebody should look.`,
+        },
+        clock(),
+      );
+    }
+  }
   if (!adoption.ok) {
     // The claim and lease work above is real and stands; only the worktree
     // half could not be trusted, and the exit code says the sweep is not done.
@@ -1301,6 +1380,102 @@ function gapsCommand(flags: Map<string, string | true>, context: Context): numbe
     write(`    ${gap.instructions}`);
   }
   return EXIT.refused;
+}
+
+// ---- the outbox -----------------------------------------------------------
+
+/**
+ * `nightorders outbox list|deliver` — reading and draining the durable
+ * outbox. Delivery runs an operator-supplied command once per pending row;
+ * the notification's text reaches it as environment variables, never
+ * substituted into the command line, because subjects and bodies quote
+ * things agents and repositories said and a shell must not meet those.
+ *
+ *   nightorders outbox deliver --cmd 'curl -d "$NIGHTORDERS_SUBJECT" ntfy.sh/mine'
+ *
+ * Exit 0 when everything pending delivered (or nothing was pending);
+ * 1 when any delivery failed — a broken channel is breakage, not a "no".
+ */
+async function outboxCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [action] = positional;
+
+  if (action === "list" || action === undefined) {
+    const wanted = flags.has("all") ? "all" : "pending";
+    const notifications = store.listNotifications(wanted);
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "outbox list", notifications }, null, 2));
+      return EXIT.ok;
+    }
+    if (notifications.length === 0) {
+      write(wanted === "pending" ? "Nothing waiting to be delivered." : "The outbox is empty.");
+      return EXIT.ok;
+    }
+    for (const one of notifications) {
+      const state =
+        one.deliveredAt !== null
+          ? `delivered ${one.deliveredAt}`
+          : one.attempts > 0
+            ? `pending, ${one.attempts} failed attempt(s): ${one.lastError ?? ""}`
+            : "pending";
+      write(`  #${one.id} ${one.kind.padEnd(18)} ${one.subject}`);
+      write(`      ${state}`);
+    }
+    return EXIT.ok;
+  }
+
+  if (action === "deliver") {
+    const command = text(flags, "cmd");
+    if (command === undefined) {
+      return fail(write, json, "outbox deliver", "usage", "--cmd says how: it runs once per notification, reading $NIGHTORDERS_KIND, $NIGHTORDERS_SUBJECT, $NIGHTORDERS_BODY", EXIT.usage);
+    }
+
+    const pending = store.listNotifications("pending");
+    if (pending.length === 0) {
+      return succeed(write, json, "outbox deliver", { delivered: 0, failed: 0 }, () => [
+        "Nothing waiting to be delivered.",
+      ]);
+    }
+
+    let delivered = 0;
+    let failed = 0;
+    for (const one of pending) {
+      const sent = await run("sh", ["-lc", command], {
+        timeoutMs: 30_000,
+        env: {
+          NIGHTORDERS_KIND: one.kind,
+          NIGHTORDERS_SUBJECT: one.subject,
+          NIGHTORDERS_BODY: one.body,
+          NIGHTORDERS_DEDUPE_KEY: one.dedupeKey,
+        },
+      });
+      if (sent.code === 0) {
+        const receipt = sent.stdout.split("\n")[0]?.trim() ?? "";
+        store.recordDelivery(one.id, { ok: true, receipt: receipt === "" ? null : receipt }, clock());
+        delivered++;
+      } else {
+        const error = sent.timedOut
+          ? "timed out"
+          : sent.stderr.split("\n")[0]?.trim() || `exit ${sent.code}`;
+        store.recordDelivery(one.id, { ok: false, error }, clock());
+        failed++;
+      }
+    }
+
+    const code = failed > 0 ? EXIT.failed : EXIT.ok;
+    if (json) {
+      write(JSON.stringify({ ok: failed === 0, command: "outbox deliver", delivered, failed }, null, 2));
+      return code;
+    }
+    write(`Delivered ${delivered}, failed ${failed}.`);
+    return code;
+  }
+
+  return fail(write, json, "outbox", "usage", `unknown \`outbox ${action}\` — try list, deliver`, EXIT.usage);
 }
 
 // ---- write access ---------------------------------------------------------

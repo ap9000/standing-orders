@@ -174,6 +174,7 @@ const OPERATE_COMMANDS = new Set([
   "tick",
   "cap",
   "gaps",
+  "outbox",
   "reconcile",
 ]);
 

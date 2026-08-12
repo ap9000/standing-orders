@@ -112,6 +112,21 @@ export function parseCapabilityKey(
   return { kind: kind as Capability["kind"], name: key.slice(split + 1) };
 }
 
+/** A fact that wants a person, durably. */
+export type Notification = {
+  id: number;
+  dedupeKey: string;
+  kind: string;
+  subject: string;
+  body: string;
+  createdAt: string;
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  deliveredAt: string | null;
+  receipt: string | null;
+};
+
 /** One build attempt. `outcome` null means it never finished — also an answer. */
 export type Run = {
   id: number;
@@ -271,6 +286,27 @@ CREATE TABLE IF NOT EXISTS run (
   committed   INTEGER,
   started_at  TEXT NOT NULL,
   finished_at TEXT
+);
+
+-- The durable outbox (§6). A notification is a fact that something wants a
+-- person, recorded next to the record that made it true — because one that
+-- lives only in a process's memory dies with the process, at exactly the
+-- moment it was most worth sending. dedupe_key is an episode identity: a
+-- gap nags once per occurrence, not once per cron firing and not forever.
+CREATE TABLE IF NOT EXISTS notification (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedupe_key      TEXT NOT NULL UNIQUE,
+  kind            TEXT NOT NULL,
+  subject         TEXT NOT NULL,
+  body            TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  last_error      TEXT,
+  delivered_at    TEXT,
+  -- What the delivery command said on success — the closest thing to a
+  -- provider receipt a shell command can hand back.
+  receipt         TEXT
 );
 
 -- Permission to write to a tracker, one row per repository and backend.
@@ -1117,6 +1153,11 @@ export class Store {
         kind,
         name,
       );
+    // A gap that just filled ends its notification episode: the next failure
+    // is a new fact, and must be allowed to say so.
+    if (Number(changes) > 0 && outcome.status === "verified") {
+      this.clearGapEpisode(repo, kind, name);
+    }
     return Number(changes) > 0;
   }
 
@@ -1138,6 +1179,69 @@ export class Store {
         .run(repo, taskRef);
       return Number(changes) > 0;
     });
+  }
+
+  // ---- the outbox ---------------------------------------------------------
+
+  /** True if this is a new fact; false if the episode already knows. */
+  enqueueNotification(
+    notification: { dedupeKey: string; kind: string; subject: string; body: string },
+    now: Date,
+  ): boolean {
+    const { changes } = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        notification.dedupeKey,
+        notification.kind,
+        notification.subject,
+        notification.body,
+        now.toISOString(),
+      );
+    return Number(changes) > 0;
+  }
+
+  listNotifications(only: "pending" | "all" = "pending"): Notification[] {
+    const where = only === "pending" ? "WHERE delivered_at IS NULL" : "";
+    return this.db
+      .prepare(`SELECT * FROM notification ${where} ORDER BY id`)
+      .all()
+      .map(readNotification);
+  }
+
+  recordDelivery(
+    id: number,
+    outcome: { ok: true; receipt: string | null } | { ok: false; error: string },
+    now: Date,
+  ): void {
+    if (outcome.ok) {
+      this.db
+        .prepare(
+          `UPDATE notification SET delivered_at = ?, receipt = ?, attempts = attempts + 1, last_attempt_at = ?, last_error = NULL
+            WHERE id = ?`,
+        )
+        .run(now.toISOString(), outcome.receipt, now.toISOString(), id);
+      return;
+    }
+    this.db
+      .prepare(
+        `UPDATE notification SET attempts = attempts + 1, last_attempt_at = ?, last_error = ?
+          WHERE id = ?`,
+      )
+      .run(now.toISOString(), outcome.error, id);
+  }
+
+  /**
+   * Close a gap's notification episode. Called when its capability verifies:
+   * the next failure is a *new* fact, and a dedupe key that suppressed it
+   * forever would be a gap the operator hears about exactly once per lifetime.
+   */
+  clearGapEpisode(repo: string, kind: string, name: string): void {
+    this.db
+      .prepare("DELETE FROM notification WHERE dedupe_key = ?")
+      .run(`gap:${repo}:${kind}:${name}`);
   }
 
   // ---- runs ---------------------------------------------------------------
@@ -1267,6 +1371,22 @@ export class Store {
       .run(idempotencyKey, operation, JSON.stringify(result ?? null), actor, at.toISOString());
     return result;
   }
+}
+
+function readNotification(row: Record<string, unknown>): Notification {
+  return {
+    id: Number(row["id"]),
+    dedupeKey: String(row["dedupe_key"]),
+    kind: String(row["kind"]),
+    subject: String(row["subject"]),
+    body: String(row["body"]),
+    createdAt: String(row["created_at"]),
+    attempts: Number(row["attempts"]),
+    lastAttemptAt: row["last_attempt_at"] === null ? null : String(row["last_attempt_at"]),
+    lastError: row["last_error"] === null ? null : String(row["last_error"]),
+    deliveredAt: row["delivered_at"] === null ? null : String(row["delivered_at"]),
+    receipt: row["receipt"] === null ? null : String(row["receipt"]),
+  };
 }
 
 function readCapability(row: Record<string, unknown>): Capability {

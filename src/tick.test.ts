@@ -560,3 +560,126 @@ describe("gaps", () => {
     expect(payload().gaps).toEqual([]);
   });
 });
+
+describe("the outbox", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let lines: string[] = [];
+
+  const run = (argv: string[]) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now: T0 });
+  };
+
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-outbox-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    await mkdir(repo, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("a gap nags once per episode, and again after it recurs", async () => {
+    const store = openStore(db);
+    const enqueue = () =>
+      store.enqueueNotification(
+        { dedupeKey: `gap:${repo}:env:KEY`, kind: "gap", subject: "env:KEY blocks work", body: "…" },
+        T0,
+      );
+
+    expect(enqueue()).toBe(true);
+    expect(enqueue()).toBe(false); // same episode: the cron firing again is not news
+
+    // The gap fills — verification closes the episode…
+    store.saveCapability({
+      repo, kind: "env", name: "KEY", probe: 'test -n "$KEY"', status: "unprobed",
+      addedBy: "alex", createdAt: T0.toISOString(), lastVerifiedAt: null,
+      verifiedBy: null, lastResult: null, expiresAt: null,
+    });
+    store.markCapability(repo, "env", "KEY", { status: "verified", by: "b1" }, T0);
+
+    // …so a recurrence is a new fact, allowed to say so.
+    expect(enqueue()).toBe(true);
+    store.close();
+  });
+
+  test("deliver hands the text over as environment, records a receipt, and keeps failures pending", async () => {
+    const store = openStore(db);
+    store.enqueueNotification(
+      { dedupeKey: "n-1", kind: "build-failed", subject: 'subject with "quotes" and $DOLLARS', body: "line one\nline two" },
+      T0,
+    );
+    store.enqueueNotification(
+      { dedupeKey: "n-2", kind: "gap", subject: "second", body: "…" },
+      T0,
+    );
+    store.close();
+
+    // The command reads env — nothing from the notification touches the
+    // command line itself. It fails once for n-2 via a marker file trick:
+    // first invocation writes the marker and succeeds; second sees it and fails.
+    const marker = join(base, "seen");
+    const cmd = `if [ -f "${marker}" ]; then echo "already: $NIGHTORDERS_DEDUPE_KEY" >&2; exit 7; fi; touch "${marker}"; echo "receipt for $NIGHTORDERS_SUBJECT"`;
+
+    const code = await run(["outbox", "deliver", "--cmd", cmd, "--json"]);
+
+    expect(code).toBe(EXIT.failed);
+    expect(payload()).toMatchObject({ ok: false, delivered: 1, failed: 1 });
+
+    const after = openStore(db);
+    const all = after.listNotifications("all");
+    after.close();
+    expect(all[0]).toMatchObject({
+      dedupeKey: "n-1",
+      receipt: 'receipt for subject with "quotes" and $DOLLARS',
+    });
+    expect(all[0]?.deliveredAt).not.toBeNull();
+    expect(all[1]).toMatchObject({ dedupeKey: "n-2", deliveredAt: null, attempts: 1, lastError: "already: n-2" });
+  });
+
+  test("a failing build leaves a durable notification with the canonical reason", async () => {
+    // Wire the whole path: tick fails a build, the outbox holds the fact.
+    await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
+    await exec("git", ["config", "user.email", "t@e.com"], { cwd: repo });
+    await exec("git", ["config", "user.name", "T"], { cwd: repo });
+    await writeFile(join(repo, "README.md"), "x\n");
+    await exec("git", ["add", "."], { cwd: repo });
+    await exec("git", ["commit", "-qm", "first"], { cwd: repo });
+
+    const broken: Runner = async () => ({ ...OK, code: 1, stderr: "the model refused" });
+    const runWith = (argv: string[]) => {
+      const [command = "", ...rest] = argv;
+      lines = [];
+      return runOperate(command, rest, line => lines.push(line), {
+        databaseFile: db,
+        now: T0,
+        agentRunner: broken,
+      });
+    };
+
+    await runWith(["runner", "register", "builder-1", "--json"]);
+    const token = payload().token as string;
+    await runWith(["approver", "add", "alex", "--json"]);
+    const approver = payload().token as string;
+    await runWith(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
+    await runWith(["task", "scope", "t-1", "--goal", "add a guard"]);
+    await runWith(["task", "approve", "t-1", "--json"]);
+    const digest = payload().scope.digest as string;
+    await runWith(["task", "approve", "t-1", "--yes", "--digest", digest, "--as", "alex", "--token", approver]);
+    await runWith(["tick", "--runner", "builder-1", "--token", token, "--repo", repo, "--pool", join(base, "pool"), "--json"]);
+
+    await run(["outbox", "list", "--json"]);
+    expect(payload().notifications).toHaveLength(1);
+    expect(payload().notifications[0]).toMatchObject({
+      kind: "build-failed",
+      subject: "t-1: build failed (agent)",
+    });
+  });
+});
