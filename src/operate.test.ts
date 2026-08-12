@@ -570,3 +570,93 @@ describe("the grant is actually enforced", () => {
     expect(payload().tasks[0].id).toBe("mine");
   });
 });
+
+describe("agreeing to a scope from the command line", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "nightorders-scope-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  /** Registering somebody who may say yes, and writing a scope to say it about. */
+  const scopeIt = async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    approverToken = payload().token as string;
+    await run(["task", "add", "fix the payouts flow", "--id", "pay"]);
+    await run(["task", "scope", "pay", "--goal", "add a guard", "--json"]);
+    return payload().scope.digest as string;
+  };
+  let approverToken = "";
+
+  test("approving without --yes shows the terms and changes nothing", async () => {
+    await scopeIt();
+
+    const code = await run(["task", "approve", "pay"]);
+
+    expect(code).toBe(EXIT.ok);
+    expect(out()).toContain("Nothing has been approved");
+    await run(["task", "show", "pay", "--json"]);
+    expect(payload().approval.approved).toBe(false);
+  });
+
+  test("--yes alone is not enough: the exact scope has to be named", async () => {
+    // An operator reads scope A, somebody rewrites it to B, and an approval
+    // that did not name what it saw would agree to B in silence.
+    await scopeIt();
+
+    const code = await run(["task", "approve", "pay", "--yes"]);
+
+    expect(code).toBe(EXIT.ok);
+    expect(out()).toContain("--digest");
+    await run(["task", "show", "pay", "--json"]);
+    expect(payload().approval.approved).toBe(false);
+  });
+
+  test("naming the scope you read approves it", async () => {
+    const digest = await scopeIt();
+
+    expect(
+      await run(["task", "approve", "pay", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]),
+    ).toBe(EXIT.ok);
+
+    await run(["task", "show", "pay", "--json"]);
+    expect(payload().approval).toMatchObject({ approved: true });
+  });
+
+  test("naming a scope that has since been rewritten is refused", async () => {
+    const stale = await scopeIt();
+    await run(["task", "scope", "pay", "--goal", "rewrite the billing model"]);
+
+    const code = await run([
+      "task", "approve", "pay", "--yes", "--digest", stale,
+      "--as", "alex", "--token", approverToken, "--json",
+    ]);
+
+    expect(code).toBe(EXIT.refused);
+    expect(payload().reason).toBe("changed");
+  });
+
+  test("a task with no scope says so rather than approving nothing", async () => {
+    await run(["task", "add", "a thing", "--id", "t-1"]);
+
+    expect(
+      await run(["task", "approve", "t-1", "--yes", "--digest", "x", "--as", "alex", "--token", "t"]),
+    ).toBe(EXIT.refused);
+  });
+});

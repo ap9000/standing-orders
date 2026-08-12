@@ -31,6 +31,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
+import type { Scope } from "./scope.js";
 
 export const SCHEMA_VERSION = 1;
 
@@ -174,6 +175,34 @@ CREATE TABLE IF NOT EXISTS backend_grant (
   granted_at       TEXT NOT NULL,
   granted_by       TEXT NOT NULL,
   PRIMARY KEY (repo, backend)
+);
+
+-- What a task is allowed to become, and whether a person agreed to it.
+--
+-- approved_digest is the whole mechanism: approval records the exact scope it
+-- saw, so rewriting the scope afterwards does not carry the approval with it.
+CREATE TABLE IF NOT EXISTS task_scope (
+  task_id         TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  goal            TEXT NOT NULL,
+  out_of_scope    TEXT,
+  touches         TEXT NOT NULL DEFAULT '[]',
+  proposed_at     TEXT NOT NULL,
+  digest          TEXT NOT NULL,
+  approved_at     TEXT,
+  approved_by     TEXT,
+  approved_digest TEXT
+);
+
+-- Whoever is allowed to say yes to a scope.
+--
+-- Separate from a runner on purpose: a runner is a machine that does work, and
+-- an approver is a person who agrees to it. Sharing one table would mean any
+-- credential that can take a task can also approve one, which is the exact
+-- collapse this whole gate exists to prevent.
+CREATE TABLE IF NOT EXISTS approver (
+  name            TEXT PRIMARY KEY,
+  credential_hash TEXT NOT NULL,
+  added_at        TEXT NOT NULL
 );
 
 -- A machine that may be given work.
@@ -627,6 +656,68 @@ export class Store {
     );
   }
 
+  // ---- scope --------------------------------------------------------------
+
+  saveScope(scope: Scope, mutation: Mutation = {}): void {
+    this.once(mutation, "saveScope", () => {
+      this.db
+        .prepare(
+          `INSERT INTO task_scope
+             (task_id, goal, out_of_scope, touches, proposed_at, digest, approved_at, approved_by, approved_digest)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (task_id) DO UPDATE SET
+             goal = excluded.goal, out_of_scope = excluded.out_of_scope,
+             touches = excluded.touches, proposed_at = excluded.proposed_at,
+             digest = excluded.digest, approved_at = excluded.approved_at,
+             approved_by = excluded.approved_by, approved_digest = excluded.approved_digest`,
+        )
+        .run(
+          scope.taskId,
+          scope.goal,
+          scope.outOfScope,
+          JSON.stringify(scope.touches),
+          scope.proposedAt,
+          scope.digest,
+          scope.approvedAt,
+          scope.approvedBy,
+          scope.approvedDigest,
+        );
+      return null;
+    });
+  }
+
+  getScope(taskId: string): Scope | null {
+    const row = this.db.prepare("SELECT * FROM task_scope WHERE task_id = ?").get(taskId);
+    return row === undefined ? null : readScope(row);
+  }
+
+  // ---- approvers ----------------------------------------------------------
+
+  saveApprover(name: string, credentialHash: string, now: Date, mutation: Mutation = {}): void {
+    this.once(mutation, "saveApprover", () => {
+      this.db
+        .prepare(
+          `INSERT INTO approver (name, credential_hash, added_at) VALUES (?, ?, ?)
+           ON CONFLICT (name) DO UPDATE SET credential_hash = excluded.credential_hash,
+                                            added_at = excluded.added_at`,
+        )
+        .run(name, credentialHash, now.toISOString());
+      return null;
+    });
+  }
+
+  approverHash(name: string): string | null {
+    const row = this.db.prepare("SELECT credential_hash FROM approver WHERE name = ?").get(name);
+    return row === undefined ? null : String(row["credential_hash"]);
+  }
+
+  listApprovers(): { name: string; addedAt: string }[] {
+    return this.db
+      .prepare("SELECT name, added_at FROM approver ORDER BY name")
+      .all()
+      .map(row => ({ name: String(row["name"]), addedAt: String(row["added_at"]) }));
+  }
+
   // ---- runners ------------------------------------------------------------
 
   saveRunner(runner: Runner, credentialHash: string, mutation: Mutation = {}): void {
@@ -763,6 +854,11 @@ export class Store {
     return row === undefined ? null : readWorktree(row);
   }
 
+  /** Drop a row whose directory is gone; a lease over nothing only refuses work. */
+  forgetWorktree(path: string): void {
+    this.db.prepare("DELETE FROM worktree WHERE path = ?").run(path);
+  }
+
   listWorktrees(): WorktreeRow[] {
     return this.db.prepare("SELECT * FROM worktree ORDER BY path").all().map(readWorktree);
   }
@@ -878,6 +974,20 @@ export type WorktreeRow = {
   /** Whether the state on disk has been checked since it was last let go. */
   verified: boolean;
 };
+
+function readScope(row: Record<string, unknown>): Scope {
+  return {
+    taskId: String(row["task_id"]),
+    goal: String(row["goal"]),
+    outOfScope: row["out_of_scope"] === null ? null : String(row["out_of_scope"]),
+    touches: readJsonArray(row["touches"]),
+    proposedAt: String(row["proposed_at"]),
+    digest: String(row["digest"]),
+    approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
+    approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
+    approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),
+  };
+}
 
 function readRunner(row: Record<string, unknown>): Runner {
   return {

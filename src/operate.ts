@@ -27,7 +27,14 @@
 
 import { homedir, hostname } from "node:os";
 import { resolve } from "node:path";
-import { openStore, databasePath, BUILT_IN, type Store, type TaskState } from "./store.js";
+import {
+  openStore,
+  databasePath,
+  BUILT_IN,
+  DEFAULT_ACTOR,
+  type Store,
+  type TaskState,
+} from "./store.js";
 import { acquire, heartbeat, release, reap, currentClaim, DEFAULT_LEASE_MS } from "./claim.js";
 import {
   proposeGrant,
@@ -46,6 +53,7 @@ import {
   isAlive,
   recoverDead,
 } from "./runner.js";
+import { propose, approve, addApprover, describeScope, approvalOf } from "./scope.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 
@@ -125,6 +133,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   const wantsValue = new Set([
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
+    "goal", "not", "touches", "by", "digest", "as",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -200,6 +209,8 @@ async function dispatch(
       return reapCommand(context);
     case "runner":
       return runnerCommand(positional, flags, context);
+    case "approver":
+      return approverCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -775,6 +786,10 @@ function taskCommand(
       return stateTask(rest, flags, context);
     case "block":
       return blockTask(rest, flags, context);
+    case "scope":
+      return scopeTask(rest, flags, context);
+    case "approve":
+      return approveTask(rest, flags, context);
     case "hold":
       return holdTask(rest, flags, context);
     case "unhold":
@@ -884,12 +899,15 @@ function showTask(positional: readonly string[], context: Context): number {
   if (task === null) return fail(write, json, "task show", "unknown-task", `no task \`${id}\``, EXIT.refused);
 
   const ref = store.refFor(BUILT_IN, id);
+  const scope = store.getScope(id);
   const detail = {
     task,
     ref: ref.id,
     blockedBy: store.blockers(id),
     hold: store.activeHold(ref.id, now),
     claim: currentClaim(store, ref.id, now),
+    scope,
+    approval: approvalOf(scope),
   };
 
   return succeed(write, json, "task show", detail, () => [
@@ -898,6 +916,9 @@ function showTask(positional: readonly string[], context: Context): number {
     ...(detail.blockedBy.length > 0 ? [`  waits for ${detail.blockedBy.join(", ")}`] : []),
     ...(detail.hold === null ? [] : [`  held: ${detail.hold.reason}`]),
     ...(detail.claim === null ? [] : [`  claimed by ${detail.claim.runner} until ${detail.claim.expiresAt}`]),
+    ...(scope === null
+      ? ["  no scope — nothing will build this until one is written and approved"]
+      : describeScope(scope)),
   ]);
 }
 
@@ -962,6 +983,185 @@ function blockTask(
   return succeed(write, json, "task block", { blocked: id, blocker: on }, () => [
     `${id} now waits for ${on}.`,
   ]);
+}
+
+/**
+ * Write down what a task is allowed to become.
+ *
+ * Proposing never approves. The two are separate commands because they are
+ * separate acts by, usually, separate parties: an agent may draft a scope, and
+ * only a person may agree to it.
+ */
+function scopeTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, now } = context;
+  const id = positional[0];
+  const goal = text(flags, "goal");
+  if (id === undefined || goal === undefined) {
+    return fail(write, json, "task scope", "usage", "`nightorders task scope <id> --goal <what success is>`", EXIT.usage);
+  }
+  if (store.getTask(id) === null) {
+    return fail(write, json, "task scope", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  }
+
+  const touches = (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(Boolean);
+  const scope = propose(store, {
+    taskId: id,
+    goal,
+    outOfScope: text(flags, "not") ?? null,
+    touches,
+    now,
+    mutation: mutationFrom(flags, now),
+  });
+
+  return succeed(write, json, "task scope", { scope }, () => [
+    `Scope written for ${id}. Nothing will build it until somebody approves it.`,
+    ...describeScope(scope),
+    "",
+    `  nightorders task approve ${id} --yes`,
+  ]);
+}
+
+/**
+ * A person says yes.
+ *
+ * `--yes` is required for the same reason `enroll` requires it: this is the
+ * moment an agent is allowed to write code against somebody's repository, and
+ * a command that did it as a side effect of being run would be the wrong shape
+ * entirely.
+ */
+function approveTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, now } = context;
+  const id = positional[0];
+  if (id === undefined) {
+    return fail(write, json, "task approve", "usage", "which task?", EXIT.usage);
+  }
+
+  const scope = store.getScope(id);
+  if (scope === null) {
+    return fail(write, json, "task approve", "no-scope", `${id} has no scope to approve — write one first`, EXIT.refused);
+  }
+
+  const saw = text(flags, "digest");
+  const asWho = text(flags, "as");
+  const token = text(flags, "token");
+
+  if (!flags.has("yes") || saw === undefined || asWho === undefined || token === undefined) {
+    if (json) {
+      write(JSON.stringify({ ok: false, command: "task approve", reason: "unconfirmed", scope }, null, 2));
+      return EXIT.refused;
+    }
+    write(`Would approve this, and let a builder work on ${id}:`);
+    write("");
+    for (const line of describeScope(scope)) write(line);
+    write("");
+    write("Nothing has been approved. Agree to this exact scope with:");
+    write(`  nightorders task approve ${id} --yes --digest ${scope.digest} --as <you> --token <token>`);
+    return EXIT.ok;
+  }
+
+  // The digest is named rather than assumed, so an operator who read one scope
+  // cannot approve a different one that replaced it while they were reading.
+  // The credential is required for a different reason: an agent that can run
+  // these commands can read the digest out of `task show`, and an approval
+  // nobody has to authenticate would let it agree to its own brief.
+  const approved = approve(store, id, asWho, now, saw, token, mutationFrom(flags, now));
+  if (!approved.ok) {
+    return fail(write, json, "task approve", approved.reason, describeApproveFailure(approved.reason, id), EXIT.refused);
+  }
+
+  return succeed(write, json, "task approve", { scope: approved.scope }, () => [
+    `Approved. A builder may now work on ${id}, within this scope:`,
+    ...describeScope(approved.scope),
+  ]);
+}
+
+function describeApproveFailure(reason: string, id: string): string {
+  if (reason === "changed") return "the scope changed since you read it — look again before approving";
+  if (reason === "no-approvers") {
+    return "nobody can approve anything yet — `nightorders approver add <you>` mints the credential that lets a person say yes";
+  }
+  if (reason === "not-an-approver") return "that is not an approver, or the token does not match";
+  return `${id} has no scope to approve`;
+}
+
+/**
+ * The people allowed to agree to a scope.
+ *
+ * Kept apart from runners deliberately: a runner credential takes work, and an
+ * approver credential agrees to it. One token that did both would collapse the
+ * gate into a formality the moment an agent held it.
+ */
+function approverCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, now } = context;
+  const [action, name] = positional;
+
+  if (action === "list" || action === undefined) {
+    const approvers = store.listApprovers();
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "approver list", approvers }, null, 2));
+      return EXIT.ok;
+    }
+    if (approvers.length === 0) {
+      write("Nobody can approve a scope yet, so nothing can be built.");
+      write("  nightorders approver add <your name>");
+      return EXIT.ok;
+    }
+    for (const one of approvers) write(`  ${one.name}  since ${one.addedAt}`);
+    return EXIT.ok;
+  }
+
+  if (action === "add") {
+    if (name === undefined) {
+      return fail(write, json, "approver add", "usage", "an approver needs a name", EXIT.usage);
+    }
+    const asWho = text(flags, "as");
+    const token = text(flags, "token");
+    const by = asWho === undefined || token === undefined ? undefined : { name: asWho, token };
+
+    const added = addApprover(store, name, now, by, undefined, mutationFrom(flags, now));
+    if (!added.ok) {
+      return fail(
+        write,
+        json,
+        "approver add",
+        added.reason,
+        "only an existing approver can add another — `--as <you> --token <token>`",
+        EXIT.refused,
+      );
+    }
+
+    return succeed(write, json, "approver add", added, () => [
+      `${added.name} may now approve scopes.`,
+      "",
+      `  token  ${added.token}`,
+      "",
+      "Shown once, stored only as a hash. Keep it somewhere an agent cannot read:",
+      "it is the difference between a person agreeing to the work and the work",
+      "agreeing to itself.",
+      ...(added.bootstrap
+        ? [
+            "",
+            "This was the first approver, so nothing had to vouch for it. Adding any",
+            "further approver now requires an existing one — do this before anything",
+            "else can reach this queue.",
+          ]
+        : []),
+    ]);
+  }
+
+  return fail(write, json, "approver", "usage", `unknown \`approver ${action}\` — try list or add`, EXIT.usage);
 }
 
 function holdTask(
