@@ -26,7 +26,7 @@
  */
 
 import { homedir, hostname } from "node:os";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   openStore,
   databasePath,
@@ -54,6 +54,8 @@ import {
   recoverDead,
 } from "./runner.js";
 import { propose, approve, addApprover, describeScope, approvalOf } from "./scope.js";
+import { WorktreePool } from "./worktree.js";
+import { build } from "./builder.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 
@@ -133,7 +135,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   const wantsValue = new Set([
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
-    "goal", "not", "touches", "by", "digest", "as",
+    "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -211,6 +213,8 @@ async function dispatch(
       return runnerCommand(positional, flags, context);
     case "approver":
       return approverCommand(positional, flags, context);
+    case "build":
+      return buildCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -617,6 +621,90 @@ function describeAuth(reason: string, name: string): string {
   if (reason === "unknown") return `no runner \`${name}\` — register it first`;
   if (reason === "retired") return `${name} has been retired`;
   return "that token does not match";
+}
+
+/**
+ * Dispatch one task to a builder: lease a checkout, run it, hand it back.
+ *
+ * Every gate lives in `build()` rather than here, so this cannot forget one.
+ * What this owns is the worktree lifecycle around it — including handing the
+ * checkout back afterwards, and *not* handing it back when the agent left
+ * uncommitted work in it, because that work is somebody's and gets kept.
+ */
+async function buildCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, now } = context;
+  const id = positional[0];
+  const runner = text(flags, "runner");
+  const token = text(flags, "token");
+  const branch = text(flags, "branch");
+
+  if (id === undefined || runner === undefined || token === undefined || branch === undefined) {
+    return fail(write, json, "build", "usage", "`nightorders build <id> --runner <name> --token <t> --branch <b> --repo <path>`", EXIT.usage);
+  }
+
+  const auth = authenticate(store, runner, token);
+  if (!auth.ok) {
+    return fail(write, json, "build", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
+  }
+
+  const repo = repoFrom(flags);
+  const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
+  const ref = store.refFor(BUILT_IN, id);
+
+  const worktrees = new WorktreePool(store, { root: pool });
+  const leased = await worktrees.lease({
+    repo,
+    branch,
+    runner,
+    taskRef: ref.id,
+    now,
+    ...(text(flags, "base") === undefined ? {} : { base: text(flags, "base") as string }),
+  });
+  if (!leased.ok) {
+    return fail(write, json, "build", leased.reason, leased.message, EXIT.refused);
+  }
+
+  const result = await build(store, {
+    taskId: id,
+    taskRef: ref.id,
+    runner,
+    worktree: leased.worktree.path,
+    branch,
+    now,
+    ...(text(flags, "model") === undefined ? {} : { model: text(flags, "model") as string }),
+    ...(text(flags, "turns") === undefined ? {} : { maxTurns: Number(text(flags, "turns")) }),
+  });
+
+  // Handed back either way. A tree with work still in it comes back
+  // unverified and is reported rather than cleaned.
+  const handedBack = await worktrees.release(leased.worktree.path, now);
+
+  if (!result.ok) {
+    return fail(write, json, "build", result.reason, result.message, EXIT.refused, {
+      worktree: leased.worktree.path,
+    });
+  }
+
+  return succeed(
+    write,
+    json,
+    "build",
+    { ...result, worktree: leased.worktree.path, clean: handedBack.ok },
+    () => [
+      result.committed
+        ? `Built ${id} and committed to ${branch}.`
+        : `Built ${id}; the agent changed nothing, which is a real answer.`,
+      `  worktree  ${leased.worktree.path}`,
+      "",
+      result.summary,
+      "",
+      "Nothing has been pushed. Look at the branch before it goes anywhere.",
+    ],
+  );
 }
 
 // ---- write access ---------------------------------------------------------

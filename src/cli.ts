@@ -167,6 +167,7 @@ const OPERATE_COMMANDS = new Set([
   "revoke",
   "runner",
   "approver",
+  "build",
 ]);
 
 /** binSource exists so tests can exercise linking without depending on a build. */

@@ -32,6 +32,7 @@ import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Store } from "./store.js";
 import { approvalOf, type Scope } from "./scope.js";
 import { currentClaim } from "./claim.js";
+import { MARKER as LEASE_MARKER } from "./worktree.js";
 
 export type Runner = (
   file: string,
@@ -219,7 +220,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     return { ok: false, reason: "agent", message: firstLine(result.stderr) || `exit ${result.code}` };
   }
 
-  return commit(git, worktree, branch, taskId, summarise(result.stdout));
+  return commit(git, worktree, branch, taskId, scope as Scope, summarise(result.stdout));
 }
 
 /**
@@ -286,18 +287,32 @@ async function commit(
   worktree: string,
   branch: string,
   taskId: string,
+  scope: Scope,
   summary: string,
 ): Promise<BuildResult> {
   const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
   if (status.code !== 0) return { ok: false, reason: "git", message: firstLine(status.stderr) };
-  if (status.stdout.trim() === "") {
+
+  // The pool's own lease marker is not the agent's work. Counting it would
+  // report changes where there are none, and staging it would put one of our
+  // internal files into somebody else's commit.
+  const changed = status.stdout
+    .split("\n")
+    .filter(line => line.trim() !== "" && !line.trimEnd().endsWith(LEASE_MARKER));
+  if (changed.length === 0) {
     return { ok: true, committed: false, branch, summary };
   }
 
-  const add = await git(GIT, ["add", "-A"], { cwd: worktree });
+  const add = await git(GIT, ["add", "-A", "--", ".", `:!${LEASE_MARKER}`], { cwd: worktree });
   if (add.code !== 0) return { ok: false, reason: "git", message: firstLine(add.stderr) };
 
-  const message = `${taskId}: ${summary.split("\n")[0] ?? "unattended build"}`;
+  // The subject comes from the agreed goal, not from the agent's own prose.
+  // An agent asked for a summary writes a report, and its first line is a
+  // markdown heading — the first real build produced the commit subject
+  // "**Project:** vamarketplacenew · **Branch:** ... work is left uncommitted",
+  // which was both unreadable and, by then, untrue. The goal is a sentence a
+  // person already agreed to, which is exactly what a subject line wants.
+  const message = [`${taskId}: ${firstSentence(scope.goal, 68)}`, "", summary].join("\n");
   // Hooks are code the repository controls, and this commit is made by an
   // unattended agent that may well have just written some of it. A pre-commit
   // hook here would run outside every boundary above it — and an interactive
@@ -333,4 +348,16 @@ function summarise(stdout: string): string {
 function firstLine(text: string): string {
   const [line = ""] = text.trim().split("\n");
   return line;
+}
+
+/** Enough of the goal to name the commit, cut on a word rather than mid-word. */
+function firstSentence(goal: string, limit: number): string {
+  const flat = goal.replace(/\s+/g, " ").trim();
+  const stop = flat.indexOf(". ");
+  const sentence = stop > 0 ? flat.slice(0, stop) : flat;
+  if (sentence.length <= limit) return sentence;
+
+  const cut = sentence.slice(0, limit);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${lastSpace > 20 ? cut.slice(0, lastSpace) : cut}…`;
 }

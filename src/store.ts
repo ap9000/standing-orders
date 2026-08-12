@@ -298,6 +298,7 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
 
   const db = connect(file);
   db.exec(SCHEMA);
+  migrate(db);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -321,6 +322,31 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
  * of stderr is not worth breaking a global for. The right fix belongs in the
  * launcher — `--disable-warning=ExperimentalWarning` — not in a library.
  */
+/**
+ * Columns added after somebody's database already existed.
+ *
+ * `CREATE TABLE IF NOT EXISTS` does exactly nothing to a table that is already
+ * there, so a column added to the schema later never reaches an existing file
+ * — and every test opening `:memory:` or a fresh path passes while the first
+ * real database fails on the next query. This one was found by opening one.
+ *
+ * Additive only, and idempotent: each column is added if it is missing and
+ * skipped if it is not. Nothing here rewrites or drops anything.
+ */
+function migrate(db: Database): void {
+  addColumn(db, "task_ref", "origin", "TEXT NOT NULL DEFAULT 'theirs'");
+}
+
+function addColumn(db: Database, table: string, column: string, definition: string): void {
+  const present = db
+    .prepare(`PRAGMA table_info(${table})`)
+    .all()
+    .some(row => String(row["name"]) === column);
+  if (present) return;
+
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
 function defaultConnect(file: string): Database {
   const require = createRequire(import.meta.url);
   const { DatabaseSync } = require("node:sqlite") as {

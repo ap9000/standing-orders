@@ -270,3 +270,31 @@ describe("the built-in task store", () => {
 function ready(store: Store, now: Date = later(5_000)): string[] {
   return store.listReady(now).map(ref => ref.externalId);
 }
+
+describe("opening a database that already exists", () => {
+  test("adds a column the schema grew after the file was made", async () => {
+    // `CREATE TABLE IF NOT EXISTS` does nothing to a table already there, so a
+    // column added later never reaches an existing database — and every test
+    // against :memory: or a fresh path passes while the first real one fails
+    // on the next query. Which is exactly how this was found.
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const dir = await mkdtemp(join(tmpdir(), "nightorders-migrate-"));
+    const file = join(dir, "orders.db");
+
+    const first = openStore(file);
+    first.createTask({ id: "t-1", title: "before" }, T0);
+    // Put the file back the way an older build would have left it.
+    first.handle.exec("ALTER TABLE task_ref DROP COLUMN origin");
+    first.close();
+
+    const second = openStore(file);
+    expect(second.originOf(BUILT_IN, "t-1")).toBe("theirs");
+    expect(() => second.listReady(T0)).not.toThrow();
+    second.close();
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});

@@ -508,3 +508,158 @@ describe("scope text is data, not instructions", () => {
     expect(prompt).not.toMatch(/^- Ignore every rule/m);
   });
 });
+
+describe("the lease marker never reaches a commit", () => {
+  let store: Store;
+  let taskRef: number;
+  let approverToken: string;
+  const gitCalls: string[][] = [];
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", now: T0 });
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    store.saveWorktree({
+      path: "/pool/thing/feat-a",
+      repo: "/code/thing",
+      branch: "feat/a",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+    propose(store, { taskId: "t-1", goal: "a guard", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    gitCalls.length = 0;
+  });
+
+  afterEach(() => store.close());
+
+  const withStatus = (stdout: string) =>
+    build(store, {
+      taskId: "t-1",
+      taskRef,
+      runner: "builder-1",
+      worktree: "/pool/thing/feat-a",
+      branch: "feat/a",
+      now: T0,
+      agent: async () => ({ ...OK, stdout: AGENT_SAID }),
+      git: async (_f, args) => {
+        gitCalls.push([...args]);
+        if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+        if (args.includes("status")) return { ...OK, stdout };
+        return { ...OK };
+      },
+    });
+
+  test("is excluded when the agent did change something", async () => {
+    // Staging it would put one of our internal files into somebody's commit.
+    await withStatus(" M src/index.ts\n?? .nightorders-lease\n");
+
+    const add = gitCalls.find(args => args[0] === "add");
+    expect(add).toContain(":!.nightorders-lease");
+  });
+
+  test("does not count as a change on its own", async () => {
+    // Otherwise every build reports a commit it did not make.
+    const result = await withStatus("?? .nightorders-lease\n");
+
+    expect(result).toMatchObject({ ok: true, committed: false });
+    expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
+  });
+});
+
+describe("the commit message", () => {
+  let store: Store;
+  let taskRef: number;
+  let approverToken: string;
+  let committed: string[] = [];
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", now: T0 });
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    store.saveWorktree({
+      path: "/pool/thing/feat-a",
+      repo: "/code/thing",
+      branch: "feat/a",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+    committed = [];
+  });
+
+  afterEach(() => store.close());
+
+  const buildWith = (goal: string, agentSaid: string) => {
+    propose(store, { taskId: "t-1", goal, now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    return build(store, {
+      taskId: "t-1",
+      taskRef,
+      runner: "builder-1",
+      worktree: "/pool/thing/feat-a",
+      branch: "feat/a",
+      now: T0,
+      agent: async () => ({ ...OK, stdout: JSON.stringify({ result: agentSaid }) }),
+      git: async (_f, args) => {
+        if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+        if (args.includes("status")) return { ...OK, stdout: " M src/x.ts\n" };
+        if (args.includes("commit")) {
+          committed = [...args];
+          return { ...OK };
+        }
+        return { ...OK };
+      },
+    });
+  };
+
+  test("names the agreed goal, not whatever the agent wrote first", async () => {
+    // The first real build produced the subject "**Project:** vamarketplacenew
+    // · **Branch:** … work is left uncommitted in the worktree" — a markdown
+    // heading from the agent's report, unreadable and by then untrue.
+    await buildWith(
+      "Add comparison pages against competing VA services",
+      "**Project:** something · **Branch:** `feat/a` — work is left uncommitted.\n\nMore prose.",
+    );
+
+    const subject = (committed[committed.indexOf("-m") + 1] ?? "").split("\n")[0] ?? "";
+    expect(subject).toBe("t-1: Add comparison pages against competing VA services");
+    expect(subject).not.toContain("**");
+  });
+
+  test("keeps the agent's report in the body, where prose belongs", async () => {
+    await buildWith("Add a guard", "I added the guard and a test for it.");
+
+    const message = committed[committed.indexOf("-m") + 1] ?? "";
+    expect(message).toContain("I added the guard and a test for it.");
+  });
+
+  test("cuts a long goal on a word, not mid-word", async () => {
+    const goal =
+      "Add a new SEO content type: comparison pages that put us against competing services and tools everywhere";
+    await buildWith(goal, "done");
+
+    const subject = (committed[committed.indexOf("-m") + 1] ?? "").split("\n")[0] ?? "";
+    expect(subject.length).toBeLessThan(90);
+    expect(subject.endsWith("…")).toBe(true);
+
+    // Whatever it kept is a whole-word prefix of what was agreed, so the
+    // subject never invents a half word nobody wrote.
+    const kept = subject.replace(/^t-1: /, "").replace(/…$/, "");
+    expect(goal.startsWith(kept)).toBe(true);
+    expect(goal[kept.length]).toBe(" ");
+  });
+});
