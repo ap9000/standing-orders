@@ -30,6 +30,13 @@ export type RunOptions = {
    * environment the question is about.
    */
   env?: Record<string, string>;
+  /**
+   * Names removed from the child's environment after the merge. This exists
+   * for exactly one class of variable: a secret the parent holds that the
+   * child must never see — the Telegram bot token in an agent's process
+   * would let the agent read and answer the operator's own decisions.
+   */
+  omitEnv?: readonly string[];
 };
 
 /** Conventions from the shell and from coreutils `timeout(1)`. */
@@ -50,7 +57,13 @@ type ExecError = Error & {
 };
 
 export function run(file: string, args: readonly string[], options: RunOptions = {}): Promise<ExecResult> {
-  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER, env } = options;
+  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER, env, omitEnv } = options;
+
+  let childEnv: Record<string, string | undefined> | undefined;
+  if (env !== undefined || (omitEnv !== undefined && omitEnv.length > 0)) {
+    childEnv = { ...process.env, ...(env ?? {}) };
+    for (const name of omitEnv ?? []) delete childEnv[name];
+  }
 
   return new Promise(resolve => {
     execFile(
@@ -63,7 +76,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         encoding: "utf8",
         shell: false,
         windowsHide: true,
-        ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
+        ...(childEnv === undefined ? {} : { env: childEnv }),
       },
       (error, stdout, stderr) => {
         if (error === null) {

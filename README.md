@@ -90,6 +90,30 @@ One pass: take the ready set, skip what nobody approved, claim what is left — 
 
 It is deliberately a pass and not a daemon: point cron at it and the fences make repetition safe — a second pass finds the first's work done and converges to `empty` (exit 3) instead of building anything twice. A broken build marks its task `failed` and the pass exits 1 even if other tasks succeeded, because exit 0 has to mean "nothing needs you". Refusals that are really a person's pending decision — a scope nobody approved, or one that changed after approval — leave the task queued and untouched.
 
+## The phone, both directions
+
+The Telegram bridge closes the loop without a terminal: a parked decision
+arrives as a message with one button per option, and a tap answers it
+through the same authenticated path as the CLI and the web view — the hold
+lifts, and the next pass resumes the task with the answer in the agent's
+brief. No LLM is anywhere in this path.
+
+```sh
+nightorders bridge telegram token <token-from-@BotFather>   # or serve's settings card
+nightorders bridge telegram pair --as you --token <approver-token>
+# send the printed /pair code to your bot from your phone, then cron the pass:
+nightorders bridge telegram        # sends pending, applies taps, exits
+```
+
+A chat is not a person: pairing binds one private chat and one immutable
+Telegram user id to one approver credential. Buttons carry opaque one-time
+tokens whose meaning lives in the local database — a stolen bot token can
+read what was sent and repaint keyboards, but it cannot mint a token,
+answer as you, or arm an irreversible choice, which takes a second minted
+confirmation tap. Rotating your approver credential strands the chat and
+every outstanding button, and the bot token itself is stripped from every
+agent's environment.
+
 ## Writing to a tracker you already have
 
 Detection tells you what is there; a grant is what lets anything be written to it.

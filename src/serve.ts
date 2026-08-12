@@ -36,6 +36,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import type { Artifact, Decision, Store } from "./store.js";
 import { authenticateApprover } from "./scope.js";
+import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
   store: Store;
@@ -43,6 +44,11 @@ export type ServeOptions = {
   clock?: () => Date;
   /** Extra Host values this server answers as (a Tailscale name, a LAN ip:port). */
   allowedHosts?: readonly string[];
+  /**
+   * Where the Telegram bot token lives when set from here. Present = the
+   * settings card renders; absent = no settings surface at all.
+   */
+  telegramTokenFile?: string;
 };
 
 const SESSION_COOKIE = "nightorders_session";
@@ -120,7 +126,43 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/" && method === "GET") {
-      return page(response, 200, listPage(store.listDecisions("unanswered")));
+      return page(
+        response,
+        200,
+        listPage(store.listDecisions("unanswered"), options.telegramTokenFile !== undefined),
+      );
+    }
+
+    // The settings card: the Telegram bot token, settable from a phone. The
+    // token is written to the same 0600 file the CLI writes — never echoed
+    // back in full, never a database column, and POST-only behind the same
+    // session + Origin + CSRF discipline as answering.
+    if (url.pathname === "/settings" && method === "GET" && options.telegramTokenFile !== undefined) {
+      const existing = loadBotToken({}, options.telegramTokenFile);
+      const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      return page(response, 200, settingsPage(existing, hasEnv, csrf, null));
+    }
+    if (url.pathname === "/settings/telegram-token" && method === "POST" && options.telegramTokenFile !== undefined) {
+      if (who.via === "cookie") {
+        const origin = request.headers.origin;
+        if (typeof origin !== "string" || !allowedHost(origin.replace(/^https?:\/\//, ""))) {
+          return respond(response, 403, "text/plain; charset=utf-8", "origin not allowed");
+        }
+      }
+      const body = await form(request);
+      if (who.via === "cookie" && first(body, "csrf") !== who.session.csrf) {
+        return respond(response, 403, "text/plain; charset=utf-8", "stale form — reload and try again");
+      }
+      const value = first(body, "token") ?? "";
+      const saved = saveBotToken(options.telegramTokenFile, value);
+      if (!saved.ok) {
+        const existing = loadBotToken({}, options.telegramTokenFile);
+        const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
+        const csrf = who.via === "cookie" ? who.session.csrf : "";
+        return page(response, 400, settingsPage(existing, hasEnv, csrf, saved.message));
+      }
+      return redirect(response, "/settings");
     }
 
     const one = /^\/d\/(\d+)$/.exec(url.pathname);
@@ -321,7 +363,7 @@ function loginPage(problem: string | null): string {
   ].join("\n"));
 }
 
-function listPage(decisions: (Decision & { taskId: string })[]): string {
+function listPage(decisions: (Decision & { taskId: string })[], settings: boolean): string {
   const rows =
     decisions.length === 0
       ? "<p>Nothing waits on you. The night parked no decisions.</p>"
@@ -332,7 +374,36 @@ function listPage(decisions: (Decision & { taskId: string })[]): string {
               `${decision.state === "expired" ? ' <strong>overdue</strong>' : ""}</p>`,
           )
           .join("\n");
-  return shell("decisions", `<h1>waiting on you</h1>\n${rows}`);
+  const footer = settings ? `<p class="meta"><a href="/settings">settings</a></p>` : "";
+  return shell("decisions", `<h1>waiting on you</h1>\n${rows}\n${footer}`);
+}
+
+function settingsPage(
+  existing: TokenSource | null,
+  hasEnv: boolean,
+  csrf: string,
+  problem: string | null,
+): string {
+  const current =
+    hasEnv
+      ? `set in the environment (${escape(TOKEN_ENV)}) — that takes precedence over anything saved here`
+      : existing === null
+        ? "not set"
+        : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
+  return shell("settings", [
+    "<h1>settings</h1>",
+    "<h2>telegram bot token</h2>",
+    `<p class="meta">current: ${current}</p>`,
+    problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,
+    `<form method="post" action="/settings/telegram-token">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<label>token from @BotFather<input type="password" name="token" autocomplete="off"></label>`,
+    `<button type="submit">save</button>`,
+    "</form>",
+    `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
+    ` <code>nightorders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
+    `<p class="meta"><a href="/">← everything waiting</a></p>`,
+  ].join("\n"));
 }
 
 function decisionPage(

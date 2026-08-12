@@ -1185,3 +1185,187 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     expect((payload().tasks ?? []).map((t: { id: string }) => t.id)).toEqual(["t-1"]);
   });
 });
+
+describe("the bridge, end to end — a tap on a phone resumes the night", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let lines: string[] = [];
+
+  const BOT_TOKEN = "777000:AAExampleExampleExample123";
+
+  const parkingAgent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    if (mailbox === undefined) throw new Error("the brief named no mailbox");
+    await writeFile(
+      join(cwd, mailbox),
+      JSON.stringify({
+        urgency: "blocking",
+        recap: "The guard can fail open or fail closed.",
+        question: "Fail open or fail closed?",
+        options: [
+          { id: "open", label: "Fail open", consequence: "slips", reversible: true },
+          { id: "closed", label: "Fail closed", consequence: "pauses", reversible: true },
+        ],
+        recommendation: "closed",
+      }),
+    );
+    return { ...OK, stdout: JSON.stringify({ result: "parked" }) };
+  };
+
+  const buildingAgent: Runner = async (_file, _args, options) => {
+    const cwd = options?.cwd ?? "";
+    await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    return { ...OK, stdout: AGENT_SAID };
+  };
+
+  /** The scripted Bot API shared across `run` calls in one test. */
+  const script = {
+    calls: [] as { method: string; params: Record<string, unknown> }[],
+    updates: [] as unknown[][],
+    nextMessageId: 500,
+  };
+  const transport = async (method: string, params: Record<string, unknown>) => {
+    script.calls.push({ method, params });
+    if (method === "getUpdates") {
+      return { ok: true, result: script.updates.shift() ?? [] };
+    }
+    if (method === "sendMessage") {
+      return { ok: true, result: { message_id: script.nextMessageId++ } };
+    }
+    return { ok: true, result: true };
+  };
+
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+
+  const run = (argv: string[], runner: Runner = parkingAgent, now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), {
+      databaseFile: db,
+      now,
+      agentRunner: runner,
+      telegramTransport: transport,
+    });
+  };
+
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), "nightorders-bridge-e2e-"));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    script.calls = [];
+    script.updates = [];
+    await mkdir(repo, { recursive: true });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("token → pair → park → send → tap → the next tick builds", async () => {
+    // Credentials and an approved task, exactly as a person would set up.
+    await run(["runner", "register", "builder-1", "--json"]);
+    const runnerToken = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "approve", "t-1", "--json"]);
+    const digest = payload().scope.digest as string;
+    await run(["task", "approve", "t-1", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
+
+    // The bot token, set through the CLI, lands beside the database, 0600.
+    let code = await run(["bridge", "telegram", "token", BOT_TOKEN, "--json"]);
+    expect(code).toBe(EXIT.ok);
+
+    // Pairing: mint the code locally, send it "from the phone".
+    await run(["bridge", "telegram", "pair", "--as", "alex", "--token", approverToken, "--json"]);
+    const pairCode = payload().code as string;
+    script.updates.push([
+      {
+        update_id: 1,
+        message: {
+          message_id: 1,
+          text: `/pair ${pairCode}`,
+          chat: { id: 4242, type: "private" },
+          from: { id: 31337 },
+        },
+      },
+    ]);
+    code = await run(["bridge", "telegram", "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload().report).toMatchObject({ paired: 1 });
+
+    // The park, for real, against real git.
+    await run(
+      ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"],
+      parkingAgent,
+    );
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "parked" }]);
+
+    // The bridge sends it; the keyboard's buttons are opaque tokens.
+    code = await run(["bridge", "telegram", "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload().report).toMatchObject({ sent: 1 });
+    const keyboarded = script.calls.filter(
+      call => call.method === "sendMessage" && call.params["reply_markup"] !== undefined,
+    );
+    const buttons = (
+      keyboarded[keyboarded.length - 1]?.params["reply_markup"] as {
+        inline_keyboard: { text: string; callback_data: string }[][];
+      }
+    ).inline_keyboard.flat();
+    const closed = buttons.find(button => button.text.includes("Fail closed"));
+    expect(closed?.callback_data).toMatch(/^[0-9a-f]{32}$/);
+
+    // The tap, from the paired person, on the message the keyboard rode.
+    const store = openStore(db);
+    const placedOn = store.getTelegramAction(closed!.callback_data)?.messageId;
+    store.close();
+    script.updates.push([
+      {
+        update_id: 2,
+        callback_query: {
+          id: "cb-1",
+          data: closed!.callback_data,
+          from: { id: 31337 },
+          message: { message_id: Number(placedOn), chat: { id: 4242 } },
+        },
+      },
+    ]);
+    code = await run(["bridge", "telegram", "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload().report).toMatchObject({ answered: 1 });
+
+    // The answer is on the record as the paired approver, via telegram…
+    const after = openStore(db);
+    expect(after.getDecision(1)).toMatchObject({
+      state: "answered",
+      choice: "closed",
+      answeredBy: "alex",
+      answeredVia: "telegram",
+    });
+    after.close();
+
+    // …and the loop resumes: the next tick builds with the answer in hand.
+    code = await run(
+      ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"],
+      buildingAgent,
+      new Date(T0.getTime() + 60_000),
+    );
+    expect(code).toBe(EXIT.ok);
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built", committed: true }]);
+  });
+});

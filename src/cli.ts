@@ -179,6 +179,7 @@ const OPERATE_COMMANDS = new Set([
   "decide",
   "incident",
   "serve",
+  "bridge",
   "reconcile",
 ]);
 

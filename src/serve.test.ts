@@ -322,3 +322,96 @@ describe("the web decision view", () => {
     expect(response.status).toBe(404);
   });
 });
+
+describe("the settings card", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let dir: string;
+  let approverToken: string;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(`${base}/login`, {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import("node:fs");
+    store = openStore(":memory:");
+    dir = mkdtempSync(join(tmpdir(), "nightorders-serve-settings-"));
+    evidenceRoot = join(dir, "evidence");
+    mkdirSync(evidenceRoot, { recursive: true });
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => new Date(),
+      telegramTokenFile: join(dir, "telegram-token"),
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the bot token is settable from the phone, stored 0600, never echoed whole", async () => {
+    const { statSync, readFileSync } = await import("node:fs");
+    const cookie = await login();
+
+    // Before: not set, and the card says so.
+    let page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain("not set");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
+
+    // A wrong shape is refused.
+    const bad = await fetch(`${base}/settings/telegram-token`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ token: "not a token", csrf }),
+    });
+    expect(bad.status).toBe(400);
+
+    // The real thing lands owner-only beside the database.
+    const token = "777000:AAExampleExampleExample123";
+    const saved = await fetch(`${base}/settings/telegram-token`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ token, csrf }),
+      redirect: "manual",
+    });
+    expect(saved.status).toBe(303);
+    const file = join(dir, "telegram-token");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readFileSync(file, "utf8").trim()).toBe(token);
+
+    // After: recognizable, never whole.
+    page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain("e123");
+    expect(page).not.toContain(token);
+  });
+
+  test("no session, no settings — and no unauthenticated writes", async () => {
+    const page = await fetch(`${base}/settings`, { redirect: "manual" });
+    expect(page.status).toBe(303);
+
+    const write = await fetch(`${base}/settings/telegram-token`, {
+      method: "POST",
+      body: new URLSearchParams({ token: "777000:AAExampleExampleExample123" }),
+    });
+    expect(write.status).toBe(401);
+  });
+});

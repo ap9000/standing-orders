@@ -34,7 +34,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -191,7 +191,7 @@ export type Decision = {
   createdAt: string;
   answeredAt: string | null;
   answeredBy: string | null;
-  answeredVia: "cli" | "web" | null;
+  answeredVia: "cli" | "web" | "telegram" | null;
   choice: string | null;
   note: string | null;
 };
@@ -210,6 +210,34 @@ export type Artifact = {
   capture: string;
   createdAt: string;
   redacted: boolean;
+};
+
+/** One Telegram chat allowed to answer as one approver. Revoked, never deleted. */
+export type TelegramBinding = {
+  id: number;
+  botId: string;
+  chatId: string;
+  userId: string;
+  approver: string;
+  approverGeneration: number;
+  pairedAt: string;
+  pairedBy: string;
+  revokedAt: string | null;
+  revokedBy: string | null;
+};
+
+/** What one opaque callback token means. The token is all Telegram ever sees. */
+export type TelegramAction = {
+  token: string;
+  binding: number;
+  decision: number;
+  optionId: string;
+  phase: "choose" | "confirm" | "cancel";
+  chatId: string;
+  messageId: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  consumedAt: string | null;
 };
 
 /** A park that never became a decision. Stays in every brief until resolved. */
@@ -415,7 +443,7 @@ CREATE TABLE IF NOT EXISTS decision (
   created_at     TEXT NOT NULL,
   answered_at    TEXT,
   answered_by    TEXT,
-  answered_via   TEXT CHECK (answered_via IN ('cli','web')),
+  answered_via   TEXT CHECK (answered_via IN ('cli','web','telegram')),
   choice         TEXT,
   note           TEXT
 );
@@ -533,7 +561,84 @@ CREATE TABLE IF NOT EXISTS task_scope (
 CREATE TABLE IF NOT EXISTS approver (
   name            TEXT PRIMARY KEY,
   credential_hash TEXT NOT NULL,
-  added_at        TEXT NOT NULL
+  added_at        TEXT NOT NULL,
+  -- Bumped whenever the credential is replaced. Anything that derives
+  -- authority from an approver — a paired Telegram chat, an outstanding
+  -- pairing code — records the generation it was granted under, and a
+  -- rotation strands every grant from the old one.
+  generation      INTEGER NOT NULL DEFAULT 1
+);
+
+-- One Telegram chat speaking as one approver. Bindings are never deleted:
+-- revocation is a stamp, because "who could answer as whom, when" is an
+-- audit question a DELETE cannot answer. The partial unique index is the
+-- v1 rule that exactly one binding is live per bot at a time.
+CREATE TABLE IF NOT EXISTS telegram_binding (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id              TEXT NOT NULL,
+  chat_id             TEXT NOT NULL,
+  user_id             TEXT NOT NULL,
+  approver            TEXT NOT NULL REFERENCES approver(name) ON DELETE RESTRICT,
+  approver_generation INTEGER NOT NULL,
+  paired_at           TEXT NOT NULL,
+  paired_by           TEXT NOT NULL,
+  pair_update_id      INTEGER,
+  revoked_at          TEXT,
+  revoked_by          TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_binding_live
+  ON telegram_binding (bot_id) WHERE revoked_at IS NULL;
+
+-- One-time pairing codes, hashed like every other credential, consumed in
+-- one transaction with the binding they create.
+CREATE TABLE IF NOT EXISTS telegram_pairing (
+  code_hash       TEXT PRIMARY KEY,
+  approver        TEXT NOT NULL REFERENCES approver(name) ON DELETE RESTRICT,
+  approver_generation INTEGER NOT NULL,
+  created_at      TEXT NOT NULL,
+  created_by      TEXT NOT NULL,
+  expires_at      TEXT NOT NULL,
+  consumed_at     TEXT,
+  consumed_chat   TEXT,
+  consumed_user   TEXT,
+  consumed_update INTEGER
+);
+
+-- Every Telegram update this installation has applied, exactly once. The
+-- PRIMARY KEY is the idempotency: a replayed batch re-applies nothing.
+CREATE TABLE IF NOT EXISTS telegram_update (
+  update_id  INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL,
+  result     TEXT NOT NULL
+);
+
+-- Opaque one-tap actions. callback_data carries only the random token; what
+-- the tap MEANS — which binding, decision, option, and phase — lives here,
+-- where a stolen bot token cannot read or forge it. Confirm challenges are
+-- short-lived rows in the same table, consumed exactly once.
+CREATE TABLE IF NOT EXISTS telegram_action (
+  token       TEXT PRIMARY KEY,
+  binding     INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  decision    INTEGER NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+  option_id   TEXT NOT NULL,
+  phase       TEXT NOT NULL CHECK (phase IN ('choose','confirm','cancel')),
+  chat_id     TEXT NOT NULL,
+  message_id  TEXT,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT,
+  consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS telegram_action_by_decision ON telegram_action (decision);
+
+-- The bridge's poll lease and cursor, per bot. One live poller at a time;
+-- the cursor only ever moves forward, and only under a live generation.
+CREATE TABLE IF NOT EXISTS bridge_lease (
+  bot_id       TEXT PRIMARY KEY,
+  owner        TEXT NOT NULL,
+  generation   INTEGER NOT NULL,
+  cursor       INTEGER NOT NULL DEFAULT 0,
+  expires_at   TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
 );
 
 -- A machine that may be given work.
@@ -674,7 +779,81 @@ function migrate(db: Database): void {
   addColumn(db, "task_ref", "repo", "TEXT");
   addColumn(db, "claim", "released_by", "TEXT");
   addColumn(db, "notification", "resolved_at", "TEXT");
+  // Delivery claiming: two deliverers (the bridge, `outbox deliver`) must
+  // not both send one row. A claim is a short lease on the act of sending.
+  addColumn(db, "notification", "claim_owner", "TEXT");
+  addColumn(db, "notification", "claim_expires_at", "TEXT");
+  addColumn(db, "approver", "generation", "INTEGER NOT NULL DEFAULT 1");
   rebuild(db);
+  rebuildDecisionVia(db);
+}
+
+/**
+ * v3: decision.answered_via admits 'telegram'. Same copy-rename recipe as
+ * rebuild(), but the detection is exact: only the two DDL shapes this
+ * project has ever written are recognized, and anything else refuses loudly
+ * — a substring guess against somebody's hand-edited schema is how a
+ * migration eats a database.
+ */
+function rebuildDecisionVia(db: Database): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decision'")
+    .get();
+  if (row === undefined) return;
+  const ddl = String(row["sql"]);
+  if (ddl.includes("'cli','web','telegram'")) return;
+  if (!ddl.includes("'cli','web'")) {
+    throw new Error(
+      "the decision table's DDL is not a shape this migration knows — refusing to rebuild it",
+    );
+  }
+
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(
+        `CREATE TABLE decision_next (
+           id             INTEGER PRIMARY KEY AUTOINCREMENT,
+           run            INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+           urgency        TEXT NOT NULL CHECK (urgency IN ('blocking')),
+           state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','expired','answered')),
+           recap          TEXT NOT NULL,
+           question       TEXT NOT NULL,
+           options        TEXT NOT NULL,
+           recommendation TEXT NOT NULL,
+           assignee       TEXT,
+           deadline       TEXT,
+           created_at     TEXT NOT NULL,
+           answered_at    TEXT,
+           answered_by    TEXT,
+           answered_via   TEXT CHECK (answered_via IN ('cli','web','telegram')),
+           choice         TEXT,
+           note           TEXT
+         )`,
+      );
+      db.exec(
+        `INSERT INTO decision_next (id, run, urgency, state, recap, question, options,
+                                    recommendation, assignee, deadline, created_at,
+                                    answered_at, answered_by, answered_via, choice, note)
+         SELECT id, run, urgency, state, recap, question, options,
+                recommendation, assignee, deadline, created_at,
+                answered_at, answered_by, answered_via, choice, note FROM decision`,
+      );
+      db.exec("DROP TABLE decision");
+      db.exec("ALTER TABLE decision_next RENAME TO decision");
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) {
+        throw new Error(`decision rebuild left ${broken.length} dangling foreign key(s)`);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 /**
@@ -922,9 +1101,23 @@ export class Store {
     );
   }
 
-  /** IMMEDIATE, so two writers queue rather than both deciding they may write. */
+  /** Whether this connection is already inside transact(); see below. */
+  private transacting = false;
+
+  /**
+   * IMMEDIATE, so two writers queue rather than both deciding they may write.
+   *
+   * Reentrant: a body that calls another transact()-wrapped method joins the
+   * outer transaction instead of throwing "within a transaction". The outer
+   * caller owns commit and rollback — which is the point: the Telegram
+   * bridge composes pairing, action consumption, and the answer CAS into
+   * one atomic unit precisely by nesting the methods that each guard
+   * themselves when called alone.
+   */
   transact<T>(body: () => T): T {
+    if (this.transacting) return body();
     this.db.exec("BEGIN IMMEDIATE");
+    this.transacting = true;
     try {
       const result = body();
       this.db.exec("COMMIT");
@@ -932,6 +1125,8 @@ export class Store {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    } finally {
+      this.transacting = false;
     }
   }
 
@@ -1226,13 +1421,21 @@ export class Store {
 
   saveApprover(name: string, credentialHash: string, now: Date, mutation: Mutation = {}): void {
     this.once(mutation, "saveApprover", () => {
-      this.db
-        .prepare(
-          `INSERT INTO approver (name, credential_hash, added_at) VALUES (?, ?, ?)
-           ON CONFLICT (name) DO UPDATE SET credential_hash = excluded.credential_hash,
-                                            added_at = excluded.added_at`,
-        )
-        .run(name, credentialHash, now.toISOString());
+      // Replacing a credential is a rotation: the generation moves, and
+      // everything that derived authority from the old one — a paired chat,
+      // an outstanding pairing code — is stranded by the comparison, then
+      // swept by revokeDerivedAuthority in the same transaction.
+      this.transact(() => {
+        this.db
+          .prepare(
+            `INSERT INTO approver (name, credential_hash, added_at, generation) VALUES (?, ?, ?, 1)
+             ON CONFLICT (name) DO UPDATE SET credential_hash = excluded.credential_hash,
+                                              added_at = excluded.added_at,
+                                              generation = approver.generation + 1`,
+          )
+          .run(name, credentialHash, now.toISOString());
+        this.revokeDerivedAuthority(name, "credential-rotation", now);
+      });
       return null;
     });
   }
@@ -1240,6 +1443,38 @@ export class Store {
   approverHash(name: string): string | null {
     const row = this.db.prepare("SELECT credential_hash FROM approver WHERE name = ?").get(name);
     return row === undefined ? null : String(row["credential_hash"]);
+  }
+
+  approverGeneration(name: string): number | null {
+    const row = this.db.prepare("SELECT generation FROM approver WHERE name = ?").get(name);
+    return row === undefined ? null : Number(row["generation"]);
+  }
+
+  /**
+   * Strand everything that speaks for an approver at one remove: live
+   * Telegram bindings are revoked (softly — the audit trail stays), unspent
+   * pairing codes and unconsumed action tokens die with them. Called on
+   * credential rotation and on explicit unpair.
+   */
+  revokeDerivedAuthority(approver: string, by: string, now: Date): void {
+    const stamp = now.toISOString();
+    const bindings = this.db
+      .prepare("SELECT id FROM telegram_binding WHERE approver = ? AND revoked_at IS NULL")
+      .all(approver)
+      .map(row => Number(row["id"]));
+    this.db
+      .prepare(
+        "UPDATE telegram_binding SET revoked_at = ?, revoked_by = ? WHERE approver = ? AND revoked_at IS NULL",
+      )
+      .run(stamp, by, approver);
+    for (const binding of bindings) {
+      this.db
+        .prepare("UPDATE telegram_action SET consumed_at = ? WHERE binding = ? AND consumed_at IS NULL")
+        .run(stamp, binding);
+    }
+    this.db
+      .prepare("DELETE FROM telegram_pairing WHERE approver = ? AND consumed_at IS NULL")
+      .run(approver);
   }
 
   listApprovers(): { name: string; addedAt: string }[] {
@@ -1882,7 +2117,7 @@ export class Store {
    * is not negotiable, and neither is "decided".
    */
   answerDecision(
-    answer: { id: number; choice: string; by: string; via: "cli" | "web"; note?: string },
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram"; note?: string },
     now: Date,
     mutation: Mutation = {},
   ):
@@ -1891,46 +2126,52 @@ export class Store {
     return this.once(
       mutation,
       "answerDecision",
-      () =>
-        this.transact(() => {
-          const existing = this.getDecision(answer.id);
-          if (existing === null) return { ok: false as const, reason: "unknown-decision" as const };
-          if (!existing.options.some(option => option.id === answer.choice)) {
-            return { ok: false as const, reason: "bad-option" as const };
-          }
-          // The note reaches web pages, terminals, and — quoted — a later
-          // agent's brief. Same discipline as everything else that travels.
-          if (answer.note !== undefined && (answer.note.length > 500 || hasForbiddenControls(answer.note))) {
-            return { ok: false as const, reason: "bad-note" as const };
-          }
-
-          const { changes } = this.db
-            .prepare(
-              `UPDATE decision SET state = 'answered', answered_at = ?, answered_by = ?,
-                                   answered_via = ?, choice = ?, note = ?
-                WHERE id = ? AND state IN ('open','expired')`,
-            )
-            .run(
-              now.toISOString(),
-              answer.by,
-              answer.via,
-              answer.choice,
-              answer.note ?? null,
-              answer.id,
-            );
-          if (Number(changes) === 0) {
-            const settled = this.getDecision(answer.id) as Decision;
-            return settled.choice === answer.choice
-              ? { ok: true as const, decision: settled, duplicate: true }
-              : { ok: false as const, reason: "already-answered" as const };
-          }
-
-          this.releaseOwnedHold("decision", String(answer.id));
-          this.resolveEpisode(`decision:${answer.id}`, now);
-          return { ok: true as const, decision: this.getDecision(answer.id) as Decision };
-        }),
+      () => this.transact(() => this.answerDecisionLocked(answer, now)),
       result => result.ok,
     );
+  }
+
+  /**
+   * The answer's body, for callers already holding the transaction — the
+   * Telegram bridge re-proves its binding and consumes its action token in
+   * the same transaction as this CAS, because "the chat was bound when we
+   * looked" and "the chat is bound as this answer lands" are different
+   * claims and only the second one authorizes anything.
+   */
+  answerDecisionLocked(
+    answer: { id: number; choice: string; by: string; via: "cli" | "web" | "telegram"; note?: string },
+    now: Date,
+  ):
+    | { ok: true; decision: Decision; duplicate?: boolean }
+    | { ok: false; reason: "unknown-decision" | "bad-option" | "already-answered" | "bad-note" } {
+    const existing = this.getDecision(answer.id);
+    if (existing === null) return { ok: false as const, reason: "unknown-decision" as const };
+    if (!existing.options.some(option => option.id === answer.choice)) {
+      return { ok: false as const, reason: "bad-option" as const };
+    }
+    // The note reaches web pages, terminals, and — quoted — a later
+    // agent's brief. Same discipline as everything else that travels.
+    if (answer.note !== undefined && (answer.note.length > 500 || hasForbiddenControls(answer.note))) {
+      return { ok: false as const, reason: "bad-note" as const };
+    }
+
+    const { changes } = this.db
+      .prepare(
+        `UPDATE decision SET state = 'answered', answered_at = ?, answered_by = ?,
+                             answered_via = ?, choice = ?, note = ?
+          WHERE id = ? AND state IN ('open','expired')`,
+      )
+      .run(now.toISOString(), answer.by, answer.via, answer.choice, answer.note ?? null, answer.id);
+    if (Number(changes) === 0) {
+      const settled = this.getDecision(answer.id) as Decision;
+      return settled.choice === answer.choice
+        ? { ok: true as const, decision: settled, duplicate: true }
+        : { ok: false as const, reason: "already-answered" as const };
+    }
+
+    this.releaseOwnedHold("decision", String(answer.id));
+    this.resolveEpisode(`decision:${answer.id}`, now);
+    return { ok: true as const, decision: this.getDecision(answer.id) as Decision };
   }
 
   // ---- evidence ------------------------------------------------------------
@@ -2045,6 +2286,371 @@ export class Store {
     if (Number(changes) === 0) return false;
     this.releaseOwnedHold("incident", String(id));
     return true;
+  }
+
+  // ---- telegram ------------------------------------------------------------
+
+  /** Mint a pairing code's record. The code itself was shown once; this is its hash. */
+  createTelegramPairing(
+    pairing: { codeHash: string; approver: string; by: string; ttlMs: number },
+    now: Date,
+  ): void {
+    const generation = this.approverGeneration(pairing.approver);
+    if (generation === null) throw new Error(`no approver named ${pairing.approver}`);
+    this.db
+      .prepare(
+        `INSERT INTO telegram_pairing (code_hash, approver, approver_generation, created_at, created_by, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        pairing.codeHash,
+        pairing.approver,
+        generation,
+        now.toISOString(),
+        pairing.by,
+        new Date(now.getTime() + pairing.ttlMs).toISOString(),
+      );
+  }
+
+  /**
+   * Consume a pairing code and create the binding, as one transaction.
+   *
+   * The conditional UPDATE is the consumption: exactly one caller ever sees
+   * `changes = 1`, however many pollers race. A replay of the very update
+   * that paired (Telegram redelivers) recognizes the finished binding
+   * instead of failing. Success invalidates every other outstanding code —
+   * a code that was minted and superseded must not still open a door — and
+   * the partial unique index enforces one live binding per bot.
+   */
+  consumeTelegramPairing(
+    attempt: {
+      codeHash: string;
+      botId: string;
+      chatId: string;
+      userId: string;
+      updateId: number;
+    },
+    now: Date,
+  ):
+    | { ok: true; binding: TelegramBinding; replay: boolean }
+    | { ok: false; reason: "unknown-code" | "already-bound" } {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const { changes } = this.db
+        .prepare(
+          `UPDATE telegram_pairing
+              SET consumed_at = ?, consumed_chat = ?, consumed_user = ?, consumed_update = ?
+            WHERE code_hash = ? AND consumed_at IS NULL AND expires_at > ?`,
+        )
+        .run(stamp, attempt.chatId, attempt.userId, attempt.updateId, attempt.codeHash, stamp);
+
+      if (Number(changes) === 0) {
+        // The same update replayed after a crash-between-apply-and-ack:
+        // the code is consumed by exactly this chat and user, and the
+        // binding it made is live. That is a completed pairing, not a foe.
+        const consumed = this.db
+          .prepare(
+            `SELECT 1 AS hit FROM telegram_pairing
+              WHERE code_hash = ? AND consumed_chat = ? AND consumed_user = ? AND consumed_update = ?`,
+          )
+          .get(attempt.codeHash, attempt.chatId, attempt.userId, attempt.updateId);
+        if (consumed !== undefined) {
+          const live = this.liveTelegramBinding(attempt.botId);
+          if (live !== null && live.chatId === attempt.chatId && live.userId === attempt.userId) {
+            return { ok: true as const, binding: live, replay: true };
+          }
+        }
+        return { ok: false as const, reason: "unknown-code" as const };
+      }
+
+      const pairing = this.db
+        .prepare("SELECT approver, approver_generation FROM telegram_pairing WHERE code_hash = ?")
+        .get(attempt.codeHash) as Record<string, unknown>;
+
+      // The code was minted under a generation; the binding is only valid
+      // if that generation still stands — a rotation between mint and
+      // consumption strands the code.
+      const current = this.approverGeneration(String(pairing["approver"]));
+      if (current === null || current !== Number(pairing["approver_generation"])) {
+        return { ok: false as const, reason: "unknown-code" as const };
+      }
+
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO telegram_binding (bot_id, chat_id, user_id, approver, approver_generation, paired_at, paired_by, pair_update_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            attempt.botId,
+            attempt.chatId,
+            attempt.userId,
+            String(pairing["approver"]),
+            Number(pairing["approver_generation"]),
+            stamp,
+            String(pairing["approver"]),
+            attempt.updateId,
+          );
+      } catch {
+        // The partial unique index said no: a live binding already exists.
+        return { ok: false as const, reason: "already-bound" as const };
+      }
+      // Every other outstanding code dies with this success.
+      this.db.prepare("DELETE FROM telegram_pairing WHERE consumed_at IS NULL").run();
+
+      const binding = this.liveTelegramBinding(attempt.botId);
+      if (binding === null) throw new Error("the binding vanished inside its own transaction");
+      return { ok: true as const, binding, replay: false };
+    });
+  }
+
+  /**
+   * The one live binding for a bot — and only while its approver's
+   * credential generation still matches. A rotation that somehow missed the
+   * sweep reads as no binding at all, which is the failure direction that
+   * fails closed.
+   */
+  liveTelegramBinding(botId: string): TelegramBinding | null {
+    const row = this.db
+      .prepare(
+        `SELECT telegram_binding.* FROM telegram_binding
+         JOIN approver ON approver.name = telegram_binding.approver
+          AND approver.generation = telegram_binding.approver_generation
+         WHERE bot_id = ? AND revoked_at IS NULL`,
+      )
+      .get(botId);
+    return row === undefined ? null : readTelegramBinding(row);
+  }
+
+  /** Revoke a bot's live binding and everything it could still do. */
+  unpairTelegram(botId: string, by: string, now: Date): boolean {
+    return this.transact(() => {
+      const live = this.liveTelegramBinding(botId);
+      if (live === null) return false;
+      const stamp = now.toISOString();
+      this.db
+        .prepare("UPDATE telegram_binding SET revoked_at = ?, revoked_by = ? WHERE id = ?")
+        .run(stamp, by, live.id);
+      this.db
+        .prepare("UPDATE telegram_action SET consumed_at = ? WHERE binding = ? AND consumed_at IS NULL")
+        .run(stamp, live.id);
+      return true;
+    });
+  }
+
+  createTelegramAction(
+    action: {
+      token: string;
+      binding: number;
+      decision: number;
+      optionId: string;
+      phase: "choose" | "confirm" | "cancel";
+      chatId: string;
+      messageId?: string;
+      ttlMs?: number;
+    },
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO telegram_action (token, binding, decision, option_id, phase, chat_id, message_id, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        action.token,
+        action.binding,
+        action.decision,
+        action.optionId,
+        action.phase,
+        action.chatId,
+        action.messageId ?? null,
+        now.toISOString(),
+        action.ttlMs === undefined ? null : new Date(now.getTime() + action.ttlMs).toISOString(),
+      );
+  }
+
+  getTelegramAction(token: string): TelegramAction | null {
+    const row = this.db.prepare("SELECT * FROM telegram_action WHERE token = ?").get(token);
+    return row === undefined ? null : readTelegramAction(row);
+  }
+
+  /**
+   * Kill every live confirm/cancel challenge on a decision. Cancel means
+   * cancelled: a confirm that survived its own cancellation would be an
+   * irreversible choice still armed after the person said stop.
+   */
+  consumeTelegramChallenges(decision: number, now: Date): void {
+    this.db
+      .prepare(
+        `UPDATE telegram_action SET consumed_at = ?
+          WHERE decision = ? AND phase IN ('confirm','cancel') AND consumed_at IS NULL`,
+      )
+      .run(now.toISOString(), decision);
+  }
+
+  /** Consume once. False means somebody already did, or it expired — either way, no. */
+  consumeTelegramAction(token: string, now: Date): boolean {
+    const stamp = now.toISOString();
+    const { changes } = this.db
+      .prepare(
+        `UPDATE telegram_action SET consumed_at = ?
+          WHERE token = ? AND consumed_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+      )
+      .run(stamp, token, stamp);
+    return Number(changes) > 0;
+  }
+
+  /** Stamp the message a choose-action's keyboard actually landed on. */
+  placeTelegramActions(tokens: readonly string[], messageId: string): void {
+    for (const token of tokens) {
+      this.db
+        .prepare("UPDATE telegram_action SET message_id = ? WHERE token = ?")
+        .run(messageId, token);
+    }
+  }
+
+  /**
+   * Take or renew the bridge's poll lease. One live poller per bot: cron
+   * overlapping a follower gets `bridge-busy`, an expired holder is taken
+   * over at the next generation, and the cursor rides the lease so a stale
+   * generation can neither poll nor move it.
+   */
+  acquireBridgeLease(
+    botId: string,
+    owner: string,
+    ttlMs: number,
+    now: Date,
+  ):
+    | { ok: true; generation: number; cursor: number }
+    | { ok: false; reason: "bridge-busy"; holder: string; until: string } {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const expires = new Date(now.getTime() + ttlMs).toISOString();
+      const row = this.db.prepare("SELECT * FROM bridge_lease WHERE bot_id = ?").get(botId);
+      if (row === undefined) {
+        this.db
+          .prepare(
+            `INSERT INTO bridge_lease (bot_id, owner, generation, cursor, expires_at, heartbeat_at)
+             VALUES (?, ?, 1, 0, ?, ?)`,
+          )
+          .run(botId, owner, expires, stamp);
+        return { ok: true as const, generation: 1, cursor: 0 };
+      }
+      const holder = String(row["owner"]);
+      const live = String(row["expires_at"]) > stamp;
+      if (live && holder !== owner) {
+        return {
+          ok: false as const,
+          reason: "bridge-busy" as const,
+          holder,
+          until: String(row["expires_at"]),
+        };
+      }
+      const generation = live && holder === owner ? Number(row["generation"]) : Number(row["generation"]) + 1;
+      this.db
+        .prepare(
+          "UPDATE bridge_lease SET owner = ?, generation = ?, expires_at = ?, heartbeat_at = ? WHERE bot_id = ?",
+        )
+        .run(owner, generation, expires, stamp, botId);
+      return { ok: true as const, generation, cursor: Number(row["cursor"]) };
+    });
+  }
+
+  /** Hand the poll back at the end of a pass, so the next cron firing is not told busy. */
+  releaseBridgeLease(botId: string, owner: string, now: Date): void {
+    this.db
+      .prepare("UPDATE bridge_lease SET expires_at = ? WHERE bot_id = ? AND owner = ?")
+      .run(now.toISOString(), botId, owner);
+  }
+
+  /** Forward only, and only under the live generation. A stale poller moves nothing. */
+  advanceBridgeCursor(
+    botId: string,
+    owner: string,
+    generation: number,
+    cursor: number,
+    now: Date,
+  ): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE bridge_lease SET cursor = ?, heartbeat_at = ?
+          WHERE bot_id = ? AND owner = ? AND generation = ? AND cursor < ?`,
+      )
+      .run(cursor, now.toISOString(), botId, owner, generation, cursor);
+    return Number(changes) > 0;
+  }
+
+  /** True if this update has not been applied before. The PRIMARY KEY is the idempotency. */
+  markTelegramUpdateApplied(updateId: number, result: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO telegram_update (update_id, applied_at, result) VALUES (?, ?, ?)",
+      )
+      .run(updateId, now.toISOString(), result);
+    return Number(changes) > 0;
+  }
+
+  // ---- delivery claiming ---------------------------------------------------
+
+  /**
+   * Claim pending notifications for one deliverer. Two deliverers — the
+   * bridge and `outbox deliver` — select-then-send-then-record, and without
+   * a claim both can send the same row in the gap. The claim is a short
+   * lease on the act of sending; a deliverer that dies mid-send leaves rows
+   * that unclaim themselves by expiry.
+   */
+  claimDeliveries(owner: string, ttlMs: number, now: Date): Notification[] {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const rows = this.db
+        .prepare(
+          `SELECT id FROM notification
+            WHERE delivered_at IS NULL AND resolved_at IS NULL
+              AND (claim_owner IS NULL OR claim_expires_at <= ?)
+            ORDER BY id`,
+        )
+        .all(stamp)
+        .map(row => Number(row["id"]));
+      const expires = new Date(now.getTime() + ttlMs).toISOString();
+      for (const id of rows) {
+        this.db
+          .prepare("UPDATE notification SET claim_owner = ?, claim_expires_at = ? WHERE id = ?")
+          .run(owner, expires, id);
+      }
+      return rows
+        .map(id => this.db.prepare("SELECT * FROM notification WHERE id = ?").get(id))
+        .filter((row): row is Record<string, unknown> => row !== undefined)
+        .map(readNotification);
+    });
+  }
+
+  /** Finalize only what this owner still holds. A lapsed claim writes nothing. */
+  finalizeDelivery(
+    id: number,
+    owner: string,
+    outcome: { ok: true; receipt: string | null } | { ok: false; error: string },
+    now: Date,
+  ): boolean {
+    const stamp = now.toISOString();
+    if (outcome.ok) {
+      const { changes } = this.db
+        .prepare(
+          `UPDATE notification SET delivered_at = ?, receipt = ?, attempts = attempts + 1,
+                                   last_attempt_at = ?, last_error = NULL,
+                                   claim_owner = NULL, claim_expires_at = NULL
+            WHERE id = ? AND claim_owner = ? AND delivered_at IS NULL`,
+        )
+        .run(stamp, outcome.receipt, stamp, id, owner);
+      return Number(changes) > 0;
+    }
+    const { changes } = this.db
+      .prepare(
+        `UPDATE notification SET attempts = attempts + 1, last_attempt_at = ?, last_error = ?,
+                                 claim_owner = NULL, claim_expires_at = NULL
+          WHERE id = ? AND claim_owner = ?`,
+      )
+      .run(stamp, outcome.error, id, owner);
+    return Number(changes) > 0;
   }
 
   // ---- idempotency --------------------------------------------------------
@@ -2173,7 +2779,8 @@ function readDecision(row: Record<string, unknown>): Decision {
     createdAt: String(row["created_at"]),
     answeredAt: row["answered_at"] === null ? null : String(row["answered_at"]),
     answeredBy: row["answered_by"] === null ? null : String(row["answered_by"]),
-    answeredVia: row["answered_via"] === null ? null : (String(row["answered_via"]) as "cli" | "web"),
+    answeredVia:
+      row["answered_via"] === null ? null : (String(row["answered_via"]) as Decision["answeredVia"]),
     choice: row["choice"] === null ? null : String(row["choice"]),
     note: row["note"] === null ? null : String(row["note"]),
   };
@@ -2192,6 +2799,36 @@ function readArtifact(row: Record<string, unknown>): Artifact {
     capture: String(row["capture"]),
     createdAt: String(row["created_at"]),
     redacted: Number(row["redacted"]) === 1,
+  };
+}
+
+function readTelegramBinding(row: Record<string, unknown>): TelegramBinding {
+  return {
+    id: Number(row["id"]),
+    botId: String(row["bot_id"]),
+    chatId: String(row["chat_id"]),
+    userId: String(row["user_id"]),
+    approver: String(row["approver"]),
+    approverGeneration: Number(row["approver_generation"]),
+    pairedAt: String(row["paired_at"]),
+    pairedBy: String(row["paired_by"]),
+    revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
+    revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
+  };
+}
+
+function readTelegramAction(row: Record<string, unknown>): TelegramAction {
+  return {
+    token: String(row["token"]),
+    binding: Number(row["binding"]),
+    decision: Number(row["decision"]),
+    optionId: String(row["option_id"]),
+    phase: String(row["phase"]) as TelegramAction["phase"],
+    chatId: String(row["chat_id"]),
+    messageId: row["message_id"] === null ? null : String(row["message_id"]),
+    createdAt: String(row["created_at"]),
+    expiresAt: row["expires_at"] === null ? null : String(row["expires_at"]),
+    consumedAt: row["consumed_at"] === null ? null : String(row["consumed_at"]),
   };
 }
 

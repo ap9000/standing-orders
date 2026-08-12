@@ -873,3 +873,140 @@ describe("answering a decision", () => {
     }
   });
 });
+
+describe("migration from an M3 database", () => {
+  test("rebuilds decision's answered_via CHECK in place, rows and ids intact", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { createRequire } = await import("node:module");
+
+    const dir = mkdtempSync(join(tmpdir(), "nightorders-m3-"));
+    const file = join(dir, "orders.db");
+
+    // The M3 shapes for exactly the tables the rebuild touches or references:
+    // decision (with the old two-value CHECK), its run and task_ref parents,
+    // and the relations that must survive the copy.
+    const require = createRequire(import.meta.url);
+    const { DatabaseSync } = require("node:sqlite");
+    const old = new DatabaseSync(file);
+    old.exec(`
+      CREATE TABLE schema_version (version INTEGER NOT NULL);
+      INSERT INTO schema_version VALUES (2);
+      CREATE TABLE task (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('queued','running','done','failed','cancelled')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE task_ref (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        backend TEXT NOT NULL, external_id TEXT NOT NULL, repo TEXT,
+        zones TEXT NOT NULL DEFAULT '[]',
+        capability_requirements TEXT NOT NULL DEFAULT '[]',
+        park_rate REAL NOT NULL DEFAULT 0,
+        origin TEXT NOT NULL DEFAULT 'theirs',
+        UNIQUE (backend, external_id)
+      );
+      CREATE TABLE run (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_ref INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+        lease_id TEXT NOT NULL, runner TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
+        parent_run INTEGER REFERENCES run(id), session_id TEXT, base_revision TEXT,
+        branch TEXT NOT NULL, worktree TEXT NOT NULL, model TEXT,
+        outcome TEXT CHECK (outcome IN ('built','failed','refused','parked')),
+        reason TEXT, committed INTEGER, started_at TEXT NOT NULL, finished_at TEXT
+      );
+      CREATE TABLE decision (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        run            INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+        urgency        TEXT NOT NULL CHECK (urgency IN ('blocking')),
+        state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','expired','answered')),
+        recap          TEXT NOT NULL, question TEXT NOT NULL, options TEXT NOT NULL,
+        recommendation TEXT NOT NULL, assignee TEXT, deadline TEXT, created_at TEXT NOT NULL,
+        answered_at    TEXT, answered_by TEXT,
+        answered_via   TEXT CHECK (answered_via IN ('cli','web')),
+        choice         TEXT, note TEXT
+      );
+      CREATE TABLE run_decision (
+        run INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+        decision INTEGER NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+        choice TEXT NOT NULL, note TEXT, PRIMARY KEY (run, decision)
+      );
+      INSERT INTO task VALUES ('t-1','w','queued','2026-08-11T00:00:00.000Z','2026-08-11T00:00:00.000Z');
+      INSERT INTO task_ref (backend, external_id, origin) VALUES ('built-in','t-1','ours');
+      INSERT INTO run (task_ref, lease_id, runner, branch, worktree, outcome, started_at)
+        VALUES (1,'l-1','b','br','/w','parked','2026-08-11T01:00:00.000Z');
+      INSERT INTO run (task_ref, lease_id, runner, branch, worktree, outcome, started_at)
+        VALUES (1,'l-2','b','br','/w','parked','2026-08-11T02:00:00.000Z');
+      INSERT INTO decision (run, urgency, recap, question, options, recommendation, created_at,
+                            state, answered_at, answered_by, answered_via, choice, note)
+        VALUES (1,'blocking','r','q','[{"id":"a","label":"a","consequence":"c","reversible":true},{"id":"b","label":"b","consequence":"c","reversible":true}]','a',
+                '2026-08-11T01:00:00.000Z','answered','2026-08-11T03:00:00.000Z','alex','web','a','noted');
+      INSERT INTO decision (run, urgency, recap, question, options, recommendation, created_at)
+        VALUES (2,'blocking','r2','q2','[{"id":"a","label":"a","consequence":"c","reversible":true},{"id":"b","label":"b","consequence":"c","reversible":true}]','b',
+                '2026-08-11T02:00:00.000Z');
+      INSERT INTO run_decision (run, decision, choice, note) VALUES (2, 1, 'a', 'noted');
+    `);
+    old.close();
+
+    const store = openStore(file);
+    try {
+      // Everything survived the copy: ids, the answered row's whole shape,
+      // the open row, and the relation across the rebuilt table.
+      expect(store.getDecision(1)).toMatchObject({
+        state: "answered", choice: "a", answeredBy: "alex", answeredVia: "web", note: "noted",
+      });
+      expect(store.getDecision(2)).toMatchObject({ state: "open", recommendation: "b" });
+      expect(store.answersFor(2)).toMatchObject([{ choice: "a", note: "noted" }]);
+
+      // The widened CHECK is real on this database: telegram answers land.
+      const answered = store.answerDecision(
+        { id: 2, choice: "b", by: "alex", via: "telegram" },
+        new Date("2026-08-11T04:00:00.000Z"),
+      );
+      expect(answered).toMatchObject({ ok: true });
+      expect(store.getDecision(2)?.answeredVia).toBe("telegram");
+
+      // New decisions keep counting from where the old table left off.
+      const run3 = store.startRun({
+        taskRef: 1, leaseId: "l-3", runner: "b", branch: "br", worktree: "/w",
+        now: new Date("2026-08-11T05:00:00.000Z"),
+      });
+      const next = store.saveDecision(
+        {
+          run: run3, urgency: "blocking", recap: "r3", question: "q3",
+          options: [
+            { id: "a", label: "a", consequence: "c", reversible: true },
+            { id: "b", label: "b", consequence: "c", reversible: true },
+          ],
+          recommendation: "a",
+        },
+        new Date("2026-08-11T05:00:00.000Z"),
+      );
+      expect(next).toBe(3);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unrecognized decision DDL is refused, not guessed at", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { createRequire } = await import("node:module");
+
+    const dir = mkdtempSync(join(tmpdir(), "nightorders-m3-odd-"));
+    const file = join(dir, "orders.db");
+    const require = createRequire(import.meta.url);
+    const { DatabaseSync } = require("node:sqlite");
+    const odd = new DatabaseSync(file);
+    // Somebody's hand-edited shape: neither the old CHECK nor the new one.
+    odd.exec(`CREATE TABLE decision (id INTEGER PRIMARY KEY, answered_via TEXT);`);
+    odd.close();
+
+    expect(() => openStore(file)).toThrow(/not a shape this migration knows/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

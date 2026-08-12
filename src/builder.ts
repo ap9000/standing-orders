@@ -37,6 +37,7 @@ import { approvalOf, type Scope } from "./scope.js";
 import { currentClaim, heartbeat, missingCapability } from "./claim.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { parseDecision, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
+import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import {
   MAILBOX_PREFIX,
   captureParkEvidence,
@@ -157,6 +158,15 @@ export const PROTECTED = new Set(["main", "master", "trunk", "develop", "release
 
 const CLAUDE = "claude";
 const GIT = "git";
+
+/**
+ * Secrets the agent's process must never inherit. The bot token authorizes
+ * reading and repainting the operator's own decision channel — an agent
+ * holding it could watch, and shape, the very questions it parked. Stripped
+ * from every agent invocation, repair turns included; an operator who
+ * exported it globally is exactly who this protects.
+ */
+const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
 
 /**
  * Build one task, if everything says it may.
@@ -402,7 +412,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         ...(skipPermissions ? ["--dangerously-skip-permissions"] : ["--permission-mode", permissionMode]),
         ...(model === undefined ? [] : ["--model", model]),
       ],
-      { cwd: worktree, timeoutMs },
+      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
@@ -657,7 +667,7 @@ async function ingestPark(args: {
           ? []
           : ["--model", (request.repairModel ?? request.model) as string]),
       ],
-      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS },
+      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST },
     );
 
     if (request.leaseId !== undefined) {

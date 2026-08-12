@@ -37,8 +37,22 @@ import {
   type Store,
   type TaskState,
 } from "./store.js";
+import { randomUUID } from "node:crypto";
 import { probeRepo, isVerified } from "./probe.js";
 import { createDecisionServer } from "./serve.js";
+import {
+  bridgePass,
+  clearBotToken,
+  createTransport,
+  hashPairingCode,
+  loadBotToken,
+  mintPairingCode,
+  redactToken,
+  saveBotToken,
+  PAIRING_TTL_MS,
+  TOKEN_ENV,
+  type TelegramTransport,
+} from "./telegram.js";
 import { scanRepo } from "./capscan.js";
 
 type CapabilityKind = Capability["kind"];
@@ -106,6 +120,8 @@ export type OperateOptions = {
    */
   agentRunner?: CommandRunner;
   gitRunner?: CommandRunner;
+  /** Injected by tests: the Telegram Bot API. Production dials the real one. */
+  telegramTransport?: TelegramTransport;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
@@ -265,8 +281,11 @@ export async function runOperate(
       // or delete it, and files hidden somewhere clever cannot be found when
       // it matters.
       evidenceRoot: join(dirname(file), "evidence"),
+      // The bot token's file home. Never a column; see telegram.ts.
+      telegramTokenFile: join(dirname(file), "telegram-token"),
       ...(options.agentRunner === undefined ? {} : { agentRunner: options.agentRunner }),
       ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
+      ...(options.telegramTransport === undefined ? {} : { telegramTransport: options.telegramTransport }),
     });
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
@@ -282,8 +301,10 @@ type Context = {
   now: Date;
   clock: () => Date;
   evidenceRoot: string;
+  telegramTokenFile: string;
   agentRunner?: CommandRunner;
   gitRunner?: CommandRunner;
+  telegramTransport?: TelegramTransport;
 };
 
 async function dispatch(
@@ -329,6 +350,8 @@ async function dispatch(
       return incidentCommand(positional, flags, context);
     case "serve":
       return serveCommand(flags, context);
+    case "bridge":
+      return bridgeCommand(positional, flags, context);
     case "enroll":
       return enrollCommand(positional, flags, context);
     case "grants":
@@ -1850,6 +1873,7 @@ async function serveCommand(
     store,
     evidenceRoot: context.evidenceRoot,
     clock: context.clock,
+    telegramTokenFile: context.telegramTokenFile,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
   });
 
@@ -1937,6 +1961,166 @@ function incidentCommand(
   ]);
 }
 
+// ---- the telegram bridge ---------------------------------------------------
+
+/**
+ * `nightorders bridge telegram …` — decisions out, answers back, no LLM in
+ * the path.
+ *
+ *   bridge telegram                      one pass: send pending, apply taps
+ *   bridge telegram pair --as <you> --token <approver-token>
+ *   bridge telegram unpair --as <you> --token <approver-token>
+ *   bridge telegram token [<bot-token>|--clear]   set the credential file
+ *   bridge telegram status
+ *
+ * The bot token comes from ${TOKEN_ENV} or the credential file this command
+ * writes (0600, beside the database). Cron the pass right after tick; a
+ * second concurrent pass loses the poll lease and reports `bridge-busy`,
+ * which is the fences working, not an error to fix.
+ */
+async function bridgeCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [channel, action] = positional;
+  if (channel !== "telegram") {
+    return fail(write, json, "bridge", "usage", "`nightorders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
+  }
+
+  if (action === "token") {
+    const value = positional[2];
+    if (flags.has("clear")) {
+      const removed = clearBotToken(context.telegramTokenFile);
+      return succeed(write, json, "bridge token", { cleared: removed }, () => [
+        removed ? "Token file removed." : "There was no token file to remove.",
+      ]);
+    }
+    if (value === undefined) {
+      return fail(
+        write,
+        json,
+        "bridge token",
+        "usage",
+        "`nightorders bridge telegram token <bot-token>` (from @BotFather), or --clear",
+        EXIT.usage,
+      );
+    }
+    const saved = saveBotToken(context.telegramTokenFile, value);
+    if (!saved.ok) return fail(write, json, "bridge token", "bad-token", saved.message, EXIT.refused);
+    return succeed(write, json, "bridge token", { saved: true, file: context.telegramTokenFile }, () => [
+      `Saved (owner-only) to ${context.telegramTokenFile}.`,
+      `${TOKEN_ENV} in the environment would take precedence over it.`,
+    ]);
+  }
+
+  const source = loadBotToken(process.env, context.telegramTokenFile);
+
+  if (action === "status") {
+    const binding = source === null ? null : store.liveTelegramBinding(source.botId);
+    const pending = store.listNotifications("pending").length;
+    if (json) {
+      write(
+        JSON.stringify(
+          {
+            ok: true,
+            command: "bridge status",
+            token: source === null ? null : { source: source.source, botId: source.botId, redacted: redactToken(source.token) },
+            paired: binding !== null,
+            approver: binding?.approver ?? null,
+            outboxPending: pending,
+          },
+          null,
+          2,
+        ),
+      );
+      return EXIT.ok;
+    }
+    write(source === null
+      ? `No bot token. Set ${TOKEN_ENV}, run \`nightorders bridge telegram token <t>\`, or use the serve settings card.`
+      : `Token ${redactToken(source.token)} (${source.source}), bot ${source.botId}.`);
+    write(binding === null ? "No chat is paired." : `Paired: chat answers as ${binding.approver}.`);
+    write(`Outbox pending: ${pending}.`);
+    return EXIT.ok;
+  }
+
+  if (action === "pair" || action === "unpair") {
+    const asWho = text(flags, "as");
+    const token = text(flags, "token");
+    if (asWho === undefined || token === undefined) {
+      return fail(write, json, `bridge ${action}`, "usage", "`--as <you> --token <approver-token>` — pairing hands your authority to a chat, so it takes your credential", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, asWho, token);
+    if (!authenticated.ok) {
+      return fail(write, json, `bridge ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, asWho), EXIT.refused);
+    }
+
+    if (action === "unpair") {
+      if (source === null) {
+        return fail(write, json, "bridge unpair", "no-token", "no bot token, so no bot to unpair", EXIT.refused);
+      }
+      const revoked = store.unpairTelegram(source.botId, asWho, clock());
+      return succeed(write, json, "bridge unpair", { revoked }, () => [
+        revoked
+          ? "Unpaired. Every outstanding button from that chat is dead. Rotate the bot token with @BotFather if it may have leaked."
+          : "Nothing was paired.",
+      ]);
+    }
+
+    const code = mintPairingCode();
+    store.createTelegramPairing(
+      { codeHash: hashPairingCode(code), approver: asWho, by: asWho, ttlMs: PAIRING_TTL_MS },
+      clock(),
+    );
+    return succeed(write, json, "bridge pair", { code, expiresInMs: PAIRING_TTL_MS }, () => [
+      "From your phone, send your bot this message within 10 minutes:",
+      "",
+      `  /pair ${code}`,
+      "",
+      "The next bridge pass completes it. The code works once, in a private",
+      "chat only, and the chat will answer as you — treat it accordingly.",
+    ]);
+  }
+
+  if (action !== undefined) {
+    return fail(write, json, "bridge", "usage", "`nightorders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
+  }
+
+  // The pass.
+  if (source === null) {
+    return fail(
+      write,
+      json,
+      "bridge",
+      "no-token",
+      `no bot token — set ${TOKEN_ENV}, run \`nightorders bridge telegram token <t>\`, or use the serve settings card`,
+      EXIT.refused,
+    );
+  }
+  const transport = context.telegramTransport ?? createTransport(source.token);
+  const passed = await bridgePass(store, { botId: source.botId, transport, clock });
+  if (!passed.ok) {
+    return fail(write, json, "bridge", passed.reason, passed.message, EXIT.refused);
+  }
+
+  const { report } = passed;
+  const broke = report.problems.length > 0;
+  const idle = report.sent === 0 && report.answered === 0 && report.paired === 0;
+  const lines = () => [
+    `Sent ${report.sent}, answered ${report.answered}, paired ${report.paired}, ignored ${report.ignored}.`,
+    ...(report.backlog ? ["Telegram still holds more updates than one pass's budget — run it again."] : []),
+    ...report.problems.map(problem => `  problem: ${problem}`),
+  ];
+  if (broke) {
+    return fail(write, json, "bridge", "telegram-transport", lines().join("\n"), EXIT.failed, { report });
+  }
+  if (idle) {
+    return fail(write, json, "bridge", "idle", "nothing to send, nothing arrived", EXIT.refused, { report });
+  }
+  return succeed(write, json, "bridge", { report }, lines);
+}
+
 // ---- the outbox -----------------------------------------------------------
 
 /**
@@ -1989,7 +2173,12 @@ async function outboxCommand(
       return fail(write, json, "outbox deliver", "usage", "--cmd says how: it runs once per notification, reading $NIGHTORDERS_KIND, $NIGHTORDERS_SUBJECT, $NIGHTORDERS_BODY", EXIT.usage);
     }
 
-    const pending = store.listNotifications("pending");
+    // Claimed, not merely listed: the Telegram bridge drains this same
+    // outbox, and select-then-send-then-record from two deliverers pages a
+    // person twice. The claim is a short lease on the act of sending; a
+    // deliverer that dies mid-send leaves rows that unclaim by expiry.
+    const owner = `outbox-${randomUUID()}`;
+    const pending = store.claimDeliveries(owner, 2 * 60_000, clock());
     if (pending.length === 0) {
       return succeed(write, json, "outbox deliver", { delivered: 0, failed: 0 }, () => [
         "Nothing waiting to be delivered.",
@@ -2010,13 +2199,13 @@ async function outboxCommand(
       });
       if (sent.code === 0) {
         const receipt = sent.stdout.split("\n")[0]?.trim() ?? "";
-        store.recordDelivery(one.id, { ok: true, receipt: receipt === "" ? null : receipt }, clock());
+        store.finalizeDelivery(one.id, owner, { ok: true, receipt: receipt === "" ? null : receipt }, clock());
         delivered++;
       } else {
         const error = sent.timedOut
           ? "timed out"
           : sent.stderr.split("\n")[0]?.trim() || `exit ${sent.code}`;
-        store.recordDelivery(one.id, { ok: false, error }, clock());
+        store.finalizeDelivery(one.id, owner, { ok: false, error }, clock());
         failed++;
       }
     }
