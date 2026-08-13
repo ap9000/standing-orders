@@ -3,7 +3,7 @@
  *
  * Everything up to here reads. This is the line, and it is drawn deliberately
  * wide of where it needs to be: discovery indexes everything it can see, and
- * Night Orders drives only what has been handed over, one repository and one
+ * Standing Orders drives only what has been handed over, one repository and one
  * backend at a time, by a person, in an act that shows its own consequences
  * first.
  *
@@ -53,7 +53,7 @@ export const MUTATION_CLASSES: readonly MutationClass[] = [
 export const DEFAULT_MUTATIONS: readonly MutationClass[] = ["create", "transition", "edge", "hold"];
 
 /**
- * Which tasks the grant covers. `ours` means the ones Night Orders created or
+ * Which tasks the grant covers. `ours` means the ones Standing Orders created or
  * was explicitly given — the design's default, and the one that keeps an
  * enrolment from becoming an amnesty over an entire backlog.
  */
@@ -106,7 +106,7 @@ export function permits(
     return {
       ok: false,
       reason: "no-grant",
-      message: `${request.repo} is not enrolled for ${request.backend} — \`nightorders enroll\` grants write access`,
+      message: `${request.repo} is not enrolled for ${request.backend} — \`standing-orders enroll\` grants write access`,
     };
   }
 
@@ -135,7 +135,7 @@ export function permits(
     return {
       ok: false,
       reason: "selector",
-      message: `the grant on ${request.repo} covers only tasks Night Orders created or was given`,
+      message: `the grant on ${request.repo} covers only tasks Standing Orders created or was given`,
     };
   }
 
@@ -296,7 +296,7 @@ export function describeGrant(grant: BackendGrant): string[] {
     `  backend      ${grant.backend}`,
     `  may touch    ${grant.paths.join(", ")}`,
     `  may do       ${grant.mutations.join(", ")}`,
-    `  on tasks     ${grant.selector === "ours" ? "only those Night Orders created or was given" : "every task in the tracker"}`,
+    `  on tasks     ${grant.selector === "ours" ? "only those Standing Orders created or was given" : "every task in the tracker"}`,
     `  credentials  ${grant.credentialScope ?? "none of its own — it uses the ones already on this machine"}`,
     `  visibility   ${describeVisibility(grant)}`,
   ];

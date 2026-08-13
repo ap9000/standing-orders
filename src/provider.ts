@@ -100,7 +100,7 @@ function toml(value: string): string {
 }
 
 /** OpenRouter rides codex under a PRIVATE provider key, isolated from user config. */
-const OPENROUTER_PROVIDER_KEY = "nightorders_openrouter";
+const OPENROUTER_PROVIDER_KEY = "standing-orders_openrouter";
 export const OPENROUTER_ENV_KEY = "OPENROUTER_API_KEY";
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -289,7 +289,7 @@ export function reportsCost(provider: ProviderId): boolean {
   return provider === "claude";
 }
 
-/** The non-spending inspection surface: what `nightorders providers` reports. */
+/** The non-spending inspection surface: what `standing-orders providers` reports. */
 export type ProviderInspection = {
   id: ProviderId;
   binary: string;

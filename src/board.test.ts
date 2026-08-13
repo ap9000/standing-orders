@@ -53,7 +53,7 @@ describe("the lane classifier", () => {
         state: "running",
         openDecisionId: 7,
         hold: { ownerKind: "decision", until: null },
-        claim: { runner: "builder-1", claimedAt: T0.toISOString(), model: "claude", branch: "nightorders/t-1", worktree: "/pool/t-1", role: "builder" },
+        claim: { runner: "builder-1", claimedAt: T0.toISOString(), model: "claude", branch: "standing-orders/t-1", worktree: "/pool/t-1", role: "builder" },
       }),
       T0,
     );
@@ -205,7 +205,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
       taskRef: withRun,
       leaseId: taken.claim.leaseId,
       runner: "builder-1",
-      branch: "nightorders/t-run",
+      branch: "standing-orders/t-run",
       worktree: "/pool/t-run",
       model: "claude",
       now,
@@ -218,7 +218,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
     expect(one?.claim).toMatchObject({
       runner: "builder-1",
       model: "claude",
-      branch: "nightorders/t-run",
+      branch: "standing-orders/t-run",
       worktree: "/pool/t-run",
     });
     const other = board.tasks.find(row => row.taskId === "t-bare");
@@ -236,7 +236,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
       taskRef: ref,
       leaseId: taken.claim.leaseId,
       runner: "builder-1",
-      branch: "nightorders/t-parked",
+      branch: "standing-orders/t-parked",
       worktree: "/pool/t-parked",
       now,
     });

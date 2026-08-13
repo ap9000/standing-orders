@@ -17,6 +17,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  existsSync,
   constants,
   fstatSync,
   mkdirSync,
@@ -50,7 +51,12 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
 };
 
 export function evidenceRoot(home: string): string {
-  return join(home, ".nightorders", "evidence");
+  const renamed = join(home, ".standing-orders", "evidence");
+  // Same continuity rule as the database: evidence recorded under the old
+  // name keeps verifying until a new-name root exists.
+  const legacy = join(home, ".nightorders", "evidence");
+  if (!existsSync(renamed) && existsSync(legacy)) return legacy;
+  return renamed;
 }
 
 /**

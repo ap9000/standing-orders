@@ -2,7 +2,7 @@
 /**
  * The command.
  *
- * `nightorders` with no arguments reads the repositories below the working
+ * `standing-orders` with no arguments reads the repositories below the working
  * directory and prints what is in flight. It writes nothing, starts nothing,
  * and asks nothing. Everything it knows comes from git and from the operator's
  * own filesystem.
@@ -61,26 +61,26 @@ type Write = (line: string) => void;
 
 const USAGE_EXIT = 2;
 
-export const HELP = `nightorders — standing orders for your agents
+export const HELP = `standing-orders — standing orders for your agents
 
 Usage
-  nightorders [path...]        report what is in flight
-  nightorders pulls            report what is waiting on a person
-  nightorders graph            report which work graph is already here
-  nightorders repos            list connected repositories, and how to adjust
-  nightorders repos add <path> connect one (no path: the repo you are in)
-  nightorders repos remove <path>
-  nightorders link             put \`nightorders\` on your PATH
-  nightorders unlink           take it off again
+  standing-orders [path...]        report what is in flight
+  standing-orders pulls            report what is waiting on a person
+  standing-orders graph            report which work graph is already here
+  standing-orders repos            list connected repositories, and how to adjust
+  standing-orders repos add <path> connect one (no path: the repo you are in)
+  standing-orders repos remove <path>
+  standing-orders link             put \`standing-orders\` on your PATH
+  standing-orders unlink           take it off again
 
-Operating the queue — see \`nightorders task\` for the whole surface
-  nightorders ready            what could be dispatched right now
-  nightorders task add <title> queue work
-  nightorders claim <id> --runner <name>
-  nightorders heartbeat <lease> / release <lease> / reap
-  nightorders tick --runner <name> --token <t> --repo <path>
+Operating the queue — see \`standing-orders task\` for the whole surface
+  standing-orders ready            what could be dispatched right now
+  standing-orders task add <title> queue work
+  standing-orders claim <id> --runner <name>
+  standing-orders heartbeat <lease> / release <lease> / reap
+  standing-orders tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
-  nightorders reconcile        recover what the last stretch left behind
+  standing-orders reconcile        recover what the last stretch left behind
 
 With nothing connected it reports everything it can find below the working
 directory. Once you connect repositories it reports those instead.
@@ -142,7 +142,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       }
       options.maxDepth = depth;
     } else if (argument.startsWith("-")) {
-      return { error: `unknown option ${argument} — try \`nightorders --help\`` };
+      return { error: `unknown option ${argument} — try \`standing-orders --help\`` };
     } else {
       roots.push(resolve(argument));
     }
@@ -305,7 +305,7 @@ async function reportEnrolled(
 
   if (missing.length > 0) {
     for (const repo of missing) write(`${repo} is enrolled but is no longer there.`);
-    write(`Drop it with \`nightorders repos remove ${missing[0]}\`.`);
+    write(`Drop it with \`standing-orders repos remove ${missing[0]}\`.`);
     write("");
   }
   write(
@@ -361,20 +361,20 @@ async function runReposCommand(argv: readonly string[], write: Write): Promise<n
 
 function listRepos(repos: readonly string[], file: string, write: Write): number {
   if (repos.length === 0) {
-    write("No repositories connected. Night Orders reports on everything it can find.");
+    write("No repositories connected. Standing Orders reports on everything it can find.");
     write("");
     write("Connect the ones you actually work in:");
-    write("  nightorders repos add ~/code/thing");
-    write("  nightorders repos add            # the repo you are standing in");
+    write("  standing-orders repos add ~/code/thing");
+    write("  standing-orders repos add            # the repo you are standing in");
     return 0;
   }
 
   write(`${repos.length === 1 ? "1 repository" : `${repos.length} repositories`} connected:`);
   for (const repo of repos) write(`  ${repo}${existsSync(repo) ? "" : "   (missing)"}`);
   write("");
-  write("  nightorders repos add <path>      connect another");
-  write("  nightorders repos remove <path>   disconnect one");
-  write("  nightorders --all                 report everything, ignoring this list");
+  write("  standing-orders repos add <path>      connect another");
+  write("  standing-orders repos remove <path>   disconnect one");
+  write("  standing-orders --all                 report everything, ignoring this list");
   write(`  ${file}`);
   return 0;
 }
@@ -402,7 +402,7 @@ async function addToRepos(
   }
   for (const path of added) write(`Connected ${path}`);
   write("");
-  write("`nightorders` now reports these. `nightorders --all` still shows everything.");
+  write("`standing-orders` now reports these. `standing-orders --all` still shows everything.");
   return 0;
 }
 
@@ -560,7 +560,7 @@ export function parseLinkArgs(argv: readonly string[]): { args: LinkArgs } | { e
       if (dir === undefined) return { error: "--to needs a directory" };
       args.to = dir;
     } else {
-      return { error: `unknown option ${argument} — try \`nightorders --help\`` };
+      return { error: `unknown option ${argument} — try \`standing-orders --help\`` };
     }
   }
 
@@ -751,7 +751,7 @@ function renderJson(
  * Whether this module is the program being run, rather than an import.
  *
  * Node resolves a module to its real path while argv[1] keeps whatever name it
- * was invoked by, so a symlinked `nightorders` on PATH compares unequal to
+ * was invoked by, so a symlinked `standing-orders` on PATH compares unequal to
  * itself unless both sides are resolved. Getting this wrong is silent: the
  * command runs, prints nothing, and exits 0.
  */

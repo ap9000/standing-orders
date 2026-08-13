@@ -17,7 +17,7 @@ describe("the mirrors", () => {
   let store: Store;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "nightorders-webhooks-"));
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-webhooks-"));
     store = openStore(":memory:");
   });
   afterEach(() => {
@@ -33,7 +33,7 @@ describe("the mirrors", () => {
 
     const targets = loadWebhookTargets({}, dir);
     expect(targets.map(one => one.kind).sort()).toEqual(["discord", "slack"]);
-    const overridden = loadWebhookTargets({ NIGHTORDERS_SLACK_WEBHOOK: "https://hooks.slack.com/services/ENV" }, dir);
+    const overridden = loadWebhookTargets({ STANDING_ORDERS_SLACK_WEBHOOK: "https://hooks.slack.com/services/ENV" }, dir);
     expect(overridden.find(one => one.kind === "slack")?.url).toContain("ENV");
 
     expect(saveConsoleUrl(dir, "http://server.tailae758.ts.net:4180/")).toMatchObject({ ok: true });
@@ -71,7 +71,7 @@ describe("the mirrors", () => {
     expect(report.sent).toBe(2);
     // Two notifications × two mirrors; slack wears mrkdwn links, discord content.
     expect(posts).toHaveLength(4);
-    expect(posts.some(one => one.body.includes("<http://host:4180/d/7|open in nightorders>"))).toBe(true);
+    expect(posts.some(one => one.body.includes("<http://host:4180/d/7|open in standing-orders>"))).toBe(true);
     expect(posts.some(one => one.body.includes('"content"'))).toBe(true);
     // Delivered rows do not re-send on the next pass.
     const again = await webhookPass(store, {
@@ -95,7 +95,7 @@ describe("the mirrors", () => {
 describe("the primary — one service pages, chosen or sensibly implied", () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "nightorders-primary-"));
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-primary-"));
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

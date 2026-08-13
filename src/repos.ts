@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 /**
  * Which repositories the operator has actually committed to.
  *
@@ -15,7 +16,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export const CONFIG_VERSION = 1;
-const DIR_NAME = "nightorders";
+const DIR_NAME = "standing-orders";
 const FILE_NAME = "repos.json";
 
 export type LoadResult = { repos: string[] } | { error: string };
@@ -23,7 +24,12 @@ export type LoadResult = { repos: string[] } | { error: string };
 export function configPath(env: Record<string, string | undefined>, home: string): string {
   const xdg = env["XDG_CONFIG_HOME"];
   const base = xdg !== undefined && xdg !== "" ? xdg : join(home, ".config");
-  return join(base, DIR_NAME, FILE_NAME);
+  const renamed = join(base, DIR_NAME, FILE_NAME);
+  // Rename continuity: an enrolled list under the old name keeps working
+  // until one exists under the new one.
+  const legacy = join(base, "nightorders", FILE_NAME);
+  if (!existsSync(renamed) && existsSync(legacy)) return legacy;
+  return renamed;
 }
 
 export async function loadRepos(file: string): Promise<LoadResult> {
@@ -44,7 +50,7 @@ export async function loadRepos(file: string): Promise<LoadResult> {
 
   const repos = readRepoList(parsed);
   if (repos === null) {
-    return { error: `${file} does not look like a Night Orders config — fix or delete it` };
+    return { error: `${file} does not look like a Standing Orders config — fix or delete it` };
   }
   return { repos: sortUnique(repos) };
 }

@@ -1,7 +1,7 @@
 /**
  * Finding git repositories on disk.
  *
- * This is the first thing Night Orders does and the only thing it does before
+ * This is the first thing Standing Orders does and the only thing it does before
  * the operator has configured anything, so it has to be fast, total, and
  * strictly read-only. It reads directory entries. It never opens a file, never
  * follows a symlink, and never descends into a repository it has found.

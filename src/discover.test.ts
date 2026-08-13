@@ -61,7 +61,7 @@ describe("inspectRepo", () => {
     const runner = fakeGit({
       worktree: ok(WORKTREES),
       "for-each-ref": ok(BRANCHES),
-      remote: ok("git@github.com:ap9000/nightorders.git\n"),
+      remote: ok("git@github.com:ap9000/standing-orders.git\n"),
       "symbolic-ref": ok("main\n"),
       status: ok(" M src/git.ts\n?? notes.md\n"),
     });
@@ -72,7 +72,7 @@ describe("inspectRepo", () => {
     // Assert
     expect(snapshot.name).toBe("repo");
     expect(snapshot.head).toBe("main");
-    expect(snapshot.remoteUrl).toBe("git@github.com:ap9000/nightorders.git");
+    expect(snapshot.remoteUrl).toBe("git@github.com:ap9000/standing-orders.git");
     expect(snapshot.branches.map(branch => branch.name)).toEqual(["main", "feature/onboarding"]);
     expect(snapshot.worktrees).toHaveLength(1);
     expect(snapshot.dirtyFiles).toBe(2);
@@ -188,7 +188,7 @@ describe("discover", () => {
   let base: string;
 
   beforeAll(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-discover-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-discover-"));
     await mkdir(join(base, "alpha", ".git"), { recursive: true });
     await mkdir(join(base, "beta", ".git"), { recursive: true });
     await writeFile(join(base, "readme.md"), "not a repo\n");
@@ -211,7 +211,7 @@ describe("inspectRepo against a real repository", () => {
   let repo: string;
 
   beforeAll(async () => {
-    repo = await mkdtemp(join(tmpdir(), "nightorders-real-"));
+    repo = await mkdtemp(join(tmpdir(), "standing-orders-real-"));
     const identity = ["-c", "user.email=test@example.com", "-c", "user.name=Test"];
     await run("git", ["init", "-b", "main", repo]);
     await writeFile(join(repo, "file.txt"), "hello\n");

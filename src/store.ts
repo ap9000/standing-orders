@@ -18,7 +18,7 @@
  * history survives.
  *
  * SQLite via `node:sqlite`, so there is no runtime dependency and no native
- * build step — `npx nightorders` has to still work on a machine with no
+ * build step — `npx standing-orders` has to still work on a machine with no
  * compiler, and a task store is not worth breaking that promise for.
  *
  * Deliberately absent: `workspace_id`. §4 lists it, but multiplayer and RBAC
@@ -26,7 +26,7 @@
  * nobody has designed yet is a column that will be wrong when they do.
  */
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
@@ -395,7 +395,7 @@ CREATE TABLE IF NOT EXISTS task_edge (
 -- The overlay starts here. Nothing below this line knows which backend the
 -- work actually lives in.
 -- The origin column is what the grant's default selector actually rests on.
--- It records whether Night Orders created this task or merely came across it,
+-- It records whether Standing Orders created this task or merely came across it,
 -- and it is written here rather than asserted by whoever is asking to write:
 -- a policy that says "only our tasks" while letting the caller declare which
 -- those are is not a policy.
@@ -1076,7 +1076,13 @@ export type Database = {
 export function databasePath(env: Record<string, string | undefined>, home: string): string {
   const xdg = env["XDG_CONFIG_HOME"];
   const base = xdg !== undefined && xdg !== "" ? xdg : join(home, ".config");
-  return join(base, "nightorders", "orders.db");
+  const renamed = join(base, "standing-orders", "orders.db");
+  // The rename (nightorders → standing-orders, 2026-08-13) must not orphan
+  // an installation: a database that already lives under the old name keeps
+  // being found there until one exists under the new one.
+  const legacy = join(base, "nightorders", "orders.db");
+  if (!existsSync(renamed) && existsSync(legacy)) return legacy;
+  return renamed;
 }
 
 export type OpenOptions = {

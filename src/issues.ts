@@ -123,7 +123,7 @@ export function githubIssues(options: IssuesOptions): GraphBackend {
         "--title",
         spec.title,
         "--body",
-        spec.body ?? "Filed by Night Orders.",
+        spec.body ?? "Filed by Standing Orders.",
       ]);
       if (result.code !== 0) return no("rejected", describeFailure(result));
 

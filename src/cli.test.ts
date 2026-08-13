@@ -104,7 +104,7 @@ describe("missing paths", () => {
   test("keeps JSON parseable when a path is missing", async () => {
     // A warning printed above the envelope would break every consumer of it
     const lines: string[] = [];
-    const absent = join(tmpdir(), "nightorders-nobody", "Documentd");
+    const absent = join(tmpdir(), "standing-orders-nobody", "Documentd");
 
     const code = await main(["--json", absent], line => lines.push(line));
 
@@ -121,7 +121,7 @@ describe("isDirectInvocation", () => {
   test("recognises the module when invoked through a symlink on PATH", () => {
     // The failure this guards is silent: the command runs, prints nothing,
     // and exits 0, because argv[1] is the link and the module is the target.
-    const resolved = isDirectInvocation(MODULE, "/home/me/.local/bin/nightorders", () =>
+    const resolved = isDirectInvocation(MODULE, "/home/me/.local/bin/standing-orders", () =>
       "/pkg/dist/cli.js",
     );
 
@@ -147,7 +147,7 @@ describe("isDirectInvocation", () => {
 });
 
 describe("link command", () => {
-  const NEVER_CREATED = join(tmpdir(), "nightorders-never-created");
+  const NEVER_CREATED = join(tmpdir(), "standing-orders-never-created");
 
   test("changes nothing without --yes", async () => {
     // The tool refuses to install things on your behalf; that has to include
@@ -190,7 +190,7 @@ describe("main", () => {
   let base: string;
 
   beforeAll(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-cli-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-cli-"));
     await mkdir(join(base, "alpha", ".git"), { recursive: true });
   });
 
@@ -204,7 +204,7 @@ describe("main", () => {
     const code = await main(["--help"], line => lines.push(line));
 
     expect(code).toBe(0);
-    expect(lines.join("\n")).toContain("nightorders");
+    expect(lines.join("\n")).toContain("standing-orders");
   });
 
   test("exits with a usage code on a bad flag", async () => {
@@ -252,7 +252,7 @@ describe("graph command", () => {
   test("says a named path does not exist rather than reporting nothing found", async () => {
     // Same rule as the main report: a typo is not an empty search.
     const lines: string[] = [];
-    const absent = join(tmpdir(), "nightorders-no-such-repo");
+    const absent = join(tmpdir(), "standing-orders-no-such-repo");
 
     const code = await main(["graph", absent], line => lines.push(line));
 
@@ -274,7 +274,7 @@ describe("the unified report envelope", () => {
   let base: string;
 
   beforeAll(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-envelope-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-envelope-"));
     await mkdir(join(base, "alpha", ".git"), { recursive: true });
   });
 

@@ -82,7 +82,7 @@ export const no = (reason: OutcomeReason, message: string): Outcome<never> => ({
 export function edgesNotEmulated(name: string): Outcome<never> {
   return no(
     "unsupported",
-    `${name} dependency edges are not confirmed here, and Night Orders does not invent them — a graph only we can see would read as ready to everyone else`,
+    `${name} dependency edges are not confirmed here, and Standing Orders does not invent them — a graph only we can see would read as ready to everyone else`,
   );
 }
 

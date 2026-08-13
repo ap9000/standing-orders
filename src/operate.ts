@@ -142,8 +142,8 @@ export type Write = (line: string) => void;
 /**
  * 0 done · 1 broke · 2 bad usage · 3 ran fine, the answer is no.
  *
- * 3 is the one that matters. `nightorders claim` losing a race and
- * `nightorders claim` failing to open the database must not look the same to a
+ * 3 is the one that matters. `standing-orders claim` losing a race and
+ * `standing-orders claim` failing to open the database must not look the same to a
  * caller deciding whether to try the next task or wake somebody up.
  */
 export const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3 } as const;
@@ -167,114 +167,114 @@ export type OperateOptions = {
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
 
-export const OPERATE_HELP = `nightorders — operating the queue
+export const OPERATE_HELP = `standing-orders — operating the queue
 
-  nightorders ready                     what could be dispatched right now
-  nightorders task add <title>          queue work
-  nightorders task list [--state <s>]   everything, or one state
-  nightorders task show <id>
-  nightorders task state <id> <state>   queued|running|done|failed|cancelled
-  nightorders task block <id> --on <id> <id> waits for <on>
-  nightorders task hold <id> --reason <why> [--until <iso>]
-  nightorders task unhold <id>
+  standing-orders ready                     what could be dispatched right now
+  standing-orders task add <title>          queue work
+  standing-orders task list [--state <s>]   everything, or one state
+  standing-orders task show <id>
+  standing-orders task state <id> <state>   queued|running|done|failed|cancelled
+  standing-orders task block <id> --on <id> <id> waits for <on>
+  standing-orders task hold <id> --reason <why> [--until <iso>]
+  standing-orders task unhold <id>
 
-  nightorders claim <id> --runner <name> [--ttl <seconds>]
-  nightorders heartbeat <lease>         still working; extends the lease
-  nightorders release <lease>           done with it; fenced if superseded
-  nightorders reap                      release every lease that ran out
+  standing-orders claim <id> --runner <name> [--ttl <seconds>]
+  standing-orders heartbeat <lease>         still working; extends the lease
+  standing-orders release <lease>           done with it; fenced if superseded
+  standing-orders reap                      release every lease that ran out
 
-  nightorders tick --runner <name> --token <t> --repo <path>
+  standing-orders tick --runner <name> --token <t> --repo <path>
                                         one unattended pass: claim what is
                                         ready and approved, build it in a
                                         leased worktree, commit to a branch.
                                         [--max <n>] tasks (default 1),
                                         [--base <ref>] for first attempts.
                                         Never pushes.
-  nightorders reconcile --repo <path>   the morning sweep: recover dead
+  standing-orders reconcile --repo <path>   the morning sweep: recover dead
                                         runners, reap expired leases, adopt
                                         or forget orphaned worktrees. Run it
                                         before tick.
 
 Capabilities — what the work needs, recorded and probed, never valued
-  nightorders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>]
+  standing-orders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>]
                                         env kind synthesizes test -n "$NAME"
-  nightorders cap list [--repo <path>]
-  nightorders cap probe [<kind:name>…]  ask the environment; exit 0 all
+  standing-orders cap list [--repo <path>]
+  standing-orders cap probe [<kind:name>…]  ask the environment; exit 0 all
                                         verified, 3 any gap
-  nightorders task require <id> --cap <kind:name>[,…]
+  standing-orders task require <id> --cap <kind:name>[,…]
                                         nothing dispatches it until every
                                         one is verified (--cap none clears)
-  nightorders gaps [--repo <path>]      what is missing, ranked by how many
+  standing-orders gaps [--repo <path>]      what is missing, ranked by how many
                                         tasks filling it would start
 
-  nightorders task plan <id> --as <you> --token <t>
+  standing-orders task plan <id> --as <you> --token <t>
                                         plan before building: an agent reads
                                         the repo, asks you questions, and
                                         proposes a scope you approve
 
 Routines — standing orders that fire on a schedule, each instance isolated
-  nightorders routine add <name> --repo <path> --goal <text>
+  standing-orders routine add <name> --repo <path> --goal <text>
       --schedule every:<min>|daily:<HH:MM>   (UTC)
       [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]
-  nightorders routine approve <name>    the step-up: approving means each
+  standing-orders routine approve <name>    the step-up: approving means each
                                         firing builds WITHOUT asking, inside
                                         exactly the stated terms; editing any
                                         term voids the approval
-  nightorders routine list | show <name>
-  nightorders routine pause|resume <name>
-  nightorders routine run-now <name> --as <you> --token <t>
+  standing-orders routine list | show <name>
+  standing-orders routine pause|resume <name>
+  standing-orders routine run-now <name> --as <you> --token <t>
 
 Agents — which provider and model each phase runs on
-  nightorders providers                 what is installed, logged in, and
+  standing-orders providers                 what is installed, logged in, and
                                         configured on this machine — without
                                         spending anything to find out
-  nightorders config show [--repo <path>]
-  nightorders config set <phase> --provider claude|codex|openrouter
+  standing-orders config show [--repo <path>]
+  standing-orders config set <phase> --provider claude|codex|openrouter
       [--model <m>] [--repo <path>] --as <you> --token <t>
                                         phases: plan | build | repair. The
                                         repo form is a project override;
                                         without it, installation-wide.
                                         Repair's PROVIDER always inherits
                                         the build it mends.
-  nightorders config clear <phase> [--repo <path>] --as <you> --token <t>
+  standing-orders config clear <phase> [--repo <path>] --as <you> --token <t>
   Pass flags still win for one pass: --provider/--model,
   --plan-provider/--plan-model, --repair-model. A routine instance is
   pinned at fire time and ignores all of them.
-  nightorders brief [--repo <path>] [--local] [--since <iso>]
+  standing-orders brief [--repo <path>] [--local] [--since <iso>]
                                         the report: recent runs, gaps,
                                         PRs (--local skips the network and
                                         says REVIEW was not read)
 
 The outbox — facts that want a person, durably
-  nightorders webhook set slack|discord <url>
+  standing-orders webhook set slack|discord <url>
                                         UI-only chat mirrors: every page a
                                         message with a console link; acting
                                         stays in the console. Delivers when
                                         Telegram is not configured.
-  nightorders webhook set console-url <http://host:port>
-  nightorders webhook primary telegram|slack|discord
+  standing-orders webhook set console-url <http://host:port>
+  standing-orders webhook primary telegram|slack|discord
                                         which service receives alerts when
                                         several are connected (asked once,
                                         the first time you add a second)
-  nightorders webhook status | test | clear slack|discord
-  nightorders outbox list [--all]
-  nightorders outbox deliver --cmd <c>  runs once per pending row, reading
-                                        $NIGHTORDERS_KIND / _SUBJECT / _BODY;
+  standing-orders webhook status | test | clear slack|discord
+  standing-orders outbox list [--all]
+  standing-orders outbox deliver --cmd <c>  runs once per pending row, reading
+                                        $STANDING_ORDERS_KIND / _SUBJECT / _BODY;
                                         exit 0 delivered receipts, 1 any fail
 
 Runners — the machines that may be given work
-  nightorders runner register <name> [--capacity <n>]
+  standing-orders runner register <name> [--capacity <n>]
                                         mints a token, shown once
-  nightorders runner list               who is registered, and answering
-  nightorders runner heartbeat <name> --token <token>
-  nightorders runner reap               take back what a dead runner held
-  nightorders runner retire <name>
+  standing-orders runner list               who is registered, and answering
+  standing-orders runner heartbeat <name> --token <token>
+  standing-orders runner reap               take back what a dead runner held
+  standing-orders runner retire <name>
 
 Write access — discovery stays read-only until you grant it
-  nightorders enroll [repo] --backend <name> --paths <p>[,<p>]
+  standing-orders enroll [repo] --backend <name> --paths <p>[,<p>]
                                         show what it would grant; --yes agrees
-  nightorders grants                    what has been granted, and to what
-  nightorders revoke [repo] --backend <name>
+  standing-orders grants                    what has been granted, and to what
+  standing-orders revoke [repo] --backend <name>
 
   --allow <a,b>     mutation classes (default: ${DEFAULT_MUTATIONS.join(",")})
   --selector ours|all   which tasks (default: ours — never a whole backlog)
@@ -592,7 +592,7 @@ function claimCommand(
   const id = positional[0];
   const runner = text(flags, "runner");
 
-  if (id === undefined) return fail(write, json, "claim", "usage", "which task? `nightorders claim <id> --runner <name> --token <token>`", EXIT.usage);
+  if (id === undefined) return fail(write, json, "claim", "usage", "which task? `standing-orders claim <id> --runner <name> --token <token>`", EXIT.usage);
   if (runner === undefined) return fail(write, json, "claim", "usage", "--runner names who is taking it", EXIT.usage);
 
   // Taking work requires proving who you are. Accepting a runner *name* alone
@@ -683,7 +683,7 @@ function leaseCommand(
 ): number {
   const { store, write, json, now } = context;
   const lease = positional[0];
-  if (lease === undefined) return fail(write, json, command, "usage", `which lease? \`nightorders ${command} <lease>\``, EXIT.usage);
+  if (lease === undefined) return fail(write, json, command, "usage", `which lease? \`standing-orders ${command} <lease>\``, EXIT.usage);
 
   const ttl = readTtl(flags);
   if (ttl === null) return fail(write, json, command, "usage", "--ttl takes whole seconds", EXIT.usage);
@@ -756,7 +756,7 @@ function runnerCommand(
     }
     if (runners.length === 0) {
       write("No runners registered.");
-      write("  nightorders runner register <name>");
+      write("  standing-orders runner register <name>");
       return EXIT.ok;
     }
     for (const one of runners) {
@@ -889,7 +889,7 @@ async function buildCommand(
   const branch = text(flags, "branch");
 
   if (id === undefined || runner === undefined || token === undefined || branch === undefined) {
-    return fail(write, json, "build", "usage", "`nightorders build <id> --runner <name> --token <t> --branch <b> --repo <path>`", EXIT.usage);
+    return fail(write, json, "build", "usage", "`standing-orders build <id> --runner <name> --token <t> --branch <b> --repo <path>`", EXIT.usage);
   }
 
   const auth = authenticate(store, runner, token);
@@ -976,7 +976,7 @@ async function buildCommand(
       { parked: true, decision: sealed.decisionId, worktree: leased.worktree.path },
       () => [
         `${id} parked a decision instead of guessing.`,
-        `  decision  ${sealed.decisionId} — \`nightorders decide ${sealed.decisionId}\``,
+        `  decision  ${sealed.decisionId} — \`standing-orders decide ${sealed.decisionId}\``,
         `  worktree  ${leased.worktree.path} (work in progress preserved)`,
       ],
     );
@@ -1093,7 +1093,7 @@ async function tickCommand(
   const token = text(flags, "token");
 
   if (runner === undefined || token === undefined) {
-    return fail(write, json, "tick", "usage", "`nightorders tick --runner <name> --token <t> --repo <path> [--max <n>] [--base <ref>]`", EXIT.usage);
+    return fail(write, json, "tick", "usage", "`standing-orders tick --runner <name> --token <t> --repo <path> [--max <n>] [--base <ref>]`", EXIT.usage);
   }
 
   // Heartbeat rather than bare auth: a pass that is about to hold leases for
@@ -1238,7 +1238,7 @@ async function tickCommand(
               dedupeKey: `gap:${home}:${parsed.kind}:${parsed.name}`,
               kind: "gap",
               subject: `${key} blocks work in ${home}`,
-              body: `${id} (and possibly others) cannot dispatch: ${claimed.message}. \`nightorders gaps --repo ${home}\``,
+              body: `${id} (and possibly others) cannot dispatch: ${claimed.message}. \`standing-orders gaps --repo ${home}\``,
             },
             clock(),
           );
@@ -1259,7 +1259,7 @@ async function tickCommand(
       // its own — never the builder's, so a later build starts from base
       // with nothing a planning session could have left as an ancestor
       // (Codex planning review, finding 1).
-      const planBranch = `nightorders-plan/${id}`;
+      const planBranch = `standing-orders-plan/${id}`;
       const planLeased = await worktrees.lease({
         repo,
         branch: planBranch,
@@ -1359,7 +1359,7 @@ async function tickCommand(
       continue;
     }
 
-    const branch = `nightorders/${id}`;
+    const branch = `standing-orders/${id}`;
 
     // A retry of this task reuses its branch; a first attempt creates it from
     // base. Suffixing instead would scatter one logical attempt across
@@ -1654,7 +1654,7 @@ async function tickCommand(
             ? `committed to ${entry.branch}`
             : "no-change, stated and verified"
           : entry.outcome === "parked"
-            ? `${entry.reason} — \`nightorders decide\``
+            ? `${entry.reason} — \`standing-orders decide\``
             : entry.reason ?? "";
       lines.push(`  ${entry.id.padEnd(24)} ${entry.outcome}  ${detail}`.trimEnd());
     }
@@ -1662,7 +1662,7 @@ async function tickCommand(
       lines.push("", "Nothing has been pushed. Look at the branches before they go anywhere.");
     }
     if (parked > 0) {
-      lines.push("", `${parked} decision${parked === 1 ? "" : "s"} waiting — \`nightorders decide\`, or \`nightorders brief\`.`);
+      lines.push("", `${parked} decision${parked === 1 ? "" : "s"} waiting — \`standing-orders decide\`, or \`standing-orders brief\`.`);
     }
     return lines;
   };
@@ -1804,7 +1804,7 @@ async function reconcileCommand(
 // The computation lives in gaps.ts, shared with the web console; the CLI
 // keeps only its own presentation.
 
-/** `nightorders gaps` — the BLOCKED section of the morning, standalone. */
+/** `standing-orders gaps` — the BLOCKED section of the morning, standalone. */
 function gapsCommand(flags: Map<string, string | true>, context: Context): number {
   const { store, write, json, clock } = context;
   const repo = repoFrom(flags);
@@ -1836,7 +1836,7 @@ function gapsCommand(flags: Map<string, string | true>, context: Context): numbe
 // ---- the report -----------------------------------------------------------
 
 /**
- * `nightorders brief` — one ritual (§6). The recent runs from the run table,
+ * `standing-orders brief` — one ritual (§6). The recent runs from the run table,
  * the blocked gaps ranked by what filling them frees, the PRs waiting on a
  * person, and where decisions will go when M3 gives them a shape.
  *
@@ -1859,7 +1859,7 @@ async function briefCommand(
   // 24 hours" — which can mix two windows, or none.
   const episode = flags.has("latest-watch") ? store.latestWatchEpisode(repo) : null;
   if (flags.has("latest-watch") && episode === null) {
-    return fail(write, json, "brief", "no-watch", "no watch episode recorded for this repo yet — run `nightorders watch` first", EXIT.refused);
+    return fail(write, json, "brief", "no-watch", "no watch episode recorded for this repo yet — run `standing-orders watch` first", EXIT.refused);
   }
   const since =
     episode?.startedAt ??
@@ -1937,7 +1937,7 @@ async function briefCommand(
     return EXIT.ok;
   }
 
-  const lines: string[] = [`nightorders — the report ─ ${repo}`];
+  const lines: string[] = [`standing-orders — the report ─ ${repo}`];
   if (episode !== null) {
     lines.push(
       `  episode      watch #${episode.id} on ${episode.runner} · ${episode.startedAt} → ${
@@ -1968,7 +1968,7 @@ async function briefCommand(
     for (const gap of gaps) {
       lines.push(`      ${gap.key.padEnd(28)} ${gap.state}`);
     }
-    lines.push(`      → nightorders gaps --repo ${repo}`);
+    lines.push(`      → standing-orders gaps --repo ${repo}`);
   }
 
   lines.push(
@@ -1981,13 +1981,13 @@ async function briefCommand(
   }
 
   if (pending.length > 0) {
-    lines.push(`  ▸ OUTBOX     ${pending.length} undelivered — nightorders outbox deliver --cmd …`);
+    lines.push(`  ▸ OUTBOX     ${pending.length} undelivered — standing-orders outbox deliver --cmd …`);
   }
 
   if (decisions.length > 0) {
     const overdue = decisions.filter(one => one.state === "expired").length;
     lines.push(
-      `  ▸ DECIDE     ${decisions.length} waiting${overdue > 0 ? ` (${overdue} overdue)` : ""} — nightorders decide`,
+      `  ▸ DECIDE     ${decisions.length} waiting${overdue > 0 ? ` (${overdue} overdue)` : ""} — standing-orders decide`,
     );
     for (const one of decisions) {
       lines.push(`      ${String(one.id).padEnd(4)} ${one.taskId.padEnd(20)} ${one.question}`);
@@ -1999,7 +1999,7 @@ async function briefCommand(
   if (stranded.length > 0) {
     lines.push(`  ▸ STRANDED   ${stranded.length} task(s) behind failed blockers — they will never become ready on their own`);
     for (const one of stranded) {
-      lines.push(`      ${one.id.padEnd(20)} waits on ${one.blockedBy.join(", ")} — \`nightorders task requeue ${one.blockedBy[0]}\``);
+      lines.push(`      ${one.id.padEnd(20)} waits on ${one.blockedBy.join(", ")} — \`standing-orders task requeue ${one.blockedBy[0]}\``);
     }
   }
 
@@ -2007,7 +2007,7 @@ async function briefCommand(
     lines.push(`  ▸ INCIDENTS  ${incidents.length} unresolved — these do not age out`);
     for (const incident of incidents) {
       lines.push(
-        `      ${incident.taskId.padEnd(20)} ${incident.kind} since ${incident.createdAt} — read run ${incident.run}'s evidence, then \`nightorders incident resolve ${incident.id}\``,
+        `      ${incident.taskId.padEnd(20)} ${incident.kind} since ${incident.createdAt} — read run ${incident.run}'s evidence, then \`standing-orders incident resolve ${incident.id}\``,
       );
     }
   }
@@ -2019,7 +2019,7 @@ async function briefCommand(
 // ---- decisions ------------------------------------------------------------
 
 /**
- * `nightorders decide` — the attention surface, in the terminal.
+ * `standing-orders decide` — the attention surface, in the terminal.
  *
  *   decide                          what waits, oldest first
  *   decide <id>                     one decision, whole, with its evidence
@@ -2057,14 +2057,14 @@ async function decideCommand(
       write(`       options: ${one.options.map(option => option.id).join(" · ")}   recommended: ${one.recommendation}`);
     }
     write("");
-    write("  → nightorders decide <id>       the whole screen");
-    write("  → nightorders decide <id> --choose <option> --as <you> --token <t>");
+    write("  → standing-orders decide <id>       the whole screen");
+    write("  → standing-orders decide <id> --choose <option> --as <you> --token <t>");
     return EXIT.refused;
   }
 
   const id = Number(idText);
   if (!Number.isInteger(id) || id <= 0) {
-    return fail(write, json, "decide", "usage", "`nightorders decide [<id>] [--choose <option>]`", EXIT.usage);
+    return fail(write, json, "decide", "usage", "`standing-orders decide [<id>] [--choose <option>]`", EXIT.usage);
   }
   const decision = store.getDecision(id);
   if (decision === null) {
@@ -2107,7 +2107,7 @@ async function decideCommand(
       }
     }
     write("");
-    write(`  → nightorders decide ${id} --choose <option> --as <you> --token <t>`);
+    write(`  → standing-orders decide ${id} --choose <option> --as <you> --token <t>`);
     return EXIT.ok;
   }
 
@@ -2137,7 +2137,7 @@ async function decideCommand(
   if (!answered.ok) {
     const why =
       answered.reason === "bad-option"
-        ? `"${choice}" is not one of this decision's options — \`nightorders decide ${id}\` shows them`
+        ? `"${choice}" is not one of this decision's options — \`standing-orders decide ${id}\` shows them`
         : answered.reason === "already-answered"
           ? `decision ${id} was already answered differently — "decided" is not negotiable; park a new task if the answer must change`
           : answered.reason === "bad-note"
@@ -2157,7 +2157,7 @@ async function decideCommand(
 }
 
 /**
- * `nightorders serve [--port N] [--host H] [--allow-host name:port …]` —
+ * `standing-orders serve [--port N] [--host H] [--allow-host name:port …]` —
  * the decision view, on a phone. Signing in takes the approver credential;
  * there is no unauthenticated bind, localhost included. Plain HTTP: put a
  * TLS proxy in front for anything beyond a trusted network — Tailscale is
@@ -2214,7 +2214,7 @@ async function serveCommand(
 }
 
 /**
- * `nightorders task requeue <id>` — the authenticated way back from a stall.
+ * `standing-orders task requeue <id>` — the authenticated way back from a stall.
  * Resolves the task's open incidents (their holds lift with them), clears
  * strikes and backoff, and returns the task to the queue in one
  * transaction. Nothing else moves a stalled task: retrying by hand-editing
@@ -2228,7 +2228,7 @@ async function requeueTask(
   const { store, write, json, clock } = context;
   const [id] = positional;
   if (id === undefined) {
-    return fail(write, json, "task requeue", "usage", "`nightorders task requeue <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task requeue", "usage", "`standing-orders task requeue <id> --as <you> --token <t>`", EXIT.usage);
   }
   const acting = await askCredentials(flags, context);
   if (acting === null) {
@@ -2250,7 +2250,7 @@ async function requeueTask(
 }
 
 /**
- * `nightorders task plan <id>` — ask for a plan before any promise exists.
+ * `standing-orders task plan <id>` — ask for a plan before any promise exists.
  * Authenticated like every act that spends money on the operator's behalf:
  * a planner agent will read the repository and interrogate you over the
  * decision surface, and who asked for that is recorded, not asserted.
@@ -2263,7 +2263,7 @@ async function planTaskCommand(
   const { store, write, json, clock } = context;
   const [id] = positional;
   if (id === undefined) {
-    return fail(write, json, "task plan", "usage", "`nightorders task plan <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task plan", "usage", "`standing-orders task plan <id> --as <you> --token <t>`", EXIT.usage);
   }
   const acting = await askCredentials(flags, context);
   if (acting === null) {
@@ -2288,7 +2288,7 @@ async function planTaskCommand(
 }
 
 /**
- * `nightorders incident list|resolve <id>` — the parks that never became
+ * `standing-orders incident list|resolve <id>` — the parks that never became
  * decisions. Resolving is an authenticated human act, the same credential as
  * approving and deciding, and it is the only thing that lifts the
  * incident's hold: `task unhold` deliberately cannot, because an operator
@@ -2316,16 +2316,16 @@ async function incidentCommand(
       write(`  ${String(incident.id).padEnd(4)} ${incident.taskId.padEnd(20)} ${incident.kind}  since ${incident.createdAt}  run ${incident.run}`);
     }
     write("");
-    write("  → nightorders incident resolve <id> --as <you> --token <t>");
+    write("  → standing-orders incident resolve <id> --as <you> --token <t>");
     return EXIT.refused;
   }
 
   if (action !== "resolve") {
-    return fail(write, json, "incident", "usage", "`nightorders incident [list|resolve <id>]`", EXIT.usage);
+    return fail(write, json, "incident", "usage", "`standing-orders incident [list|resolve <id>]`", EXIT.usage);
   }
   const id = Number(idText);
   if (!Number.isInteger(id) || id <= 0) {
-    return fail(write, json, "incident resolve", "usage", "`nightorders incident resolve <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "incident resolve", "usage", "`standing-orders incident resolve <id> --as <you> --token <t>`", EXIT.usage);
   }
   const acting = await askCredentials(flags, context);
   if (acting === null) {
@@ -2347,7 +2347,7 @@ async function incidentCommand(
 }
 
 /**
- * `nightorders webhook …` — Slack and Discord as UI-ONLY mirrors: every
+ * `standing-orders webhook …` — Slack and Discord as UI-ONLY mirrors: every
  * page is a message with a console link; acting stays in the console
  * behind its own authentication. The URL is a credential: 0600 file
  * beside the database, or the environment, never anywhere else.
@@ -2377,13 +2377,13 @@ async function webhookCommand(
     }
     if (primary.implicit && primary.channel !== null) {
       write(`  ! several services are connected and none was chosen — ${primary.channel} receives alerts by default.`);
-      write(`    Choose: nightorders webhook primary telegram|slack|discord`);
+      write(`    Choose: standing-orders webhook primary telegram|slack|discord`);
     }
-    write(`  links    ${consoleUrl ?? "NOT SET — messages will carry no console link; nightorders webhook set console-url http://host:port"}`);
+    write(`  links    ${consoleUrl ?? "NOT SET — messages will carry no console link; standing-orders webhook set console-url http://host:port"}`);
     if (targets.length === 0) {
       write("");
-      write("  nightorders webhook set slack https://hooks.slack.com/services/…");
-      write("  nightorders webhook set discord https://discord.com/api/webhooks/…");
+      write("  standing-orders webhook set slack https://hooks.slack.com/services/…");
+      write("  standing-orders webhook set discord https://discord.com/api/webhooks/…");
       write(`  (or export ${SLACK_ENV} / ${DISCORD_ENV})`);
     }
     write("");
@@ -2395,10 +2395,10 @@ async function webhookCommand(
   if (action === "test") {
     const targets = loadWebhookTargets(process.env, dir);
     if (targets.length === 0) {
-      return fail(write, json, "webhook test", "unconfigured", "no webhook configured — `nightorders webhook set slack|discord <url>`", EXIT.refused);
+      return fail(write, json, "webhook test", "unconfigured", "no webhook configured — `standing-orders webhook set slack|discord <url>`", EXIT.refused);
     }
     store.enqueueNotification(
-      { dedupeKey: `webhook-test:${clock().getTime()}`, kind: "test", subject: "nightorders webhook test", body: "If you can read this, the mirror works. Acting happens in the console." },
+      { dedupeKey: `webhook-test:${clock().getTime()}`, kind: "test", subject: "standing-orders webhook test", body: "If you can read this, the mirror works. Acting happens in the console." },
       clock(),
     );
     const report = await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock });
@@ -2428,7 +2428,7 @@ async function webhookCommand(
   }
 
   if (action !== "set" || which === undefined || value === undefined) {
-    return fail(write, json, "webhook", "usage", "`nightorders webhook [status|test|set slack|discord|console-url <value>|clear slack|discord]`", EXIT.usage);
+    return fail(write, json, "webhook", "usage", "`standing-orders webhook [status|test|set slack|discord|console-url <value>|clear slack|discord]`", EXIT.usage);
   }
   if (which === "console-url") {
     const saved = saveConsoleUrl(dir, value);
@@ -2452,19 +2452,19 @@ async function webhookCommand(
       savePrimary(dir, answer);
       chosen = answer;
     } else {
-      write(`Left unchosen — ${after.channel} receives alerts by default. Decide any time: nightorders webhook primary <service>`);
+      write(`Left unchosen — ${after.channel} receives alerts by default. Decide any time: standing-orders webhook primary <service>`);
     }
   }
   return succeed(write, json, "webhook set", { which, ...(chosen === null ? {} : { primary: chosen }) }, () => [
     `${which} mirror configured — the URL lives in a private file beside the database.`,
     ...(chosen === null ? [] : [`${chosen} carries the pages.`]),
-    ...(after.implicit && chosen === null && !interactive() ? [`Several services are configured — choose the pager: nightorders webhook primary <service>`] : []),
-    `Send yourself a proof: nightorders webhook test`,
+    ...(after.implicit && chosen === null && !interactive() ? [`Several services are configured — choose the pager: standing-orders webhook primary <service>`] : []),
+    `Send yourself a proof: standing-orders webhook test`,
   ]);
 }
 
 /**
- * `nightorders providers` — identification, never integration theater.
+ * `standing-orders providers` — identification, never integration theater.
  *
  * Four different claims, kept apart on purpose (Codex provider review):
  * INSTALLED (the binary answered --version), CONFIGURED (a phase names
@@ -2535,12 +2535,12 @@ async function providersCommand(
     if (phases.length > 0) write(`  configured     ${phases.join(", ")} (installation)`);
     write("");
   }
-  write("  \u2192 nightorders config show    which provider each phase actually resolves to");
+  write("  \u2192 standing-orders config show    which provider each phase actually resolves to");
   return EXIT.ok;
 }
 
 /**
- * \`nightorders config …\` — which provider and model each phase runs on.
+ * \`standing-orders config …\` — which provider and model each phase runs on.
  *
  * Two scopes: the installation, and one project's override. Mutations are
  * AUTHENTICATED and AUDITED — spend routing is authority, not preference
@@ -2586,13 +2586,13 @@ async function configCommand(
     write("  repair note: the repair PROVIDER always inherits the build it mends — only its model is configurable.");
     if (installation.length === 0 && project.length === 0) {
       write("  nothing configured — every phase runs the default (claude).");
-      write("  nightorders config set build --provider claude --model sonnet --as <you> --token <t>");
+      write("  standing-orders config set build --provider claude --model sonnet --as <you> --token <t>");
     }
     return EXIT.ok;
   }
 
   if (action !== "set" && action !== "clear") {
-    return fail(write, json, "config", "usage", "`nightorders config [show|set <phase> --provider <p> [--model <m>]|clear <phase>] [--repo <path>] --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "config", "usage", "`standing-orders config [show|set <phase> --provider <p> [--model <m>]|clear <phase>] [--repo <path>] --as <you> --token <t>`", EXIT.usage);
   }
   if (phase === undefined || !["plan", "build", "repair"].includes(phase)) {
     return fail(write, json, `config ${action}`, "usage", "which phase? plan, build, or repair", EXIT.usage);
@@ -2638,7 +2638,7 @@ async function configCommand(
 }
 
 /**
- * `nightorders routine …` — standing orders. Filing one is cheap; the
+ * `standing-orders routine …` — standing orders. Filing one is cheap; the
  * expensive act is the approval, which restates every term including "each
  * firing builds without asking" and takes the approver's credential, same
  * as a scope. Pausing needs no ceremony because stopping spend never does.
@@ -2661,7 +2661,7 @@ async function routineCommand(
       return EXIT.ok;
     }
     if (routines.length === 0) {
-      write("No standing orders. `nightorders routine add <name> --repo <path> --goal <text> --schedule every:60` files one.");
+      write("No standing orders. `standing-orders routine add <name> --repo <path> --goal <text> --schedule every:60` files one.");
       return EXIT.ok;
     }
     for (const routine of routines) {
@@ -2680,7 +2680,7 @@ async function routineCommand(
     const goal = text(flags, "goal");
     const schedule = text(flags, "schedule");
     if (repoGiven === undefined || goal === undefined || schedule === undefined) {
-      return fail(write, json, "routine add", "usage", "`nightorders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]`", EXIT.usage);
+      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]`", EXIT.usage);
     }
     const ceilingGiven = text(flags, "ceiling");
     const terms: RoutineTerms = {
@@ -2706,7 +2706,7 @@ async function routineCommand(
       `Filed ${name}. Nothing fires until somebody approves the standing order:`,
       ...(routine === null ? [] : describeRoutine(routine)),
       "",
-      `  nightorders routine approve ${name}`,
+      `  standing-orders routine approve ${name}`,
     ]);
   }
 
@@ -2775,7 +2775,7 @@ async function routineCommand(
         for (const line of describeRoutine(routine)) write(line);
         write("");
         write("Nothing has been approved. Agree to exactly this with:");
-        write(`  nightorders routine approve ${name} --yes --digest ${routine.digest} --as <you> --token <your password>`);
+        write(`  standing-orders routine approve ${name} --yes --digest ${routine.digest} --as <you> --token <your password>`);
         return EXIT.ok;
       }
       const approved = approveRoutine(store, routine.id, asWho as string, clock(), saw as string, token as string);
@@ -2784,7 +2784,7 @@ async function routineCommand(
       }
       return succeed(write, json, "routine approve", { routine: approved.routine }, () => [
         `Approved. ${name} fires on its schedule from now on; first at ${approved.routine.nextFireAt}.`,
-        `Pause it any time: nightorders routine pause ${name}`,
+        `Pause it any time: standing-orders routine pause ${name}`,
       ]);
     }
     case "pause":
@@ -2814,7 +2814,7 @@ async function routineCommand(
       ]);
     }
     default:
-      return fail(write, json, "routine", "usage", "`nightorders routine [add|list|show|approve|pause|resume|run-now]`", EXIT.usage);
+      return fail(write, json, "routine", "usage", "`standing-orders routine [add|list|show|approve|pause|resume|run-now]`", EXIT.usage);
   }
 }
 
@@ -2832,9 +2832,9 @@ function readTokenFile(path: string | undefined): string | undefined {
 // ---- the daemon ------------------------------------------------------------
 
 /**
- * `nightorders daemon install|status|uninstall|logs` — the loop as a
+ * `standing-orders daemon install|status|uninstall|logs` — the loop as a
  * service, no crontab. Writes the platform's own supervision unit (launchd
- * on macOS, systemd --user on Linux) pointed at `nightorders watch`, with
+ * on macOS, systemd --user on Linux) pointed at `standing-orders watch`, with
  * the runner token in a 0600 file beside the database rather than inside
  * the unit. The OS restarts it across crashes and reboots, and watch's
  * incarnation recovery is what makes those restarts safe.
@@ -2853,7 +2853,7 @@ async function daemonCommand(
   const binFlag = text(flags, "bin");
   const resolveBin = async (): Promise<{ bin: string; binArgs: string[] } | null> => {
     if (binFlag !== undefined) return { bin: binFlag, binArgs: [] };
-    const found = await supervise("sh", ["-lc", "command -v nightorders"]);
+    const found = await supervise("sh", ["-lc", "command -v standing-orders"]);
     if (found.code === 0 && found.stdout.trim() !== "") {
       return { bin: found.stdout.trim(), binArgs: [] };
     }
@@ -2864,7 +2864,7 @@ async function daemonCommand(
     const runnerName = text(flags, "runner");
     const token = text(flags, "token");
     if (runnerName === undefined || token === undefined) {
-      return fail(write, json, "daemon install", "usage", "`nightorders daemon install --runner <name> --token <t> --repo <path>` (plus any watch flags to bake in)", EXIT.usage);
+      return fail(write, json, "daemon install", "usage", "`standing-orders daemon install --runner <name> --token <t> --repo <path>` (plus any watch flags to bake in)", EXIT.usage);
     }
     const auth = authenticate(store, runnerName, token);
     if (!auth.ok) {
@@ -2877,7 +2877,7 @@ async function daemonCommand(
         json,
         "daemon install",
         "no-bin",
-        "`nightorders` is not on the PATH the service would use — run `nightorders link` first, or pass --bin <absolute path>",
+        "`standing-orders` is not on the PATH the service would use — run `standing-orders link` first, or pass --bin <absolute path>",
         EXIT.refused,
       );
     }
@@ -2923,7 +2923,7 @@ async function daemonCommand(
       `  logs    ${plan.logPath}`,
       "",
       "It survives reboots and restarts itself after crashes; watch's",
-      "incarnation recovery makes those restarts safe. `nightorders daemon",
+      "incarnation recovery makes those restarts safe. `standing-orders daemon",
       "status` to check on it, `daemon uninstall` to take it back off.",
     ]);
   }
@@ -2931,7 +2931,7 @@ async function daemonCommand(
   // status / uninstall / logs share the computed plan; the bin is cosmetic there.
   const plan = planDaemon({
     platform: process.platform,
-    bin: binFlag ?? "nightorders",
+    bin: binFlag ?? "standing-orders",
     binArgs: [],
     runner: text(flags, "runner") ?? "runner",
     repo,
@@ -2948,7 +2948,7 @@ async function daemonCommand(
     }
     write(`${plan.label}: ${state.detail}`);
     write(`  logs  ${plan.logPath}`);
-    if (state.state === "not-installed") write("  → nightorders daemon install --runner <name> --token <t> --repo <path>");
+    if (state.state === "not-installed") write("  → standing-orders daemon install --runner <name> --token <t> --repo <path>");
     return state.state === "running" ? EXIT.ok : EXIT.refused;
   }
 
@@ -2966,7 +2966,7 @@ async function daemonCommand(
     ]);
   }
 
-  return fail(write, json, "daemon", "usage", "`nightorders daemon [install|status|uninstall|logs]`", EXIT.usage);
+  return fail(write, json, "daemon", "usage", "`standing-orders daemon [install|status|uninstall|logs]`", EXIT.usage);
 }
 
 // ---- the watch loop --------------------------------------------------------
@@ -2975,7 +2975,7 @@ const WATCH_LEASE_MS = 90_000;
 const WATCH_HEARTBEAT_MS = 30_000;
 
 /**
- * `nightorders watch` — the loop (§5, §6): the cron chain as one
+ * `standing-orders watch` — the loop (§5, §6): the cron chain as one
  * work-conserving process, still spending zero tokens while idle.
  *
  * Composition, not new semantics: every pass it runs — tick, reconcile, the
@@ -3008,7 +3008,7 @@ async function watchCommand(
   const runner = text(flags, "runner");
   const token = text(flags, "token") ?? readTokenFile(text(flags, "token-file"));
   if (runner === undefined || token === undefined) {
-    return fail(write, json, "watch", "usage", "`nightorders watch --runner <name> --token <t>|--token-file <path> --repo <path> [--for <ms>]`", EXIT.usage);
+    return fail(write, json, "watch", "usage", "`standing-orders watch --runner <name> --token <t>|--token-file <path> --repo <path> [--for <ms>]`", EXIT.usage);
   }
   // Passes built from these flags authenticate with the resolved token.
   flags.set("token", token);
@@ -3237,7 +3237,7 @@ async function watchCommand(
 // ---- the telegram bridge ---------------------------------------------------
 
 /**
- * `nightorders bridge telegram …` — decisions out, answers back, no LLM in
+ * `standing-orders bridge telegram …` — decisions out, answers back, no LLM in
  * the path.
  *
  *   bridge telegram                      one pass: send pending, apply taps
@@ -3260,7 +3260,7 @@ async function bridgeCommand(
   const { store, write, json, clock } = context;
   const [channel, action] = positional;
   if (channel !== "telegram") {
-    return fail(write, json, "bridge", "usage", "`nightorders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
+    return fail(write, json, "bridge", "usage", "`standing-orders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
   }
 
   if (action === "token") {
@@ -3277,7 +3277,7 @@ async function bridgeCommand(
         json,
         "bridge token",
         "usage",
-        "`nightorders bridge telegram token <bot-token>` (from @BotFather), or --clear",
+        "`standing-orders bridge telegram token <bot-token>` (from @BotFather), or --clear",
         EXIT.usage,
       );
     }
@@ -3312,7 +3312,7 @@ async function bridgeCommand(
       return EXIT.ok;
     }
     write(source === null
-      ? `No bot token. Set ${TOKEN_ENV}, run \`nightorders bridge telegram token <t>\`, or use the serve settings card.`
+      ? `No bot token. Set ${TOKEN_ENV}, run \`standing-orders bridge telegram token <t>\`, or use the serve settings card.`
       : `Token ${redactToken(source.token)} (${source.source}), bot ${source.botId}.`);
     write(binding === null ? "No chat is paired." : `Paired: chat answers as ${binding.approver}.`);
     write(`Outbox pending: ${pending}.`);
@@ -3358,7 +3358,7 @@ async function bridgeCommand(
   }
 
   if (action !== undefined) {
-    return fail(write, json, "bridge", "usage", "`nightorders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
+    return fail(write, json, "bridge", "usage", "`standing-orders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
   }
 
   // The pass.
@@ -3368,7 +3368,7 @@ async function bridgeCommand(
       json,
       "bridge",
       "no-token",
-      `no bot token — set ${TOKEN_ENV}, run \`nightorders bridge telegram token <t>\`, or use the serve settings card`,
+      `no bot token — set ${TOKEN_ENV}, run \`standing-orders bridge telegram token <t>\`, or use the serve settings card`,
       EXIT.refused,
     );
   }
@@ -3444,12 +3444,12 @@ async function bridgeCommand(
 // ---- publication -----------------------------------------------------------
 
 /**
- * `nightorders publish …` — built work to a pushed branch and a PR, under a
+ * `standing-orders publish …` — built work to a pushed branch and a PR, under a
  * grant whose terms were shown before the yes.
  *
  *   publish                              one pass: push intents, open/adopt PRs
  *   publish grant --github <owner/name> [--base main] [--remote origin]
- *                 [--head-prefix nightorders/] [--all-tasks] [--ready]
+ *                 [--head-prefix standing-orders/] [--all-tasks] [--ready]
  *                 --as <you> --token <approver-token> [--yes]
  *   publish revoke --as <you> --token <approver-token>
  *   publish status
@@ -3476,7 +3476,7 @@ async function publishCommand(
       repo,
       githubRepo: github,
       remote: text(flags, "remote") ?? "origin",
-      headPrefix: text(flags, "head-prefix") ?? "nightorders/",
+      headPrefix: text(flags, "head-prefix") ?? "standing-orders/",
       base: text(flags, "base") ?? "main",
       capabilities: ["push-branch", "open-pr"] as ("push-branch" | "open-pr")[],
       selector: (flags.has("all-tasks") ? "all" : "ours") as "all" | "ours",
@@ -3506,7 +3506,7 @@ async function publishCommand(
     return succeed(write, json, "publish grant", { granted: true, grant: spec }, () => [
       `Granted by ${asWho}:`,
       ...describePublicationGrant(spec),
-      "Revoke any time: `nightorders publish revoke --as <you> --token <t>`.",
+      "Revoke any time: `standing-orders publish revoke --as <you> --token <t>`.",
     ]);
   }
 
@@ -3542,7 +3542,7 @@ async function publishCommand(
   }
 
   if (action !== undefined) {
-    return fail(write, json, "publish", "usage", "`nightorders publish [grant|revoke|status]`", EXIT.usage);
+    return fail(write, json, "publish", "usage", "`standing-orders publish [grant|revoke|status]`", EXIT.usage);
   }
 
   // The pass.
@@ -3568,13 +3568,13 @@ async function publishCommand(
 // ---- the outbox -----------------------------------------------------------
 
 /**
- * `nightorders outbox list|deliver` — reading and draining the durable
+ * `standing-orders outbox list|deliver` — reading and draining the durable
  * outbox. Delivery runs an operator-supplied command once per pending row;
  * the notification's text reaches it as environment variables, never
  * substituted into the command line, because subjects and bodies quote
  * things agents and repositories said and a shell must not meet those.
  *
- *   nightorders outbox deliver --cmd 'curl -d "$NIGHTORDERS_SUBJECT" ntfy.sh/mine'
+ *   standing-orders outbox deliver --cmd 'curl -d "$STANDING_ORDERS_SUBJECT" ntfy.sh/mine'
  *
  * Exit 0 when everything pending delivered (or nothing was pending);
  * 1 when any delivery failed — a broken channel is breakage, not a "no".
@@ -3614,7 +3614,7 @@ async function outboxCommand(
   if (action === "deliver") {
     const command = text(flags, "cmd");
     if (command === undefined) {
-      return fail(write, json, "outbox deliver", "usage", "--cmd says how: it runs once per notification, reading $NIGHTORDERS_KIND, $NIGHTORDERS_SUBJECT, $NIGHTORDERS_BODY", EXIT.usage);
+      return fail(write, json, "outbox deliver", "usage", "--cmd says how: it runs once per notification, reading $STANDING_ORDERS_KIND, $STANDING_ORDERS_SUBJECT, $STANDING_ORDERS_BODY", EXIT.usage);
     }
 
     // Claimed, not merely listed: the Telegram bridge drains this same
@@ -3635,10 +3635,10 @@ async function outboxCommand(
       const sent = await run("sh", ["-lc", command], {
         timeoutMs: 30_000,
         env: {
-          NIGHTORDERS_KIND: one.kind,
-          NIGHTORDERS_SUBJECT: one.subject,
-          NIGHTORDERS_BODY: one.body,
-          NIGHTORDERS_DEDUPE_KEY: one.dedupeKey,
+          STANDING_ORDERS_KIND: one.kind,
+          STANDING_ORDERS_SUBJECT: one.subject,
+          STANDING_ORDERS_BODY: one.body,
+          STANDING_ORDERS_DEDUPE_KEY: one.dedupeKey,
         },
       });
       if (sent.code === 0) {
@@ -3735,11 +3735,11 @@ async function enrollCommand(
   store.saveGrant(grant, mutationFrom(flags, now));
 
   return succeed(write, json, "enroll", { grant }, () => [
-    `Granted. Night Orders may now write to ${backend} in ${repo}.`,
+    `Granted. Standing Orders may now write to ${backend} in ${repo}.`,
     ...describeGrant(grant),
     ...describeWithheld(grant),
     "",
-    "Take it back with `nightorders revoke`.",
+    "Take it back with `standing-orders revoke`.",
   ]);
 }
 
@@ -3753,7 +3753,7 @@ function grantsCommand(context: Context): number {
   }
   if (grants.length === 0) {
     write("Nothing is enrolled. Discovery is read-only until something is.");
-    write("  nightorders enroll <repo> --backend <name> --paths <path>");
+    write("  standing-orders enroll <repo> --backend <name> --paths <path>");
     return EXIT.ok;
   }
   for (const grant of grants) {
@@ -3884,7 +3884,7 @@ async function addTask(
       return fail(write, json, "task add", created.reason, created.message, code);
     }
 
-    // Created through Night Orders, so it is ours — recorded here rather than
+    // Created through Standing Orders, so it is ours — recorded here rather than
     // asserted later, which is what the grant's default selector rests on.
     store.refFor(backendName, created.value, "ours");
     return succeed(write, json, "task add", { id: created.value, backend: backendName }, () => [
@@ -3946,7 +3946,7 @@ function requireTask(
   const id = positional[0];
   const given = text(flags, "cap");
   if (id === undefined || given === undefined) {
-    return fail(write, json, "task require", "usage", "`nightorders task require <id> --cap <kind:name>[,<kind:name>]` — or --cap none to clear", EXIT.usage);
+    return fail(write, json, "task require", "usage", "`standing-orders task require <id> --cap <kind:name>[,<kind:name>]` — or --cap none to clear", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task require", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -3989,7 +3989,7 @@ async function capCommand(
 
   if (action === "add") {
     if (name === undefined) {
-      return fail(write, json, "cap add", "usage", "`nightorders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>] [--expires <iso>]`", EXIT.usage);
+      return fail(write, json, "cap add", "usage", "`standing-orders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>] [--expires <iso>]`", EXIT.usage);
     }
     const kind = (text(flags, "kind") ?? "env") as CapabilityKind;
     if (!["env", "cli", "mcp", "ci", "other"].includes(kind)) {
@@ -4029,7 +4029,7 @@ async function capCommand(
       probe === null
         ? "No probe — nothing can verify it, so it will stand as a gap until it has one."
         : `Probe: ${probe}`,
-      "Nothing is verified yet: `nightorders cap probe`.",
+      "Nothing is verified yet: `standing-orders cap probe`.",
     ]);
   }
 
@@ -4040,7 +4040,7 @@ async function capCommand(
       return EXIT.ok;
     }
     if (capabilities.length === 0) {
-      write(`No capabilities recorded for ${repo}. \`nightorders cap add\` or \`cap scan\`.`);
+      write(`No capabilities recorded for ${repo}. \`standing-orders cap add\` or \`cap scan\`.`);
       return EXIT.ok;
     }
     for (const one of capabilities) {
@@ -4087,7 +4087,7 @@ async function capCommand(
       write(`  rejected ${bad.name} from ${bad.source} — not a valid identifier`);
     }
     write("");
-    write(`${recorded} new, ${report.found.length - recorded} already recorded. Nothing is verified: \`nightorders cap probe\`.`);
+    write(`${recorded} new, ${report.found.length - recorded} already recorded. Nothing is verified: \`standing-orders cap probe\`.`);
     return EXIT.ok;
   }
 
@@ -4190,7 +4190,7 @@ async function stateTask(
   const { store, write, json, now } = context;
   const [id, state] = positional;
   if (id === undefined || state === undefined) {
-    return fail(write, json, "task state", "usage", "`nightorders task state <id> <state>`", EXIT.usage);
+    return fail(write, json, "task state", "usage", "`standing-orders task state <id> <state>`", EXIT.usage);
   }
   if (!STATES.includes(state as TaskState)) {
     return fail(write, json, "task state", "usage", `state is one of ${STATES.join(", ")}`, EXIT.usage);
@@ -4229,7 +4229,7 @@ function blockTask(
   const id = positional[0];
   const on = text(flags, "on");
   if (id === undefined || on === undefined) {
-    return fail(write, json, "task block", "usage", "`nightorders task block <id> --on <id>`", EXIT.usage);
+    return fail(write, json, "task block", "usage", "`standing-orders task block <id> --on <id>`", EXIT.usage);
   }
   for (const each of [id, on]) {
     if (store.getTask(each) === null) {
@@ -4261,7 +4261,7 @@ function scopeTask(
   const id = positional[0];
   const goal = text(flags, "goal");
   if (id === undefined || goal === undefined) {
-    return fail(write, json, "task scope", "usage", "`nightorders task scope <id> --goal <what success is>`", EXIT.usage);
+    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is>`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task scope", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -4281,7 +4281,7 @@ function scopeTask(
     `Scope written for ${id}. Nothing will build it until somebody approves it.`,
     ...describeScope(scope),
     "",
-    `  nightorders task approve ${id} --yes`,
+    `  standing-orders task approve ${id} --yes`,
   ]);
 }
 
@@ -4350,7 +4350,7 @@ async function approveTask(
     for (const line of describeScope(scope)) write(line);
     write("");
     write("Nothing has been approved. Agree to this exact scope with:");
-    write(`  nightorders task approve ${id} --yes --digest ${scope.digest} --as <you> --token <your password>`);
+    write(`  standing-orders task approve ${id} --yes --digest ${scope.digest} --as <you> --token <your password>`);
     return EXIT.ok;
   }
   if (saw === undefined || asWho === undefined || token === undefined) {
@@ -4376,7 +4376,7 @@ async function approveTask(
 function describeApproveFailure(reason: string, id: string): string {
   if (reason === "changed") return "the scope changed since you read it — look again before approving";
   if (reason === "no-approvers") {
-    return "nobody can approve anything yet — `nightorders approver add <you>` mints the credential that lets a person say yes";
+    return "nobody can approve anything yet — `standing-orders approver add <you>` mints the credential that lets a person say yes";
   }
   if (reason === "not-an-approver") return "that is not an approver, or the token does not match";
   return `${id} has no scope to approve`;
@@ -4425,7 +4425,7 @@ async function approverCommand(
     }
     if (approvers.length === 0) {
       write("Nobody can approve a scope yet, so nothing can be built.");
-      write("  nightorders approver add <your name>");
+      write("  standing-orders approver add <your name>");
       return EXIT.ok;
     }
     for (const one of approvers) write(`  ${one.name}  since ${one.addedAt}`);
@@ -4502,7 +4502,7 @@ function holdTask(
   const id = positional[0];
   const reason = text(flags, "reason");
   if (id === undefined || reason === undefined) {
-    return fail(write, json, "task hold", "usage", "`nightorders task hold <id> --reason <why>`", EXIT.usage);
+    return fail(write, json, "task hold", "usage", "`standing-orders task hold <id> --reason <why>`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task hold", "unknown-task", `no task \`${id}\``, EXIT.refused);

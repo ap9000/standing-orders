@@ -1,10 +1,10 @@
 /**
  * The daemon manager: the loop as a service, with no crontab in sight.
  *
- * `nightorders daemon install` writes the platform's own supervision unit —
+ * `standing-orders daemon install` writes the platform's own supervision unit —
  * a launchd LaunchAgent on macOS, a systemd user unit on Linux, a Task
  * Scheduler task on Windows, chosen by process.platform — pointed at
- * `nightorders watch`, and loads it. The OS keeps it alive across crashes
+ * `standing-orders watch`, and loads it. The OS keeps it alive across crashes
  * and reboots; watch's incarnation recovery is what makes those restarts
  * safe, so the two halves were built for each other.
  *
@@ -47,7 +47,7 @@ export function labelFor(repo: string): string {
     .replace(/^-+|-+$/g, "")
     .toLowerCase()
     .slice(-40);
-  return `com.nightorders.watch.${slug === "" ? "root" : slug}`;
+  return `com.standing-orders.watch.${slug === "" ? "root" : slug}`;
 }
 
 /**
@@ -68,7 +68,7 @@ export function planDaemon(args: {
   const home = args.home ?? homedir();
   if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
     return {
-      error: `no supervisor template for ${platform} — run \`nightorders watch\` under your own service manager`,
+      error: `no supervisor template for ${platform} — run \`standing-orders watch\` under your own service manager`,
     };
   }
 
@@ -143,7 +143,7 @@ ${escaped}
     const unitContent = `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>nightorders watch — ${xml(repo)}</Description>
+    <Description>standing-orders watch — ${xml(repo)}</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -180,7 +180,7 @@ ${escaped}
   }
 
   const unitContent = `[Unit]
-Description=nightorders watch — ${repo}
+Description=standing-orders watch — ${repo}
 
 [Service]
 ExecStart=${command.map(systemdEscape).join(" ")}

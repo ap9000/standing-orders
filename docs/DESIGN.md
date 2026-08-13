@@ -1,4 +1,4 @@
-# Night Orders — design v0.4
+# Standing Orders — design v0.4
 
 **Standing orders for your agents. Wake me only for these.**
 
@@ -23,7 +23,7 @@ A captain's night orders are written standing instructions for the officer of th
 
 **Deferred, not rejected:** the spatial board and zones, multiplayer cursors, in-browser terminals, dev-server management. Those come after M4.
 
-| | agor | firstmate | Night Orders |
+| | agor | firstmate | Standing Orders |
 |---|---|---|---|
 | Getting started | init → daemon → open → add repo → wizard | clone a distro, launch a harness inside it | one command, zero config |
 | Dispatch | manual — drag a branch into a zone | first mate decides, conversationally | dependency graph + ready-query |
@@ -32,7 +32,7 @@ A captain's night orders are written standing instructions for the officer of th
 | Missing credential | env vars you set in advance | — | probed pre-dispatch, ranked by unblocks |
 | Surface | web app | repo of conventions, tmux | daemon + CLI + small web UI |
 
-Agor optimizes for a team steering agents *live*. firstmate optimizes for one conversational liaison. **Night Orders optimizes for long-running work nobody is watching** — the operator may be asleep, in meetings, or gone for the weekend; the plane behaves the same.
+Agor optimizes for a team steering agents *live*. firstmate optimizes for one conversational liaison. **Standing Orders optimizes for long-running work nobody is watching** — the operator may be asleep, in meetings, or gone for the weekend; the plane behaves the same.
 
 **Licence: MIT** — a structural opening BSL 1.1 cannot occupy.
 
@@ -47,7 +47,7 @@ Agor optimizes for a team steering agents *live*. firstmate optimizes for one co
 The wedge. Read-only, using credentials that already exist — `git` and `gh` are authenticated, so there is **no OAuth app, no client secret, no callback server, no token to store.**
 
 ```sh
-npx nightorders            # no init, no daemon start, no wizard
+npx standing-orders            # no init, no daemon start, no wizard
 ```
 
 First run walks the filesystem for `.git`, then per repo:
@@ -62,20 +62,20 @@ gh issue list --json number,title,labels
 
 and prints what is in flight. **No agent has run. Nothing has been configured.** Every other tool in this space starts from an empty database it expects you to fill.
 
-**Discovery is total and read-only; management is opt-in per repo.** Night Orders indexes everything it can see and drives only what you enroll.
+**Discovery is total and read-only; management is opt-in per repo.** Standing Orders indexes everything it can see and drives only what you enroll.
 
 Adoption is the hard part, not discovery. treehouse's rules apply: untracked files count as dirty even when repo config hides them; in-use is detected from running processes; reconstructed state is marked leased-until-verified.
 
 ### Choosing the graph
 
-Detected, not asked — and **detection is not authorization.** Finding a populated tracker tells you it exists; it does not tell you the operator wants Night Orders scheduling, closing, or restructuring its contents.
+Detected, not asked — and **detection is not authorization.** Finding a populated tracker tells you it exists; it does not tell you the operator wants Standing Orders scheduling, closing, or restructuring its contents.
 
 ```
   Work graph — detected in your repos
   ▸ beads            .beads/ in 2 repos · 47 open · native deps · runtime ok
     GitHub Issues    112 open across 6 repos · native deps · gh 2.67 too old
     built-in         local task store · nothing to install
-  Nothing is enrolled. `nightorders enroll <repo>` grants write access.
+  Nothing is enrolled. `standing-orders enroll <repo>` grants write access.
 ```
 
 **Data and runtime are detected independently.** A populated `backlog.md` with no working runtime is displayed and recommended; it is not dispatchable. That is the correct failure mode for unattended operation — better a visible gap at 9am than a dead loop at 3am.
@@ -90,7 +90,7 @@ Detected, not asked — and **detection is not authorization.** Finding a popula
 
 GitHub Issues has native `blocked_by` dependencies and sub-issues over REST, so an earlier draft's "no deps" was wrong. Native relations are used where a capability probe confirms them — including the `gh` version, since dependency fields need `gh ≥ 2.94` even though the REST route works on any version. Cross-repository dependency semantics are **unverified and fail closed.**
 
-Switching later does not lose Night Orders' own state, because Claim, Run, Decision, and Capability reference tasks by `(backend, external_id)`. See §4.
+Switching later does not lose Standing Orders' own state, because Claim, Run, Decision, and Capability reference tasks by `(backend, external_id)`. See §4.
 
 ### Capability preflight
 
@@ -118,11 +118,11 @@ Two proven graph layers already exist — `beads` (26k★) and `tasks-axi`, whic
 
 The honest statement of the boundary:
 
-> **Night Orders owns a minimal local task store as a fallback, adapts richer external trackers when present, and keeps operational Claim, Run, Decision, Capability, and event state in a backend-independent overlay.**
+> **Standing Orders owns a minimal local task store as a fallback, adapts richer external trackers when present, and keeps operational Claim, Run, Decision, Capability, and event state in a backend-independent overlay.**
 
 An earlier draft claimed we own *no* task store while shipping a built-in one. That was self-deception: anything that can create, store, transition, and link tasks is a task store, whether it takes 150 lines or 15,000. The defensible position is not "we own nothing" — it is "we own something deliberately small and decline to compete with full trackers." The built-in ships enough authoring and inspection to be usable, and no search, labels, comments, or sync.
 
-**Never install anything.** Discovery executes no package manager, package runner, or third-party initializer — not `npx -y tasks-axi`, which fetches and runs code, and emphatically not `bd init`, which can modify agent integrations and hooks, stage files, and create a bootstrap commit. When installation or initialization is needed, Night Orders prints the upstream command *and a summary of its side effects* as text. The operator runs it outside Night Orders. Management then requires separate write enrollment.
+**Never install anything.** Discovery executes no package manager, package runner, or third-party initializer — not `npx -y tasks-axi`, which fetches and runs code, and emphatically not `bd init`, which can modify agent integrations and hooks, stage files, and create a bootstrap commit. When installation or initialization is needed, Standing Orders prints the upstream command *and a summary of its side effects* as text. The operator runs it outside Standing Orders. Management then requires separate write enrollment.
 
 ```
 GraphBackend
@@ -161,9 +161,9 @@ Evidence lives on the runner; the control plane stores a reference and serves it
 
 ### Writing to someone else's store
 
-Discovery is always read-only. Managing a repo requires a persisted per-repo **`BackendGrant`** that displays and constrains exactly what Night Orders may touch: which files or GitHub repos, which mutation classes, which tasks, which credential scope, and whether the changes will be visible to other tools or land in git history.
+Discovery is always read-only. Managing a repo requires a persisted per-repo **`BackendGrant`** that displays and constrains exactly what Standing Orders may touch: which files or GitHub repos, which mutation classes, which tasks, which credential scope, and whether the changes will be visible to other tools or land in git history.
 
-**Default write scope covers only tasks explicitly enrolled or created through Night Orders** — never every open task it happened to find. Agents operate strictly inside the grant; widening it takes another human action.
+**Default write scope covers only tasks explicitly enrolled or created through Standing Orders** — never every open task it happened to find. Agents operate strictly inside the grant; widening it takes another human action.
 
 ### When a backend vanishes
 
@@ -218,7 +218,7 @@ Rollback proves worktree cleanliness and base revision first. `git reset --hard`
 One ritual. Gaps rank by **how many tasks they unblock** — never alphabetically.
 
 ```
-nightorders ── good morning ──────────────────────
+standing-orders ── good morning ──────────────────────
   overnight    7 PRs · 2 aborted · 412k tokens · $18.40
   idle spend   $0.02                    ← §5, measured
   ▸ BLOCKED    1 gap unblocks 3 tasks
@@ -296,7 +296,7 @@ A builder is never resumed *to drive the gate*, but **is** resumed when a findin
 
 | | Scope | Ships when |
 |---|---|---|
-| **M0** | Zero-config discovery · **graph-backend detection + adapters (beads, GitHub Issues, built-in SQLite)** · overlay records · **Claim/lease with fencing** · idempotency · AXI CLI. No agents run. | `npx nightorders` shows every branch, PR, and issue in flight. **Useful before it is autonomous.** |
+| **M0** | Zero-config discovery · **graph-backend detection + adapters (beads, GitHub Issues, built-in SQLite)** · overlay records · **Claim/lease with fencing** · idempotency · AXI CLI. No agents run. | `npx standing-orders` shows every branch, PR, and issue in flight. **Useful before it is autonomous.** |
 | **M1** | Runner registration **with auth from the first commit** · heartbeat · treehouse adapter · claude builder · reconciliation for dead runner / orphaned worktree / duplicate completion. | one task goes queued → branch → commit unattended |
 | **M2** | Capability probes · SetupRequest · secrets-on-runner · morning briefing · notification outbox. | fill one gap, three tasks start |
 | **M3** | Decision schema · validation · bounded repair · driver role · evidence artifacts · web decision view. | a park renders as one screen, answerable on a phone |
@@ -314,7 +314,7 @@ Adopting a graph backend removed roughly a third of M0 and replaced it with adap
 1. ~~Whether the graph should project over beads.~~ **Resolved in v0.4:** pluggable backend, detected during onboarding, built-in SQLite only as fallback.
 2. ~~Does agor already have an approval primitive?~~ **Resolved:** no. Agor gates *tool calls* (`auto-approve | supervised | manual`), which is a synchronous "may I run this command?" carrying no semantic content. A decision record is asynchronous, describes a judgement call, and lets the loop continue without you. Their callbacks are agent-to-agent, not human escalation. Also confirmed absent: approval inbox, credential preflight, dependency-graph scheduling, failure taxonomy — their Scheduler is cron-style triggers for templated prompts. **Re-check before launch:** *Cards (Beta)* and *In-Conversation Widgets* are plausible substrate for structured decisions and are still moving.
 3. ~~Does the loop ever push to `main`?~~ **Resolved: never.** A pull request is always the terminus. The gate is only trustworthy because nothing reaches the default branch without passing it, and an autonomous loop with commit rights to `main` has no safe failure mode.
-4. **CLI alias.** `nightorders` is twelve characters and `no` is unusable as a shell alias. Deliberately left open — decide it after typing it a hundred times, not from a design doc.
+4. **CLI alias.** `standing-orders` is twelve characters and `no` is unusable as a shell alias. Deliberately left open — decide it after typing it a hundred times, not from a design doc.
 
 ---
 

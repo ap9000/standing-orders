@@ -41,7 +41,7 @@ describe("permits", () => {
     const verdict = permits(null, request());
 
     expect(verdict).toMatchObject({ ok: false, reason: "no-grant" });
-    if (!verdict.ok) expect(verdict.message).toContain("nightorders enroll");
+    if (!verdict.ok) expect(verdict.message).toContain("standing-orders enroll");
   });
 
   test("allows what was granted", () => {
@@ -57,7 +57,7 @@ describe("permits", () => {
   });
 
   test("keeps an enrolment from becoming an amnesty over a whole backlog", () => {
-    // The default selector covers only tasks Night Orders created or was
+    // The default selector covers only tasks Standing Orders created or was
     // given. Enrolling a repo with four hundred open issues is not
     // volunteering all four hundred to an unattended agent.
     expect(permits(grant(), request({ origin: "theirs" })).ok).toBe(false);
@@ -224,7 +224,7 @@ describe("describeGrant", () => {
     const lines = describeGrant(grant({ observedByGit: true })).join("\n");
 
     expect(lines).toContain(".beads");
-    expect(lines).toContain("only those Night Orders created or was given");
+    expect(lines).toContain("only those Standing Orders created or was given");
     expect(lines).toContain("git status");
   });
 

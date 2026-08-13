@@ -43,7 +43,7 @@ describe("publication", () => {
         repo: REPO,
         githubRepo: "alex/thing",
         remote: "origin",
-        headPrefix: "nightorders/",
+        headPrefix: "standing-orders/",
         base: "main",
         capabilities: ["push-branch", "open-pr"],
         selector: "all",
@@ -62,7 +62,7 @@ describe("publication", () => {
         githubRepo: "alex/thing",
         remote: "origin",
         base: "main",
-        head: "nightorders/t-1",
+        head: "standing-orders/t-1",
         headSha: "abc123def",
         bodyHash: "x",
         draft: true,
@@ -78,7 +78,7 @@ describe("publication", () => {
       taskRef,
       leaseId: "lease-1",
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });
@@ -92,7 +92,7 @@ describe("publication", () => {
   afterEach(() => store.close());
 
   test("the grant is checked whole: repo, remote, base, prefix, capability", () => {
-    const shape = { githubRepo: "alex/thing", remote: "origin", base: "main", head: "nightorders/t-1", state: "intended" as const };
+    const shape = { githubRepo: "alex/thing", remote: "origin", base: "main", head: "standing-orders/t-1", state: "intended" as const };
 
     expect(permitsPublication(null, shape)).toMatchObject({ ok: false });
 
@@ -136,7 +136,7 @@ describe("publication", () => {
     expect(one.pushed).toBe(1);
     expect(first.calls[0]).toMatchObject({
       file: "git",
-      args: ["push", "origin", "abc123def:refs/heads/nightorders/t-1"],
+      args: ["push", "origin", "abc123def:refs/heads/standing-orders/t-1"],
     });
     expect(store.publicationForRun(runId)?.state).toBe("pushed");
 
@@ -229,7 +229,7 @@ describe("watching CI on opened PRs", () => {
         githubRepo: "alex/thing",
         remote: "origin",
         base: "main",
-        head: "nightorders/t-1",
+        head: "standing-orders/t-1",
         headSha: "abc123",
         bodyHash: "x",
         draft: true,
@@ -258,7 +258,7 @@ describe("watching CI on opened PRs", () => {
       taskRef,
       leaseId: "lease-1",
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });

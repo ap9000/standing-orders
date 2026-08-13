@@ -1,5 +1,5 @@
 {
-  "name": "nightorders",
+  "name": "standing-orders",
   "version": "0.1.0",
   "description": "Standing orders for your agents. Wake me only for these.",
   "directories": {
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ap9000/nightorders.git"
+    "url": "git+https://github.com/ap9000/standing-orders.git"
   },
   "keywords": [
     "agents",
@@ -25,11 +25,11 @@
   "license": "MIT",
   "type": "module",
   "bugs": {
-    "url": "https://github.com/ap9000/nightorders/issues"
+    "url": "https://github.com/ap9000/standing-orders/issues"
   },
-  "homepage": "https://github.com/ap9000/nightorders#readme",
+  "homepage": "https://github.com/ap9000/standing-orders#readme",
   "bin": {
-    "nightorders": "./dist/cli.js"
+    "standing-orders": "./dist/cli.js"
   },
   "engines": {
     "node": ">=22.13.0"

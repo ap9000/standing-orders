@@ -251,7 +251,7 @@ describe("the built-in task store", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
 
-    const dir = await mkdtemp(join(tmpdir(), "nightorders-store-"));
+    const dir = await mkdtemp(join(tmpdir(), "standing-orders-store-"));
     const file = join(dir, "nested", "orders.db");
 
     const first = openStore(file);
@@ -281,7 +281,7 @@ describe("opening a database that already exists", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
 
-    const dir = await mkdtemp(join(tmpdir(), "nightorders-migrate-"));
+    const dir = await mkdtemp(join(tmpdir(), "standing-orders-migrate-"));
     const file = join(dir, "orders.db");
 
     const first = openStore(file);
@@ -317,7 +317,7 @@ describe("a task and its reference are created together", () => {
     store.close();
   });
 
-  test("a task nightorders created is recorded as ours", () => {
+  test("a task standing-orders created is recorded as ours", () => {
     const store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "ours" }, T0);
 
@@ -441,7 +441,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       taskRef: ref,
       leaseId: "lease-1",
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });
@@ -556,7 +556,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       taskRef: other,
       leaseId: "lease-2",
       runner: "builder-1",
-      branch: "nightorders/t-2",
+      branch: "standing-orders/t-2",
       worktree: "/pool/t-2",
       now: T0,
     });
@@ -642,7 +642,7 @@ describe("the M3 schema: owned holds, decisions, evidence, incidents", () => {
       taskRef: ref,
       leaseId: "lease-1",
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       role: "repair",
       parentRun: run,
@@ -664,7 +664,7 @@ describe("migration from an M2 database", () => {
     const { join } = await import("node:path");
     const { createRequire } = await import("node:module");
 
-    const dir = mkdtempSync(join(tmpdir(), "nightorders-m2-"));
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-m2-"));
     const file = join(dir, "orders.db");
 
     // The M2 shapes, verbatim — this is what a real database looks like the
@@ -713,9 +713,9 @@ describe("migration from an M2 database", () => {
       INSERT INTO task_ref (backend, external_id, origin) VALUES ('built-in','t-1','ours');
       INSERT INTO hold VALUES (1, 'waiting on legal', NULL, '2026-08-11T00:00:00.000Z');
       INSERT INTO run (task_ref, lease_id, runner, branch, worktree, outcome, committed, started_at, finished_at)
-        VALUES (1,'lease-1','builder-1','nightorders/t-1','/pool/t-1','built',1,'2026-08-11T01:00:00.000Z','2026-08-11T01:10:00.000Z');
+        VALUES (1,'lease-1','builder-1','standing-orders/t-1','/pool/t-1','built',1,'2026-08-11T01:00:00.000Z','2026-08-11T01:10:00.000Z');
       INSERT INTO run (task_ref, lease_id, runner, branch, worktree, started_at)
-        VALUES (1,'lease-2','builder-1','nightorders/t-1','/pool/t-1','2026-08-11T02:00:00.000Z');
+        VALUES (1,'lease-2','builder-1','standing-orders/t-1','/pool/t-1','2026-08-11T02:00:00.000Z');
       INSERT INTO notification (dedupe_key, kind, subject, body, created_at, delivered_at, receipt)
         VALUES ('gap:x:env:KEY','gap','s','b','2026-08-11T00:00:00.000Z','2026-08-11T00:01:00.000Z','r-1');
     `);
@@ -761,7 +761,7 @@ describe("answering a decision", () => {
       taskRef: ref,
       leaseId: "lease-1",
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });
@@ -881,7 +881,7 @@ describe("migration from an M3 database", () => {
     const { join } = await import("node:path");
     const { createRequire } = await import("node:module");
 
-    const dir = mkdtempSync(join(tmpdir(), "nightorders-m3-"));
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-m3-"));
     const file = join(dir, "orders.db");
 
     // The M3 shapes for exactly the tables the rebuild touches or references:
@@ -1013,7 +1013,7 @@ describe("migration from an M3 database", () => {
     const { join } = await import("node:path");
     const { createRequire } = await import("node:module");
 
-    const dir = mkdtempSync(join(tmpdir(), "nightorders-m3-odd-"));
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-m3-odd-"));
     const file = join(dir, "orders.db");
     const require = createRequire(import.meta.url);
     const { DatabaseSync } = require("node:sqlite");
@@ -1208,7 +1208,7 @@ describe("the console read model, bounded by construction", () => {
       taskRef: ref,
       leaseId: `lease-${n}`,
       runner: "builder-1",
-      branch: `nightorders/t-${n}`,
+      branch: `standing-orders/t-${n}`,
       worktree: `/pool/t-${n}`,
       now: T0,
     });
@@ -1304,7 +1304,7 @@ describe("migration from a v6 database (planning, v7)", () => {
     const { join } = await import("node:path");
     const { createRequire } = await import("node:module");
 
-    const dir = mkdtempSync(join(tmpdir(), "nightorders-v6-"));
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-v6-"));
     const file = join(dir, "orders.db");
 
     // The v6 shapes for exactly the tables the v7 rebuilds touch or
@@ -1381,7 +1381,7 @@ describe("migration from a v6 database (planning, v7)", () => {
       // The widened CHECKs admit the planning rows v6 refused.
       const planner = store.startRun({
         taskRef: 1, leaseId: "l-2", runner: "b", role: "planner",
-        branch: "nightorders-plan/t-1", worktree: "/w2", now: new Date("2026-08-12T02:00:00.000Z"),
+        branch: "standing-orders-plan/t-1", worktree: "/w2", now: new Date("2026-08-12T02:00:00.000Z"),
       });
       expect(planner).toBeGreaterThan(1);
       store.handle

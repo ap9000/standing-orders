@@ -11,10 +11,10 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 const repo = (overrides: Partial<RepoSnapshot> = {}): RepoSnapshot => ({
-  path: "/code/nightorders",
-  name: "nightorders",
+  path: "/code/standing-orders",
+  name: "standing-orders",
   head: "main",
-  remoteUrl: "git@github.com:ap9000/nightorders.git",
+  remoteUrl: "git@github.com:ap9000/standing-orders.git",
   branches: [],
   worktrees: [],
   dirtyFiles: 0,
@@ -84,7 +84,7 @@ describe("renderReport", () => {
 
     expect(output).toContain("No git repositories found");
     expect(output).toContain("/tmp/empty");
-    expect(output).toContain("nightorders");
+    expect(output).toContain("standing-orders");
   });
 
   test("counts the branches in flight in its header", () => {
@@ -305,7 +305,7 @@ describe("renderGraph", () => {
     expect(output).toContain("brew install beads");
     // the side effect is the part someone would be angry to discover later
     expect(output).toContain("AGENTS.md");
-    expect(output).toContain("Night Orders runs none of these");
+    expect(output).toContain("Standing Orders runs none of these");
   });
 
   test("does not offer setup commands when a backend was found", () => {
@@ -372,7 +372,7 @@ describe("renderReport with pull requests and issues", () => {
     // request and issue in flight.
     const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
     const remote = remoteFor({
-      "/code/nightorders": { pulls: [pull(45)], issues: [issue("1"), issue("2")] },
+      "/code/standing-orders": { pulls: [pull(45)], issues: [issue("1"), issue("2")] },
     });
 
     const output = renderReport(snapshots, { now: NOW, remote });
@@ -385,7 +385,7 @@ describe("renderReport with pull requests and issues", () => {
 
     const output = renderReport(snapshots, {
       now: NOW,
-      remote: remoteFor({ "/code/nightorders": {} }),
+      remote: remoteFor({ "/code/standing-orders": {} }),
     });
 
     expect(output).toContain("1 branch in flight");
@@ -404,11 +404,11 @@ describe("renderReport with pull requests and issues", () => {
 
   test("gives each waiting pull request its own line, under its repository", () => {
     const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
-    const remote = remoteFor({ "/code/nightorders": { pulls: [pull(45), pull(46)] } });
+    const remote = remoteFor({ "/code/standing-orders": { pulls: [pull(45), pull(46)] } });
 
     const output = renderReport(snapshots, { now: NOW, remote });
     const lines = output.split("\n");
-    const repoLine = lines.findIndex(line => line.startsWith("nightorders"));
+    const repoLine = lines.findIndex(line => line.startsWith("standing-orders"));
     const pullLine = lines.findIndex(line => line.includes("#45"));
 
     expect(pullLine).toBeGreaterThan(repoLine);
@@ -421,7 +421,7 @@ describe("renderReport with pull requests and issues", () => {
     // lists it is asking for attention nothing needs.
     const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
     const remote = remoteFor({
-      "/code/nightorders": { pulls: [pull(45, { checks: "running" })] },
+      "/code/standing-orders": { pulls: [pull(45, { checks: "running" })] },
     });
 
     expect(renderReport(snapshots, { now: NOW, remote })).not.toContain("#45");
@@ -435,7 +435,7 @@ describe("renderReport with pull requests and issues", () => {
 
     const output = renderReport(snapshots, {
       now: NOW,
-      remote: remoteFor({ "/code/nightorders": { issues } }),
+      remote: remoteFor({ "/code/standing-orders": { issues } }),
     });
 
     expect(output).toContain("40 issues open");
@@ -446,12 +446,12 @@ describe("renderReport with pull requests and issues", () => {
     // Otherwise the pull request appears under whichever repo happens to be
     // above it, which is worse than not showing it.
     const snapshots = [repo({ branches: [] })];
-    const remote = remoteFor({ "/code/nightorders": { pulls: [pull(45)] } });
+    const remote = remoteFor({ "/code/standing-orders": { pulls: [pull(45)] } });
 
     const output = renderReport(snapshots, { now: NOW, remote });
 
-    expect(output).toContain("nightorders");
-    expect(output.indexOf("nightorders")).toBeLessThan(output.indexOf("#45"));
+    expect(output).toContain("standing-orders");
+    expect(output.indexOf("standing-orders")).toBeLessThan(output.indexOf("#45"));
   });
 
   test("names the repositories the budget did not reach", () => {
@@ -463,14 +463,14 @@ describe("renderReport with pull requests and issues", () => {
       repo({ name: "oddcircle", path: "/code/oddcircle" }),
     ];
     const remote = remoteFor({
-      "/code/nightorders": {},
+      "/code/standing-orders": {},
       "/code/oddcircle": { skipped: true },
     });
 
     const output = renderReport(snapshots, { now: NOW, remote });
 
     expect(output).toContain("Not checked for pull requests or issues: oddcircle.");
-    expect(output).toContain("nightorders pulls");
+    expect(output).toContain("standing-orders pulls");
   });
 
   test("does not claim nothing is in flight when it did not look", () => {
@@ -478,12 +478,12 @@ describe("renderReport with pull requests and issues", () => {
     // remote read skipped, and a report that says "nothing in flight" about
     // work it never asked about.
     const snapshots = [repo({ branches: [] })];
-    const remote = remoteFor({ "/code/nightorders": { skipped: true } });
+    const remote = remoteFor({ "/code/standing-orders": { skipped: true } });
 
     const output = renderReport(snapshots, { now: NOW, remote });
 
     expect(output).toContain("that were checked");
-    expect(output).toContain("Not checked for pull requests or issues: nightorders.");
+    expect(output).toContain("Not checked for pull requests or issues: standing-orders.");
   });
 
   test("truncates a long list of skipped repositories", () => {
@@ -505,7 +505,7 @@ describe("renderReport with pull requests and issues", () => {
     // nothing there".
     const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
     const remote = remoteFor({
-      "/code/nightorders": {
+      "/code/standing-orders": {
         issuesRead: false,
         problems: ["could not read issues: gh auth login required"],
       },
@@ -520,7 +520,7 @@ describe("renderReport with pull requests and issues", () => {
   test("surfaces a remote problem rather than dropping it", () => {
     const snapshots = [repo({ branches: [branch("feat/a", { ahead: 1 }, DAY)] })];
     const remote = remoteFor({
-      "/code/nightorders": { problems: ["could not read pull requests: timed out"] },
+      "/code/standing-orders": { problems: ["could not read pull requests: timed out"] },
     });
 
     expect(renderReport(snapshots, { now: NOW, remote })).toContain("timed out");

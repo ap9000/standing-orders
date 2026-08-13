@@ -136,7 +136,7 @@ describe("planning mode, against real git", () => {
   };
 
   beforeEach(async () => {
-    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-plan-")));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-plan-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -236,7 +236,7 @@ describe("planning mode, against real git", () => {
 
     // The builder's branch is its own — the planner's disposable branch is
     // not an ancestor and the smoke-test file never existed there.
-    const log = await git(["log", "--oneline", "nightorders/limiter"]);
+    const log = await git(["log", "--oneline", "standing-orders/limiter"]);
     expect(log.stdout).toContain("limiter");
   });
 

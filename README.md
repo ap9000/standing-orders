@@ -1,12 +1,12 @@
-# Night Orders
+# Standing Orders
 
 **Standing orders for your agents. Wake me only for these.**
 
-> **Status: M4 built; publish pending.** The whole loop runs: `nightorders watch` (or `nightorders daemon install` — no crontab) dispatches approved work, spends nothing while idle, survives crashes by recovering exactly its own predecessor's claims, and stops taking work on the first signal. Failures are typed — strikes, doubling backoff, three-strike stalls a person exits with `task requeue` — and every provider spawn is stamped before it spends, so cost is measured, never asserted. An agent that hits a judgement call **parks a typed decision instead of guessing**; answer it in the terminal (`decide`), the web console (`serve` — the whole queue, phone-first, approval step-up), or a Telegram tap (the watch embeds a long-poll follower: phone to build, no timer in between). Built work leaves as a pushed branch and a pull request under a publication grant whose exact terms you agreed to, through a crash-durable intent; CI on those PRs is watched as episodes that never call silence green. The whole unattended stretch is one test, `night.test.ts`: queue twelve, walk away, come back to PRs. npm publish is the operator's act and has not happened yet — the `m4` tag waits for the registry, not the other way around. Architecture: [`docs/DESIGN.md`](docs/DESIGN.md); the item-by-item ledger: [`docs/PROGRESS.md`](docs/PROGRESS.md).
+> **Status: M4 built; publish pending.** The whole loop runs: `standing-orders watch` (or `standing-orders daemon install` — no crontab) dispatches approved work, spends nothing while idle, survives crashes by recovering exactly its own predecessor's claims, and stops taking work on the first signal. Failures are typed — strikes, doubling backoff, three-strike stalls a person exits with `task requeue` — and every provider spawn is stamped before it spends, so cost is measured, never asserted. An agent that hits a judgement call **parks a typed decision instead of guessing**; answer it in the terminal (`decide`), the web console (`serve` — the whole queue, phone-first, approval step-up), or a Telegram tap (the watch embeds a long-poll follower: phone to build, no timer in between). Built work leaves as a pushed branch and a pull request under a publication grant whose exact terms you agreed to, through a crash-durable intent; CI on those PRs is watched as episodes that never call silence green. The whole unattended stretch is one test, `night.test.ts`: queue twelve, walk away, come back to PRs. npm publish is the operator's act and has not happened yet — the `m4` tag waits for the registry, not the other way around. Architecture: [`docs/DESIGN.md`](docs/DESIGN.md); the item-by-item ledger: [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 The name comes from a captain's night orders — the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product, and it is not about the hour: it is for **long-running work that outlasts your attention** — an afternoon of errands, a weekend, or yes, a night.
 
-Night Orders is a control plane for coding agents, optimized for the stretch where **nobody is watching**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
+Standing Orders is a control plane for coding agents, optimized for the stretch where **nobody is watching**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
 
 It owns a deliberately small local task store, adapts richer trackers when they are already there, and owns no worktree pool, no review gate, and no agents. Those are adapters over [`beads`](https://github.com/gastownhall/beads), [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, and `codex`.
 
@@ -15,8 +15,8 @@ It owns a deliberately small local task store, adapts richer trackers when they 
 **Sixty seconds to first value.** No init, no daemon start, no wizard, no OAuth app.
 
 ```sh
-git clone https://github.com/ap9000/nightorders && cd nightorders
-npm install && npm run dev -- ~/code      # `npx nightorders` once it ships
+git clone https://github.com/ap9000/standing-orders && cd standing-orders
+npm install && npm run dev -- ~/code      # `npx standing-orders` once it ships
 ```
 
 It walks the filesystem for `.git` and reads every repo through the `git` credentials already on your machine, then shows what is in flight:
@@ -37,7 +37,7 @@ No agent has run. Nothing has been configured, written, or installed. Every othe
 
 Reads are priced before they are made. Listing refs is O(refs) and finishes in milliseconds; `git status` is O(working tree) and was measured at over two minutes on a real repo, so it is off by default behind `--dirty`. Computing ahead/behind walks history — 22s cold on a 304MB repo — so it is bounded at 5s and degrades to a branch list that says what it withheld. Every call goes through `--no-optional-locks`, so a scan never takes the index lock from an editor you have open.
 
-`nightorders pulls` answers the narrower question of what is waiting on a person, and `nightorders graph` says which work graph is already here:
+`standing-orders pulls` answers the narrower question of what is waiting on a person, and `standing-orders graph` says which work graph is already here:
 
 ```
 Work graph — detected in your repos
@@ -51,21 +51,21 @@ Nothing is enrolled, and detection grants nothing.
 
 Backends are chosen by looking rather than asking, but **detection is not authorization** — finding a populated tracker says it exists, not that anyone wants an agent scheduling or closing what is in it. Data and runtime are detected separately, so a tracker whose binary is missing is reported as real work this machine cannot dispatch, which is a visible gap at 9am instead of a dead loop at 3am. Two populated trackers means neither is chosen: task count is not authority, and the biggest one may be the abandoned one. Where a fact is not established — Backlog.md's dependency edges, for instance — it is marked unverified and **fails closed**, because a private dependency graph other tools cannot see is shadow data.
 
-**Nothing is ever installed for you.** `bd init` stages files, edits agent integrations, and can create a commit, so Night Orders prints the command and its side effects and lets you run it.
+**Nothing is ever installed for you.** `bd init` stages files, edits agent integrations, and can create a commit, so Standing Orders prints the command and its side effects and lets you run it.
 
 ## Queueing work, and taking it
 
 The built-in store is the fallback backend, and the commands over it are written for an agent first — because the agent is what runs them ten thousand times while you are away.
 
 ```sh
-nightorders task add "migrate the payouts schema" --id schema
-nightorders task add "wire the payouts API" --id api
-nightorders task block api --on schema     # api waits for schema
+standing-orders task add "migrate the payouts schema" --id schema
+standing-orders task add "wire the payouts API" --id api
+standing-orders task block api --on schema     # api waits for schema
 
-nightorders ready --json                   # what could be dispatched now
-nightorders claim schema --runner builder-1 --key dispatch-schema
-nightorders heartbeat <lease>              # still working
-nightorders release <lease>                # done holding it
+standing-orders ready --json                   # what could be dispatched now
+standing-orders claim schema --runner builder-1 --key dispatch-schema
+standing-orders heartbeat <lease>              # still working
+standing-orders release <lease>                # done holding it
 ```
 
 Four properties make that loop safe to run unattended.
@@ -80,13 +80,13 @@ Four properties make that loop safe to run unattended.
 
 ## The unattended pass
 
-`nightorders tick` is the loop above with nobody typing it, once per invocation:
+`standing-orders tick` is the loop above with nobody typing it, once per invocation:
 
 ```sh
-nightorders tick --runner builder-1 --token <t> --repo ~/code/thing --max 1
+standing-orders tick --runner builder-1 --token <t> --repo ~/code/thing --max 1
 ```
 
-One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `nightorders/<task-id>`, and commit. **It never pushes**, and it cannot touch the default branch; a pull request is always the terminus, and opening one stays a person's decision at this milestone.
+One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `standing-orders/<task-id>`, and commit. **It never pushes**, and it cannot touch the default branch; a pull request is always the terminus, and opening one stays a person's decision at this milestone.
 
 It is deliberately a pass and not a daemon: point cron at it and the fences make repetition safe — a second pass finds the first's work done and converges to `empty` (exit 3) instead of building anything twice. A broken build marks its task `failed` and the pass exits 1 even if other tasks succeeded, because exit 0 has to mean "nothing needs you". Refusals that are really a person's pending decision — a scope nobody approved, or one that changed after approval — leave the task queued and untouched.
 
@@ -98,13 +98,13 @@ running" is one command, and reboots and crashes are the supervisor's
 problem:
 
 ```sh
-nightorders daemon install --runner builder-1 --token <runner-token> --repo ~/code/thing
-nightorders daemon status      # running, as which pid, logs where
-nightorders daemon logs        # the file to tail
-nightorders daemon uninstall   # take it back off
+standing-orders daemon install --runner builder-1 --token <runner-token> --repo ~/code/thing
+standing-orders daemon status      # running, as which pid, logs where
+standing-orders daemon logs        # the file to tail
+standing-orders daemon uninstall   # take it back off
 ```
 
-Under the hood it runs `nightorders watch`: a work-conserving loop that
+Under the hood it runs `standing-orders watch`: a work-conserving loop that
 composes the same passes cron would call — but wakes on events (a decision
 answered from your phone dispatches the next build in seconds), recovers
 its own predecessor's mid-flight work after a crash, and spends zero tokens
@@ -132,30 +132,30 @@ Setup, once:
 
 1. In Telegram, message **@BotFather**: `/newbot`, pick a name and a
    username. Copy the token it hands you.
-2. `nightorders bridge telegram token <that-token>` — stored in a 0600 file
-   beside the database (or set `NIGHTORDERS_TELEGRAM_TOKEN`, which wins;
+2. `standing-orders bridge telegram token <that-token>` — stored in a 0600 file
+   beside the database (or set `STANDING_ORDERS_TELEGRAM_TOKEN`, which wins;
    or paste it into `serve`'s settings card from your phone).
-3. `nightorders approver add you --password <yours>` if you have no
+3. `standing-orders approver add you --password <yours>` if you have no
    sign-in yet — that name and password are the login for the console and
    every approving act. (Omit `--password` and a high-entropy one is
    minted and printed once instead — better for API/bearer use.)
-4. `nightorders bridge telegram pair --as you --token <approver-token>` —
+4. `standing-orders bridge telegram pair --as you --token <approver-token>` —
    prints a one-time code, good for ten minutes.
 5. From your phone, open your bot's chat, press Start, send
-   `/pair <that-code>`, then run `nightorders bridge telegram` once to
+   `/pair <that-code>`, then run `standing-orders bridge telegram` once to
    complete it. The bot replies with who the chat now answers as.
 
 Then cron the pass next to `tick`:
 
 ```sh
-nightorders bridge telegram        # sends pending, applies taps, exits
+standing-orders bridge telegram        # sends pending, applies taps, exits
 ```
 
 `bridge telegram status` shows the token source, the binding, and what is
 waiting. For answers in seconds instead of at the next cron firing,
-`nightorders bridge telegram --follow` stays on the wire — one long-poll
+`standing-orders bridge telegram --follow` stays on the wire — one long-poll
 actor holding the same poll lease, so a cron pass overlapping it simply
-loses the race. `nightorders watch` embeds the same follower automatically
+loses the race. `standing-orders watch` embeds the same follower automatically
 when a bot token is configured: a tap on your phone answers the decision,
 the answer wakes the loop, and the freed task resumes — phone to build,
 no timer in between.
@@ -171,7 +171,7 @@ agent's environment.
 
 ## The console
 
-`nightorders serve --repo <path>` is no longer just the decision view — it
+`standing-orders serve --repo <path>` is no longer just the decision view — it
 is the whole built-in queue, operable from a phone: an inbox of everything
 waiting on you, a live activity report (run counts, measured spend,
 decisions, incidents, stranded work, gaps), every task with its scope, holds, runs, decisions and
@@ -197,20 +197,20 @@ console, and says so.
 Detection tells you what is there; a grant is what lets anything be written to it.
 
 ```sh
-nightorders enroll . --backend github-issues --paths owner/name   # shows the terms
-nightorders enroll . --backend github-issues --paths owner/name --yes
-nightorders grants          # what has been granted, and to what
-nightorders revoke .        # take it back
+standing-orders enroll . --backend github-issues --paths owner/name   # shows the terms
+standing-orders enroll . --backend github-issues --paths owner/name --yes
+standing-orders grants          # what has been granted, and to what
+standing-orders revoke .        # take it back
 
-nightorders ready --backend github-issues     # reads need no grant
-nightorders task add "..." --backend beads    # writes do
+standing-orders ready --backend github-issues     # reads need no grant
+standing-orders task add "..." --backend beads    # writes do
 ```
 
-The grant is not a boolean. It records which paths or repositories may be touched, which mutation classes are allowed, which tasks are covered, which credential scope applies, and whether the writes will turn up in `git status` — that last one asked of `git check-ignore` rather than assumed. Two defaults carry weight: only tasks Night Orders created or was given, because enrolling a repo with four hundred open issues is not volunteering all four hundred; and `close` is withheld, because closing what somebody else filed is not the same act as transitioning your own task.
+The grant is not a boolean. It records which paths or repositories may be touched, which mutation classes are allowed, which tasks are covered, which credential scope applies, and whether the writes will turn up in `git status` — that last one asked of `git check-ignore` rather than assumed. Two defaults carry weight: only tasks Standing Orders created or was given, because enrolling a repo with four hundred open issues is not volunteering all four hundred; and `close` is withheld, because closing what somebody else filed is not the same act as transitioning your own task.
 
 Every backend goes through the same contract, and the authorization wraps it rather than living inside each adapter — an adapter written later inherits the check instead of having to remember it.
 
-**Edges are never emulated.** beads has native dependencies and they are used. This GitHub adapter has not confirmed the dependency endpoint against a live repository, so `addEdge` refuses rather than storing a graph only Night Orders can see — one that would read as ready to every human on the repo. That is the design's rule, and the refusal says so.
+**Edges are never emulated.** beads has native dependencies and they are used. This GitHub adapter has not confirmed the dependency endpoint against a live repository, so `addEdge` refuses rather than storing a graph only Standing Orders can see — one that would read as ready to every human on the repo. That is the design's rule, and the refusal says so.
 
 The beads adapter is built to beads' own documentation and exercised against a stubbed runner; it has never run against a real installation, because `bd` was not present on the machine it was written on. Commands whose flags could not be established — a general status update, in particular — refuse rather than guess.
 
@@ -234,7 +234,7 @@ And it costs nothing while idle. **An LLM never polls.** The daemon handles ever
 
 | | | |
 |---|---|---|
-| M0 | discovery, graph adapters, leases, CLI | `npx nightorders` shows what is in flight — **useful before it is autonomous** |
+| M0 | discovery, graph adapters, leases, CLI | `npx standing-orders` shows what is in flight — **useful before it is autonomous** |
 | M1 | runners, worktrees, first builder | one task goes queued → branch → commit unattended |
 | M2 | capability probes, secrets, briefing | fill one gap, three tasks start |
 | M3 | decisions, evidence, web view | a park renders as one screen, answerable on a phone — **and it does, executably** |

@@ -85,7 +85,7 @@ export type BuildRequest = {
    * gateway refuses a paid call whose run is missing or already finished.
    */
   runId: number;
-  /** Where evidence files live. Defaults to ~/.nightorders/evidence. */
+  /** Where evidence files live. Defaults to ~/.standing-orders/evidence. */
   evidenceRoot?: string;
   /** Defaults to the safe one; see the note on permissions above. */
   permissionMode?: "acceptEdits" | "auto" | "plan";
@@ -220,7 +220,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       : {
           ok: false,
           reason: "unapproved",
-          message: `${taskId} has no approved scope — \`nightorders task scope\` then \`task approve\``,
+          message: `${taskId} has no approved scope — \`standing-orders task scope\` then \`task approve\``,
         };
   }
 
@@ -282,7 +282,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   }
 
   // What the task needs, the machine must verifiably have — checked here as
-  // well as at dispatch, because `nightorders build` reaches this function
+  // well as at dispatch, because `standing-orders build` reaches this function
   // without passing through tick's gate, and a gate one road bypasses is a
   // suggestion. Recorded statuses only: probes ran at the checkpoint, and a
   // requirement nobody recorded fails closed.
@@ -291,7 +291,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     return {
       ok: false,
       reason: "capability",
-      message: `${taskId} ${requirement} — \`nightorders cap probe\` after supplying it`,
+      message: `${taskId} ${requirement} — \`standing-orders cap probe\` after supplying it`,
     };
   }
 

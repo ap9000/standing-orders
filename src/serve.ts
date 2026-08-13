@@ -1,6 +1,6 @@
 /**
  * The web console (§7, grown per the console review): the whole built-in
- * queue, visible and operable from a phone. `nightorders serve` — node:http,
+ * queue, visible and operable from a phone. `standing-orders serve` — node:http,
  * no dependencies, no JavaScript in the page. TLS is a proxy's job and the
  * docs say so; what is not delegated is everything else:
  *
@@ -115,7 +115,7 @@ export type ServeOptions = {
   projectRoots?: readonly string[];
 };
 
-const SESSION_COOKIE = "nightorders_session";
+const SESSION_COOKIE = "standing-orders_session";
 const BODY_CAP = 16 * 1024;
 /** A cookie idles out after half a day and dies outright after a week. */
 const SESSION_IDLE_MS = 12 * 60 * 60_000;
@@ -182,7 +182,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   const server = createServer((request, response) => {
     void handle(request, response).catch(error => {
-      if (process.env["NIGHTORDERS_SERVE_DEBUG"] === "1") console.error("SERVE ERROR:", error);
+      if (process.env["STANDING_ORDERS_SERVE_DEBUG"] === "1") console.error("SERVE ERROR:", error);
       if (!response.headersSent) {
         respond(response, 500, "text/plain; charset=utf-8", "something broke");
       } else {
@@ -272,7 +272,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   function projectOf(who: Who, request: IncomingMessage): string | null | undefined {
     if (who.via === "cookie") return who.session.project;
-    const header = request.headers["x-nightorders-project"];
+    const header = request.headers["x-standing-orders-project"];
     if (header === undefined) return defaultProject;
     if (Array.isArray(header)) return undefined;
     const canonical = canonicalProject(header);
@@ -1981,7 +1981,7 @@ function shell(
 
   const side = [
     `<aside class="side">`,
-    `<a class="brand" href="/">night<span class="dot">·</span>orders</a>`,
+    `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
     `<div class="side-project">` +
       (chrome.project === null
         ? `<span class="name meta">no project open</span>`
@@ -2021,8 +2021,8 @@ function shell(
 function loginPage(problem: string | null): string {
   return shell("night orders", [
     `<div class="login-shell">`,
-    `<h1>night<span class="dot">\u00b7</span>orders</h1>`,
-    `<p class="meta hint">users are added on the server: <code>nightorders approver add &lt;name&gt; --password &hellip;</code></p>`,
+    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
+    `<p class="meta hint">users are added on the server: <code>standing-orders approver add &lt;name&gt; --password &hellip;</code></p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
     `<label>username<input type="text" name="name" autocomplete="username"></label>`,
@@ -2246,7 +2246,7 @@ function systemPage(chrome: Chrome, data: {
     .join("\n");
   const agentsCard =
     `<h2>agents</h2>` +
-    `<p class="meta">who does the thinking, phase by phase — changing this is an authenticated act at the terminal (<code>nightorders config</code>), never a browser click</p>` +
+    `<p class="meta">who does the thinking, phase by phase — changing this is an authenticated act at the terminal (<code>standing-orders config</code>), never a browser click</p>` +
     `<div class="card">${agentLines}` +
     `<p class="meta">repair always stays on the provider that built — only its model can differ. A routine pins its agent the moment it fires; nothing after that can re-route it.</p>` +
     `</div>`;
@@ -2256,7 +2256,7 @@ function systemPage(chrome: Chrome, data: {
     `<p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p>`,
     agentsCard,
     cards.length === 0
-      ? `<p class="meta">no worker machine registered yet \u2014 <code>nightorders runner register &lt;name&gt;</code>, then <code>nightorders daemon install</code> keeps the background service running</p>`
+      ? `<p class="meta">no worker machine registered yet \u2014 <code>standing-orders runner register &lt;name&gt;</code>, then <code>standing-orders daemon install</code> keeps the background service running</p>`
       : `<div class="cards">${cards.join("")}</div>`,
     data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} notification(s) pending delivery</p>` : "",
   ].join("\n"), { chrome, refreshSeconds: data.building.length > 0 ? 10 : 60 });
@@ -2550,7 +2550,7 @@ function routinesPage(
   const list =
     tracks.length === 0
       ? `<p class="meta">No standing orders${chrome.project === null ? "" : " in this project"}. File one from the terminal:</p>` +
-        `<pre class="recap">nightorders routine add nightly-deps --repo &lt;path&gt; \\\n  --goal "Refresh the lockfile and note anything major" \\\n  --schedule daily:03:30</pre>` +
+        `<pre class="recap">standing-orders routine add nightly-deps --repo &lt;path&gt; \\\n  --goal "Refresh the lockfile and note anything major" \\\n  --schedule daily:03:30</pre>` +
         `<p class="meta">then approve it here — approving a routine is what lets each firing build without asking.</p>`
       : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
   return shell("routines", [
@@ -2793,7 +2793,7 @@ function homePage(chrome: Chrome, data: {
   const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const fleet =
     fleetCards.length === 0
-      ? `<h2>system status</h2><p class="hint">no worker machine registered yet \u2014 <code>nightorders runner register &lt;name&gt;</code>, then <code>nightorders daemon install</code> keeps the background service running</p>`
+      ? `<h2>system status</h2><p class="hint">no worker machine registered yet \u2014 <code>standing-orders runner register &lt;name&gt;</code>, then <code>standing-orders daemon install</code> keeps the background service running</p>`
       : `<h2>system status</h2><p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p><div class="cards">${fleetCards.join("")}</div>`;
 
   const startHere =
@@ -2803,7 +2803,7 @@ function homePage(chrome: Chrome, data: {
           `<p><strong>Nothing is queued yet — here is the whole loop:</strong></p>`,
           `<p>1. <a href="/tasks">Add a task</a> — plain words for work you want done${data.repo === null ? "" : ` in <span class="mono">${escape(data.repo)}</span>`}.</p>`,
           `<p>2. Open it and write its scope — the goal, and what it must not become. Approve exactly that.</p>`,
-          `<p>3. Leave <code>nightorders watch</code> (or the daemon) running. Approved tasks build unattended, each on its own branch.</p>`,
+          `<p>3. Leave <code>standing-orders watch</code> (or the daemon) running. Approved tasks build unattended, each on its own branch.</p>`,
           `<p class="meta">When an agent is unsure it stops and asks — those questions land here, under \u201cwaiting on you\u201d.</p>`,
           `</div>`,
         ].join("\n")
@@ -3301,7 +3301,7 @@ function settingsPage(
           ),
           `<button type="submit">use this service</button>`,
           `</form>`,
-          `<p class="meta">Telegram keeps accepting taps and replies even when another service delivers the alerts. Connect services from the terminal: <code>nightorders webhook set slack|discord &lt;url&gt;</code>.</p>`,
+          `<p class="meta">Telegram keeps accepting taps and replies even when another service delivers the alerts. Connect services from the terminal: <code>standing-orders webhook set slack|discord &lt;url&gt;</code>.</p>`,
         ].join("\n");
   const current =
     hasEnv
@@ -3321,7 +3321,7 @@ function settingsPage(
     `<button type="submit">save</button>`,
     "</form>",
     `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
-    ` <code>nightorders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
+    ` <code>standing-orders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
   ].join("\n"), { chrome });
 }
 

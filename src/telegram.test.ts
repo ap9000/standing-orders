@@ -94,7 +94,7 @@ describe("the telegram bridge", () => {
       taskRef,
       leaseId: `lease-${Math.random()}`,
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });
@@ -474,7 +474,7 @@ describe("the bot token's homes", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "nightorders-tg-token-"));
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-tg-token-"));
   });
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
@@ -546,7 +546,7 @@ describe("the follower — on the wire until told to stop", () => {
       taskRef,
       leaseId: `lease-${Math.random()}`,
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });
@@ -680,7 +680,7 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
   ): number => {
     const run = store.startRun({
       taskRef, leaseId: `lease-${Math.random()}`, runner: "b",
-      branch: "nightorders/t-1", worktree: "/pool/t-1", now: T0,
+      branch: "standing-orders/t-1", worktree: "/pool/t-1", now: T0,
     });
     const id = store.saveDecision({
       run, urgency: "blocking", recap: "Policy call.", question: "Open or closed?",

@@ -400,7 +400,7 @@ export function fireRoutine(
           {
             kind: "routine-blocked",
             subject: `${routine.name} cannot fire: its agent is misconfigured`,
-            body: `${agent.problem}. Fix it with \`nightorders config\`; the due slot fires on the next pass.`,
+            body: `${agent.problem}. Fix it with \`standing-orders config\`; the due slot fires on the next pass.`,
           },
           scheduledFor,
           now,

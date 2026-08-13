@@ -10,13 +10,13 @@ describe("configPath", () => {
   test("honours XDG_CONFIG_HOME", () => {
     const path = configPath({ XDG_CONFIG_HOME: "/xdg" }, HOME);
 
-    expect(path).toBe(join("/xdg", "nightorders", "repos.json"));
+    expect(path).toBe(join("/xdg", "standing-orders", "repos.json"));
   });
 
   test("falls back to ~/.config", () => {
-    expect(configPath({}, HOME)).toBe(join(HOME, ".config", "nightorders", "repos.json"));
+    expect(configPath({}, HOME)).toBe(join(HOME, ".config", "standing-orders", "repos.json"));
     expect(configPath({ XDG_CONFIG_HOME: "" }, HOME)).toBe(
-      join(HOME, ".config", "nightorders", "repos.json"),
+      join(HOME, ".config", "standing-orders", "repos.json"),
     );
   });
 });
@@ -25,7 +25,7 @@ describe("loadRepos", () => {
   let base: string;
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-repos-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-repos-"));
   });
 
   afterEach(async () => {
@@ -40,7 +40,7 @@ describe("loadRepos", () => {
   });
 
   test("round-trips through save, creating the directory", async () => {
-    const file = join(base, "config", "nightorders", "repos.json");
+    const file = join(base, "config", "standing-orders", "repos.json");
 
     await saveRepos(file, ["/code/b", "/code/a"]);
 

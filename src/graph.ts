@@ -443,7 +443,7 @@ function describeFailure(result: ExecResult): string {
  * without a filesystem.
  *
  * The rung that does the most work is the third: several populated repo-local
- * trackers mean Night Orders stays in discovery until a person says which one.
+ * trackers mean Standing Orders stays in discovery until a person says which one.
  * Picking the largest would be inventing authority out of a row count.
  *
  * GitHub Issues is never chosen automatically. It has native edges, but a

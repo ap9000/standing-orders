@@ -50,7 +50,7 @@ describe("argv dialects", () => {
     const argv = adapterFor("openrouter").argv({ ...ASK, model: "anthropic/claude-sonnet-4.5" });
     expect(adapterFor("openrouter").binary).toBe(adapterFor("codex").binary);
     const joined = argv.join(" ");
-    expect(joined).toContain('model_provider="nightorders_openrouter"');
+    expect(joined).toContain('model_provider="standing-orders_openrouter"');
     expect(joined).toContain('base_url="https://openrouter.ai/api/v1"');
     expect(joined).toContain(`env_key="${OPENROUTER_ENV_KEY}"`);
     // The model's own shells never inherit the key — only the transport.

@@ -8,7 +8,7 @@ describe("scanning a repository for what it says it needs", () => {
   let repo: string;
 
   beforeEach(async () => {
-    repo = await mkdtemp(join(tmpdir(), "nightorders-capscan-"));
+    repo = await mkdtemp(join(tmpdir(), "standing-orders-capscan-"));
   });
 
   afterEach(async () => {

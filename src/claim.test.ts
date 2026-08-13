@@ -743,7 +743,7 @@ describe("sealing a park", () => {
       taskRef: task,
       leaseId,
       runner: "runner-a",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });
@@ -891,7 +891,7 @@ describe("the resume and the attention budget", () => {
       taskRef: task,
       leaseId,
       runner: "runner-a",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: at,
     });

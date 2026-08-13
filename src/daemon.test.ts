@@ -34,7 +34,7 @@ describe("the daemon plan", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "nightorders-daemon-"));
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-daemon-"));
   });
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
@@ -42,7 +42,7 @@ describe("the daemon plan", () => {
   const plan = (platform: NodeJS.Platform = "darwin"): DaemonPlan => {
     const made = planDaemon({
       platform,
-      bin: "/usr/local/bin/nightorders",
+      bin: "/usr/local/bin/standing-orders",
       binArgs: [],
       runner: "builder-1",
       repo: "/Users/alex/code/thing",
@@ -55,7 +55,7 @@ describe("the daemon plan", () => {
   };
 
   test("labels are one per repo, and never collide on punctuation", () => {
-    expect(labelFor("/Users/alex/code/thing")).toBe("com.nightorders.watch.users-alex-code-thing");
+    expect(labelFor("/Users/alex/code/thing")).toBe("com.standing-orders.watch.users-alex-code-thing");
     expect(labelFor("/Users/alex/code thing!")).not.toContain(" ");
     expect(labelFor("/a")).not.toBe(labelFor("/b"));
   });
@@ -153,7 +153,7 @@ describe("the daemon on windows", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "nightorders-daemon-win-"));
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-daemon-win-"));
   });
 
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
@@ -161,7 +161,7 @@ describe("the daemon on windows", () => {
   const plan = (): DaemonPlan => {
     const made = planDaemon({
       platform: "win32",
-      bin: "C:\\Users\\alex\\AppData\\Roaming\\npm\\nightorders.cmd",
+      bin: "C:\\Users\\alex\\AppData\\Roaming\\npm\\standing-orders.cmd",
       binArgs: [],
       runner: "builder-1",
       repo: "C:\\code\\thing",

@@ -16,8 +16,8 @@ describe("reading evidence back, believing nothing", () => {
   let outside: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "nightorders-evidence-"));
-    outside = mkdtempSync(join(tmpdir(), "nightorders-outside-"));
+    root = mkdtempSync(join(tmpdir(), "standing-orders-evidence-"));
+    outside = mkdtempSync(join(tmpdir(), "standing-orders-outside-"));
   });
 
   afterEach(() => {

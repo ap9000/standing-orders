@@ -85,7 +85,7 @@ describe("the pool, against a stubbed git", () => {
     store = openStore(":memory:");
     // Real path up front: adoption compares real paths, and a fabricated
     // candidate under a symlinked root would never match itself.
-    root = realpathSync(mkdtempSync(join(tmpdir(), "nightorders-stub-")));
+    root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-stub-")));
     calls.length = 0;
     // A worktree can only be leased to a runner the control plane knows.
     for (const name of ["builder-1", "builder-2"]) {
@@ -344,7 +344,7 @@ describe("the pool, against real git", () => {
   let store: Store;
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-pool-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-pool-"));
     repo = join(base, "repo");
     await mkdir(repo, { recursive: true });
     store = openStore(":memory:");

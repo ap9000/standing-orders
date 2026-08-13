@@ -2,7 +2,7 @@
  * Reading the state of repositories.
  *
  * Every git invocation here is a read, and every one is prefixed with
- * `--no-optional-locks` — Night Orders scans repositories the operator may be
+ * `--no-optional-locks` — Standing Orders scans repositories the operator may be
  * working in right now, and a discovery pass must never contend for the index
  * lock with their editor.
  *

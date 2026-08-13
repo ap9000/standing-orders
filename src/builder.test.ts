@@ -188,7 +188,7 @@ describe("the builder's gates", () => {
   });
 
   test("will not build a task whose requirement nobody verified", async () => {
-    // tick's gate is one road here; `nightorders build` is another, and a
+    // tick's gate is one road here; `standing-orders build` is another, and a
     // gate one road bypasses is a suggestion.
     claimIt();
     approveScope();
@@ -875,16 +875,16 @@ describe("the lease marker never reaches a commit", () => {
 
   test("is excluded when the agent did change something", async () => {
     // Staging it would put one of our internal files into somebody's commit.
-    await withStatus(" M src/index.ts\n?? .nightorders-lease\n");
+    await withStatus(" M src/index.ts\n?? .standing-orders-lease\n");
 
     const add = gitCalls.find(args => args[0] === "add");
-    expect(add).toContain(":!.nightorders-lease");
+    expect(add).toContain(":!.standing-orders-lease");
   });
 
   test("does not count as a change on its own", async () => {
     // Otherwise every build reports a commit it did not make — and an agent
     // honestly saying no-change would be contradicted by our own marker.
-    const result = await withStatus("?? .nightorders-lease\n", "no-change");
+    const result = await withStatus("?? .standing-orders-lease\n", "no-change");
 
     expect(result).toMatchObject({ ok: true, committed: false, noChange: true });
     expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
@@ -1226,8 +1226,8 @@ describe("the park", () => {
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", now: T0 });
-    worktree = mkdtempSync(join(tmpdir(), "nightorders-park-wt-"));
-    evidence = mkdtempSync(join(tmpdir(), "nightorders-park-ev-"));
+    worktree = mkdtempSync(join(tmpdir(), "standing-orders-park-wt-"));
+    evidence = mkdtempSync(join(tmpdir(), "standing-orders-park-ev-"));
     store.saveWorktree({
       path: worktree,
       repo: "/code/thing",
@@ -1440,8 +1440,8 @@ describe("bounded repair", () => {
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", now: T0 });
-    worktree = mkdtempSync(join(tmpdir(), "nightorders-repair-wt-"));
-    evidence = mkdtempSync(join(tmpdir(), "nightorders-repair-ev-"));
+    worktree = mkdtempSync(join(tmpdir(), "standing-orders-repair-wt-"));
+    evidence = mkdtempSync(join(tmpdir(), "standing-orders-repair-ev-"));
     store.saveWorktree({
       path: worktree,
       repo: "/code/thing",

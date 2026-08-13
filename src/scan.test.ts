@@ -15,7 +15,7 @@ let outside: string;
 const makeRepo = (path: string) => mkdir(join(path, ".git"), { recursive: true });
 
 beforeAll(async () => {
-  base = await mkdtemp(join(tmpdir(), "nightorders-scan-"));
+  base = await mkdtemp(join(tmpdir(), "standing-orders-scan-"));
   root = join(base, "root");
   outside = join(base, "outside");
 

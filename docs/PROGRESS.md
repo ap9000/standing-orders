@@ -1,5 +1,19 @@
 # Progress
 
+**2026-08-13 — the product is `standing-orders`.** The tagline was the
+brand all along ("Standing orders for your agents"): the rename drops the
+last night-shaped thing before anything is published, keeps the naval
+lineage (a night order IS a standing order), and costs almost nothing at
+this exact moment — the npm name was still unclaimed. Swept: package
+name and bin, every command example and console surface (the brand reads
+standing·orders), env vars (STANDING_ORDERS_*), branch namespaces
+(standing-orders/<task>). Kept: the NIGHTORDERS-* protocol markers
+(invisible plumbing, per the de-night decision) and night.test.ts.
+Continuity: databasePath, evidenceRoot, and repos.json all fall back to
+their nightorders-named homes when no new-name file exists — the rename
+orphans nobody. Earlier entries below keep the old name: they are
+history, and history happened under it.
+
 The living ledger of what has actually shipped, against the milestones in
 [`DESIGN.md`](DESIGN.md) §10. One row per milestone item: its state, the
 commit that proved it, and the date. "Proved" means tests exist and pass —

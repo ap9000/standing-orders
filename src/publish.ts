@@ -57,7 +57,7 @@ export function describePublicationGrant(grant: {
     `  may push     branches under ${grant.headPrefix} — nothing else, ever`,
     `  base         PRs target ${grant.base}`,
     `  capabilities ${grant.capabilities.join(", ")}`,
-    `  tasks        ${grant.selector === "ours" ? "only tasks nightorders created or was given" : "any task"}`,
+    `  tasks        ${grant.selector === "ours" ? "only tasks standing-orders created or was given" : "any task"}`,
     `  mode         ${grant.draft ? "draft PRs" : "ready-for-review PRs"}`,
   ];
 }
@@ -77,7 +77,7 @@ export function publicationBody(store: Store, publication: Publication): string 
     `## ${task?.title ?? taskId}`,
     "",
     ...(scope === null ? [] : [`**Goal:** ${scope.goal}`, ""]),
-    `Built unattended by nightorders (task \`${taskId}\`, run #${publication.run}).`,
+    `Built unattended by standing-orders (task \`${taskId}\`, run #${publication.run}).`,
     `Base \`${run?.baseRevision ?? "?"}\` → head \`${publication.headSha}\`.`,
   ];
 
@@ -241,7 +241,7 @@ async function openOrAdopt(
   const title = store.getTask(taskId)?.title ?? taskId;
   // --body-file, not --body: the body quotes an agent and a shell must not
   // meet it. The file lives in a private temp dir for exactly one call.
-  const dir = mkdtempSync(join(tmpdir(), "nightorders-pr-"));
+  const dir = mkdtempSync(join(tmpdir(), "standing-orders-pr-"));
   try {
     const bodyFile = join(dir, "body.md");
     writeFileSync(bodyFile, body, { mode: 0o600 });

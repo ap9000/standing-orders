@@ -684,7 +684,7 @@ export function finalizeParkFenced(
         dedupeKey: `decision:${decisionId}`,
         kind: "decision",
         subject: `${taskId} parked a decision`,
-        body: `${oneLine(decision.question, 200)}\n\`nightorders decide ${decisionId}\``,
+        body: `${oneLine(decision.question, 200)}\n\`standing-orders decide ${decisionId}\``,
       },
       now,
     );
@@ -848,7 +848,7 @@ export function finalizeFailureFenced(
           dedupeKey: `commit-failure:${runId}`,
           kind: "commit-failure",
           subject: `${taskId}: the commit itself failed`,
-          body: `${oneLine(message, 200)}\nThe work is preserved, uncommitted, in ${args.worktree}. Prove it and \`nightorders task requeue ${taskId}\`.`,
+          body: `${oneLine(message, 200)}\nThe work is preserved, uncommitted, in ${args.worktree}. Prove it and \`standing-orders task requeue ${taskId}\`.`,
         },
         now,
       );
@@ -878,7 +878,7 @@ export function finalizeFailureFenced(
           dedupeKey: `stalled:${run.taskRef}`,
           kind: "attempts-exhausted",
           subject: `${taskId} stalled after ${strikes} straight failures`,
-          body: `Last failure (${failureClass}): ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`nightorders task requeue ${taskId}\`.`,
+          body: `Last failure (${failureClass}): ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`standing-orders task requeue ${taskId}\`.`,
         },
         now,
       );

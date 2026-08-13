@@ -13,7 +13,7 @@ describe("operating the queue from the command line", () => {
   let lines: string[];
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nightorders-operate-"));
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-operate-"));
     db = join(dir, "orders.db");
     lines = [];
     // The database is new each test, so tokens minted against the last one
@@ -297,7 +297,7 @@ describe("operating the queue from the command line", () => {
 
   test("prints the surface when asked for `task` alone", async () => {
     expect(await run(["task"])).toBe(EXIT.ok);
-    expect(out()).toContain("nightorders claim");
+    expect(out()).toContain("standing-orders claim");
   });
 });
 
@@ -307,7 +307,7 @@ describe("write access", () => {
   let lines: string[];
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nightorders-grant-"));
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-grant-"));
     db = join(dir, "orders.db");
     lines = [];
     // The database is new each test, so tokens minted against the last one
@@ -353,7 +353,7 @@ describe("write access", () => {
     expect(code).toBe(EXIT.ok);
     expect(out()).toContain("Nothing has been granted");
     expect(out()).toContain("may do");
-    expect(out()).toContain("only those Night Orders created or was given");
+    expect(out()).toContain("only those Standing Orders created or was given");
 
     await run(["grants", "--json"]);
     expect(payload().count).toBe(0);
@@ -432,7 +432,7 @@ describe("the grant is actually enforced", () => {
   let lines: string[];
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nightorders-enforce-"));
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-enforce-"));
     db = join(dir, "orders.db");
     lines = [];
     // The database is new each test, so tokens minted against the last one
@@ -480,7 +480,7 @@ describe("the grant is actually enforced", () => {
 
     expect(code).toBe(EXIT.refused);
     expect(payload()).toMatchObject({ ok: false, reason: "no-grant" });
-    expect(payload().message).toContain("nightorders enroll");
+    expect(payload().message).toContain("standing-orders enroll");
   });
 
   test("still refuses once enrolled, when the task is not ours", async () => {
@@ -577,7 +577,7 @@ describe("agreeing to a scope from the command line", () => {
   let lines: string[];
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nightorders-scope-"));
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-scope-"));
     db = join(dir, "orders.db");
     lines = [];
   });
@@ -667,7 +667,7 @@ describe("routine — standing orders from the command line", () => {
   let lines: string[];
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nightorders-routine-cli-"));
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-routine-cli-"));
     db = join(dir, "orders.db");
     lines = [];
   });
@@ -751,7 +751,7 @@ describe("config — spend routing is authenticated authority", () => {
   let lines: string[];
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nightorders-config-"));
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-config-"));
     db = join(dir, "orders.db");
     lines = [];
   });
@@ -808,7 +808,7 @@ describe("providers — identification without spend", () => {
   let lines: string[];
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "nightorders-providers-"));
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-providers-"));
     db = join(dir, "orders.db");
     lines = [];
   });
@@ -848,7 +848,7 @@ describe("providers — identification without spend", () => {
 describe("the CLI router", () => {
   test("every verb the operate dispatcher knows is reachable from the binary", async () => {
     // routine/config/providers shipped reachable only through runOperate —
-    // the real `nightorders` binary refused them (found by the console
+    // the real `standing-orders` binary refused them (found by the console
     // polish pass). The two lists must never drift again.
     const { readFileSync } = await import("node:fs");
     const operate = readFileSync("src/operate.ts", "utf8");

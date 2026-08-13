@@ -1,7 +1,7 @@
 /**
  * Gaps: what the machine lacks, ranked by what filling it would free (§6).
  *
- * One computation, shared — the CLI brief, `nightorders gaps`, and the web
+ * One computation, shared — the CLI brief, `standing-orders gaps`, and the web
  * console all show the same ranking because they call the same function.
  * A second copy would only learn to disagree with this one.
  */
@@ -80,7 +80,7 @@ export function computeGaps(store: Store, repo: string, now: Date): Gap[] {
       const capability = store.getCapability(taskRepo, parsed.kind, parsed.name);
       if (capability === null) {
         unmet.push(key);
-        claim(key, `unrecorded for ${taskRepo}`, "nightorders cap add, then cap probe", parsed.kind);
+        claim(key, `unrecorded for ${taskRepo}`, "standing-orders cap add, then cap probe", parsed.kind);
       } else if (!isVerified(capability, now)) {
         unmet.push(key);
       }

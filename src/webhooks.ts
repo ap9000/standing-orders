@@ -21,10 +21,10 @@ import { readFileSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Notification, Store } from "./store.js";
 
-export const SLACK_ENV = "NIGHTORDERS_SLACK_WEBHOOK";
-export const DISCORD_ENV = "NIGHTORDERS_DISCORD_WEBHOOK";
-export const CONSOLE_URL_ENV = "NIGHTORDERS_CONSOLE_URL";
-export const PRIMARY_ENV = "NIGHTORDERS_MESSAGING_PRIMARY";
+export const SLACK_ENV = "STANDING_ORDERS_SLACK_WEBHOOK";
+export const DISCORD_ENV = "STANDING_ORDERS_DISCORD_WEBHOOK";
+export const CONSOLE_URL_ENV = "STANDING_ORDERS_CONSOLE_URL";
+export const PRIMARY_ENV = "STANDING_ORDERS_MESSAGING_PRIMARY";
 
 export type WebhookKind = "slack" | "discord";
 
@@ -170,7 +170,7 @@ export async function postWebhook(
           text: [
             `*${notification.subject}*`,
             notification.body,
-            ...(link === null ? [] : [`<${link}|open in nightorders>`]),
+            ...(link === null ? [] : [`<${link}|open in standing-orders>`]),
           ].join("\n"),
         }
       : {

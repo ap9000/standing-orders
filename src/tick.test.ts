@@ -75,7 +75,7 @@ describe("tick, against real git", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-tick-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-tick-"));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -135,13 +135,13 @@ describe("tick, against real git", () => {
       ok: true,
       command: "tick",
       considered: 1,
-      dispatched: [{ id: "t-1", outcome: "built", committed: true, branch: "nightorders/t-1" }],
+      dispatched: [{ id: "t-1", outcome: "built", committed: true, branch: "standing-orders/t-1" }],
     });
     expect(code).toBe(EXIT.ok);
     expect(agentRan).toHaveLength(1);
 
     // The commit is real, on the task's branch, containing the agent's work…
-    const shown = await git(["show", "--stat", "--oneline", "nightorders/t-1"]);
+    const shown = await git(["show", "--stat", "--oneline", "standing-orders/t-1"]);
     expect(shown.code).toBe(0);
     expect(shown.stdout).toContain("guard.ts");
     // …and main never moved.
@@ -157,7 +157,7 @@ describe("tick, against real git", () => {
     expect(payload().runs[0]).toMatchObject({
       outcome: "built",
       committed: true,
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       runner: "builder-1",
     });
     expect(payload().runs[0].finishedAt).not.toBeNull();
@@ -194,10 +194,10 @@ describe("tick, against real git", () => {
     // The intent was written with the completion — the exact accepted SHA.
     await run(["publish", "status", "--repo", repo, "--json"]);
     expect(payload().pending).toHaveLength(1);
-    const head = await git(["rev-parse", "nightorders/t-1"]);
+    const head = await git(["rev-parse", "standing-orders/t-1"]);
     expect(payload().pending[0]).toMatchObject({
       state: "intended",
-      head: "nightorders/t-1",
+      head: "standing-orders/t-1",
       headSha: head.stdout.trim(),
       githubRepo: "alex/thing",
     });
@@ -222,7 +222,7 @@ describe("tick, against real git", () => {
     expect(payload().report).toMatchObject({ pushed: 1, opened: 1 });
     expect(calls[0]).toMatchObject({
       file: "git",
-      args: ["push", "origin", `${head.stdout.trim()}:refs/heads/nightorders/t-1`],
+      args: ["push", "origin", `${head.stdout.trim()}:refs/heads/standing-orders/t-1`],
     });
     await run(["publish", "status", "--repo", repo, "--json"]);
     expect(payload().pending).toHaveLength(0);
@@ -358,7 +358,7 @@ describe("reconcile, against real git", () => {
   beforeEach(async () => {
     // Resolved to its real path up front: git reports real paths, and the
     // assertions compare against what git says.
-    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-reconcile-")));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-reconcile-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -421,11 +421,11 @@ describe("reconcile, against real git", () => {
     await run(["runner", "register", "builder-1", "--json"]);
     const store = openStore(db);
     const wt = join(pool, "repo", "gone");
-    await exec("git", ["worktree", "add", "-b", "nightorders/gone", wt], { cwd: repo });
+    await exec("git", ["worktree", "add", "-b", "standing-orders/gone", wt], { cwd: repo });
     store.saveWorktree({
       path: wt,
       repo,
-      branch: "nightorders/gone",
+      branch: "standing-orders/gone",
       runner: "builder-1",
       taskRef: null,
       createdAt: T0.toISOString(),
@@ -447,7 +447,7 @@ describe("reconcile, against real git", () => {
     // A crash between `git worktree add` and the row: the directory is real,
     // inside the pool root, and the database has never heard of it.
     const wt = join(pool, "repo", "crashed");
-    await exec("git", ["worktree", "add", "-b", "nightorders/crashed", wt], { cwd: repo });
+    await exec("git", ["worktree", "add", "-b", "standing-orders/crashed", wt], { cwd: repo });
 
     const code = await run(["reconcile", "--repo", repo, "--pool", pool, "--json"]);
 
@@ -495,7 +495,7 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-m2-")));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-m2-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -573,7 +573,7 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
 
     // Three real branches, three real commits, and main never moved.
     for (const id of ["t-1", "t-2", "t-3"]) {
-      const shown = await git(["show", "--stat", "--oneline", `nightorders/${id}`]);
+      const shown = await git(["show", "--stat", "--oneline", `standing-orders/${id}`]);
       expect(shown.code).toBe(0);
       expect(shown.stdout).toContain("guard.ts");
     }
@@ -597,7 +597,7 @@ describe("gaps", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-gaps-")));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-gaps-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     await mkdir(repo, { recursive: true });
@@ -681,7 +681,7 @@ describe("the outbox", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-outbox-")));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-outbox-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     await mkdir(repo, { recursive: true });
@@ -731,7 +731,7 @@ describe("the outbox", () => {
     // command line itself. It fails once for n-2 via a marker file trick:
     // first invocation writes the marker and succeeds; second sees it and fails.
     const marker = join(base, "seen");
-    const cmd = `if [ -f "${marker}" ]; then echo "already: $NIGHTORDERS_DEDUPE_KEY" >&2; exit 7; fi; touch "${marker}"; echo "receipt for $NIGHTORDERS_SUBJECT"`;
+    const cmd = `if [ -f "${marker}" ]; then echo "already: $STANDING_ORDERS_DEDUPE_KEY" >&2; exit 7; fi; touch "${marker}"; echo "receipt for $STANDING_ORDERS_SUBJECT"`;
 
     const code = await run(["outbox", "deliver", "--cmd", cmd, "--json"]);
 
@@ -817,7 +817,7 @@ describe("the morning briefing", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-brief-")));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-brief-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -947,7 +947,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-park-e2e-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-park-e2e-"));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -1022,7 +1022,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
     // main never moved, and no commit landed on the task branch.
     const main = await git(["log", "--oneline", "main"]);
     expect(main.stdout.trim().split("\n")).toHaveLength(1);
-    const branch = await git(["log", "--oneline", "nightorders/t-1"]);
+    const branch = await git(["log", "--oneline", "standing-orders/t-1"]);
     expect(branch.stdout.trim().split("\n")).toHaveLength(1);
   });
 
@@ -1136,7 +1136,7 @@ describe("decide, end to end — the morning answers and the machine hears it", 
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-decide-e2e-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-decide-e2e-"));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -1365,7 +1365,7 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-bridge-e2e-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-bridge-e2e-"));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -1574,7 +1574,7 @@ describe("watch — the loop, zero tokens idle", () => {
   };
 
   beforeEach(async () => {
-    base = realpathSync(await mkdtemp(join(tmpdir(), "nightorders-watch-")));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-watch-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -1685,7 +1685,7 @@ describe("watch — the loop, zero tokens idle", () => {
     });
     store.setTaskState("t-1", "running", past);
     store.startRun({
-      taskRef: ref, leaseId: "lease-dead", runner: "builder-1", branch: "nightorders/t-1",
+      taskRef: ref, leaseId: "lease-dead", runner: "builder-1", branch: "standing-orders/t-1",
       worktree: join(pool, "x"), now: past,
     });
     store.close();

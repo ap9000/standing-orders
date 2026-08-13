@@ -34,7 +34,7 @@ describe("run", () => {
 
   test("flags a missing binary instead of rejecting", async () => {
     // `gh` is absent on most machines; that must not end discovery
-    const result = await run("nightorders-no-such-binary", ["--version"]);
+    const result = await run("standing-orders-no-such-binary", ["--version"]);
 
     expect(result.notFound).toBe(true);
     expect(result.code).toBe(NOT_FOUND_CODE);

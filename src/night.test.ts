@@ -115,7 +115,7 @@ describe("the night: twelve tasks, one fake clock", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "nightorders-night-"));
+    base = await mkdtemp(join(tmpdir(), "standing-orders-night-"));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");

@@ -49,7 +49,7 @@ describe("the web decision view", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
-    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-serve-ev-"));
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-serve-ev-"));
 
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -61,7 +61,7 @@ describe("the web decision view", () => {
       taskRef,
       leaseId: "lease-1",
       runner: "builder-1",
-      branch: "nightorders/t-1",
+      branch: "standing-orders/t-1",
       worktree: "/pool/t-1",
       now: T0,
     });
@@ -371,7 +371,7 @@ describe("the settings card", () => {
   beforeEach(async () => {
     const { mkdtempSync } = await import("node:fs");
     store = openStore(":memory:");
-    dir = mkdtempSync(join(tmpdir(), "nightorders-serve-settings-"));
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-serve-settings-"));
     evidenceRoot = join(dir, "evidence");
     mkdirSync(evidenceRoot, { recursive: true });
     const added = addApprover(store, "alex", T0);
@@ -486,14 +486,14 @@ describe("the operations console", () => {
       taskRef,
       leaseId: `lease-${n}`,
       runner: "builder-1",
-      branch: `nightorders/x-${n}`,
+      branch: `standing-orders/x-${n}`,
       worktree: `/pool/x-${n}`,
       now: new Date(Date.now() - n * 60_000),
     });
 
   beforeEach(async () => {
     store = openStore(":memory:");
-    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-console-ev-"));
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-console-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -550,7 +550,7 @@ describe("the operations console", () => {
     register(store, { name: "builder-1", host: "host", capacity: 2, now: new Date() });
     acquire(store, ref, "builder-1", { now: new Date(), ttlMs: 60 * 60_000 });
     store.saveWorktree({
-      path: "/pool/repo/nightorders-t-live-abc123", repo: "/repo/main", branch: "nightorders/t-live",
+      path: "/pool/repo/standing-orders-t-live-abc123", repo: "/repo/main", branch: "standing-orders/t-live",
       runner: "builder-1", taskRef: ref, createdAt: new Date().toISOString(),
       leasedAt: new Date().toISOString(), releasedAt: null, verified: true,
     });
@@ -559,7 +559,7 @@ describe("the operations console", () => {
     const system = await (await fetch(url("/system"), { headers: { cookie } })).text();
     expect(system).toContain('http-equiv="refresh" content="10"');
     expect(system).toContain("1/2 building");
-    expect(system).toContain("nightorders-t-live-abc123");
+    expect(system).toContain("standing-orders-t-live-abc123");
     // The inbox never auto-refreshes: it can hold typed input.
     const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
     expect(inbox).not.toContain('http-equiv="refresh"');
@@ -953,10 +953,10 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
-    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-v2-ev-"));
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-v2-ev-"));
     // Two real directories: A is inside the ceiling, B is not.
-    repoA = realpathSync(mkdtempSync(join(tmpdir(), "nightorders-v2-repoA-")));
-    repoB = realpathSync(mkdtempSync(join(tmpdir(), "nightorders-v2-repoB-")));
+    repoA = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-v2-repoA-")));
+    repoB = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-v2-repoB-")));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -985,7 +985,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     const ref = seedTaskIn(id, repo);
     const run = store.startRun({
       taskRef: ref, leaseId: `lease-${id}`, runner: "b1",
-      branch: `nightorders/${id}`, worktree: `/pool/${id}`, now: T0,
+      branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: T0,
     });
     const decision = store.saveDecision(
       {
@@ -1114,7 +1114,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     const auth = { authorization: `Bearer alex:${approverToken}` };
 
     // Naming an out-of-ceiling project is a refusal, not a fallback.
-    const denied = await fetch(url("/tasks"), { headers: { ...auth, "x-nightorders-project": repoB } });
+    const denied = await fetch(url("/tasks"), { headers: { ...auth, "x-standing-orders-project": repoB } });
     expect(denied.status).toBe(403);
 
     // And the resource ceiling holds without any header games.
@@ -1131,7 +1131,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
   test("a v5 database opens as v6 with the project registry usable", async () => {
     // The in-memory store in this suite was born v6; prove the additive
     // migration by opening a file store twice across the version bump path.
-    const dir = mkdtempSync(join(tmpdir(), "nightorders-v2-mig-"));
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-v2-mig-"));
     try {
       const first = openStore(join(dir, "q.db"));
       first.createTask({ id: "t-old", title: "pre-existing" }, T0);
@@ -1168,7 +1168,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
-    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-board-ev-"));
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-board-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -1198,7 +1198,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     if (!taken.ok) throw new Error("claim refused");
     store.startRun({
       taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
-      branch: "nightorders/t-live", worktree: "/pool/nightorders-t-live-abc",
+      branch: "standing-orders/t-live", worktree: "/pool/standing-orders-t-live-abc",
       model: "claude", now: new Date(now.getTime() - 12 * 60_000),
     });
     store.createTask({ id: "t-ready", title: "all set" }, T0);
@@ -1218,7 +1218,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(board).toContain("builder-1");
     expect(board).toContain("m elapsed");
     expect(board).toContain("claude");
-    expect(board).toContain("nightorders-t-live-abc");
+    expect(board).toContain("standing-orders-t-live-abc");
     expect(board).toContain("all set");
     expect(board).toContain("write its scope");
     // Read-only by construction: an auto-refreshing surface never holds a
@@ -1296,7 +1296,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     store.setPlanState(ref, "drafted");
     const run = store.startRun({
       taskRef: ref, leaseId: "plan-lease", runner: "b", role: "planner",
-      branch: "nightorders-plan/t-plan", worktree: "/pool/plan", now: new Date(),
+      branch: "standing-orders-plan/t-plan", worktree: "/pool/plan", now: new Date(),
     });
     const content = Buffer.from("## Approach\nDo the thing carefully.\n", "utf8");
     const { mkdirSync: mkdirS, writeFileSync: writeS } = await import("node:fs");
@@ -1352,7 +1352,7 @@ describe("the rolled-up board — every project, one ceiling", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
-    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-rollup-ev-"));
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-rollup-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -1469,7 +1469,7 @@ describe("routines — standing orders on the console", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
-    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-routine-ev-"));
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-routine-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -1670,7 +1670,7 @@ describe("routines — standing orders on the console", () => {
 describe("the agents card — configuration, readable at a glance", () => {
   test("says what each phase runs on, who chose it, and that the browser cannot change it", async () => {
     const store = openStore(":memory:");
-    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-agents-ev-"));
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-agents-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "alex", T0);
@@ -1696,7 +1696,7 @@ describe("the agents card — configuration, readable at a glance", () => {
       expect(html).toContain("gpt-5-codex");
       expect(html).toContain("no dollar costs");
       expect(html).toContain("the default — nothing configured"); // repair, untouched
-      expect(html).toContain("nightorders config");
+      expect(html).toContain("standing-orders config");
       expect(html).not.toMatch(/<form[^>]*config/);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -1709,7 +1709,7 @@ describe("the agents card — configuration, readable at a glance", () => {
 describe("mutations from browsers that omit Origin", () => {
   test("absent Origin + valid CSRF proceeds; a present wrong Origin still refuses", async () => {
     const store = openStore(":memory:");
-    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-origin-ev-"));
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-origin-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
     store.createTask({ id: "t-o", title: "w" }, T0);
@@ -1773,7 +1773,7 @@ describe("/next — clearing the queue one thing at a time", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
-    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-next-ev-"));
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-next-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -1885,7 +1885,7 @@ describe("/next — clearing the queue one thing at a time", () => {
 describe("since you last looked", () => {
   test("a return visit says what concluded in between; fragment polls never move the anchor", async () => {
     const store = openStore(":memory:");
-    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-delta-ev-"));
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-delta-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
     const clockBox = { now: new Date() };
@@ -1928,7 +1928,7 @@ describe("since you last looked", () => {
 describe("quick capture — from thought to the approve card in two steps", () => {
   test("title + goal on the inbox lands on the task screen with the step-up ready", async () => {
     const store = openStore(":memory:");
-    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-capture-ev-"));
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-capture-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
     const server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
@@ -1973,7 +1973,7 @@ describe("quick capture — from thought to the approve card in two steps", () =
 describe("the roll-up inbox — every project, one ceiling, links only", () => {
   test("a projectless session sees admitted rows with chips; foreign repos neither render nor count", async () => {
     const store = openStore(":memory:");
-    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-rollup-ev-"));
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-rollup-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
 

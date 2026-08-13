@@ -25,7 +25,7 @@ import { validateNote } from "./decision.js";
 import type { Store, Decision, Notification, TelegramBinding } from "./store.js";
 
 /** The environment name — and therefore the name the builder strips from agents. */
-export const TOKEN_ENV = "NIGHTORDERS_TELEGRAM_TOKEN";
+export const TOKEN_ENV = "STANDING_ORDERS_TELEGRAM_TOKEN";
 
 /** BotFather's shape: numeric bot id, colon, secret. */
 const TOKEN_SHAPE = /^(\d+):[A-Za-z0-9_-]{20,}$/;
@@ -374,7 +374,7 @@ async function deliverOutbox(
     for (const row of claimed) {
       store.finalizeDelivery(row.id, owner, { ok: false, error: "no paired telegram chat" }, clock());
     }
-    report.problems.push("outbox rows are pending but no chat is paired — `nightorders bridge telegram pair`");
+    report.problems.push("outbox rows are pending but no chat is paired — `standing-orders bridge telegram pair`");
     return;
   }
 
@@ -844,7 +844,7 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     (action.messageId !== null && action.messageId !== String(message.message_id))
   ) {
     // Bound person, dead or foreign button: acknowledged, not acted on.
-    ack("that button is stale — nightorders decide shows what still waits");
+    ack("that button is stale — standing-orders decide shows what still waits");
     report.ignored++;
     return;
   }
