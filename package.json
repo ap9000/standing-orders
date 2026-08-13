@@ -29,7 +29,7 @@
   },
   "homepage": "https://github.com/ap9000/standing-orders#readme",
   "bin": {
-    "standing-orders": "./dist/cli.js"
+    "standing-orders": "dist/cli.js"
   },
   "engines": {
     "node": ">=22.13.0"
