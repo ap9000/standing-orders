@@ -195,6 +195,28 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **done** — 2026-08-13 | Alex ran `npm publish` (with the 2FA the registry demanded). The first attempt was refused and thereby caught a shipping bug: npm's normalizer silently deletes a `./`-prefixed bin path, which would have published a package `npx` could not invoke — fixed in `e0a75c3` before anything reached the registry. Verified after: `npm view standing-orders` shows 0.1.0 with `bin = { 'standing-orders': 'dist/cli.js' }`, and a cold `npx -y standing-orders@0.1.0 --help` from the registry in a scratch directory with its own npm cache printed the real usage screen. `git tag m4` follows this verification, in this same commit's push |
 
+## M5 — foundations + see the work (2026-08-13, the competitive round: two research passes + Codex review; scratchpad roadmap-m5-final.md + codex-roadmap-findings.md ARE the spec)
+
+The strategy Codex endorsed: the field optimizes live steering; unattended
+with phone check-ins is the blind spot and we hold six of its seven
+requirements. Close the see-the-work table stakes, surface what is already
+recorded, keep every invariant. Notable rulings absorbed: reportsCost stays
+claude-only (tokens are not dollars — flipping it would fake a dollar
+ceiling); merge-when-green is out (a standing grant cannot make a merge
+reversible, and the plane executing merges would end PR-as-terminus) —
+replaced by a read-only review queue; the v1 diff is the immutable terminal
+diff, because during the agent turn HEAD must equal base by design.
+
+| Item | State | Proof |
+|---|---|---|
+| Envelope contract — one versioned machine shape | **done** | src/envelope.ts: `envelopeJson` stamps `envelopeVersion` 1 ahead of `ok`/`command`; all ~35 emission sites in operate.ts + cli.ts route through it (the sed left zero `JSON.stringify({ ok` — enforced by a source-rule test); scan/pulls/graph joined the envelope (pulls' bare array and graph's naked object were pre-1.0 wire breaks taken deliberately, empty-repo cases now fail as `no-repositories` instead of printing `[]`); `standing-orders contract` states the version + bounded capability tokens (envelope/1, stable-reasons, idempotency-keys, exit-codes/0-1-2-3, output-file), consumers told to ignore unknowns; `-o <file>` at the entry point tees the captured envelope to a file (requires --json, refused as usage otherwise) so an agent reads its answer from a path, not scrollback; envelope.test.ts (8) sweeps success/failure envelopes across eight subsystems |
+| Provider audit + init-failure gating | in progress | — |
+| Immutable terminal diff per run | not started | — |
+| Machine-phase activity chip | not started | — |
+| Evidence-first screens + attempt ledger | not started | — |
+| Cost surfaced honestly (tokens ≠ dollars) | not started | — |
+| Per-repo approved worktree setup | not started | — |
+
 ## The primary messenger (2026-08-13, the operator's ask: "ask which service… allow selection of primary")
 
 Exactly ONE service carries the pages. `effectivePrimary` resolves it:

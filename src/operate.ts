@@ -39,6 +39,7 @@ import {
 } from "./store.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { envelopeJson } from "./envelope.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -532,7 +533,7 @@ async function readyCommand(
 
     const tasks = result.value;
     if (json) {
-      write(JSON.stringify({ ok: tasks.length > 0, command: "ready", backend: backendName, count: tasks.length, tasks }, null, 2));
+      write(envelopeJson({ ok: tasks.length > 0, command: "ready", backend: backendName, count: tasks.length, tasks }));
       return tasks.length > 0 ? EXIT.ok : EXIT.refused;
     }
     if (tasks.length === 0) {
@@ -547,7 +548,7 @@ async function readyCommand(
   const ready = store.listReady(now);
 
   if (json) {
-    write(JSON.stringify({ ok: ready.length > 0, command: "ready", count: ready.length, tasks: ready.map(ref => describeRef(store, ref, now)) }, null, 2));
+    write(envelopeJson({ ok: ready.length > 0, command: "ready", count: ready.length, tasks: ready.map(ref => describeRef(store, ref, now)) }));
     return ready.length > 0 ? EXIT.ok : EXIT.refused;
   }
 
@@ -718,7 +719,7 @@ function reapCommand(context: Context): number {
   const reaped = reap(store, now);
 
   if (json) {
-    write(JSON.stringify({ ok: true, command: "reap", count: reaped.length, released: reaped }, null, 2));
+    write(envelopeJson({ ok: true, command: "reap", count: reaped.length, released: reaped }));
     return EXIT.ok;
   }
 
@@ -751,7 +752,7 @@ function runnerCommand(
   if (action === "list" || action === undefined) {
     const runners = store.listRunners().map(one => ({ ...one, alive: isAlive(one, now) }));
     if (json) {
-      write(JSON.stringify({ ok: true, command: "runner list", count: runners.length, runners }, null, 2));
+      write(envelopeJson({ ok: true, command: "runner list", count: runners.length, runners }));
       return EXIT.ok;
     }
     if (runners.length === 0) {
@@ -827,7 +828,7 @@ function runnerCommand(
     );
 
     if (json) {
-      write(JSON.stringify({ ok: true, command: "runner reap", recovered }, null, 2));
+      write(envelopeJson({ ok: true, command: "runner reap", recovered }));
       return EXIT.ok;
     }
     if (recovered.length === 0) {
@@ -1811,7 +1812,7 @@ function gapsCommand(flags: Map<string, string | true>, context: Context): numbe
   const gaps = computeGaps(store, repo, clock());
 
   if (json) {
-    write(JSON.stringify({ ok: true, command: "gaps", repo, gaps }, null, 2));
+    write(envelopeJson({ ok: true, command: "gaps", repo, gaps }));
     return gaps.length === 0 ? EXIT.ok : EXIT.refused;
   }
   if (gaps.length === 0) {
@@ -1909,7 +1910,7 @@ async function briefCommand(
 
   if (json) {
     write(
-      JSON.stringify(
+      envelopeJson(
         {
           ok: true,
           command: "brief",
@@ -1930,8 +1931,6 @@ async function briefCommand(
           incidents,
           stranded,
         },
-        null,
-        2,
       ),
     );
     return EXIT.ok;
@@ -2044,7 +2043,7 @@ async function decideCommand(
   if (idText === undefined) {
     const waiting = store.listDecisions("unanswered");
     if (json) {
-      write(JSON.stringify({ ok: true, command: "decide", waiting }, null, 2));
+      write(envelopeJson({ ok: true, command: "decide", waiting }));
       return waiting.length === 0 ? EXIT.ok : EXIT.refused;
     }
     if (waiting.length === 0) {
@@ -2077,7 +2076,7 @@ async function decideCommand(
     const run = store.getRun(decision.run);
     const taskId = run === null ? "?" : store.externalIdFor(run.taskRef) ?? "?";
     if (json) {
-      write(JSON.stringify({ ok: true, command: "decide", decision, taskId, evidence }, null, 2));
+      write(envelopeJson({ ok: true, command: "decide", decision, taskId, evidence }));
       return EXIT.ok;
     }
     write(`${taskId} — ${decision.state.toUpperCase()}${decision.deadline === null ? "" : ` · deadline ${decision.deadline}`}`);
@@ -2198,7 +2197,7 @@ async function serveCommand(
   const bound = server.address();
   const actual = typeof bound === "object" && bound !== null ? bound.port : port;
   if (json) {
-    write(JSON.stringify({ ok: true, command: "serve", host, port: actual }, null, 2));
+    write(envelopeJson({ ok: true, command: "serve", host, port: actual }));
   } else {
     write(`Decisions at http://${host}:${actual}/ — sign in with your approver name and token.`);
     write("Plain HTTP: keep it on localhost or a tailnet, and put TLS in front for anything else.");
@@ -2305,7 +2304,7 @@ async function incidentCommand(
   if (action === undefined || action === "list") {
     const incidents = store.openIncidents();
     if (json) {
-      write(JSON.stringify({ ok: true, command: "incident list", incidents }, null, 2));
+      write(envelopeJson({ ok: true, command: "incident list", incidents }));
       return incidents.length === 0 ? EXIT.ok : EXIT.refused;
     }
     if (incidents.length === 0) {
@@ -2368,7 +2367,7 @@ async function webhookCommand(
     const consoleUrl = loadConsoleUrl(process.env, dir);
     const primary = effectivePrimary(process.env, dir, telegramConfigured);
     if (json) {
-      write(JSON.stringify({ ok: true, command: "webhook status", configured: primary.configured, primary: primary.channel, implicit: primary.implicit, consoleUrl }, null, 2));
+      write(envelopeJson({ ok: true, command: "webhook status", configured: primary.configured, primary: primary.channel, implicit: primary.implicit, consoleUrl }));
       return EXIT.ok;
     }
     write(`Messaging${primary.configured.length === 0 ? ": nothing configured" : ""}`);
@@ -2514,7 +2513,7 @@ async function providersCommand(
   }
 
   if (json) {
-    write(JSON.stringify({ ok: true, command: "providers", providers: report }, null, 2));
+    write(envelopeJson({ ok: true, command: "providers", providers: report }));
     return EXIT.ok;
   }
   for (const one of report) {
@@ -2571,7 +2570,7 @@ async function configCommand(
       };
     });
     if (json) {
-      write(JSON.stringify({ ok: true, command: "config show", installation, project, resolved }, null, 2));
+      write(envelopeJson({ ok: true, command: "config show", installation, project, resolved }));
       return EXIT.ok;
     }
     write(`Effective phase agents${scope === INSTALLATION_SCOPE ? "" : ` for ${scope}`}:`);
@@ -2657,7 +2656,7 @@ async function routineCommand(
       repoFilter === undefined ? null : canonicalProject(repoFilter) ?? resolve(repoFilter),
     );
     if (json) {
-      write(JSON.stringify({ ok: true, command: "routine list", routines }, null, 2));
+      write(envelopeJson({ ok: true, command: "routine list", routines }));
       return EXIT.ok;
     }
     if (routines.length === 0) {
@@ -2722,7 +2721,7 @@ async function routineCommand(
     case "show": {
       const fires = store.routineFires(routine.id, 14);
       if (json) {
-        write(JSON.stringify({ ok: true, command: "routine show", routine, fires }, null, 2));
+        write(envelopeJson({ ok: true, command: "routine show", routine, fires }));
         return EXIT.ok;
       }
       const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
@@ -2767,7 +2766,7 @@ async function routineCommand(
       const armed = (flags.has("yes") || confirmedAloud) && saw !== undefined && asWho !== undefined && token !== undefined;
       if (!armed) {
         if (json) {
-          write(JSON.stringify({ ok: false, command: "routine approve", reason: "unconfirmed", routine }, null, 2));
+          write(envelopeJson({ ok: false, command: "routine approve", reason: "unconfirmed", routine }));
           return EXIT.refused;
         }
         write(`Would approve this standing order — every firing of it builds without asking:`);
@@ -2901,7 +2900,7 @@ async function daemonCommand(
 
     if (flags.has("dry-run")) {
       if (json) {
-        write(JSON.stringify({ ok: true, command: "daemon install", dryRun: true, plan }, null, 2));
+        write(envelopeJson({ ok: true, command: "daemon install", dryRun: true, plan }));
         return EXIT.ok;
       }
       write(`Would write ${plan.unitPath}:`);
@@ -2943,7 +2942,7 @@ async function daemonCommand(
   if (action === "status") {
     const state = await daemonStatus(plan, supervise);
     if (json) {
-      write(JSON.stringify({ ok: true, command: "daemon status", ...state, label: plan.label, logs: plan.logPath }, null, 2));
+      write(envelopeJson({ ok: true, command: "daemon status", ...state, label: plan.label, logs: plan.logPath }));
       return state.state === "running" ? EXIT.ok : EXIT.refused;
     }
     write(`${plan.label}: ${state.detail}`);
@@ -3296,7 +3295,7 @@ async function bridgeCommand(
     const pending = store.listNotifications("pending").length;
     if (json) {
       write(
-        JSON.stringify(
+        envelopeJson(
           {
             ok: true,
             command: "bridge status",
@@ -3305,8 +3304,6 @@ async function bridgeCommand(
             approver: binding?.approver ?? null,
             outboxPending: pending,
           },
-          null,
-          2,
         ),
       );
       return EXIT.ok;
@@ -3532,7 +3529,7 @@ async function publishCommand(
     const grant = store.publicationGrantFor(repo);
     const pending = store.pendingPublications();
     if (json) {
-      write(JSON.stringify({ ok: true, command: "publish status", grant, pending }, null, 2));
+      write(envelopeJson({ ok: true, command: "publish status", grant, pending }));
       return EXIT.ok;
     }
     write(grant === null ? "No live publication grant." : `Granted by ${grant.grantedBy} at ${grant.grantedAt}:`);
@@ -3591,7 +3588,7 @@ async function outboxCommand(
     const wanted = flags.has("all") ? "all" : "pending";
     const notifications = store.listNotifications(wanted);
     if (json) {
-      write(JSON.stringify({ ok: true, command: "outbox list", notifications }, null, 2));
+      write(envelopeJson({ ok: true, command: "outbox list", notifications }));
       return EXIT.ok;
     }
     if (notifications.length === 0) {
@@ -3656,7 +3653,7 @@ async function outboxCommand(
 
     const code = failed > 0 ? EXIT.failed : EXIT.ok;
     if (json) {
-      write(JSON.stringify({ ok: failed === 0, command: "outbox deliver", delivered, failed }, null, 2));
+      write(envelopeJson({ ok: failed === 0, command: "outbox deliver", delivered, failed }));
       return code;
     }
     write(`Delivered ${delivered}, failed ${failed}.`);
@@ -3720,7 +3717,7 @@ async function enrollCommand(
 
   if (!flags.has("yes")) {
     if (json) {
-      write(JSON.stringify({ ok: false, command: "enroll", reason: "unconfirmed", grant }, null, 2));
+      write(envelopeJson({ ok: false, command: "enroll", reason: "unconfirmed", grant }));
       return EXIT.refused;
     }
     write("Would grant write access:");
@@ -3748,7 +3745,7 @@ function grantsCommand(context: Context): number {
   const grants = store.listGrants();
 
   if (json) {
-    write(JSON.stringify({ ok: true, command: "grants", count: grants.length, grants }, null, 2));
+    write(envelopeJson({ ok: true, command: "grants", count: grants.length, grants }));
     return EXIT.ok;
   }
   if (grants.length === 0) {
@@ -4036,7 +4033,7 @@ async function capCommand(
   if (action === "list" || action === undefined) {
     const capabilities = store.listCapabilities(repo);
     if (json) {
-      write(JSON.stringify({ ok: true, command: "cap list", repo, capabilities }, null, 2));
+      write(envelopeJson({ ok: true, command: "cap list", repo, capabilities }));
       return EXIT.ok;
     }
     if (capabilities.length === 0) {
@@ -4073,7 +4070,7 @@ async function capCommand(
       recorded++;
     }
     if (json) {
-      write(JSON.stringify({ ok: true, command: "cap scan", repo, recorded, ...report }, null, 2));
+      write(envelopeJson({ ok: true, command: "cap scan", repo, recorded, ...report }));
       return EXIT.ok;
     }
     if (report.found.length === 0) {
@@ -4111,7 +4108,7 @@ async function capCommand(
         `  ${`${one.kind}:${one.name}`.padEnd(32)} ${one.status}${one.detail === undefined ? "" : `  ${one.detail}`}`,
       );
     if (json) {
-      write(JSON.stringify({ ok: true, command: "cap probe", repo, outcomes }, null, 2));
+      write(envelopeJson({ ok: true, command: "cap probe", repo, outcomes }));
     } else {
       write(lines().join("\n"));
     }
@@ -4133,7 +4130,7 @@ function listTasks(flags: Map<string, string | true>, context: Context): number 
   const tasks = store.listTasks(wanted as TaskState | undefined);
 
   if (json) {
-    write(JSON.stringify({ ok: true, command: "task list", count: tasks.length, tasks }, null, 2));
+    write(envelopeJson({ ok: true, command: "task list", count: tasks.length, tasks }));
     return EXIT.ok;
   }
   if (tasks.length === 0) {
@@ -4342,7 +4339,7 @@ async function approveTask(
     saw !== undefined && asWho !== undefined && token !== undefined;
   if (!armed) {
     if (json) {
-      write(JSON.stringify({ ok: false, command: "task approve", reason: "unconfirmed", scope }, null, 2));
+      write(envelopeJson({ ok: false, command: "task approve", reason: "unconfirmed", scope }));
       return EXIT.refused;
     }
     write(`Would approve this, and let a builder work on ${id}:`);
@@ -4420,7 +4417,7 @@ async function approverCommand(
   if (action === "list" || action === undefined) {
     const approvers = store.listApprovers();
     if (json) {
-      write(JSON.stringify({ ok: true, command: "approver list", approvers }, null, 2));
+      write(envelopeJson({ ok: true, command: "approver list", approvers }));
       return EXIT.ok;
     }
     if (approvers.length === 0) {
@@ -4547,7 +4544,7 @@ function succeed(
   data: Record<string, unknown>,
   lines: () => string[],
 ): number {
-  write(json ? JSON.stringify({ ok: true, command, ...data }, null, 2) : lines().join("\n"));
+  write(json ? envelopeJson({ ok: true, command, ...data }) : lines().join("\n"));
   return EXIT.ok;
 }
 
@@ -4565,7 +4562,7 @@ function fail(
   code: number,
   extra: Record<string, unknown> = {},
 ): number {
-  write(json ? JSON.stringify({ ok: false, command, reason, message, ...extra }, null, 2) : message);
+  write(json ? envelopeJson({ ok: false, command, reason, message, ...extra }) : message);
   return code;
 }
 

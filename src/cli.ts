@@ -11,11 +11,12 @@
  * should not have to parse a column layout.
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
+import { CAPABILITIES, ENVELOPE_VERSION, capturedEnvelope, envelopeJson, resetCapturedEnvelope } from "./envelope.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
 import {
@@ -72,6 +73,7 @@ Usage
   standing-orders repos remove <path>
   standing-orders link             put \`standing-orders\` on your PATH
   standing-orders unlink           take it off again
+  standing-orders contract         the machine contract: envelope version + capabilities
 
 Operating the queue — see \`standing-orders task\` for the whole surface
   standing-orders ready            what could be dispatched right now
@@ -92,6 +94,7 @@ Options
   --dirty       also read each working tree for uncommitted files
   --local       branches only: no network, no pull requests, no issues
   --json        emit a machine-readable envelope instead of a report
+  -o <file>     also write that envelope to a file (requires --json)
   -h, --help    show this
 
 Nothing is written, installed, or configured. Every repository is read
@@ -193,15 +196,70 @@ const OPERATE_COMMANDS = new Set([
 /** binSource exists so tests can exercise linking without depending on a build. */
 export type MainOptions = { binSource?: string; operate?: OperateOptions };
 
+/**
+ * Strip `-o <file>` / `--output <file>` before dispatch. The flag belongs to
+ * the entry point, not to any one command: after the command runs, whatever
+ * envelope it serialized is copied to the file, so an agent reads its answer
+ * from a path instead of scraping a terminal. Requires `--json`, because the
+ * file receives the machine envelope and nothing else does.
+ */
+export function extractOutputFlag(
+  argv: readonly string[],
+): { args: string[]; outputFile?: string } | { error: string } {
+  const args: string[] = [];
+  let outputFile: string | undefined;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "-o" || arg === "--output") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("-")) {
+        return { error: `${arg} takes a file path` };
+      }
+      outputFile = value;
+      i += 1;
+      continue;
+    }
+    args.push(arg as string);
+  }
+  return { args, ...(outputFile === undefined ? {} : { outputFile }) };
+}
+
 export async function main(
   argv: readonly string[],
   write: Write = line => console.log(line),
   mainOptions: MainOptions = {},
 ): Promise<number> {
+  const extracted = extractOutputFlag(argv);
+  if ("error" in extracted) {
+    write(extracted.error);
+    return USAGE_EXIT;
+  }
+  const { args, outputFile } = extracted;
+  if (outputFile !== undefined && !args.includes("--json")) {
+    write("-o requires --json — the output file receives the machine envelope");
+    return USAGE_EXIT;
+  }
+
+  resetCapturedEnvelope();
+  const code = await dispatch(args, write, mainOptions);
+
+  if (outputFile !== undefined) {
+    const captured = capturedEnvelope();
+    if (captured !== null) writeFileSync(outputFile, `${captured}\n`);
+  }
+  return code;
+}
+
+async function dispatch(
+  argv: readonly string[],
+  write: Write,
+  mainOptions: MainOptions,
+): Promise<number> {
   const [first, ...rest] = argv;
   if (first === "link" || first === "unlink") {
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
+  if (first === "contract") return runContractCommand(rest, write);
   if (first === "repos") return runReposCommand(rest, write);
   if (first === "pulls") return runPullsCommand(rest, write);
   if (first === "graph") return runGraphCommand(rest, write);
@@ -443,7 +501,7 @@ async function runPullsCommand(argv: readonly string[], write: Write): Promise<n
 
   const { present, missing } = partitionRoots(targets, existsSync);
   if (present.length === 0) {
-    write(json ? "[]" : describeMissing(missing));
+    write(json ? envelopeJson({ ok: false, command: "pulls", reason: "no-repositories", message: describeMissing(missing), groups: [] }) : describeMissing(missing));
     return USAGE_EXIT;
   }
 
@@ -454,7 +512,11 @@ async function runPullsCommand(argv: readonly string[], write: Write): Promise<n
     }),
   );
 
-  write(json ? JSON.stringify(groups, null, 2) : renderPulls(groups, { now: new Date() }));
+  write(
+    json
+      ? envelopeJson({ ok: true, command: "pulls", count: groups.length, groups })
+      : renderPulls(groups, { now: new Date() }),
+  );
   return 0;
 }
 
@@ -478,7 +540,7 @@ async function runGraphCommand(argv: readonly string[], write: Write): Promise<n
 
   const { present, missing } = partitionRoots(targets, existsSync);
   if (present.length === 0) {
-    write(json ? "[]" : describeMissing(missing));
+    write(json ? envelopeJson({ ok: false, command: "graph", reason: "no-repositories", message: describeMissing(missing), detections: [] }) : describeMissing(missing));
     return USAGE_EXIT;
   }
 
@@ -501,7 +563,7 @@ async function runGraphCommand(argv: readonly string[], write: Write): Promise<n
 
   write(
     json
-      ? JSON.stringify(envelope, null, 2)
+      ? envelopeJson({ ok: true, command: "graph", ...envelope })
       : renderGraph(detections, enrolled === undefined ? {} : { enrolled }),
   );
   return 0;
@@ -705,6 +767,29 @@ async function runUnlink(dir: string, yes: boolean, write: Write): Promise<numbe
 }
 
 /**
+ * `contract` is the machine contract, stated by the machine: the envelope
+ * version and the capability tokens an agent consumer can feature-detect on.
+ * Behaviors, not versions — consumers ignore tokens they do not recognize.
+ */
+function runContractCommand(argv: readonly string[], write: Write): number {
+  const json = argv.includes("--json");
+  if (json) {
+    write(envelopeJson({ ok: true, command: "contract", capabilities: [...CAPABILITIES] }));
+    return 0;
+  }
+  write(`standing-orders machine contract — envelope v${ENVELOPE_VERSION}`);
+  write("");
+  write("Every --json answer is one envelope on stdout: { envelopeVersion, ok,");
+  write("command, ... } — failures add a stable `reason` token and a human");
+  write("`message`. Consumers must ignore keys and capabilities they do not");
+  write("recognize.");
+  write("");
+  write("Capabilities:");
+  for (const capability of CAPABILITIES) write(`  ${capability}`);
+  return 0;
+}
+
+/**
  * The machine-readable envelope. Remote state is folded into each repository
  * rather than sitting in a parallel map, so a consumer never has to join two
  * collections to answer "what is happening in this repo" — and `remoteRead`
@@ -734,17 +819,15 @@ function renderJson(
     };
   });
 
-  return JSON.stringify(
-    {
-      scannedAt: now.toISOString(),
-      roots,
-      missingRoots,
-      remoteRead: remote !== undefined,
-      repos: withRemote,
-    },
-    null,
-    2,
-  );
+  return envelopeJson({
+    ok: true,
+    command: "scan",
+    scannedAt: now.toISOString(),
+    roots,
+    missingRoots,
+    remoteRead: remote !== undefined,
+    repos: withRemote,
+  });
 }
 
 /**
