@@ -37,6 +37,8 @@ import {
   type TaskState,
 } from "./store.js";
 import type { ParsedDecision, Problem } from "./decision.js";
+import { digestOf } from "./scope.js";
+import type { ParsedPlan } from "./plan.js";
 import { PROVIDER_BINARY } from "./invoke.js";
 
 export type Claim = {
@@ -220,11 +222,38 @@ export function acquireIfReady(
     maxOpenDecisions?: number;
     /** The model this dispatch would run — the quota scope. */
     model?: string;
+    /** What this dispatch is FOR. Re-proved inside the transaction — the
+     * caller's survey is not trusted (Codex planning review, finding 2). */
+    dispatchRole?: "builder" | "planner";
   },
 ): AcquireResult | NotReady {
+  const role = options.dispatchRole ?? "builder";
   return inTransaction(store, () => {
     const why = notReady(store, taskRef, options.now);
     if (why !== null) return { ok: false as const, reason: "not-ready" as const, message: why };
+
+    // The role's own precondition, re-read where the write lock has pinned
+    // it — never an early return past the shared gates below. A planner
+    // dispatches exactly when the operator asked and no promise exists yet;
+    // a builder dispatches exactly when the promise is approved.
+    const approvedScope = store.handle
+      .prepare(
+        `SELECT 1 AS hit FROM task_scope
+         JOIN task_ref ON task_ref.id = ? AND task_scope.task_id = task_ref.external_id
+         WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL`,
+      )
+      .get(taskRef);
+    if (role === "planner") {
+      const ref = store.refForId(taskRef);
+      if (ref?.plan !== "requested") {
+        return { ok: false as const, reason: "not-ready" as const, message: "no plan was requested" };
+      }
+      if (approvedScope !== undefined) {
+        return { ok: false as const, reason: "not-ready" as const, message: "the scope is already approved — nothing left to plan" };
+      }
+    } else if (approvedScope === undefined) {
+      return { ok: false as const, reason: "not-ready" as const, message: "the scope is not approved" };
+    }
     // Capabilities are re-read inside the same transaction as the CAS, like
     // every other readiness fact: a key that expired between the survey and
     // the take must not be dispatched on the survey's answer.
@@ -252,15 +281,12 @@ export function acquireIfReady(
     // pass cannot also treat it as open.
     const scope = options.model ?? "";
     const quota = store.quotaState(runner, PROVIDER_BINARY, scope, options.now);
-    if (quota !== null) {
-      if (quota.state === "exhausted") {
-        return {
-          ok: false as const,
-          reason: "quota" as const,
-          message: `${runner}'s provider quota is exhausted (${quota.reason})${quota.resetAt === null ? "" : ` until ${quota.resetAt}`} — a free slot against an exhausted quota is not capacity`,
-        };
-      }
-      store.consumeHalfOpen(runner, PROVIDER_BINARY, scope, options.now);
+    if (quota !== null && quota.state === "exhausted") {
+      return {
+        ok: false as const,
+        reason: "quota" as const,
+        message: `${runner}'s provider quota is exhausted (${quota.reason})${quota.resetAt === null ? "" : ` until ${quota.resetAt}`} — a free slot against an exhausted quota is not capacity`,
+      };
     }
     // The attention budget (§8, gate 6), proved where every other readiness
     // fact is proved. A phone with thirty open questions answers none of
@@ -269,6 +295,15 @@ export function acquireIfReady(
     // — a rate nobody measured is not a rate.
     const budget = options.maxOpenDecisions ?? DEFAULT_MAX_OPEN_DECISIONS;
     if (store.countUnanswered() >= budget) {
+      // A planner exists to generate questions; above the budget it is
+      // refused outright — no zero-rate first-timer pass (finding 2).
+      if (role === "planner") {
+        return {
+          ok: false as const,
+          reason: "attention-budget" as const,
+          message: `${store.countUnanswered()} decisions already wait — a planner would only add more; answer some first`,
+        };
+      }
       const rate = store.refForId(taskRef)?.parkRate ?? 0;
       if (rate > 0) {
         return {
@@ -278,7 +313,15 @@ export function acquireIfReady(
         };
       }
     }
-    return acquireLocked(store, taskRef, runner, options);
+    const taken = acquireLocked(store, taskRef, runner, options);
+    // The half-open probe slot is consumed only WITH the claim it admits —
+    // an attention refusal or a lost CAS must not re-arm the quota as
+    // exhausted with no probe in flight (finding 3). Same transaction, so
+    // consume-with-claim is all-or-nothing.
+    if (taken.ok && quota !== null) {
+      store.consumeHalfOpen(runner, PROVIDER_BINARY, scope, options.now);
+    }
+    return taken;
   });
 }
 

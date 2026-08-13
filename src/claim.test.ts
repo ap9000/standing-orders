@@ -17,6 +17,16 @@ import {
 } from "./claim.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
+
+/** acquireIfReady now re-proves the approved scope for builder dispatches
+ * (Codex planning review, finding 2) — these tests approve by hand. */
+function approveScopeFor(store: Store, taskId: string): void {
+  store.saveScope({
+    taskId, goal: "the work", outOfScope: null, touches: [],
+    proposedAt: "2026-08-11T00:00:00.000Z", digest: `dg-${taskId}`,
+    approvedAt: "2026-08-11T00:00:00.000Z", approvedBy: "alex", approvedDigest: `dg-${taskId}`,
+  });
+}
 const later = (ms: number) => new Date(T0.getTime() + ms);
 
 /** Lease ids are opaque; naming them makes a fencing failure readable. */
@@ -32,6 +42,7 @@ describe("claim", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -300,7 +311,9 @@ describe("reap", () => {
 
   test("releases what has run out and leaves what has not", () => {
     store.createTask({ id: "a", title: "a" }, T0);
+    approveScopeFor(store, "a");
     store.createTask({ id: "b", title: "b" }, T0);
+    approveScopeFor(store, "b");
     const a = store.refFor("built-in", "a").id;
     const b = store.refFor("built-in", "b").id;
 
@@ -319,6 +332,7 @@ describe("reap", () => {
 
   test("does not reap the same lease twice", () => {
     store.createTask({ id: "a", title: "a" }, T0);
+    approveScopeFor(store, "a");
     const a = store.refFor("built-in", "a").id;
     acquire(store, a, "runner-a", { now: T0, ttlMs: 60_000 });
 
@@ -335,6 +349,7 @@ describe("duplicate completion", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -373,6 +388,7 @@ describe("a completion that happened, retried late", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -407,6 +423,7 @@ describe("acquireIfReady", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -447,6 +464,7 @@ describe("acquireIfReady", () => {
 
   test("refuses a task whose blocker is not done, and names the blocker", () => {
     store.createTask({ id: "t-0", title: "first" }, T0);
+    approveScopeFor(store, "t-0");
     store.addEdge("t-1", "t-0");
 
     const result = acquireIfReady(store, task, "runner-a", { now: later(1_000) });
@@ -470,6 +488,7 @@ describe("completeFenced", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -528,6 +547,7 @@ describe("release provenance", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -608,6 +628,7 @@ describe("the capability gate in acquireIfReady", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
     store.setRequirements(task, ["env:SUPABASE_KEY"]);
   });
@@ -661,8 +682,15 @@ describe("the capability gate in acquireIfReady", () => {
   test("the task's own placement outranks the dispatcher's repo", () => {
     // Verified where the dispatch is running, but the task lives elsewhere,
     // and elsewhere has nothing recorded — the task's placement is the truth.
+    // Placement must precede the scope row: placeTask refuses to re-aim an
+    // already-scoped task.
+    store.createTask({ id: "t-placed", title: "placed" }, later(1))
+    const placed = store.refFor("built-in", "t-placed").id;
+    store.setRequirements(placed, ["env:SUPABASE_KEY"]);
     store.saveCapability(cap({ status: "verified" }));
-    store.placeTask(task, "/code/other");
+    store.placeTask(placed, "/code/other");
+    approveScopeFor(store, "t-placed");
+    const task = placed;
 
     const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
 
@@ -675,6 +703,7 @@ describe("the capability gate in acquireIfReady", () => {
 
   test("a task requiring nothing is untouched by all of this", () => {
     store.createTask({ id: "t-2", title: "free" }, T0);
+    approveScopeFor(store, "t-2");
     const free = store.refFor("built-in", "t-2").id;
 
     const result = acquireIfReady(store, free, "runner-a", { now: T0, newLeaseId: ids("lease-f") });
@@ -703,6 +732,7 @@ describe("sealing a park", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -850,6 +880,7 @@ describe("the resume and the attention budget", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -959,6 +990,7 @@ describe("the resume and the attention budget", () => {
 
     // A task that has never parked is not punished for the backlog.
     store.createTask({ id: "fresh", title: "x" }, T0);
+    approveScopeFor(store, "fresh");
     const fresh = store.refFor("built-in", "fresh").id;
     const taken = acquireIfReady(store, fresh, "runner-a", { now: later(2_000) });
     expect(taken).toMatchObject({ ok: true });
@@ -994,6 +1026,7 @@ describe("the failure taxonomy, fenced", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
 
@@ -1095,6 +1128,7 @@ describe("the failure taxonomy, fenced", () => {
 
   test("stranded work is derived, named, and freed by requeueing the blocker", () => {
     store.createTask({ id: "t-2", title: "dependent" }, T0);
+    approveScopeFor(store, "t-2");
     store.addEdge("t-2", "t-1");
     store.setTaskState("t-1", "failed", later(1_000));
 
@@ -1113,7 +1147,9 @@ describe("capacity and quota, at the claim", () => {
   beforeEach(() => {
     store = openStore(":memory:");
     store.createTask({ id: "t-a", title: "a" }, T0);
+    approveScopeFor(store, "t-a");
     store.createTask({ id: "t-b", title: "b" }, T0);
+    approveScopeFor(store, "t-b");
     a = store.refFor("built-in", "t-a").id;
     b = store.refFor("built-in", "t-b").id;
   });

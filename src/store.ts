@@ -77,6 +77,10 @@ export type TaskRef = {
   parkRate: number;
   /** Consecutive concluded failures. Three stalls the task; any success resets. */
   strikes: number;
+  /** Planning mode: 'requested' dispatches a planner; 'drafted' awaits review. */
+  plan: "requested" | "drafted" | null;
+  /** Planning failures, counted apart from build strikes by design. */
+  planStrikes: number;
   /** Recorded, not asserted: what the grant's selector is checked against. */
   origin: TaskOrigin;
 };
@@ -2350,6 +2354,64 @@ export class Store {
   }
 
   /** One more consecutive failure. Returns the new count. */
+  /**
+   * The operator's explicit ask: plan this before anything builds. Refused
+   * transactionally when the moment has passed — an approved scope means
+   * the promise is already made, a live claim means the machine is already
+   * spending, and a plan already under way needs no second request.
+   */
+  requestPlan(taskRef: number, now: Date): { ok: true } | { ok: false; reason: string } {
+    return this.transact(() => {
+      const ref = this.db.prepare("SELECT * FROM task_ref WHERE id = ?").get(taskRef);
+      if (ref === undefined) return { ok: false as const, reason: "no such task reference" };
+      const task = this.db
+        .prepare("SELECT state FROM task WHERE id = ?")
+        .get(String(ref["external_id"]));
+      if (task === undefined) return { ok: false as const, reason: "no such task" };
+      if (String(task["state"]) !== "queued") {
+        return { ok: false as const, reason: `state is ${String(task["state"])}, not queued` };
+      }
+      if (ref["plan"] !== null && ref["plan"] !== undefined) {
+        return { ok: false as const, reason: `a plan is already ${String(ref["plan"])}` };
+      }
+      const approved = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM task_scope
+           WHERE task_id = ? AND approved_digest = digest AND approved_at IS NOT NULL`,
+        )
+        .get(String(ref["external_id"]));
+      if (approved !== undefined) {
+        return { ok: false as const, reason: "the scope is already approved — planning happens before the promise, not after" };
+      }
+      const live = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM claim WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?`,
+        )
+        .get(taskRef, now.toISOString());
+      if (live !== undefined) {
+        return { ok: false as const, reason: "a runner holds this task right now" };
+      }
+      this.db.prepare("UPDATE task_ref SET plan = 'requested' WHERE id = ?").run(taskRef);
+      this.bumpWake();
+      return { ok: true as const };
+    });
+  }
+
+  /** Move the planning state; null clears it. Caller owns the transaction story. */
+  setPlanState(taskRef: number, state: "requested" | "drafted" | null): void {
+    this.db.prepare("UPDATE task_ref SET plan = ? WHERE id = ?").run(state, taskRef);
+  }
+
+  addPlanStrike(taskRef: number): number {
+    this.db.prepare("UPDATE task_ref SET plan_strikes = plan_strikes + 1 WHERE id = ?").run(taskRef);
+    const row = this.db.prepare("SELECT plan_strikes FROM task_ref WHERE id = ?").get(taskRef);
+    return Number(row?.["plan_strikes"] ?? 0);
+  }
+
+  resetPlanStrikes(taskRef: number): void {
+    this.db.prepare("UPDATE task_ref SET plan_strikes = 0 WHERE id = ?").run(taskRef);
+  }
+
   addStrike(taskRef: number): number {
     this.db.prepare("UPDATE task_ref SET strikes = strikes + 1 WHERE id = ?").run(taskRef);
     const row = this.db.prepare("SELECT strikes FROM task_ref WHERE id = ?").get(taskRef);
@@ -4757,6 +4819,11 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     zones: readJsonArray(row["zones"]),
     capabilityRequirements: readJsonArray(row["capability_requirements"]),
     parkRate: Number(row["park_rate"]),
+    plan:
+      row["plan"] === null || row["plan"] === undefined
+        ? null
+        : (String(row["plan"]) as "requested" | "drafted"),
+    planStrikes: Number(row["plan_strikes"] ?? 0),
     strikes: Number(row["strikes"] ?? 0),
     origin: String(row["origin"]) === "ours" ? "ours" : "theirs",
   };
