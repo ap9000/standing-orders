@@ -36,7 +36,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -156,7 +156,7 @@ export type Run = {
   leaseId: string;
   runner: string;
   /** 'repair' = a resumed session mending its own park payload. Never 'driver'; see the DDL. */
-  role: "builder" | "repair";
+  role: "builder" | "repair" | "planner";
   parentRun: number | null;
   sessionId: string | null;
   baseRevision: string | null;
@@ -362,6 +362,13 @@ CREATE TABLE IF NOT EXISTS task_ref (
   capability_requirements TEXT NOT NULL DEFAULT '[]',
   park_rate               REAL NOT NULL DEFAULT 0,
   origin                  TEXT NOT NULL DEFAULT 'theirs',
+  -- Planning mode (v7): 'requested' dispatches a planner before any scope
+  -- is approved; 'drafted' means a proposed scope + plan document await the
+  -- operator. NULL is the ordinary task that never asked for a plan.
+  plan                    TEXT CHECK (plan IN ('requested','drafted')),
+  -- Planning failures count separately from build strikes: a planner that
+  -- cannot finish must never spend the builder's three attempts.
+  plan_strikes            INTEGER NOT NULL DEFAULT 0,
   UNIQUE (backend, external_id)
 );
 
@@ -456,7 +463,7 @@ CREATE TABLE IF NOT EXISTS run (
   -- Deliberately NOT 'driver': the design's driver is the event-woken gate
   -- role that first exists at M4, and recording repair under that name now
   -- would make the two indistinguishable in every cost report afterwards.
-  role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
+  role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner')),
   parent_run    INTEGER REFERENCES run(id),
   -- The agent session, kept so a malformed park can be repaired by resuming
   -- the conversation that produced it instead of paying for a fresh one.
@@ -530,7 +537,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -568,7 +575,7 @@ CREATE TABLE IF NOT EXISTS run_decision (
 CREATE TABLE IF NOT EXISTS incident (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
-  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure')),
+  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted')),
   created_at  TEXT NOT NULL,
   resolved_at TEXT,
   resolved_by TEXT
@@ -1031,7 +1038,7 @@ function migrate(db: Database): void {
     `CREATE TABLE incident_next (
        id          INTEGER PRIMARY KEY AUTOINCREMENT,
        run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
-       kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure')),
+       kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted')),
        created_at  TEXT NOT NULL,
        resolved_at TEXT,
        resolved_by TEXT
@@ -1047,6 +1054,57 @@ function migrate(db: Database): void {
   addColumn(db, "run", "usage_json", "TEXT");
   addColumn(db, "run", "head_revision", "TEXT");
   addColumn(db, "run", "handoff", "TEXT");
+  // v7 (planning): additive task_ref columns, then three CHECK widenings —
+  // each a copy-rename against an exactly recognized predecessor, run AFTER
+  // every older normalizer so a v6 database is the only shape they see
+  // (Codex planning review, finding 8: editing the fresh DDL alone would
+  // skip existing files, recording v7 over a table that still refuses
+  // planner rows).
+  addColumn(db, "task_ref", "plan", "TEXT CHECK (plan IN ('requested','drafted'))");
+  addColumn(db, "task_ref", "plan_strikes", "INTEGER NOT NULL DEFAULT 0");
+  rebuildForV4(
+    db,
+    "run",
+    "role IN ('builder','repair')",
+    "'planner'",
+    V4_RUN_DDL("run_next"),
+    V4_RUN_COLUMNS,
+  );
+  rebuildForV4(
+    db,
+    "artifact",
+    "'diff','status','park-payload'",
+    "'plan'",
+    `CREATE TABLE artifact_next (
+       id             INTEGER PRIMARY KEY AUTOINCREMENT,
+       run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+       kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan')),
+       key            TEXT NOT NULL,
+       bytes_original INTEGER NOT NULL,
+       bytes_stored   INTEGER NOT NULL,
+       truncated      INTEGER NOT NULL DEFAULT 0,
+       sha256         TEXT NOT NULL,
+       capture        TEXT NOT NULL,
+       created_at     TEXT NOT NULL,
+       redacted       INTEGER NOT NULL DEFAULT 0
+     )`,
+    ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted"],
+  );
+  rebuildForV4(
+    db,
+    "incident",
+    "'malformed-decision','attempts-exhausted','commit-failure'",
+    "'malformed-plan'",
+    `CREATE TABLE incident_next (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+       kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted')),
+       created_at  TEXT NOT NULL,
+       resolved_at TEXT,
+       resolved_by TEXT
+     )`,
+    ["id", "run", "kind", "created_at", "resolved_at", "resolved_by"],
+  );
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -1056,7 +1114,7 @@ function V4_RUN_DDL(name: string): string {
     task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
     lease_id      TEXT NOT NULL,
     runner        TEXT NOT NULL,
-    role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
+    role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner')),
     parent_run    INTEGER REFERENCES run(id),
     session_id    TEXT,
     base_revision TEXT,
@@ -2434,7 +2492,7 @@ export class Store {
     branch: string;
     worktree: string;
     model?: string;
-    role?: "builder" | "repair";
+    role?: "builder" | "repair" | "planner";
     parentRun?: number;
     sessionId?: string;
     now: Date;

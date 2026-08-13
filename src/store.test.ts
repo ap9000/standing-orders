@@ -1296,3 +1296,107 @@ describe("the console read model, bounded by construction", () => {
     expect(store.artifactForRun(mine, artifact + 99)).toBeNull();
   });
 });
+
+describe("migration from a v6 database (planning, v7)", () => {
+  test("widens run role, artifact kind, and incident kind in place; planner rows insert after", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { createRequire } = await import("node:module");
+
+    const dir = mkdtempSync(join(tmpdir(), "nightorders-v6-"));
+    const file = join(dir, "orders.db");
+
+    // The v6 shapes for exactly the tables the v7 rebuilds touch or
+    // reference: run with the two-role CHECK, artifact with three kinds,
+    // incident with three kinds, and their parents.
+    const require = createRequire(import.meta.url);
+    const { DatabaseSync } = require("node:sqlite");
+    const old = new DatabaseSync(file);
+    old.exec(`
+      CREATE TABLE schema_version (version INTEGER NOT NULL);
+      INSERT INTO schema_version VALUES (6);
+      CREATE TABLE task (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('queued','running','done','failed','cancelled')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE task_ref (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        backend TEXT NOT NULL, external_id TEXT NOT NULL, repo TEXT,
+        zones TEXT NOT NULL DEFAULT '[]',
+        capability_requirements TEXT NOT NULL DEFAULT '[]',
+        park_rate REAL NOT NULL DEFAULT 0,
+        origin TEXT NOT NULL DEFAULT 'theirs',
+        strikes INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (backend, external_id)
+      );
+      CREATE TABLE run (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_ref INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+        lease_id TEXT NOT NULL, runner TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair')),
+        parent_run INTEGER REFERENCES run(id), session_id TEXT, base_revision TEXT,
+        branch TEXT NOT NULL, worktree TEXT NOT NULL, model TEXT,
+        outcome TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change')),
+        reason TEXT, committed INTEGER, started_at TEXT NOT NULL, finished_at TEXT,
+        provider_started_at TEXT, tokens_in INTEGER, tokens_out INTEGER,
+        cost_usd REAL, usage_json TEXT, head_revision TEXT, handoff TEXT
+      );
+      CREATE TABLE artifact (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload')),
+        key TEXT NOT NULL, bytes_original INTEGER NOT NULL, bytes_stored INTEGER NOT NULL,
+        truncated INTEGER NOT NULL DEFAULT 0, sha256 TEXT NOT NULL, capture TEXT NOT NULL,
+        created_at TEXT NOT NULL, redacted INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE incident (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure')),
+        created_at TEXT NOT NULL, resolved_at TEXT, resolved_by TEXT
+      );
+      INSERT INTO task VALUES ('t-1','w','queued','2026-08-12T00:00:00.000Z','2026-08-12T00:00:00.000Z');
+      INSERT INTO task_ref (backend, external_id, origin, strikes) VALUES ('built-in','t-1','ours',2);
+      INSERT INTO run (task_ref, lease_id, runner, role, branch, worktree, outcome, started_at, cost_usd)
+        VALUES (1,'l-1','b','repair','br','/w','failed','2026-08-12T01:00:00.000Z',0.42);
+      INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at)
+        VALUES (1,'diff','1/diff.patch',10,10,'abc','git diff (exit 0)','2026-08-12T01:05:00.000Z');
+      INSERT INTO incident (run, kind, created_at)
+        VALUES (1,'attempts-exhausted','2026-08-12T01:10:00.000Z');
+    `);
+    old.close();
+
+    const store = openStore(file);
+    try {
+      // Every v6 row survived the three rebuilds, ids and values intact.
+      const run = store.handle.prepare("SELECT * FROM run WHERE id = 1").get();
+      expect(run).toMatchObject({ role: "repair", outcome: "failed", cost_usd: 0.42 });
+      const artifact = store.handle.prepare("SELECT * FROM artifact WHERE id = 1").get();
+      expect(artifact).toMatchObject({ kind: "diff", key: "1/diff.patch" });
+      const incident = store.handle.prepare("SELECT * FROM incident WHERE id = 1").get();
+      expect(incident).toMatchObject({ kind: "attempts-exhausted" });
+
+      // The widened CHECKs admit the planning rows v6 refused.
+      const planner = store.startRun({
+        taskRef: 1, leaseId: "l-2", runner: "b", role: "planner",
+        branch: "nightorders-plan/t-1", worktree: "/w2", now: new Date("2026-08-12T02:00:00.000Z"),
+      });
+      expect(planner).toBeGreaterThan(1);
+      store.handle
+        .prepare("INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(planner, "plan", `${planner}/plan.md`, 5, 5, "def", "plan handoff", "2026-08-12T02:05:00.000Z");
+      store.handle
+        .prepare("INSERT INTO incident (run, kind, created_at) VALUES (?,?,?)")
+        .run(planner, "malformed-plan", "2026-08-12T02:10:00.000Z");
+
+      // The additive planning columns exist and default honestly.
+      const ref = store.handle.prepare("SELECT plan, plan_strikes FROM task_ref WHERE id = 1").get();
+      expect(ref).toMatchObject({ plan: null, plan_strikes: 0 });
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
