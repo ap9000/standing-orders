@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
     "test": "vitest run",
     "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "repository": {
     "type": "git",
