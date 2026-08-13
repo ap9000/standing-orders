@@ -23,6 +23,15 @@ import { join as join2 } from "node:path";
 /** The worktree the current test's build runs in — a real directory, because
  * the protocol files (park mailbox, terminal handoff) live on a real disk. */
 let wt = "";
+
+// A real directory per test, for every describe in this file: each fresh
+// in-memory store restarts run ids at 1, so a shared on-disk evidence root
+// would collide on the exclusive-create writes — and the old empty-string
+// worktree landed handoff files in the process cwd, which is where a small
+// museum of protocol-file debris in the repo root once came from.
+beforeEach(() => {
+  wt = freshWorktree();
+});
 /** The open run record the current test's build writes to. */
 let runId = 0;
 
@@ -221,6 +230,27 @@ describe("the builder's gates", () => {
     const result = await build(store, request());
 
     expect(result).toMatchObject({ ok: true, committed: true });
+  });
+
+  test("a committed build leaves its terminal diff behind — patch and stat, capture recorded (M5.3)", async () => {
+    claimIt();
+    approveScope();
+    const req = request();
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    const artifacts = store.artifactsFor(req.runId as number);
+    const kinds = artifacts.map(one => one.kind);
+    expect(kinds).toContain("terminal-diff");
+    expect(kinds).toContain("diff-stat");
+    // The capture string is the provenance: the exact command and its exit.
+    const stat = artifacts.find(one => one.kind === "diff-stat");
+    expect(stat?.capture).toContain("numstat");
+    expect(stat?.capture).toContain("(exit 0)");
+    const patch = artifacts.find(one => one.kind === "terminal-diff");
+    expect(patch?.capture).toContain("--no-ext-diff");
+    expect(patch?.capture).toContain("--no-textconv");
   });
 
   test("refuses the repo's own default branch, even under a custom name", async () => {

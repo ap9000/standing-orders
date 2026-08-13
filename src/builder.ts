@@ -41,6 +41,7 @@ import { invokeAgent, type AgentOutcome } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import {
   captureParkEvidence,
+  captureTerminalDiff,
   evidenceRoot,
   handoffName,
   looksLikeProtocolFile,
@@ -635,6 +636,9 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       };
     }
     store.recordOutcomeFacts(request.runId, { headRevision: baseRevision, handoff: handoff.conclusion });
+    // The explicit zero: base against base, captured and recorded, because
+    // "no diff artifact" must never be how a no-change run says no change.
+    await captureTerminalDiff(store, git, worktree, baseRevision, baseRevision, root, request.runId, clock());
     return { ok: true, committed: false, noChange: true, branch, summary: handoff.conclusion };
   }
 
@@ -650,10 +654,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   if (made.ok && made.parked === undefined && made.committed) {
     const newHead = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
     if (newHead.code === 0) {
+      const head = newHead.stdout.trim();
       store.recordOutcomeFacts(request.runId, {
-        headRevision: newHead.stdout.trim(),
+        headRevision: head,
         handoff: handoff.conclusion,
       });
+      // The terminal diff: the exact accepted base→head patch plus its
+      // NUL-delimited stat, captured while the worktree still exists —
+      // a built run's page must show its diff long after the checkout is
+      // released (M5.3).
+      await captureTerminalDiff(store, git, worktree, baseRevision, head, root, request.runId, clock());
     }
   }
   return made;

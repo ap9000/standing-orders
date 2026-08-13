@@ -48,6 +48,8 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   status: 64 * 1024,
   "park-payload": LIMITS.payload,
   plan: PLAN_LIMITS.document,
+  "terminal-diff": 256 * 1024,
+  "diff-stat": 32 * 1024,
 };
 
 export function evidenceRoot(home: string): string {
@@ -341,4 +343,114 @@ export async function captureParkEvidence(
     ids.push(storeEvidence(store, root, runId, kind, name, content, command, now));
   }
   return ids;
+}
+
+/** One file's row in the terminal diff-stat. null adds/dels = binary. */
+export type DiffStatFile = {
+  path: string;
+  additions: number | null;
+  deletions: number | null;
+  renamedFrom?: string;
+};
+
+export type DiffStat = {
+  schema: 1;
+  base: string;
+  head: string;
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  binaryCount: number;
+  files: DiffStatFile[];
+  /** True when the file list was cut to fit the cap — counts stay complete. */
+  filesTruncated: boolean;
+};
+
+const DIFF_STAT_FILE_LIMIT = 400;
+
+/**
+ * Parse `git diff --numstat -z` output. NUL-delimited, so filenames are never
+ * guessed out of patch headers (Codex roadmap review, scope cut A.3): plain
+ * entries are one token "adds\tdels\tpath"; renames are "adds\tdels\t" with
+ * the two paths as the following tokens. Binary files carry "-" counts,
+ * recorded as null — never coerced to zero.
+ */
+export function parseNumstat(raw: string, base: string, head: string): DiffStat {
+  const tokens = raw.split("\u0000").filter(token => token.length > 0);
+  const files: DiffStatFile[] = [];
+  let additions = 0;
+  let deletions = 0;
+  let binaryCount = 0;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i] as string;
+    const parts = token.split("\t");
+    if (parts.length < 3) continue; // not a numstat entry this parser knows
+    const adds = parts[0] === "-" ? null : Number(parts[0]);
+    const dels = parts[1] === "-" ? null : Number(parts[1]);
+    if ((adds !== null && !Number.isFinite(adds)) || (dels !== null && !Number.isFinite(dels))) continue;
+    let path = parts.slice(2).join("\t");
+    let renamedFrom: string | undefined;
+    if (path === "") {
+      // Rename: the next two tokens are the old and new paths.
+      renamedFrom = tokens[i + 1];
+      path = tokens[i + 2] ?? "";
+      i += 2;
+      if (path === "") continue;
+    }
+    if (adds === null || dels === null) binaryCount += 1;
+    additions += adds ?? 0;
+    deletions += dels ?? 0;
+    files.push({ path, additions: adds, deletions: dels, ...(renamedFrom === undefined ? {} : { renamedFrom }) });
+  }
+  const kept = files.slice(0, DIFF_STAT_FILE_LIMIT);
+  return {
+    schema: 1,
+    base,
+    head,
+    fileCount: files.length,
+    additions,
+    deletions,
+    binaryCount,
+    files: kept,
+    filesTruncated: kept.length < files.length,
+  };
+}
+
+/**
+ * Capture the TERMINAL diff — the immutable base→head patch of a run that
+ * committed, taken before its worktree is released (M5.3; the Codex scope
+ * cut is the spec). Two artifacts: the bounded plain patch, and a
+ * machine-parsed stat whose filenames came NUL-delimited from git, never
+ * from patch headers. Same execution posture as the park capture: external
+ * diff drivers and textconv disabled by name, because this must not run
+ * anything the agent may have just written. A no-change run stores the
+ * explicit zero-stat rather than storing nothing — "no diff" and "capture
+ * failed" have to read differently.
+ */
+export async function captureTerminalDiff(
+  store: Store,
+  git: (file: string, args: readonly string[], options?: { cwd?: string }) => Promise<ExecResult>,
+  worktree: string,
+  base: string,
+  head: string,
+  root: string,
+  runId: number,
+  now: Date,
+): Promise<{ diffId: number; statId: number }> {
+  const patchArgs = ["--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv", "--no-color", base, head];
+  const patch = await git("git", patchArgs, { cwd: worktree });
+  const patchCommand = `git ${patchArgs.filter(a => a !== "--no-optional-locks").join(" ")} (exit ${patch.code})`;
+  const patchContent = Buffer.from(patch.code === 0 ? patch.stdout : patch.stderr, "utf8");
+  const diffId = storeEvidence(store, root, runId, "terminal-diff", "terminal-diff.patch", patchContent, patchCommand, now);
+
+  const statArgs = ["--no-optional-locks", "diff", "--numstat", "-z", base, head];
+  const stat = await git("git", statArgs, { cwd: worktree });
+  const statCommand = `git ${statArgs.filter(a => a !== "--no-optional-locks").join(" ")} (exit ${stat.code})`;
+  const statContent =
+    stat.code === 0
+      ? Buffer.from(JSON.stringify(parseNumstat(stat.stdout, base, head)), "utf8")
+      : Buffer.from(stat.stderr, "utf8");
+  const statId = storeEvidence(store, root, runId, "diff-stat", "terminal-diff-stat.json", statContent, statCommand, now);
+
+  return { diffId, statId };
 }

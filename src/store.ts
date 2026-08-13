@@ -36,7 +36,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -261,7 +261,7 @@ export type Decision = {
 export type Artifact = {
   id: number;
   run: number;
-  kind: "diff" | "status" | "park-payload" | "plan";
+  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -664,7 +664,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -1291,6 +1291,30 @@ function migrate(db: Database): void {
   // digest that binds an irreversible confirmation to the EXACT note it
   // confirmed (Codex free-text review, finding 3).
   addColumn(db, "telegram_action", "note_digest", "TEXT");
+  // v11 (M5 terminal diff): artifact.kind admits 'terminal-diff' (the
+  // immutable base→head patch captured before the worktree releases) and
+  // 'diff-stat' (its machine-parsed summary). Same recognized-exactly
+  // CHECK-widening recipe as v7's.
+  rebuildForV4(
+    db,
+    "artifact",
+    "'diff','status','park-payload','plan'",
+    "'terminal-diff','diff-stat'",
+    `CREATE TABLE artifact_next (
+       id             INTEGER PRIMARY KEY AUTOINCREMENT,
+       run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+       kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat')),
+       key            TEXT NOT NULL,
+       bytes_original INTEGER NOT NULL,
+       bytes_stored   INTEGER NOT NULL,
+       truncated      INTEGER NOT NULL DEFAULT 0,
+       sha256         TEXT NOT NULL,
+       capture        TEXT NOT NULL,
+       created_at     TEXT NOT NULL,
+       redacted       INTEGER NOT NULL DEFAULT 0
+     )`,
+    ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted"],
+  );
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */

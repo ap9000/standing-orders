@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
+import { parseNumstat, readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import type { Artifact } from "./store.js";
 
 describe("reading evidence back, believing nothing", () => {
@@ -106,5 +106,47 @@ describe("reading evidence back, believing nothing", () => {
   test("a missing file is a calm refusal, not a throw", () => {
     const read = readVerifiedArtifact(root, record("1/never-written", Buffer.from("x")));
     expect(read).toMatchObject({ ok: false, problem: expect.stringContaining("gone or unresolvable") });
+  });
+});
+
+describe("parseNumstat — filenames come NUL-delimited from git, never from patch headers", () => {
+  const NUL = "\u0000";
+
+  test("plain, binary, and rename entries", () => {
+    const raw =
+      ["3\t1\tsrc/a.ts", "-\t-\tassets/logo.png", "2\t0\t"].join(NUL) +
+      NUL + "old/name.ts" + NUL + "new/name.ts" + NUL;
+    const stat = parseNumstat(raw, "base1234", "head5678");
+    expect(stat.base).toBe("base1234");
+    expect(stat.head).toBe("head5678");
+    expect(stat.fileCount).toBe(3);
+    expect(stat.additions).toBe(5);
+    expect(stat.deletions).toBe(1);
+    expect(stat.binaryCount).toBe(1);
+    expect(stat.files[0]).toMatchObject({ path: "src/a.ts", additions: 3, deletions: 1 });
+    // Binary counts are null, never coerced to zero — unmeasured is unmeasured.
+    expect(stat.files[1]).toMatchObject({ path: "assets/logo.png", additions: null, deletions: null });
+    expect(stat.files[2]).toMatchObject({ path: "new/name.ts", renamedFrom: "old/name.ts" });
+  });
+
+  test("empty output is the explicit zero, not an error", () => {
+    const stat = parseNumstat("", "base1234", "base1234");
+    expect(stat.fileCount).toBe(0);
+    expect(stat.additions).toBe(0);
+    expect(stat.filesTruncated).toBe(false);
+  });
+
+  test("a filename containing a tab survives — the path is everything after the second tab", () => {
+    const stat = parseNumstat(`1\t1\tweird\tname.txt${NUL}`, "b", "h");
+    expect(stat.files[0]?.path).toBe("weird\tname.txt");
+  });
+
+  test("the file list is bounded; the counts stay complete", () => {
+    const raw = Array.from({ length: 500 }, (_, i) => `1\t0\tfile-${i}.ts`).join(NUL) + NUL;
+    const stat = parseNumstat(raw, "b", "h");
+    expect(stat.fileCount).toBe(500);
+    expect(stat.additions).toBe(500);
+    expect(stat.files.length).toBe(400);
+    expect(stat.filesTruncated).toBe(true);
   });
 });

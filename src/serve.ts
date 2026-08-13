@@ -653,10 +653,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such run", "/runs");
       }
       const taskId = store.externalIdFor(found.taskRef) ?? "?";
+      const artifacts = store.artifactsFor(found.id);
       return page(
         response,
         200,
-        runPage(chromeFor(project, "runs", runListPane(project, found.id)), found, taskId, store.artifactsFor(found.id)),
+        runPage(
+          chromeFor(project, "runs", runListPane(project, found.id)),
+          found,
+          taskId,
+          artifacts,
+          terminalDiffView(artifacts, evidenceRoot),
+        ),
       );
     }
 
@@ -3177,7 +3184,129 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor
   return shell("builds", [`<h1>builds</h1><p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
 }
 
-function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]): string {
+/** What the run page shows of the terminal diff — verified bytes or a named problem, never silence. */
+type TerminalDiffView = {
+  patch: { text: string; truncated: boolean; artifactId: number } | { problem: string } | null;
+  stat:
+    | {
+        base: string;
+        head: string;
+        fileCount: number;
+        additions: number;
+        deletions: number;
+        binaryCount: number;
+        filesTruncated: boolean;
+        files: { path: string; additions: number | null; deletions: number | null; renamedFrom?: string }[];
+      }
+    | { problem: string }
+    | null;
+};
+
+const CAPTURE_EXIT = /\(exit ([0-9]{1,4})\)\s*$/;
+
+/**
+ * Assemble the terminal-diff card's facts. Every branch names its state:
+ * a failed capture (nonzero exit recorded in the capture string) reads as
+ * the failure it is, unverifiable bytes read as their problem, and absence
+ * returns null so old runs simply show nothing rather than a broken card.
+ */
+function terminalDiffView(artifacts: Artifact[], root: string): TerminalDiffView | null {
+  const patchArtifact = artifacts.find(one => one.kind === "terminal-diff");
+  const statArtifact = artifacts.find(one => one.kind === "diff-stat");
+  if (patchArtifact === undefined && statArtifact === undefined) return null;
+
+  const view: TerminalDiffView = { patch: null, stat: null };
+
+  if (patchArtifact !== undefined) {
+    const exit = CAPTURE_EXIT.exec(patchArtifact.capture);
+    if (exit !== null && exit[1] !== "0") {
+      view.patch = { problem: `capture failed — ${patchArtifact.capture}` };
+    } else {
+      const read = readVerifiedArtifact(root, patchArtifact);
+      view.patch = read.ok
+        ? { text: read.content.toString("utf8"), truncated: patchArtifact.truncated, artifactId: patchArtifact.id }
+        : { problem: `stored but unverifiable — ${read.problem}` };
+    }
+  }
+
+  if (statArtifact !== undefined) {
+    const exit = CAPTURE_EXIT.exec(statArtifact.capture);
+    if (exit !== null && exit[1] !== "0") {
+      view.stat = { problem: `capture failed — ${statArtifact.capture}` };
+    } else {
+      const read = readVerifiedArtifact(root, statArtifact);
+      if (!read.ok) {
+        view.stat = { problem: `stored but unverifiable — ${read.problem}` };
+      } else {
+        try {
+          const parsed = JSON.parse(read.content.toString("utf8")) as TerminalDiffView["stat"];
+          view.stat =
+            parsed !== null && typeof parsed === "object" && "base" in parsed ? parsed : { problem: "stat is not the shape this page knows" };
+        } catch {
+          view.stat = { problem: "stat did not parse as JSON" };
+        }
+      }
+    }
+  }
+
+  return view;
+}
+
+/** Render the terminal diff card: stat and capture health first, the bounded patch beneath a fold. */
+function terminalDiffCard(view: TerminalDiffView, runId: number): string {
+  const parts: string[] = ["<h2>what changed</h2>"];
+
+  if (view.stat === null) {
+    parts.push(`<p class="meta">no stat was captured for this run</p>`);
+  } else if ("problem" in view.stat) {
+    parts.push(`<p class="meta">stat: ${escape(view.stat.problem)}</p>`);
+  } else {
+    const s = view.stat;
+    const zero = s.fileCount === 0;
+    parts.push(
+      `<p class="row"><span class="mono">${escape(s.base.slice(0, 12))} → ${escape(s.head.slice(0, 12))}</span> — ` +
+        (zero
+          ? "no changes, verified"
+          : `${s.fileCount} file(s) · +${s.additions} −${s.deletions}` +
+            (s.binaryCount > 0 ? ` · ${s.binaryCount} binary` : "") +
+            (s.filesTruncated ? " · file list cut, counts complete" : "")) +
+        `</p>`,
+    );
+    if (!zero) {
+      parts.push(
+        `<div class="evidence">` +
+          s.files
+            .slice(0, 40)
+            .map(
+              file =>
+                `<p class="row mono">${escape(file.path)}${file.renamedFrom === undefined ? "" : ` (was ${escape(file.renamedFrom)})`} ` +
+                `<span class="meta">${file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`}</span></p>`,
+            )
+            .join("\n") +
+          (s.files.length > 40 ? `<p class="meta">…and ${s.files.length - 40} more file(s)</p>` : "") +
+          `</div>`,
+      );
+    }
+  }
+
+  if (view.patch === null) {
+    parts.push(`<p class="meta">terminal diff not captured for this run</p>`);
+  } else if ("problem" in view.patch) {
+    parts.push(`<p class="meta">patch: ${escape(view.patch.problem)}</p>`);
+  } else if (view.patch.text.trim() === "") {
+    parts.push(`<p class="meta">empty patch — captured successfully, nothing changed</p>`);
+  } else {
+    parts.push(
+      `<details><summary>the patch${view.patch.truncated ? " (TRUNCATED — the raw artifact says how much was cut)" : ""}</summary>` +
+        `<pre class="mono" style="overflow-x:auto">${escape(view.patch.text)}</pre></details>` +
+        `<p class="meta"><a href="/r/${runId}/evidence/${view.patch.artifactId}">raw patch artifact</a></p>`,
+    );
+  }
+
+  return parts.join("\n");
+}
+
+function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[], terminal: TerminalDiffView | null = null): string {
   // [label, value, mono?] — identifiers and figures read in the data face.
   const facts: [string, string | null, boolean?][] = [
     ["task", taskId, true],
@@ -3223,6 +3352,7 @@ function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]
   return shell(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     rows,
+    terminal === null ? "" : terminalDiffCard(terminal, run.id),
     handoff,
     evidence,
   ].join("\n"), { chrome });
