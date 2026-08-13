@@ -569,6 +569,37 @@ describe("the operations console", () => {
     expect(runView).toContain("tokens, not prices");
   });
 
+  test("an operator note lands beside the run, immutable and validated (M6)", async () => {
+    store.createTask({ id: "t-note", title: "noted" }, T0);
+    const ref = store.refFor("built-in", "t-note").id;
+    const run = store.startRun({ taskRef: ref, leaseId: "l-n1", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+    store.finishRun(run, { outcome: "failed", reason: "agent", now: T0 });
+
+    const cookie = await login();
+    const taskHtml = await (await fetch(url("/t/t-note"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(taskHtml)?.[1] ?? "";
+    const posted = await fetch(url(`/r/${run}/note`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, note: "suspect — the fix touched the wrong module" }),
+      redirect: "manual",
+    });
+    expect(posted.status).toBe(303);
+
+    const page = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
+    expect(page).toContain("operator notes");
+    expect(page).toContain("suspect — the fix touched the wrong module");
+
+    // An empty note is refused by the shared validator, not stored blank.
+    const blank = await fetch(url(`/r/${run}/note`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, note: "   " }),
+      redirect: "manual",
+    });
+    expect(blank.status).toBe(400);
+  });
+
   test("the overview is live: refresh meta, building-now card, system status", async () => {
     store.createTask({ id: "t-live", title: "being built right now" }, T0);
     const ref = store.refFor("built-in", "t-live").id;

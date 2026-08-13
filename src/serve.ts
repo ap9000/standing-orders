@@ -63,7 +63,7 @@ import {
   proposeGuarded,
   type Scope,
 } from "./scope.js";
-import { hasForbiddenControls } from "./decision.js";
+import { hasForbiddenControls, validateNote } from "./decision.js";
 import type { Runner } from "./runner.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import {
@@ -663,6 +663,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           taskId,
           artifacts,
           terminalDiffView(artifacts, evidenceRoot),
+          store.notesForRun(found.id),
+          who.via === "cookie" ? who.session.csrf : "",
         ),
       );
     }
@@ -1175,6 +1177,23 @@ export function createDecisionServer(options: ServeOptions): Server {
     const routineAct = /^\/routines\/([0-9]{1,15})\/(approve|pause|resume|run-now)$/.exec(url.pathname);
     if (routineAct !== null) {
       return routineMutation(response, who, Number(routineAct[1]), routineAct[2] as string, body, now);
+    }
+
+    const runNote = /^\/r\/([0-9]{1,15})\/note$/.exec(url.pathname);
+    if (runNote !== null) {
+      // An operator's verdict beside the machine's record (M6): immutable,
+      // bounded by the same validator as decision notes, ceiling-checked
+      // like every run resource. Ordinary authenticated mutation — no
+      // nonce, because nothing here approves anything.
+      const id = Number(runNote[1]);
+      const found = store.getRun(id);
+      if (found === null || !visible(taskRepoOf(found.taskRef))) {
+        return refuse(response, who, 404, "no such run");
+      }
+      const note = validateNote(body.get("note") ?? "");
+      if (!note.ok) return refuse(response, who, 400, note.problem);
+      store.addRunNote(id, who.name, note.note, now);
+      return redirect(response, `/r/${id}`);
     }
 
     const resolve = /^\/i\/([0-9]{1,15})\/resolve$/.exec(url.pathname);
@@ -3198,9 +3217,9 @@ function taskPage(chrome: Chrome, data: {
       : "",
     act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" aria-label="hold reason" style="width:12rem">`),
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
-    stalled ? act("requeue", "requeue") : "",
+    stalled ? act("requeue", "retry — branch and workspace kept") : "",
     stalled
-      ? `<p class="meta">requeue resolves the incidents, resets the strikes, and puts the task back in the queue</p>`
+      ? `<p class="meta">resolves the incidents, resets the strikes, and queues the task again; the preserved branch and workspace state are NOT erased</p>`
       : "",
     `</div>`,
     // Cancel gets the same ceremony as an irreversible answer: armed behind
@@ -3386,7 +3405,15 @@ function terminalDiffCard(view: TerminalDiffView, runId: number): string {
   return parts.join("\n");
 }
 
-function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[], terminal: TerminalDiffView | null = null): string {
+function runPage(
+  chrome: Chrome,
+  run: Run,
+  taskId: string,
+  artifacts: Artifact[],
+  terminal: TerminalDiffView | null = null,
+  notes: { id: number; author: string; note: string; createdAt: string }[] = [],
+  csrf = "",
+): string {
   // [label, value, mono?] — identifiers and figures read in the data face.
   const facts: [string, string | null, boolean?][] = [
     ["task", taskId, true],
@@ -3440,12 +3467,32 @@ function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]
           )
           .join("\n") +
         "</div>";
+  const noteRows =
+    notes.length === 0
+      ? ""
+      : notes
+          .map(
+            one =>
+              `<p class="row"><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span> ` +
+              `${escape(one.note)}</p>`,
+          )
+          .join("\n");
+  const noteForm =
+    csrf === ""
+      ? ""
+      : `<form method="post" action="/r/${run.id}/note" class="row">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="text" name="note" placeholder="a note for whoever reads this run next" aria-label="run note" style="width:100%;max-width:28rem">` +
+        `<button type="submit">add note</button></form>`;
+  const notesCard = noteRows === "" && noteForm === "" ? "" : `<h2>operator notes</h2>${noteRows}${noteForm}`;
+
   return shell(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     rows,
     terminal === null ? "" : terminalDiffCard(terminal, run.id),
     handoff,
     evidence,
+    notesCard,
   ].join("\n"), { chrome });
 }
 

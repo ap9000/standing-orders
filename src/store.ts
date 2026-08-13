@@ -1078,6 +1078,17 @@ CREATE TABLE IF NOT EXISTS worktree_setup (
 CREATE UNIQUE INDEX IF NOT EXISTS worktree_setup_live
   ON worktree_setup (repo) WHERE revoked_at IS NULL;
 
+-- An operator's note on a run (M6): immutable, bounded, append-only — the
+-- human's verdict next to the machine's record. Never a mutation of the
+-- run itself; runs and evidence are audit history.
+CREATE TABLE IF NOT EXISTS run_note (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  run        INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  author     TEXT NOT NULL,
+  note       TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mutation (
   idempotency_key TEXT PRIMARY KEY,
   operation       TEXT NOT NULL,
@@ -2337,6 +2348,30 @@ export class Store {
   /** The cache stamp: this checkout completed this setup. Success-only by contract. */
   stampWorktreeSetup(path: string, digest: string): void {
     this.db.prepare("UPDATE worktree SET setup_digest = ? WHERE path = ?").run(digest, path);
+  }
+
+  // ---- run notes (M6) -----------------------------------------------------
+
+  /** Append one immutable operator note to a run. Validation is the caller's (validateNote). */
+  addRunNote(runId: number, author: string, note: string, now: Date): number {
+    const run = this.getRun(runId);
+    if (run === null) throw new Error(`run ${runId} does not exist — a note needs a record to sit next to`);
+    const inserted = this.db
+      .prepare("INSERT INTO run_note (run, author, note, created_at) VALUES (?, ?, ?, ?)")
+      .run(runId, author, note, now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  notesForRun(runId: number): { id: number; author: string; note: string; createdAt: string }[] {
+    return this.db
+      .prepare("SELECT * FROM run_note WHERE run = ? ORDER BY id")
+      .all(runId)
+      .map(row => ({
+        id: Number(row["id"]),
+        author: String(row["author"]),
+        note: String(row["note"]),
+        createdAt: String(row["created_at"]),
+      }));
   }
 
   listWorktrees(): WorktreeRow[] {
