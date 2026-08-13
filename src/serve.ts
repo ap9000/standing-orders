@@ -375,6 +375,51 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/next") {
+      // Triage: everything waiting on a person, one at a time, hardest-
+      // blocked first — oldest question, then plans and scopes to approve,
+      // then stalled work to retry, then requirement gaps. `skip` is a
+      // bounded, session-free cursor of keys the operator set aside; every
+      // act 303s back here, which is what makes it a flow and not a list.
+      const skipped = new Set(
+        (url.searchParams.get("skip") ?? "").split(",").filter(one => /^[darg]:[A-Za-z0-9._:-]{1,80}$/.test(one)).slice(0, 20),
+      );
+      const decisions = store.listDecisionsScoped(project).filter(one => one.state !== "answered");
+      const approvals = store.scopesAwaitingApproval(project, 20);
+      const requeueables = store.listRequeueablesScoped(project, now, 20);
+      const gaps = project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0);
+      type Item =
+        | { key: string; kind: "decision"; decision: (typeof decisions)[number] }
+        | { key: string; kind: "approval"; approval: (typeof approvals)[number] }
+        | { key: string; kind: "requeue"; stalled: (typeof requeueables)[number] }
+        | { key: string; kind: "gap"; gap: (typeof gaps)[number] };
+      const queue: Item[] = [
+        ...decisions.map(decision => ({ key: `d:${decision.id}`, kind: "decision" as const, decision })),
+        ...approvals.map(approval => ({ key: `a:${approval.taskId}`, kind: "approval" as const, approval })),
+        ...requeueables.map(stalled => ({ key: `r:${stalled.taskId}`, kind: "requeue" as const, stalled })),
+        ...gaps.map(gap => ({ key: `g:${gap.key.replace(/[^A-Za-z0-9._:-]/g, "_")}`, kind: "gap" as const, gap })),
+      ];
+      const remaining = queue.filter(one => !skipped.has(one.key));
+      const item = remaining[0] ?? null;
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      if (item !== null && item.kind === "approval") {
+        // The card restates the digest-bound terms, so the nonce may be
+        // minted here — same rule as the task screen, same binding.
+        const nonce = who.via === "cookie" ? mintApprovalNonce(who.name, item.approval.taskId, item.approval.digest) : "";
+        const ref = store.lookupRef(item.approval.taskId);
+        const scope = store.getScope(item.approval.taskId);
+        return page(response, 200, nextPage(chromeFor(project, "inbox"), {
+          item, scope,
+          planDocument: ref !== null && ref.plan === "drafted" ? planDocumentOf(ref.id) : null,
+          csrf, nonce, remaining: remaining.length, skipped: [...skipped], now,
+        }));
+      }
+      return page(response, 200, nextPage(chromeFor(project, "inbox"), {
+        item, scope: null, planDocument: null, csrf, nonce: "",
+        remaining: remaining.length, skipped: [...skipped], now,
+      }));
+    }
+
     // The board's old name; bookmarks keep working. A GET-only alias, so a
     // plain 302 — never the shared 303 helper, which belongs to POST landings.
     if (url.pathname === "/morning") {
@@ -991,7 +1036,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const why = answered.reason === "already-answered" ? "already answered — somebody got there first" : answered.reason;
         return refuse(response, who, status, why, `/d/${id}`);
       }
-      return redirect(response, `/d/${id}`);
+      return redirect(response, body.get("return") === "next" ? "/next" : `/d/${id}`);
     }
 
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
@@ -1064,7 +1109,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return taskScreen(response, who, taskId, `not requeued: ${requeued.reason}`, 409);
         }
         // Allow-listed return only — never an arbitrary URL from the form.
-        return redirect(response, body.get("return") === "inbox" ? "/" : taskHref(taskId));
+        return redirect(response, body.get("return") === "inbox" ? "/" : body.get("return") === "next" ? "/next" : taskHref(taskId));
       }
       case "plan": {
         // The operator's explicit ask, refused transactionally when the
@@ -1120,7 +1165,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const status = approved.reason === "changed" ? 409 : 403;
           return taskScreen(response, who, taskId, `not approved: ${approved.reason}`, status);
         }
-        return redirect(response, taskHref(taskId));
+        return redirect(response, body.get("return") === "next" ? "/next" : taskHref(taskId));
       }
       default:
         return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
@@ -1948,6 +1993,7 @@ function inboxPage(chrome: Chrome, data: {
   return shell("inbox", [
     `<h1>inbox</h1>`,
     `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, the machine needs nothing</p>`,
+    empty ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
     empty ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
     decisions,
     approvals,
@@ -3050,6 +3096,128 @@ function settingsPage(
   ].join("\n"), { chrome });
 }
 
+/**
+ * The triage flow: everything waiting on a person, one card at a time.
+ * Full context ON the card, the act inline, and every act lands back here
+ * — clearing the queue is taps, not navigation. Read state travels in the
+ * URL (the bounded skip cursor), never in the session: two tabs cannot
+ * fight, and a shared link shows the same queue.
+ */
+function nextPage(chrome: Chrome, data: {
+  item:
+    | { key: string; kind: "decision"; decision: Decision & { taskId: string } }
+    | { key: string; kind: "approval"; approval: { taskId: string; title: string; goal: string; digest: string; proposedAt: string } }
+    | { key: string; kind: "requeue"; stalled: { taskId: string; title: string; strikes: number; incidentCount: number } }
+    | { key: string; kind: "gap"; gap: Gap }
+    | null;
+  scope: Scope | null;
+  planDocument: string | null;
+  csrf: string;
+  nonce: string;
+  remaining: number;
+  skipped: string[];
+  now: Date;
+}): string {
+  const { item } = data;
+  if (item === null) {
+    const held = data.skipped.length;
+    return shell("next", [
+      `<h1>all clear</h1>`,
+      held > 0
+        ? `<p>Nothing left except the ${held} you set aside. <a href="/next">Look at those again</a>, or come back later.</p>`
+        : `<p>Nothing needs you. The machine is either working or waiting on its own clocks.</p>`,
+      `<p class="meta"><a href="/board">the board</a> shows what is moving · <a href="/">the inbox</a> lists everything at once</p>`,
+    ].join("\n"), { chrome });
+  }
+
+  const skipHref = `/next?skip=${encodeURIComponent([...data.skipped, item.key].join(","))}`;
+  const header =
+    `<p class="meta">${data.remaining === 1 ? "the last thing waiting on you" : `1 of ${data.remaining} waiting on you`}` +
+    ` · <a href="${skipHref}">not now — next \u2192</a></p>`;
+
+  let card = "";
+  if (item.kind === "decision") {
+    const { decision } = item;
+    card =
+      `<h1>${escape(decision.taskId)} <span class="meta">asked ${escape(when(decision.createdAt))}</span></h1>` +
+      `<div class="recap">${escape(decision.recap)}</div>` +
+      `<div class="question">${escape(decision.question)}</div>` +
+      decisionOptionForms(decision, data.csrf, "next");
+  } else if (item.kind === "approval") {
+    const scope = data.scope;
+    card =
+      `<h1>${escape(item.approval.taskId)}</h1>` +
+      `<p>${escape(item.approval.title)}</p>` +
+      (data.planDocument === null
+        ? ""
+        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p><pre class="recap plan-doc">${escape(data.planDocument)}</pre></div>`) +
+      `<form method="post" action="${taskHref(item.approval.taskId)}/approve" class="card approve-form">` +
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+      `<input type="hidden" name="nonce" value="${escape(data.nonce)}">` +
+      `<input type="hidden" name="digest" value="${escape(item.approval.digest)}">` +
+      `<input type="hidden" name="return" value="next">` +
+      `<p><strong>approve exactly this:</strong></p>` +
+      `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? item.approval.goal)}</p>` +
+      `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
+      `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
+      `<label>your password, typed again — a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>` +
+      `<button type="submit">approve this scope</button>` +
+      `</form>` +
+      `<p class="meta"><a href="${taskHref(item.approval.taskId)}">open the full task</a> to edit the scope first</p>`;
+  } else if (item.kind === "requeue") {
+    card =
+      `<h1>${escape(item.stalled.taskId)}</h1>` +
+      `<p>${escape(item.stalled.title)}</p>` +
+      `<p class="meta">stopped — ${item.stalled.incidentCount} incident(s)${item.stalled.strikes > 0 ? ` after ${item.stalled.strikes} attempt(s)` : ""}</p>` +
+      `<form method="post" action="${taskHref(item.stalled.taskId)}/requeue" class="card">` +
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+      `<input type="hidden" name="return" value="next">` +
+      `<p class="meta">requeue resolves the incidents, resets the strikes, and puts it back in line</p>` +
+      `<button type="submit">retry this work</button>` +
+      `</form>` +
+      `<p class="meta"><a href="${taskHref(item.stalled.taskId)}">open the full task</a> to read the runs first</p>`;
+  } else {
+    const { gap } = item;
+    card =
+      `<h1>supply ${escape(gap.key)}</h1>` +
+      `<p class="meta">${escape(gap.state)}</p>` +
+      `<p>Filling this starts ${gap.unblocks.length} task(s): ${gap.unblocks.map(one => `<span class="mono">${escape(one)}</span>`).join(", ")}</p>` +
+      `<div class="card"><p class="meta">prove it filled from the terminal:</p><pre class="recap">${escape(gap.verify)}</pre></div>`;
+  }
+
+  return shell("next", [header, card].join("\n"), { chrome });
+}
+
+/**
+ * A decision's answer forms — one source of truth for the decision screen
+ * and the triage flow. The consequence reads BEFORE the button that buys
+ * it; irreversible options arm behind one deliberate tap AND the server
+ * independently requires the confirm field. `returnTo` is allow-listed by
+ * the answer handler, never an arbitrary URL.
+ */
+function decisionOptionForms(decision: Decision, csrf: string, returnTo: "next" | null): string {
+  return decision.options
+    .map(option => {
+      const recommended = option.id === decision.recommendation;
+      const inner = [
+        `<form class="option${recommended ? " recommended" : ""}" method="post" action="/d/${decision.id}/answer">`,
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+        `<input type="hidden" name="choice" value="${escape(option.id)}">`,
+        ...(returnTo === null ? [] : [`<input type="hidden" name="return" value="${returnTo}">`]),
+        ...(option.reversible ? [] : [`<input type="hidden" name="confirm" value="yes">`]),
+        recommended ? `<p class="meta" style="margin:0 0 .375rem"><span class="badge">recommended</span></p>` : "",
+        `<p class="consequence">${escape(option.consequence)}</p>`,
+        `<button type="submit">${escape(option.label)}${option.reversible ? "" : ` <span class="badge badge-overdue">irreversible</span>`}</button>`,
+        `<input type="text" name="note" placeholder="optional note — travels with this answer" aria-label="optional note">`,
+        `</form>`,
+      ].join("\n");
+      return option.reversible
+        ? inner
+        : `<details class="arm-danger"><summary>${escape(option.label)} — irreversible, tap to arm</summary>${inner}</details>`;
+    })
+    .join("\n");
+}
+
 function decisionPage(
   chrome: Chrome,
   decision: Decision,
@@ -3059,31 +3227,7 @@ function decisionPage(
   now: Date,
 ): string {
   const csrf = who.via === "cookie" ? who.session.csrf : "";
-  const options = decision.options
-    .map(option => {
-      const recommended = option.id === decision.recommendation;
-      // The consequence reads BEFORE the button that buys it, and the
-      // recommendation is a visible ring, not a parenthetical — a thumb at
-      // 7am finds the default without reading every card.
-      const inner = [
-        `<form class="option${recommended ? " recommended" : ""}" method="post" action="/d/${decision.id}/answer">`,
-        `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-        `<input type="hidden" name="choice" value="${escape(option.id)}">`,
-        ...(option.reversible ? [] : [`<input type="hidden" name="confirm" value="yes">`]),
-        recommended ? `<p class="meta" style="margin:0 0 .375rem"><span class="badge">recommended</span></p>` : "",
-        `<p class="consequence">${escape(option.consequence)}</p>`,
-        `<button type="submit">${escape(option.label)}${option.reversible ? "" : ` <span class="badge badge-overdue">irreversible</span>`}</button>`,
-        `<input type="text" name="note" placeholder="optional note — travels with this answer" aria-label="optional note">`,
-        `</form>`,
-      ].join("\n");
-      // An irreversible option hides its button behind one deliberate extra
-      // tap — no script, just <details>. The server independently requires
-      // the confirm field either way.
-      return option.reversible
-        ? inner
-        : `<details class="arm-danger"><summary>${escape(option.label)} — irreversible, tap to arm</summary>${inner}</details>`;
-    })
-    .join("\n");
+  const options = decisionOptionForms(decision, csrf, null);
 
   const answered =
     decision.state === "answered"

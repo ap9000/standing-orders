@@ -1714,3 +1714,131 @@ describe("mutations from browsers that omit Origin", () => {
     }
   });
 });
+
+describe("/next — clearing the queue one thing at a time", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const url = (path: string) => `${base}${path}`;
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-next-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("question first, act inline, land on the next item; approvals carry the step-up on the card", async () => {
+    // One open question and one unapproved scope wait.
+    store.createTask({ id: "t-q", title: "asked" }, T0);
+    const qRef = store.refFor("built-in", "t-q").id;
+    const run = store.startRun({ taskRef: qRef, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0 });
+    store.saveDecision({
+      run, urgency: "blocking", recap: "Two ways to cache.", question: "Per-user or global?",
+      options: [
+        { id: "user", label: "Per-user", consequence: "More state.", reversible: true },
+        { id: "global", label: "Global", consequence: "Coarser.", reversible: true },
+      ],
+      recommendation: "user",
+    }, T0);
+    store.createTask({ id: "t-a", title: "needs a yes" }, T0);
+    store.saveScope({
+      taskId: "t-a", goal: "do the thing", outOfScope: "not the other thing", touches: ["src/x.ts"],
+      proposedAt: T0.toISOString(), digest: "d".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+
+    const cookie = await login();
+    // The oldest question leads, with its answers ON the card.
+    const first = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    expect(first).toContain("1 of 2 waiting on you");
+    expect(first).toContain("Per-user or global?");
+    expect(first).toContain('name="return" value="next"');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(first)?.[1] as string;
+
+    // Answering lands on the NEXT item — the approval, step-up included.
+    const answered = await fetch(url("/d/1/answer"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, choice: "user", return: "next" }),
+      redirect: "manual",
+    });
+    expect(answered.status).toBe(303);
+    expect(answered.headers.get("location")).toBe("/next");
+
+    const second = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    expect(second).toContain("the last thing waiting on you");
+    expect(second).toContain("approve exactly this:");
+    expect(second).toContain("not the other thing");
+    expect(second).toContain('type="password"');
+    const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(second)?.[1] as string;
+    const csrf2 = /name="csrf" value="([0-9a-f]{64})"/.exec(second)?.[1] as string;
+
+    const approved = await fetch(url("/t/t-a/approve"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf: csrf2, nonce, digest: "d".repeat(32), token: approverToken, return: "next" }),
+      redirect: "manual",
+    });
+    expect(approved.status).toBe(303);
+    expect(approved.headers.get("location")).toBe("/next");
+
+    // The queue is clear, and says so like a person would.
+    const done = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    expect(done).toContain("Nothing needs you");
+  });
+
+  test("not-now sets an item aside without touching it, and all-clear remembers the held ones", async () => {
+    store.createTask({ id: "t-1", title: "one" }, T0);
+    store.saveScope({
+      taskId: "t-1", goal: "g", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "a".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const cookie = await login();
+    const first = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    const skip = /href="(\/next\?skip=[^"]+)"/.exec(first)?.[1] as string;
+    expect(skip).toBeDefined();
+    const after = await (await fetch(url(skip.replace(/&amp;/g, "&")), { headers: { cookie } })).text();
+    expect(after).toContain("the 1 you set aside");
+    // Nothing was approved by setting it aside.
+    expect(store.getScope("t-1")?.approvedAt).toBeNull();
+  });
+
+  test("the inbox offers the flow only when something waits", async () => {
+    const cookie = await login();
+    const idle = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(idle).not.toContain("clear the queue");
+    store.createTask({ id: "t-w", title: "w" }, T0);
+    store.saveScope({
+      taskId: "t-w", goal: "g", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "b".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const busy = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(busy).toContain("clear the queue");
+  });
+});

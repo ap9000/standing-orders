@@ -149,6 +149,26 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## The unblock-first push (2026-08-13, Alex's three criteria; five phases)
+
+Criteria: simple to understand and action · accelerates the work · keeps
+the operator unblocking and creating. Phase A ships **/next — the triage
+flow**: everything waiting on a person, ONE card at a time, hardest-
+blocked first (oldest question → plans/scopes to approve → stalled work
+to retry → requirement gaps), full context on the card (recap + question
+with the answer buttons inline; the restated scope and plan document with
+the password step-up inline — the nonce may mint here because the card
+restates the digest-bound terms, the same rule as the task screen), and
+every act 303s back to /next: clearing four items is four acts, not four
+navigations. "Not now" is a bounded URL cursor (never session state — two
+tabs cannot fight, a shared link shows the same queue) and the all-clear
+remembers what was set aside. The decision answer forms were extracted to
+ONE builder shared by /d and /next; return paths stay allow-listed. The
+inbox offers "clear the queue →" only when something waits. Phases B–E
+(roll-up inbox under per-row ceiling — Codex review in flight; phone-
+first stacked board; since-you-last-looked strip; quick capture) follow
+per scratchpad/design-push-brief.md. 783 tests.
+
 ## Providers + phase configuration (2026-08-13, Codex plan review: 1 crit, 6 high — its prescriptions ARE the spec)
 
 Three harnesses behind the one door. `provider.ts` is the only module that
