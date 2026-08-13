@@ -7,7 +7,7 @@
  * walks repos it has never seen, and one broken repo must not end the scan.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 
 export type ExecResult = {
   /** Process exit code, or one of the synthetic codes below. */
@@ -117,4 +117,125 @@ function resolveCode(
   if (flags.overflowed) return OVERFLOW_CODE;
   if (flags.timedOut) return TIMEOUT_CODE;
   return 1;
+}
+
+/**
+ * The streaming transport for JSONL-emitting providers.
+ *
+ * A long agent session can write far more event stream than any fixed
+ * buffer should hold, and the lines that matter — the session identity,
+ * the terminal usage — arrive LAST. Buffering-and-overflowing would kill
+ * the process at 8 MiB and lose exactly the facts a paid run must not
+ * lose (Codex provider review, high finding 2). So stdout is consumed
+ * incrementally and only the load-bearing lines are retained:
+ *
+ *   - every `thread.started` and `turn.completed` / `turn.failed` line
+ *   - the LAST `item.completed` line carrying an agent_message
+ *
+ * each capped per line; everything else is counted and dropped. The
+ * result's stdout is the retained lines joined — a synthetic, bounded
+ * envelope the parser reads exactly like test fixtures.
+ */
+const JSONL_LINE_CAP = 64 * 1024;
+const JSONL_STDERR_CAP = 64 * 1024;
+
+export function runStreamJsonl(
+  file: string,
+  args: readonly string[],
+  options: RunOptions = {},
+): Promise<ExecResult> {
+  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, env, omitEnv } = options;
+
+  let childEnv: Record<string, string | undefined> | undefined;
+  if (env !== undefined || (omitEnv !== undefined && omitEnv.length > 0)) {
+    childEnv = { ...process.env, ...(env ?? {}) };
+    for (const name of omitEnv ?? []) delete childEnv[name];
+  }
+
+  return new Promise(resolve => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(file, [...args], {
+        cwd,
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(childEnv === undefined ? {} : { env: childEnv }),
+      });
+    } catch (error) {
+      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      return;
+    }
+
+    const kept: string[] = [];
+    let lastMessage: string | null = null;
+    let partial = "";
+    let stderr = "";
+    let timedOut = false;
+    let notFound = false;
+
+    const keep = (line: string): void => {
+      if (line.length > JSONL_LINE_CAP) return; // oversized: counted absent, never truncated JSON
+      try {
+        const event = JSON.parse(line) as Record<string, unknown>;
+        const type = String(event["type"] ?? "");
+        if (type === "thread.started" || type === "turn.completed" || type === "turn.failed") {
+          kept.push(line);
+        } else if (type === "item.completed") {
+          const item = event["item"] as Record<string, unknown> | undefined;
+          if (item !== undefined && String(item["type"] ?? "") === "agent_message") {
+            lastMessage = line;
+          }
+        }
+      } catch {
+        // Not JSON: not an event; dropped.
+      }
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      partial += chunk;
+      let cut = partial.indexOf("\n");
+      while (cut !== -1) {
+        keep(partial.slice(0, cut));
+        partial = partial.slice(cut + 1);
+        cut = partial.indexOf("\n");
+      }
+      if (partial.length > JSONL_LINE_CAP * 2) partial = partial.slice(-JSONL_LINE_CAP);
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (stderr.length < JSONL_STDERR_CAP) stderr += chunk.slice(0, JSONL_STDERR_CAP - stderr.length);
+    });
+
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (partial.trim() !== "") keep(partial);
+      const lines = lastMessage === null ? kept : [...kept, lastMessage];
+      resolve({
+        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+        stdout: lines.join("\n"),
+        stderr,
+        timedOut,
+        notFound,
+      });
+    };
+
+    // A failed spawn fires 'error' and may never fire 'close' — both routes
+    // settle, exactly once.
+    child.on("error", error => {
+      notFound = (error as NodeJS.ErrnoException).code === "ENOENT";
+      if (stderr === "") stderr = String(error);
+      finish(null);
+    });
+    child.on("close", code => finish(code));
+  });
 }

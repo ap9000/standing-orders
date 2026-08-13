@@ -1410,6 +1410,21 @@ describe("migration from a v6 database (planning, v7)", () => {
       );
       expect(created.ok).toBe(true);
       expect(store.routineByName("deps")?.paused).toBe(false);
+
+      // v9 rode the same open: history reads provider 'claude' truthfully
+      // (nothing else ever spawned), a new run records its own, the agent
+      // pin columns exist and default honestly NULL, and phase_config is
+      // writable on the migrated database.
+      expect(store.getRun(1)?.provider).toBe("claude");
+      const codexRun = store.startRun({
+        taskRef: 1, leaseId: "l-9", runner: "b", branch: "br", worktree: "/w9",
+        provider: "codex", now: new Date("2026-08-12T04:00:00.000Z"),
+      });
+      expect(store.getRun(codexRun)?.provider).toBe("codex");
+      const pin = store.handle.prepare("SELECT agent_provider, agent_model FROM task_ref WHERE id = 1").get();
+      expect(pin).toMatchObject({ agent_provider: null, agent_model: null });
+      store.setPhaseConfig("installation", "plan", "claude", "opus", "alex", new Date("2026-08-12T04:01:00.000Z"));
+      expect(store.phaseConfig("installation", "plan")).toMatchObject({ provider: "claude", model: "opus", updatedBy: "alex" });
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

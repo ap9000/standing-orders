@@ -37,7 +37,7 @@ import { approvalOf, type Scope } from "./scope.js";
 import { currentClaim, heartbeat, missingCapability } from "./claim.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
-import { invokeAgent } from "./invoke.js";
+import { invokeAgent, type AgentOutcome } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import {
   captureParkEvidence,
@@ -91,6 +91,9 @@ export type BuildRequest = {
   permissionMode?: "acceptEdits" | "auto" | "plan";
   /** Named honestly, never the default, and only ever set by a person. */
   skipPermissions?: boolean;
+  /** The harness this build runs on. Repair ALWAYS inherits it — a session
+   * resumed across providers is not a session (Codex provider review, Q3). */
+  provider?: "claude" | "codex" | "openrouter";
   model?: string;
   /**
    * The model repair turns run on. Repair is a few-k, one-job resumption —
@@ -197,10 +200,11 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     now,
     permissionMode = "acceptEdits",
     skipPermissions = false,
+    provider = "claude",
     model,
     maxTurns = DEFAULT_MAX_TURNS,
     timeoutMs = DEFAULT_BUILD_TIMEOUT_MS,
-    agent = run,
+    agent,
     git = run,
   } = request;
 
@@ -426,22 +430,21 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     }
   }
 
-  let result: ExecResult;
+  let result: AgentOutcome;
   try {
     result = await invokeAgent(
       store,
       request.runId,
-      [
-        "-p",
-        brief(scope as Scope, branch, mailbox, done, answers, planDocument),
-        "--output-format",
-        "json",
-        "--max-turns",
-        String(maxTurns),
-        ...(skipPermissions ? ["--dangerously-skip-permissions"] : ["--permission-mode", permissionMode]),
-        ...(model === undefined ? [] : ["--model", model]),
-      ],
-      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, runner: agent, clock },
+      { provider, model: model ?? null },
+      {
+        phase: "build",
+        brief: brief(scope as Scope, branch, mailbox, done, answers, planDocument),
+        maxTurns,
+        permissionMode,
+        skipPermissions,
+        resumeSession: null,
+      },
+      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
@@ -497,9 +500,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // progress stays in the worktree, preserved for the resume — and this
   // function only assembles the package. Sealing it against the lease is
   // `finalizeParkFenced`, one transaction, in the caller's hands.
-  const said = envelope(result.stdout);
-  if (said.sessionId !== undefined) {
-    store.stampRun(request.runId, { sessionId: said.sessionId });
+  if (result.sessionId !== null) {
+    store.stampRun(request.runId, { sessionId: result.sessionId });
   }
   const parked = await ingestPark({
     store,
@@ -510,7 +512,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     mailbox,
     baseRevision,
     root,
-    sessionId: said.sessionId,
+    sessionId: result.sessionId ?? undefined,
   });
   if (parked !== null) {
     if ("fenced" in parked) {
@@ -657,7 +659,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
 async function ingestPark(args: {
   store: Store;
   request: BuildRequest;
-  agent: Runner;
+  agent: Runner | undefined;
   git: Runner;
   worktree: string;
   mailbox: string;
@@ -770,6 +772,9 @@ async function ingestPark(args: {
         ? {}
         : { model: (request.repairModel ?? request.model) as string }),
       role: "repair",
+      // Repair inherits the parent's provider, structurally: the session
+      // id it resumes has no meaning anywhere else (Codex review, Q3).
+      provider: request.provider ?? "claude",
       parentRun: runId,
       sessionId,
       now: clock(),
@@ -778,23 +783,16 @@ async function ingestPark(args: {
     const spoken = await invokeAgent(
       store,
       repairRun,
-      [
-        "-p",
-        repairPrompt(problems, mailbox),
-        "--resume",
-        sessionId,
-        "--output-format",
-        "json",
-        "--max-turns",
-        String(REPAIR_MAX_TURNS),
-        ...(request.skipPermissions
-          ? ["--dangerously-skip-permissions"]
-          : ["--permission-mode", request.permissionMode ?? "acceptEdits"]),
-        ...((request.repairModel ?? request.model) === undefined
-          ? []
-          : ["--model", (request.repairModel ?? request.model) as string]),
-      ],
-      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST, runner: agent, clock },
+      { provider: request.provider ?? "claude", model: (request.repairModel ?? request.model) ?? null },
+      {
+        phase: "repair",
+        brief: repairPrompt(problems, mailbox),
+        maxTurns: REPAIR_MAX_TURNS,
+        permissionMode: request.permissionMode ?? "acceptEdits",
+        skipPermissions: request.skipPermissions ?? false,
+        resumeSession: sessionId,
+      },
+      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
     );
 
     if (request.leaseId !== undefined) {
@@ -817,8 +815,7 @@ async function ingestPark(args: {
     }
 
     // Resuming forks a fresh session id; the next turn resumes the newest.
-    const resumed = envelope(spoken.stdout);
-    if (resumed.sessionId !== undefined) sessionId = resumed.sessionId;
+    if (spoken.sessionId !== null) sessionId = spoken.sessionId;
 
     const rewritten = ingest(`park-repair-${turn + 1}.json`);
     if (rewritten === null) {

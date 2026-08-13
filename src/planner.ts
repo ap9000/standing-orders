@@ -53,6 +53,8 @@ export type PlanRequest = {
   now: Date;
   clock?: () => Date;
   model?: string;
+  /** The harness this planning session runs on. */
+  provider?: "claude" | "codex" | "openrouter";
   maxTurns?: number;
   timeoutMs?: number;
   pulseMs?: number;
@@ -145,7 +147,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
     worktree,
     branch,
     now,
-    agent = run,
+    agent,
     git = run,
     timeoutMs = DEFAULT_PLAN_TIMEOUT_MS,
     maxTurns = DEFAULT_PLAN_TURNS,
@@ -205,20 +207,18 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
     result = await invokeAgent(
       store,
       request.runId,
-      [
-        "-p",
-        plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? []),
-        "--output-format",
-        "json",
-        "--max-turns",
-        String(maxTurns),
+      { provider: request.provider ?? "claude", model: request.model ?? null },
+      {
+        phase: "plan",
+        brief: plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? []),
+        maxTurns,
         // Read-only by policy AND by check: plan mode is the permission
         // posture; the clean-tree proof below is the law.
-        "--permission-mode",
-        request.permissionMode ?? "plan",
-        ...(request.model === undefined ? [] : ["--model", request.model]),
-      ],
-      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, runner: agent, clock },
+        permissionMode: request.permissionMode ?? "plan",
+        skipPermissions: false,
+        resumeSession: null,
+      },
+      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);

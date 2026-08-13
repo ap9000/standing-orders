@@ -36,7 +36,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -83,6 +83,9 @@ export type TaskRef = {
   planStrikes: number;
   /** The standing order this task is an instance of; null for one-off work. */
   routineId: number | null;
+  /** The pinned agent, when a fire transaction stamped one. Authoritative. */
+  agentProvider: string | null;
+  agentModel: string | null;
   /** Recorded, not asserted: what the grant's selector is checked against. */
   origin: TaskOrigin;
 };
@@ -200,6 +203,8 @@ export type Run = {
   runner: string;
   /** 'repair' = a resumed session mending its own park payload. Never 'driver'; see the DDL. */
   role: "builder" | "repair" | "planner";
+  /** Which harness ran it. History is 'claude' truthfully: nothing else ever spawned. */
+  provider: string;
   parentRun: number | null;
   sessionId: string | null;
   baseRevision: string | null;
@@ -416,7 +421,27 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- Ordinary one-off work carries NULL; the board uses this to keep
   -- instances in their track row instead of the main lanes.
   routine_id              INTEGER REFERENCES routine(id),
+  -- The pinned agent (v9): which provider/model this task's builds run on,
+  -- stamped by the routine fire transaction (digest-authoritative) — a
+  -- runtime flag never overrides a pin. NULL = resolve from config.
+  agent_provider          TEXT,
+  agent_model             TEXT,
   UNIQUE (backend, external_id)
+);
+
+-- Phase configuration (v9): which provider/model each phase runs on.
+-- scope 'installation' is the plane-wide answer; a canonical repo path is
+-- that project's override. Rows are COMPLETE pairs (provider required,
+-- model optional = harness default), written only through authenticated,
+-- audited verbs — spend routing is authority, not preference.
+CREATE TABLE IF NOT EXISTS phase_config (
+  scope      TEXT NOT NULL,
+  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair')),
+  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter')),
+  model      TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  PRIMARY KEY (scope, phase)
 );
 
 -- A standing order (v8): a pre-approved template whose instances build
@@ -560,6 +585,10 @@ CREATE TABLE IF NOT EXISTS run (
   -- role that first exists at M4, and recording repair under that name now
   -- would make the two indistinguishable in every cost report afterwards.
   role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner')),
+  -- Which provider harness this attempt ran on (v9). The default is a
+  -- truthful backfill for history: every run before v9 passed through the
+  -- fixed claude gateway. New dispatches always supply it explicitly.
+  provider      TEXT NOT NULL DEFAULT 'claude',
   parent_run    INTEGER REFERENCES run(id),
   -- The agent session, kept so a malformed park can be repaired by resuming
   -- the conversation that produced it instead of paying for a fresh one.
@@ -1207,6 +1236,16 @@ function migrate(db: Database): void {
   // grows the nullable instance link. The routine table exists by the time
   // this runs because openStore executes SCHEMA first.
   addColumn(db, "task_ref", "routine_id", "INTEGER REFERENCES routine(id)");
+  // v9 (providers): run.provider rides all three canonical shapes — fresh
+  // SCHEMA, V4_RUN_DDL, V4_RUN_COLUMNS — AND this additive column for
+  // databases whose run table is already current (the rebuilds only fire
+  // on pre-v7 shapes; ordering per the Codex provider review, Q7). The
+  // default backfills history truthfully: only claude ever spawned.
+  addColumn(db, "run", "provider", "TEXT NOT NULL DEFAULT 'claude'");
+  // The instance/task agent pin: stamped at routine fire time so a firing
+  // resolved under approved terms cannot be re-routed by later flags.
+  addColumn(db, "task_ref", "agent_provider", "TEXT");
+  addColumn(db, "task_ref", "agent_model", "TEXT");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -1217,6 +1256,7 @@ function V4_RUN_DDL(name: string): string {
     lease_id      TEXT NOT NULL,
     runner        TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner')),
+    provider      TEXT NOT NULL DEFAULT 'claude',
     parent_run    INTEGER REFERENCES run(id),
     session_id    TEXT,
     base_revision TEXT,
@@ -1239,7 +1279,7 @@ function V4_RUN_DDL(name: string): string {
 }
 
 const V4_RUN_COLUMNS = [
-  "id", "task_ref", "lease_id", "runner", "role", "parent_run", "session_id",
+  "id", "task_ref", "lease_id", "runner", "role", "provider", "parent_run", "session_id",
   "base_revision", "branch", "worktree", "model", "outcome", "reason",
   "committed", "started_at", "finished_at", "provider_started_at", "tokens_in",
   "tokens_out", "cost_usd", "usage_json", "head_revision", "handoff",
@@ -2560,6 +2600,63 @@ export class Store {
     });
   }
 
+  // ---- phase configuration ------------------------------------------------
+
+  /** One phase's configured agent at one scope, or null. */
+  phaseConfig(scope: string, phase: string): { provider: string; model: string | null; updatedAt: string; updatedBy: string } | null {
+    const row = this.db
+      .prepare("SELECT * FROM phase_config WHERE scope = ? AND phase = ?")
+      .get(scope, phase);
+    return row === undefined
+      ? null
+      : {
+          provider: String(row["provider"]),
+          model: row["model"] === null ? null : String(row["model"]),
+          updatedAt: String(row["updated_at"]),
+          updatedBy: String(row["updated_by"]),
+        };
+  }
+
+  listPhaseConfig(scope: string): { phase: string; provider: string; model: string | null; updatedAt: string; updatedBy: string }[] {
+    return this.db
+      .prepare("SELECT * FROM phase_config WHERE scope = ? ORDER BY phase")
+      .all(scope)
+      .map(row => ({
+        phase: String(row["phase"]),
+        provider: String(row["provider"]),
+        model: row["model"] === null ? null : String(row["model"]),
+        updatedAt: String(row["updated_at"]),
+        updatedBy: String(row["updated_by"]),
+      }));
+  }
+
+  /** Write one complete pair. Audited: who changed spend routing, and when. */
+  setPhaseConfig(scope: string, phase: string, provider: string, model: string | null, by: string, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO phase_config (scope, phase, provider, model, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (scope, phase) DO UPDATE SET
+           provider = excluded.provider, model = excluded.model,
+           updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      )
+      .run(scope, phase, provider, model, now.toISOString(), by);
+  }
+
+  clearPhaseConfig(scope: string, phase: string): boolean {
+    const { changes } = this.db
+      .prepare("DELETE FROM phase_config WHERE scope = ? AND phase = ?")
+      .run(scope, phase);
+    return Number(changes) > 0;
+  }
+
+  /** Pin a task's agent — the fire transaction's stamp; flags never override it. */
+  pinTaskAgent(taskRef: number, provider: string, model: string | null): void {
+    this.db
+      .prepare("UPDATE task_ref SET agent_provider = ?, agent_model = ? WHERE id = ?")
+      .run(provider, model, taskRef);
+  }
+
   // ---- routines -----------------------------------------------------------
 
   /**
@@ -3007,14 +3104,15 @@ export class Store {
     worktree: string;
     model?: string;
     role?: "builder" | "repair" | "planner";
+    provider?: string;
     parentRun?: number;
     sessionId?: string;
     now: Date;
   }): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, parent_run, session_id, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.taskRef,
@@ -3024,6 +3122,7 @@ export class Store {
         run.worktree,
         run.model ?? null,
         run.role ?? "builder",
+        run.provider ?? "claude",
         run.parentRun ?? null,
         run.sessionId ?? null,
         run.now.toISOString(),
@@ -5106,6 +5205,7 @@ function readRun(row: Record<string, unknown>): Run {
     leaseId: String(row["lease_id"]),
     runner: String(row["runner"]),
     role: String(row["role"] ?? "builder") as Run["role"],
+    provider: String(row["provider"] ?? "claude"),
     parentRun: row["parent_run"] === null || row["parent_run"] === undefined ? null : Number(row["parent_run"]),
     sessionId: row["session_id"] === null || row["session_id"] === undefined ? null : String(row["session_id"]),
     baseRevision:
@@ -5331,6 +5431,14 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
       row["routine_id"] === null || row["routine_id"] === undefined
         ? null
         : Number(row["routine_id"]),
+    agentProvider:
+      row["agent_provider"] === null || row["agent_provider"] === undefined
+        ? null
+        : String(row["agent_provider"]),
+    agentModel:
+      row["agent_model"] === null || row["agent_model"] === undefined
+        ? null
+        : String(row["agent_model"]),
     origin: String(row["origin"]) === "ours" ? "ours" : "theirs",
   };
 }

@@ -1,33 +1,30 @@
 /**
- * The invocation gateway: the only door to the provider binary (§5).
+ * The invocation gateway: the only door to any provider binary (§5).
  *
  * "Never let an LLM poll" is only enforceable if there is exactly one place
  * that can start an LLM, and this is it. Every call verifies an open run
- * record, stamps `provider_started_at` the instant before the process
- * spawns, and parses usage off the envelope of EVERY completed process —
- * nonzero exits included, because a failed turn still spent money and a
- * cost report that skips failures is a smaller number, not a truer one.
+ * record WHOSE RECORDED PROVIDER MATCHES the one about to spawn (a repair
+ * resumed on the wrong harness is a meaningless session id and a silent
+ * fresh spend — refused here, structurally), stamps `provider_started_at`
+ * the instant before the process spawns, and parses usage off the envelope
+ * of EVERY completed process — nonzero exits included, because a failed
+ * turn still spent money and a cost report that skips failures is a
+ * smaller number, not a truer one.
  *
- * An architecture test asserts no other production module names the
- * provider binary. The zero-token invariant this makes real: provider
- * spawns == runs carrying provider_started_at, and each stamp precedes its
- * spawn.
+ * The architecture test asserts the boundary by imports, not by string
+ * scan: only this module imports the registry's spawning surface
+ * (`adapterFor`), and only builder/planner import `invokeAgent`.
  */
 
+import { adapterFor, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
 import type { Store } from "./store.js";
-import type { ExecResult, RunOptions } from "./exec.js";
+import type { RunOptions } from "./exec.js";
 
-/** The provider binary. Referenced here and nowhere else in production code. */
+export type { ProviderRunner } from "./provider.js";
+
+/** The claude binary name — kept for the legacy quota rows and tests that
+ * describe history; new code carries a resolved AgentSpec instead. */
 export const PROVIDER_BINARY = "claude";
-
-/** How the caller actually spawns — injectable so tests script the provider. */
-export type ProviderRunner = (
-  file: string,
-  args: readonly string[],
-  options?: RunOptions,
-) => Promise<ExecResult>;
-
-const USAGE_JSON_CAP = 8 * 1024;
 
 export type ProviderUsage = {
   tokensIn: number | null;
@@ -35,17 +32,31 @@ export type ProviderUsage = {
   costUsd: number | null;
 };
 
+export type AgentOutcome = {
+  code: number;
+  stderr: string;
+  timedOut: boolean;
+  notFound: boolean;
+  /** The harness session, for repair-by-resume on the SAME provider. */
+  sessionId: string | null;
+  /** The agent's spoken conclusion — diagnostics, never the handoff. */
+  finalMessage: string | null;
+  usage: ProviderUsage;
+};
+
 /**
  * Spend money, on the record. Throws — never refuses quietly — when the run
- * is missing or already finished: a caller that reaches for the provider
- * without an open run is a bug, not a case.
+ * is missing, already finished, or recorded against a different provider:
+ * a caller that reaches for a harness without a matching open run is a
+ * bug, not a case.
  */
 export async function invokeAgent(
   store: Store,
   runId: number,
-  args: readonly string[],
-  options: RunOptions & { runner: ProviderRunner; clock?: () => Date },
-): Promise<ExecResult & { usage: ProviderUsage }> {
+  spec: AgentSpec,
+  invocation: Omit<Invocation, "model">,
+  options: RunOptions & { runner?: ProviderRunner; clock?: () => Date },
+): Promise<AgentOutcome> {
   const clock = options.clock ?? (() => new Date());
   const run = store.getRun(runId);
   if (run === null || run.outcome !== null) {
@@ -53,6 +64,18 @@ export async function invokeAgent(
       `run ${runId} is not an open attempt — nothing spends without a run record that will outlive it`,
     );
   }
+  if (run.provider !== spec.provider) {
+    throw new Error(
+      `run ${runId} was opened for ${run.provider} but ${spec.provider} is about to spawn — a session resumed across harnesses is not a session`,
+    );
+  }
+
+  const adapter = adapterFor(spec.provider);
+  const argv = adapter.argv({ ...invocation, model: spec.model });
+  const timeoutMs = adapter.clampTimeout(
+    invocation.phase,
+    options.timeoutMs ?? 30 * 60_000,
+  );
 
   // The stamp precedes the spawn, so a crash between the two leaves a run
   // that claims spend which never happened — the honest direction. A spawn
@@ -61,43 +84,32 @@ export async function invokeAgent(
   store.stampProviderStart(runId, clock());
 
   const { runner, clock: _clock, ...runOptions } = options;
-  const result = await runner(PROVIDER_BINARY, args, runOptions);
-
-  const usage = parseUsage(result.stdout);
-  store.recordUsage(runId, {
-    ...(usage.tokensIn === null ? {} : { tokensIn: usage.tokensIn }),
-    ...(usage.tokensOut === null ? {} : { tokensOut: usage.tokensOut }),
-    ...(usage.costUsd === null ? {} : { costUsd: usage.costUsd }),
-    ...(usage.raw === null ? {} : { usageJson: usage.raw }),
+  const spawn = runner ?? adapter.defaultRunner;
+  const result = await spawn(adapter.binary, argv, {
+    ...runOptions,
+    timeoutMs,
+    omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
   });
 
-  return { ...result, usage };
-}
+  const envelope = adapter.parse(result.stdout);
+  store.recordUsage(runId, {
+    ...(envelope.tokensIn === null ? {} : { tokensIn: envelope.tokensIn }),
+    ...(envelope.tokensOut === null ? {} : { tokensOut: envelope.tokensOut }),
+    ...(envelope.costUsd === null ? {} : { costUsd: envelope.costUsd }),
+    ...(envelope.usageRaw === null ? {} : { usageJson: envelope.usageRaw }),
+  });
 
-/**
- * The envelope's usage block, taken from any process that produced one —
- * exit code notwithstanding. Absent or malformed stays null: the brief
- * reports "measured across X of Y invocations", never a sum that quietly
- * skipped the expensive failures.
- */
-function parseUsage(stdout: string): ProviderUsage & { raw: string | null } {
-  try {
-    const parsed = JSON.parse(stdout) as {
-      usage?: { input_tokens?: unknown; output_tokens?: unknown };
-      total_cost_usd?: unknown;
-    };
-    const input = parsed.usage?.input_tokens;
-    const output = parsed.usage?.output_tokens;
-    const cost = parsed.total_cost_usd;
-    const raw =
-      parsed.usage === undefined ? null : JSON.stringify(parsed.usage).slice(0, USAGE_JSON_CAP);
-    return {
-      tokensIn: typeof input === "number" && input >= 0 ? input : null,
-      tokensOut: typeof output === "number" && output >= 0 ? output : null,
-      costUsd: typeof cost === "number" && cost >= 0 ? cost : null,
-      raw,
-    };
-  } catch {
-    return { tokensIn: null, tokensOut: null, costUsd: null, raw: null };
-  }
+  return {
+    code: result.code,
+    stderr: result.stderr,
+    timedOut: result.timedOut,
+    notFound: result.notFound,
+    sessionId: envelope.sessionId,
+    finalMessage: envelope.finalMessage,
+    usage: {
+      tokensIn: envelope.tokensIn,
+      tokensOut: envelope.tokensOut,
+      costUsd: envelope.costUsd,
+    },
+  };
 }

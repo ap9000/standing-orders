@@ -40,7 +40,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { probeRepo, isVerified } from "./probe.js";
-import { PROVIDER_BINARY } from "./invoke.js";
+
 import { createDecisionServer } from "./serve.js";
 import {
   daemonStatus,
@@ -1274,7 +1274,7 @@ async function tickCommand(
           now: clock(),
         });
         if (sealed.ok) {
-          store.clearQuota(runner, PROVIDER_BINARY, model ?? "");
+          store.clearQuota(runner, "claude", model ?? "");
           dispatched.push({ id, outcome: "planned" });
         } else {
           dispatched.push({ id, outcome: "failed", reason: "fenced" });
@@ -1444,7 +1444,7 @@ async function tickCommand(
         // and proves the credential, clearing any quota stamp it was
         // dispatched through as a half-open probe.
         store.resetStrikes(ref.id);
-        store.clearQuota(runner, PROVIDER_BINARY, model ?? "");
+        store.clearQuota(runner, "claude", model ?? "");
         dispatched.push({
           id,
           outcome: "built",

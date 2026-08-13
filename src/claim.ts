@@ -39,7 +39,7 @@ import {
 import type { ParsedDecision, Problem } from "./decision.js";
 import { digestOf } from "./scope.js";
 import type { ParsedPlan } from "./plan.js";
-import { PROVIDER_BINARY } from "./invoke.js";
+
 
 export type Claim = {
   taskRef: number;
@@ -220,6 +220,8 @@ export function acquireIfReady(
   options: AcquireOptions & {
     repo?: string;
     maxOpenDecisions?: number;
+    /** The provider this dispatch resolved to — the quota key. */
+    provider?: string;
     /** The model this dispatch would run — the quota scope. */
     model?: string;
     /** What this dispatch is FOR. Re-proved inside the transaction — the
@@ -280,7 +282,10 @@ export function acquireIfReady(
     // admits exactly this dispatch as its probe, consumed here so a racing
     // pass cannot also treat it as open.
     const scope = options.model ?? "";
-    const quota = store.quotaState(runner, PROVIDER_BINARY, scope, options.now);
+    // Quota is keyed to the credential that actually exhausts: the RESOLVED
+    // provider, never a fixed binary name — codex quota must not collide
+    // with claude's, nor bypass it (Codex provider review, high finding 5).
+    const quota = store.quotaState(runner, options.provider ?? "claude", scope, options.now);
     if (quota !== null && quota.state === "exhausted") {
       return {
         ok: false as const,
@@ -319,7 +324,7 @@ export function acquireIfReady(
     // exhausted with no probe in flight (finding 3). Same transaction, so
     // consume-with-claim is all-or-nothing.
     if (taken.ok && quota !== null) {
-      store.consumeHalfOpen(runner, PROVIDER_BINARY, scope, options.now);
+      store.consumeHalfOpen(runner, options.provider ?? "claude", scope, options.now);
     }
     return taken;
   });
