@@ -48,6 +48,9 @@ export type BoardFacts = {
     role: string | null;
     /** Which harness is spending — worn on the card when it is not claude. */
     provider: string | null;
+    /** The machine's own phase (M5.4) — stamped at state-machine boundaries,
+     * never parsed from a provider stream. Null before the first boundary. */
+    phase: string | null;
   } | null;
   /** The top-precedence live hold: operator > backoff > decision > incident. */
   hold: { ownerKind: "operator" | "decision" | "incident" | "backoff"; until: string | null } | null;

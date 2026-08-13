@@ -432,6 +432,9 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     }
   }
 
+  // The machine's own boundary, stamped by the machine: the spawn follows
+  // within this same tick, and no provider stream is ever consulted (M5.4).
+  store.setRunPhase(request.runId, "agent-running");
   let result: AgentOutcome;
   try {
     result = await invokeAgent(
@@ -513,6 +516,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // progress stays in the worktree, preserved for the resume — and this
   // function only assembles the package. Sealing it against the lease is
   // `finalizeParkFenced`, one transaction, in the caller's hands.
+  store.setRunPhase(request.runId, "validating-handoff");
   if (result.sessionId !== null) {
     store.stampRun(request.runId, { sessionId: result.sessionId });
   }
@@ -638,6 +642,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     store.recordOutcomeFacts(request.runId, { headRevision: baseRevision, handoff: handoff.conclusion });
     // The explicit zero: base against base, captured and recorded, because
     // "no diff artifact" must never be how a no-change run says no change.
+    store.setRunPhase(request.runId, "capturing-evidence");
     await captureTerminalDiff(store, git, worktree, baseRevision, baseRevision, root, request.runId, clock());
     return { ok: true, committed: false, noChange: true, branch, summary: handoff.conclusion };
   }
@@ -650,6 +655,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       message: "the handoff said completed but nothing changed — a claim of work with no work is the no-op gnhf warns about",
     };
   }
+  store.setRunPhase(request.runId, "committing");
   const made = await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion);
   if (made.ok && made.parked === undefined && made.committed) {
     const newHead = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
@@ -663,6 +669,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       // NUL-delimited stat, captured while the worktree still exists —
       // a built run's page must show its diff long after the checkout is
       // released (M5.3).
+      store.setRunPhase(request.runId, "capturing-evidence");
       await captureTerminalDiff(store, git, worktree, baseRevision, head, root, request.runId, clock());
     }
   }

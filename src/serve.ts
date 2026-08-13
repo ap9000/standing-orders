@@ -2335,17 +2335,30 @@ function boardBody(
       card.stalledSince === null ? "" : ` \u00b7 waiting ${age(card.stalledSince)}`
     }</span></a>`;
 
+  // The machine phase's chip copy \u2014 plain words for the machine's own
+  // boundaries. Unknown values (a newer daemon's vocabulary) show nothing
+  // rather than raw tokens.
+  const PHASE_LABEL: Record<string, string> = {
+    "agent-running": "agent working",
+    "validating-handoff": "checking the handoff",
+    "capturing-evidence": "capturing evidence",
+    committing: "committing",
+  };
+
   const building = (card: BoardCard): string => {
     const claim = card.claim;
     if (claim === null) return plain(card);
     const minutes = Math.max(1, Math.round((data.now.getTime() - new Date(claim.claimedAt).getTime()) / 60_000));
     const workspace = claim.worktree === null ? null : (claim.worktree.split("/").pop() ?? claim.worktree);
+    const phase = claim.phase === null ? undefined : PHASE_LABEL[claim.phase];
     return (
       `<a class="lane-card building" href="${card.href}">` +
       `<span class="t"><span class="dot dot-ok pulse"></span>${escape(card.title)}</span>` +
       `<span class="meta">${escape(claim.runner)} \u00b7 ${minutes}m elapsed${
         claim.model === null ? " \u00b7 preparing workspace" : ` \u00b7 ${escape(claim.model)}`
-      }${claim.provider !== null && claim.provider !== "claude" ? ` \u00b7 ${escape(claim.provider)}` : ""}${card.attempt === null ? "" : ` \u00b7 attempt ${card.attempt}`}${chip(card.repo)}</span>` +
+      }${claim.provider !== null && claim.provider !== "claude" ? ` \u00b7 ${escape(claim.provider)}` : ""}${
+        phase === undefined ? "" : ` \u00b7 ${phase}`
+      }${card.attempt === null ? "" : ` \u00b7 attempt ${card.attempt}`}${chip(card.repo)}</span>` +
       (claim.branch === null
         ? ""
         : `<span class="mono meta">${escape(claim.branch)}${workspace === null ? "" : ` \u00b7 ${escape(workspace)}`}</span>`) +
@@ -3312,6 +3325,7 @@ function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]
     ["task", taskId, true],
     ["role", run.role],
     ["outcome", run.outcome ?? "never finished"],
+    ["phase", run.outcome === null ? run.phase : null],
     ["reason", run.reason],
     ["runner", run.runner, true],
     ["branch", run.branch, true],

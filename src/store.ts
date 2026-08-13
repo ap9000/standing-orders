@@ -225,7 +225,22 @@ export type Run = {
   headRevision: string | null;
   /** The validated terminal handoff's conclusion. */
   handoff: string | null;
+  /**
+   * Where the machine is in ITS OWN state machine — stamped by the control
+   * plane at boundaries it owns, never parsed from a provider stream (M5.4).
+   * Meaningful while the run is open; the last value simply remains after.
+   */
+  phase: RunPhase | null;
 };
+
+/** The bounded activity vocabulary. Machine-authored — a model's prose never becomes one of these. */
+export const RUN_PHASES = [
+  "agent-running",
+  "validating-handoff",
+  "capturing-evidence",
+  "committing",
+] as const;
+export type RunPhase = (typeof RUN_PHASES)[number];
 
 /** One option of a decision. `reversible` is a field so a scheduler can refuse to auto-apply. */
 export type DecisionOption = {
@@ -1291,6 +1306,12 @@ function migrate(db: Database): void {
   // digest that binds an irreversible confirmation to the EXACT note it
   // confirmed (Codex free-text review, finding 3).
   addColumn(db, "telegram_action", "note_digest", "TEXT");
+  // v11 (M5 activity): the machine-authored phase — stamped by the control
+  // plane at its own state-machine boundaries, never parsed out of a
+  // provider stream. Transient in meaning (read while the run is open),
+  // durable in storage (the simplest shared state between daemon and
+  // console is the database they already share).
+  addColumn(db, "run", "phase", "TEXT");
   // v11 (M5 terminal diff): artifact.kind admits 'terminal-diff' (the
   // immutable base→head patch captured before the worktree releases) and
   // 'diff-stat' (its machine-parsed summary). Same recognized-exactly
@@ -1332,6 +1353,7 @@ function V4_RUN_DDL(name: string): string {
     branch        TEXT NOT NULL,
     worktree      TEXT NOT NULL,
     model         TEXT,
+    phase         TEXT,
     outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change')),
     reason        TEXT,
     committed     INTEGER,
@@ -1349,7 +1371,7 @@ function V4_RUN_DDL(name: string): string {
 
 const V4_RUN_COLUMNS = [
   "id", "task_ref", "lease_id", "runner", "role", "provider", "parent_run", "session_id",
-  "base_revision", "branch", "worktree", "model", "outcome", "reason",
+  "base_revision", "branch", "worktree", "model", "phase", "outcome", "reason",
   "committed", "started_at", "finished_at", "provider_started_at", "tokens_in",
   "tokens_out", "cost_usd", "usage_json", "head_revision", "handoff",
 ];
@@ -3309,6 +3331,19 @@ export class Store {
       );
   }
 
+  /**
+   * Stamp the machine's current phase on an OPEN run. A closed run's phase
+   * is history and stays put; an unknown phase is a caller bug and throws.
+   * Bounded writes by construction: the vocabulary has five values and the
+   * state machine passes each boundary once.
+   */
+  setRunPhase(id: number, phase: RunPhase): void {
+    if (!RUN_PHASES.includes(phase)) {
+      throw new Error(`"${phase}" is not a phase this machine has — the vocabulary is closed`);
+    }
+    this.db.prepare("UPDATE run SET phase = ? WHERE id = ? AND outcome IS NULL").run(phase, id);
+  }
+
   /** The accepted head and the validated conclusion, once known. */
   recordOutcomeFacts(id: number, facts: { headRevision?: string; handoff?: string }): void {
     this.db
@@ -4763,7 +4798,7 @@ export class Store {
              (SELECT routine.name FROM routine WHERE routine.id = task_ref.routine_id) AS routine_name,
              live.runner AS claim_runner, live.acquired_at AS claim_at, live.lease_id AS claim_lease,
              claim_run.model AS claim_model, claim_run.branch AS claim_branch, claim_run.worktree AS claim_worktree,
-             claim_run.role AS claim_role, claim_run.provider AS claim_provider,
+             claim_run.role AS claim_role, claim_run.provider AS claim_provider, claim_run.phase AS claim_phase,
              (SELECT hold.owner_kind FROM hold
                WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
                ORDER BY CASE hold.owner_kind WHEN 'operator' THEN 0 WHEN 'backoff' THEN 1 WHEN 'decision' THEN 2 ELSE 3 END, hold.id
@@ -4880,6 +4915,7 @@ export class Store {
                 worktree: text(row, "claim_worktree"),
                 role: text(row, "claim_role"),
                 provider: text(row, "claim_provider"),
+                phase: text(row, "claim_phase"),
               },
         hold:
           row["hold_kind"] === null || row["hold_kind"] === undefined
@@ -5471,6 +5507,12 @@ function readRun(row: Record<string, unknown>): Run {
         ? null
         : String(row["head_revision"]),
     handoff: row["handoff"] === null || row["handoff"] === undefined ? null : String(row["handoff"]),
+    phase:
+      row["phase"] === null || row["phase"] === undefined
+        ? null
+        : (RUN_PHASES as readonly string[]).includes(String(row["phase"]))
+          ? (String(row["phase"]) as RunPhase)
+          : null,
   };
 }
 

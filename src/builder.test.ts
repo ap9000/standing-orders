@@ -251,6 +251,21 @@ describe("the builder's gates", () => {
     const patch = artifacts.find(one => one.kind === "terminal-diff");
     expect(patch?.capture).toContain("--no-ext-diff");
     expect(patch?.capture).toContain("--no-textconv");
+    // The machine's phase reached the last boundary the machine owns —
+    // stamped by the state machine, never parsed from a provider stream.
+    expect(store.getRun(req.runId as number)?.phase).toBe("capturing-evidence");
+  });
+
+  test("the phase vocabulary is closed, and a finished run's phase is history", () => {
+    const runId = store.startRun({
+      taskRef, leaseId: "lease-p", runner: "builder-1", branch: "b", worktree: wt, now: T0,
+    });
+    store.setRunPhase(runId, "agent-running");
+    expect(store.getRun(runId)?.phase).toBe("agent-running");
+    expect(() => store.setRunPhase(runId, "vibing" as never)).toThrow(/vocabulary is closed/);
+    store.finishRun(runId, { outcome: "failed", reason: "agent", now: T0 });
+    store.setRunPhase(runId, "committing");
+    expect(store.getRun(runId)?.phase).toBe("agent-running");
   });
 
   test("refuses the repo's own default branch, even under a custom name", async () => {
