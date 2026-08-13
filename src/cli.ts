@@ -61,7 +61,7 @@ type Write = (line: string) => void;
 
 const USAGE_EXIT = 2;
 
-export const HELP = `standing-orders — standing orders for your agents
+export const HELP = `standing-orders — a control plane for unattended coding agents
 
 Usage
   standing-orders [path...]        report what is in flight

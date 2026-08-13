@@ -2,13 +2,11 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-dark.svg">
-  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-light.svg" alt="standing·orders — wake me only for these" width="480">
+  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-light.svg" alt="standing·orders — a control plane for unattended coding agents" width="480">
 </picture>
 
-**The control plane for coding agents you can safely leave alone.**
-
-Queue twelve tasks, walk away, come back to pull requests —
-with near-zero token spend across every idle hour.
+**Queue twelve tasks, walk away, come back to pull requests —
+interrupted only for decisions that genuinely need a human.**
 
 [![CI](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml/badge.svg)](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/standing-orders)](https://www.npmjs.com/package/standing-orders)

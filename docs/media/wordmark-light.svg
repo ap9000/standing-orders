@@ -3,5 +3,5 @@
     .w { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 44px; font-weight: 700; letter-spacing: -1px; }
   </style>
   <text x="280" y="58" text-anchor="middle" class="w"><tspan fill="#1f2328">standing</tspan><tspan fill="#9a6700">·</tspan><tspan fill="#1f2328">orders</tspan></text>
-  <text x="280" y="84" text-anchor="middle" fill="#59636e" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; letter-spacing: 3px;">WAKE ME ONLY FOR THESE</text>
+  <text x="280" y="84" text-anchor="middle" fill="#59636e" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; letter-spacing: 2px;">A CONTROL PLANE FOR UNATTENDED CODING AGENTS</text>
 </svg>
