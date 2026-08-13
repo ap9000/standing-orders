@@ -44,6 +44,7 @@ import {
   captureTerminalDiff,
   evidenceRoot,
   handoffName,
+  storeHandoffArtifact,
   looksLikeProtocolFile,
   mailboxName,
   quarantineMailboxes,
@@ -673,6 +674,22 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     // "no diff artifact" must never be how a no-change run says no change.
     store.setRunPhase(request.runId, "capturing-evidence");
     await captureTerminalDiff(store, git, worktree, baseRevision, baseRevision, root, request.runId, clock());
+    storeHandoffArtifact(store, root, {
+      schema: 1,
+      taskId,
+      runId: request.runId,
+      provider,
+      sessionId: result.sessionId,
+      branch,
+      worktree,
+      base: baseRevision,
+      head: baseRevision,
+      outcome: "no-change",
+      committed: false,
+      decisionsIncorporated: answers.map(one => one.decision.id),
+      conclusion: handoff.conclusion,
+      freshness: { stampedAt: clock().toISOString(), currentAsOf: baseRevision },
+    }, clock());
     return { ok: true, committed: false, noChange: true, branch, summary: handoff.conclusion };
   }
 
@@ -700,6 +717,22 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       // released (M5.3).
       store.setRunPhase(request.runId, "capturing-evidence");
       await captureTerminalDiff(store, git, worktree, baseRevision, head, root, request.runId, clock());
+      storeHandoffArtifact(store, root, {
+        schema: 1,
+        taskId,
+        runId: request.runId,
+        provider,
+        sessionId: result.sessionId,
+        branch,
+        worktree,
+        base: baseRevision,
+        head,
+        outcome: "built",
+        committed: true,
+        decisionsIncorporated: answers.map(one => one.decision.id),
+        conclusion: handoff.conclusion,
+        freshness: { stampedAt: clock().toISOString(), currentAsOf: head },
+      }, clock());
     }
   }
   return made;

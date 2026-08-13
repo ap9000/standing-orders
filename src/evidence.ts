@@ -50,6 +50,8 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   plan: PLAN_LIMITS.document,
   "terminal-diff": 256 * 1024,
   "diff-stat": 32 * 1024,
+  handoff: 32 * 1024,
+  "revision-brief": 64 * 1024,
 };
 
 export function evidenceRoot(home: string): string {
@@ -414,6 +416,56 @@ export function parseNumstat(raw: string, base: string, head: string): DiffStat 
     files: kept,
     filesTruncated: kept.length < files.length,
   };
+}
+
+/** The freshness-stamped handoff artifact's shape (M6.10). */
+export type HandoffArtifact = {
+  schema: 1;
+  taskId: string;
+  runId: number;
+  provider: string;
+  sessionId: string | null;
+  branch: string;
+  worktree: string;
+  base: string;
+  head: string;
+  outcome: "built" | "no-change";
+  committed: boolean;
+  /** Decision ids whose answers were in this run's brief — causality, not time. */
+  decisionsIncorporated: number[];
+  /** The agent's conclusion — agent-reported, and labeled so by its position here. */
+  conclusion: string;
+  freshness: {
+    stampedAt: string;
+    /** A successor proves this against the branch before trusting anything above. */
+    currentAsOf: string;
+  };
+};
+
+/**
+ * Write the handoff artifact (M6.10): the machine's own statement of where
+ * a finished run left the world — workspace identity, exact base and head,
+ * which answered decisions the brief carried, and a freshness stamp a
+ * successor can PROVE against the branch before spending a token on stale
+ * context. This is what makes a cold takeover context-bearing rather than
+ * repo-only; a provider session is memory, not a freshness proof.
+ */
+export function storeHandoffArtifact(
+  store: Store,
+  root: string,
+  payload: HandoffArtifact,
+  now: Date,
+): number {
+  return storeEvidence(
+    store,
+    root,
+    payload.runId,
+    "handoff",
+    "handoff.json",
+    Buffer.from(JSON.stringify(payload, null, 2), "utf8"),
+    "machine-authored handoff (exit 0)",
+    now,
+  );
 }
 
 /**

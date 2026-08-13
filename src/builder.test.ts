@@ -290,6 +290,11 @@ describe("the builder's gates", () => {
     // The machine's phase reached the last boundary the machine owns —
     // stamped by the state machine, never parsed from a provider stream.
     expect(store.getRun(req.runId as number)?.phase).toBe("capturing-evidence");
+    // And the freshness-stamped handoff (M6.10): the machine's statement of
+    // where this run left the world, provable against the branch.
+    const handoff = artifacts.find(one => one.kind === "handoff");
+    expect(handoff).toBeDefined();
+    expect(handoff?.capture).toContain("machine-authored");
   });
 
   test("the phase vocabulary is closed, and a finished run's phase is history", () => {

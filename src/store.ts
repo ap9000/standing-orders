@@ -277,7 +277,7 @@ export type Decision = {
 export type Artifact = {
   id: number;
   run: number;
-  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat";
+  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat" | "handoff" | "revision-brief";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -680,7 +680,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -1365,6 +1365,29 @@ function migrate(db: Database): void {
        id             INTEGER PRIMARY KEY AUTOINCREMENT,
        run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
        kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat')),
+       key            TEXT NOT NULL,
+       bytes_original INTEGER NOT NULL,
+       bytes_stored   INTEGER NOT NULL,
+       truncated      INTEGER NOT NULL DEFAULT 0,
+       sha256         TEXT NOT NULL,
+       capture        TEXT NOT NULL,
+       created_at     TEXT NOT NULL,
+       redacted       INTEGER NOT NULL DEFAULT 0
+     )`,
+    ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted"],
+  );
+  // v11b (M6 handoff + revision briefs): the same recipe again, recognizing
+  // BOTH the pre-v11 shape (already rebuilt by the step above when this
+  // runs on an old file) and a database that opened at v11 earlier today.
+  rebuildForV4(
+    db,
+    "artifact",
+    "'terminal-diff','diff-stat'",
+    "'handoff','revision-brief'",
+    `CREATE TABLE artifact_next (
+       id             INTEGER PRIMARY KEY AUTOINCREMENT,
+       run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+       kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief')),
        key            TEXT NOT NULL,
        bytes_original INTEGER NOT NULL,
        bytes_stored   INTEGER NOT NULL,
