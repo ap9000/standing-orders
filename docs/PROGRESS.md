@@ -149,6 +149,20 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Console v3 — workflow tabs (2026-08-13, Codex-reviewed)
+
+Navigation reorganized by workflow stage per a second Codex IA review:
+`/` = **inbox** (one card per stall: decisions, scopes awaiting approval as
+links to the step-up screen — never forms or nonces in lists, and the
+inbox never auto-refreshes; inline retry per stalled task with allow-listed
+return; cancelled-blocker repair cards; gaps that actually free work;
+saturated cached badge); **work** = active queue; **done** = one row per
+completed task with final build, conclusion, cost, PR, observed-only CI
+state; ledger → /morning ("last 24 hours", honestly a rolling window);
+machinery → /system (live-refreshing); builds/requirements demoted to
+footer with deep links kept. The review also caught and fixed a ceiling
+bypass in inline incident resolution. 697 tests.
+
 ## Console v2 — the workspace (2026-08-12, Codex-reviewed: 11 findings)
 
 The user asked for a standalone multi-pane interface with project
