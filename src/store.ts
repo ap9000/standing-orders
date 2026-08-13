@@ -929,6 +929,17 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   const db = connect(file);
   db.exec(SCHEMA);
   migrate(db);
+  // Attention/history indexes come AFTER migration: on a database whose
+  // constrained tables still carry a pre-rebuild shape, creating a partial
+  // index first would fail with a raw SQL error instead of the migration's
+  // articulate refusal.
+  db.exec(`-- Attention and history predicates the inbox/done tabs saturate on. v6.
+CREATE INDEX IF NOT EXISTS decision_attention ON decision (run, id) WHERE state IN ('open','expired');
+CREATE INDEX IF NOT EXISTS incident_attention ON incident (run, id) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS task_ref_repo ON task_ref (repo, id);
+CREATE INDEX IF NOT EXISTS run_task_outcome ON run (task_ref, outcome, id DESC);
+CREATE INDEX IF NOT EXISTS task_done_recent ON task (updated_at DESC, id DESC) WHERE state = 'done';
+CREATE INDEX IF NOT EXISTS run_started ON run (started_at, id);`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -3541,6 +3552,278 @@ export class Store {
         lastOpenedAt: String(row["last_opened_at"]),
       }));
   }
+
+  /**
+   * Tasks whose scope waits on a person's yes: proposed, not approved (or
+   * approval voided by an edit), task not terminal. The inbox's core row —
+   * an unapproved scope is work the machine is forbidden to start.
+   */
+  scopesAwaitingApproval(
+    repo: string | null,
+    limit = 10,
+  ): { taskId: string; title: string; goal: string; digest: string; proposedAt: string }[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 50));
+    return this.db
+      .prepare(
+        `SELECT task.id AS task_id, task.title, task_scope.goal, task_scope.digest, task_scope.proposed_at
+         FROM task_scope
+         JOIN task ON task.id = task_scope.task_id
+         JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+         WHERE task.state IN ('queued','running')
+           AND (task_scope.approved_at IS NULL OR task_scope.approved_by IS NULL
+                OR task_scope.approved_digest IS NULL OR task_scope.approved_digest != task_scope.digest)
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         ORDER BY task_scope.proposed_at, task.id LIMIT ?`,
+      )
+      .all(BUILT_IN, repo, repo, page)
+      .map(row => ({
+        taskId: String(row["task_id"]),
+        title: String(row["title"]),
+        goal: String(row["goal"]),
+        digest: String(row["digest"]),
+        proposedAt: String(row["proposed_at"]),
+      }));
+  }
+
+  /**
+   * One row per human-stalled task (v3 review, finding 2): failed, or
+   * carrying unresolved incidents, and free of live claims — requeue is the
+   * one inline verb, and incident kinds ride along as context, never as
+   * separate cards.
+   */
+  listRequeueablesScoped(
+    repo: string | null,
+    now: Date,
+    limit = 10,
+  ): { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number }[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 50));
+    return this.db
+      .prepare(
+        `WITH open_incidents AS (
+           SELECT run.task_ref AS task_ref, COUNT(*) AS incident_count,
+                  MIN(incident.created_at) AS oldest
+           FROM incident JOIN run ON run.id = incident.run
+           WHERE incident.resolved_at IS NULL
+           GROUP BY run.task_ref
+         )
+         SELECT task.id, task.title, task.state, task_ref.strikes,
+                COALESCE(open_incidents.incident_count, 0) AS incident_count,
+                COALESCE(open_incidents.oldest, task.updated_at) AS sort_at
+         FROM task
+         JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+         LEFT JOIN open_incidents ON open_incidents.task_ref = task_ref.id
+         WHERE (task.state = 'failed' OR open_incidents.task_ref IS NOT NULL)
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM claim
+             WHERE claim.task_ref = task_ref.id AND claim.released_at IS NULL
+               AND claim.expires_at > ?
+               AND claim.lease_generation = (
+                 SELECT MAX(newest.lease_generation) FROM claim AS newest
+                 WHERE newest.task_ref = claim.task_ref
+               )
+           )
+         ORDER BY sort_at, task_ref.id LIMIT ?`,
+      )
+      .all(BUILT_IN, repo, repo, now.toISOString(), page)
+      .map(row => ({
+        taskId: String(row["id"]),
+        title: String(row["title"]),
+        state: String(row["state"]) as TaskState,
+        strikes: Number(row["strikes"]),
+        incidentCount: Number(row["incident_count"]),
+      }));
+  }
+
+  /**
+   * Cancelled blockers with queued dependents — one repair card per
+   * blocker, because a cancelled task cannot be requeued; the dependents
+   * are impact, not additional items.
+   */
+  listCancelledBlockersScoped(
+    repo: string | null,
+    limit = 10,
+  ): { blockerId: string; dependentCount: number; exampleDependent: string }[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 50));
+    return this.db
+      .prepare(
+        `SELECT task_edge.blocker AS blocker, COUNT(*) AS dependents, MIN(task_edge.blocked) AS example
+         FROM task_edge
+         JOIN task AS blocker_task ON blocker_task.id = task_edge.blocker AND blocker_task.state = 'cancelled'
+         JOIN task AS dependent ON dependent.id = task_edge.blocked AND dependent.state = 'queued'
+         JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task_edge.blocked
+         WHERE (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         GROUP BY task_edge.blocker ORDER BY task_edge.blocker LIMIT ?`,
+      )
+      .all(BUILT_IN, repo, repo, page)
+      .map(row => ({
+        blockerId: String(row["blocker"]),
+        dependentCount: Number(row["dependents"]),
+        exampleDependent: String(row["example"]),
+      }));
+  }
+
+  /**
+   * Active work only, running first — the Work tab's page. Terminal history
+   * belongs to Done and the build ledger, never to this list.
+   */
+  listActiveWorkScoped(
+    repo: string | null,
+    now: Date,
+    limit = 50,
+  ): (Task & { repo: string | null; approved: boolean; held: boolean; buildingBy: string | null; strikes: number })[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 100));
+    return this.db
+      .prepare(
+        `SELECT task.*, task_ref.repo AS task_repo, task_ref.strikes AS ref_strikes,
+           EXISTS (
+             SELECT 1 FROM task_scope
+             WHERE task_scope.task_id = task.id AND task_scope.approved_digest = task_scope.digest
+               AND task_scope.approved_at IS NOT NULL
+           ) AS approved,
+           EXISTS (
+             SELECT 1 FROM hold
+             WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
+           ) AS held,
+           (SELECT claim.runner FROM claim
+             WHERE claim.task_ref = task_ref.id AND claim.released_at IS NULL AND claim.expires_at > ?
+               AND claim.lease_generation = (
+                 SELECT MAX(newest.lease_generation) FROM claim AS newest
+                 WHERE newest.task_ref = claim.task_ref)
+             LIMIT 1) AS building_by
+         FROM task
+         JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+         WHERE task.state IN ('running','queued')
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         ORDER BY CASE task.state WHEN 'running' THEN 0 ELSE 1 END, task.updated_at DESC, task.id DESC
+         LIMIT ?`,
+      )
+      .all(now.toISOString(), now.toISOString(), BUILT_IN, repo, repo, page)
+      .map(row => ({
+        id: String(row["id"]),
+        title: String(row["title"]),
+        state: String(row["state"]) as TaskState,
+        createdAt: String(row["created_at"]),
+        updatedAt: String(row["updated_at"]),
+        repo: row["task_repo"] === null ? null : String(row["task_repo"]),
+        approved: Number(row["approved"]) === 1,
+        held: Number(row["held"]) === 1,
+        buildingBy: row["building_by"] === null ? null : String(row["building_by"]),
+        strikes: Number(row["ref_strikes"]),
+      }));
+  }
+
+  /**
+   * Completed work, one row per done task with its final accepted run and
+   * any publication attached — never composed from separate task and PR
+   * lists (v3 review, finding 8). Manual done-without-run rows stay
+   * visible; no-change is labeled, not hidden.
+   */
+  listCompletedWorkScoped(
+    repo: string | null,
+    limit = 50,
+  ): {
+    taskId: string;
+    title: string;
+    completedAt: string;
+    outcome: string | null;
+    handoff: string | null;
+    costUsd: number | null;
+    prNumber: number | null;
+    prUrl: string | null;
+    publicationState: string | null;
+  }[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 100));
+    return this.db
+      .prepare(
+        `WITH completed AS (
+           SELECT task.id, task.title, task.updated_at AS completed_at, task_ref.id AS ref_id
+           FROM task
+           JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+           WHERE task.state = 'done'
+             AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         )
+         SELECT completed.*, run.outcome, run.handoff, run.cost_usd,
+                publication.state AS pub_state, publication.pr_number, publication.pr_url
+         FROM completed
+         LEFT JOIN run ON run.id = (
+           SELECT MAX(final.id) FROM run AS final
+           WHERE final.task_ref = completed.ref_id
+             AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
+         )
+         LEFT JOIN publication ON publication.run = run.id
+         ORDER BY completed.completed_at DESC, completed.id DESC LIMIT ?`,
+      )
+      .all(BUILT_IN, repo, repo, page)
+      .map(row => ({
+        taskId: String(row["id"]),
+        title: String(row["title"]),
+        completedAt: String(row["completed_at"]),
+        outcome: row["outcome"] === null ? null : String(row["outcome"]),
+        handoff: row["handoff"] === null ? null : String(row["handoff"]),
+        costUsd: row["cost_usd"] === null ? null : Number(row["cost_usd"]),
+        prNumber: row["pr_number"] === null ? null : Number(row["pr_number"]),
+        prUrl: row["pr_url"] === null ? null : String(row["pr_url"]),
+        publicationState: row["pub_state"] === null ? null : String(row["pub_state"]),
+      }));
+  }
+
+  /** Whether an open CI-failure episode exists for a PR — observed, never inferred. */
+  ciFailureObserved(prNumber: number): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 AS hit FROM notification WHERE dedupe_key LIKE ? AND resolved_at IS NULL LIMIT 1",
+      )
+      .get(`ci:${prNumber}:%`);
+    return row !== undefined;
+  }
+
+  /**
+   * The inbox badge, saturated: counts action items up to a cap so the
+   * sidebar never pays for an unbounded scan (v3 review, finding 7).
+   * Requirement gaps are excluded here — they are derived, not stored —
+   * and the inbox page itself shows them; the badge under-counting a gap
+   * is a smaller wrong than a full graph walk on every render.
+   */
+  countInboxScoped(repo: string | null, now: Date, cap = 100): { count: number; saturated: boolean } {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM (
+           SELECT 'd' || decision.id AS k FROM decision
+             JOIN run ON run.id = decision.run
+             JOIN task_ref ON task_ref.id = run.task_ref
+             WHERE decision.state IN ('open','expired')
+               AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+           UNION ALL
+           SELECT 'a' || task.id FROM task_scope
+             JOIN task ON task.id = task_scope.task_id
+             JOIN task_ref ON task_ref.backend = '${'built-in'}' AND task_ref.external_id = task.id
+             WHERE task.state IN ('queued','running')
+               AND (task_scope.approved_at IS NULL OR task_scope.approved_by IS NULL
+                    OR task_scope.approved_digest IS NULL OR task_scope.approved_digest != task_scope.digest)
+               AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+           UNION ALL
+           SELECT 'r' || task.id FROM task
+             JOIN task_ref ON task_ref.backend = '${'built-in'}' AND task_ref.external_id = task.id
+             WHERE (task.state = 'failed' OR EXISTS (
+                 SELECT 1 FROM incident JOIN run ON run.id = incident.run
+                 WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL))
+               AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+               AND NOT EXISTS (
+                 SELECT 1 FROM claim
+                 WHERE claim.task_ref = task_ref.id AND claim.released_at IS NULL AND claim.expires_at > ?
+                   AND claim.lease_generation = (
+                     SELECT MAX(newest.lease_generation) FROM claim AS newest
+                     WHERE newest.task_ref = claim.task_ref))
+           LIMIT ?
+         )`,
+      )
+      .get(repo, repo, repo, repo, repo, repo, now.toISOString(), cap);
+    const count = Number(row?.["n"] ?? 0);
+    return { count, saturated: count >= cap };
+  }
+
+  /** Every repo the queue has ever seen — candidates for the opener, never authorization. */
 
   /** Every repo the queue has ever seen — candidates for the opener, never authorization. */
   knownRepos(): string[] {

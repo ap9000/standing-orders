@@ -714,9 +714,20 @@ export function createDecisionServer(options: ServeOptions): Server {
     const resolve = /^\/i\/([0-9]{1,15})\/resolve$/.exec(url.pathname);
     if (resolve !== null) {
       const id = Number(resolve[1]);
+      // The ceiling applies to incident mutation exactly as to every other
+      // resource (v3 review, finding 3): resolve incident → run → task, and
+      // an incident outside this server's scope does not exist here. The
+      // task id is captured BEFORE resolving — afterwards the incident is
+      // no longer open and could not be found again.
+      const openRow = store.openIncidents().find(one => one.id === id);
+      const incidentRun = openRow === undefined ? null : store.getRun(openRow.run);
+      if (openRow !== undefined && incidentRun !== null && !visible(taskRepoOf(incidentRun.taskRef))) {
+        return refuse(response, who, 404, "no such incident");
+      }
       const resolved = store.resolveIncident(id, who.name, now);
       if (!resolved) return refuse(response, who, 409, "already resolved, or never open");
-      return redirect(response, incidentHome(id));
+      const back = body.get("return") === "inbox" ? "/" : openRow === undefined ? "/" : taskHref(openRow.taskId);
+      return redirect(response, back);
     }
 
     return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
@@ -810,15 +821,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       default:
         return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
     }
-  }
-
-  /** Where to land after resolving an incident: its task, if it still resolves to one. */
-  function incidentHome(incidentId: number): string {
-    const incident = store
-      .openIncidents()
-      .find(one => one.id === incidentId);
-    if (incident !== undefined) return taskHref(incident.taskId);
-    return "/";
   }
 
   // ---- identity ------------------------------------------------------------
