@@ -600,6 +600,72 @@ describe("the operations console", () => {
     expect(blank.status).toBe(400);
   });
 
+  test("review comments on the terminal diff seal into one revision task that must be approved (M6.8)", async () => {
+    store.createTask({ id: "t-rev", title: "original work" }, T0);
+    const ref = store.refFor("built-in", "t-rev").id;
+    const run = store.startRun({ taskRef: ref, leaseId: "l-r1", runner: "b-1", branch: "so/t-rev", worktree: "/w", now: T0 });
+    store.recordOutcomeFacts(run, { headRevision: "headsha1234", handoff: "did it" });
+    store.finishRun(run, { outcome: "built", now: T0 });
+    mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
+    const patch = Buffer.from("diff --git a/y b/y\n+line\n", "utf8");
+    writeFileSync(join(evidenceRoot, String(run), "terminal-diff.patch"), patch);
+    store.saveArtifact(
+      {
+        run,
+        kind: "terminal-diff",
+        key: `${run}/terminal-diff.patch`,
+        bytesOriginal: patch.length,
+        bytesStored: patch.length,
+        truncated: false,
+        sha256: createHash("sha256").update(patch).digest("hex"),
+        capture: "git diff base head (exit 0)",
+      },
+      T0,
+    );
+
+    const cookie = await login();
+    const taskHtml = await (await fetch(url("/t/t-rev"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(taskHtml)?.[1] ?? "";
+
+    const commented = await fetch(url(`/r/${run}/comment`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, path: "src/y.ts", line: "12", note: "tighten the guard here" }),
+      redirect: "manual",
+    });
+    expect(commented.status).toBe(303);
+
+    const runView = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
+    expect(runView).toContain("tighten the guard here");
+    expect(runView).toContain("turn 1 comment(s) into a revision task");
+
+    const revised = await fetch(url(`/r/${run}/revise`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(revised.status).toBe(303);
+    const target = revised.headers.get("location") ?? "";
+
+    // The new task's screen restates the batch beside its own approval —
+    // and the scope is unapproved by construction.
+    const taskView = await (await fetch(url(target), { headers: { cookie } })).text();
+    expect(taskView).toContain("the review batch");
+    expect(taskView).toContain("tighten the guard here");
+    expect(taskView).toContain("t-rev");
+    expect(taskView).toContain("approve");
+
+    // The batch is consumed: a second seal has nothing to work with.
+    const again = await fetch(url(`/r/${run}/revise`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(again.status).toBe(400);
+  });
+
   test("the overview is live: refresh meta, building-now card, system status", async () => {
     store.createTask({ id: "t-live", title: "being built right now" }, T0);
     const ref = store.refFor("built-in", "t-live").id;

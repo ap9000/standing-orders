@@ -43,9 +43,10 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readVerifiedArtifact } from "./evidence.js";
+import { readVerifiedArtifact, storeEvidence } from "./evidence.js";
 import {
   type Artifact,
+  type DiffComment,
   type Capability,
   type Decision,
   type Hold,
@@ -665,6 +666,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           terminalDiffView(artifacts, evidenceRoot),
           store.notesForRun(found.id),
           who.via === "cookie" ? who.session.csrf : "",
+          store.liveDiffComments(found.id),
         ),
       );
     }
@@ -826,6 +828,39 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   /** The task screen, shared by the GET and by every refusal that re-renders it. */
+  /**
+   * What a revision task's approval must restate (M6.8): the exact comment
+   * batch, read back through the verified artifact path. A brief that no
+   * longer verifies is a named problem on the screen — approving against
+   * bytes nobody can prove is not approving anything.
+   */
+  function revisionViewOf(ref: ReturnType<Store["lookupRef"]>): RevisionView | null {
+    if (ref === null || ref.revisionBriefArtifact === null) return null;
+    const artifact = store.getArtifact(ref.revisionBriefArtifact);
+    if (artifact === null) return { problem: "the revision brief artifact is missing" };
+    const read = readVerifiedArtifact(evidenceRoot, artifact);
+    if (!read.ok) return { problem: `the revision brief no longer verifies — ${read.problem}` };
+    try {
+      const parsed = JSON.parse(read.content.toString("utf8")) as {
+        sourceTask?: unknown;
+        sourceRun?: unknown;
+        comments?: { path?: unknown; line?: unknown; note?: unknown; author?: unknown }[];
+      };
+      return {
+        sourceTask: String(parsed.sourceTask ?? "?"),
+        sourceRun: Number(parsed.sourceRun ?? 0),
+        comments: (parsed.comments ?? []).slice(0, 100).map(one => ({
+          path: one.path === null || one.path === undefined ? null : String(one.path),
+          line: one.line === null || one.line === undefined ? null : Number(one.line),
+          note: String(one.note ?? ""),
+          author: String(one.author ?? "?"),
+        })),
+      };
+    } catch {
+      return { problem: "the revision brief did not parse" };
+    }
+  }
+
   function taskScreen(
     response: ServerResponse,
     who: Who,
@@ -860,6 +895,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
         planDocument: ref === null ? null : planDocumentOf(ref.id),
+        revision: revisionViewOf(ref),
         repo: ref?.repo ?? null,
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
@@ -1194,6 +1230,101 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!note.ok) return refuse(response, who, 400, note.problem);
       store.addRunNote(id, who.name, note.note, now);
       return redirect(response, `/r/${id}`);
+    }
+
+    const diffComment = /^\/r\/([0-9]{1,15})\/comment$/.exec(url.pathname);
+    if (diffComment !== null) {
+      // A review comment on the IMMUTABLE terminal diff (M6.8): bound to
+      // the exact artifact and its hash. Ordinary authenticated mutation —
+      // the nonce belongs to the approval screen that later restates the
+      // batch, never to the comment box.
+      const id = Number(diffComment[1]);
+      const found = store.getRun(id);
+      if (found === null || !visible(taskRepoOf(found.taskRef))) {
+        return refuse(response, who, 404, "no such run");
+      }
+      const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
+      if (terminal === undefined) {
+        return refuse(response, who, 400, "this run has no terminal diff to comment on", `/r/${id}`);
+      }
+      const note = validateNote(body.get("note") ?? "");
+      if (!note.ok) return refuse(response, who, 400, note.problem, `/r/${id}`);
+      const rawPath = (body.get("path") ?? "").trim();
+      if (rawPath.length > 300 || hasForbiddenControls(rawPath)) {
+        return refuse(response, who, 400, "that path is not a path", `/r/${id}`);
+      }
+      const rawLine = (body.get("line") ?? "").trim();
+      const line = rawLine === "" ? null : Number(rawLine);
+      if (line !== null && (!Number.isInteger(line) || line < 1 || line > 1_000_000)) {
+        return refuse(response, who, 400, "that line number is not a line number", `/r/${id}`);
+      }
+      store.addDiffComment(
+        { artifactId: terminal.id, runId: id, path: rawPath === "" ? null : rawPath, line, note: note.note, author: who.name },
+        now,
+      );
+      return redirect(response, `/r/${id}`);
+    }
+
+    const revise = /^\/r\/([0-9]{1,15})\/revise$/.exec(url.pathname);
+    if (revise !== null) {
+      // Seal the live comment batch into ONE unapproved revision task with
+      // an immutable brief (M6.8). Deterministic — no model reads anything
+      // here — and every revision takes its own approval: comments can
+      // semantically widen work, and no path check can prove they did not.
+      const id = Number(revise[1]);
+      const found = store.getRun(id);
+      if (found === null || !visible(taskRepoOf(found.taskRef))) {
+        return refuse(response, who, 404, "no such run");
+      }
+      const comments = store.liveDiffComments(id);
+      if (comments.length === 0) {
+        return refuse(response, who, 400, "no live comments to turn into a revision", `/r/${id}`);
+      }
+      const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
+      const sourceScope = store.getScope(sourceTaskId);
+      const repo = taskRepoOf(found.taskRef);
+      const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
+      const made = store.createConsoleTask(
+        {
+          title: `revise ${sourceTaskId}: ${comments.length} review comment(s) on build #${id}`,
+          ...(repo === null ? {} : { repo }),
+          goal:
+            `${sourceScope?.goal ?? `revise ${sourceTaskId}`}` +
+            ` — apply the review comments recorded on build #${id}; the revision brief carries the exact batch`,
+        },
+        now,
+      );
+      if (!made.ok) return refuse(response, who, 400, `could not create the revision task: ${made.reason}`, `/r/${id}`);
+      const brief = {
+        schema: 1 as const,
+        targetTask: made.id,
+        sourceTask: sourceTaskId,
+        sourceRun: id,
+        head: found.headRevision,
+        diffArtifactSha: terminal?.sha256 ?? null,
+        comments: comments.map(one => ({
+          id: one.id,
+          path: one.path,
+          line: one.line,
+          note: one.note,
+          author: one.author,
+          createdAt: one.createdAt,
+        })),
+      };
+      const artifactId = storeEvidence(
+        store,
+        evidenceRoot,
+        id,
+        "revision-brief",
+        `revision-brief-${made.id}.json`,
+        Buffer.from(JSON.stringify(brief, null, 2), "utf8"),
+        "machine-authored revision brief (exit 0)",
+        now,
+      );
+      const newRef = store.lookupRef(made.id);
+      if (newRef !== null) store.markRevision(newRef.id, sourceTaskId, artifactId);
+      store.consumeDiffComments(id, comments.map(one => one.id), made.id);
+      return redirect(response, taskHref(made.id));
     }
 
     const resolve = /^\/i\/([0-9]{1,15})\/resolve$/.exec(url.pathname);
@@ -2996,11 +3127,17 @@ function newTaskPage(
   ].join("\n"), { chrome });
 }
 
+/** The revision batch a task's approval screen restates, or the named reason it cannot. */
+type RevisionView =
+  | { sourceTask: string; sourceRun: number; comments: { path: string | null; line: number | null; note: string; author: string }[] }
+  | { problem: string };
+
 function taskPage(chrome: Chrome, data: {
   task: Task;
   strikes: number;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
+  revision?: RevisionView | null;
   repo: string | null;
   holds: Hold[];
   claimed: boolean;
@@ -3065,6 +3202,28 @@ function taskPage(chrome: Chrome, data: {
           `<pre class="recap plan-doc">${escape(data.planDocument)}</pre>`,
           `</div>`,
         ].join("\n");
+
+  // The revision batch (M6.8), restated on the SAME screen as the approval
+  // it belongs to: the approver sees exactly the comments the brief carries.
+  // A brief that cannot be verified is a named problem, never a blank.
+  const revisionCard =
+    data.revision === null || data.revision === undefined
+      ? ""
+      : "problem" in data.revision
+        ? `<div class="card"><p><strong>revision brief</strong></p><p class="meta">${escape(data.revision.problem)}</p></div>`
+        : [
+            `<div class="card">`,
+            `<p><strong>the review batch</strong> <span class="meta">this task revises ` +
+              `<a href="${taskHref(data.revision.sourceTask)}" class="mono">${escape(data.revision.sourceTask)}</a>` +
+              ` after review of <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a> — approving the scope approves applying exactly these</span></p>`,
+            ...data.revision.comments.map(
+              one =>
+                `<p class="row"><span class="meta">${escape(one.author)}</span> ` +
+                `${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}` +
+                `${escape(one.note)}</p>`,
+            ),
+            `</div>`,
+          ].join("\n");
 
   // The approval form restates every field the digest binds — an operator
   // approves what is on this form, not what is elsewhere on the page — and
@@ -3251,6 +3410,7 @@ function taskPage(chrome: Chrome, data: {
     "<h2>scope</h2>",
     scopeCard,
     planCard,
+    revisionCard,
     approveForm,
     scopeForm,
     holds,
@@ -3413,6 +3573,7 @@ function runPage(
   terminal: TerminalDiffView | null = null,
   notes: { id: number; author: string; note: string; createdAt: string }[] = [],
   csrf = "",
+  comments: DiffComment[] = [],
 ): string {
   // [label, value, mono?] — identifiers and figures read in the data face.
   const facts: [string, string | null, boolean?][] = [
@@ -3467,6 +3628,40 @@ function runPage(
           )
           .join("\n") +
         "</div>";
+  // Review comments on the immutable terminal diff (M6.8): listed, added,
+  // and sealed into ONE unapproved revision task. The seal is deliberately
+  // plain — the ceremony lives on the revision task's approval screen,
+  // which restates the batch; this button only creates the unapproved task.
+  const hasTerminalDiff = terminal !== null && terminal.patch !== null && !("problem" in (terminal.patch as object));
+  const commentRows = comments
+    .map(
+      one =>
+        `<p class="row"><span class="meta">${escape(one.author)}</span> ` +
+        `${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}` +
+        `${escape(one.note)}</p>`,
+    )
+    .join("\n");
+  const commentForm =
+    csrf === "" || !hasTerminalDiff
+      ? ""
+      : `<form method="post" action="/r/${run.id}/comment" class="row">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="text" name="path" placeholder="file (optional)" aria-label="file" class="mono" style="width:14rem">` +
+        `<input type="text" name="line" placeholder="line" aria-label="line" inputmode="numeric" style="width:4.5rem">` +
+        `<input type="text" name="note" placeholder="what should change here" aria-label="review comment" style="width:100%;max-width:22rem">` +
+        `<button type="submit">comment</button></form>`;
+  const reviseForm =
+    csrf === "" || comments.length === 0
+      ? ""
+      : `<form method="post" action="/r/${run.id}/revise">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<button type="submit">turn ${comments.length} comment(s) into a revision task</button>` +
+        `<span class="meta"> — creates one unapproved task carrying exactly this batch; you approve its scope before anything builds</span></form>`;
+  const reviewCard =
+    commentRows === "" && commentForm === ""
+      ? ""
+      : `<h2>review</h2>${commentRows}${commentForm}${reviseForm}`;
+
   const noteRows =
     notes.length === 0
       ? ""
@@ -3490,6 +3685,7 @@ function runPage(
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     rows,
     terminal === null ? "" : terminalDiffCard(terminal, run.id),
+    reviewCard,
     handoff,
     evidence,
     notesCard,

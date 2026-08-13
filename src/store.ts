@@ -87,6 +87,10 @@ export type TaskRef = {
   /** The pinned agent, when a fire transaction stamped one. Authoritative. */
   agentProvider: string | null;
   agentModel: string | null;
+  /** The task whose reviewed run this one revises (M6.8); null ordinarily. */
+  revisionOf: string | null;
+  /** The immutable brief artifact carrying the exact comment batch. */
+  revisionBriefArtifact: number | null;
   /** Recorded, not asserted: what the grant's selector is checked against. */
   origin: TaskOrigin;
 };
@@ -444,6 +448,11 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- runtime flag never overrides a pin. NULL = resolve from config.
   agent_provider          TEXT,
   agent_model             TEXT,
+  -- A revision task (M6.8): which task's reviewed run it revises, and the
+  -- immutable brief artifact carrying the exact comment batch. Every
+  -- revision requires its own approval; nothing is inherited.
+  revision_of             TEXT,
+  revision_brief_artifact INTEGER REFERENCES artifact(id),
   UNIQUE (backend, external_id)
 );
 
@@ -1089,6 +1098,24 @@ CREATE TABLE IF NOT EXISTS run_note (
   created_at TEXT NOT NULL
 );
 
+-- A review comment on an IMMUTABLE terminal diff (M6.8). Bound to the exact
+-- artifact and its hash — a comment on bytes that can never change — plus
+-- the file and line it speaks to. Immutable themselves: an edit supersedes,
+-- and consumption by a revision task is recorded, never deletion.
+CREATE TABLE IF NOT EXISTS diff_comment (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  artifact      INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+  artifact_sha  TEXT NOT NULL,
+  run           INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  path          TEXT,
+  line          INTEGER,
+  note          TEXT NOT NULL,
+  author        TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  superseded_by INTEGER REFERENCES diff_comment(id),
+  consumed_by   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS mutation (
   idempotency_key TEXT PRIMARY KEY,
   operation       TEXT NOT NULL,
@@ -1346,6 +1373,10 @@ function migrate(db: Database): void {
   // through the fresh SCHEMA's IF NOT EXISTS, and existing worktree rows
   // gain the setup cache column.
   addColumn(db, "worktree", "setup_digest", "TEXT");
+  // v11b (M6.8 revision tasks): additive columns; diff_comment arrives via
+  // the fresh SCHEMA's IF NOT EXISTS.
+  addColumn(db, "task_ref", "revision_of", "TEXT");
+  addColumn(db, "task_ref", "revision_brief_artifact", "INTEGER REFERENCES artifact(id)");
   // v11 (M5 activity): the machine-authored phase — stamped by the control
   // plane at its own state-machine boundaries, never parsed out of a
   // provider stream. Transient in meaning (read while the run is open),
@@ -2383,6 +2414,68 @@ export class Store {
       .prepare("INSERT INTO run_note (run, author, note, created_at) VALUES (?, ?, ?, ?)")
       .run(runId, author, note, now.toISOString());
     return Number(inserted.lastInsertRowid);
+  }
+
+  // ---- diff comments and revision tasks (M6.8) ---------------------------
+
+  /**
+   * A comment on an immutable terminal diff. The artifact must belong to
+   * the run and be a terminal diff; the recorded sha binds the words to the
+   * exact bytes reviewed — a comment whose artifact hash no longer matches
+   * is a comment on something else, refused at read time by the verifier.
+   */
+  addDiffComment(
+    args: { artifactId: number; runId: number; path: string | null; line: number | null; note: string; author: string },
+    now: Date,
+  ): number {
+    const artifact = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
+    if (artifact === undefined || artifact.kind !== "terminal-diff") {
+      throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — comments bind to the exact bytes reviewed`);
+    }
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO diff_comment (artifact, artifact_sha, run, path, line, note, author, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(args.artifactId, artifact.sha256, args.runId, args.path, args.line, args.note, args.author, now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /** Live (unsuperseded, unconsumed) comments on a run's terminal diff. */
+  liveDiffComments(runId: number): DiffComment[] {
+    return this.db
+      .prepare("SELECT * FROM diff_comment WHERE run = ? AND superseded_by IS NULL AND consumed_by IS NULL ORDER BY id")
+      .all(runId)
+      .map(readDiffComment);
+  }
+
+  /** Every comment on a run, consumed included — the audit view. */
+  allDiffComments(runId: number): DiffComment[] {
+    return this.db.prepare("SELECT * FROM diff_comment WHERE run = ? ORDER BY id").all(runId).map(readDiffComment);
+  }
+
+  /**
+   * Seal a comment batch into a revision task, in one transaction: the
+   * comments are marked consumed by the new task id, so a second click
+   * finds nothing to consume instead of minting a duplicate task.
+   */
+  consumeDiffComments(runId: number, ids: readonly number[], taskId: string): number {
+    if (ids.length === 0) return 0;
+    let consumed = 0;
+    for (const id of ids) {
+      const done = this.db
+        .prepare("UPDATE diff_comment SET consumed_by = ? WHERE id = ? AND run = ? AND consumed_by IS NULL AND superseded_by IS NULL")
+        .run(taskId, id, runId);
+      consumed += Number(done.changes);
+    }
+    return consumed;
+  }
+
+  /** Stamp a task as the revision it is: source task + immutable brief. */
+  markRevision(taskRef: number, revisionOf: string, briefArtifact: number): void {
+    this.db
+      .prepare("UPDATE task_ref SET revision_of = ?, revision_brief_artifact = ? WHERE id = ?")
+      .run(revisionOf, briefArtifact, taskRef);
   }
 
   notesForRun(runId: number): { id: number; author: string; note: string; createdAt: string }[] {
@@ -5857,6 +5950,14 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
       row["agent_model"] === null || row["agent_model"] === undefined
         ? null
         : String(row["agent_model"]),
+    revisionOf:
+      row["revision_of"] === null || row["revision_of"] === undefined
+        ? null
+        : String(row["revision_of"]),
+    revisionBriefArtifact:
+      row["revision_brief_artifact"] === null || row["revision_brief_artifact"] === undefined
+        ? null
+        : Number(row["revision_brief_artifact"]),
     origin: String(row["origin"]) === "ours" ? "ours" : "theirs",
   };
 }
@@ -5909,6 +6010,21 @@ export type WorktreeRow = {
   verified: boolean;
   /** The approved setup this checkout last completed — the cache key (M5.7). */
   setupDigest?: string | null;
+};
+
+/** A review comment bound to the exact bytes of an immutable terminal diff. */
+export type DiffComment = {
+  id: number;
+  artifact: number;
+  artifactSha: string;
+  run: number;
+  path: string | null;
+  line: number | null;
+  note: string;
+  author: string;
+  createdAt: string;
+  supersededBy: number | null;
+  consumedBy: string | null;
 };
 
 /** One repo's approved worktree setup — the command text, never secret values. */
@@ -5964,6 +6080,22 @@ function readWorktree(row: Record<string, unknown>): WorktreeRow {
     verified: Number(row["verified"]) === 1,
     setupDigest:
       row["setup_digest"] === null || row["setup_digest"] === undefined ? null : String(row["setup_digest"]),
+  };
+}
+
+function readDiffComment(row: Record<string, unknown>): DiffComment {
+  return {
+    id: Number(row["id"]),
+    artifact: Number(row["artifact"]),
+    artifactSha: String(row["artifact_sha"]),
+    run: Number(row["run"]),
+    path: row["path"] === null ? null : String(row["path"]),
+    line: row["line"] === null ? null : Number(row["line"]),
+    note: String(row["note"]),
+    author: String(row["author"]),
+    createdAt: String(row["created_at"]),
+    supersededBy: row["superseded_by"] === null ? null : Number(row["superseded_by"]),
+    consumedBy: row["consumed_by"] === null ? null : String(row["consumed_by"]),
   };
 }
 
