@@ -3285,9 +3285,9 @@ function settingsPage(
     messaging === null || messaging.configured.length === 0
       ? ""
       : [
-          "<h2>who pages you</h2>",
-          `<p class="meta">every alert goes out through ONE service — the others stay quiet so nothing pages twice${
-            messaging.implicit ? " · <strong>several are set up and none was chosen — pick one</strong>" : ""
+          "<h2>connected messaging</h2>",
+          `<p class="meta">alerts are sent through one service — the others stay quiet so you are never notified twice${
+            messaging.implicit ? " · <strong>several are connected and none was chosen — pick one</strong>" : ""
           }</p>`,
           `<form method="post" action="/settings/messaging" class="card">`,
           `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
@@ -3295,13 +3295,13 @@ function settingsPage(
             channel =>
               `<label style="display:flex;gap:.5rem;align-items:center"><input type="radio" name="primary" value="${escape(channel)}"${
                 channel === messaging.channel ? " checked" : ""
-              }> ${escape(channel)}${channel === messaging.channel ? ` <span class="meta">— pages now${messaging.implicit ? " (by default, not by choice)" : ""}</span>` : ""}${
+              }> ${escape(channel)}${channel === messaging.channel ? ` <span class="meta">— receiving alerts now${messaging.implicit ? " (by default, not by choice)" : ""}</span>` : ""}${
                 channel === "telegram" ? ` <span class="meta">· can carry answer buttons and reply-notes</span>` : ` <span class="meta">· messages with console links; acting stays here</span>`
               }</label>`,
           ),
-          `<button type="submit">page me there</button>`,
+          `<button type="submit">use this service</button>`,
           `</form>`,
-          `<p class="meta">Telegram keeps accepting taps and replies even when another service pages — answering is its job either way. Add services from the terminal: <code>nightorders webhook set slack|discord &lt;url&gt;</code>.</p>`,
+          `<p class="meta">Telegram keeps accepting taps and replies even when another service delivers the alerts. Connect services from the terminal: <code>nightorders webhook set slack|discord &lt;url&gt;</code>.</p>`,
         ].join("\n");
   const current =
     hasEnv
