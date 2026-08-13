@@ -74,6 +74,14 @@ export type ParsedEnvelope = {
   tokensOut: number | null;
   costUsd: number | null;
   usageRaw: string | null;
+  /**
+   * Whether the provider was seen to initialize (codex: thread.started).
+   * null = this transport carries no init signal (claude's buffered JSON),
+   * so absence proves nothing. A `false` here on a failed run means the
+   * harness never came up — config, auth, or install — and the turn must
+   * not be treated as an agent's attempt (M5 provider audit).
+   */
+  initObserved: boolean | null;
 };
 
 type Adapter = {
@@ -136,9 +144,10 @@ function claudeParse(stdout: string): ParsedEnvelope {
       tokensOut: typeof output === "number" && output >= 0 ? output : null,
       costUsd: typeof cost === "number" && cost >= 0 ? cost : null,
       usageRaw: parsed.usage === undefined ? null : JSON.stringify(parsed.usage).slice(0, USAGE_JSON_CAP),
+      initObserved: null,
     };
   } catch {
-    return { sessionId: null, finalMessage: null, tokensIn: null, tokensOut: null, costUsd: null, usageRaw: null };
+    return { sessionId: null, finalMessage: null, tokensIn: null, tokensOut: null, costUsd: null, usageRaw: null, initObserved: null };
   }
 }
 
@@ -172,6 +181,7 @@ function codexParse(stdout: string): ParsedEnvelope {
   let tokensIn: number | null = null;
   let tokensOut: number | null = null;
   let usageRaw: string | null = null;
+  let initObserved = false;
   for (const line of stdout.split("\n")) {
     if (line.trim() === "") continue;
     let event: Record<string, unknown>;
@@ -182,6 +192,9 @@ function codexParse(stdout: string): ParsedEnvelope {
     }
     const type = String(event["type"] ?? "");
     if (type === "thread.started") {
+      // The init signal, id or no id: the harness came up. A malformed
+      // thread_id loses the session, not the fact of initialization.
+      initObserved = true;
       const id = event["thread_id"];
       if (typeof id === "string") sessionId = id;
     } else if (type === "turn.completed") {
@@ -203,7 +216,7 @@ function codexParse(stdout: string): ParsedEnvelope {
   }
   // Codex reports no dollars. NULL is the honest cost — unmeasured — and
   // every surface downstream already says so instead of summing a lie.
-  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw };
+  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved };
 }
 
 /** Codex wall-clock caps, phase by phase — the turn bound it does not have. */
@@ -260,6 +273,68 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
  */
 export function adapterFor(provider: ProviderId): Adapter {
   return ADAPTERS[provider];
+}
+
+/**
+ * The provider audit: what each harness supports, what we actually pass,
+ * and what user-global configuration can leak into an unattended run.
+ * REPORT BEFORE ENFORCEMENT (Codex roadmap review, item 10): none of this
+ * changes an invocation — it states facts an operator reads on `providers`,
+ * so hermetic mode can later be turned on per provider from evidence
+ * instead of hope. `enforced` is a literal false until that day.
+ */
+export type ProviderAudit = {
+  /** How output reaches us — and therefore which signals can exist at all. */
+  transport: "buffered-json" | "streaming-jsonl";
+  /** Whether a later invocation can resume this provider's session. */
+  resume: "native" | "none";
+  /** The event whose absence on a failed run means "never initialized". */
+  initSignal: "thread.started" | "none";
+  isolation: {
+    /** The harness's hermetic flag, if it has one. We do not pass it. */
+    flag: string | null;
+    /** Whether that flag preserves resume. false = documented conflict. */
+    resumeSafe: boolean | null;
+    enforced: false;
+  };
+  /** User-global surfaces that can reach an invocation today. */
+  configSurface: readonly string[];
+};
+
+const AUDITS: Record<ProviderId, ProviderAudit> = {
+  claude: {
+    transport: "buffered-json",
+    resume: "native",
+    initSignal: "none",
+    isolation: { flag: "--bare", resumeSafe: null, enforced: false },
+    configSurface: [
+      "~/.claude/CLAUDE.md and settings (hooks, MCP servers, plugins)",
+      "repository CLAUDE.md / .claude directory",
+    ],
+  },
+  codex: {
+    transport: "streaming-jsonl",
+    resume: "native",
+    initSignal: "thread.started",
+    // --ephemeral exists and is deliberately not passed: repair resumes
+    // sessions, and ephemeral runs have none to resume.
+    isolation: { flag: "--ephemeral", resumeSafe: false, enforced: false },
+    configSurface: ["~/.codex/config.toml", "repository AGENTS.md"],
+  },
+  openrouter: {
+    transport: "streaming-jsonl",
+    resume: "native",
+    initSignal: "thread.started",
+    isolation: { flag: "--ephemeral", resumeSafe: false, enforced: false },
+    // The constant -c overrides pin the model provider per invocation, so
+    // user config cannot reroute the spend — but the file still loads.
+    configSurface: ["~/.codex/config.toml (model_provider pinned per invocation)", "repository AGENTS.md"],
+  },
+};
+
+/** Read-only facts about a provider — safe anywhere, spawns nothing. */
+export function auditOf(provider: ProviderId): ProviderAudit {
+  return AUDITS[provider];
 }
 
 /**

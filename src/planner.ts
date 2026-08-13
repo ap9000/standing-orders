@@ -233,6 +233,14 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       message: `the planner ran past ${Math.round(timeoutMs / 60_000)} minutes and was stopped`,
     };
   }
+  if (result.initFailed) {
+    return {
+      ok: false,
+      kind: "failure",
+      reason: "provider-init",
+      message: "the provider harness never initialized — config, auth, or install, not the plan",
+    };
+  }
   if (result.code !== 0) {
     return { ok: false, kind: "failure", reason: "agent", message: `agent exit ${result.code}` };
   }

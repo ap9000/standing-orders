@@ -132,8 +132,51 @@ describe("the invocation gateway", () => {
     );
     expect(result.sessionId).toBe("thread-abc");
     expect(result.finalMessage).toBe("done and dusted");
+    expect(result.initFailed).toBe(false);
     // cached tokens ride the raw record only — input is input.
     expect(store.getRun(codexRun)).toMatchObject({ tokensIn: 9_000, tokensOut: 800, costUsd: null });
+  });
+
+  /** M5 provider audit: init failure is observed structurally, never guessed. */
+  const codexRunFor = (id: string) => {
+    store.createTask({ id, title: "w" }, T0);
+    return store.startRun({
+      taskRef: store.refFor("built-in", id).id, leaseId: `lease-${id}`, runner: "builder-1",
+      branch: "b", worktree: "/w", provider: "codex", now: T0,
+    });
+  };
+
+  test("a codex turn with no thread.started and nothing to show is an init failure", async () => {
+    const id = codexRunFor("t-init-1");
+    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+      runner: async () => ({ ...OK, code: 1, stdout: "", stderr: "error: bad config.toml" }),
+    });
+    expect(result.initFailed).toBe(true);
+  });
+
+  test("a completed turn without the init event is NOT an init failure — a renamed event must not read as broken", async () => {
+    const id = codexRunFor("t-init-2");
+    const jsonl = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "fine" } });
+    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+      runner: async () => ({ ...OK, stdout: jsonl }),
+    });
+    expect(result.initFailed).toBe(false);
+  });
+
+  test("a timeout is a timeout, not an init failure — even with no init event seen", async () => {
+    const id = codexRunFor("t-init-3");
+    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+      runner: async () => ({ ...OK, code: 1, stdout: "", timedOut: true }),
+    });
+    expect(result.initFailed).toBe(false);
+    expect(result.timedOut).toBe(true);
+  });
+
+  test("claude's buffered transport proves nothing about initialization — never flagged", async () => {
+    const result = await invokeAgent(store, runId, CLAUDE, ASK, {
+      runner: async () => ({ ...OK, code: 1, stderr: "exploded before the harness" }),
+    });
+    expect(result.initFailed).toBe(false);
   });
 });
 

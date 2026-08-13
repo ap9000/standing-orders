@@ -42,6 +42,15 @@ export type AgentOutcome = {
   /** The agent's spoken conclusion — diagnostics, never the handoff. */
   finalMessage: string | null;
   usage: ProviderUsage;
+  /**
+   * The harness never came up: the provider has an init signal, it was not
+   * seen, and the turn also has nothing to show. Config, auth, or install —
+   * not an agent's attempt, and callers must not treat it as one (M5
+   * provider audit: init failure is retryable infrastructure, and its
+   * distinct reason keeps a broken environment from reading as three
+   * strikes of bad agent work).
+   */
+  initFailed: boolean;
 };
 
 /**
@@ -111,5 +120,12 @@ export async function invokeAgent(
       tokensOut: envelope.tokensOut,
       costUsd: envelope.costUsd,
     },
+    // Gated on the run ALSO having nothing to show: a harness that renamed
+    // its init event but completed the turn must not read as broken.
+    initFailed:
+      envelope.initObserved === false &&
+      (result.code !== 0 || envelope.finalMessage === null) &&
+      !result.timedOut &&
+      !result.notFound,
   };
 }

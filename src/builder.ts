@@ -148,7 +148,8 @@ export type BuildRefusal =
   | "timeout"
   | "git"
   | "commit-failure"
-  | "malformed-decision";
+  | "malformed-decision"
+  | "provider-init";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -458,6 +459,17 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ok: false,
       reason: "timeout",
       message: `the builder ran past ${Math.round(timeoutMs / 60_000)} minutes and was stopped — whatever it wrote is still in ${worktree}`,
+    };
+  }
+  if (result.initFailed) {
+    // The harness never initialized — config, auth, or install, observed
+    // structurally (the provider's init event never arrived and the turn
+    // has nothing to show). Not an agent's attempt: the distinct reason
+    // keeps a broken environment from counting as bad agent work.
+    return {
+      ok: false,
+      reason: "provider-init",
+      message: `the provider harness never initialized — ${firstLine(result.stderr) || `exit ${result.code}`}`,
     };
   }
   if (result.code !== 0) {
@@ -803,12 +815,12 @@ async function ingestPark(args: {
       }
     }
 
-    if (spoken.timedOut || spoken.code !== 0) {
+    if (spoken.timedOut || spoken.code !== 0 || spoken.initFailed) {
       // A broken repair turn spends one of the two attempts: the bound is on
       // total spend, not on successful tries.
       store.finishRun(repairRun, {
         outcome: "failed",
-        reason: spoken.timedOut ? "timeout" : "agent",
+        reason: spoken.timedOut ? "timeout" : spoken.initFailed ? "provider-init" : "agent",
         now: clock(),
       });
       continue;

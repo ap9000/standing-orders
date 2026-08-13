@@ -126,7 +126,7 @@ import {
 } from "./routine.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
-import { inspectionOf, isProviderId, PROVIDER_IDS, validateSpec } from "./provider.js";
+import { auditOf, inspectionOf, isProviderId, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
 import {
   build,
   DEFAULT_BUILD_TIMEOUT_MS,
@@ -1589,7 +1589,8 @@ async function tickCommand(
       result.reason === "moved-branch" ||
       result.reason === "timeout" ||
       result.reason === "git" ||
-      result.reason === "commit-failure"
+      result.reason === "commit-failure" ||
+      result.reason === "provider-init"
     ) {
       // The attempt itself broke. One fenced transaction decides what that
       // means — a strike and a doubling backoff, a stall after three, or a
@@ -1604,7 +1605,7 @@ async function tickCommand(
           ? "agent-reported"
           : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
             ? "no-op"
-            : result.reason === "timeout" || result.reason === "git"
+            : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init"
               ? "retryable-infra"
               : result.reason === "commit-failure"
                 ? "commit-failure"
@@ -2509,6 +2510,11 @@ async function providersCommand(
       ...(keyPresent === null ? {} : { keyPresent, keyEnv: facts.requiresEnv }),
       measuresCost: facts.measuresCost,
       configuredPhases: configured.get(id) ?? [],
+      // The audit: facts about the harness, reported before any of them is
+      // enforced. What transport we read, whether a session can resume,
+      // which init signal exists, what hermetic flag we deliberately do NOT
+      // pass, and which user-global config can reach an unattended run.
+      audit: auditOf(id),
     });
   }
 
@@ -2532,6 +2538,17 @@ async function providersCommand(
     write(`  cost           ${one["measuresCost"] === true ? "measured in dollars per run" : "tokens only — runs land as UNMEASURED; ceilinged routines fail closed on them"}`);
     const phases = one["configuredPhases"] as string[];
     if (phases.length > 0) write(`  configured     ${phases.join(", ")} (installation)`);
+    const audit = one["audit"] as ProviderAudit;
+    write(`  transport      ${audit.transport}${audit.initSignal === "none" ? " — no init signal; a failed run cannot say whether the harness came up" : ` — init observed via ${audit.initSignal}`}`);
+    write(`  resume         ${audit.resume}`);
+    write(
+      `  isolation      ${
+        audit.isolation.flag === null
+          ? "no hermetic flag"
+          : `${audit.isolation.flag} exists, not passed${audit.isolation.resumeSafe === false ? " — it would break session resume" : audit.isolation.resumeSafe === null ? " — its effect on resume is unvalidated" : ""}`
+      }`,
+    );
+    write(`  config surface ${audit.configSurface.join("; ")}`);
     write("");
   }
   write("  \u2192 standing-orders config show    which provider each phase actually resolves to");

@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { adapterFor, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY } from "./provider.js";
+import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY, PROVIDER_IDS } from "./provider.js";
 import { runStreamJsonl } from "./exec.js";
 
 const ASK = {
@@ -127,5 +127,42 @@ describe("the streaming JSONL transport", () => {
   test("a runaway process is killed at the clock and says timedOut", async () => {
     const result = await runStreamJsonl(process.execPath, ["-e", "setInterval(()=>{},1000)"], { timeoutMs: 500 });
     expect(result.timedOut).toBe(true);
+  });
+});
+
+describe("the provider audit — report before enforcement", () => {
+  test("facts are stated and nothing is enforced", () => {
+    const codex = auditOf("codex");
+    expect(codex.transport).toBe("streaming-jsonl");
+    expect(codex.initSignal).toBe("thread.started");
+    // --ephemeral exists and is deliberately not passed: it breaks resume,
+    // and the audit says so instead of silently choosing.
+    expect(codex.isolation.flag).toBe("--ephemeral");
+    expect(codex.isolation.resumeSafe).toBe(false);
+    expect(codex.isolation.enforced).toBe(false);
+
+    const claude = auditOf("claude");
+    expect(claude.transport).toBe("buffered-json");
+    // No init signal in buffered mode: a failed claude run cannot say
+    // whether the harness came up, and nothing downstream may pretend it can.
+    expect(claude.initSignal).toBe("none");
+
+    for (const id of PROVIDER_IDS) {
+      const audit = auditOf(id);
+      expect(audit.configSurface.length).toBeGreaterThan(0);
+      expect(audit.isolation.enforced).toBe(false);
+    }
+  });
+
+  test("codexParse observes initialization; claudeParse honestly cannot", () => {
+    const codex = adapterFor("codex");
+    const started = codex.parse(JSON.stringify({ type: "thread.started", thread_id: "t-1" }));
+    expect(started.initObserved).toBe(true);
+    const silent = codex.parse("");
+    expect(silent.initObserved).toBe(false);
+
+    const claude = adapterFor("claude");
+    expect(claude.parse("{}").initObserved).toBe(null);
+    expect(claude.parse("not json").initObserved).toBe(null);
   });
 });
