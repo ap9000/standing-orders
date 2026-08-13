@@ -2740,13 +2740,18 @@ export class Store {
    * (finding 5 — the arithmetic behind failing closed).
    */
   routineSpend(routineId: number, sinceIso: string): { costUsd: number; unmeasuredRuns: number } {
+    // The window is anchored to provider_started_at — the exact stamp money
+    // can move — never to when the run row was opened (Codex Phase C
+    // review, M2): a run opened before the cutoff whose provider started
+    // inside it is spend inside the window, measured or not.
     const row = this.db
       .prepare(
         `SELECT COALESCE(SUM(run.cost_usd), 0) AS cost,
-                SUM(CASE WHEN run.provider_started_at IS NOT NULL AND run.cost_usd IS NULL THEN 1 ELSE 0 END) AS unmeasured
+                SUM(CASE WHEN run.cost_usd IS NULL THEN 1 ELSE 0 END) AS unmeasured
            FROM run
            JOIN task_ref ON task_ref.id = run.task_ref
-          WHERE task_ref.routine_id = ? AND run.started_at >= ?`,
+          WHERE task_ref.routine_id = ?
+            AND run.provider_started_at IS NOT NULL AND run.provider_started_at >= ?`,
       )
       .get(routineId, sinceIso);
     return {
@@ -2759,16 +2764,32 @@ export class Store {
    * The single-flight question: the oldest instance not successfully
    * completed nor explicitly abandoned — queued, running, held, parked,
    * and failed instances all block (finding 9's definition, verbatim).
+   * A LIVE CLAIM blocks regardless of task state (Codex Phase C review,
+   * H2): a state string written over a running build — `task state <id>
+   * done` bypassing the guarded cancel — must not conjure a twin beside
+   * a provider that is still spending.
    */
-  routineBlocker(routineId: number): { taskId: string; state: string } | null {
+  routineBlocker(routineId: number, now: Date): { taskId: string; state: string } | null {
     const row = this.db
       .prepare(
         `SELECT task.id, task.state FROM task
            JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
-          WHERE task_ref.routine_id = ? AND task.state NOT IN ('done','cancelled')
+          WHERE task_ref.routine_id = ?
+            AND (
+              task.state NOT IN ('done','cancelled')
+              OR EXISTS (
+                SELECT 1 FROM claim
+                WHERE claim.task_ref = task_ref.id
+                  AND claim.released_at IS NULL AND claim.expires_at > ?
+                  AND claim.lease_generation = (
+                    SELECT MAX(newest.lease_generation) FROM claim AS newest
+                    WHERE newest.task_ref = task_ref.id
+                  )
+              )
+            )
           ORDER BY task.created_at LIMIT 1`,
       )
-      .get(BUILT_IN, routineId);
+      .get(BUILT_IN, routineId, now.toISOString());
     return row === undefined
       ? null
       : { taskId: String(row["id"]), state: String(row["state"]) };
@@ -2820,24 +2841,51 @@ export class Store {
   }
 
   /**
+   * Page a blocked track once per EPISODE: an open episode under this
+   * prefix already nags, so nothing enqueues; a resolved one is history,
+   * and the fresh suffix keys a new row past the dedupe uniqueness — a
+   * recurrence after recovery pages again (Codex Phase C review, L1).
+   * Prefix matching is exact-bytes (substr), never LIKE — task ids may
+   * contain `_`, which LIKE would read as a wildcard.
+   */
+  enqueueRoutineEpisode(
+    prefix: string,
+    notification: { kind: string; subject: string; body: string },
+    suffix: string,
+    now: Date,
+  ): boolean {
+    return this.transact(() => {
+      const head = `${prefix}:`;
+      const open = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM notification
+            WHERE substr(dedupe_key, 1, ?) = ? AND resolved_at IS NULL LIMIT 1`,
+        )
+        .get(head.length, head);
+      if (open !== undefined) return false;
+      return this.enqueueNotification({ dedupeKey: `${head}${suffix}`, ...notification }, now);
+    });
+  }
+
+  /**
    * Close every blocked-track episode for a routine — called when a firing
    * succeeds, because success is the proof the blocker is gone (budget
    * cleared, blocking instance finished). Receipts stay; only the "wants a
    * person" bit resolves.
    */
   resolveRoutineEpisodes(routineId: number, now: Date): void {
-    this.db
-      .prepare(
-        `UPDATE notification SET resolved_at = ?
-          WHERE resolved_at IS NULL
-            AND (dedupe_key = ? OR dedupe_key = ? OR dedupe_key LIKE ?)`,
-      )
-      .run(
-        now.toISOString(),
-        `routine-budget:${routineId}`,
-        `routine-unmeasured:${routineId}`,
-        `routine-singleflight:${routineId}:%`,
-      );
+    for (const prefix of [
+      `routine-budget:${routineId}:`,
+      `routine-unmeasured:${routineId}:`,
+      `routine-singleflight:${routineId}:`,
+    ]) {
+      this.db
+        .prepare(
+          `UPDATE notification SET resolved_at = ?
+            WHERE resolved_at IS NULL AND substr(dedupe_key, 1, ?) = ?`,
+        )
+        .run(now.toISOString(), prefix.length, prefix);
+    }
   }
 
   /**
@@ -2861,7 +2909,7 @@ export class Store {
         routine,
         fires: this.routineFires(routine.id, 14),
         spend: this.routineSpend(routine.id, since),
-        blocker: this.routineBlocker(routine.id),
+        blocker: this.routineBlocker(routine.id, now),
       })),
     );
   }

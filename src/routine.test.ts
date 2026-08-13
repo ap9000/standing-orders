@@ -329,3 +329,153 @@ describe("firing, inside one proving transaction", () => {
     expect(due.map(one => one.name)).toEqual(["deps"]);
   });
 });
+
+describe("the review's regressions (Codex Phase C findings)", () => {
+  let store: Store;
+  let token: string;
+  let routineId: number;
+
+  const create = (terms: RoutineTerms = TERMS, name = "deps") => {
+    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, T0);
+    if (!created.ok) throw new Error("duplicate routine in test setup");
+    return created.id;
+  };
+  const approve = (id: number, at: Date = T0) => {
+    const approved = approveRoutine(store, id, "alex", at, store.getRoutine(id)?.digest ?? "", token);
+    expect(approved.ok).toBe(true);
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("approver setup failed");
+    token = added.token;
+    routineId = create();
+  });
+
+  afterEach(() => store.close());
+
+  test("H1: terms edited under a REUSED digest fire nothing — the digest is re-derived, not trusted", () => {
+    approve(routineId);
+    // A store-API caller smuggles new terms while presenting the digest the
+    // operator approved. The columns now agree with each other and lie
+    // about the terms.
+    const smuggled = { ...TERMS, goal: "Wire the money elsewhere", schedule: "every:5" };
+    store.updateRoutineTerms(routineId, { ...smuggled, digest: routineDigestOf(TERMS) }, later(MINUTE));
+
+    const refused = fireRoutine(store, routineId, later(2 * HOUR));
+    expect(refused).toMatchObject({ ok: false, reason: "not-approved" });
+    expect(store.listTasks()).toHaveLength(0);
+
+    // Approval over a lying row refuses the same way.
+    const reapprove = approveRoutine(store, routineId, "alex", later(MINUTE), routineDigestOf(TERMS), token);
+    expect(reapprove).toMatchObject({ ok: false, reason: "changed" });
+  });
+
+  test("H2: a live claim blocks single-flight whatever the task's state string says", async () => {
+    const { acquire } = await import("./claim.js");
+    approve(routineId);
+    const fired = fireRoutine(store, routineId, later(HOUR));
+    expect(fired.ok).toBe(true);
+    if (!fired.ok) return;
+
+    // A runner takes the instance; the provider is live.
+    const ref = store.refFor(BUILT_IN, fired.taskId);
+    const taken = acquire(store, ref.id, "builder-1", { now: later(HOUR + MINUTE), ttlMs: 60 * MINUTE });
+    expect(taken.ok).toBe(true);
+
+    // Somebody writes 'done' over it with the generic state command,
+    // bypassing the guarded cancel. The claim is still live — no twin.
+    store.setTaskState(fired.taskId, "done", later(HOUR + 2 * MINUTE));
+    const skipped = fireRoutine(store, routineId, later(2 * HOUR));
+    expect(skipped).toMatchObject({ ok: false, reason: "single-flight" });
+  });
+
+  test("M1: run-now landing exactly on the due instant cannot strand the schedule", () => {
+    approve(routineId);
+    const due = store.getRoutine(routineId)?.nextFireAt as string;
+
+    // The manual fire at the exact due moment takes a MANUAL ledger key.
+    const manual = fireRoutine(store, routineId, new Date(due), { manual: true });
+    expect(manual.ok).toBe(true);
+    if (!manual.ok) return;
+    store.setTaskState(manual.taskId, "done", later(HOUR + MINUTE));
+
+    // The scheduled slot is still open: the pass fires it and advances.
+    const scheduled = fireRoutine(store, routineId, later(HOUR + 2 * MINUTE));
+    expect(scheduled.ok).toBe(true);
+    expect(store.getRoutine(routineId)?.nextFireAt).toBe(later(2 * HOUR).toISOString());
+  });
+
+  test("M1: a stale scheduled pointer heals — slot-taken advances past the recorded slot", () => {
+    approve(routineId);
+    const due = store.getRoutine(routineId)?.nextFireAt as string;
+    // The slot is already on the ledger (a crash between insert and
+    // advance, or an older bug): the refusal must move the pointer.
+    store.recordRoutineFire(
+      { routineId, scheduledFor: due, outcome: "fired", reason: null, instanceTaskRef: null },
+      later(HOUR),
+    );
+    const refused = fireRoutine(store, routineId, later(HOUR + MINUTE));
+    expect(refused).toMatchObject({ ok: false, reason: "slot-taken" });
+    expect(store.getRoutine(routineId)?.nextFireAt).toBe(later(2 * HOUR).toISOString());
+    // And the next pass is back on the grid.
+    expect(fireRoutine(store, routineId, later(2 * HOUR)).ok).toBe(true);
+  });
+
+  test("M2: the budget window anchors to when money could move, not when the run row opened", () => {
+    approve(routineId);
+    const first = fireRoutine(store, routineId, later(HOUR));
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    store.setTaskState(first.taskId, "done", later(HOUR + MINUTE));
+
+    // The run row was opened EIGHT days before this firing's window, but
+    // its provider started inside the window and never recorded a cost:
+    // it is unmeasured spend inside the window, and it blocks.
+    const ref = store.refFor(BUILT_IN, first.taskId);
+    const run = store.startRun({
+      taskRef: ref.id, leaseId: "old-lease", runner: "r1",
+      branch: "b", worktree: "w", now: new Date(T0.getTime() - 8 * DAY),
+    });
+    store.stampProviderStart(run, later(HOUR));
+    const blocked = fireRoutine(store, routineId, later(2 * HOUR));
+    expect(blocked).toMatchObject({ ok: false, reason: "unmeasured" });
+  });
+
+  test("L1: a recurrence AFTER recovery pages again — resolved history does not gag the pager", () => {
+    approve(routineId);
+    const first = fireRoutine(store, routineId, later(HOUR));
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    store.setTaskState(first.taskId, "done", later(HOUR + MINUTE));
+
+    // Episode one: an unmeasured paid run blocks and pages.
+    const ref = store.refFor(BUILT_IN, first.taskId);
+    const run1 = store.startRun({ taskRef: ref.id, leaseId: "l1", runner: "r1", branch: "b", worktree: "w", now: later(HOUR) });
+    store.stampProviderStart(run1, later(HOUR));
+    expect(fireRoutine(store, routineId, later(2 * HOUR))).toMatchObject({ ok: false, reason: "unmeasured" });
+    // Still episode one: a second blocked slot does not page twice.
+    expect(fireRoutine(store, routineId, later(3 * HOUR))).toMatchObject({ ok: false, reason: "unmeasured" });
+    expect(store.listNotifications("all").filter(one => one.kind === "routine-blocked")).toHaveLength(1);
+
+    // Recovery: the cost lands small, the next slot fires, episodes resolve.
+    store.recordUsage(run1, { costUsd: 0.1 });
+    const recovered = fireRoutine(store, routineId, later(4 * HOUR));
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) return;
+    store.setTaskState(recovered.taskId, "done", later(4 * HOUR + MINUTE));
+
+    // Episode two: a NEW unmeasured run blocks again — and pages again.
+    const ref2 = store.refFor(BUILT_IN, recovered.taskId);
+    const run2 = store.startRun({ taskRef: ref2.id, leaseId: "l2", runner: "r1", branch: "b", worktree: "w", now: later(4 * HOUR) });
+    store.stampProviderStart(run2, later(4 * HOUR));
+    expect(fireRoutine(store, routineId, later(5 * HOUR))).toMatchObject({ ok: false, reason: "unmeasured" });
+    expect(store.listNotifications("all").filter(one => one.kind === "routine-blocked")).toHaveLength(2);
+  });
+
+  test("M4: a template that asks for concurrent instances is refused at validation", () => {
+    const problems = validateRoutineTerms({ ...TERMS, singleFlight: false });
+    expect(problems.map(one => one.field)).toContain("singleFlight");
+  });
+});

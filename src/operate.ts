@@ -2378,9 +2378,9 @@ async function routineCommand(
         for (const fire of fires) {
           const said =
             fire.outcome === "fired"
-              ? `${fire.instanceTaskId ?? "instance"}${fire.instanceState === null ? "" : ` (${fire.instanceState})`}`
+              ? `${fire.instanceTaskId ?? "instance"}${fire.instanceState === null ? "" : ` (${fire.instanceState})`}${fire.reason === "manual" ? "  (run now)" : ""}`
               : `skipped — ${fire.reason ?? ""}`;
-          write(`    ${fire.scheduledFor}  ${said}`);
+          write(`    ${fire.scheduledFor.replace(/^manual:/, "")}  ${said}`);
         }
       }
       return EXIT.ok;

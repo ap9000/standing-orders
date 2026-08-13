@@ -1550,11 +1550,11 @@ describe("routines — standing orders on the console", () => {
     const cookie = await login();
     const screen = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(screen)?.[1] as string;
-    const post = (verb: string) =>
+    const post = (verb: string, extra: Record<string, string> = {}) =>
       fetch(url(`/routines/${id}/${verb}`), {
         method: "POST",
         headers: { cookie, origin: base },
-        body: new URLSearchParams({ csrf }),
+        body: new URLSearchParams({ csrf, ...extra }),
         redirect: "manual",
       });
 
@@ -1563,18 +1563,24 @@ describe("routines — standing orders on the console", () => {
     expect((await post("resume")).status).toBe(303);
     expect(store.getRoutine(id)?.paused).toBe(false);
 
-    // Unapproved: run-now refuses with the reason on the screen.
-    const refusedPage = await post("run-now");
+    // run-now is spend outside the schedule: the session alone cannot ask
+    // (Codex Phase C review, M3) — no password, no fire; wrong password,
+    // no fire.
+    expect((await post("run-now")).status).toBe(400);
+    expect((await post("run-now", { token: "not-it" })).status).toBe(403);
+
+    // Credentialed but unapproved: refuses with the reason on the screen.
+    const refusedPage = await post("run-now", { token: approverToken });
     expect(refusedPage.status).toBe(409);
 
     const approvedNow = approveRoutine(store, id, "alex", T0, store.getRoutine(id)?.digest ?? "", approverToken);
     expect(approvedNow.ok).toBe(true);
-    expect((await post("run-now")).status).toBe(303);
+    expect((await post("run-now", { token: approverToken })).status).toBe(303);
     // One instance exists, linked and approved; a second run-now hits
     // single-flight and refuses to the person's face.
     const instances = store.listTasks().filter(one => one.id.startsWith("audit-"));
     expect(instances).toHaveLength(1);
-    expect((await post("run-now")).status).toBe(409);
+    expect((await post("run-now", { token: approverToken })).status).toBe(409);
   });
 
   test("the board keeps instances in their track row, except when they need a person", async () => {

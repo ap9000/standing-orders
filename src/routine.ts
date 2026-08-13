@@ -170,7 +170,28 @@ export function validateRoutineTerms(terms: RoutineTerms): RoutineProblem[] {
   if (terms.costCeilingUsd !== null && (!Number.isFinite(terms.costCeilingUsd) || terms.costCeilingUsd <= 0)) {
     problems.push({ field: "costCeilingUsd", problem: "a positive dollar amount, or absent for no ceiling" });
   }
+  // v1 is one-at-a-time, period: every approval surface SAYS so, and a
+  // stored false would make the ceremony describe behavior the firing does
+  // not have (Codex Phase C review, M4). The column stays for a future that
+  // designs the concurrent case; until then it is not accepted.
+  if (terms.singleFlight !== true) {
+    problems.push({ field: "singleFlight", problem: "v1 routines run one instance at a time — singleFlight must be true" });
+  }
   return problems;
+}
+
+/** The stored row's terms, for re-proving the digest against what is actually there. */
+export function termsOf(routine: Routine): RoutineTerms {
+  return {
+    repo: routine.repo,
+    goal: routine.goal,
+    outOfScope: routine.outOfScope,
+    touches: routine.touches,
+    requirements: routine.requirements,
+    schedule: routine.schedule,
+    singleFlight: routine.singleFlight,
+    costCeilingUsd: routine.costCeilingUsd,
+  };
 }
 
 /** The instance task id: the routine's name stamped with its scheduled slot. */
@@ -207,6 +228,12 @@ export function approveRoutine(
     const routine = store.getRoutine(routineId);
     if (routine === null) return { ok: false as const, reason: "no-such-routine" as const };
     if (sawDigest !== routine.digest) return { ok: false as const, reason: "changed" as const };
+    // The digest is re-derived from the stored terms, never trusted as a
+    // column (Codex Phase C review, H1): a row whose digest does not match
+    // its own terms is not something a person can meaningfully agree to.
+    if (routineDigestOf(termsOf(routine)) !== routine.digest) {
+      return { ok: false as const, reason: "changed" as const };
+    }
 
     const schedule = parseSchedule(routine.schedule);
     if (schedule === null) return { ok: false as const, reason: "changed" as const };
@@ -267,7 +294,16 @@ export function fireRoutine(
     const routine = store.getRoutine(routineId);
     if (routine === null) return { ok: false as const, reason: "no-such-routine" as const };
 
-    if (routine.approvedAt === null || routine.approvedDigest !== routine.digest) {
+    // Approval is proved THREE ways: a stamp exists, it matches the stored
+    // digest, and — because a digest column can be written by any store
+    // caller — the digest is re-derived from the stored terms themselves
+    // (Codex Phase C review, H1). Terms edited under a reused digest fire
+    // nothing, whatever the columns claim.
+    if (
+      routine.approvedAt === null ||
+      routine.approvedDigest !== routine.digest ||
+      routineDigestOf(termsOf(routine)) !== routine.digest
+    ) {
       return {
         ok: false as const,
         reason: "not-approved" as const,
@@ -282,15 +318,25 @@ export function fireRoutine(
     const schedule = parseSchedule(routine.schedule);
     if (schedule === null) return { ok: false as const, reason: "bad-schedule" as const };
 
-    const scheduledFor = manual ? now.toISOString() : routine.nextFireAt;
-    if (scheduledFor === null || (!manual && scheduledFor > now.toISOString())) {
+    const occurredAt = manual ? now.toISOString() : routine.nextFireAt;
+    if (occurredAt === null || (!manual && occurredAt > now.toISOString())) {
       return { ok: false as const, reason: "not-due" as const };
     }
+    // A manual firing has its own ledger identity: it must never claim a
+    // scheduled slot's key, or a run-now landing exactly on the due instant
+    // would strand the schedule on that slot forever (Codex review, M1).
+    const slotKey = manual ? `manual:${occurredAt}` : occurredAt;
+    const scheduledFor = occurredAt;
 
     // The slot check is a plain read because the whole function is one
     // IMMEDIATE transaction — two passes finding the same due slot queue on
     // the lock, and the second sees the first's row.
-    if (!store.routineSlotOpen(routineId, scheduledFor)) {
+    if (!store.routineSlotOpen(routineId, slotKey)) {
+      // A scheduled pointer aimed at an already-recorded slot is stale —
+      // heal it by advancing past the slot, or this refusal repeats forever.
+      if (!manual) {
+        store.setRoutineNextFire(routineId, nextFireAt(schedule, occurredAt, now), now);
+      }
       return { ok: false as const, reason: "slot-taken" as const };
     }
 
@@ -298,37 +344,44 @@ export function fireRoutine(
     const skip = (
       reason: "single-flight" | "budget" | "unmeasured",
       ledgerReason: string,
-      page: { dedupeKey: string; subject: string; body: string } | null,
+      page: { prefix: string; subject: string; body: string } | null,
       detail: string,
     ): FireOutcome => {
       if (manual) return { ok: false, reason, detail };
       store.recordRoutineFire(
-        { routineId, scheduledFor, outcome: "skipped", reason: ledgerReason, instanceTaskRef: null },
+        { routineId, scheduledFor: slotKey, outcome: "skipped", reason: ledgerReason, instanceTaskRef: null },
         now,
       );
       store.setRoutineNextFire(routineId, nextFireAt(schedule, scheduledFor, now), now);
       if (page !== null) {
-        store.enqueueNotification({ kind: "routine-blocked", ...page }, now);
+        // One page per blocking EPISODE: an open episode nags nobody twice,
+        // and a resolved one is history that must not suppress the next
+        // recurrence (Codex review, L1) — the slot stamp keys each afresh.
+        store.enqueueRoutineEpisode(
+          page.prefix,
+          { kind: "routine-blocked", subject: page.subject, body: page.body },
+          scheduledFor,
+          now,
+        );
       }
       return { ok: false, reason, detail };
     };
 
-    if (routine.singleFlight) {
-      const blocker = store.routineBlocker(routineId);
-      if (blocker !== null) {
-        return skip(
-          "single-flight",
-          `single-flight:${blocker.taskId}`,
-          {
-            // Once per blocking instance, not per missed slot: the same
-            // stuck task must not page every firing until somebody looks.
-            dedupeKey: `routine-singleflight:${routineId}:${blocker.taskId}`,
-            subject: `${routine.name} has stopped: ${blocker.taskId} is stuck`,
-            body: `The ${routine.name} track skipped its scheduled run because its last instance (${blocker.taskId}, ${blocker.state}) has not finished. The track stays stopped until that instance completes or is cancelled.`,
-          },
-          `instance ${blocker.taskId} (${blocker.state}) has not finished`,
-        );
-      }
+    // Single-flight is unconditional in v1 (Codex review, M4) — and a live
+    // claim blocks REGARDLESS of task state, so a state string written over
+    // a running build cannot conjure a twin beside it (H2).
+    const blocker = store.routineBlocker(routineId, now);
+    if (blocker !== null) {
+      return skip(
+        "single-flight",
+        `single-flight:${blocker.taskId}`,
+        {
+          prefix: `routine-singleflight:${routineId}:${blocker.taskId}`,
+          subject: `${routine.name} has stopped: ${blocker.taskId} is stuck`,
+          body: `The ${routine.name} track skipped its scheduled run because its last instance (${blocker.taskId}, ${blocker.state}) has not finished. The track stays stopped until that instance completes or is cancelled.`,
+        },
+        `instance ${blocker.taskId} (${blocker.state}) has not finished`,
+      );
     }
 
     if (routine.costCeilingUsd !== null) {
@@ -343,7 +396,7 @@ export function fireRoutine(
           "unmeasured",
           "unmeasured",
           {
-            dedupeKey: `routine-unmeasured:${routineId}`,
+            prefix: `routine-unmeasured:${routineId}`,
             subject: `${routine.name} is blocked: spend is unmeasured`,
             body: `${spend.unmeasuredRuns} paid run(s) in the last 7 days recorded no cost, so the $${routine.costCeilingUsd.toFixed(2)} ceiling cannot be honestly enforced. The track skips its firings until the window rolls past them.`,
           },
@@ -355,7 +408,7 @@ export function fireRoutine(
           "budget",
           "budget",
           {
-            dedupeKey: `routine-budget:${routineId}`,
+            prefix: `routine-budget:${routineId}`,
             subject: `${routine.name} hit its budget`,
             body: `Instances spent $${spend.costUsd.toFixed(2)} of the $${routine.costCeilingUsd.toFixed(2)} ceiling in the last 7 days. Firings skip until the window rolls; raise the ceiling to resume sooner (that edit voids the approval, on purpose).`,
           },
@@ -402,7 +455,7 @@ export function fireRoutine(
     });
 
     store.recordRoutineFire(
-      { routineId, scheduledFor, outcome: "fired", reason: null, instanceTaskRef: ref.id },
+      { routineId, scheduledFor: slotKey, outcome: "fired", reason: manual ? "manual" : null, instanceTaskRef: ref.id },
       now,
     );
     if (!manual) {

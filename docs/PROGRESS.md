@@ -183,7 +183,24 @@ authorizeMutation (finding 7); the board grows **track rows** under the
 lanes — per routine: status, schedule, week's spend, and a run-history
 strip of dots (green built · red failed · pulsing building · hollow
 skipped), while instances stay OUT of the main lanes except attention,
-where they surface wearing the routine's name. 750 tests.
+where they surface wearing the routine's name.
+
+A post-build Codex review of the implementation (0 critical, 2 high, 4
+medium, 1 low; migration and XSS declared clean) drove a hardening round,
+each with a regression test: the fire AND approval transactions re-derive
+the digest from the stored terms rather than trusting the column (H1 — a
+store caller smuggling edited terms under the approved digest fires
+nothing); a live claim blocks single-flight regardless of the task's
+state string (H2 — `task state <id> done` over a running build cannot
+conjure a twin); manual firings take their own `manual:` ledger identity
+and a stale scheduled pointer heals by advancing (M1 — run-now on the
+exact due instant can no longer strand the schedule); the budget window
+anchors to `provider_started_at`, the stamp money actually moves on (M2);
+console run-now is a password step-up like approval — spend outside the
+schedule re-proves the approver secret (M3); `singleFlight: false` is
+refused at validation so the ceremony's "one at a time" is always true
+(M4); and blocked-track pages are episodes — an open one never nags
+twice, a recurrence after recovery pages again (L1). 757 tests.
 
 ## Planning mode (2026-08-13, Phase B; the round-2 findings are its spec)
 

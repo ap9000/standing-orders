@@ -768,7 +768,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         routine,
         fires: store.routineFires(routine.id, 14),
         spend: store.routineSpend(routine.id, new Date(clock().getTime() - 7 * 24 * 60 * 60_000).toISOString()),
-        blocker: store.routineBlocker(routine.id),
+        blocker: store.routineBlocker(routine.id, clock()),
         csrf: who.via === "cookie" ? who.session.csrf : "",
         nonce,
         problem,
@@ -824,6 +824,20 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `/routines/${routineId}`);
       }
       case "run-now": {
+        // Step-up (Codex Phase C review, M3): run-now is spend outside the
+        // approved schedule, so a session alone cannot ask for it — the
+        // password is typed again, like an approval. A bearer caller
+        // re-proved its credential on this very request.
+        if (who.via === "cookie") {
+          const token = body.get("token") ?? "";
+          if (token === "") {
+            return routinePage(response, who, routineId, "run now requires your password, typed again", 400);
+          }
+          const authenticated = authenticateApprover(store, who.name, token);
+          if (!authenticated.ok) {
+            return routinePage(response, who, routineId, "that is not your password", 403);
+          }
+        }
         const outcome = fireRoutine(store, routineId, now, { manual: true });
         if (!outcome.ok) {
           return routinePage(response, who, routineId, `not fired: ${outcome.detail ?? outcome.reason}`, 409);
@@ -2178,13 +2192,14 @@ function routineStatus(routine: Routine): { text: string; badge: string } {
  */
 function trackStrip(fires: Track["fires"]): string {
   const dots = [...fires].reverse().map(fire => {
+    const slot = fire.scheduledFor.replace(/^manual:/, "");
     if (fire.outcome === "skipped") {
-      return `<span class="fire fire-skip" title="${escape(fire.scheduledFor)} — skipped: ${escape(fire.reason ?? "")}"></span>`;
+      return `<span class="fire fire-skip" title="${escape(slot)} — skipped: ${escape(fire.reason ?? "")}"></span>`;
     }
     const state = fire.instanceState;
     const kind =
       state === "done" ? "fire-ok" : state === "failed" || state === "cancelled" ? "fire-bad" : "fire-live";
-    const title = `${fire.scheduledFor} — ${fire.instanceTaskId ?? "instance"}${state === null ? "" : ` (${state})`}`;
+    const title = `${slot} — ${fire.instanceTaskId ?? "instance"}${state === null ? "" : ` (${state})`}`;
     return fire.instanceTaskId === null
       ? `<span class="fire ${kind}" title="${escape(title)}"></span>`
       : `<a class="fire ${kind}" href="${taskHref(fire.instanceTaskId)}" title="${escape(title)}"></a>`;
@@ -2207,7 +2222,7 @@ function trackRow(track: Track, all: boolean): string {
     `<p class="meta">${escape(routine.goal.length > 110 ? routine.goal.slice(0, 110) + "…" : routine.goal)}</p>` +
     `<p>${trackStrip(fires)}` +
     `<span class="right meta">${spend.unmeasuredRuns > 0 ? `<strong>spend unmeasured</strong> · ` : ""}$${spend.costUsd.toFixed(2)} this week${routine.costCeilingUsd === null ? "" : ` of $${routine.costCeilingUsd.toFixed(2)}`}</span></p>` +
-    (blocker !== null && routine.singleFlight
+    (blocker !== null
       ? `<p class="meta">stopped behind <a href="${taskHref(blocker.taskId)}" class="mono">${escape(blocker.taskId)}</a> (${escape(blocker.state)})</p>`
       : latest?.instanceTaskId !== undefined && latest.instanceTaskId !== null
         ? `<p class="meta">latest: <a href="${taskHref(latest.instanceTaskId)}" class="mono">${escape(latest.instanceTaskId)}</a>${latest.instanceState === null ? "" : ` (${escape(latest.instanceState)})`}</p>`
@@ -2277,11 +2292,18 @@ function routineScreenPage(chrome: Chrome, data: {
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
     `<button type="submit"${danger ? ' class="danger"' : ""}>${label}</button></form>`;
 
+  const runNowForm =
+    approved && !routine.paused
+      ? `<form method="post" action="${routineHref(routine.id)}/run-now" class="inline">` +
+        `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+        `<input type="password" name="token" class="inline" placeholder="your password" aria-label="password for run now" style="width:11rem"> ` +
+        `<button type="submit">run now</button></form>`
+      : "";
   const acts =
     `<div class="card">` +
     (routine.paused ? verb("resume", "resume") : verb("pause", "pause")) +
-    (approved && !routine.paused ? " " + verb("run-now", "run now") : "") +
-    `<p class="meta">${routine.paused ? "resuming fires again at the next due slot" : "pausing stops firing instantly; a running instance finishes"}${approved && !routine.paused ? " · run now spawns an extra instance without touching the schedule" : ""}</p>` +
+    (runNowForm === "" ? "" : " " + runNowForm) +
+    `<p class="meta">${routine.paused ? "resuming fires again at the next due slot" : "pausing stops firing instantly; a running instance finishes"}${runNowForm === "" ? "" : " · run now spawns an extra instance without touching the schedule — spend outside the schedule takes your password again"}</p>` +
     `</div>`;
 
   const ledger =
@@ -2295,7 +2317,8 @@ function routineScreenPage(chrome: Chrome, data: {
                   ? "fired"
                   : `<a href="${taskHref(fire.instanceTaskId)}" class="mono">${escape(fire.instanceTaskId)}</a>${fire.instanceState === null ? "" : ` <span class="badge badge-${escape(fire.instanceState)}">${escape(fire.instanceState)}</span>`}`
                 : `<span class="meta">skipped — ${escape(fire.reason ?? "")}</span>`;
-            return `<p class="row">${said}<span class="right meta mono">${escape(when(fire.scheduledFor))}</span></p>`;
+            const slot = fire.scheduledFor.replace(/^manual:/, "");
+            return `<p class="row">${said}<span class="right meta mono">${fire.reason === "manual" ? "run now · " : ""}${escape(when(slot))}</span></p>`;
           })
           .join("\n");
 
@@ -2304,7 +2327,7 @@ function routineScreenPage(chrome: Chrome, data: {
       `<span class="meta"> · ${escape(projectName(routine.repo))}</span></h1>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     `<p>${trackStrip(fires)}<span class="right meta">$${data.spend.costUsd.toFixed(2)} this week${data.spend.unmeasuredRuns > 0 ? " · <strong>some spend unmeasured</strong>" : ""}</span></p>`,
-    data.blocker !== null && routine.singleFlight
+    data.blocker !== null
       ? `<div class="problem">stopped behind <a href="${taskHref(data.blocker.taskId)}" class="mono">${escape(data.blocker.taskId)}</a> (${escape(data.blocker.state)}) — the track resumes when it finishes or is cancelled</div>`
       : "",
     approved && !routine.paused && routine.nextFireAt !== null
