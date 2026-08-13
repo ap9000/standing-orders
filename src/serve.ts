@@ -134,6 +134,9 @@ type Session = {
   project: string | null;
   /** Bumped on every open: stale tabs carry the revision they were rendered under. */
   projectRevision: number;
+  /** When this session last READ the board — the anchor for "since you
+   * last looked". Full page loads move it; fragment polls never do. */
+  sawBoardAt: number | null;
 };
 
 /** One rendered approval form: who saw which digest of which task, once. */
@@ -306,6 +309,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         csrf: randomBytes(32).toString("hex"),
         generation: store.approverGeneration(name as string) ?? 1,
         createdAt: Date.now(),
+        sawBoardAt: null,
         lastSeen: Date.now(),
         project: defaultProject,
         projectRevision: 1,
@@ -365,6 +369,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         inboxPage(chromeFor(project, "inbox"), {
           csrf: who.via === "cookie" ? who.session.csrf : "",
+          revision: who.via === "cookie" ? who.session.projectRevision : 0,
           decisions: store.listDecisionsScoped(project).slice(0, 10),
           approvals: store.scopesAwaitingApproval(project, 10),
           requeueables: store.listRequeueablesScoped(project, now, 10),
@@ -462,6 +467,25 @@ export function createDecisionServer(options: ServeOptions): Server {
           now,
         ),
       );
+      // "Since you last looked": what concluded between this session's
+      // previous full board read and now. Fragment polls never move the
+      // anchor — an open tab is not a person looking.
+      let delta: { agoMinutes: number; built: number; failed: number; questions: number } | null = null;
+      if (who.via === "cookie" && url.searchParams.get("fragment") !== "1") {
+        const prev = who.session.sawBoardAt;
+        if (prev !== null && now.getTime() - prev > 5 * 60_000) {
+          const sinceIso = new Date(prev).toISOString();
+          const runs = store.runsSinceScoped(sinceIso, all ? null : project).filter(one => all ? one.taskId !== "" : true);
+          delta = {
+            agoMinutes: Math.round((now.getTime() - prev) / 60_000),
+            built: runs.filter(one => one.outcome === "built" || one.outcome === "no-change").length,
+            failed: runs.filter(one => one.outcome === "failed").length,
+            questions: store.listDecisionsScoped(all ? null : project).filter(one => one.createdAt >= sinceIso && one.state !== "answered").length,
+          };
+          if (delta.built === 0 && delta.failed === 0 && delta.questions === 0) delta = null;
+        }
+        who.session.sawBoardAt = now.getTime();
+      }
       const buildingCount = cards.filter(card => card.lane === "building").length;
       // Instances belong to their track row, not the main lanes — the board
       // is for one-off work; tracks are the heartbeat. The one exception is
@@ -471,7 +495,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         .routineTracks(all ? null : project, now, admission)
         .filter(track => visible(track.routine.repo));
       const body = boardBody(
-        { cards: laneCards, tracks, done, saturated: snapshot.saturated, now, all, project },
+        { cards: laneCards, tracks, done, saturated: snapshot.saturated, now, all, project, delta },
         pr => store.ciFailureObserved(pr),
       );
       if (url.searchParams.get("fragment") === "1") {
@@ -1729,6 +1753,19 @@ const STYLE = `
     display: grid; grid-template-columns: repeat(5, minmax(15rem, 1fr));
     gap: .75rem; overflow-x: auto; padding-bottom: .75rem; align-items: start;
   }
+  /* The phone is the real usage scene: lanes stack, ordered by what the
+     operator came for — needs-you first, then what is moving, then what
+     waits its turn. Empty lanes collapse to their headline. */
+  @media (max-width: 40rem) {
+    .board { display: flex; flex-direction: column; overflow-x: visible; }
+    .board .lane { min-height: 0; }
+    .board .lane-attention { order: 0; }
+    .board .lane-building { order: 1; }
+    .board .lane-queued { order: 2; }
+    .board .lane-waiting { order: 3; }
+    .board .lane-done { order: 4; }
+    .board .lane-empty { margin: 0; }
+  }
   .lane {
     background: var(--muted); border: 1px solid var(--border);
     border-radius: .625rem; padding: .625rem; min-height: 12rem;
@@ -1907,6 +1944,7 @@ function loginPage(problem: string | null): string {
  */
 function inboxPage(chrome: Chrome, data: {
   csrf: string;
+  revision: number;
   decisions: (Decision & { taskId: string })[];
   approvals: { taskId: string; title: string; goal: string; proposedAt: string }[];
   requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number }[];
@@ -2000,6 +2038,17 @@ function inboxPage(chrome: Chrome, data: {
     requeueables,
     cancelled,
     gaps,
+    // Quick capture: the shortest path from "I want this done" to the
+    // approve card — title and goal here, the yes on the next screen. The
+    // one-shot form posts to the same guarded handler as the full page.
+    `<h2>capture new work</h2>`,
+    `<form method="post" action="/tasks/add" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<input type="hidden" name="projectRevision" value="${data.revision}">`,
+    `<label>what should get done<input type="text" name="title" placeholder="a title the board can wear" maxlength="200"></label>`,
+    `<label>what success looks like <span class="meta">(becomes the scope you approve on the next screen)</span><textarea name="goal" rows="2"></textarea></label>`,
+    `<button type="submit">queue it \u2192 approve its scope next</button>`,
+    `</form>`,
   ].join("\n"), { chrome });
 }
 
@@ -2113,6 +2162,7 @@ function boardBody(
     /** The rolled-up view: every project inside the ceiling at once. */
     all: boolean;
     project: string | null;
+    delta: { agoMinutes: number; built: number; failed: number; questions: number } | null;
   },
   ciRed: (pr: number) => boolean,
 ): string {
@@ -2225,8 +2275,24 @@ function boardBody(
         data.tracks.map(track => trackRow(track, data.all)).join("\n") +
         `</section>`;
 
+  const ago = (minutes: number): string =>
+    minutes < 60 ? `${minutes}m` : minutes < 48 * 60 ? `${Math.round(minutes / 60)}h` : `${Math.round(minutes / (24 * 60))}d`;
+  const deltaLine =
+    data.delta === null
+      ? ""
+      : `<p class="meta"><strong>since you last looked</strong> (${ago(data.delta.agoMinutes)} ago): ` +
+        [
+          data.delta.built > 0 ? `<span class="good">${data.delta.built} built</span>` : "",
+          data.delta.failed > 0 ? `<span class="bad">${data.delta.failed} failed</span>` : "",
+          data.delta.questions > 0
+            ? `${data.delta.questions} question${data.delta.questions > 1 ? "s" : ""} \u2014 <a href="/next">answer \u2192</a>`
+            : "",
+        ].filter(one => one !== "").join(" \u00b7 ") +
+        `</p>`;
+
   return [
     `<h1>board</h1>`,
+    deltaLine,
     `<p class="meta">the whole pipeline at a glance, updating in place \u2014 open the <a href="/">inbox</a> to act on what needs you</p>`,
     toggle,
     `<div class="board">`,

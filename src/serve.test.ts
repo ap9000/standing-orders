@@ -1842,3 +1842,91 @@ describe("/next — clearing the queue one thing at a time", () => {
     expect(busy).toContain("clear the queue");
   });
 });
+
+describe("since you last looked", () => {
+  test("a return visit says what concluded in between; fragment polls never move the anchor", async () => {
+    const store = openStore(":memory:");
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-delta-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+    const clockBox = { now: new Date() };
+    const server = createDecisionServer({ store, evidenceRoot, clock: () => clockBox.now, repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const login = await fetch(`${base}/login`, {
+        method: "POST", body: new URLSearchParams({ name: "alex", token: added.token }), redirect: "manual",
+      });
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] as string;
+
+      // First look: no previous anchor, no strip.
+      const first = await (await fetch(`${base}/board`, { headers: { cookie } })).text();
+      expect(first).not.toContain("since you last looked");
+
+      // Work concludes while the operator is away.
+      store.createTask({ id: "t-d", title: "w" }, T0);
+      const ref = store.refFor("built-in", "t-d").id;
+      const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b", branch: "br", worktree: "/w", now: clockBox.now });
+      store.finishRun(run, { outcome: "built", now: clockBox.now });
+
+      // A fragment poll in the open tab does NOT count as looking.
+      clockBox.now = new Date(clockBox.now.getTime() + 10 * 60_000);
+      await fetch(`${base}/board?fragment=1`, { headers: { cookie } });
+
+      const back = await (await fetch(`${base}/board`, { headers: { cookie } })).text();
+      expect(back).toContain("since you last looked");
+      expect(back).toContain("1 built");
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      store.close();
+      rmSync(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("quick capture — from thought to the approve card in two steps", () => {
+  test("title + goal on the inbox lands on the task screen with the step-up ready", async () => {
+    const store = openStore(":memory:");
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-capture-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+    const server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const login = await fetch(`${base}/login`, {
+        method: "POST", body: new URLSearchParams({ name: "alex", token: added.token }), redirect: "manual",
+      });
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] as string;
+      const inbox = await (await fetch(`${base}/`, { headers: { cookie } })).text();
+      expect(inbox).toContain("capture new work");
+      const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(inbox)?.[1] as string;
+      const revision = /name="projectRevision" value="([0-9]+)"/.exec(inbox)?.[1] as string;
+
+      const made = await fetch(`${base}/tasks/add`, {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({
+          csrf, projectRevision: revision,
+          title: "Guard the webhook", goal: "Reject unsigned payloads at the edge",
+        }),
+        redirect: "manual",
+      });
+      expect(made.status).toBe(303);
+      const where = made.headers.get("location") as string;
+      const screen = await (await fetch(`${base}${where}`, { headers: { cookie } })).text();
+      // Step two IS the approval: the scope is written, the password waits.
+      expect(screen).toContain("Reject unsigned payloads");
+      expect(screen).toContain("approve exactly this:");
+      expect(screen).toContain('type="password"');
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      store.close();
+      rmSync(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+});
