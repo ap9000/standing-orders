@@ -17,6 +17,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
 import { CAPABILITIES, ENVELOPE_VERSION, capturedEnvelope, envelopeJson, resetCapturedEnvelope } from "./envelope.js";
+import { applyInstall, contextBlock, planInstall } from "./skills.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
 import {
@@ -74,6 +75,7 @@ Usage
   standing-orders link             put \`standing-orders\` on your PATH
   standing-orders unlink           take it off again
   standing-orders contract         the machine contract: envelope version + capabilities
+  standing-orders skills install   teach a repo's agents this queue exists (preview first)
 
 Operating the queue — see \`standing-orders task\` for the whole surface
   standing-orders ready            what could be dispatched right now
@@ -261,6 +263,7 @@ async function dispatch(
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
   if (first === "contract") return runContractCommand(rest, write);
+  if (first === "skills") return runSkillsCommand(rest, write);
   if (first === "repos") return runReposCommand(rest, write);
   if (first === "pulls") return runPullsCommand(rest, write);
   if (first === "graph") return runGraphCommand(rest, write);
@@ -764,6 +767,63 @@ async function runUnlink(dir: string, yes: boolean, write: Write): Promise<numbe
   await applyUnlink(plan);
   write("");
   write("Removed.");
+  return 0;
+}
+
+/**
+ * `skills install` (M7.13): teach a repository's agents that this queue
+ * exists — the Agent Skills entry all four major CLIs read, plus an
+ * optional managed AGENTS.md block. Preview by default; --yes writes;
+ * a skill file this installer did not write is refused, never eaten.
+ */
+function runSkillsCommand(argv: readonly string[], write: Write): number {
+  const json = argv.includes("--json");
+  const action = argv.find(argument => !argument.startsWith("-"));
+  if (action !== "install") {
+    write(json ? envelopeJson({ ok: false, command: "skills", reason: "usage", message: "`standing-orders skills install [--repo <path>] [--write-context] [--yes]`" }) : "`standing-orders skills install [--repo <path>] [--write-context] [--yes]`");
+    return USAGE_EXIT;
+  }
+  const repoAt = argv.indexOf("--repo");
+  const repo = repoAt !== -1 && typeof argv[repoAt + 1] === "string" ? resolve(argv[repoAt + 1] as string) : process.cwd();
+  const writeContext = argv.includes("--write-context");
+  const confirmed = argv.includes("--yes");
+
+  if (!existsSync(join(repo, ".git"))) {
+    write(json ? envelopeJson({ ok: false, command: "skills install", reason: "not-a-repo", message: `${repo} has no .git — name the repository with --repo` }) : `${repo} has no .git — name the repository with --repo`);
+    return USAGE_EXIT;
+  }
+
+  const plan = planInstall(repo, writeContext);
+  if (!confirmed) {
+    if (json) {
+      write(envelopeJson({ ok: false, command: "skills install", reason: "unconfirmed", plan }));
+      return 3;
+    }
+    write(`Would write, exactly:`);
+    write(`  ${plan.skillPath}  (${plan.skillAction === "refuse-foreign" ? "REFUSED — a skill this installer did not write is already there" : plan.skillAction})`);
+    if (plan.contextPath !== null) {
+      write(`  ${plan.contextPath}  (${plan.contextAction} — only the marked block is ever touched)`);
+    } else {
+      write(`  AGENTS.md untouched — add --write-context to install the managed block, or paste it yourself:`);
+      write("");
+      for (const line of contextBlock().split("\n")) write(`  ${line}`);
+    }
+    write("");
+    write("Nothing was written. Re-run with --yes to apply.");
+    return 3;
+  }
+
+  const result = applyInstall(repo, writeContext);
+  if (!result.ok) {
+    write(json ? envelopeJson({ ok: false, command: "skills install", reason: result.reason, message: result.message }) : result.message);
+    return 1;
+  }
+  if (json) {
+    write(envelopeJson({ ok: true, command: "skills install", wrote: result.wrote, plan: result.plan }));
+    return 0;
+  }
+  for (const file of result.wrote) write(`wrote ${file}`);
+  write("Agents that read Agent Skills (claude, codex, gemini, opencode) will discover the queue on their next session here.");
   return 0;
 }
 

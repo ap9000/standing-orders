@@ -227,6 +227,18 @@ diff, because during the agent turn HEAD must equal base by design.
 | Operator note + honest requeue label | **done** — late entry, shipped in 8dbdbba | run_note (v11 additive): immutable, bounded by the decision-note validator (500u/2000B, control/bidi refused), ordinary authenticated mutation with CSRF — NO nonce, nothing here approves anything; ceiling-checked like every run resource; rendered beside the machine's record. The requeue act now says what it keeps: "retry — branch and workspace kept", because runs and evidence are audit history and nothing destructive hides behind one tap. Fresh-retry-from-clean-base stays a future designed workflow with branch generations, per the Codex cut |
 | Deterministic hard stop | **done** — late entry, shipped in 719f2d0 | providers spawn detached in their own process group, set by the invocation gateway and nowhere else; the streaming AND buffered transports both register live providers and both kill the GROUP on timeout (the execFile path detours through spawn when a group is required, same contract: output caps, overflow≠timeout, ENOENT). Watch: first signal graceful + starts --stop-grace (default 30s); expiry or a second signal SIGKILLs every live group via terminateLiveProviders. Runs finalize as failures, worktrees preserved, fences keep late output out of commits. The test spawns a grandchild and proves the corpse: kill(pid, 0) must throw |
 
+## M7 — agent citizenship · M8 — the outer loop (2026-08-13, same roadmap)
+
+| Item | State | Proof |
+|---|---|---|
+| `skills install` | **done** | src/skills.ts + `standing-orders skills install`: writes the Agent Skills entry (.claude/skills/standing-orders/SKILL.md — the cross-vendor layout claude/codex/gemini/opencode all read) whose description is the routing contract (use for queue/status/briefs; NOT for pushing, merging, approving) and whose body carries the machine contract (envelope, stable reasons, exit-code quartet, idempotency keys, -o file, untrusted-output hygiene) while deferring to live --help as authoritative — a skill that duplicates the manual drifts from it. Preview by default (exit 3, nothing written), --yes to apply, --repo to aim, --write-context for the AGENTS.md managed block (marker-fenced, replaced only between its own markers, host prose never rewritten; without the flag the snippet prints for the operator to place). A skill file the installer did not write is REFUSED, never eaten. skills.test.ts (7) |
+| Hook packs | **deferred, named** | shippable Stop/TaskCompleted hook configs would have foreign agent sessions REPORTING INTO the queue — an ingestion surface for unauthenticated writes that needs its own identity/review round, exactly like acting-from-Slack did. Not smuggled in as config files |
+| MCP facade | deferred (roadmap ruling) | thin wrapper over the same envelope if demand shows; CLIs + skills won the local-tool layer |
+| GitHub issue intake, preview-first | in progress | — |
+| PR review-comment intake | not started | — |
+| CI-repair, suggestion-first | not started | — |
+| Review-backpressure queue | not started | — |
+
 ## The primary messenger (2026-08-13, the operator's ask: "ask which service… allow selection of primary")
 
 Exactly ONE service carries the pages. `effectivePrimary` resolves it:
