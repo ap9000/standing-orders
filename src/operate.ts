@@ -124,7 +124,7 @@ import {
   type RoutineTerms,
 } from "./routine.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import { isProviderId, PROVIDER_IDS, validateSpec, reportsCost } from "./provider.js";
+import { inspectionOf, isProviderId, PROVIDER_IDS, validateSpec } from "./provider.js";
 import {
   build,
   DEFAULT_BUILD_TIMEOUT_MS,
@@ -222,6 +222,23 @@ Routines — standing orders that fire on a schedule, each instance isolated
   nightorders routine list | show <name>
   nightorders routine pause|resume <name>
   nightorders routine run-now <name> --as <you> --token <t>
+
+Agents — which provider and model each phase runs on
+  nightorders providers                 what is installed, logged in, and
+                                        configured on this machine — without
+                                        spending anything to find out
+  nightorders config show [--repo <path>]
+  nightorders config set <phase> --provider claude|codex|openrouter
+      [--model <m>] [--repo <path>] --as <you> --token <t>
+                                        phases: plan | build | repair. The
+                                        repo form is a project override;
+                                        without it, installation-wide.
+                                        Repair's PROVIDER always inherits
+                                        the build it mends.
+  nightorders config clear <phase> [--repo <path>] --as <you> --token <t>
+  Pass flags still win for one pass: --provider/--model,
+  --plan-provider/--plan-model, --repair-model. A routine instance is
+  pinned at fire time and ignores all of them.
   nightorders brief [--repo <path>] [--local] [--since <iso>]
                                         the report: recent runs, gaps,
                                         PRs (--local skips the network and
@@ -415,6 +432,8 @@ async function dispatch(
       return routineCommand(positional, flags, context);
     case "config":
       return configCommand(positional, flags, context);
+    case "providers":
+      return providersCommand(flags, context);
     case "serve":
       return serveCommand(flags, context);
     case "watch":
@@ -2310,7 +2329,83 @@ async function incidentCommand(
 }
 
 /**
- * `nightorders config …` — which provider and model each phase runs on.
+ * `nightorders providers` — identification, never integration theater.
+ *
+ * Four different claims, kept apart on purpose (Codex provider review):
+ * INSTALLED (the binary answered --version), CONFIGURED (a phase names
+ * it), HISTORICALLY SUCCESSFUL (a stamped run concluded — proof of login
+ * AT THAT TIME), and CURRENTLY AUTHENTICATED (only where a cheap,
+ * non-spending probe exists — codex's \`login status\`). Claude has no
+ * probe that does not risk spend, and this report says so instead of
+ * guessing; an OpenRouter key's PRESENCE proves neither validity nor
+ * authorization, and is reported as exactly that.
+ */
+async function providersCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const probe = context.gitRunner ?? run;
+  const configured = new Map<string, string[]>();
+  for (const scope of [INSTALLATION_SCOPE]) {
+    for (const row of store.listPhaseConfig(scope)) {
+      configured.set(row.provider, [...(configured.get(row.provider) ?? []), row.phase]);
+    }
+  }
+
+  const report: Record<string, unknown>[] = [];
+  for (const id of PROVIDER_IDS) {
+    const facts = inspectionOf(id);
+    const version = await probe(facts.binary, ["--version"], { timeoutMs: 5_000 });
+    const installed = version.code === 0 && !version.notFound;
+    let identity: string | null = null;
+    if (installed && facts.identityProbe !== null) {
+      const asked = await probe(facts.binary, [...facts.identityProbe], { timeoutMs: 5_000 });
+      identity = asked.code === 0 ? (asked.stdout.trim().split("\n")[0] ?? null) : "not logged in";
+    }
+    const lastSuccess = store.providerLastSuccess(id);
+    const keyPresent = facts.requiresEnv === null ? null : (process.env[facts.requiresEnv] ?? "") !== "";
+    report.push({
+      provider: id,
+      binary: facts.binary,
+      installed,
+      version: installed ? (version.stdout.trim().split("\n")[0] ?? "") : null,
+      identity,
+      lastSuccessfulRun: lastSuccess,
+      ...(keyPresent === null ? {} : { keyPresent, keyEnv: facts.requiresEnv }),
+      measuresCost: facts.measuresCost,
+      configuredPhases: configured.get(id) ?? [],
+    });
+  }
+
+  if (json) {
+    write(JSON.stringify({ ok: true, command: "providers", providers: report }, null, 2));
+    return EXIT.ok;
+  }
+  for (const one of report) {
+    const name = String(one["provider"]);
+    write(`${name}`);
+    write(`  installed      ${one["installed"] === true ? `yes — ${String(one["version"])}` : `no — \`${String(one["binary"])}\` did not answer`}`);
+    if (one["identity"] !== null && one["identity"] !== undefined) {
+      write(`  authenticated  ${String(one["identity"])} (probed just now, without spending)`);
+    } else if (name === "claude") {
+      write(`  authenticated  not probed — no non-spending check exists; a real run is the proof`);
+    }
+    write(`  last success   ${one["lastSuccessfulRun"] === null ? "never on this installation" : `${String(one["lastSuccessfulRun"])} — login was valid then`}`);
+    if (one["keyEnv"] !== undefined) {
+      write(`  ${String(one["keyEnv"])}  ${one["keyPresent"] === true ? "present (not validated — presence is not authorization)" : "ABSENT — runs will fail until the runner exports it"}`);
+    }
+    write(`  cost           ${one["measuresCost"] === true ? "measured in dollars per run" : "tokens only — runs land as UNMEASURED; ceilinged routines fail closed on them"}`);
+    const phases = one["configuredPhases"] as string[];
+    if (phases.length > 0) write(`  configured     ${phases.join(", ")} (installation)`);
+    write("");
+  }
+  write("  \u2192 nightorders config show    which provider each phase actually resolves to");
+  return EXIT.ok;
+}
+
+/**
+ * \`nightorders config …\` — which provider and model each phase runs on.
  *
  * Two scopes: the installation, and one project's override. Mutations are
  * AUTHENTICATED and AUDITED — spend routing is authority, not preference

@@ -149,6 +149,52 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Providers + phase configuration (2026-08-13, Codex plan review: 1 crit, 6 high — its prescriptions ARE the spec)
+
+Three harnesses behind the one door. `provider.ts` is the only module that
+may name a binary: **claude** (dialect unchanged, byte-identical, the
+whole suite proves it), **codex** (`exec --json`, sandbox
+workspace-write, resume as a subcommand, `login status` as the one cheap
+identity probe; wall clocks clamped below claude's because codex has no
+turn bound), and **openrouter** — the codex harness pointed at OpenRouter
+through constant `-c` overrides (keys never caller-supplied, values
+TOML-quoted, model ids validated against an argv-safe charset that still
+admits `/ . : -`), the API key read from the runner's environment and
+EXCLUDED from every shell the model itself launches. Codex JSONL rides a
+new streaming transport retaining only load-bearing lines — the buffered
+runner would overflow at 8 MiB and lose the terminal usage of a paid run.
+`invokeAgent` takes a semantic request, refuses a run opened for a
+different provider (repair inherits its parent structurally — a session
+resumed across harnesses is not a session), and quota is keyed to the
+resolved provider. The architecture rule reads IMPORTS, not string
+literals. Schema v9: `run.provider` across all three canonical shapes
+(default 'claude' — truthful history), the task agent pin, `phase_config`.
+
+**Configuration**, layered and stated: pinned task agent (nothing
+overrides it) > pass flags (`--provider/--model`,
+`--plan-provider/--plan-model`, `--repair-model`; per-field — `--model`
+rides the resolved provider, `--provider` runs its own default) > project
+override > installation > default. Config rows live IN THE DATABASE as
+complete pairs, written only by authenticated, audited verbs
+(`nightorders config set/clear … --as --token`) — spend routing is
+authority, and a 0600 file under the agents' own UID is not a boundary.
+Routine firings resolve the instance agent inside the fire transaction
+and PIN it (the review's critical finding: approved-terms firings must
+not be re-routed by later flags), and a cost ceiling against a provider
+that reports no dollars skips the slot with a page instead of deadlocking
+on the second firing. `nightorders providers` keeps four claims apart:
+installed / configured / historically successful / currently
+authenticated (codex only — claude has no non-spending probe, and the
+report says so; an OpenRouter key's presence "is not authorization").
+Codex/openrouter runs land honestly UNMEASURED in dollars.
+
+Deferred, named: an explicit digest-bound `agent` term on routine
+templates (the fire-time pin already carries the safety; the term adds
+the operator's explicit choice at approval), console surfacing of
+provider/config state (system page card, board provider chips), per-task
+one-off override, an agent-reviewer role (its own design round). 777
+tests.
+
 ## Routines — standing orders as tracks (2026-08-13, Phase C; findings 4, 5, 9, 10 are its spec)
 
 A routine is a pre-approved template for repeating work: goal, exclusions,

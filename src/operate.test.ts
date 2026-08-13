@@ -801,3 +801,46 @@ describe("config — spend routing is authenticated authority", () => {
     );
   });
 });
+
+describe("providers — identification without spend", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "nightorders-providers-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("reports installed/authenticated/history as separate claims, probing nothing that spends", async () => {
+    const probed: string[][] = [];
+    const probe = async (file: string, args: readonly string[]) => {
+      probed.push([file, ...args]);
+      if (args[0] === "--version") return { code: 0, stdout: `${file} 9.9.9\n`, stderr: "", timedOut: false, notFound: false };
+      if (args[0] === "login") return { code: 0, stdout: "Logged in using ChatGPT\n", stderr: "", timedOut: false, notFound: false };
+      return { code: 1, stdout: "", stderr: "", timedOut: false, notFound: false };
+    };
+    lines = [];
+    const code = await runOperate("providers", ["--json"], line => lines.push(line), {
+      databaseFile: db,
+      now: T0,
+      gitRunner: probe,
+    });
+    expect(code).toBe(EXIT.ok);
+    const report = JSON.parse(lines.join("\n")).providers as Record<string, unknown>[];
+    const codex = report.find(one => one["provider"] === "codex");
+    expect(codex).toMatchObject({ installed: true, identity: "Logged in using ChatGPT", measuresCost: false });
+    const claude = report.find(one => one["provider"] === "claude");
+    // No non-spending auth probe exists for claude: identity stays null,
+    // history stands in ("never" on a fresh database).
+    expect(claude).toMatchObject({ identity: null, lastSuccessfulRun: null, measuresCost: true });
+    const openrouter = report.find(one => one["provider"] === "openrouter");
+    expect(openrouter).toHaveProperty("keyPresent");
+    // Only --version and login status were ever run — nothing that spends.
+    expect(probed.every(one => one[1] === "--version" || one[1] === "login")).toBe(true);
+  });
+});

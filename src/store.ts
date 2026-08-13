@@ -2600,6 +2600,22 @@ export class Store {
     });
   }
 
+  /**
+   * The newest moment a provider provably worked here: a stamped, concluded
+   * success. Historical proof only — it says "was authenticated then",
+   * never "is authenticated now".
+   */
+  providerLastSuccess(provider: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(started_at) AS at FROM run
+          WHERE provider = ? AND provider_started_at IS NOT NULL
+            AND outcome IN ('built','parked','no-change')`,
+      )
+      .get(provider);
+    return row?.["at"] === null || row?.["at"] === undefined ? null : String(row["at"]);
+  }
+
   // ---- phase configuration ------------------------------------------------
 
   /** One phase's configured agent at one scope, or null. */
