@@ -1145,3 +1145,208 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     }
   });
 });
+
+describe("the board — the pipeline as lanes, live in place", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-board-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("every lane renders, and a building card carries worker, model, elapsed, and workspace", async () => {
+    const now = new Date();
+    store.createTask({ id: "t-live", title: "being built" }, T0);
+    const ref = store.refFor("built-in", "t-live").id;
+    store.saveScope({
+      taskId: "t-live", goal: "build it", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "d1",
+      approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d1",
+    });
+    const taken = acquire(store, ref, "builder-1", { now: new Date(now.getTime() - 12 * 60_000), ttlMs: 60 * 60_000 });
+    if (!taken.ok) throw new Error("claim refused");
+    store.startRun({
+      taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
+      branch: "nightorders/t-live", worktree: "/pool/nightorders-t-live-abc",
+      model: "claude", now: new Date(now.getTime() - 12 * 60_000),
+    });
+    store.createTask({ id: "t-ready", title: "all set" }, T0);
+    store.saveScope({
+      taskId: "t-ready", goal: "go", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "d2",
+      approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d2",
+    });
+    store.createTask({ id: "t-bare", title: "no scope yet" }, T0);
+
+    const cookie = await login();
+    const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
+    for (const lane of ["needs you", "queued", "waiting", "building", "done recently"]) {
+      expect(board).toContain(lane);
+    }
+    expect(board).toContain("being built");
+    expect(board).toContain("builder-1");
+    expect(board).toContain("m elapsed");
+    expect(board).toContain("claude");
+    expect(board).toContain("nightorders-t-live-abc");
+    expect(board).toContain("all set");
+    expect(board).toContain("write its scope");
+    // Read-only by construction: an auto-refreshing surface never holds a
+    // form, a nonce, or a password field.
+    expect(board).not.toContain("<form");
+    expect(board).not.toContain('type="password"');
+  });
+
+  test("the board's CSP admits exactly its own script: fresh nonce per response, never unsafe-inline", async () => {
+    const cookie = await login();
+    const first = await fetch(url("/board"), { headers: { cookie } });
+    const csp = first.headers.get("content-security-policy") ?? "";
+    const html = await first.text();
+    const match = /script-src 'nonce-([^']+)'/.exec(csp);
+    expect(match).not.toBeNull();
+    expect(html).toContain(`<script nonce="${match?.[1]}">`);
+    expect(csp).not.toMatch(/script-src [^;]*unsafe-inline/);
+    expect(csp).toContain("connect-src 'self'");
+
+    const second = await fetch(url("/board"), { headers: { cookie } });
+    const secondMatch = /script-src 'nonce-([^']+)'/.exec(second.headers.get("content-security-policy") ?? "");
+    expect(secondMatch?.[1]).not.toBe(match?.[1]);
+
+    // Pages without the live region keep the script-free constant policy.
+    const inbox = await fetch(url("/"), { headers: { cookie } });
+    expect(inbox.headers.get("content-security-policy")).not.toContain("script-src");
+  });
+
+  test("the fragment is the region alone, behind the same auth", async () => {
+    const cookie = await login();
+    const fragment = await fetch(url("/board?fragment=1"), { headers: { cookie } });
+    const body = await fragment.text();
+    expect(body).toContain('class="board"');
+    expect(body).not.toContain("<html");
+    expect(body).not.toContain("<script");
+
+    const anonymous = await fetch(url("/board?fragment=1"), { redirect: "manual" });
+    expect(anonymous.status).toBe(303);
+    expect(anonymous.headers.get("location")).toBe("/login");
+  });
+
+  test("the old morning route forwards to activity, which speaks of windows, not nights", async () => {
+    const cookie = await login();
+    const moved = await fetch(url("/morning"), { headers: { cookie }, redirect: "manual" });
+    expect(moved.status).toBe(302);
+    expect(moved.headers.get("location")).toBe("/activity");
+
+    const activity = await (await fetch(url("/activity"), { headers: { cookie } })).text();
+    expect(activity).toContain("<h1>activity</h1>");
+    expect(activity).not.toContain("morning");
+    expect(activity).not.toContain("overnight");
+    expect(activity).not.toContain("the night");
+  });
+});
+
+describe("the rolled-up board — every project, one ceiling", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-rollup-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({
+      store, evidenceRoot, clock: () => new Date(),
+      repos: ["/repo/alpha", "/repo/beta"],
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("scope=all shows every admitted project's cards, chipped — and nothing beyond the ceiling", async () => {
+    for (const [id, repo] of [
+      ["t-alpha", "/repo/alpha"],
+      ["t-beta", "/repo/beta"],
+      ["t-outside", "/repo/forbidden"],
+    ] as const) {
+      store.createTask({ id, title: `work in ${repo}` }, T0);
+      store.placeTask(store.refFor("built-in", id).id, repo);
+    }
+    store.createTask({ id: "t-unplaced", title: "belongs to nobody yet" }, T0);
+
+    const cookie = await login();
+    const board = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
+    expect(board).toContain("t-alpha");
+    expect(board).toContain("t-beta");
+    // The chips name the projects.
+    expect(board).toContain(">alpha</span>");
+    expect(board).toContain(">beta</span>");
+    // Outside the ceiling: not a card, not a name, not a byte.
+    expect(board).not.toContain("t-outside");
+    expect(board).not.toContain("forbidden");
+    // Unplaced work dispatches anywhere, so the roll-up owns it honestly.
+    expect(board).toContain("t-unplaced");
+
+    // The fragment carries the same scope and the same ceiling.
+    const fragment = await (await fetch(url("/board?scope=all&fragment=1"), { headers: { cookie } })).text();
+    expect(fragment).toContain("t-alpha");
+    expect(fragment).not.toContain("t-outside");
+
+    // Without scope=all and without an open project, the board defers to
+    // the opener — the roll-up is the only project-less board.
+    const bare = await fetch(url("/board"), { headers: { cookie }, redirect: "manual" });
+    expect(bare.status).toBe(303);
+    expect(bare.headers.get("location")).toBe("/projects");
+  });
+});

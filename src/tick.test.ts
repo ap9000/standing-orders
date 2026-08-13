@@ -850,7 +850,7 @@ describe("the morning briefing", () => {
     await run(["task", "approve", id, "--yes", "--digest", digest, "--as", "alex", "--token", approver]);
   };
 
-  test("reports the overnight from the run table, offline, honestly", async () => {
+  test("reports the run tally from the run table, offline, honestly", async () => {
     const { token, approver } = await setup();
     await approvedTask("t-good", approver);
     await approvedTask("t-bad", approver);
@@ -865,11 +865,11 @@ describe("the morning briefing", () => {
     const report = payload();
     // Both tasks share a frozen creation instant, so which ran first is not
     // promised — one built, one failed, and both are on the record.
-    expect(report.overnight.built).toHaveLength(1);
-    expect(report.overnight.built[0]).toMatchObject({ committed: true });
-    expect(report.overnight.failed).toHaveLength(1);
-    expect(report.overnight.failed[0]).toMatchObject({ reason: "unknown" });
-    const seen = [report.overnight.built[0].taskId, report.overnight.failed[0].taskId].sort();
+    expect(report.tally.built).toHaveLength(1);
+    expect(report.tally.built[0]).toMatchObject({ committed: true });
+    expect(report.tally.failed).toHaveLength(1);
+    expect(report.tally.failed[0]).toMatchObject({ reason: "unknown" });
+    const seen = [report.tally.built[0].taskId, report.tally.failed[0].taskId].sort();
     expect(seen).toEqual(["t-bad", "t-good"]);
     // REVIEW was not read, and says so — not "zero PRs".
     expect(report.review).toEqual({ state: "not-read", why: "--local, the network was not asked" });
@@ -1651,7 +1651,7 @@ describe("watch — the loop, zero tokens idle", () => {
     expect(code).toBe(EXIT.ok);
     expect(payload().episode).toMatchObject({ id: episode?.id, runner: "builder-1" });
     expect(payload().since).toBe(episode?.startedAt);
-    expect(payload().overnight.built.length).toBeGreaterThanOrEqual(1);
+    expect(payload().tally.built.length).toBeGreaterThanOrEqual(1);
   });
 
   test("watch + watch is a loud refusal; the lease names the holder", async () => {

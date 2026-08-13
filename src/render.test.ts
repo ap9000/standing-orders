@@ -252,7 +252,7 @@ describe("renderGraph", () => {
     ]);
 
     expect(output).toContain("bd not installed");
-    expect(output).toContain("Nothing here could be scheduled from it tonight");
+    expect(output).toContain("Nothing here could be scheduled from it as it stands");
     // It cannot be read either, so it must not claim otherwise.
     expect(output).not.toContain("It can be read");
   });

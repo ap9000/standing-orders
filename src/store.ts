@@ -31,6 +31,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls } from "./decision.js";
 import { digestOf } from "./scope.js";
+import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
@@ -3727,6 +3728,7 @@ export class Store {
   ): {
     taskId: string;
     title: string;
+    repo: string | null;
     completedAt: string;
     outcome: string | null;
     handoff: string | null;
@@ -3740,7 +3742,8 @@ export class Store {
     return this.db
       .prepare(
         `WITH completed AS (
-           SELECT task.id, task.title, task.updated_at AS completed_at, task_ref.id AS ref_id
+           SELECT task.id, task.title, task.updated_at AS completed_at, task_ref.id AS ref_id,
+                  task_ref.repo AS task_repo
            FROM task
            JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
            WHERE task.state = 'done'
@@ -3761,6 +3764,7 @@ export class Store {
       .map(row => ({
         taskId: String(row["id"]),
         title: String(row["title"]),
+        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
         completedAt: String(row["completed_at"]),
         outcome: row["outcome"] === null ? null : String(row["outcome"]),
         handoff: row["handoff"] === null ? null : String(row["handoff"]),
@@ -3773,6 +3777,136 @@ export class Store {
         prUrl: row["pr_url"] === null ? null : String(row["pr_url"]),
         publicationState: row["pub_state"] === null ? null : String(row["pub_state"]),
       }));
+  }
+
+  /**
+   * Everything the board needs, in one snapshot: every non-terminal task's
+   * lane-relevant facts plus the recent completions, fetched inside a single
+   * transaction so a concurrent writer cannot make one card appear in two
+   * lanes or in none (Codex board review, finding 2). Classification itself
+   * is the pure function in board.ts — this method only gathers facts.
+   *
+   * Bounded honestly: at most `cap` active tasks, newest first; when the
+   * cap is hit `saturated` says so, and the board's lane totals speak only
+   * for what was fetched.
+   */
+  boardScoped(
+    repo: string | null,
+    now: Date,
+    cap = 200,
+  ): {
+    tasks: BoardFacts[];
+    saturated: boolean;
+    done: ReturnType<Store["listCompletedWorkScoped"]>;
+  } {
+    const page = Math.max(1, Math.min(Math.floor(cap), 500));
+    return this.transact(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT task.id, task.title, task.state, task.updated_at, task_ref.strikes, task_ref.repo AS task_repo,
+             EXISTS (SELECT 1 FROM task_scope WHERE task_scope.task_id = task.id) AS has_scope,
+             EXISTS (
+               SELECT 1 FROM task_scope
+               WHERE task_scope.task_id = task.id AND task_scope.approved_digest = task_scope.digest
+                 AND task_scope.approved_at IS NOT NULL
+             ) AS approved,
+             (SELECT decision.id FROM decision JOIN run ON run.id = decision.run
+               WHERE run.task_ref = task_ref.id AND decision.answered_at IS NULL
+               ORDER BY decision.id LIMIT 1) AS open_decision,
+             (SELECT COUNT(*) FROM incident JOIN run ON run.id = incident.run
+               WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL) AS open_incidents,
+             live.runner AS claim_runner, live.acquired_at AS claim_at, live.lease_id AS claim_lease,
+             claim_run.model AS claim_model, claim_run.branch AS claim_branch, claim_run.worktree AS claim_worktree,
+             (SELECT hold.owner_kind FROM hold
+               WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
+               ORDER BY CASE hold.owner_kind WHEN 'operator' THEN 0 WHEN 'backoff' THEN 1 WHEN 'decision' THEN 2 ELSE 3 END, hold.id
+               LIMIT 1) AS hold_kind,
+             (SELECT hold.until FROM hold
+               WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
+               ORDER BY CASE hold.owner_kind WHEN 'operator' THEN 0 WHEN 'backoff' THEN 1 WHEN 'decision' THEN 2 ELSE 3 END, hold.id
+               LIMIT 1) AS hold_until,
+             (SELECT task_edge.blocker FROM task_edge
+               JOIN task AS blocker_task ON blocker_task.id = task_edge.blocker
+               WHERE task_edge.blocked = task.id AND blocker_task.state != 'done'
+               ORDER BY task_edge.blocker LIMIT 1) AS unmet_dependency,
+             (SELECT requirement.value FROM json_each(task_ref.capability_requirements) AS requirement
+               WHERE task_ref.repo IS NOT NULL AND NOT EXISTS (
+                 SELECT 1 FROM capability
+                 WHERE capability.repo = task_ref.repo AND capability.status = 'verified'
+                   AND (capability.expires_at IS NULL OR capability.expires_at > ?)
+                   AND capability.kind || ':' || capability.name = requirement.value
+               ) LIMIT 1) AS missing_requirement
+           FROM task
+           JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+           LEFT JOIN claim AS live ON live.task_ref = task_ref.id
+             AND live.released_at IS NULL AND live.expires_at > ?
+             AND live.lease_generation = (
+               SELECT MAX(newest.lease_generation) FROM claim AS newest
+               WHERE newest.task_ref = live.task_ref
+             )
+           LEFT JOIN run AS claim_run ON claim_run.id = (
+             SELECT MAX(candidate.id) FROM run AS candidate WHERE candidate.lease_id = live.lease_id
+           )
+           WHERE task.state IN ('queued','running','failed')
+             AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+           ORDER BY task.updated_at DESC, task.id DESC
+           LIMIT ?`,
+        )
+        .all(
+          now.toISOString(),
+          now.toISOString(),
+          now.toISOString(),
+          BUILT_IN,
+          now.toISOString(),
+          repo,
+          repo,
+          page,
+        );
+      const tasks = rows.map(row => ({
+        taskId: String(row["id"]),
+        title: String(row["title"]),
+        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
+        state: String(row["state"]) as "queued" | "running" | "failed",
+        updatedAt: String(row["updated_at"]),
+        strikes: Number(row["strikes"]),
+        hasScope: Number(row["has_scope"]) === 1,
+        approved: Number(row["approved"]) === 1,
+        openDecisionId:
+          row["open_decision"] === null || row["open_decision"] === undefined
+            ? null
+            : Number(row["open_decision"]),
+        openIncidents: Number(row["open_incidents"]),
+        claim:
+          row["claim_runner"] === null || row["claim_runner"] === undefined
+            ? null
+            : {
+                runner: String(row["claim_runner"]),
+                claimedAt: String(row["claim_at"]),
+                model: row["claim_model"] === null || row["claim_model"] === undefined ? null : String(row["claim_model"]),
+                branch: row["claim_branch"] === null || row["claim_branch"] === undefined ? null : String(row["claim_branch"]),
+                worktree:
+                  row["claim_worktree"] === null || row["claim_worktree"] === undefined
+                    ? null
+                    : String(row["claim_worktree"]),
+              },
+        hold:
+          row["hold_kind"] === null || row["hold_kind"] === undefined
+            ? null
+            : {
+                ownerKind: String(row["hold_kind"]) as "operator" | "decision" | "incident" | "backoff",
+                until: row["hold_until"] === null || row["hold_until"] === undefined ? null : String(row["hold_until"]),
+              },
+        unmetDependency:
+          row["unmet_dependency"] === null || row["unmet_dependency"] === undefined
+            ? null
+            : String(row["unmet_dependency"]),
+        missingRequirement:
+          row["missing_requirement"] === null || row["missing_requirement"] === undefined
+            ? null
+            : String(row["missing_requirement"]),
+      }));
+      return { tasks, saturated: rows.length === page, done: this.listCompletedWorkScoped(repo, 10) };
+    });
   }
 
   /** Whether an open CI-failure episode exists for a PR — observed, never inferred. */

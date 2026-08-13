@@ -1,6 +1,7 @@
 /**
- * The overnight, summarized — one arithmetic, shared by the CLI brief and
- * the web console so the two can never disagree about what a night cost.
+ * A window of runs, tallied — one arithmetic, shared by the CLI brief and
+ * the web console so the two can never disagree about what a stretch of
+ * unattended work cost.
  *
  * Economics are measured, never asserted: every provider spawn stamps its
  * run before spending, so `invoked` is the complete population; `measured`
@@ -10,7 +11,7 @@
 
 import type { Run } from "./store.js";
 
-export type Overnight<T extends Run> = {
+export type RunTally<T extends Run> = {
   built: T[];
   failed: T[];
   refused: T[];
@@ -22,7 +23,7 @@ export type Overnight<T extends Run> = {
   tokens: number;
 };
 
-export function overnight<T extends Run>(runs: T[]): Overnight<T> {
+export function tally<T extends Run>(runs: T[]): RunTally<T> {
   const invoked = runs.filter(one => one.providerStartedAt !== null);
   const measured = invoked.filter(one => one.costUsd !== null);
   return {
@@ -40,7 +41,7 @@ export function overnight<T extends Run>(runs: T[]): Overnight<T> {
 }
 
 /** The spend line, one wording everywhere. */
-export function spendLine(summary: Overnight<Run>): string {
+export function spendLine(summary: RunTally<Run>): string {
   if (summary.invoked.length === 0) return "nothing — no provider was invoked";
   const dollars = `$${summary.spend.toFixed(4)}`;
   return summary.measured.length === summary.invoked.length

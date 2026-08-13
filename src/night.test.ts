@@ -236,7 +236,7 @@ describe("the night: twelve tasks, one fake clock", () => {
     // -- The brief tells the same story from the same rows.
     await run(["brief", "--local", "--repo", repo, "--since", T0.toISOString(), "--json"], at(31));
     const brief = payload();
-    expect(brief.overnight.built).toHaveLength(12); // 11 commits + 1 honest no-change
+    expect(brief.tally.built).toHaveLength(12); // 11 commits + 1 honest no-change
     expect(brief.decide).toHaveLength(0);
     expect(brief.incidents).toHaveLength(0);
     expect(brief.stranded).toHaveLength(0);

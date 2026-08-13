@@ -68,7 +68,7 @@ import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { ask, askHidden, confirm, interactive } from "./prompt.js";
 import { canonicalProject } from "./project.js";
-import { overnight, spendLine } from "./summary.js";
+import { tally, spendLine } from "./summary.js";
 import {
   bodyHashOf,
   describePublicationGrant,
@@ -193,7 +193,7 @@ Capabilities — what the work needs, recorded and probed, never valued
                                         tasks filling it would start
 
   nightorders brief [--repo <path>] [--local] [--since <iso>]
-                                        the morning: overnight runs, gaps,
+                                        the report: recent runs, gaps,
                                         PRs (--local skips the network and
                                         says REVIEW was not read)
 
@@ -1434,13 +1434,13 @@ async function tickCommand(
       lines.push("", "Nothing has been pushed. Look at the branches before they go anywhere.");
     }
     if (parked > 0) {
-      lines.push("", `${parked} decision${parked === 1 ? "" : "s"} waiting — \`nightorders decide\`, or the morning brief.`);
+      lines.push("", `${parked} decision${parked === 1 ? "" : "s"} waiting — \`nightorders decide\`, or \`nightorders brief\`.`);
     }
     return lines;
   };
 
   // One broken build fails the pass even if others succeeded: exit 0 must
-  // mean "nothing needs you", and a half-broken night does.
+  // mean "nothing needs you", and a half-broken pass does not qualify.
   if (broke > 0) {
     return fail(write, json, "tick", "build-failed", `${broke} of ${dispatched.length} dispatched tasks broke`, EXIT.failed, {
       considered,
@@ -1471,7 +1471,7 @@ async function tickCommand(
 }
 
 /**
- * The morning sweep: everything the night may have left behind, in one pass.
+ * The recovery sweep: everything an unattended stretch may have left behind, in one pass.
  *
  * Three recoveries, in an order that matters. Dead runners first, because
  * recovery is the only path that *requeues* the tasks they held — reaping an
@@ -1557,7 +1557,7 @@ async function reconcileCommand(
     },
     () =>
       nothing
-        ? ["Nothing to reconcile. The night left everything where it should be."]
+        ? ["Nothing to reconcile. Everything is where it should be."]
         : [
             ...recovered.map(
               one =>
@@ -1603,17 +1603,17 @@ function gapsCommand(flags: Map<string, string | true>, context: Context): numbe
   return EXIT.refused;
 }
 
-// ---- the morning ----------------------------------------------------------
+// ---- the report -----------------------------------------------------------
 
 /**
- * `nightorders brief` — one ritual (§6). The overnight from the run table,
+ * `nightorders brief` — one ritual (§6). The recent runs from the run table,
  * the blocked gaps ranked by what filling them frees, the PRs waiting on a
  * person, and where decisions will go when M3 gives them a shape.
  *
  * REVIEW is a live network read through `gh`, so it distinguishes three
  * states a lazy version would collapse: read and empty, read and full, and
  * *not read* — offline (--local) or failed — because "no PRs" and "could
- * not look" send the morning in different directions. Token and dollar
+ * not look" send the reader in different directions. Token and dollar
  * figures wait until run records carry usage (M4's economics); a briefing
  * that printed $0.00 it never measured would be lying with precision.
  */
@@ -1624,9 +1624,9 @@ async function briefCommand(
   const { store, write, json, clock } = context;
   const repo = repoFrom(flags);
 
-  // --latest-watch bounds the morning to one night's actual edges (§6): the
-  // last watch episode's window and runner, instead of "the last 24 hours" —
-  // which can mix two nights, or none.
+  // --latest-watch bounds the report to one service window's actual edges
+  // (§6): the last watch episode's window and runner, instead of "the last
+  // 24 hours" — which can mix two windows, or none.
   const episode = flags.has("latest-watch") ? store.latestWatchEpisode(repo) : null;
   if (flags.has("latest-watch") && episode === null) {
     return fail(write, json, "brief", "no-watch", "no watch episode recorded for this repo yet — run `nightorders watch` first", EXIT.refused);
@@ -1646,7 +1646,7 @@ async function briefCommand(
   }
   // One arithmetic, shared with the console — see summary.ts for why the
   // measured/invoked distinction exists.
-  const { built, failed, refused, cutDown, invoked, measured, spend, tokens } = overnight(runs);
+  const { built, failed, refused, cutDown, invoked, measured, spend, tokens } = tally(runs);
 
   const gaps = computeGaps(store, repo, clock());
   const pending = store.listNotifications("pending");
@@ -1686,7 +1686,7 @@ async function briefCommand(
           repo,
           since,
           episode,
-          overnight: { built, failed, refused, cutDown },
+          tally: { built, failed, refused, cutDown },
           economics: {
             invocations: invoked.length,
             measured: measured.length,
@@ -1707,7 +1707,7 @@ async function briefCommand(
     return EXIT.ok;
   }
 
-  const lines: string[] = [`nightorders — good morning ─ ${repo}`];
+  const lines: string[] = [`nightorders — the report ─ ${repo}`];
   if (episode !== null) {
     lines.push(
       `  episode      watch #${episode.id} on ${episode.runner} · ${episode.startedAt} → ${
@@ -1716,7 +1716,7 @@ async function briefCommand(
     );
   }
   lines.push(
-    `  overnight    ${built.length} built · ${failed.length} failed · ${refused.length} refused${
+    `  runs         ${built.length} built · ${failed.length} failed · ${refused.length} refused${
       cutDown.length > 0 ? ` · ${cutDown.length} cut down mid-flight` : ""
     }`,
   );
@@ -1818,7 +1818,7 @@ async function decideCommand(
       return waiting.length === 0 ? EXIT.ok : EXIT.refused;
     }
     if (waiting.length === 0) {
-      write("Nothing waits on you. The night parked no decisions.");
+      write("Nothing waits on you. No decisions were parked.");
       return EXIT.ok;
     }
     for (const one of waiting) {

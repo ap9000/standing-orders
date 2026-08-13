@@ -75,7 +75,9 @@ import {
   resolveCeiling,
   rowVisible,
 } from "./project.js";
-import { overnight, spendLine } from "./summary.js";
+import { tally, spendLine } from "./summary.js";
+import { classify } from "./board.js";
+import type { BoardCard } from "./board.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -268,7 +270,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const method = request.method ?? "GET";
-    const who = identify(request);
+    // A fragment poll is the page keeping itself fresh, not a person acting.
+    // It authenticates like any request but must not count as activity —
+    // otherwise a board left open on a wall keeps its session alive forever
+    // (Codex board review, finding 4).
+    const touch = !(method === "GET" && url.searchParams.get("fragment") === "1");
+    const who = identify(request, touch);
 
     if (url.pathname === "/login" && method === "GET") {
       return page(response, 200, loginPage(null));
@@ -333,7 +340,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
       !url.pathname.startsWith("/d/") && url.pathname !== "/projects" &&
-      url.pathname !== "/settings" && url.pathname !== "/logout";
+      url.pathname !== "/settings" && url.pathname !== "/logout" &&
+      !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
 
     if (url.pathname === "/projects") {
@@ -356,16 +364,62 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    // The board's old name; bookmarks keep working. A GET-only alias, so a
+    // plain 302 — never the shared 303 helper, which belongs to POST landings.
     if (url.pathname === "/morning") {
+      response.writeHead(302, { ...SAFETY, Location: "/activity" });
+      response.end();
+      return;
+    }
+
+    if (url.pathname === "/board") {
+      // scope=all is the rolled-up view: every project this server was
+      // allowed to serve, on one board. The ceiling still rules row by row
+      // (rowVisible, the same predicate as every list) — a repo outside
+      // the server's configuration never renders a card, whatever the
+      // database holds. Unplaced work (repo NULL) appears: it dispatches
+      // anywhere, so every board honestly owns it.
+      const all = url.searchParams.get("scope") === "all";
+      const snapshot = store.boardScoped(all ? null : project, now);
+      const admitted = all
+        ? snapshot.tasks.filter(facts => facts.repo === null || visible(facts.repo))
+        : snapshot.tasks;
+      const done = all
+        ? snapshot.done.filter(row => row.repo === null || visible(row.repo))
+        : snapshot.done;
+      const cards = admitted.map(facts => classify(facts, now));
+      const buildingCount = cards.filter(card => card.lane === "building").length;
+      const body = boardBody(
+        { cards, done, saturated: snapshot.saturated, now, all, project },
+        pr => store.ciFailureObserved(pr),
+      );
+      if (url.searchParams.get("fragment") === "1") {
+        // The live region alone — the in-page swapper's diet. Same auth,
+        // same ceiling, no shell.
+        return respond(response, 200, "text/html; charset=utf-8", body);
+      }
+      const nonce = randomBytes(16).toString("base64");
+      return page(
+        response,
+        200,
+        shell("board", body, {
+          chrome: chromeFor(project, "board"),
+          live: { everySeconds: buildingCount > 0 ? 10 : 30, nonce },
+        }),
+        nonce,
+      );
+    }
+
+    if (url.pathname === "/activity") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       return page(
         response,
         200,
-        homePage(chromeFor(project, "morning"), {
+        homePage(chromeFor(project, "activity"), {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           taskCount: store.listTasksScoped(project, undefined, 1, null).length,
           repo: project,
-          summary: overnight(store.runsSinceScoped(since, project)),
+          summary: tally(store.runsSinceScoped(since, project)),
           decisions: store.listDecisionsScoped(project),
           incidents: store.openIncidents(project),
           stranded: store.strandedTasks(project),
@@ -883,7 +937,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   // ---- identity ------------------------------------------------------------
 
-  function identify(request: IncomingMessage): Who | null {
+  function identify(request: IncomingMessage, touch = true): Who | null {
     const bearer = /^Bearer (.+):(.+)$/.exec(request.headers.authorization ?? "");
     if (bearer !== null) {
       const authenticated = authenticateApprover(store, bearer[1] as string, bearer[2] as string);
@@ -892,7 +946,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const cookies = request.headers.cookie ?? "";
     const match = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{64})`).exec(cookies);
     if (match === null) return null;
-    const session = lookupSession(match[1] as string);
+    const session = lookupSession(match[1] as string, touch);
     return session === null ? null : { name: session.name, via: "cookie", session };
   }
 
@@ -902,7 +956,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * rotated credential kills its cookies the same way it kills its Telegram
    * bindings: authority derived from the old secret does not outlive it.
    */
-  function lookupSession(candidate: string): Session | null {
+  function lookupSession(candidate: string, touch = true): Session | null {
     const bytes = Buffer.from(candidate, "utf8");
     for (const [id, session] of sessions) {
       const stored = Buffer.from(id, "utf8");
@@ -916,7 +970,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         sessions.delete(id);
         return null;
       }
-      session.lastSeen = now;
+      if (touch) session.lastSeen = now;
       return session;
     }
     return null;
@@ -1006,7 +1060,7 @@ function taskHref(taskId: string): string {
 }
 
 /** The spend line for a 7am reader: whole cents, "runs", the gap still named. */
-function consoleSpend(summary: ReturnType<typeof overnight<Run & { taskId: string }>>): string {
+function consoleSpend(summary: ReturnType<typeof tally<Run & { taskId: string }>>): string {
   if (summary.invoked.length === 0) return "nothing — no provider was invoked";
   const dollars = `$${summary.spend.toFixed(2)}`;
   const gap = summary.invoked.length - summary.measured.length;
@@ -1041,8 +1095,22 @@ function respond(response: ServerResponse, status: number, type: string, body: s
   response.end(body);
 }
 
-function page(response: ServerResponse, status: number, html: string): void {
-  respond(response, status, "text/html; charset=utf-8", html);
+/**
+ * A page response. With a nonce, this response's CSP admits exactly the one
+ * inline script the shell stamped with the same value — generated per
+ * response, never shared, never 'unsafe-inline' (Codex board review,
+ * finding 9). Everything else keeps the constant script-free policy.
+ */
+function page(response: ServerResponse, status: number, html: string, nonce?: string): void {
+  if (nonce === undefined) return respond(response, status, "text/html; charset=utf-8", html);
+  response.writeHead(status, {
+    ...SAFETY,
+    "Content-Security-Policy":
+      `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; ` +
+      "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "Content-Type": "text/html; charset=utf-8",
+  });
+  response.end(html);
 }
 
 function redirect(response: ServerResponse, to: string): void {
@@ -1191,7 +1259,7 @@ const STYLE = `
   .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: -.375rem 0 .625rem; opacity: .8; }
   .num { font-variant-numeric: tabular-nums; }
 
-  /* The morning ledger: the night's harvest as strong figures in a sentence,
+  /* The ledger: the window's harvest as strong figures in a sentence,
      not a metric-card grid. */
   .ledger { font-size: 0.9375rem; color: var(--muted-foreground); margin: .875rem 0 0; line-height: 1.9; }
   .ledger b { font-weight: 650; font-size: 1.25rem; color: var(--foreground); font-variant-numeric: tabular-nums; padding-right: .1rem; }
@@ -1402,11 +1470,41 @@ const STYLE = `
     button, form.option button { min-height: 2.75rem; }
     .topbar nav a { padding: 0 .5rem; }
   }
+
+  /* The board: lanes as columns, the pipeline left to right. The container
+     owns the horizontal scroll so narrow screens pan the pipeline instead
+     of crushing it. The reading measure is for prose — a five-lane
+     pipeline gets the whole content pane. */
+  .content > main:has(.board) { max-width: none; }
+  .board {
+    display: grid; grid-template-columns: repeat(5, minmax(15rem, 1fr));
+    gap: .75rem; overflow-x: auto; padding-bottom: .75rem; align-items: start;
+  }
+  .lane {
+    background: var(--muted); border: 1px solid var(--border);
+    border-radius: .625rem; padding: .625rem; min-height: 12rem;
+  }
+  .lane h2 { margin: 0 0 .125rem; font-size: .8125rem; }
+  .lane h2 a { color: inherit; text-decoration: none; }
+  .lane .hint { margin-top: 0; }
+  .lane-count { color: var(--muted-foreground); font-weight: 400; font-variant-numeric: tabular-nums; }
+  .lane-attention { border-top: 2px solid var(--warning); }
+  .lane-building { border-top: 2px solid var(--success); }
+  .lane-card {
+    display: block; text-decoration: none; color: inherit;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: .5rem; padding: .5rem .625rem; margin-top: .5rem;
+  }
+  .lane-card:hover { border-color: var(--ring); }
+  .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; }
+  .lane-card .meta, .lane-card .mono { display: block; margin-top: .125rem; font-size: .75rem; }
+  .lane-empty { margin: .75rem 0 .25rem; }
+  .lane-more { display: block; margin-top: .5rem; font-size: .75rem; }
 `;
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "work" | "done" | "morning" | "system" | "tasks" | "runs" | "caps" | "projects" | "settings" | "none";
+  active: "inbox" | "board" | "work" | "done" | "activity" | "system" | "tasks" | "runs" | "caps" | "projects" | "settings" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -1416,10 +1514,42 @@ type Chrome = {
   listPane?: string;
 };
 
+/**
+ * The board's liveness: fetch this page's own fragment on a timer and swap
+ * it in place — no flicker, no scroll reset, no long-lived stream to manage,
+ * and correct by cadence rather than by trusting the scheduler's wake
+ * sequence to narrate every UI-visible change (Codex board review, finding
+ * 3 chose this over SSE). A redirect or auth failure navigates to /login
+ * instead of ever inserting the login page into the region (finding 4).
+ * The swapped markup is this server's own rendering of the same route —
+ * escaped at the sink like every page, fetched same-origin — and the
+ * nonce'd CSP refuses to execute anything the region could smuggle.
+ */
+function liveScript(everySeconds: number): string {
+  const ms = Math.max(5, Math.floor(everySeconds)) * 1000;
+  return (
+    `(function(){var main=document.querySelector("main");if(!main)return;` +
+    `function cycle(){var q=location.search?location.search+"&fragment=1":"?fragment=1";` +
+    `fetch(location.pathname+q,{redirect:"manual",cache:"no-store"})` +
+    `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return null;}` +
+    `return r.ok?r.text():null;})` +
+    `.then(function(t){if(t)main.innerHTML=t;})` +
+    `.catch(function(){})` +
+    `.then(function(){setTimeout(cycle,${ms});});}` +
+    `setTimeout(cycle,${ms});})();`
+  );
+}
+
 function shell(
   title: string,
   body: string,
-  options: { nav?: boolean; chrome?: Chrome; refreshSeconds?: number } = {},
+  options: {
+    nav?: boolean;
+    chrome?: Chrome;
+    refreshSeconds?: number;
+    /** In-place fragment refresh — read-only pages only, one nonce per response. */
+    live?: { everySeconds: number; nonce: string };
+  } = {},
 ): string {
   const head = [
     "<!doctype html>",
@@ -1431,12 +1561,21 @@ function shell(
     ...(options.refreshSeconds === undefined
       ? []
       : [`<meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.refreshSeconds))}">`]),
+    // With the in-place swapper, the whole-page refresh survives only as
+    // the no-JavaScript fallback.
+    ...(options.live === undefined
+      ? []
+      : [`<noscript><meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.live.everySeconds))}"></noscript>`]),
     `<title>${escape(title)}</title><style>${STYLE}</style></head><body>`,
   ].join("\n");
+  const tail =
+    options.live === undefined
+      ? `</body></html>`
+      : `<script nonce="${options.live.nonce}">${liveScript(options.live.everySeconds)}</script></body></html>`;
 
   if (options.chrome === undefined) {
     // Chromeless: the login page and refusal pages.
-    return [head, `<main>`, body, `</main></body></html>`].join("\n");
+    return [head, `<main>`, body, `</main>`, tail].join("\n");
   }
 
   const chrome = options.chrome;
@@ -1454,13 +1593,14 @@ function shell(
       `<a href="/projects">switch project</a></div>`,
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
-    item("work", "/tasks", "work"),
+    item("board", "/board", "board"),
     item("done", "/done", "done"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
     `<span class="grow"></span>`,
     `<nav class="foot">`,
-    item("morning", "/morning", "morning brief"),
+    item("activity", "/activity", "activity"),
+    item("work", "/tasks", "task list"),
     item("system", "/system", "system"),
     item("runs", "/runs", "builds"),
     item("caps", "/caps", "requirements"),
@@ -1477,7 +1617,7 @@ function shell(
         `<div class="detail"><main>${body}</main></div>` +
         `</div></div>`;
 
-  return [head, `<div class="app">`, side, content, `</div></body></html>`].join("\n");
+  return [head, `<div class="app">`, side, content, `</div>`, tail].join("\n");
 }
 
 
@@ -1590,7 +1730,7 @@ function inboxPage(chrome: Chrome, data: {
   return shell("inbox", [
     `<h1>inbox</h1>`,
     `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, the machine needs nothing</p>`,
-    empty ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/morning">Read the morning brief</a> or <a href="/tasks">see what is in flight</a>.</p></div>` : "",
+    empty ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
     decisions,
     approvals,
     requeueables,
@@ -1651,6 +1791,117 @@ function systemPage(chrome: Chrome, data: {
   ].join("\n"), { chrome, refreshSeconds: data.building.length > 0 ? 10 : 60 });
 }
 
+/**
+ * The board: the pipeline as lanes, position as meaning — attention, then
+ * queued, then waiting, then building, then recently done. Read-only by
+ * construction (every card is a link, no forms, no nonces), which is what
+ * makes it safe to re-render itself while somebody watches.
+ */
+function boardBody(
+  data: {
+    cards: BoardCard[];
+    done: ReturnType<Store["listCompletedWorkScoped"]>;
+    saturated: boolean;
+    now: Date;
+    /** The rolled-up view: every project inside the ceiling at once. */
+    all: boolean;
+    project: string | null;
+  },
+  ciRed: (pr: number) => boolean,
+): string {
+  const chip = (repo: string | null): string =>
+    !data.all || repo === null ? "" : ` <span class="badge">${escape(projectName(repo))}</span>`;
+  const CAP = 30;
+  const lane = (
+    key: "attention" | "queued" | "waiting" | "building",
+    title: string,
+    hint: string,
+    renderOne: (card: BoardCard) => string,
+  ): string => {
+    const cards = data.cards.filter(card => card.lane === key);
+    const shown = cards.slice(0, CAP);
+    const more = cards.length - shown.length;
+    return (
+      `<section class="lane lane-${key}"><h2>${title} <span class="lane-count">${cards.length}${
+        data.saturated ? "+" : ""
+      }</span></h2><p class="hint">${hint}</p>` +
+      (shown.length === 0 ? `<p class="meta lane-empty">nothing here</p>` : shown.map(renderOne).join("")) +
+      (more > 0 ? `<a class="lane-more" href="/tasks">+${more} more in the task list</a>` : "") +
+      `</section>`
+    );
+  };
+
+  const plain = (card: BoardCard): string =>
+    `<a class="lane-card" href="${card.href}">` +
+    `<span class="t">${escape(card.title)}</span>` +
+    `<span class="meta">${escape(card.reason)}${chip(card.repo)}</span>` +
+    `<span class="mono meta">${escape(card.taskId)}</span></a>`;
+
+  const building = (card: BoardCard): string => {
+    const claim = card.claim;
+    if (claim === null) return plain(card);
+    const minutes = Math.max(1, Math.round((data.now.getTime() - new Date(claim.claimedAt).getTime()) / 60_000));
+    const workspace = claim.worktree === null ? null : (claim.worktree.split("/").pop() ?? claim.worktree);
+    return (
+      `<a class="lane-card building" href="${card.href}">` +
+      `<span class="t"><span class="dot dot-ok pulse"></span>${escape(card.title)}</span>` +
+      `<span class="meta">${escape(claim.runner)} \u00b7 ${minutes}m elapsed${
+        claim.model === null ? " \u00b7 preparing workspace" : ` \u00b7 ${escape(claim.model)}`
+      }</span>` +
+      (claim.branch === null
+        ? ""
+        : `<span class="mono meta">${escape(claim.branch)}${workspace === null ? "" : ` \u00b7 ${escape(workspace)}`}</span>`) +
+      `</a>`
+    );
+  };
+
+  const doneCards =
+    data.done.length === 0
+      ? `<p class="meta lane-empty">nothing finished yet</p>`
+      : data.done
+          .map(row => {
+            const pr =
+              row.prNumber === null
+                ? ""
+                : ` <span class="badge badge-open">PR #${row.prNumber}</span>` +
+                  (ciRed(row.prNumber) ? ` <span class="badge badge-failed">CI failing</span>` : "");
+            return (
+              `<a class="lane-card" href="${taskHref(row.taskId)}">` +
+              `<span class="t">${escape(row.title)}</span>` +
+              `<span class="meta">${row.outcome === "no-change" ? "no change needed" : "built"}${
+                row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`
+              }${row.costUsd === null ? "" : ` \u00b7 $${row.costUsd.toFixed(2)}`}${pr}</span>` +
+              `<span class="mono meta">${escape(row.taskId)}</span></a>`
+            );
+          })
+          .join("");
+
+  const toggle =
+    data.project === null && !data.all
+      ? ""
+      : `<p class="meta board-scope">` +
+        (data.all
+          ? (data.project === null
+              ? `<strong>all projects</strong>`
+              : `<a href="/board">${escape(projectName(data.project))}</a> \u00b7 <strong>all projects</strong>`) +
+            ` \u2014 every project this server serves, each card wearing its project`
+          : `<strong>${escape(projectName(data.project as string))}</strong> \u00b7 <a href="/board?scope=all">all projects</a>`) +
+        `</p>`;
+
+  return [
+    `<h1>board</h1>`,
+    `<p class="meta">the whole pipeline at a glance, updating in place \u2014 open the <a href="/">inbox</a> to act on what needs you</p>`,
+    toggle,
+    `<div class="board">`,
+    lane("attention", "needs you", "answer, approve, or repair \u2014 these wait for a person", plain),
+    lane("queued", "queued", "ready \u2014 starts when a worker has a free slot", plain),
+    lane("waiting", "waiting", "paused on a timer, a dependency, or a missing requirement", plain),
+    lane("building", "building", "live \u2014 each card is one agent in its own workspace", building),
+    `<section class="lane lane-done"><h2><a href="/done">done recently</a></h2><p class="hint">the last few finished \u2014 the full ledger is under done</p>${doneCards}</section>`,
+    `</div>`,
+  ].join("\n");
+}
+
 /** Completed work: one row per done task, its final run and PR attached. */
 function donePage(
   chrome: Chrome,
@@ -1692,7 +1943,7 @@ function homePage(chrome: Chrome, data: {
   runners: Runner[];
   worktrees: WorktreeRow[];
   episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
-  summary: ReturnType<typeof overnight<Run & { taskId: string }>>;
+  summary: ReturnType<typeof tally<Run & { taskId: string }>>;
   decisions: (Decision & { taskId: string })[];
   incidents: (Incident & { taskId: string })[];
   stranded: { id: string; blockedBy: string[] }[];
@@ -1713,7 +1964,7 @@ function homePage(chrome: Chrome, data: {
 
   const decide =
     data.decisions.length === 0
-      ? `<p class="meta">Nothing waits on you. The night parked no decisions.</p>`
+      ? `<p class="meta">Nothing waits on you. No decisions were parked.</p>`
       : data.decisions
           .map(
             decision =>
@@ -1814,7 +2065,7 @@ function homePage(chrome: Chrome, data: {
         `<span class="v">${
           data.episode.endedAt === null
             ? `running since ${escape(when(data.episode.startedAt))}`
-            : `last night: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${escape(when(data.episode.endedAt))}`
+            : `last window: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${escape(when(data.episode.endedAt))}`
         }</span></div>`;
   const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const fleet =
@@ -1829,17 +2080,17 @@ function homePage(chrome: Chrome, data: {
           `<p><strong>Nothing is queued yet — here is the whole loop:</strong></p>`,
           `<p>1. <a href="/tasks">Add a task</a> — plain words for work you want done${data.repo === null ? "" : ` in <span class="mono">${escape(data.repo)}</span>`}.</p>`,
           `<p>2. Open it and write its scope — the goal, and what it must not become. Approve exactly that.</p>`,
-          `<p>3. Leave <code>nightorders watch</code> (or the daemon) running. Approved tasks build overnight, each on its own branch.</p>`,
+          `<p>3. Leave <code>nightorders watch</code> (or the daemon) running. Approved tasks build unattended, each on its own branch.</p>`,
           `<p class="meta">When an agent is unsure it stops and asks — those questions land here, under \u201cwaiting on you\u201d.</p>`,
           `</div>`,
         ].join("\n")
       : "";
 
-  return shell("morning brief", [
-    `<h1>morning brief</h1>`,
+  return shell("activity", [
+    `<h1>activity</h1>`,
     data.repo === null
       ? ""
-      : `<p class="meta"><strong>${escape(projectName(data.repo))}</strong> — the last 24 hours, honestly labeled: a rolling window, not a calendar night</p>`,
+      : `<p class="meta"><strong>${escape(projectName(data.repo))}</strong> — the last 24 hours, honestly labeled: a rolling window, whatever your hours are</p>`,
     startHere,
     ledger,
     `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
@@ -1881,7 +2132,7 @@ function tasksPage(
           .join("\n");
   return shell("tasks", [
     "<h1>tasks</h1>",
-    `<p class="meta">work you want done${repo === null ? "" : ` in <span class="mono">${escape(repo)}</span>`} \u2014 a task builds overnight only after its scope is approved; open one to write or approve its scope</p>`,
+    `<p class="meta">work you want done${repo === null ? "" : ` in <span class="mono">${escape(repo)}</span>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
     rows,
@@ -1934,7 +2185,7 @@ function projectsPage(
 
   return shell("projects", [
     `<h1>projects</h1>`,
-    `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its mornings, and its runs</p>`,
+    `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its board, and its runs</p>`,
     unscopedMode
       ? `<p class="meta">this server was started without a project ceiling, so every path in the queue is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`
       : "",
@@ -1969,7 +2220,7 @@ function newTaskPage(
     `<h1>new task</h1>`,
     `<p class="meta">plain words for work you want done${
       project === null ? "" : ` in <span class="mono">${escape(project)}</span>`
-    } — it builds overnight once you approve its scope on the next screen</p>`,
+    } — it builds unattended once you approve its scope on the next screen</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/tasks/add" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
@@ -2165,7 +2416,7 @@ function taskPage(chrome: Chrome, data: {
 function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor: number | null): string {
   const list =
     rows.length === 0
-      ? `<p class="meta">No runs yet \u2014 a run is one overnight build attempt; they appear once the watch dispatches an approved task.</p>`
+      ? `<p class="meta">No runs yet \u2014 a run is one unattended build attempt; they appear once the watch dispatches an approved task.</p>`
       : rows
           .map(
             run =>

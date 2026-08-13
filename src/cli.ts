@@ -80,7 +80,7 @@ Operating the queue — see \`nightorders task\` for the whole surface
   nightorders heartbeat <lease> / release <lease> / reap
   nightorders tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
-  nightorders reconcile        recover what the night left behind
+  nightorders reconcile        recover what the last stretch left behind
 
 With nothing connected it reports everything it can find below the working
 directory. Once you connect repositories it reports those instead.

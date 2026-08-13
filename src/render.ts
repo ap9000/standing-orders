@@ -746,7 +746,7 @@ function describeChoice(choice: ReturnType<typeof chooseBackend>): string[] {
       // Deliberately not "it can be read, but…": when the runtime is missing
       // it cannot be read either, and the sentence would contradict the row
       // directly above it.
-      lines.push("Nothing here could be scheduled from it tonight.");
+      lines.push("Nothing here could be scheduled from it as it stands.");
     }
   } else if (choice.action === "ambiguous") {
     const names = choice.kinds.map(kind => GRAPH_LABELS[kind]).join(" and ");

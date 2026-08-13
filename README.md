@@ -2,11 +2,11 @@
 
 **Standing orders for your agents. Wake me only for these.**
 
-> **Status: M4 built; publish pending.** The whole loop runs: `nightorders watch` (or `nightorders daemon install` — no crontab) dispatches approved work, spends nothing while idle, survives crashes by recovering exactly its own predecessor's claims, and stops taking work on the first signal. Failures are typed — strikes, doubling backoff, three-strike stalls a person exits with `task requeue` — and every provider spawn is stamped before it spends, so cost is measured, never asserted. An agent that hits a judgement call **parks a typed decision instead of guessing**; answer it in the terminal (`decide`), the web console (`serve` — the whole queue, phone-first, approval step-up), or a Telegram tap (the watch embeds a long-poll follower: phone to build, no timer in between). Built work leaves as a pushed branch and a pull request under a publication grant whose exact terms you agreed to, through a crash-durable intent; CI on those PRs is watched as episodes that never call silence green. The night itself is `night.test.ts`: queue twelve, sleep, wake to PRs. npm publish is the operator's act and has not happened yet — the `m4` tag waits for the registry, not the other way around. Architecture: [`docs/DESIGN.md`](docs/DESIGN.md); the item-by-item ledger: [`docs/PROGRESS.md`](docs/PROGRESS.md).
+> **Status: M4 built; publish pending.** The whole loop runs: `nightorders watch` (or `nightorders daemon install` — no crontab) dispatches approved work, spends nothing while idle, survives crashes by recovering exactly its own predecessor's claims, and stops taking work on the first signal. Failures are typed — strikes, doubling backoff, three-strike stalls a person exits with `task requeue` — and every provider spawn is stamped before it spends, so cost is measured, never asserted. An agent that hits a judgement call **parks a typed decision instead of guessing**; answer it in the terminal (`decide`), the web console (`serve` — the whole queue, phone-first, approval step-up), or a Telegram tap (the watch embeds a long-poll follower: phone to build, no timer in between). Built work leaves as a pushed branch and a pull request under a publication grant whose exact terms you agreed to, through a crash-durable intent; CI on those PRs is watched as episodes that never call silence green. The whole unattended stretch is one test, `night.test.ts`: queue twelve, walk away, come back to PRs. npm publish is the operator's act and has not happened yet — the `m4` tag waits for the registry, not the other way around. Architecture: [`docs/DESIGN.md`](docs/DESIGN.md); the item-by-item ledger: [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
-A captain's night orders are the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product.
+The name comes from a captain's night orders — the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product, and it is not about the hour: it is for **long-running work that outlasts your attention** — an afternoon of errands, a weekend, or yes, a night.
 
-Night Orders is a control plane for coding agents, optimized for the case where **the operator is asleep**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
+Night Orders is a control plane for coding agents, optimized for the stretch where **nobody is watching**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
 
 It owns a deliberately small local task store, adapts richer trackers when they are already there, and owns no worktree pool, no review gate, and no agents. Those are adapters over [`beads`](https://github.com/gastownhall/beads), [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, and `codex`.
 
@@ -55,7 +55,7 @@ Backends are chosen by looking rather than asking, but **detection is not author
 
 ## Queueing work, and taking it
 
-The built-in store is the fallback backend, and the commands over it are written for an agent first — because the agent is what runs them ten thousand times while you are asleep.
+The built-in store is the fallback backend, and the commands over it are written for an agent first — because the agent is what runs them ten thousand times while you are away.
 
 ```sh
 nightorders task add "migrate the payouts schema" --id schema
@@ -172,9 +172,9 @@ agent's environment.
 ## The console
 
 `nightorders serve --repo <path>` is no longer just the decision view — it
-is the whole built-in queue, operable from a phone: the morning brief live
-on the home page (overnight counts, measured spend, decisions, incidents,
-stranded work, gaps), every task with its scope, holds, runs, decisions and
+is the whole built-in queue, operable from a phone: an inbox of everything
+waiting on you, a live activity report (run counts, measured spend,
+decisions, incidents, stranded work, gaps), every task with its scope, holds, runs, decisions and
 incidents on one screen, run pages with the economics and the agent's
 concluding words, and read-only capabilities. Adding a task, holding,
 requeuing, cancelling, and editing a scope all happen from the page — each

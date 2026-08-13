@@ -149,6 +149,41 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## The board + the long-running reframe (2026-08-13, Codex-reviewed: 12 findings)
+
+The operator's directives: figure out the spatial work board; get rid of
+the night-specific thinking — this plane is for long-running work,
+whenever it runs; and dependencies are now allowed where they buy UX.
+
+**The board** (`/board`, primary nav): the pipeline as lanes — needs you ·
+queued · waiting · building · done recently. One exhaustive precedence-
+ordered classifier (`board.ts`) over one transactional snapshot
+(`boardScoped`), so a parked task is attention exactly once and an
+unscoped task cannot vanish from every lane (findings 1–2); orphaned
+`running` rows get a repair card; queued claims only task-local readiness
+(finding 6); building cards carry worker · model · elapsed · branch ·
+workspace, with honest "preparing workspace" before a run exists
+(finding 7). Read-only by construction: every card a link, no forms, no
+nonces. **Liveness without SSE** (finding 3 killed the wake-seq-driven
+stream): a ~15-line first-party script — per-response nonce'd CSP, never
+unsafe-inline (finding 9) — fetches the page's own fragment on a timer
+and swaps it in place; `<noscript>` falls back to meta refresh; fragment
+polls authenticate but never touch `lastSeen`, so an open board cannot
+keep a session alive (finding 4). **The roll-up**: `/board?scope=all`
+shows every project the ceiling admits on one board, each card wearing
+its project chip, enforced row-by-row with the same `rowVisible`
+predicate — a repo outside the server's configuration never renders.
+
+**De-night**: `/morning` → 302 → `/activity`; `overnight()` →
+`tally()` and the `--json` envelope key `overnight` → `tally` (a wire
+break made exactly while the package is unpublished, finding 10); brief/
+reconcile/decide/opener/task prose reframed ("builds unattended", "last
+window", "No decisions were parked"); README and DESIGN now position for
+long-running work nobody is watching — the captain's night orders stay
+as the name's origin, one paragraph, not the frame. Brand, protocol
+markers (`NIGHTORDERS-*`), and `night.test.ts` deliberately keep their
+names. 714 tests.
+
 ## Console v3 — workflow tabs (2026-08-13, Codex-reviewed)
 
 Navigation reorganized by workflow stage per a second Codex IA review:

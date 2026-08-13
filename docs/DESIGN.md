@@ -32,7 +32,7 @@ A captain's night orders are written standing instructions for the officer of th
 | Missing credential | env vars you set in advance | — | probed pre-dispatch, ranked by unblocks |
 | Surface | web app | repo of conventions, tmux | daemon + CLI + small web UI |
 
-Agor optimizes for a team steering agents *live*. firstmate optimizes for one conversational liaison. **Night Orders optimizes for the operator being asleep.**
+Agor optimizes for a team steering agents *live*. firstmate optimizes for one conversational liaison. **Night Orders optimizes for long-running work nobody is watching** — the operator may be asleep, in meetings, or gone for the weekend; the plane behaves the same.
 
 **Licence: MIT** — a structural opening BSL 1.1 cannot occupy.
 
