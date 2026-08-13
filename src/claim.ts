@@ -915,6 +915,224 @@ function oneLine(text: string, cap: number): string {
 }
 
 /** The live claim on a task, if there is one. */
+export const MAX_PLAN_STRIKES = 3;
+
+/** Backoff for planner retries: shorter than the builder's — a planner that
+ * cannot start is usually a transient, and nothing downstream is waiting on
+ * a workspace. */
+const PLAN_BACKOFF_MS = [60_000, 2 * 60_000, 4 * 60_000] as const;
+
+export type PlanFinalize =
+  | { ok: true }
+  | { ok: false; reason: "fenced" | "unknown" };
+
+/**
+ * Seal a successful planning run: the proposed scope, the plan document
+ * artifact, the drafted state, the run outcome, and the page to the
+ * operator exist together or — if the lease was superseded — not at all.
+ * The scope proposal is authority-bearing (it is what the approve card
+ * will restate), which is why this is the park discipline, not the DONE
+ * one (Codex planning review, question 2).
+ */
+export function finalizePlanFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    plan: ParsedPlan;
+    /** The already-captured plan document file, described; null when the
+     * capture itself failed (the plan still lands as scope + handoff). */
+    artifact: {
+      key: string;
+      bytesOriginal: number;
+      bytesStored: number;
+      truncated: boolean;
+      sha256: string;
+      capture: string;
+    } | null;
+    now: Date;
+  },
+): PlanFinalize {
+  const { leaseId, runId, taskId, plan, now } = args;
+  const db = store.handle;
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a plan seals exactly one`);
+    }
+    if (run.role !== "planner") {
+      throw new Error(`run ${runId} is a ${run.role} run — only planner runs draft plans`);
+    }
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'completed'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+
+    store.saveScope({
+      taskId,
+      goal: plan.goal,
+      outOfScope: plan.outOfScope,
+      touches: plan.touches,
+      proposedAt: now.toISOString(),
+      digest: digestOf({ goal: plan.goal, outOfScope: plan.outOfScope, touches: plan.touches }),
+      approvedAt: null,
+      approvedBy: null,
+      approvedDigest: null,
+    });
+    if (args.artifact !== null) {
+      store.saveArtifact({ run: runId, kind: "plan", ...args.artifact }, now);
+    }
+    store.setPlanState(run.taskRef, "drafted");
+    store.resetPlanStrikes(run.taskRef);
+    store.finishRun(runId, { outcome: "built", reason: "plan-drafted", now });
+    store.enqueueNotification(
+      {
+        dedupeKey: `plan:${run.taskRef}:${runId}`,
+        kind: "plan-ready",
+        subject: `${taskId}: plan ready for review`,
+        body: `The planner proposes: ${oneLine(plan.goal, 200)}\nReview, edit, and approve the scope — nothing builds until you do.`,
+      },
+      now,
+    );
+    return { ok: true as const };
+  });
+}
+
+export type PlanFailureDisposition =
+  | { ok: true; disposition: "malformed-incident"; incidentId: number }
+  | { ok: true; disposition: "backoff"; strikes: number }
+  | { ok: true; disposition: "exhausted"; incidentId: number; strikes: number }
+  | { ok: false; reason: "fenced" | "unknown" };
+
+/**
+ * The planner's own fenced failure finalizer (Codex planning review,
+ * finding 6): releases exactly the planner claim, finishes the run,
+ * counts a SEPARATE planning strike — a planner that cannot finish must
+ * never spend the builder's three attempts — and eventually leaves a
+ * durable incident + hold + page. It never marks the task done, never
+ * touches builder strikes, never commits, never publishes.
+ *
+ * A malformed payload goes straight to its incident with no strike: the
+ * protocol failed, not the weather, and retrying the same session buys
+ * nothing without the repair machinery (deliberately not wired for
+ * planners in v1).
+ */
+export function finalizePlanFailureFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    kind: "malformed" | "failure";
+    message: string;
+    now: Date;
+  },
+): PlanFailureDisposition {
+  const { leaseId, runId, taskId, kind, message, now } = args;
+  const db = store.handle;
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a failure seals exactly one`);
+    }
+    if (run.role !== "planner") {
+      throw new Error(`run ${runId} is a ${run.role} run — this finalizer seals planner attempts only`);
+    }
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'released'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+    store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? "malformed-plan" : oneLine(message, 120), now });
+
+    if (kind === "malformed") {
+      const incidentId = store.createIncident({ run: runId, kind: "malformed-plan" }, now);
+      store.holdOwned(
+        {
+          taskRef: run.taskRef,
+          ownerKind: "incident",
+          ownerId: String(incidentId),
+          reason: "malformed-plan — the planner's payload failed validation",
+          until: null,
+        },
+        now,
+      );
+      store.enqueueNotification(
+        {
+          dedupeKey: `malformed-plan:${runId}`,
+          kind: "malformed-plan",
+          subject: `${taskId}: the planner's plan failed validation`,
+          body: `${oneLine(message, 300)}\nResolve the incident to let planning retry.`,
+        },
+        now,
+      );
+      return { ok: true as const, disposition: "malformed-incident" as const, incidentId };
+    }
+
+    const strikes = store.addPlanStrike(run.taskRef);
+    if (strikes >= MAX_PLAN_STRIKES) {
+      const incidentId = store.createIncident({ run: runId, kind: "plan-attempts-exhausted" }, now);
+      store.holdOwned(
+        {
+          taskRef: run.taskRef,
+          ownerKind: "incident",
+          ownerId: String(incidentId),
+          reason: `plan-attempts-exhausted — ${strikes} straight planning failures`,
+          until: null,
+        },
+        now,
+      );
+      store.enqueueNotification(
+        {
+          dedupeKey: `plan-stalled:${run.taskRef}`,
+          kind: "plan-attempts-exhausted",
+          subject: `${taskId}: planning stalled after ${strikes} straight failures`,
+          body: `Last failure: ${oneLine(message, 200)}\nResolve the incident to let planning retry, or write the scope yourself.`,
+        },
+        now,
+      );
+      return { ok: true as const, disposition: "exhausted" as const, incidentId, strikes };
+    }
+
+    const wait = PLAN_BACKOFF_MS[Math.min(strikes, PLAN_BACKOFF_MS.length) - 1] as number;
+    const until = new Date(now.getTime() + wait);
+    store.holdOwned(
+      {
+        taskRef: run.taskRef,
+        // Its own owner id: a planning pause must never displace the
+        // builder's backoff for the same task, or vice versa.
+        ownerKind: "backoff",
+        ownerId: `plan:${run.taskRef}`,
+        reason: `plan retry ${strikes}/${MAX_PLAN_STRIKES} — backing off ${Math.round(wait / 60_000)}m`,
+        until,
+      },
+      now,
+    );
+    store.enqueueNotification(
+      {
+        dedupeKey: `plan-run:${runId}:failed`,
+        kind: "plan-failed",
+        subject: `${taskId}: planning attempt failed, retry ${strikes}/${MAX_PLAN_STRIKES}`,
+        body: `${oneLine(message, 200)}\nNext attempt no earlier than ${until.toISOString()}.`,
+      },
+      now,
+    );
+    return { ok: true as const, disposition: "backoff" as const, strikes };
+  });
+}
+
 export function currentClaim(store: Store, taskRef: number, now: Date): Claim | null {
   const row = latest(store.handle, taskRef);
   if (row === undefined || !isLive(row, now.toISOString())) return null;

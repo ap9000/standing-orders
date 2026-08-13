@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { join, sep } from "node:path";
 import { LIMITS } from "./decision.js";
+import { PLAN_LIMITS } from "./plan.js";
 import type { Artifact, Store } from "./store.js";
 import type { ExecResult } from "./exec.js";
 
@@ -36,6 +37,8 @@ import type { ExecResult } from "./exec.js";
 export const MAILBOX_PREFIX = "NIGHTORDERS-PARK-";
 /** The terminal handoff: how every non-parking attempt says how it ended. */
 export const HANDOFF_PREFIX = "NIGHTORDERS-DONE-";
+/** The planner's terminal handoff: the proposed scope and the plan document. */
+export const PLAN_PREFIX = "NIGHTORDERS-PLAN-";
 export const MAILBOX_SUFFIX = ".json";
 
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
@@ -43,6 +46,7 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   diff: 256 * 1024,
   status: 64 * 1024,
   "park-payload": LIMITS.payload,
+  plan: PLAN_LIMITS.document,
 };
 
 export function evidenceRoot(home: string): string {
@@ -65,13 +69,17 @@ export function looksLikeMailbox(name: string): boolean {
 /** Every protocol file the sweep must never let an old attempt leave behind. */
 export function looksLikeProtocolFile(name: string): boolean {
   return (
-    (name.startsWith(MAILBOX_PREFIX) || name.startsWith(HANDOFF_PREFIX)) &&
+    (name.startsWith(MAILBOX_PREFIX) || name.startsWith(HANDOFF_PREFIX) || name.startsWith(PLAN_PREFIX)) &&
     name.endsWith(MAILBOX_SUFFIX)
   );
 }
 
 export function handoffName(): string {
   return `${HANDOFF_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
+}
+
+export function planFileName(): string {
+  return `${PLAN_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 /**

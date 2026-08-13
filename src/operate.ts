@@ -86,6 +86,8 @@ import {
   finalizeFailureFenced,
   finalizeMalformedFenced,
   finalizeParkFenced,
+  finalizePlanFenced,
+  finalizePlanFailureFenced,
   type FailureClass,
   heartbeat,
   release,
@@ -117,6 +119,7 @@ import {
   DEFAULT_BUILD_TIMEOUT_MS,
   type Runner as CommandRunner,
 } from "./builder.js";
+import { plan as planTask } from "./planner.js";
 import { run } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
@@ -980,7 +983,7 @@ async function buildCommand(
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "parked" | "skipped" | "failed";
+  outcome: "built" | "planned" | "parked" | "skipped" | "failed";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -1091,14 +1094,17 @@ async function tickCommand(
       continue;
     }
 
-    // Skip, not refuse: an unapproved task in the ready set is a person's
-    // pending decision, and the pass reports it rather than spending on it.
-    if (!approvalOf(store.getScope(id)).approved) {
+    // A plan the operator asked for dispatches a PLANNER — the one
+    // legitimate spend on a task with no approved scope. Everything else
+    // unapproved is a person's pending decision: skip, not refuse.
+    const wantsPlan = ref.plan === "requested" && !approvalOf(store.getScope(id)).approved;
+    if (!wantsPlan && !approvalOf(store.getScope(id)).approved) {
       dispatched.push({ id, outcome: "skipped", reason: "unapproved" });
       continue;
     }
 
     const claimed = acquireIfReady(store, ref.id, runner, {
+      ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
       now: clock(),
       ttlMs: leaseTtlMs,
       repo,
@@ -1140,6 +1146,110 @@ async function tickCommand(
       continue;
     }
     const lease = claimed.claim.leaseId;
+
+    if (wantsPlan) {
+      // The planner's workspace is disposable and its branch namespace is
+      // its own — never the builder's, so a later build starts from base
+      // with nothing a planning session could have left as an ancestor
+      // (Codex planning review, finding 1).
+      const planBranch = `nightorders-plan/${id}`;
+      const planLeased = await worktrees.lease({
+        repo,
+        branch: planBranch,
+        runner,
+        taskRef: ref.id,
+        now: clock(),
+        base,
+      });
+      if (!planLeased.ok) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "failed", reason: planLeased.reason });
+        broke++;
+        continue;
+      }
+      const planRunId = store.startRun({
+        taskRef: ref.id,
+        leaseId: lease,
+        runner,
+        role: "planner",
+        branch: planBranch,
+        worktree: planLeased.worktree.path,
+        ...(model === undefined ? {} : { model }),
+        now: clock(),
+      });
+      const answers = store
+        .answeredDecisionsFor(id, 5)
+        .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
+      const outcome = await planTask(store, {
+        taskId: id,
+        taskTitle: store.getTask(id)?.title ?? id,
+        taskRef: ref.id,
+        runner,
+        leaseId: lease,
+        runId: planRunId,
+        worktree: planLeased.worktree.path,
+        branch: planBranch,
+        now: clock(),
+        clock,
+        evidenceRoot: context.evidenceRoot,
+        answers,
+        ...(model === undefined ? {} : { model }),
+        ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+        ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+      });
+      await worktrees.release(planLeased.worktree.path, clock());
+
+      if (outcome.ok && "parked" in outcome) {
+        const sealed = finalizeParkFenced(store, {
+          leaseId: lease,
+          runId: planRunId,
+          taskId: id,
+          decision: outcome.parked.decision,
+          artifactIds: outcome.parked.artifactIds,
+          now: clock(),
+        });
+        if (sealed.ok) {
+          store.resetPlanStrikes(ref.id);
+          dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}` });
+          parked++;
+        } else {
+          dispatched.push({ id, outcome: "failed", reason: "fenced" });
+          broke++;
+        }
+        continue;
+      }
+      if (outcome.ok) {
+        const sealed = finalizePlanFenced(store, {
+          leaseId: lease,
+          runId: planRunId,
+          taskId: id,
+          plan: outcome.drafted.plan,
+          artifact: outcome.drafted.artifact,
+          now: clock(),
+        });
+        if (sealed.ok) {
+          store.clearQuota(runner, PROVIDER_BINARY, model ?? "");
+          dispatched.push({ id, outcome: "planned" });
+        } else {
+          dispatched.push({ id, outcome: "failed", reason: "fenced" });
+          broke++;
+        }
+        continue;
+      }
+      const sealedFailure = finalizePlanFailureFenced(store, {
+        leaseId: lease,
+        runId: planRunId,
+        taskId: id,
+        kind: outcome.kind,
+        message: outcome.message,
+        now: clock(),
+      });
+      dispatched.push({ id, outcome: "failed", reason: outcome.reason });
+      if (!sealedFailure.ok) release(store, lease, clock());
+      broke++;
+      continue;
+    }
+
     const branch = `nightorders/${id}`;
 
     // A retry of this task reuses its branch; a first attempt creates it from
@@ -1447,10 +1557,10 @@ async function tickCommand(
       dispatched,
     });
   }
-  // A pass whose only events were parks exits 0: nothing broke, nothing
-  // needs code — the questions are in the attention surface where they
-  // belong, which is the system working.
-  if (built > 0 || parked > 0) {
+  // A pass whose only events were parks or drafted plans exits 0: nothing
+  // broke, nothing needs code — the questions and the plan are in the
+  // attention surface where they belong, which is the system working.
+  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned")) {
     return succeed(write, json, "tick", { considered, dispatched }, summary);
   }
   if (considered === 0) {
@@ -2015,6 +2125,44 @@ async function requeueTask(
   }
   return succeed(write, json, "task requeue", { id, resolvedIncidents: result.resolvedIncidents }, () => [
     `${id} is queued again${result.resolvedIncidents > 0 ? `, ${result.resolvedIncidents} incident(s) resolved` : ""}. Strikes cleared; the next pass may take it.`,
+  ]);
+}
+
+/**
+ * `nightorders task plan <id>` — ask for a plan before any promise exists.
+ * Authenticated like every act that spends money on the operator's behalf:
+ * a planner agent will read the repository and interrogate you over the
+ * decision surface, and who asked for that is recorded, not asserted.
+ */
+async function planTaskCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [id] = positional;
+  if (id === undefined) {
+    return fail(write, json, "task plan", "usage", "`nightorders task plan <id> --as <you> --token <t>`", EXIT.usage);
+  }
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task plan", "usage", "planning takes `--as <you> --token <t>` — it dispatches an agent that spends", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task plan", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
+  }
+  if (store.getTask(id) === null) {
+    return fail(write, json, "task plan", "refused", `no task ${id}`, EXIT.refused);
+  }
+  const ref = store.refFor(BUILT_IN, id);
+  const result = store.requestPlan(ref.id, clock());
+  if (!result.ok) {
+    return fail(write, json, "task plan", "refused", result.reason, EXIT.refused);
+  }
+  return succeed(write, json, "task plan", { id }, () => [
+    `${id} will be planned before it is built: the next pass dispatches a planner.`,
+    "Its questions reach you like any decision; its plan lands as a scope for you to edit and approve.",
   ]);
 }
 
@@ -3081,6 +3229,8 @@ function taskCommand(
       return requireTask(rest, flags, context);
     case "requeue":
       return requeueTask(rest, flags, context);
+    case "plan":
+      return planTaskCommand(rest, flags, context);
     default:
       return fail(
         context.write,

@@ -217,7 +217,7 @@ export type Decision = {
 export type Artifact = {
   id: number;
   run: number;
-  kind: "diff" | "status" | "park-payload";
+  kind: "diff" | "status" | "park-payload" | "plan";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -261,7 +261,7 @@ export type TelegramAction = {
 export type Incident = {
   id: number;
   run: number;
-  kind: "malformed-decision" | "attempts-exhausted" | "commit-failure";
+  kind: "malformed-decision" | "attempts-exhausted" | "commit-failure" | "malformed-plan" | "plan-attempts-exhausted";
   createdAt: string;
   resolvedAt: string | null;
   resolvedBy: string | null;
@@ -2840,6 +2840,42 @@ export class Store {
    * reads in the order the questions arrived. "unanswered" is open + expired:
    * expiry makes a decision louder, never gone.
    */
+  /** The newest planner run's plan document for a task, when one exists. */
+  latestPlanArtifact(taskRef: number): Artifact | null {
+    const row = this.db
+      .prepare(
+        `SELECT artifact.* FROM artifact
+         JOIN run ON run.id = artifact.run
+         WHERE run.task_ref = ? AND run.role = 'planner' AND artifact.kind = 'plan'
+         ORDER BY artifact.id DESC LIMIT 1`,
+      )
+      .get(taskRef);
+    return row === undefined ? null : readArtifact(row as Record<string, unknown>);
+  }
+
+  /** Answered questions for one task, newest first — the planner's memory. */
+  answeredDecisionsFor(
+    taskId: string,
+    limit = 5,
+  ): { question: string; choice: string | null; note: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT decision.question, decision.choice, decision.note
+         FROM decision
+         JOIN run ON run.id = decision.run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         WHERE task_ref.backend = ? AND task_ref.external_id = ?
+           AND decision.answered_at IS NOT NULL
+         ORDER BY decision.answered_at DESC, decision.id DESC LIMIT ?`,
+      )
+      .all(BUILT_IN, taskId, Math.max(1, Math.min(Math.floor(limit), 20)))
+      .map(row => ({
+        question: String(row["question"]),
+        choice: row["choice"] === null ? null : String(row["choice"]),
+        note: row["note"] === null ? null : String(row["note"]),
+      }));
+  }
+
   listDecisions(only: "open" | "unanswered" | "all" = "unanswered"): (Decision & { taskId: string })[] {
     const where =
       only === "open"
