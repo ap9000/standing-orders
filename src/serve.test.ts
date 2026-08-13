@@ -539,6 +539,30 @@ describe("the operations console", () => {
     expect(home).toContain("t-dead");
   });
 
+  test("the morning is live: refresh meta, building-now card, and the fleet", async () => {
+    store.createTask({ id: "t-live", title: "being built right now" }, T0);
+    const ref = store.refFor("built-in", "t-live").id;
+    const { register } = await import("./runner.js");
+    register(store, { name: "builder-1", host: "host", capacity: 2, now: new Date() });
+    acquire(store, ref, "builder-1", { now: new Date(), ttlMs: 60 * 60_000 });
+    store.saveWorktree({
+      path: "/pool/repo/nightorders-t-live-abc123", repo: "/repo/main", branch: "nightorders/t-live",
+      runner: "builder-1", taskRef: ref, createdAt: new Date().toISOString(),
+      leasedAt: new Date().toISOString(), releasedAt: null, verified: true,
+    });
+    const cookie = await login();
+
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    // Building: the claim renders as a pulsing card, and the page refreshes fast.
+    expect(home).toContain("building right now");
+    expect(home).toContain("t-live");
+    expect(home).toContain('http-equiv="refresh" content="10"');
+    // The fleet: the runner with its occupancy, the worktree with its branch.
+    expect(home).toContain("the fleet");
+    expect(home).toContain("1/2 building");
+    expect(home).toContain("nightorders-t-live-abc123");
+  });
+
   test("tasks: list, validated filter, and atomic add from the console", async () => {
     store.createTask({ id: "t-1", title: "already here" }, T0);
     const cookie = await login();

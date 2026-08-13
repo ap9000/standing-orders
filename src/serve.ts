@@ -54,6 +54,7 @@ import {
   type Store,
   type Task,
   type TaskState,
+  type WorktreeRow,
 } from "./store.js";
 import {
   approvalOf,
@@ -63,12 +64,14 @@ import {
   type Scope,
 } from "./scope.js";
 import { hasForbiddenControls } from "./decision.js";
+import type { Runner } from "./runner.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import {
   authorizedProject,
   canonicalProject,
   isGitRepo,
   projectName,
+  sameRepo,
   resolveCeiling,
   rowVisible,
 } from "./project.js";
@@ -161,7 +164,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   const taskRepoOf = (taskRef: number): string | null => store.refForId(taskRef)?.repo ?? null;
 
   const server = createServer((request, response) => {
-    void handle(request, response).catch(() => {
+    void handle(request, response).catch(error => {
+      if (process.env["NIGHTORDERS_SERVE_DEBUG"] === "1") console.error("SERVE ERROR:", error);
       if (!response.headersSent) {
         respond(response, 500, "text/plain; charset=utf-8", "something broke");
       } else {
@@ -351,6 +355,12 @@ export function createDecisionServer(options: ServeOptions): Server {
           gaps: project === null ? null : computeGaps(store, project, now),
           outboxPending: store.listNotifications("pending").length,
           settings: options.telegramTokenFile !== undefined,
+          building: store.liveClaims(project, now),
+          runners: store.listRunners(),
+          worktrees: store
+            .listWorktrees()
+            .filter(one => project === null || sameRepo(one.repo, project)),
+          episode: project === null ? null : store.latestWatchEpisode(project),
           now,
         }),
       );
@@ -1304,6 +1314,23 @@ const STYLE = `
     .content > main, .split > .detail > main { padding: 1.25rem 1.25rem 4rem; }
   }
 
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .625rem; margin: .5rem 0; }
+  .stat-card {
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    padding: .75rem .875rem; box-shadow: var(--shadow); min-width: 0;
+  }
+  .stat-card .k { font-weight: 600; font-size: .875rem; display: flex; align-items: center; gap: .4rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat-card .v { font-size: .75rem; color: var(--muted-foreground); margin-top: .25rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 9999px; flex: none; }
+  .dot-ok { background: var(--success); }
+  .dot-warn { background: var(--warning); }
+  .dot-off { background: var(--muted-foreground); opacity: .5; }
+  .dot-bad { background: var(--destructive-strong); }
+  .pulse { animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
   .login-shell { max-width: 22rem; margin: 14vh auto 0; padding: 0 1.25rem; }
   .login-shell h1 { text-align: center; margin-bottom: .25rem; }
   .login-shell .hint { text-align: center; margin-bottom: 1rem; }
@@ -1328,12 +1355,18 @@ type Chrome = {
 function shell(
   title: string,
   body: string,
-  options: { nav?: boolean; chrome?: Chrome } = {},
+  options: { nav?: boolean; chrome?: Chrome; refreshSeconds?: number } = {},
 ): string {
   const head = [
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8">`,
     `<meta name="viewport" content="width=device-width, initial-scale=1">`,
+    // Live status with zero JavaScript: the page asks the browser to fetch
+    // it again. Only ever on read-only briefing pages — a refresh on a page
+    // with a form would eat what somebody was typing.
+    ...(options.refreshSeconds === undefined
+      ? []
+      : [`<meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.refreshSeconds))}">`]),
     `<title>${escape(title)}</title><style>${STYLE}</style></head><body>`,
   ].join("\n");
 
@@ -1399,6 +1432,10 @@ function loginPage(problem: string | null): string {
 function homePage(chrome: Chrome, data: {
   taskCount: number;
   repo: string | null;
+  building: { taskId: string; runner: string; claimedAt: string; expiresAt: string }[];
+  runners: Runner[];
+  worktrees: WorktreeRow[];
+  episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
   summary: ReturnType<typeof overnight<Run & { taskId: string }>>;
   decisions: (Decision & { taskId: string })[];
   incidents: (Incident & { taskId: string })[];
@@ -1467,8 +1504,64 @@ function homePage(chrome: Chrome, data: {
             .join("\n") +
           ``;
 
-  // The sidebar owns navigation now; the page keeps only its content.
-  const footer = "";
+  // Live at the fidelity the moment deserves: fast while something builds,
+  // gentle when the page is just a briefing. GET-only, so refresh is safe.
+  const refresh = data.building.length > 0 ? 10 : 60;
+
+  // BUILDING RIGHT NOW: each live claim as a pulsing card — the one moment
+  // an operator actually watches this page, so it re-renders itself.
+  const building =
+    data.building.length === 0
+      ? ""
+      : `<h2>building right now</h2><div class="cards">` +
+        data.building
+          .map(
+            claim =>
+              `<a class="stat-card" href="${taskHref(claim.taskId)}" style="text-decoration:none">` +
+              `<span class="k"><span class="dot dot-ok pulse"></span>${escape(claim.taskId)}</span>` +
+              `<span class="v">${escape(claim.runner)} \u00b7 since ${escape(when(claim.claimedAt))}</span></a>`,
+          )
+          .join("") +
+        `</div>`;
+
+  // THE FLEET: runners by heartbeat age, worktrees by lease state, the watch.
+  const nowMs = data.now.getTime();
+  const runnerCards = data.runners
+    .filter(one => one.retiredAt === null)
+    .map(one => {
+      const age = nowMs - new Date(one.heartbeatAt).getTime();
+      const dot = age < 5 * 60_000 ? "dot-ok" : age < 60 * 60_000 ? "dot-warn" : "dot-off";
+      const said = age < 5 * 60_000 ? "alive" : age < 60 * 60_000 ? `quiet ${Math.round(age / 60_000)}m` : "not heard from";
+      const busy = data.building.filter(claim => claim.runner === one.name).length;
+      return (
+        `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
+        `<span class="v">${said} \u00b7 ${busy}/${one.capacity} building</span></div>`
+      );
+    });
+  const worktreeCards = data.worktrees.map(tree => {
+    const leased = tree.leasedAt !== null && tree.releasedAt === null;
+    const dot = leased ? "dot-ok" : tree.verified ? "dot-off" : "dot-warn";
+    const state = leased ? "building" : tree.verified ? "free" : "back unverified";
+    const name = tree.path.split("/").pop() ?? tree.path;
+    return (
+      `<div class="stat-card"><span class="k"><span class="dot ${dot}${leased ? " pulse" : ""}"></span><span class="mono">${escape(name)}</span></span>` +
+      `<span class="v">${escape(tree.branch)} \u00b7 ${state}</span></div>`
+    );
+  });
+  const watchCard =
+    data.episode === null
+      ? ""
+      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>the watch</span>` +
+        `<span class="v">${
+          data.episode.endedAt === null
+            ? `running since ${escape(when(data.episode.startedAt))}`
+            : `last night: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${escape(when(data.episode.endedAt))}`
+        }</span></div>`;
+  const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
+  const fleet =
+    fleetCards.length === 0
+      ? `<h2>the fleet</h2><p class="meta">no runner registered yet \u2014 <code>nightorders runner register &lt;name&gt;</code>, then <code>nightorders daemon install</code> keeps the loop running</p>`
+      : `<h2>the fleet</h2><div class="cards">${fleetCards.join("")}</div>`;
 
   const startHere =
     data.taskCount === 0
@@ -1492,12 +1585,14 @@ function homePage(chrome: Chrome, data: {
     ledger,
     `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
     data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} pending delivery</p>` : "",
+    building,
     "<h2>waiting on you</h2>",
     decide,
     incidents,
     stranded,
     gaps,
-  ].join("\n"), { chrome });
+    fleet,
+  ].join("\n"), { chrome, refreshSeconds: refresh });
 }
 
 function tasksPage(

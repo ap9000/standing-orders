@@ -3494,6 +3494,29 @@ export class Store {
     return Number(changes);
   }
 
+  /** What is being built right now: current, unexpired claims with their task and holder. */
+  liveClaims(repo: string | null, now: Date): { taskId: string; runner: string; claimedAt: string; expiresAt: string }[] {
+    return this.db
+      .prepare(
+        `SELECT task_ref.external_id AS task_id, claim.runner, claim.acquired_at, claim.expires_at
+         FROM claim JOIN task_ref ON task_ref.id = claim.task_ref
+         WHERE claim.released_at IS NULL AND claim.expires_at > ?
+           AND claim.lease_generation = (
+             SELECT MAX(newest.lease_generation) FROM claim AS newest
+             WHERE newest.task_ref = claim.task_ref
+           )
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+         ORDER BY claim.acquired_at`,
+      )
+      .all(now.toISOString(), repo, repo)
+      .map(row => ({
+        taskId: String(row["task_id"]),
+        runner: String(row["runner"]),
+        claimedAt: String(row["acquired_at"]),
+        expiresAt: String(row["expires_at"]),
+      }));
+  }
+
   // ---- projects ------------------------------------------------------------
 
   /** Remember a project was opened. Upsert keeps added_at; recency always moves. */
