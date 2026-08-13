@@ -1666,3 +1666,51 @@ describe("the agents card — configuration, readable at a glance", () => {
     }
   });
 });
+
+describe("mutations from browsers that omit Origin", () => {
+  test("absent Origin + valid CSRF proceeds; a present wrong Origin still refuses", async () => {
+    const store = openStore(":memory:");
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-origin-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+    store.createTask({ id: "t-o", title: "w" }, T0);
+    const server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const login = await fetch(`${base}/login`, {
+        method: "POST", body: new URLSearchParams({ name: "alex", token: added.token }), redirect: "manual",
+      });
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] as string;
+      const page = await (await fetch(`${base}/t/t-o`, { headers: { cookie } })).text();
+      const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
+
+      // iOS Safari's shape: same-origin POST, no Origin header at all.
+      const noOrigin = await fetch(`${base}/t/t-o/hold`, {
+        method: "POST", headers: { cookie },
+        body: new URLSearchParams({ csrf, reason: "from the phone" }), redirect: "manual",
+      });
+      expect(noOrigin.status).toBe(303);
+
+      // A hostile page still names itself, and is still refused.
+      const foreign = await fetch(`${base}/t/t-o/unhold`, {
+        method: "POST", headers: { cookie, origin: "http://evil.example" },
+        body: new URLSearchParams({ csrf }),
+      });
+      expect(foreign.status).toBe(403);
+
+      // And CSRF stays the hard gate even with no Origin.
+      const noToken = await fetch(`${base}/t/t-o/unhold`, {
+        method: "POST", headers: { cookie },
+        body: new URLSearchParams({ csrf: "0".repeat(64) }),
+      });
+      expect(noToken.status).toBe(403);
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      store.close();
+      rmSync(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+});

@@ -210,8 +210,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
     }
     if (who.via === "cookie") {
+      // A PRESENT Origin must name this server. An ABSENT one is not a
+      // forgery: iOS Safari and some in-app browsers omit Origin on
+      // same-origin form posts, and refusing them locked the console on
+      // the operator's own phone. The per-session CSRF token below is the
+      // primary proof either way — a cross-site attacker can post, but
+      // cannot read the token to include it.
       const origin = request.headers.origin;
-      if (typeof origin !== "string" || !allowedHost(origin.replace(/^https?:\/\//, ""))) {
+      const referer = request.headers.referer;
+      const named = typeof origin === "string" && origin !== "null" ? origin : typeof referer === "string" ? referer : null;
+      if (named !== null && !allowedHost(named.replace(/^https?:\/\//, "").split("/")[0])) {
         return { status: 403, message: "origin not allowed" };
       }
       if (body.get("csrf") !== who.session.csrf) {
