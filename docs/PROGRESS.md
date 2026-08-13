@@ -1,5 +1,17 @@
 # Progress
 
+**2026-08-13 — the repo is the product too.** Pre-publish front-door pass:
+GitHub Actions CI (ubuntu + macos × node 22/24: typecheck, build, the full
+suite) with badges; CONTRIBUTING.md (fail-closed rules, the adapter
+contract as the contribution surface); issue forms that ask for `--json`
+output and warn against pasting tokens; repo topics; and a README
+restructure — hero with an animated SVG of the unattended stretch
+(docs/media/demo.svg, hand-built, no GIF tooling), a three-line npx
+quickstart, and the status wall moved to its own section above Milestones
+so the first screen is proof, not prose. npm publish remains the
+operator's act; the README now ships as the registry front page when it
+happens.
+
 **2026-08-13 — the product is `standing-orders`.** The tagline was the
 brand all along ("Standing orders for your agents"): the rename drops the
 last night-shaped thing before anything is published, keeps the naval

@@ -1,0 +1,23 @@
+name: Feature request
+description: A capability Standing Orders should have.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The situation
+      description: >
+        What were you trying to do, unattended or otherwise, when you hit the
+        limit? Concrete scenes land better than abstract capabilities.
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: The shape you'd expect
+      description: >
+        Optional. What would the command, screen, or behavior look like?
+        Note that the design fails closed and keeps LLMs out of approval
+        paths — proposals that fit that shape move faster.
+    validations:
+      required: false

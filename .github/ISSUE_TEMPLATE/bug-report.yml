@@ -1,0 +1,35 @@
+name: Bug report
+description: Something behaved differently than documented, or broke.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        The command you ran, what you expected, and what you got. If the
+        command supports it, `--json` output is the most useful form.
+      placeholder: |
+        $ standing-orders tick --runner builder-1 ...
+        expected: ...
+        got: ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version (`node --version`), and how it was running (cron, `watch`, `daemon`, by hand).
+      placeholder: macOS 15 · Node 22.13 · daemon (launchd)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        `standing-orders daemon logs` names the log file for daemon issues.
+        Strip approver tokens, bot tokens, and webhook URLs before pasting —
+        and rotate anything pasted by accident.
+    validations:
+      required: false

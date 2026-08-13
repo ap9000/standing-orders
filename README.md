@@ -1,8 +1,33 @@
-# Standing Orders
+<div align="center">
+
+# standing·orders
 
 **Standing orders for your agents. Wake me only for these.**
 
-> **Status: M4 built; publish pending.** The whole loop runs: `standing-orders watch` (or `standing-orders daemon install` — no crontab) dispatches approved work, spends nothing while idle, survives crashes by recovering exactly its own predecessor's claims, and stops taking work on the first signal. Failures are typed — strikes, doubling backoff, three-strike stalls a person exits with `task requeue` — and every provider spawn is stamped before it spends, so cost is measured, never asserted. An agent that hits a judgement call **parks a typed decision instead of guessing**; answer it in the terminal (`decide`), the web console (`serve` — the whole queue, phone-first, approval step-up), or a Telegram tap (the watch embeds a long-poll follower: phone to build, no timer in between). Built work leaves as a pushed branch and a pull request under a publication grant whose exact terms you agreed to, through a crash-durable intent; CI on those PRs is watched as episodes that never call silence green. The whole unattended stretch is one test, `unattended.test.ts`: queue twelve, walk away, come back to PRs. npm publish is the operator's act and has not happened yet — the `m4` tag waits for the registry, not the other way around. Architecture: [`docs/DESIGN.md`](docs/DESIGN.md); the item-by-item ledger: [`docs/PROGRESS.md`](docs/PROGRESS.md).
+Queue twelve tasks, walk away, come back to pull requests —
+with near-zero token spend across every idle hour.
+
+[![CI](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml/badge.svg)](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/standing-orders)](https://www.npmjs.com/package/standing-orders)
+![node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-brightgreen)
+![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+<img src="docs/media/demo.svg" alt="Queue tasks, install the daemon, leave; a parked decision is answered from a phone and the tasks come back as pull requests." width="760">
+
+</div>
+
+```sh
+npx standing-orders                    # what's in flight across your repos — read-only, zero config
+npx standing-orders serve --repo .     # the whole queue, phone-first, on a local console
+npx standing-orders daemon install …   # the unattended loop, as an OS service — no crontab
+```
+
+An agent that hits a judgement call **parks a typed decision instead of
+guessing** — answer it from the terminal, the console, or a Telegram tap,
+and the freed build resumes in seconds. Built work leaves only as a pushed
+branch and a pull request, under a publication grant whose exact terms you
+approved. **No LLM sits in any approval path, and an LLM never polls.**
 
 The name comes from a captain's night orders — the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product, and it is not about the hour: it is for **long-running work that outlasts your attention** — an afternoon of errands, a weekend, or yes, a night.
 
@@ -15,8 +40,7 @@ It owns a deliberately small local task store, adapts richer trackers when they 
 **Sixty seconds to first value.** No init, no daemon start, no wizard, no OAuth app.
 
 ```sh
-git clone https://github.com/ap9000/standing-orders && cd standing-orders
-npm install && npm run dev -- ~/code      # `npx standing-orders` once it ships
+npx standing-orders ~/code     # or: git clone … && npm install && npm run dev -- ~/code
 ```
 
 It walks the filesystem for `.git` and reads every repo through the `git` credentials already on your machine, then shows what is in flight:
@@ -229,6 +253,20 @@ And it costs nothing while idle. **An LLM never polls.** The daemon handles ever
 | Agent guesses on an irreversible call | `reversible` is a schema field; irreversible options never auto-apply |
 | You wake to five transcripts | one briefing: what ran, what is blocked, what needs deciding |
 | Secrets on a shared server | the control plane stores metadata only; values stay in the runner's keychain |
+
+## Status
+
+**M4 built.** The whole loop runs: `standing-orders watch` (or `daemon
+install` — no crontab) dispatches approved work, spends nothing while idle,
+survives crashes by recovering exactly its own predecessor's claims, and
+stops taking work on the first signal. Failures are typed — strikes,
+doubling backoff, three-strike stalls a person exits with `task requeue` —
+and every provider spawn is stamped before it spends, so cost is measured,
+never asserted. CI on published PRs is watched as episodes that never call
+silence green. The whole unattended stretch is one test,
+[`src/unattended.test.ts`](src/unattended.test.ts): queue twelve, walk
+away, come back to PRs. Architecture: [`docs/DESIGN.md`](docs/DESIGN.md);
+the item-by-item ledger: [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 ## Milestones
 

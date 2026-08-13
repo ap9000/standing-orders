@@ -1,0 +1,63 @@
+# Contributing
+
+Standing Orders is small on purpose: Node ≥ 22.13, zero runtime dependencies,
+one SQLite file, and a design document that says no more often than yes.
+Contributions that fit that shape are very welcome.
+
+## Getting set up
+
+```sh
+git clone https://github.com/ap9000/standing-orders && cd standing-orders
+npm install
+npm test              # the whole suite, ~800 tests
+npm run typecheck
+npm run dev -- --help # run the CLI from source
+```
+
+There is nothing else — no services to start, no env file to copy. Tests
+create their own temporary databases and repositories and clean up after
+themselves.
+
+## What makes a change land
+
+**Every behavior is a test.** The suite is the specification; a fix without a
+regression test will be asked for one. Fakes are preferred over mocks — most
+of the suite drives real SQLite databases and real git repositories in temp
+directories, and the unattended stretch is one end-to-end test
+(`src/unattended.test.ts`) that queues twelve tasks and walks away.
+
+**Fail closed.** Where a fact is not established, the code refuses and says
+why, rather than guessing. A new adapter that cannot verify an endpoint
+should refuse the operation, visibly — see how the GitHub adapter treats
+`addEdge`.
+
+**No new runtime dependencies** without a conversation first. Node's standard
+library (including `node:sqlite`, global `fetch`, and `WebSocket`) has been
+enough so far.
+
+**Security-sensitive paths need care.** Approval nonces are minted only on
+screens that restate the digest-bound terms; credentials never appear in
+URLs, the database, or logs; anything an agent's environment can see is
+scrubbed of tokens. If your change touches approval, pairing, grants, or
+spawning, expect review to be slow and specific.
+
+## Writing a provider adapter
+
+The most useful contribution surface. `src/provider.ts` is the only module
+that names an agent binary: an adapter supplies argv builders for build,
+plan, and repair invocations, an envelope parser for the tool's output
+stream, timeout clamps, and an identity probe. `src/provider.test.ts` shows
+the argv snapshots expected of each; `src/invoke.test.ts` holds the
+architecture rule that keeps spawning confined to `src/invoke.ts`. Copy the
+`codex` adapter as a starting point — it is the smallest complete one.
+
+## Reporting bugs
+
+`standing-orders --json` output, the command you ran, and what you expected
+are usually enough. For daemon issues, `standing-orders daemon logs` names
+the file to attach. Never include an approver token, bot token, or webhook
+URL in an issue — rotate anything you pasted by accident.
+
+## Conduct
+
+Be kind, assume competence, argue about the design rather than the person.
