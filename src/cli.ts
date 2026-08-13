@@ -189,6 +189,7 @@ const OPERATE_COMMANDS = new Set([
   "reconcile",
   "routine",
   "config",
+  "setup",
   "providers",
   "webhook",
 ]);

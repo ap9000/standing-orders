@@ -232,6 +232,42 @@ describe("the builder's gates", () => {
     expect(result).toMatchObject({ ok: true, committed: true });
   });
 
+  test("the approved worktree setup runs before the agent; failure blocks the spawn; success is cached (M5.7)", async () => {
+    claimIt();
+    approveScope();
+    store.setWorktreeSetup({ repo: "/code/thing", command: "npm ci", timeoutMs: 60_000, approvedBy: "alex" }, T0);
+    const setupCalls: string[][] = [];
+
+    // A failed setup is an environment problem: typed, and the agent never spawns.
+    const blocked = await build(store, request({
+      setup: (async (_file: string, args: readonly string[]) => {
+        setupCalls.push([...args]);
+        return { ...OK, code: 1, stderr: "npm ERR! ENOENT" };
+      }) as Runner,
+    }));
+    expect(blocked).toMatchObject({ ok: false, reason: "setup" });
+    expect(agentCalls).toHaveLength(0);
+
+    // Success stamps the digest on the checkout…
+    const built = await build(store, request({
+      setup: (async (_file: string, args: readonly string[]) => {
+        setupCalls.push([...args]);
+        return { ...OK };
+      }) as Runner,
+    }));
+    expect(built).toMatchObject({ ok: true, committed: true });
+    expect(setupCalls).toHaveLength(2);
+    expect(setupCalls[1]).toEqual(["-c", "npm ci"]);
+
+    // …so the same digest never runs twice in one worktree.
+    const again = await build(store, request({
+      setup: (async () => {
+        throw new Error("the cache said this must not run");
+      }) as Runner,
+    }));
+    expect(again.ok).toBe(true);
+  });
+
   test("a committed build leaves its terminal diff behind — patch and stat, capture recorded (M5.3)", async () => {
     claimIt();
     approveScope();

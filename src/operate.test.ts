@@ -802,6 +802,59 @@ describe("config — spend routing is authenticated authority", () => {
   });
 });
 
+describe("setup — the approved worktree setup is authenticated authority (M5.7)", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-setup-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  test("set restates the terms, takes the credential, lands with --yes; clear revokes", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+
+    // No credential: refused as usage — an approved command runs unattended forever.
+    expect(await run(["setup", "set", "--repo", "/code/thing", "--command", "npm ci", "--json"])).toBe(EXIT.usage);
+
+    // Credentialed but unconfirmed: the terms come back, nothing is stored.
+    const unconfirmed = await run(["setup", "set", "--repo", "/code/thing", "--command", "npm ci", "--as", "alex", "--token", token, "--json"]);
+    expect(unconfirmed).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "unconfirmed", setupCommand: "npm ci" });
+    await run(["setup", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().setup).toBe(null);
+
+    // --yes lands it, digest-bound, and show restates it.
+    const set = await run(["setup", "set", "--repo", "/code/thing", "--command", "npm ci", "--timeout-seconds", "120", "--as", "alex", "--token", token, "--yes", "--json"]);
+    expect(set).toBe(EXIT.ok);
+    const digest = payload().digest as string;
+    await run(["setup", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().setup).toMatchObject({ command: "npm ci", timeoutMs: 120_000, digest, approvedBy: "alex" });
+
+    // A control-character command never becomes standing authority.
+    const sneaky = await run(["setup", "set", "--repo", "/code/thing", "--command", "npm ci\u0007", "--as", "alex", "--token", token, "--yes", "--json"]);
+    expect(sneaky).toBe(EXIT.usage);
+
+    const cleared = await run(["setup", "clear", "--repo", "/code/thing", "--as", "alex", "--token", token, "--json"]);
+    expect(cleared).toBe(EXIT.ok);
+    await run(["setup", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().setup).toBe(null);
+  });
+});
+
 describe("providers — identification without spend", () => {
   let dir: string;
   let db: string;

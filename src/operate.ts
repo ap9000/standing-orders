@@ -40,6 +40,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { envelopeJson } from "./envelope.js";
+import { hasForbiddenControls } from "./decision.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -238,6 +239,14 @@ Agents — which provider and model each phase runs on
                                         Repair's PROVIDER always inherits
                                         the build it mends.
   standing-orders config clear <phase> [--repo <path>] --as <you> --token <t>
+
+  standing-orders setup show --repo <path>  what a fresh checkout runs first
+  standing-orders setup set --repo <path> --command "npm ci"
+      [--timeout-seconds <n>] --as <you> --token <t> [--yes]
+                                        approve the command every fresh
+                                        worktree runs before any agent —
+                                        a failed setup blocks the build
+  standing-orders setup clear --repo <path> --as <you> --token <t>
   Pass flags still win for one pass: --provider/--model,
   --plan-provider/--plan-model, --repair-model. A routine instance is
   pinned at fire time and ignores all of them.
@@ -310,6 +319,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
+    "command", "timeout-seconds",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -448,6 +458,8 @@ async function dispatch(
       return routineCommand(positional, flags, context);
     case "config":
       return configCommand(positional, flags, context);
+    case "setup":
+      return setupCommand(positional, flags, context);
     case "providers":
       return providersCommand(flags, context);
     case "webhook":
@@ -1590,7 +1602,8 @@ async function tickCommand(
       result.reason === "timeout" ||
       result.reason === "git" ||
       result.reason === "commit-failure" ||
-      result.reason === "provider-init"
+      result.reason === "provider-init" ||
+      result.reason === "setup"
     ) {
       // The attempt itself broke. One fenced transaction decides what that
       // means — a strike and a doubling backoff, a stall after three, or a
@@ -1605,7 +1618,7 @@ async function tickCommand(
           ? "agent-reported"
           : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
             ? "no-op"
-            : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init"
+            : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup"
               ? "retryable-infra"
               : result.reason === "commit-failure"
                 ? "commit-failure"
@@ -2650,6 +2663,107 @@ async function configCommand(
   return succeed(write, json, "config set", { scope, phase, provider: providerGiven, model: modelGiven, warnings }, () => [
     `${phase} at ${scope === INSTALLATION_SCOPE ? "the installation" : scope} now runs ${providerGiven}${modelGiven === null ? "" : ` · ${modelGiven}`}, set by ${acting.name}.`,
     ...warnings.map(one => `  ! ${one}`),
+  ]);
+}
+
+/**
+ * `standing-orders setup …` — the per-repo worktree setup (M5.7). What a
+ * fresh checkout runs before any agent spawns in it: dependencies, .env
+ * copies, generated code. Approval is authority (an approved command runs
+ * unattended in every future worktree), so `set` and `clear` take the
+ * approver's credential and `set` restates the exact terms — command,
+ * timeout, digest — before `--yes` lands them. The command TEXT is stored;
+ * secret values never are.
+ */
+async function setupCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const clock = context.clock ?? (() => new Date());
+  const action = positional[0] ?? "show";
+  const repo = text(flags, "repo");
+
+  if (action === "show") {
+    if (repo === undefined) {
+      return fail(write, json, "setup show", "usage", "which repo? --repo <path>", EXIT.usage);
+    }
+    const live = store.liveWorktreeSetup(repo);
+    if (json) {
+      write(envelopeJson({ ok: true, command: "setup show", repo, setup: live }));
+      return EXIT.ok;
+    }
+    write(
+      live === null
+        ? `No worktree setup for ${repo}. Fresh checkouts run nothing before the agent.`
+        : `${repo} runs before every agent:\n  ${live.command}\n  timeout ${Math.round(live.timeoutMs / 1000)}s · digest ${live.digest} · approved by ${live.approvedBy} at ${live.approvedAt}`,
+    );
+    return EXIT.ok;
+  }
+
+  if (action !== "set" && action !== "clear") {
+    return fail(write, json, "setup", "usage", "`standing-orders setup [show|set --command <cmd> [--timeout-seconds <n>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
+  }
+  if (repo === undefined) {
+    return fail(write, json, `setup ${action}`, "usage", "which repo? --repo <path>", EXIT.usage);
+  }
+
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, `setup ${action}`, "usage", "an approved setup runs unattended in every future worktree — changing it takes `--as <you> --token <t>`", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, `setup ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, repo), EXIT.refused);
+  }
+
+  if (action === "clear") {
+    const cleared = store.clearWorktreeSetup(repo, acting.name, clock());
+    return succeed(write, json, "setup clear", { repo, cleared }, () => [
+      cleared ? `Cleared — fresh checkouts of ${repo} run nothing now.` : `Nothing was set for ${repo}.`,
+    ]);
+  }
+
+  const command = text(flags, "command");
+  if (command === undefined || command.trim() === "") {
+    return fail(write, json, "setup set", "usage", "--command <cmd> is what every fresh checkout will run", EXIT.usage);
+  }
+  if (command.length > 2000 || hasForbiddenControls(command)) {
+    return fail(write, json, "setup set", "invalid", "the command must be under 2000 characters with no control or bidi characters", EXIT.usage);
+  }
+  const timeoutSeconds = Number(text(flags, "timeout-seconds") ?? "300");
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 3600) {
+    return fail(write, json, "setup set", "invalid", "--timeout-seconds is 1..3600", EXIT.usage);
+  }
+
+  if (flags.get("yes") !== true) {
+    if (json) {
+      write(envelopeJson({ ok: false, command: "setup set", reason: "unconfirmed", repo, setupCommand: command, timeoutSeconds }));
+      return EXIT.refused;
+    }
+    for (const line of [
+      `The terms, exactly:`,
+      `  repo     ${repo}`,
+      `  command  ${command}`,
+      `  timeout  ${timeoutSeconds}s`,
+      ``,
+      `Every FUTURE worktree of this repo runs this command unattended,`,
+      `before any agent spawns in it, with the same scrubbed environment`,
+      `the agent gets. A failed setup blocks the build as an environment`,
+      `problem. Re-run with --yes to approve.`,
+    ]) {
+      write(line);
+    }
+    return EXIT.refused;
+  }
+
+  const saved = store.setWorktreeSetup(
+    { repo, command, timeoutMs: timeoutSeconds * 1000, approvedBy: acting.name },
+    clock(),
+  );
+  return succeed(write, json, "setup set", { repo, digest: saved.digest, timeoutSeconds }, () => [
+    `Approved: fresh checkouts of ${repo} run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) before any agent.`,
   ]);
 }
 

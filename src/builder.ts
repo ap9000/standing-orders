@@ -106,6 +106,8 @@ export type BuildRequest = {
   timeoutMs?: number;
   agent?: Runner;
   git?: Runner;
+  /** Runs the approved worktree setup command (M5.7). Tests inject; production uses exec. */
+  setup?: Runner;
 };
 
 /**
@@ -150,7 +152,8 @@ export type BuildRefusal =
   | "git"
   | "commit-failure"
   | "malformed-decision"
-  | "provider-init";
+  | "provider-init"
+  | "setup";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -295,6 +298,32 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       reason: "capability",
       message: `${taskId} ${requirement} — \`standing-orders cap probe\` after supplying it`,
     };
+  }
+
+  // The approved worktree setup (M5.7): every rival worktree tool shipped
+  // without this and got burned — a checkout without dependencies fails
+  // every build in it. The command is operator-approved, digest-bound, and
+  // runs BEFORE any agent spawns here; a failure blocks the invocation as
+  // the environment problem it is, and success is stamped on the checkout
+  // so the same digest never runs twice in one worktree. It sees the same
+  // scrubbed environment the agent does — an approved `npm ci` is not an
+  // approved read of the bot token.
+  const setupWanted = store.liveWorktreeSetup(leased.repo);
+  if (setupWanted !== null && leased.setupDigest !== setupWanted.digest) {
+    const runSetup = request.setup ?? run;
+    const made = await runSetup("/bin/sh", ["-c", setupWanted.command], {
+      cwd: worktree,
+      timeoutMs: setupWanted.timeoutMs,
+      omitEnv: AGENT_ENV_DENYLIST,
+    });
+    if (made.timedOut || made.code !== 0) {
+      return {
+        ok: false,
+        reason: "setup",
+        message: `the approved setup for ${leased.repo} ${made.timedOut ? `ran past ${Math.round(setupWanted.timeoutMs / 60_000)}m` : `exited ${made.code}`} — ${firstLine(made.stderr) || "no stderr"}; no agent spawns in a checkout whose setup failed`,
+      };
+    }
+    store.stampWorktreeSetup(worktree, setupWanted.digest);
   }
 
   // And git is asked what branch is actually checked out there, because the

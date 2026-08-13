@@ -26,6 +26,7 @@
  * nobody has designed yet is a column that will be wrong when they do.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -1050,8 +1051,32 @@ CREATE TABLE IF NOT EXISTS worktree (
   released_at   TEXT,
   -- Reconstructed state is trusted only after it has been checked; see
   -- treehouse's rule about state you did not watch being created.
-  verified      INTEGER NOT NULL DEFAULT 0
+  verified      INTEGER NOT NULL DEFAULT 0,
+  -- The approved setup this checkout last ran to completion (M5.7):
+  -- matching the live setup's digest is the cache hit; anything else runs
+  -- it again before an agent may spawn here.
+  setup_digest  TEXT
 );
+
+-- The per-repo worktree setup (M5.7): the command every fresh checkout runs
+-- before any agent spawns in it — dependencies, .env copies, generated
+-- code. Digest-bound and operator-approved like every other authority: the
+-- command TEXT is stored, secret VALUES never are. One live row per repo;
+-- clearing revokes rather than deletes, because who approved what remains
+-- a fact.
+CREATE TABLE IF NOT EXISTS worktree_setup (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo        TEXT NOT NULL,
+  command     TEXT NOT NULL,
+  timeout_ms  INTEGER NOT NULL,
+  digest      TEXT NOT NULL,
+  approved_by TEXT NOT NULL,
+  approved_at TEXT NOT NULL,
+  revoked_at  TEXT,
+  revoked_by  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS worktree_setup_live
+  ON worktree_setup (repo) WHERE revoked_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS mutation (
   idempotency_key TEXT PRIMARY KEY,
@@ -1306,6 +1331,10 @@ function migrate(db: Database): void {
   // digest that binds an irreversible confirmation to the EXACT note it
   // confirmed (Codex free-text review, finding 3).
   addColumn(db, "telegram_action", "note_digest", "TEXT");
+  // v11 (M5 worktree setup): additive — the worktree_setup table arrives
+  // through the fresh SCHEMA's IF NOT EXISTS, and existing worktree rows
+  // gain the setup cache column.
+  addColumn(db, "worktree", "setup_digest", "TEXT");
   // v11 (M5 activity): the machine-authored phase — stamped by the control
   // plane at its own state-machine boundaries, never parsed out of a
   // provider stream. Transient in meaning (read while the run is open),
@@ -2259,6 +2288,55 @@ export class Store {
   /** Drop a row whose directory is gone; a lease over nothing only refuses work. */
   forgetWorktree(path: string): void {
     this.db.prepare("DELETE FROM worktree WHERE path = ?").run(path);
+  }
+
+  // ---- worktree setup (M5.7) ---------------------------------------------
+
+  /**
+   * Approve one repo's setup, revoking any predecessor in the same
+   * transaction — exactly one live setup per repo, enforced by the partial
+   * unique index rather than by anything a caller remembers.
+   */
+  setWorktreeSetup(
+    args: { repo: string; command: string; timeoutMs: number; approvedBy: string },
+    now: Date,
+  ): WorktreeSetup {
+    const digest = createHash("sha256")
+      .update(`${args.repo}\u0000${args.command}\u0000${args.timeoutMs}`, "utf8")
+      .digest("hex")
+      .slice(0, 16);
+    return this.transact(() => {
+      this.db
+        .prepare("UPDATE worktree_setup SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+        .run(now.toISOString(), args.approvedBy, args.repo);
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO worktree_setup (repo, command, timeout_ms, digest, approved_by, approved_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(args.repo, args.command, args.timeoutMs, digest, args.approvedBy, now.toISOString());
+      const row = this.db.prepare("SELECT * FROM worktree_setup WHERE id = ?").get(Number(inserted.lastInsertRowid));
+      return readWorktreeSetup(row as Record<string, unknown>);
+    });
+  }
+
+  liveWorktreeSetup(repo: string): WorktreeSetup | null {
+    const row = this.db
+      .prepare("SELECT * FROM worktree_setup WHERE repo = ? AND revoked_at IS NULL")
+      .get(repo);
+    return row === undefined ? null : readWorktreeSetup(row);
+  }
+
+  clearWorktreeSetup(repo: string, by: string, now: Date): boolean {
+    const done = this.db
+      .prepare("UPDATE worktree_setup SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+      .run(now.toISOString(), by, repo);
+    return Number(done.changes) > 0;
+  }
+
+  /** The cache stamp: this checkout completed this setup. Success-only by contract. */
+  stampWorktreeSetup(path: string, digest: string): void {
+    this.db.prepare("UPDATE worktree SET setup_digest = ? WHERE path = ?").run(digest, path);
   }
 
   listWorktrees(): WorktreeRow[] {
@@ -5771,6 +5849,21 @@ export type WorktreeRow = {
   releasedAt: string | null;
   /** Whether the state on disk has been checked since it was last let go. */
   verified: boolean;
+  /** The approved setup this checkout last completed — the cache key (M5.7). */
+  setupDigest?: string | null;
+};
+
+/** One repo's approved worktree setup — the command text, never secret values. */
+export type WorktreeSetup = {
+  id: number;
+  repo: string;
+  command: string;
+  timeoutMs: number;
+  digest: string;
+  approvedBy: string;
+  approvedAt: string;
+  revokedAt: string | null;
+  revokedBy: string | null;
 };
 
 function readScope(row: Record<string, unknown>): Scope {
@@ -5811,6 +5904,22 @@ function readWorktree(row: Record<string, unknown>): WorktreeRow {
     leasedAt: row["leased_at"] === null ? null : String(row["leased_at"]),
     releasedAt: row["released_at"] === null ? null : String(row["released_at"]),
     verified: Number(row["verified"]) === 1,
+    setupDigest:
+      row["setup_digest"] === null || row["setup_digest"] === undefined ? null : String(row["setup_digest"]),
+  };
+}
+
+function readWorktreeSetup(row: Record<string, unknown>): WorktreeSetup {
+  return {
+    id: Number(row["id"]),
+    repo: String(row["repo"]),
+    command: String(row["command"]),
+    timeoutMs: Number(row["timeout_ms"]),
+    digest: String(row["digest"]),
+    approvedBy: String(row["approved_by"]),
+    approvedAt: String(row["approved_at"]),
+    revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
+    revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
   };
 }
 
