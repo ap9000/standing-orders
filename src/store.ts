@@ -4603,7 +4603,7 @@ export class Store {
              (SELECT routine.name FROM routine WHERE routine.id = task_ref.routine_id) AS routine_name,
              live.runner AS claim_runner, live.acquired_at AS claim_at, live.lease_id AS claim_lease,
              claim_run.model AS claim_model, claim_run.branch AS claim_branch, claim_run.worktree AS claim_worktree,
-             claim_run.role AS claim_role,
+             claim_run.role AS claim_role, claim_run.provider AS claim_provider,
              (SELECT hold.owner_kind FROM hold
                WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
                ORDER BY CASE hold.owner_kind WHEN 'operator' THEN 0 WHEN 'backoff' THEN 1 WHEN 'decision' THEN 2 ELSE 3 END, hold.id
@@ -4719,6 +4719,7 @@ export class Store {
                 branch: text(row, "claim_branch"),
                 worktree: text(row, "claim_worktree"),
                 role: text(row, "claim_role"),
+                provider: text(row, "claim_provider"),
               },
         hold:
           row["hold_kind"] === null || row["hold_kind"] === undefined

@@ -78,7 +78,7 @@ import {
 import { tally, spendLine } from "./summary.js";
 import { classify } from "./board.js";
 import type { BoardCard } from "./board.js";
-import { approveRoutine, describeSchedule, fireRoutine, parseSchedule } from "./routine.js";
+import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import type { Routine } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
@@ -360,6 +360,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
       url.pathname !== "/" &&
+      !/^\/t\/[^/]+$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && url.pathname !== "/projects" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
@@ -677,7 +678,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       const tracks = store
         .routineTracks(project, now)
         .filter(track => visible(track.routine.repo));
-      return page(response, 200, routinesPage(chromeFor(project, "routines"), tracks, now));
+      return page(response, 200, routinesPage(chromeFor(project, "routines"), tracks, {
+        csrf: who.via === "cookie" ? who.session.csrf : "",
+        revision: who.via === "cookie" ? who.session.projectRevision : 0,
+        problem: null,
+      }));
     }
 
     const routineScreen = /^\/routines\/([0-9]{1,15})$/.exec(url.pathname);
@@ -829,7 +834,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     return page(
       response,
       status,
-      taskPage(chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)), {
+      taskPage(
+        paneProject === null && !unscopedMode
+          ? chromeFor(paneProject, "tasks")
+          : chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)),
+        {
         task: found,
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
@@ -1083,6 +1092,57 @@ export function createDecisionServer(options: ServeOptions): Server {
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
+    }
+
+    if (url.pathname === "/routines/add") {
+      // A standing order files into the OPEN project — never a typed path,
+      // so the ceiling question never even arises — and lands on its own
+      // screen where the approval step-up already lives: filing is cheap,
+      // the yes is the ceremony.
+      const project = projectOf(who, request);
+      if (project === undefined || project === null) {
+        return refuse(response, who, 403, "open a project first — a standing order lives somewhere specific");
+      }
+      if (who.via === "cookie") {
+        const seen = body.get("projectRevision");
+        if (seen !== null && seen !== String(who.session.projectRevision)) {
+          return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", "/routines");
+        }
+      }
+      const name = (body.get("name") ?? "").trim();
+      const ceilingGiven = (body.get("ceiling") ?? "").trim();
+      const terms: RoutineTerms = {
+        repo: project,
+        goal: (body.get("goal") ?? "").trim(),
+        outOfScope: (body.get("not") ?? "").trim() || null,
+        touches: (body.get("touches") ?? "").split(/[\n,]/).map(one => one.trim()).filter(one => one !== ""),
+        requirements: [],
+        schedule: (body.get("schedule") ?? "").trim(),
+        singleFlight: true,
+        costCeilingUsd: ceilingGiven === "" ? null : Number(ceilingGiven),
+      };
+      const problems = validateRoutineTerms(terms);
+      if (!ROUTINE_NAME.test(name)) {
+        problems.unshift({ field: "name", problem: "lowercase letters, digits, and dashes — it becomes each instance's id" });
+      }
+      if (problems.length > 0) {
+        const tracks = store.routineTracks(project, now).filter(track => visible(track.routine.repo));
+        return page(response, 400, routinesPage(chromeFor(project, "routines"), tracks, {
+          csrf: who.via === "cookie" ? who.session.csrf : "",
+          revision: who.via === "cookie" ? who.session.projectRevision : 0,
+          problem: problems.map(one => `${one.field}: ${one.problem}`).join(" · "),
+        }));
+      }
+      const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, now);
+      if (!created.ok) {
+        const tracks = store.routineTracks(project, now).filter(track => visible(track.routine.repo));
+        return page(response, 409, routinesPage(chromeFor(project, "routines"), tracks, {
+          csrf: who.via === "cookie" ? who.session.csrf : "",
+          revision: who.via === "cookie" ? who.session.projectRevision : 0,
+          problem: `a routine named ${name} already exists`,
+        }));
+      }
+      return redirect(response, `/routines/${created.id}`);
     }
 
     const routineAct = /^\/routines\/([0-9]{1,15})\/(approve|pause|resume|run-now)$/.exec(url.pathname);
@@ -2258,7 +2318,7 @@ function boardBody(
       `<span class="t"><span class="dot dot-ok pulse"></span>${escape(card.title)}</span>` +
       `<span class="meta">${escape(claim.runner)} \u00b7 ${minutes}m elapsed${
         claim.model === null ? " \u00b7 preparing workspace" : ` \u00b7 ${escape(claim.model)}`
-      }${card.attempt === null ? "" : ` \u00b7 attempt ${card.attempt}`}${chip(card.repo)}</span>` +
+      }${claim.provider !== null && claim.provider !== "claude" ? ` \u00b7 ${escape(claim.provider)}` : ""}${card.attempt === null ? "" : ` \u00b7 attempt ${card.attempt}`}${chip(card.repo)}</span>` +
       (claim.branch === null
         ? ""
         : `<span class="mono meta">${escape(claim.branch)}${workspace === null ? "" : ` \u00b7 ${escape(workspace)}`}</span>`) +
@@ -2443,8 +2503,30 @@ function trackRow(track: Track, all: boolean): string {
   );
 }
 
-function routinesPage(chrome: Chrome, tracks: Track[], now: Date): string {
-  void now;
+function routinesPage(
+  chrome: Chrome,
+  tracks: Track[],
+  form: { csrf: string; revision: number; problem: string | null },
+): string {
+  const capture =
+    chrome.project === null
+      ? ""
+      : [
+          `<h2>file a standing order</h2>`,
+          form.problem === null ? "" : `<div class="problem">${escape(form.problem)}</div>`,
+          `<form method="post" action="/routines/add" class="card">`,
+          `<input type="hidden" name="csrf" value="${escape(form.csrf)}">`,
+          `<input type="hidden" name="projectRevision" value="${form.revision}">`,
+          `<label>name <span class="meta">(lowercase-with-dashes — it names each instance)</span><input type="text" name="name" placeholder="nightly-deps" maxlength="41"></label>`,
+          `<label>goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2"></textarea></label>`,
+          `<label>not this <span class="meta">(optional)</span><input type="text" name="not"></label>`,
+          `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches"></label>`,
+          `<label>schedule <span class="meta">(every:&lt;minutes&gt; or daily:&lt;HH:MM&gt; UTC)</span><input type="text" name="schedule" placeholder="daily:03:30"></label>`,
+          `<label>budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem"></label>`,
+          `<button type="submit">file it \u2192 approve the standing order next</button>`,
+          `<p class="meta">filing is cheap — nothing fires until you approve the template on the next screen, password and all</p>`,
+          `</form>`,
+        ].join("\n");
   const list =
     tracks.length === 0
       ? `<p class="meta">No standing orders${chrome.project === null ? "" : " in this project"}. File one from the terminal:</p>` +
@@ -2455,6 +2537,7 @@ function routinesPage(chrome: Chrome, tracks: Track[], now: Date): string {
     `<h1>routines</h1>`,
     `<p class="hint">standing orders — repeating work that fires on a schedule, each instance building alone in its own workspace; anything needing you bubbles to the inbox</p>`,
     list,
+    capture,
   ].join("\n"), { chrome });
 }
 

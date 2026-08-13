@@ -46,6 +46,8 @@ export type BoardFacts = {
     worktree: string | null;
     /** The run's role when one exists — a planning session reads differently. */
     role: string | null;
+    /** Which harness is spending — worn on the card when it is not claude. */
+    provider: string | null;
   } | null;
   /** The top-precedence live hold: operator > backoff > decision > incident. */
   hold: { ownerKind: "operator" | "decision" | "incident" | "backoff"; until: string | null } | null;

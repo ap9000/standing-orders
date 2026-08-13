@@ -1610,6 +1610,45 @@ describe("routines — standing orders on the console", () => {
     expect(after).toContain("failed");
   });
 
+  test("filing from the console lands on the approval ceremony; a bad definition names every problem", async () => {
+    const cookie = await login();
+    const screen = await (await fetch(url("/routines"), { headers: { cookie } })).text();
+    expect(screen).toContain("file a standing order");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(screen)?.[1] as string;
+    const revision = /name="projectRevision" value="([0-9]+)"/.exec(screen)?.[1] as string;
+
+    // Every problem at once, stored nothing.
+    const bad = await fetch(url("/routines/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, projectRevision: revision, name: "Bad Name", goal: "", schedule: "hourly" }),
+    });
+    expect(bad.status).toBe(400);
+    const badHtml = await bad.text();
+    expect(badHtml).toContain("name:");
+    expect(badHtml).toContain("goal:");
+    expect(badHtml).toContain("schedule:");
+    expect(store.listRoutines(null)).toHaveLength(0);
+
+    // A good one lands on its screen — where the step-up already waits.
+    const made = await fetch(url("/routines/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({
+        csrf, projectRevision: revision,
+        name: "weekly-notes", goal: "Refresh the notes", schedule: "daily:03:30",
+      }),
+      redirect: "manual",
+    });
+    expect(made.status).toBe(303);
+    const where = made.headers.get("location") as string;
+    const detail = await (await fetch(url(where), { headers: { cookie } })).text();
+    expect(detail).toContain("BUILDS IT WITHOUT ASKING");
+    expect(detail).toContain("daily at 03:30 UTC");
+    // Filed into the OPEN project, not a typed path.
+    expect(store.routineByName("weekly-notes")?.repo).toBe("/repo/main");
+  });
+
   test("/routines names the empty state and shows the ledger once firings exist", async () => {
     const cookie = await login();
     const empty = await (await fetch(url("/routines"), { headers: { cookie } })).text();
@@ -1987,6 +2026,16 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
       expect(html).not.toMatch(/<form[^>]*requeue/);
       // The badge counted 3 admitted approvals, never the secret one.
       expect(html).toMatch(/class="count badge badge-open">3/);
+
+      // Tapping a row lands on the task itself — the roll-up hands off to
+      // the detail, not to the project picker. The row's own ceiling check
+      // is the authorization; the cross-project list pane never renders.
+      const detail = await fetch(`${base}/t/t-main`, { headers: { cookie }, redirect: "manual" });
+      expect(detail.status).toBe(200);
+      const detailHtml = await detail.text();
+      expect(detailHtml).toContain("approve exactly this:");
+      expect(detailHtml).not.toContain("t-side"); // no list pane leaking other projects
+      expect((await fetch(`${base}/t/t-secret`, { headers: { cookie } })).status).toBe(404);
 
       // Everything else still requires opening a project.
       const board = await fetch(`${base}/board`, { headers: { cookie }, redirect: "manual" });
