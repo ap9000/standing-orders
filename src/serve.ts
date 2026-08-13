@@ -346,6 +346,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         200,
         homePage(chromeFor(project, "morning"), {
+          csrf: who.via === "cookie" ? who.session.csrf : "",
           taskCount: store.listTasksScoped(project, undefined, 1, null).length,
           repo: project,
           summary: overnight(store.runsSinceScoped(since, project)),
@@ -1431,6 +1432,7 @@ function loginPage(problem: string | null): string {
 }
 
 function homePage(chrome: Chrome, data: {
+  csrf: string;
   taskCount: number;
   repo: string | null;
   building: { taskId: string; runner: string; claimedAt: string; expiresAt: string }[];
@@ -1473,11 +1475,14 @@ function homePage(chrome: Chrome, data: {
   const incidents =
     data.incidents.length === 0
       ? ""
-      : `<h2>incidents</h2><p class="hint">builds that stopped and need a person — open the task to resolve or retry</p>` +
+      : `<h2>incidents</h2><p class="hint">builds that stopped and need a person — resolve here, or open the task to retry it</p>` +
         data.incidents
           .map(
             one =>
-              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> — ${escape(one.kind)}</p>`,
+              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> — ${escape(one.kind)}` +
+              `<span class="right"><form method="post" action="/i/${one.id}/resolve" class="inline">` +
+              `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+              `<button type="submit">resolve</button></form></span></p>`,
           )
           .join("\n");
 
@@ -1489,8 +1494,8 @@ function homePage(chrome: Chrome, data: {
           .map(
             one =>
               `<p class="row"><a href="${taskHref(one.id)}">${escape(one.id)}</a> waits on ${one.blockedBy
-                .map(blocker => escape(blocker))
-                .join(", ")}</p>`,
+                .map(blocker => `<a href="${taskHref(blocker)}">${escape(blocker)}</a>`)
+                .join(", ")} <span class="right meta">open the blocker to retry it</span></p>`,
           )
           .join("\n");
 
@@ -1501,7 +1506,7 @@ function homePage(chrome: Chrome, data: {
         ? ""
         : `<h2>missing requirements</h2><p class="hint">tools or credentials builds need — checked before any money is spent</p>` +
           data.gaps
-            .map(gap => `<p class="row">${escape(gap.key)} — ${escape(gap.state)}</p>`)
+            .map(gap => `<p class="row"><a href="/caps">${escape(gap.key)}</a> — ${escape(gap.state)}<span class="right meta">how to fix →</span></p>`)
             .join("\n") +
           ``;
 
