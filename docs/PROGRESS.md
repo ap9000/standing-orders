@@ -7,9 +7,12 @@ lineage (a night order IS a standing order), and costs almost nothing at
 this exact moment — the npm name was still unclaimed. Swept: package
 name and bin, every command example and console surface (the brand reads
 standing·orders), env vars (STANDING_ORDERS_*), branch namespaces
-(standing-orders/<task>). Kept: the NIGHTORDERS-* protocol markers
-(invisible plumbing, per the de-night decision) and night.test.ts.
-Continuity: databasePath, evidenceRoot, and repos.json all fall back to
+(standing-orders/<task>). SECOND PASS same day, per the operator ("all
+under one name"): the protocol markers are STANDING-ORDERS-PARK/DONE/
+PLAN-* (the worktree sweep still recognizes pre-rename NIGHTORDERS-*
+leftovers — cleanup has no vintage), unattended.test.ts carries the E2E
+(née night.test.ts), and the working folder itself is
+~/Documents/standing-orders. Continuity: databasePath, evidenceRoot, and repos.json all fall back to
 their nightorders-named homes when no new-name file exists — the rename
 orphans nobody. Earlier entries below keep the old name: they are
 history, and history happened under it.
@@ -159,7 +162,7 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | `daemon` — the loop as a service, no crontab (operator request 2026-08-12) | **done** | `daemon install/status/uninstall/logs`: writes launchd (macOS) or systemd --user (Linux) units running `watch --token-file`; the runner token lives 0600 beside the database, never in the unit; crash-only KeepAlive with throttle, restarts made safe by incarnation recovery; unsupported platforms refuse with instructions; supervisor calls scripted in tests; Windows added same day — Task Scheduler XML (logon trigger, restart-on-failure, IgnoreNew singleton, cmd log redirection) via schtasks, honestly noted as not yet exercised on physical Windows |
 | Publication grant + durable push/PR intent | **done** | schema v5 (additive): an authenticated publication grant separate from tracker writes — `push-branch` and `open-pr` as distinct capabilities, exact GitHub repo/remote/head-prefix/base, task selector, draft mode, terms printed before `--yes`, revocation immediate; the intent is written **inside the fenced completion transaction** (claim's `inTransaction` now joins the store's reentrant transact) so "done" and "this must reach a PR" cannot come apart; the worker pushes the exact accepted SHA (`git push remote sha:refs/heads/head`), then adopts any existing PR on that head before daring to create (`gh pr list` → `create --body-file`, never `--body` — the body quotes an agent), every phase durable and crash-retryable, `MAX_PUBLISH_ATTEMPTS` then a durable failure that pages; the PR body regenerates byte-identical from run records (base/head SHA, answered decisions, conclusion fenced as prose so `Fixes #…` gains no semantics); `no-change` publishes nothing; CLI `publish [grant\|revoke\|status]`, and watch publishes in the same window it builds |
 | CI observation + watch-episode briefing | **done** | `observeChecks` reads the structured rollup and exact head OID for every PR this plane opened (`gh pr view --json`), reusing the brief's passing/failing/running/none semantics plus not-read for transport failure; CI episodes keyed `ci:<pr>:<headOid>` — a red head pages once, resolves when that exact head turns green or a newer commit buries it, and `none`/`running`/not-read are never called green (an unread rollup neither pages nor resolves); watch observes on the reconcile cadence. The night is a row: `watch_episode` (repo, runner, incarnation, window, totals) written at start and sealed at exit — a crash leaves `ended_at` NULL, which is itself data; `brief --latest-watch` bounds the morning to exactly that episode's runner and window instead of "the last 24 hours" |
-| Twelve-task E2E | **done** | night.test.ts — one fake-clocked night against real git, built-in backend only (stated; external dispatch deferred): clean builds, honest no-change, a park answered mid-night via `decide`, three strikes → attempts-exhausted → authenticated requeue → built, a timeout that backs off and recovers, a dependency chain, a scope approved while the night runs, duplicate empty passes refusing idempotently; the zero-token invariant asserted as arithmetic (provider spawns == stamped runs, exactly); eleven publications pushed and opened against scripted gh; the brief telling the same story from the same rows (12 built, no decisions, no incidents, nothing stranded) |
+| Twelve-task E2E | **done** | unattended.test.ts — one fake-clocked night against real git, built-in backend only (stated; external dispatch deferred): clean builds, honest no-change, a park answered mid-night via `decide`, three strikes → attempts-exhausted → authenticated requeue → built, a timeout that backs off and recovers, a dependency chain, a scope approved while the night runs, duplicate empty passes refusing idempotently; the zero-token invariant asserted as arithmetic (provider spawns == stamped runs, exactly); eleven publications pushed and opened against scripted gh; the brief telling the same story from the same rows (12 built, no decisions, no incidents, nothing stranded) |
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
@@ -435,7 +438,7 @@ reconcile/decide/opener/task prose reframed ("builds unattended", "last
 window", "No decisions were parked"); README and DESIGN now position for
 long-running work nobody is watching — the captain's night orders stay
 as the name's origin, one paragraph, not the frame. Brand, protocol
-markers (`NIGHTORDERS-*`), and `night.test.ts` deliberately keep their
+markers (`NIGHTORDERS-*`), and `unattended.test.ts` deliberately keep their
 names. 714 tests.
 
 ## Console v3 — workflow tabs (2026-08-13, Codex-reviewed)

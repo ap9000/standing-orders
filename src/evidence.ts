@@ -35,11 +35,11 @@ import type { Artifact, Store } from "./store.js";
 import type { ExecResult } from "./exec.js";
 
 /** The park mailbox pattern. Each run's actual name carries a nonce; see `mailboxName`. */
-export const MAILBOX_PREFIX = "NIGHTORDERS-PARK-";
+export const MAILBOX_PREFIX = "STANDING-ORDERS-PARK-";
 /** The terminal handoff: how every non-parking attempt says how it ended. */
-export const HANDOFF_PREFIX = "NIGHTORDERS-DONE-";
+export const HANDOFF_PREFIX = "STANDING-ORDERS-DONE-";
 /** The planner's terminal handoff: the proposed scope and the plan document. */
-export const PLAN_PREFIX = "NIGHTORDERS-PLAN-";
+export const PLAN_PREFIX = "STANDING-ORDERS-PLAN-";
 export const MAILBOX_SUFFIX = ".json";
 
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
@@ -72,10 +72,15 @@ export function looksLikeMailbox(name: string): boolean {
   return name.startsWith(MAILBOX_PREFIX) && name.endsWith(MAILBOX_SUFFIX);
 }
 
-/** Every protocol file the sweep must never let an old attempt leave behind. */
+/** Every protocol file the sweep must never let an old attempt leave behind.
+ * The pre-rename NIGHTORDERS- prefix stays recognized here — a worktree cut
+ * down before 2026-08-13 may still hold one, and cleanup has no vintage. */
 export function looksLikeProtocolFile(name: string): boolean {
   return (
-    (name.startsWith(MAILBOX_PREFIX) || name.startsWith(HANDOFF_PREFIX) || name.startsWith(PLAN_PREFIX)) &&
+    (name.startsWith(MAILBOX_PREFIX) ||
+      name.startsWith(HANDOFF_PREFIX) ||
+      name.startsWith(PLAN_PREFIX) ||
+      name.startsWith("NIGHTORDERS-")) &&
     name.endsWith(MAILBOX_SUFFIX)
   );
 }

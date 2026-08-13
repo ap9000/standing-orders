@@ -134,8 +134,8 @@ describe("repairPrompt", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
 
-    const prompt = repairPrompt(result.problems, "NIGHTORDERS-PARK-abc.json");
+    const prompt = repairPrompt(result.problems, "STANDING-ORDERS-PARK-abc.json");
     expect(prompt).toContain('"ghost" does not match any option id');
-    expect(prompt).toContain("Rewrite NIGHTORDERS-PARK-abc.json only");
+    expect(prompt).toContain("Rewrite STANDING-ORDERS-PARK-abc.json only");
   });
 });

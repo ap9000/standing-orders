@@ -22,8 +22,8 @@ const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false }
 const T0 = new Date("2026-08-12T22:00:00.000Z");
 const SAID = JSON.stringify({ result: "planning" });
 
-const PLAN_FILE = /NIGHTORDERS-PLAN-[0-9a-f]{16}\.json/;
-const PARK_FILE = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/;
+const PLAN_FILE = /STANDING-ORDERS-PLAN-[0-9a-f]{16}\.json/;
+const PARK_FILE = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/;
 
 describe("planning mode, against real git", () => {
   let base: string;
@@ -122,7 +122,7 @@ describe("planning mode, against real git", () => {
     const cwd = options?.cwd ?? "";
     const prompt = String(args[args.indexOf("-p") + 1] ?? "");
     prompts.push(prompt);
-    const done = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
     if (cwd !== "") {
       await writeFile(join(cwd, "limiter.ts"), "export const limited = true;\n");
       if (done !== undefined) {

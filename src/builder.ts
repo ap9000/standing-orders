@@ -974,7 +974,7 @@ function fence(text: string): string {
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
     // A quoted protocol-shaped name is broken VISIBLY, so untrusted text
     // can never collide with the real nonce-bearing filename that follows.
-    .replace(/NIGHTORDERS-/g, "NIGHTORDERS[quoted]-")
+    .replace(/STANDING-ORDERS-/g, "NIGHTORDERS[quoted]-")
     .trim()}`;
 }
 
@@ -1008,7 +1008,7 @@ async function commit(
       line =>
         line.trim() !== "" &&
         !line.trimEnd().endsWith(LEASE_MARKER) &&
-        !line.includes("NIGHTORDERS-"),
+        !line.includes("STANDING-ORDERS-"),
     );
   if (changed.length === 0) {
     return { ok: true, committed: false, branch, summary };
@@ -1016,7 +1016,7 @@ async function commit(
 
   const add = await git(
     GIT,
-    ["add", "-A", "--", ".", `:!${LEASE_MARKER}`, ":!NIGHTORDERS-*"],
+    ["add", "-A", "--", ".", `:!${LEASE_MARKER}`, ":!STANDING-ORDERS-*", ":!NIGHTORDERS-*"],
     { cwd: worktree },
   );
   if (add.code !== 0) return { ok: false, reason: "commit-failure", message: firstLine(add.stderr) };

@@ -36,7 +36,7 @@ const conclude = (
   conclusion = "Added the guard and a test for it.",
 ): void => {
   const prompt = args[args.indexOf("-p") + 1] ?? "";
-  const name = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+  const name = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
   if (name !== undefined && options?.cwd !== undefined) {
     writeSync2(join2(options.cwd, name), JSON.stringify({ version: 1, status, conclusion }));
   }
@@ -412,7 +412,7 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain("never commit to main");
     // The judgement-call escape hatch is the park protocol, not prose: the
     // brief names this attempt's own mailbox, nonce and all.
-    expect(prompt).toMatch(/Park it:[\s\S]*NIGHTORDERS-PARK-[0-9a-f]{16}\.json/);
+    expect(prompt).toMatch(/Park it:[\s\S]*STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/);
     expect(prompt).toContain('"reversible": true or false');
   });
 
@@ -1185,7 +1185,7 @@ describe("the park", () => {
     (payload: unknown, shape: "file" | "symlink" = "file"): Runner =>
     async (_file, args, options) => {
       const prompt = args[args.indexOf("-p") + 1] ?? "";
-      const name = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      const name = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
       if (name === undefined) throw new Error("the brief named no mailbox");
       const cwd = options?.cwd ?? worktree;
       if (shape === "symlink") {
@@ -1267,7 +1267,7 @@ describe("the park", () => {
     expect(result.parked.decision.question).toBe("Fail open or fail closed on timeout?");
 
     // The mailbox left the worktree — ingested once, then gone.
-    expect(readdirSync(worktree).filter(name => name.startsWith("NIGHTORDERS-PARK-"))).toHaveLength(0);
+    expect(readdirSync(worktree).filter(name => name.startsWith("STANDING-ORDERS-PARK-"))).toHaveLength(0);
     // Machine-captured evidence: the payload, the diff, the inventory.
     const kinds = store.artifactsFor(runId).map(artifact => artifact.kind).sort();
     expect(kinds).toEqual(["diff", "park-payload", "status"]);
@@ -1323,7 +1323,7 @@ describe("the park", () => {
   test("stale park-shaped files are swept to quarantine, never ingested, never committed", async () => {
     // A mailbox a cut-down attempt left behind. Whatever it says, the lease
     // that could have vouched for it is gone.
-    writeFileSync(join(worktree, "NIGHTORDERS-PARK-00000000deadbeef.json"), JSON.stringify(decision));
+    writeFileSync(join(worktree, "STANDING-ORDERS-PARK-00000000deadbeef.json"), JSON.stringify(decision));
 
     const agent: Runner = async (_file, args, options) => {
     conclude(args, options);
@@ -1333,7 +1333,7 @@ describe("the park", () => {
 
     // The stale park did not become a decision — the build ran normally.
     expect(result).toMatchObject({ ok: true, committed: true });
-    expect(existsSync(join(worktree, "NIGHTORDERS-PARK-00000000deadbeef.json"))).toBe(false);
+    expect(existsSync(join(worktree, "STANDING-ORDERS-PARK-00000000deadbeef.json"))).toBe(false);
     // Its bytes survive in quarantine under this run's evidence.
     const quarantined = readdirSync(join(evidence, String(runId))).filter(name =>
       name.startsWith("quarantine-"),
@@ -1341,7 +1341,7 @@ describe("the park", () => {
     expect(quarantined).toHaveLength(1);
     // And the commit staged around every protocol-shaped name either way.
     const add = gitCalls.find(args => args.includes("add"));
-    expect(add?.some(arg => arg.includes("NIGHTORDERS-"))).toBe(true);
+    expect(add?.some(arg => arg.includes("STANDING-ORDERS-"))).toBe(true);
   });
 
   test("a build without an open run cannot spend at all", async () => {
@@ -1391,7 +1391,7 @@ describe("bounded repair", () => {
 
   const mailboxFrom = (args: readonly string[]): string => {
     const prompt = args[args.indexOf("-p") + 1] ?? "";
-    const name = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const name = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
     if (name === undefined) throw new Error("no mailbox named in the prompt");
     return name;
   };

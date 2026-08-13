@@ -45,7 +45,7 @@ describe("routines, against real git", () => {
   const buildingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-    const done = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
     if (cwd !== "") {
       await writeFile(join(cwd, `work-${Date.now()}.md`), "refreshed\n");
       if (done !== undefined) {

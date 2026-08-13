@@ -2,10 +2,10 @@
  * The M4 acceptance sentence, executable: queue twelve, sleep, wake to PRs —
  * with near-zero idle spend, every failure typed, and nothing lost between.
  *
- * One fake-clocked night against real git: clean builds, a stated
- * no-change, a park answered by a person mid-night, three strikes and an
+ * One fake-clocked unattended stretch against real git: clean builds, a stated
+ * no-change, a park answered by a person mid-stretch, three strikes and an
  * authenticated requeue, a transient timeout that backs off and recovers,
- * a dependency chain, a scope approved while the night runs, and a
+ * a dependency chain, a scope approved while the stretch runs, and a
  * duplicate pass that finds nothing to do twice. The zero-token invariant
  * is asserted as arithmetic: provider spawns == runs stamped before
  * spending, exactly.
@@ -13,7 +13,7 @@
  * Built-in backend only, stated: external-backend dispatch is deferred in
  * writing (PROGRESS.md), so the twelve live in the built-in queue. The
  * Telegram disconnect path is proved in telegram.test.ts (the follower's
- * backoff); this night answers its park through the CLI.
+ * backoff); this stretch answers its park through the CLI.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
@@ -49,8 +49,8 @@ describe("the night: twelve tasks, one fake clock", () => {
     const cwd = options?.cwd ?? "";
     const prompt = args[args.indexOf("-p") + 1] ?? "";
     const taskId = /\bt-\d\d\b/.exec(prompt)?.[0] ?? "?";
-    const done = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
-    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
 
     const conclude = async (status: "completed" | "no-change") => {
       if (done !== undefined && cwd !== "") {

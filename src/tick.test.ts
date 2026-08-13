@@ -32,7 +32,7 @@ const concludeDone = async (
   conclusion = "Added the guard and a test for it.",
 ): Promise<void> => {
   const prompt = args[args.indexOf("-p") + 1] ?? "";
-  const name = /NIGHTORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+  const name = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
   // An empty cwd would write into the checkout running the tests.
   if (name !== undefined && cwd !== "") {
     await writeFile(join(cwd, name), JSON.stringify({ version: 1, status, conclusion }));
@@ -901,7 +901,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
   const parkingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     const prompt = args[args.indexOf("-p") + 1] ?? "";
-    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
     if (mailbox === undefined) throw new Error("the brief named no mailbox");
     // Work in progress first — the park must preserve it, uncommitted.
     await writeFile(join(cwd, "half-done.ts"), "// the part before the question\n");
@@ -925,7 +925,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
   const babblingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     const prompt = args[args.indexOf("-p") + 1] ?? "";
-    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
     if (mailbox !== undefined) {
       await writeFile(join(cwd, mailbox), JSON.stringify({ urgency: "blocking", recap: "er" }));
     }
@@ -1038,7 +1038,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
     const status = await exec("git", ["status", "--porcelain"], { cwd: worktree as string });
     expect(status.stdout).toContain("half-done.ts");
     // And the mailbox is gone — ingested once, not left to confuse anyone.
-    expect(status.stdout).not.toContain("NIGHTORDERS-PARK-");
+    expect(status.stdout).not.toContain("STANDING-ORDERS-PARK-");
   });
 
   test("a second pass does not double-park: the held task is simply not ready", async () => {
@@ -1096,7 +1096,7 @@ describe("decide, end to end — the morning answers and the machine hears it", 
   const parkingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     const prompt = args[args.indexOf("-p") + 1] ?? "";
-    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
     if (mailbox === undefined) throw new Error("the brief named no mailbox");
     await writeFile(
       join(cwd, mailbox),
@@ -1269,7 +1269,7 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     const babbling: Runner = async (_file, args, options) => {
       const cwd = options?.cwd ?? "";
       const prompt = args[args.indexOf("-p") + 1] ?? "";
-      const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
       if (mailbox !== undefined) await writeFile(join(cwd, mailbox), "not even json");
       return { ...OK, stdout: JSON.stringify({ result: "tried" }) };
     };
@@ -1307,7 +1307,7 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
   const parkingAgent: Runner = async (_file, args, options) => {
     const cwd = options?.cwd ?? "";
     const prompt = args[args.indexOf("-p") + 1] ?? "";
-    const mailbox = /NIGHTORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
     if (mailbox === undefined) throw new Error("the brief named no mailbox");
     await writeFile(
       join(cwd, mailbox),
