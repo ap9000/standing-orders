@@ -1627,3 +1627,42 @@ describe("routines — standing orders on the console", () => {
     expect(screen).toContain("weekly-");
   });
 });
+
+describe("the agents card — configuration, readable at a glance", () => {
+  test("says what each phase runs on, who chose it, and that the browser cannot change it", async () => {
+    const store = openStore(":memory:");
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-agents-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPhaseConfig("/repo/main", "plan", "claude", "opus", "alex", T0);
+    const server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const login = await fetch(`${base}/login`, {
+        method: "POST",
+        body: new URLSearchParams({ name: "alex", token: added.token }),
+        redirect: "manual",
+      });
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] as string;
+      const html = await (await fetch(`${base}/system`, { headers: { cookie } })).text();
+      // Plain sentences, provenance in words, the honest cost note — and
+      // no form anywhere near it: changing routing is the terminal's act.
+      expect(html).toContain("agents");
+      expect(html).toContain("chosen for this project by alex");
+      expect(html).toContain("set for the whole installation by alex");
+      expect(html).toContain("gpt-5-codex");
+      expect(html).toContain("no dollar costs");
+      expect(html).toContain("the default — nothing configured"); // repair, untouched
+      expect(html).toContain("nightorders config");
+      expect(html).not.toMatch(/<form[^>]*config/);
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      store.close();
+      rmSync(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+});

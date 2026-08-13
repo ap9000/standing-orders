@@ -844,3 +844,19 @@ describe("providers — identification without spend", () => {
     expect(probed.every(one => one[1] === "--version" || one[1] === "login")).toBe(true);
   });
 });
+
+describe("the CLI router", () => {
+  test("every verb the operate dispatcher knows is reachable from the binary", async () => {
+    // routine/config/providers shipped reachable only through runOperate —
+    // the real `nightorders` binary refused them (found by the console
+    // polish pass). The two lists must never drift again.
+    const { readFileSync } = await import("node:fs");
+    const operate = readFileSync("src/operate.ts", "utf8");
+    const cli = readFileSync("src/cli.ts", "utf8");
+    const body = operate.slice(operate.indexOf("function dispatch("), operate.indexOf("\n}", operate.indexOf("function dispatch(")));
+    const dispatched = [...body.matchAll(/case "([a-z-]+)":/g)].map(one => one[1] as string);
+    const routed = /const OPERATE_COMMANDS = new Set\(\[([^\]]+)\]\)/.exec(cli)?.[1] ?? "";
+    const missing = [...new Set(dispatched)].filter(verb => !routed.includes(`"${verb}"`));
+    expect(missing).toEqual([]);
+  });
+});

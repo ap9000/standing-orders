@@ -79,6 +79,7 @@ import { tally, spendLine } from "./summary.js";
 import { classify } from "./board.js";
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule } from "./routine.js";
+import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import type { Routine } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -479,6 +480,19 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         200,
         systemPage(chromeFor(project, "system"), {
+          agents: (["plan", "build", "repair"] as const).map(phase => {
+            const answer = resolvePhaseAgent(store, phase, project, {});
+            const row =
+              (project === null ? null : store.phaseConfig(project, phase)) ??
+              store.phaseConfig(INSTALLATION_SCOPE, phase);
+            return {
+              phase,
+              ...(answer.ok
+                ? { provider: answer.spec.provider, model: answer.spec.model, source: answer.source }
+                : { problem: answer.problem }),
+              setBy: row?.updatedBy ?? null,
+            };
+          }),
           building: store.liveClaims(project, now),
           runners: store.listRunners(),
           worktrees: store.listWorktrees().filter(one => project === null || sameRepo(one.repo, project)),
@@ -1937,6 +1951,14 @@ function inboxPage(chrome: Chrome, data: {
 
 /** System: the machinery — workers, background service, workspaces. */
 function systemPage(chrome: Chrome, data: {
+  agents: {
+    phase: "plan" | "build" | "repair";
+    provider?: string;
+    model?: string | null;
+    source?: "pinned" | "flag" | "project" | "installation" | "default";
+    problem?: string;
+    setBy: string | null;
+  }[];
   building: { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null }[];
   runners: Runner[];
   worktrees: WorktreeRow[];
@@ -1977,9 +1999,43 @@ function systemPage(chrome: Chrome, data: {
             : `last run: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${escape(when(data.episode.endedAt))}`
         }</span></div>`;
   const cards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
+  const PHASE_SAID: Record<string, string> = {
+    plan: "planning sessions ask questions and draft the plan you approve",
+    build: "builds do the work, unattended, inside the approved scope",
+    repair: "repair turns mend a malformed handoff in the same session",
+  };
+  const agentLines = data.agents
+    .map(one => {
+      if (one.problem !== undefined) {
+        return `<p class="row"><span class="mono">${escape(one.phase)}</span> <span class="badge badge-failed">misconfigured</span> <span class="meta">${escape(one.problem)}</span></p>`;
+      }
+      const who =
+        one.source === "project"
+          ? `chosen for this project${one.setBy === null ? "" : ` by ${escape(one.setBy)}`}`
+          : one.source === "installation"
+            ? `set for the whole installation${one.setBy === null ? "" : ` by ${escape(one.setBy)}`}`
+            : "the default — nothing configured";
+      const dollars = one.provider === "claude" ? "" : ` · <span title="this provider reports tokens, not dollars — its runs land as unmeasured spend">no dollar costs</span>`;
+      return (
+        `<p class="row"><span class="mono">${escape(one.phase)}</span> ` +
+        `<strong>${escape(one.provider ?? "")}</strong>` +
+        `${one.model === null || one.model === undefined ? ` <span class="meta">(its default model)</span>` : ` · <span class="mono">${escape(one.model)}</span>`}` +
+        `<span class="right meta">${who}${dollars}</span></p>` +
+        `<p class="meta" style="margin-top:0">${PHASE_SAID[one.phase] ?? ""}</p>`
+      );
+    })
+    .join("\n");
+  const agentsCard =
+    `<h2>agents</h2>` +
+    `<p class="meta">who does the thinking, phase by phase — changing this is an authenticated act at the terminal (<code>nightorders config</code>), never a browser click</p>` +
+    `<div class="card">${agentLines}` +
+    `<p class="meta">repair always stays on the provider that built — only its model can differ. A routine pins its agent the moment it fires; nothing after that can re-route it.</p>` +
+    `</div>`;
+
   return shell("system", [
     `<h1>system</h1>`,
     `<p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p>`,
+    agentsCard,
     cards.length === 0
       ? `<p class="meta">no worker machine registered yet \u2014 <code>nightorders runner register &lt;name&gt;</code>, then <code>nightorders daemon install</code> keeps the background service running</p>`
       : `<div class="cards">${cards.join("")}</div>`,

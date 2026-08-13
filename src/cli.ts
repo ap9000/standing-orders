@@ -184,6 +184,9 @@ const OPERATE_COMMANDS = new Set([
   "bridge",
   "publish",
   "reconcile",
+  "routine",
+  "config",
+  "providers",
 ]);
 
 /** binSource exists so tests can exercise linking without depending on a build. */
