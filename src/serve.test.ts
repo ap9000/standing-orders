@@ -1349,4 +1349,26 @@ describe("the rolled-up board — every project, one ceiling", () => {
     expect(bare.status).toBe(303);
     expect(bare.headers.get("location")).toBe("/projects");
   });
+
+  test("a blocker beyond the ceiling keeps its name but never its state", async () => {
+    store.createTask({ id: "t-waiting", title: "blocked here" }, T0);
+    store.createTask({ id: "t-secret", title: "elsewhere" }, T0);
+    store.placeTask(store.refFor("built-in", "t-waiting").id, "/repo/alpha");
+    store.placeTask(store.refFor("built-in", "t-secret").id, "/repo/forbidden");
+    store.addEdge("t-waiting", "t-secret");
+    store.setTaskState("t-secret", "running", new Date());
+    store.saveScope({
+      taskId: "t-waiting", goal: "wait politely", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "dg-w",
+      approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "dg-w",
+    });
+
+    const cookie = await login();
+    const board = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
+    // The edge belongs to the visible task; the other project's live
+    // status does not travel through it.
+    expect(board).toContain("waits on t-secret");
+    expect(board).not.toContain("waits on t-secret \u2014");
+    expect(board).not.toContain("building now");
+  });
 });

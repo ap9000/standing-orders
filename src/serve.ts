@@ -380,14 +380,32 @@ export function createDecisionServer(options: ServeOptions): Server {
       // database holds. Unplaced work (repo NULL) appears: it dispatches
       // anywhere, so every board honestly owns it.
       const all = url.searchParams.get("scope") === "all";
-      const snapshot = store.boardScoped(all ? null : project, now);
+      // Roll-up admission happens BEFORE the query limit when the ceiling
+      // is an enumerable repo list — unauthorized rows must not consume
+      // the page (Codex round 2, finding 11). Root-based ceilings cannot
+      // be enumerated into SQL; they keep the post-filter alone.
+      const admission =
+        all && ceiling.roots.length === 0 && ceiling.repos.length > 0 ? [...ceiling.repos] : null;
+      const snapshot = store.boardScoped(all ? null : project, now, 200, admission);
       const admitted = all
         ? snapshot.tasks.filter(facts => facts.repo === null || visible(facts.repo))
         : snapshot.tasks;
       const done = all
         ? snapshot.done.filter(row => row.repo === null || visible(row.repo))
         : snapshot.done;
-      const cards = admitted.map(facts => classify(facts, now));
+      // A blocker may live in a repo this server must not speak about —
+      // redact its state before the pure classifier composes a sentence
+      // from it (Codex round 2, finding 12). The dependency's NAME stays:
+      // the edge belongs to the visible task; the other project's live
+      // status does not.
+      const cards = admitted.map(facts =>
+        classify(
+          facts.blockerRepo !== null && !visible(facts.blockerRepo)
+            ? { ...facts, blockerState: null }
+            : facts,
+          now,
+        ),
+      );
       const buildingCount = cards.filter(card => card.lane === "building").length;
       const body = boardBody(
         { cards, done, saturated: snapshot.saturated, now, all, project },
@@ -1812,6 +1830,13 @@ function boardBody(
   const chip = (repo: string | null): string =>
     !data.all || repo === null ? "" : ` <span class="badge">${escape(projectName(repo))}</span>`;
   const CAP = 30;
+  const age = (iso: string): string => {
+    const minutes = Math.max(1, Math.round((data.now.getTime() - new Date(iso).getTime()) / 60_000));
+    if (minutes < 60) return `${minutes}m`;
+    if (minutes < 48 * 60) return `${Math.round(minutes / 60)}h`;
+    return `${Math.round(minutes / (24 * 60))}d`;
+  };
+
   const lane = (
     key: "attention" | "queued" | "waiting" | "building",
     title: string,
@@ -1819,6 +1844,13 @@ function boardBody(
     renderOne: (card: BoardCard) => string,
   ): string => {
     const cards = data.cards.filter(card => card.lane === key);
+    // The longest-stalled card leads the board: attention sorts by how
+    // long it has waited, everything else stays newest-first.
+    if (key === "attention") {
+      cards.sort((a, b) =>
+        (a.stalledSince ?? "9999").localeCompare(b.stalledSince ?? "9999"),
+      );
+    }
     const shown = cards.slice(0, CAP);
     const more = cards.length - shown.length;
     return (
@@ -1835,7 +1867,9 @@ function boardBody(
     `<a class="lane-card" href="${card.href}">` +
     `<span class="t">${escape(card.title)}</span>` +
     `<span class="meta">${escape(card.reason)}${chip(card.repo)}</span>` +
-    `<span class="mono meta">${escape(card.taskId)}</span></a>`;
+    `<span class="mono meta">${escape(card.taskId)}${
+      card.stalledSince === null ? "" : ` \u00b7 waiting ${age(card.stalledSince)}`
+    }</span></a>`;
 
   const building = (card: BoardCard): string => {
     const claim = card.claim;
@@ -1847,7 +1881,7 @@ function boardBody(
       `<span class="t"><span class="dot dot-ok pulse"></span>${escape(card.title)}</span>` +
       `<span class="meta">${escape(claim.runner)} \u00b7 ${minutes}m elapsed${
         claim.model === null ? " \u00b7 preparing workspace" : ` \u00b7 ${escape(claim.model)}`
-      }</span>` +
+      }${card.attempt === null ? "" : ` \u00b7 attempt ${card.attempt}`}${chip(card.repo)}</span>` +
       (claim.branch === null
         ? ""
         : `<span class="mono meta">${escape(claim.branch)}${workspace === null ? "" : ` \u00b7 ${escape(workspace)}`}</span>`) +
@@ -1871,6 +1905,7 @@ function boardBody(
               `<span class="meta">${row.outcome === "no-change" ? "no change needed" : "built"}${
                 row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`
               }${row.costUsd === null ? "" : ` \u00b7 $${row.costUsd.toFixed(2)}`}${pr}</span>` +
+              `${row.handoff === null ? "" : `<span class="meta">${escape(row.handoff.length > 120 ? row.handoff.slice(0, 120) + "\u2026" : row.handoff)}</span>`}` +
               `<span class="mono meta">${escape(row.taskId)}</span></a>`
             );
           })

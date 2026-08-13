@@ -149,6 +149,24 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Card accretion (2026-08-13, Codex round 2: 13 findings; Phase A of three)
+
+The card now answers the question you would ask at its stage. Needs-you
+cards carry the actual question and how long they have stalled ("waiting
+7h"), and the lane sorts oldest-first — truthfully: the snapshot fetches
+an oldest-stalls page alongside the newest page inside one transaction,
+so an old stall cannot fall off a saturated board (finding 11). Queued
+cards show the approved goal — the promise, not "ready". Waiting cards
+name what the blocker is doing ("waits on schema-cleanup — building
+now"), with the state redacted when the blocker lives outside the
+ceiling (finding 12) — the edge's name belongs to the visible task; the
+other project's status does not. Building cards say "attempt 2" when
+strikes exist. Done cards quote the agent's conclusion. Roll-up
+admission now bounds the SQL page itself, not just the render. Phases B
+(planning mode) and C (routines/tracks) are specced with the same
+review's findings as their spec — see the session plan addendum. 718
+tests.
+
 ## The board + the long-running reframe (2026-08-13, Codex-reviewed: 12 findings)
 
 The operator's directives: figure out the spatial work board; get rid of

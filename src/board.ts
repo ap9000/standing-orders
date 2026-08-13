@@ -22,9 +22,17 @@ export type BoardFacts = {
   strikes: number;
   hasScope: boolean;
   approved: boolean;
+  /** First line of the scope's goal — the promise a queued card shows. */
+  goal: string | null;
   /** An unanswered decision's id — open or expired; expiry never answers. */
   openDecisionId: number | null;
+  /** The same decision's question and birth — fetched together with the
+   * id so all three name one decision (Codex round 2, finding 13). */
+  question: string | null;
+  decisionCreatedAt: string | null;
   openIncidents: number;
+  /** Oldest unresolved incident — the honest stall anchor for stopped work. */
+  oldestIncidentAt: string | null;
   /** The newest live claim, with its run's provenance when a run exists. A
    * claim legitimately precedes its run (finding 7) — every run field is
    * nullable and the card says "preparing" until they arrive. */
@@ -39,6 +47,10 @@ export type BoardFacts = {
   hold: { ownerKind: "operator" | "decision" | "incident" | "backoff"; until: string | null } | null;
   /** The first blocker that is not done, when one exists. */
   unmetDependency: string | null;
+  /** That blocker's state — pre-redacted by the caller to null when the
+   * blocker's repo is outside the ceiling (Codex round 2, finding 12);
+   * the classifier never learns what it must not say. */
+  blockerState: string | null;
   /** The first required capability not currently verified, as "kind:name". */
   missingRequirement: string | null;
 };
@@ -53,6 +65,10 @@ export type BoardCard = {
   /** Where the card's link should land. */
   href: string;
   claim: BoardFacts["claim"];
+  /** When this stall began — attention cards only; the lane sorts by it. */
+  stalledSince: string | null;
+  /** The live attempt's ordinal when earlier ones failed — building only. */
+  attempt: number | null;
   overdue: boolean;
 };
 
@@ -68,6 +84,8 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     repo: facts.repo,
     href: `/t/${encodeURIComponent(facts.taskId)}`,
     claim: facts.claim,
+    stalledSince: null as string | null,
+    attempt: null as number | null,
     overdue: false,
   };
 
@@ -75,6 +93,7 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     return {
       ...base,
       lane: "building",
+      attempt: facts.strikes > 0 ? facts.strikes + 1 : null,
       reason:
         facts.claim.model === null && facts.claim.branch === null
           ? `${facts.claim.runner} · preparing workspace`
@@ -82,12 +101,21 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     };
   }
   if (facts.openDecisionId !== null) {
-    return { ...base, lane: "attention", reason: "answer a question", href: `/d/${facts.openDecisionId}` };
+    // The question is the content — the generic verb only when the
+    // snapshot could not carry it.
+    return {
+      ...base,
+      lane: "attention",
+      reason: facts.question ?? "answer a question",
+      href: `/d/${facts.openDecisionId}`,
+      stalledSince: facts.decisionCreatedAt ?? facts.updatedAt,
+    };
   }
   if (facts.state === "failed" || facts.openIncidents > 0) {
     return {
       ...base,
       lane: "attention",
+      stalledSince: facts.oldestIncidentAt ?? facts.updatedAt,
       reason:
         facts.openIncidents > 0
           ? `stopped — ${facts.openIncidents} incident${facts.openIncidents > 1 ? "s" : ""}`
@@ -95,16 +123,16 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     };
   }
   if (!facts.hasScope) {
-    return { ...base, lane: "attention", reason: "write its scope" };
+    return { ...base, lane: "attention", reason: "write its scope", stalledSince: facts.updatedAt };
   }
   if (!facts.approved) {
-    return { ...base, lane: "attention", reason: "approve its scope" };
+    return { ...base, lane: "attention", reason: "approve its scope", stalledSince: facts.updatedAt };
   }
   if (facts.state === "running") {
     // Running with no live claim: the build vanished out from under the
     // state machine (reaped, or the claim expired mid-flight). A repair
     // card, not a silent omission (finding 1).
-    return { ...base, lane: "attention", reason: "build vanished — needs repair" };
+    return { ...base, lane: "attention", reason: "build vanished — needs repair", stalledSince: facts.updatedAt };
   }
   if (facts.hold !== null) {
     const until = facts.hold.until;
@@ -123,7 +151,16 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     return { ...base, lane: "waiting", reason };
   }
   if (facts.unmetDependency !== null) {
-    return { ...base, lane: "waiting", reason: `waits on ${facts.unmetDependency}` };
+    // The blocker's own state changes what waiting means: behind a build
+    // that is running, this is patience; behind one that failed, it is a
+    // problem wearing a calm lane.
+    const doing =
+      facts.blockerState === null
+        ? ""
+        : facts.blockerState === "running"
+          ? " — building now"
+          : ` — ${facts.blockerState}`;
+    return { ...base, lane: "waiting", reason: `waits on ${facts.unmetDependency}${doing}` };
   }
   if (facts.missingRequirement !== null) {
     return { ...base, lane: "waiting", reason: `needs ${facts.missingRequirement}` };
@@ -132,5 +169,6 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
   // capacity, provider quota, the attention budget) are deliberately not
   // per-card claims — the board cannot know which runner would take this
   // task, so the queued lane's header speaks for the fleet (finding 6).
-  return { ...base, lane: "queued", reason: "ready" };
+  // The card at this stage IS the promise: show the goal, not "ready".
+  return { ...base, lane: "queued", reason: facts.goal ?? "ready" };
 }

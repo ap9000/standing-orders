@@ -3794,27 +3794,47 @@ export class Store {
     repo: string | null,
     now: Date,
     cap = 200,
+    admitted: string[] | null = null,
   ): {
-    tasks: BoardFacts[];
+    /** blockerRepo rides along so the caller can redact blockerState
+     * against its ceiling before the pure classifier ever sees it. */
+    tasks: (BoardFacts & { blockerRepo: string | null })[];
     saturated: boolean;
     done: ReturnType<Store["listCompletedWorkScoped"]>;
   } {
     const page = Math.max(1, Math.min(Math.floor(cap), 500));
-    return this.transact(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT task.id, task.title, task.state, task.updated_at, task_ref.strikes, task_ref.repo AS task_repo,
+    // The admission set is applied BEFORE the limit (Codex round 2,
+    // finding 11): in the roll-up, rows outside the ceiling must not
+    // consume the page and crowd out admitted cards. Serve still filters
+    // per-row afterward — this is the bound, that is the law.
+    const admission =
+      admitted === null
+        ? "(? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)"
+        : `(task_ref.repo IS NULL OR task_ref.repo IN (${admitted.map(() => "?").join(",")}))`;
+    const admissionParams = admitted === null ? [repo, repo] : admitted;
+
+    const columns = `
+        SELECT task.id, task.title, task.state, task.updated_at, task_ref.strikes, task_ref.repo AS task_repo,
              EXISTS (SELECT 1 FROM task_scope WHERE task_scope.task_id = task.id) AS has_scope,
              EXISTS (
                SELECT 1 FROM task_scope
                WHERE task_scope.task_id = task.id AND task_scope.approved_digest = task_scope.digest
                  AND task_scope.approved_at IS NOT NULL
              ) AS approved,
+             (SELECT substr(task_scope.goal, 1, 90) FROM task_scope WHERE task_scope.task_id = task.id) AS goal,
              (SELECT decision.id FROM decision JOIN run ON run.id = decision.run
                WHERE run.task_ref = task_ref.id AND decision.answered_at IS NULL
                ORDER BY decision.id LIMIT 1) AS open_decision,
+             (SELECT substr(decision.question, 1, 120) FROM decision JOIN run ON run.id = decision.run
+               WHERE run.task_ref = task_ref.id AND decision.answered_at IS NULL
+               ORDER BY decision.id LIMIT 1) AS open_question,
+             (SELECT decision.created_at FROM decision JOIN run ON run.id = decision.run
+               WHERE run.task_ref = task_ref.id AND decision.answered_at IS NULL
+               ORDER BY decision.id LIMIT 1) AS open_decision_at,
              (SELECT COUNT(*) FROM incident JOIN run ON run.id = incident.run
                WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL) AS open_incidents,
+             (SELECT MIN(incident.created_at) FROM incident JOIN run ON run.id = incident.run
+               WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL) AS oldest_incident_at,
              live.runner AS claim_runner, live.acquired_at AS claim_at, live.lease_id AS claim_lease,
              claim_run.model AS claim_model, claim_run.branch AS claim_branch, claim_run.worktree AS claim_worktree,
              (SELECT hold.owner_kind FROM hold
@@ -3829,6 +3849,15 @@ export class Store {
                JOIN task AS blocker_task ON blocker_task.id = task_edge.blocker
                WHERE task_edge.blocked = task.id AND blocker_task.state != 'done'
                ORDER BY task_edge.blocker LIMIT 1) AS unmet_dependency,
+             (SELECT blocker_task.state FROM task_edge
+               JOIN task AS blocker_task ON blocker_task.id = task_edge.blocker
+               WHERE task_edge.blocked = task.id AND blocker_task.state != 'done'
+               ORDER BY task_edge.blocker LIMIT 1) AS blocker_state,
+             (SELECT blocker_ref.repo FROM task_edge
+               JOIN task AS blocker_task ON blocker_task.id = task_edge.blocker
+               JOIN task_ref AS blocker_ref ON blocker_ref.backend = task_ref.backend AND blocker_ref.external_id = task_edge.blocker
+               WHERE task_edge.blocked = task.id AND blocker_task.state != 'done'
+               ORDER BY task_edge.blocker LIMIT 1) AS blocker_repo,
              (SELECT requirement.value FROM json_each(task_ref.capability_requirements) AS requirement
                WHERE task_ref.repo IS NOT NULL AND NOT EXISTS (
                  SELECT 1 FROM capability
@@ -3848,64 +3877,94 @@ export class Store {
              SELECT MAX(candidate.id) FROM run AS candidate WHERE candidate.lease_id = live.lease_id
            )
            WHERE task.state IN ('queued','running','failed')
-             AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+             AND ${admission}`;
+    const shared = [now.toISOString(), now.toISOString(), now.toISOString(), BUILT_IN, now.toISOString(), ...admissionParams];
+
+    return this.transact(() => {
+      // Two bounded pages, one snapshot (Codex round 2, finding 11): the
+      // newest active work, PLUS the oldest attention candidates by their
+      // stall anchor — an old stalled task must not fall off the board
+      // just because two hundred newer things moved. The predicate here
+      // only SELECTS candidates; the classifier in board.ts still owns
+      // what attention means.
+      const newest = this.db
+        .prepare(`${columns}
            ORDER BY task.updated_at DESC, task.id DESC
-           LIMIT ?`,
-        )
-        .all(
-          now.toISOString(),
-          now.toISOString(),
-          now.toISOString(),
-          BUILT_IN,
-          now.toISOString(),
-          repo,
-          repo,
-          page,
-        );
+           LIMIT ?`)
+        .all(...shared, page);
+      const attentionPage = Math.min(page, 100);
+      const stalled = this.db
+        .prepare(`${columns}
+             AND (
+               task.state = 'failed'
+               OR EXISTS (SELECT 1 FROM incident JOIN run ON run.id = incident.run
+                          WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL)
+               OR EXISTS (SELECT 1 FROM decision JOIN run ON run.id = decision.run
+                          WHERE run.task_ref = task_ref.id AND decision.answered_at IS NULL)
+               OR NOT EXISTS (SELECT 1 FROM task_scope
+                              WHERE task_scope.task_id = task.id AND task_scope.approved_digest = task_scope.digest
+                                AND task_scope.approved_at IS NOT NULL)
+             )
+           ORDER BY COALESCE(open_decision_at, oldest_incident_at, task.updated_at) ASC, task.id
+           LIMIT ?`)
+        .all(...shared, attentionPage);
+
+      const seen = new Set<string>();
+      const rows = [...newest, ...stalled].filter(row => {
+        const id = String(row["id"]);
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+
+      const text = (row: Record<string, unknown>, key: string): string | null =>
+        row[key] === null || row[key] === undefined ? null : String(row[key]);
+
       const tasks = rows.map(row => ({
         taskId: String(row["id"]),
         title: String(row["title"]),
-        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
+        repo: text(row, "task_repo"),
         state: String(row["state"]) as "queued" | "running" | "failed",
         updatedAt: String(row["updated_at"]),
         strikes: Number(row["strikes"]),
         hasScope: Number(row["has_scope"]) === 1,
         approved: Number(row["approved"]) === 1,
+        goal: text(row, "goal"),
         openDecisionId:
           row["open_decision"] === null || row["open_decision"] === undefined
             ? null
             : Number(row["open_decision"]),
+        question: text(row, "open_question"),
+        decisionCreatedAt: text(row, "open_decision_at"),
         openIncidents: Number(row["open_incidents"]),
+        oldestIncidentAt: text(row, "oldest_incident_at"),
         claim:
           row["claim_runner"] === null || row["claim_runner"] === undefined
             ? null
             : {
                 runner: String(row["claim_runner"]),
                 claimedAt: String(row["claim_at"]),
-                model: row["claim_model"] === null || row["claim_model"] === undefined ? null : String(row["claim_model"]),
-                branch: row["claim_branch"] === null || row["claim_branch"] === undefined ? null : String(row["claim_branch"]),
-                worktree:
-                  row["claim_worktree"] === null || row["claim_worktree"] === undefined
-                    ? null
-                    : String(row["claim_worktree"]),
+                model: text(row, "claim_model"),
+                branch: text(row, "claim_branch"),
+                worktree: text(row, "claim_worktree"),
               },
         hold:
           row["hold_kind"] === null || row["hold_kind"] === undefined
             ? null
             : {
                 ownerKind: String(row["hold_kind"]) as "operator" | "decision" | "incident" | "backoff",
-                until: row["hold_until"] === null || row["hold_until"] === undefined ? null : String(row["hold_until"]),
+                until: text(row, "hold_until"),
               },
-        unmetDependency:
-          row["unmet_dependency"] === null || row["unmet_dependency"] === undefined
-            ? null
-            : String(row["unmet_dependency"]),
-        missingRequirement:
-          row["missing_requirement"] === null || row["missing_requirement"] === undefined
-            ? null
-            : String(row["missing_requirement"]),
+        unmetDependency: text(row, "unmet_dependency"),
+        blockerState: text(row, "blocker_state"),
+        blockerRepo: text(row, "blocker_repo"),
+        missingRequirement: text(row, "missing_requirement"),
       }));
-      return { tasks, saturated: rows.length === page, done: this.listCompletedWorkScoped(repo, 10) };
+      return {
+        tasks,
+        saturated: newest.length === page,
+        done: this.listCompletedWorkScoped(repo, 10),
+      };
     });
   }
 

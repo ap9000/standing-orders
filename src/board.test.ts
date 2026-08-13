@@ -24,8 +24,13 @@ function facts(overrides: Partial<BoardFacts> = {}): BoardFacts {
     strikes: 0,
     hasScope: true,
     approved: true,
+    goal: null,
     openDecisionId: null,
+    question: null,
+    decisionCreatedAt: null,
     openIncidents: 0,
+    oldestIncidentAt: null,
+    blockerState: null,
     claim: null,
     hold: null,
     unmetDependency: null,
@@ -103,6 +108,38 @@ describe("the lane classifier", () => {
     ).toBe("retrying now");
     expect(classify(facts({ unmetDependency: "t-0" }), T0).reason).toBe("waits on t-0");
     expect(classify(facts({ missingRequirement: "env:KEY" }), T0).reason).toBe("needs env:KEY");
+  });
+
+  test("the card accretes: question as content, goal as promise, blocker state, attempt", () => {
+    const asked = classify(
+      facts({ openDecisionId: 5, question: "Fail open or fail closed?", decisionCreatedAt: "2026-08-01T09:00:00Z" }),
+      T0,
+    );
+    expect(asked.reason).toBe("Fail open or fail closed?");
+    expect(asked.stalledSince).toBe("2026-08-01T09:00:00Z");
+
+    expect(classify(facts({ goal: "One row per real job across boards" }), T0).reason).toBe(
+      "One row per real job across boards",
+    );
+
+    expect(
+      classify(facts({ unmetDependency: "t-0", blockerState: "running" }), T0).reason,
+    ).toBe("waits on t-0 — building now");
+    expect(
+      classify(facts({ unmetDependency: "t-0", blockerState: "failed" }), T0).reason,
+    ).toBe("waits on t-0 — failed");
+    // Redacted blocker state: the name stays, the other project's status
+    // does not.
+    expect(classify(facts({ unmetDependency: "t-0" }), T0).reason).toBe("waits on t-0");
+
+    const secondTry = classify(
+      facts({
+        strikes: 1,
+        claim: { runner: "r", claimedAt: T0.toISOString(), model: "claude", branch: "b", worktree: "/w" },
+      }),
+      T0,
+    );
+    expect(secondTry.attempt).toBe(2);
   });
 
   test("total: every combination lands in exactly one lane", () => {
@@ -274,13 +311,45 @@ describe("boardScoped — one snapshot, all the facts", () => {
     expect(board.tasks.map(row => row.taskId)).not.toContain("t-theirs");
   });
 
-  test("the cap is honest: saturation is declared, never silent", () => {
-    for (let i = 0; i < 3; i++) store.createTask({ id: `t-${i}`, title: `t ${i}` }, T0);
+  test("the cap is honest, and an old stall is rescued past it", () => {
+    // Three tasks, created oldest-first; each is an attention candidate
+    // (no approved scope). Under a cap of 2 the newest page holds two,
+    // saturation is declared — and the oldest stall still reaches the
+    // board through the attention page (Codex round 2, finding 11).
+    for (let i = 0; i < 3; i++) {
+      store.createTask({ id: `t-${i}`, title: `t ${i}` }, new Date(T0.getTime() + i * 60_000));
+    }
     const capped = store.boardScoped(null, T0, 2);
-    expect(capped.tasks).toHaveLength(2);
     expect(capped.saturated).toBe(true);
+    expect(capped.tasks.map(row => row.taskId)).toContain("t-0");
     const roomy = store.boardScoped(null, T0, 50);
     expect(roomy.tasks).toHaveLength(3);
     expect(roomy.saturated).toBe(false);
+  });
+
+  test("the admission list bounds the page itself, not just the render", () => {
+    store.createTask({ id: "t-in", title: "admitted" }, T0);
+    store.createTask({ id: "t-out", title: "beyond the ceiling" }, T0);
+    store.placeTask(store.refFor("built-in", "t-in").id, "/repo/main");
+    store.placeTask(store.refFor("built-in", "t-out").id, "/repo/other");
+    const board = store.boardScoped(null, T0, 200, ["/repo/main"]);
+    expect(board.tasks.map(row => row.taskId)).toContain("t-in");
+    expect(board.tasks.map(row => row.taskId)).not.toContain("t-out");
+  });
+
+  test("the snapshot carries the accretion facts: goal, question, blocker state", () => {
+    const now = new Date(T0.getTime() + 60_000);
+    store.createTask({ id: "t-first", title: "goes first" }, T0);
+    store.createTask({ id: "t-second", title: "waits behind" }, T0);
+    store.addEdge("t-second", "t-first");
+    store.setTaskState("t-first", "running", now);
+    approvedScope("t-second");
+
+    const board = store.boardScoped(null, now);
+    const second = board.tasks.find(row => row.taskId === "t-second");
+    expect(second?.goal).toBe("do the thing");
+    expect(second?.unmetDependency).toBe("t-first");
+    expect(second?.blockerState).toBe("running");
+    expect(second?.blockerRepo).toBeNull();
   });
 });
