@@ -124,6 +124,7 @@ import {
   type RoutineTerms,
 } from "./routine.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { clearWebhook, loadConsoleUrl, loadWebhookTargets, saveConsoleUrl, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { inspectionOf, isProviderId, PROVIDER_IDS, validateSpec } from "./provider.js";
 import {
   build,
@@ -245,6 +246,13 @@ Agents — which provider and model each phase runs on
                                         says REVIEW was not read)
 
 The outbox — facts that want a person, durably
+  nightorders webhook set slack|discord <url>
+                                        UI-only chat mirrors: every page a
+                                        message with a console link; acting
+                                        stays in the console. Delivers when
+                                        Telegram is not configured.
+  nightorders webhook set console-url <http://host:port>
+  nightorders webhook status | test | clear slack|discord
   nightorders outbox list [--all]
   nightorders outbox deliver --cmd <c>  runs once per pending row, reading
                                         $NIGHTORDERS_KIND / _SUBJECT / _BODY;
@@ -358,6 +366,7 @@ export async function runOperate(
       // or delete it, and files hidden somewhere clever cannot be found when
       // it matters.
       evidenceRoot: join(dirname(file), "evidence"),
+      databaseFile: file,
       // The bot token's file home. Never a column; see telegram.ts.
       telegramTokenFile: join(dirname(file), "telegram-token"),
       ...(options.agentRunner === undefined ? {} : { agentRunner: options.agentRunner }),
@@ -379,6 +388,8 @@ type Context = {
   now: Date;
   clock: () => Date;
   evidenceRoot: string;
+  /** The directory holding the database — where credential files live. */
+  databaseFile: string;
   telegramTokenFile: string;
   agentRunner?: CommandRunner;
   gitRunner?: CommandRunner;
@@ -434,6 +445,8 @@ async function dispatch(
       return configCommand(positional, flags, context);
     case "providers":
       return providersCommand(flags, context);
+    case "webhook":
+      return webhookCommand(positional, flags, context);
     case "serve":
       return serveCommand(flags, context);
     case "watch":
@@ -2329,6 +2342,83 @@ async function incidentCommand(
 }
 
 /**
+ * `nightorders webhook …` — Slack and Discord as UI-ONLY mirrors: every
+ * page is a message with a console link; acting stays in the console
+ * behind its own authentication. The URL is a credential: 0600 file
+ * beside the database, or the environment, never anywhere else.
+ */
+async function webhookCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const dir = dirname(context.databaseFile);
+  const [action, which, value] = positional;
+
+  if (action === undefined || action === "status") {
+    const targets = loadWebhookTargets(process.env, dir);
+    const consoleUrl = loadConsoleUrl(process.env, dir);
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "webhook status", configured: targets.map(one => one.kind), consoleUrl }, null, 2));
+      return EXIT.ok;
+    }
+    write(`Chat mirrors${targets.length === 0 ? ": none configured" : ""}`);
+    for (const target of targets) write(`  ${target.kind.padEnd(8)} configured (URL held privately)`);
+    write(`  links    ${consoleUrl ?? "NOT SET — messages will carry no console link; nightorders webhook set console-url http://host:port"}`);
+    if (targets.length === 0) {
+      write("");
+      write("  nightorders webhook set slack https://hooks.slack.com/services/…");
+      write("  nightorders webhook set discord https://discord.com/api/webhooks/…");
+      write(`  (or export ${SLACK_ENV} / ${DISCORD_ENV})`);
+    }
+    write("");
+    write("  Mirrors deliver when Telegram is not configured; with a paired Telegram");
+    write("  chat, Telegram carries the page (it can hold buttons) and mirrors stay quiet.");
+    return EXIT.ok;
+  }
+
+  if (action === "test") {
+    const targets = loadWebhookTargets(process.env, dir);
+    if (targets.length === 0) {
+      return fail(write, json, "webhook test", "unconfigured", "no webhook configured — `nightorders webhook set slack|discord <url>`", EXIT.refused);
+    }
+    store.enqueueNotification(
+      { dedupeKey: `webhook-test:${clock().getTime()}`, kind: "test", subject: "nightorders webhook test", body: "If you can read this, the mirror works. Acting happens in the console." },
+      clock(),
+    );
+    const report = await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock });
+    if (report.problems.length > 0) {
+      return fail(write, json, "webhook test", "delivery", report.problems.join("; "), EXIT.failed);
+    }
+    return succeed(write, json, "webhook test", { sent: report.sent }, () => [`Sent ${report.sent} message(s). Check the channel.`]);
+  }
+
+  if (action === "clear" && (which === "slack" || which === "discord")) {
+    clearWebhook(dir, which);
+    return succeed(write, json, "webhook clear", { which }, () => [`${which} mirror cleared.`]);
+  }
+
+  if (action !== "set" || which === undefined || value === undefined) {
+    return fail(write, json, "webhook", "usage", "`nightorders webhook [status|test|set slack|discord|console-url <value>|clear slack|discord]`", EXIT.usage);
+  }
+  if (which === "console-url") {
+    const saved = saveConsoleUrl(dir, value);
+    if (!saved.ok) return fail(write, json, "webhook set", "invalid", saved.message, EXIT.usage);
+    return succeed(write, json, "webhook set", { which }, () => [`Console links will open ${value.replace(/\/+$/, "")}.`]);
+  }
+  if (which !== "slack" && which !== "discord") {
+    return fail(write, json, "webhook set", "usage", "set what? slack, discord, or console-url", EXIT.usage);
+  }
+  const saved = saveWebhook(dir, which, value);
+  if (!saved.ok) return fail(write, json, "webhook set", "invalid", saved.message, EXIT.usage);
+  return succeed(write, json, "webhook set", { which }, () => [
+    `${which} mirror configured — the URL lives in a private file beside the database.`,
+    `Send yourself a proof: nightorders webhook test`,
+  ]);
+}
+
+/**
  * `nightorders providers` — identification, never integration theater.
  *
  * Four different claims, kept apart on purpose (Codex provider review):
@@ -3040,6 +3130,14 @@ async function watchCommand(
         if (source !== null) {
           quiet.length = 0;
           await bridgeCommand(["telegram"], passFlags(), quietContext);
+        } else {
+          // UI-only mirrors: with no Telegram, Slack/Discord carry the
+          // pages — each a message with a console link, acting in the UI.
+          const dir = dirname(context.databaseFile);
+          const targets = loadWebhookTargets(process.env, dir);
+          if (targets.length > 0) {
+            await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock: context.clock });
+          }
         }
       }
 

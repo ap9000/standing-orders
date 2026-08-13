@@ -149,6 +149,26 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Slack and Discord, UI-only (2026-08-13, the operator's scoping — "can be ui only")
+
+Chat mirrors, deliberately one-way: every page becomes a message with a
+deep link into the console (decisions to their screen, everything else to
+/next), and the ACTING stays in the console behind its own
+authentication and step-ups. No bot, no pairing, no inbound events — an
+outbound webhook is not an authentication surface, which is exactly what
+made this cheap; the day acting-from-Slack is wanted it gets the Telegram
+treatment (its own review, its own identity model), never a shortcut
+through this module. Webhook URLs are CREDENTIALS: shape-checked, 0600
+files beside the database or environment variables, never a column,
+never in an error (a failure names the platform and status only —
+proven). Delivery rides the SAME claim/finalize discipline as every
+deliverer, so a mirror and a bridge can never both own one row; mirrors
+deliver when Telegram is not configured, and stay quiet when a paired
+chat (which can carry buttons) does the paging. `nightorders webhook
+set slack|discord|console-url · status · test · clear`; the watch loop
+mirrors on the bridge cadence. Node 22's global fetch — still zero
+runtime deps. 792 tests.
+
 ## Free-text answers from Telegram (2026-08-13, Codex security review: verdict "safe with conditions" — the conditions ARE the build)
 
 Reply to a decision message with prose and it becomes the answer's NOTE;
