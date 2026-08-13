@@ -1465,9 +1465,10 @@ function homePage(chrome: Chrome, data: {
           data.gaps
             .map(gap => `<p class="row">${escape(gap.key)} — ${escape(gap.state)}</p>`)
             .join("\n") +
-          `<p class="meta"><a href="/caps">capabilities</a></p>`;
+          ``;
 
-  const footer = data.settings ? `<p class="meta"><a href="/settings">settings</a></p>` : "";
+  // The sidebar owns navigation now; the page keeps only its content.
+  const footer = "";
 
   const startHere =
     data.taskCount === 0
@@ -1486,7 +1487,7 @@ function homePage(chrome: Chrome, data: {
     `<h1>the morning</h1>`,
     data.repo === null
       ? ""
-      : `<p class="meta">the overnight queue for <span class="mono">${escape(data.repo)}</span> \u2014 what got built, what broke, what waits on you</p>`,
+      : `<p class="meta">the overnight queue for <strong>${escape(projectName(data.repo))}</strong> — what got built, what broke, what waits on you</p>`,
     startHere,
     ledger,
     `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
@@ -1496,7 +1497,6 @@ function homePage(chrome: Chrome, data: {
     incidents,
     stranded,
     gaps,
-    footer,
   ].join("\n"), { chrome });
 }
 
