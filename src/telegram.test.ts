@@ -661,3 +661,135 @@ describe("the follower — on the wire until told to stop", () => {
     expect(lease).toMatchObject({ ok: true });
   });
 });
+
+describe("free-text answers — a reply becomes the note, a tap remains the choice", () => {
+  let store: Store;
+  let taskRef: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+  });
+  afterEach(() => store.close());
+
+  const decisionWith = (
+    options: { id: string; label: string; consequence: string; reversible: boolean }[],
+  ): number => {
+    const run = store.startRun({
+      taskRef, leaseId: `lease-${Math.random()}`, runner: "b",
+      branch: "nightorders/t-1", worktree: "/pool/t-1", now: T0,
+    });
+    const id = store.saveDecision({
+      run, urgency: "blocking", recap: "Policy call.", question: "Open or closed?",
+      options, recommendation: options[0]?.id ?? "open",
+    }, T0);
+    store.enqueueNotification(
+      { dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked", body: "q" }, T0,
+    );
+    return id;
+  };
+
+  const pair = async (script: ReturnType<typeof scriptedTransport>) => {
+    const code = mintPairingCode();
+    store.createTelegramPairing(
+      { codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, T0,
+    );
+    script.updates.push([privatePair(1, code)]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(1_000) });
+  };
+
+  const reply = (updateId: number, replyTo: number, text: string, over: Record<string, unknown> = {}) => ({
+    update_id: updateId,
+    message: {
+      message_id: 9000 + updateId,
+      text,
+      chat: { id: CHAT, type: "private" },
+      from: { id: USER },
+      reply_to_message: { message_id: replyTo },
+      ...over,
+    },
+  });
+
+  test("reply → echoed draft → tap answers WITH the note; the wrong shapes stay silent", async () => {
+    const script = scriptedTransport();
+    await pair(script);
+    const decisionId = decisionWith([
+      { id: "open", label: "Fail open", consequence: "c", reversible: true },
+      { id: "closed", label: "Fail closed", consequence: "c", reversible: true },
+    ]);
+    // Deliver: the keyboard message id is recorded for reply routing.
+    script.updates.push([]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(2_000) });
+    const keyboardCall = script.calls.filter(one => one.method === "sendMessage").pop();
+    const keyboard = (keyboardCall?.params["reply_markup"] as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
+    const chooseOpen = keyboard[0]?.[0]?.callback_data as string;
+    // The scripted transport minted message ids from 100; the LAST decision
+    // part carried the keyboard.
+    const sends = script.calls.filter(one => one.method === "sendMessage").length;
+    const keyboardMessageId = 100 + sends - 1;
+
+    // An UNTHREADED message is silence; a FORWARDED reply is silence.
+    script.updates.push([
+      { update_id: 10, message: { message_id: 9010, text: "cap the store at 10k", chat: { id: CHAT, type: "private" }, from: { id: USER } } },
+      reply(11, keyboardMessageId, "forwarded thing", { forward_date: 123 }),
+    ]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(3_000) });
+    expect(store.liveNoteDraft(1, decisionId, later(3_000))).toBeNull();
+
+    // A real reply drafts, and the bot echoes the EXACT captured text.
+    script.updates.push([reply(12, keyboardMessageId, "use per-user but cap the store at 10k entries")]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(4_000) });
+    const draft = store.liveNoteDraft(1, decisionId, later(4_000));
+    expect(draft?.note).toBe("use per-user but cap the store at 10k entries");
+    const echo = script.calls.filter(one => one.method === "sendMessage").pop();
+    expect(String(echo?.params["text"])).toContain("| use per-user but cap the store at 10k entries");
+
+    // The tap carries the note into the answer, atomically.
+    script.updates.push([{ update_id: 13, callback_query: { id: "cb1", data: chooseOpen, from: { id: USER }, message: { message_id: keyboardMessageId, chat: { id: CHAT } } } }]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    const settled = store.getDecision(decisionId);
+    expect(settled?.state).toBe("answered");
+    expect(settled?.choice).toBe("open");
+    expect(settled?.note).toBe("use per-user but cap the store at 10k entries");
+    expect(store.liveNoteDraft(1, decisionId, later(5_000))).toBeNull();
+  });
+
+  test("an irreversible confirm binds the note it displayed — a newer note strands the armed yes", async () => {
+    const script = scriptedTransport();
+    await pair(script);
+    const decisionId = decisionWith([
+      { id: "keep", label: "Keep", consequence: "c", reversible: true },
+      { id: "drop", label: "Drop the table", consequence: "gone forever", reversible: false },
+    ]);
+    script.updates.push([]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(2_000) });
+    const keyboard = (script.calls.filter(one => one.method === "sendMessage").pop()?.params["reply_markup"] as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
+    const chooseDrop = keyboard[1]?.[0]?.callback_data as string;
+    const sends = script.calls.filter(one => one.method === "sendMessage").length;
+    const keyboardMessageId = 100 + sends - 1;
+
+    // Note, then arm: the challenge shows the note.
+    script.updates.push([reply(20, keyboardMessageId, "only the staging table")]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(3_000) });
+    script.updates.push([{ update_id: 21, callback_query: { id: "cb2", data: chooseDrop, from: { id: USER }, message: { message_id: keyboardMessageId, chat: { id: CHAT } } } }]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(4_000) });
+    const armEdit = script.calls.filter(one => one.method === "editMessageText").pop();
+    expect(String(armEdit?.params["text"])).toContain("| only the staging table");
+    const confirmKeyboard = (armEdit?.params["reply_markup"] as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
+    const confirmToken = confirmKeyboard[0]?.[0]?.callback_data as string;
+
+    // A NEWER note lands while armed: the confirmation is stranded.
+    script.updates.push([reply(22, keyboardMessageId, "actually all of them")]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(5_000) });
+    script.updates.push([{ update_id: 23, callback_query: { id: "cb3", data: confirmToken, from: { id: USER }, message: { message_id: keyboardMessageId, chat: { id: CHAT } } } }]);
+    await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(6_000) });
+    expect(store.getDecision(decisionId)?.state).toBe("open");
+    const acks = script.calls.filter(one => one.method === "answerCallbackQuery");
+    // The new note consumed the armed challenge, so the confirm tap finds
+    // it already dead — the exact stranding the review prescribed.
+    expect(String(acks.pop()?.params["text"] ?? "")).toContain("expired");
+  });
+});

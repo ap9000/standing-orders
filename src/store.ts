@@ -299,6 +299,8 @@ export type TelegramAction = {
   createdAt: string;
   expiresAt: string | null;
   consumedAt: string | null;
+  /** Binds a confirm to the exact note it displayed; null = no note armed. */
+  noteDigest: string | null;
 };
 
 /** A park that never became a decision. Stays in every brief until resolved. */
@@ -5539,6 +5541,7 @@ function readTelegramAction(row: Record<string, unknown>): TelegramAction {
     createdAt: String(row["created_at"]),
     expiresAt: row["expires_at"] === null ? null : String(row["expires_at"]),
     consumedAt: row["consumed_at"] === null ? null : String(row["consumed_at"]),
+    noteDigest: row["note_digest"] === null || row["note_digest"] === undefined ? null : String(row["note_digest"]),
   };
 }
 

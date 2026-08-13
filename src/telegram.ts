@@ -21,6 +21,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { validateNote } from "./decision.js";
 import type { Store, Decision, Notification, TelegramBinding } from "./store.js";
 
 /** The environment name — and therefore the name the builder strips from agents. */
@@ -170,6 +171,8 @@ export type BridgeReport = {
   /** Updates Telegram still holds beyond this pass's page budget. */
   backlog: boolean;
   problems: string[];
+  /** Free-text notes captured as drafts. */
+  noted?: number;
 };
 
 type Effect = () => Promise<void>;
@@ -422,6 +425,11 @@ async function deliverOne(
   for (const part of parts.slice(0, -1)) {
     const sent = await send(transport, binding.chatId, part);
     if (!sent.ok) return { ok: false, error: sent.error };
+    // Every part is a message somebody may REPLY to with a note: each id
+    // routes to this decision, exactly (Codex free-text review, finding 1).
+    if (sent.messageId !== null) {
+      store.recordTelegramDecisionMessage(binding.id, binding.chatId, sent.messageId, decision.id, clock());
+    }
   }
 
   // The buttons: one opaque token per option, minted before the send so a
@@ -458,6 +466,7 @@ async function deliverOne(
       tokens.map(({ token }) => token),
       sent.messageId,
     );
+    store.recordTelegramDecisionMessage(binding.id, binding.chatId, sent.messageId, decision.id, clock());
   }
   return { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) };
 }
@@ -508,6 +517,14 @@ type Update = {
     text?: string;
     chat?: { id: number; type?: string };
     from?: { id: number };
+    reply_to_message?: { message_id: number };
+    /** Presence of any of these disqualifies a note: only direct, initial,
+     * plain text counts as authored-and-confirmed by the paired operator. */
+    forward_origin?: unknown;
+    forward_date?: unknown;
+    via_bot?: unknown;
+    sender_chat?: unknown;
+    caption?: string;
   };
   callback_query?: {
     id: string;
@@ -612,6 +629,12 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
   const from = message.from;
   const pair = /^\/pair\s+([0-9a-f]{32})\s*$/.exec(message.text ?? "");
 
+  if (pair === null && chat !== undefined && from !== undefined) {
+    // Not a pairing: maybe a free-text note. Every condition or silence.
+    applyNote(context, update, effects);
+    return;
+  }
+
   // Only /pair, only in a private chat, only with the sender on the record.
   // A group is exactly where "the chat" and "the person" diverge, which is
   // why a group cannot pair at all.
@@ -648,6 +671,112 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
       link_preview_options: { is_disabled: true },
     });
   });
+}
+
+/**
+ * A free-text note, accepted only as an AUTHENTICATED REPLY to a recorded
+ * decision message (Codex free-text review, prescribed design): live
+ * binding, private chat, exact chat AND user, a reply_to that maps to
+ * exactly one decision this bot sent, the decision still unanswered, and
+ * direct initial plain text — no forwards, media, captions, bots, or
+ * channel identities. Everything else is silence: a reply naming what was
+ * wrong is an oracle. Choice stays TAP-ONLY; prose never selects an option.
+ */
+function applyNote(context: Context, update: Update, effects: Effect[]): void {
+  const { store, botId, transport, clock, report } = context;
+  const message = update.message as NonNullable<Update["message"]>;
+  const chat = message.chat;
+  const from = message.from;
+  const binding = store.liveTelegramBinding(botId);
+
+  const say = (text: string): void => {
+    effects.push(async () => {
+      await transport("sendMessage", {
+        chat_id: String(chat?.id ?? ""),
+        text,
+        reply_parameters: { message_id: message.message_id },
+        link_preview_options: { is_disabled: true },
+      });
+    });
+  };
+
+  if (
+    binding === null ||
+    chat === undefined || chat.type !== "private" ||
+    from === undefined ||
+    String(chat.id) !== binding.chatId ||
+    String(from.id) !== binding.userId ||
+    message.reply_to_message === undefined ||
+    message.text === undefined ||
+    message.forward_origin !== undefined ||
+    message.forward_date !== undefined ||
+    message.via_bot !== undefined ||
+    message.sender_chat !== undefined ||
+    message.caption !== undefined
+  ) {
+    report.ignored++;
+    return;
+  }
+
+  const decisionId = store.decisionForTelegramMessage(
+    binding.id,
+    binding.chatId,
+    String(message.reply_to_message.message_id),
+  );
+  if (decisionId === null) {
+    // A reply to something that never carried a decision — including a
+    // send whose record was lost: fail closed, never guess by recency.
+    report.ignored++;
+    return;
+  }
+  const decision = store.getDecision(decisionId);
+  if (decision === null) {
+    report.ignored++;
+    return;
+  }
+  if (decision.state === "answered") {
+    say(`already answered: ${decision.choice ?? "?"} — this note did not travel`);
+    report.ignored++;
+    return;
+  }
+
+  const valid = validateNote(message.text);
+  if (!valid.ok) {
+    say(`that note cannot travel: ${valid.problem}`);
+    report.ignored++;
+    return;
+  }
+
+  const saved = store.saveNoteDraft(
+    {
+      binding: binding.id,
+      decision: decision.id,
+      updateId: update.update_id,
+      messageId: String(message.message_id),
+      replyTo: String(message.reply_to_message.message_id),
+      note: valid.note,
+    },
+    clock(),
+  );
+  if (!saved) {
+    // An older or equal update raced in late: the newer note stands.
+    report.ignored++;
+    return;
+  }
+  // A new note voids any ARMED irreversible confirmation: what it showed
+  // is no longer what would travel (Codex free-text review, finding 3).
+  store.consumeTelegramChallenges(decision.id, clock());
+  report.noted = (report.noted ?? 0) + 1;
+  // The echo IS the ceremony: the exact captured text, line-prefixed, so a
+  // later edit of the operator's own message cannot rewrite the audit.
+  say(
+    [
+      `noted for ${taskOf(store, decision)}:`,
+      ...valid.note.split("\n").map((line: string) => `| ${line}`),
+      "",
+      "Tap an option on the decision to answer WITH this note. It expires in 10 minutes; a new reply replaces it.",
+    ].join("\n"),
+  );
 }
 
 function applyCallback(context: Context, update: Update, effects: Effect[]): void {
@@ -729,6 +858,12 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
       ack("that option no longer exists");
       return;
     }
+    if (expiredDraftGuard(store, binding, decision.id, clock())) {
+      // The token is NOT consumed: the same button answers on the next tap,
+      // now that the operator knows the note is gone.
+      ack("your note expired — tap again to answer without it, or reply with a fresh note first");
+      return;
+    }
     if (!store.consumeTelegramAction(token, clock())) {
       ack("that button was already used");
       return;
@@ -742,8 +877,14 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
       const confirm = randomBytes(16).toString("hex");
       const cancel = randomBytes(16).toString("hex");
       const placedOn = String(message.message_id);
+      // The confirmation binds the EXACT answer tuple: option AND the note
+      // it displays (its digest; null when none). A note that changes,
+      // expires, or is cancelled strands this challenge (finding 3).
+      const draft = store.liveNoteDraft(binding.id, decision.id, clock());
+      const digest = draft === null ? undefined : noteDigestOf(draft.note);
+      if (draft !== null) store.setNoteDraftState(draft.id, "armed");
       store.createTelegramAction(
-        { token: confirm, binding: binding.id, decision: decision.id, optionId: option.id, phase: "confirm", chatId: binding.chatId, messageId: placedOn, ttlMs: CONFIRM_TTL_MS },
+        { token: confirm, binding: binding.id, decision: decision.id, optionId: option.id, phase: "confirm", chatId: binding.chatId, messageId: placedOn, ttlMs: CONFIRM_TTL_MS, ...(digest === undefined ? {} : { noteDigest: digest }) },
         clock(),
       );
       store.createTelegramAction(
@@ -752,7 +893,9 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
       );
       ack("irreversible — confirm it");
       editText(
-        `⚠ ${option.label} is IRREVERSIBLE.\n${option.consequence}\n\nConfirm?`,
+        `⚠ ${option.label} is IRREVERSIBLE.\n${option.consequence}\n${
+          draft === null ? "" : `\nWith your note:\n${draft.note.split("\n").map(line => `| ${line}`).join("\n")}\n`
+        }\nConfirm?`,
         [
           [{ text: `⚠ Yes, ${option.label}`, callback_data: confirm }],
           [{ text: "Cancel", callback_data: cancel }],
@@ -776,13 +919,29 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
       ack("that option no longer exists");
       return;
     }
+    // The tuple the challenge displayed must still be the tuple that
+    // travels: the CURRENT live draft's digest (or none) must equal what
+    // was armed. Anything else strands the yes (finding 3).
+    const current = store.liveNoteDraft(binding.id, decision.id, clock());
+    const currentDigest = current === null ? null : noteDigestOf(current.note);
+    if ((action.noteDigest ?? null) !== currentDigest) {
+      store.consumeTelegramChallenges(decision.id, clock());
+      ack("the note changed since this confirmation — read it again and re-arm");
+      return;
+    }
     answerNow(context, decision, option.id, binding, ack, editText);
     return;
   }
 
-  // cancel: consume it, kill its sibling confirm, restore the choices.
+  // cancel: consume it, kill its sibling confirm, discard the note draft
+  // (cancel means cancelled — the note it displayed dies with it), and
+  // restore the choices.
   store.consumeTelegramAction(token, clock());
   store.consumeTelegramChallenges(decision.id, clock());
+  {
+    const draft = store.liveNoteDraft(binding.id, decision.id, clock());
+    if (draft !== null) store.setNoteDraftState(draft.id, "discarded");
+  }
   const fresh = decision.options.map(option => ({ option, token: randomBytes(16).toString("hex") }));
   for (const { option, token: choose } of fresh) {
     store.createTelegramAction(
@@ -811,19 +970,25 @@ function answerNow(
   editText: (text: string, keyboard?: { text: string; callback_data: string }[][]) => void,
 ): void {
   const { store, clock, report } = context;
+  // The live draft is the note that travels — consumed WITH the answer in
+  // the same transaction the whole update already holds; a CAS loss
+  // discards it (Codex free-text review, finding 4: never choose-then-note).
+  const draft = store.liveNoteDraft(binding.id, decision.id, clock());
   const answered = store.answerDecisionLocked(
-    { id: decision.id, choice, by: binding.approver, via: "telegram" },
+    { id: decision.id, choice, by: binding.approver, via: "telegram", ...(draft === null ? {} : { note: draft.note }) },
     clock(),
   );
   if (answered.ok) {
+    if (draft !== null) store.setNoteDraftState(draft.id, "consumed");
     report.answered++;
-    ack(`✓ ${choice}`);
+    ack(`✓ ${choice}${draft === null ? "" : " — with your note"}`);
     editText(answeredText(store, answered.decision));
     return;
   }
   if (answered.reason === "already-answered") {
+    if (draft !== null) store.setNoteDraftState(draft.id, "discarded");
     const settled = store.getDecision(decision.id);
-    ack(`already answered: ${settled?.choice ?? "?"} — decided is not negotiable`);
+    ack(`already answered: ${settled?.choice ?? "?"}${draft === null ? "" : " — your note did NOT travel"}`);
     if (settled !== null) editText(answeredText(store, settled));
     return;
   }
@@ -834,6 +999,29 @@ function answeredText(store: Store, decision: Decision): string {
   return [
     `✓ ${taskOf(store, decision)} — answered: ${decision.choice ?? "?"}`,
     `by ${decision.answeredBy ?? "?"} via ${decision.answeredVia ?? "?"}`,
-    ...(decision.note === null ? [] : [`note: ${decision.note}`]),
+    // Line-prefixed, never inline: a multiline note must not be able to
+    // draw fake status lines (Codex free-text review, finding 7).
+    ...(decision.note === null ? [] : ["with note:", ...decision.note.split("\n").map(line => `| ${line}`)]),
   ].join("\n");
+}
+
+function noteDigestOf(note: string): string {
+  return createHash("sha256").update(note, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
+ * A pending draft that ALREADY EXPIRED must never silently drop: the tap
+ * proceeds only after the operator is told (Codex free-text review, state
+ * machine — "never silently answer without the expected note").
+ */
+function expiredDraftGuard(store: Store, binding: TelegramBinding, decisionId: number, now: Date): boolean {
+  const expired = store.handle
+    .prepare(
+      `SELECT id FROM telegram_note_draft
+        WHERE binding = ? AND decision = ? AND state IN ('pending','armed') AND expires_at <= ?`,
+    )
+    .get(binding.id, decisionId, now.toISOString());
+  if (expired === undefined) return false;
+  store.setNoteDraftState(Number(expired["id"]), "discarded");
+  return true;
 }

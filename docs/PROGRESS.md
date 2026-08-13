@@ -149,6 +149,33 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Free-text answers from Telegram (2026-08-13, Codex security review: verdict "safe with conditions" — the conditions ARE the build)
+
+Reply to a decision message with prose and it becomes the answer's NOTE;
+choosing stays TAP-ONLY forever (finding 2: mapping prose to an option is
+never safe). The reply is accepted only as an authenticated thread: live
+binding, private chat, exact chat AND user ids, a reply_to that maps
+through the new outbound-message→decision table (every sent part
+recorded; a lost record fails closed — never routed by recency), the
+decision still unanswered, and direct initial plain text — forwards,
+media, captions, bots, edits, and channel identities are silence, and so
+is everything else wrong (a correction is an oracle). The note passes ONE
+shared validator (500 units / 2000 bytes / controls AND bidi-invisibles
+refused) before persisting as an IMMUTABLE, expiring draft — one live per
+decision, superseded only by a GREATER update_id — and the bot echoes the
+exact captured text back, line-prefixed, so editing the original message
+cannot rewrite the audit. A tap consumes the live draft WITH the answer
+in one transaction; duplicate success now requires the whole tuple
+(choice AND note — a racing web answer without the note is
+already-answered, never a silent success, finding 4); an EXPIRED draft
+never silently drops (the tap is refused once, token unconsumed, and says
+so). Irreversible confirms bind the note's digest: the challenge displays
+the note it would travel with, and a newer note, expiry, or cancel
+strands the armed yes (finding 3). The agent-facing fence now collapses
+Unicode line separators, breaks quoted NIGHTORDERS- prefixes visibly, and
+a trusted rule bounds the note to refining the CHOSEN option — never
+choosing, widening, or overriding (finding 5). Schema v10. 789 tests.
+
 ## The unblock-first push (2026-08-13, Alex's three criteria; five phases)
 
 Criteria: simple to understand and action · accelerates the work · keeps
