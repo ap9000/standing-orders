@@ -1394,6 +1394,22 @@ describe("migration from a v6 database (planning, v7)", () => {
       // The additive planning columns exist and default honestly.
       const ref = store.handle.prepare("SELECT plan, plan_strikes FROM task_ref WHERE id = 1").get();
       expect(ref).toMatchObject({ plan: null, plan_strikes: 0 });
+
+      // v8 rode the same open: the routine tables exist, the instance link
+      // is present and honestly NULL, and a standing order can be filed on
+      // the migrated database.
+      const ref8 = store.handle.prepare("SELECT routine_id FROM task_ref WHERE id = 1").get();
+      expect(ref8).toMatchObject({ routine_id: null });
+      const created = store.createRoutine(
+        {
+          name: "deps", repo: "/work/repo", goal: "refresh", outOfScope: null,
+          touches: [], requirements: [], schedule: "every:60",
+          singleFlight: true, costCeilingUsd: null, digest: "d".repeat(32),
+        },
+        new Date("2026-08-12T03:00:00.000Z"),
+      );
+      expect(created.ok).toBe(true);
+      expect(store.routineByName("deps")?.paused).toBe(false);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

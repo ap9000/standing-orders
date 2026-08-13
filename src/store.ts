@@ -36,7 +36,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -81,8 +81,47 @@ export type TaskRef = {
   plan: "requested" | "drafted" | null;
   /** Planning failures, counted apart from build strikes by design. */
   planStrikes: number;
+  /** The standing order this task is an instance of; null for one-off work. */
+  routineId: number | null;
   /** Recorded, not asserted: what the grant's selector is checked against. */
   origin: TaskOrigin;
+};
+
+/** A standing order: a pre-approved template whose instances build unattended. */
+export type Routine = {
+  id: number;
+  name: string;
+  repo: string;
+  goal: string;
+  outOfScope: string | null;
+  touches: string[];
+  requirements: string[];
+  /** 'every:<minutes>' or 'daily:<HH:MM>' (UTC). */
+  schedule: string;
+  singleFlight: boolean;
+  /** Rolling 7-day dollar ceiling; null = none. Enforcement fails closed. */
+  costCeilingUsd: number | null;
+  paused: boolean;
+  /** Of every term above. Approval binds to this exact value. */
+  digest: string;
+  approvedAt: string | null;
+  approvedBy: string | null;
+  approvedDigest: string | null;
+  /** The next scheduled occurrence; null until approved. */
+  nextFireAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** One scheduled slot's outcome, fired or skipped — never silent. */
+export type RoutineFire = {
+  id: number;
+  routineId: number;
+  scheduledFor: string;
+  outcome: "fired" | "skipped";
+  reason: string | null;
+  instanceTaskRef: number | null;
+  createdAt: string;
 };
 
 /** Who placed a hold — and therefore who alone may lift it. */
@@ -373,8 +412,61 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- Planning failures count separately from build strikes: a planner that
   -- cannot finish must never spend the builder's three attempts.
   plan_strikes            INTEGER NOT NULL DEFAULT 0,
+  -- The standing order this task is an instance of, when it is one (v8).
+  -- Ordinary one-off work carries NULL; the board uses this to keep
+  -- instances in their track row instead of the main lanes.
+  routine_id              INTEGER REFERENCES routine(id),
   UNIQUE (backend, external_id)
 );
+
+-- A standing order (v8): a pre-approved template whose instances build
+-- without asking, because the operator agreed to the TEMPLATE — schedule,
+-- budget, and "each firing builds unattended" restated at the yes. The
+-- digest covers every term that constrains the order, and approval binds to
+-- it exactly as a scope approval does: editing any term strands the yes.
+CREATE TABLE IF NOT EXISTS routine (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  name             TEXT NOT NULL UNIQUE,
+  repo             TEXT NOT NULL,
+  goal             TEXT NOT NULL,
+  out_of_scope     TEXT,
+  touches          TEXT NOT NULL DEFAULT '[]',
+  requirements     TEXT NOT NULL DEFAULT '[]',
+  -- 'every:<minutes>' or 'daily:<HH:MM>' (UTC). Parsed, never guessed at.
+  schedule         TEXT NOT NULL,
+  single_flight    INTEGER NOT NULL DEFAULT 1,
+  -- Rolling 7-day ceiling in dollars. NULL is honestly "no ceiling";
+  -- enforcement FAILS CLOSED on unmeasured paid runs (finding 5).
+  cost_ceiling_usd REAL,
+  paused           INTEGER NOT NULL DEFAULT 0,
+  digest           TEXT NOT NULL,
+  approved_at      TEXT,
+  approved_by      TEXT,
+  approved_digest  TEXT,
+  -- The next scheduled occurrence. NULL until approved; advanced by the
+  -- fire transaction and nothing else, aligned to cadence (finding 10).
+  next_fire_at     TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+
+-- The firing ledger (v8): one row per scheduled slot, fired or skipped.
+-- UNIQUE (routine_id, scheduled_for) is the idempotency — two passes both
+-- finding the same due slot insert once, and the second learns it lost.
+-- Skips are recorded, not silent: a budget block or a single-flight block
+-- must render as a hollow dot, not read as "covered" (finding 10).
+CREATE TABLE IF NOT EXISTS routine_fire (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  routine_id        INTEGER NOT NULL REFERENCES routine(id) ON DELETE CASCADE,
+  scheduled_for     TEXT NOT NULL,
+  outcome           TEXT NOT NULL CHECK (outcome IN ('fired','skipped')),
+  reason            TEXT,
+  instance_task_ref INTEGER REFERENCES task_ref(id),
+  created_at        TEXT NOT NULL,
+  UNIQUE (routine_id, scheduled_for)
+);
+
+CREATE INDEX IF NOT EXISTS routine_fire_recent ON routine_fire (routine_id, id DESC);
 
 -- A hold is an operational pause, not a claim about the work's structure,
 -- which is why it may live out here while dependency edges may not.
@@ -1109,6 +1201,12 @@ function migrate(db: Database): void {
      )`,
     ["id", "run", "kind", "created_at", "resolved_at", "resolved_by"],
   );
+  // v8 (routines): purely additive — two new tables arrive through the fresh
+  // SCHEMA's CREATE TABLE IF NOT EXISTS (they did not exist before, so the
+  // recognizer story of the CHECK widenings does not apply), and task_ref
+  // grows the nullable instance link. The routine table exists by the time
+  // this runs because openStore executes SCHEMA first.
+  addColumn(db, "task_ref", "routine_id", "INTEGER REFERENCES routine(id)");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2460,6 +2558,286 @@ export class Store {
         return Number(changes) > 0;
       });
     });
+  }
+
+  // ---- routines -----------------------------------------------------------
+
+  /**
+   * File a standing order, unapproved. The digest is computed by the caller
+   * (routineDigestOf) from exactly the terms stored here; approval later
+   * binds to it. Nothing fires until a person agrees to the template.
+   */
+  createRoutine(
+    spec: {
+      name: string;
+      repo: string;
+      goal: string;
+      outOfScope: string | null;
+      touches: string[];
+      requirements: string[];
+      schedule: string;
+      singleFlight: boolean;
+      costCeilingUsd: number | null;
+      digest: string;
+    },
+    now: Date,
+  ): { ok: true; id: number } | { ok: false; reason: "duplicate" } {
+    return this.transact(() => {
+      const existing = this.db.prepare("SELECT 1 AS hit FROM routine WHERE name = ?").get(spec.name);
+      if (existing !== undefined) return { ok: false as const, reason: "duplicate" as const };
+      const stamp = now.toISOString();
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO routine
+             (name, repo, goal, out_of_scope, touches, requirements, schedule,
+              single_flight, cost_ceiling_usd, digest, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          spec.name,
+          spec.repo,
+          spec.goal,
+          spec.outOfScope,
+          JSON.stringify(spec.touches),
+          JSON.stringify(spec.requirements),
+          spec.schedule,
+          spec.singleFlight ? 1 : 0,
+          spec.costCeilingUsd,
+          spec.digest,
+          stamp,
+          stamp,
+        );
+      return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+    });
+  }
+
+  getRoutine(id: number): Routine | null {
+    const row = this.db.prepare("SELECT * FROM routine WHERE id = ?").get(id);
+    return row === undefined ? null : readRoutine(row);
+  }
+
+  routineByName(name: string): Routine | null {
+    const row = this.db.prepare("SELECT * FROM routine WHERE name = ?").get(name);
+    return row === undefined ? null : readRoutine(row);
+  }
+
+  /** Every routine one view may see. NULL repo filter means "no filter". */
+  listRoutines(repo: string | null, admitted: string[] | null = null): Routine[] {
+    const where =
+      admitted === null
+        ? "WHERE (? IS NULL OR routine.repo = ?)"
+        : `WHERE routine.repo IN (${admitted.map(() => "?").join(",") || "''"})`;
+    const params = admitted === null ? [repo, repo] : admitted;
+    return this.db
+      .prepare(`SELECT * FROM routine ${where} ORDER BY routine.name`)
+      .all(...params)
+      .map(readRoutine);
+  }
+
+  /**
+   * Rewrite a template's terms. The new digest rides along, and the old
+   * approval is kept — invalidated by the mismatch, exactly like a scope
+   * edit, so the refusal can say "approved, then edited" rather than
+   * "never approved". The firing transaction re-proves the match.
+   */
+  updateRoutineTerms(
+    id: number,
+    terms: {
+      goal: string;
+      outOfScope: string | null;
+      touches: string[];
+      requirements: string[];
+      schedule: string;
+      costCeilingUsd: number | null;
+      digest: string;
+    },
+    now: Date,
+  ): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE routine SET goal = ?, out_of_scope = ?, touches = ?, requirements = ?,
+                            schedule = ?, cost_ceiling_usd = ?, digest = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(
+        terms.goal,
+        terms.outOfScope,
+        JSON.stringify(terms.touches),
+        JSON.stringify(terms.requirements),
+        terms.schedule,
+        terms.costCeilingUsd,
+        terms.digest,
+        now.toISOString(),
+        id,
+      );
+    return Number(changes) > 0;
+  }
+
+  /**
+   * The approval stamp, raw. Callers own the ceremony — credential,
+   * digest re-read, and the transaction — in approveRoutine (routine.ts).
+   */
+  stampRoutineApproval(id: number, by: string, digest: string, nextFireAt: string, now: Date): void {
+    this.db
+      .prepare(
+        `UPDATE routine SET approved_at = ?, approved_by = ?, approved_digest = ?,
+                            next_fire_at = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(now.toISOString(), by, digest, nextFireAt, now.toISOString(), id);
+  }
+
+  /** Pausing is instant and needs no ceremony; resuming re-arms the schedule. */
+  setRoutinePaused(id: number, paused: boolean, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE routine SET paused = ?, updated_at = ? WHERE id = ?")
+      .run(paused ? 1 : 0, now.toISOString(), id);
+    if (Number(changes) > 0) this.bumpWake();
+    return Number(changes) > 0;
+  }
+
+  /**
+   * Routines a pass should try to fire: approved (digest intact), unpaused,
+   * due, and placed in this pass's repository. Each candidate is re-proved
+   * inside fireRoutine's own transaction — this list only nominates.
+   */
+  dueRoutines(repo: string, now: Date): Routine[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM routine
+         WHERE repo = ? AND paused = 0
+           AND approved_at IS NOT NULL AND approved_digest = digest
+           AND next_fire_at IS NOT NULL AND next_fire_at <= ?
+         ORDER BY next_fire_at, id`,
+      )
+      .all(repo, now.toISOString())
+      .map(readRoutine);
+  }
+
+  /** The last firings, newest first — the board's run-history strip. */
+  routineFires(routineId: number, limit = 14): (RoutineFire & { instanceTaskId: string | null; instanceState: string | null })[] {
+    return this.db
+      .prepare(
+        `SELECT routine_fire.*, task_ref.external_id AS instance_task_id, task.state AS instance_state
+           FROM routine_fire
+           LEFT JOIN task_ref ON task_ref.id = routine_fire.instance_task_ref
+           LEFT JOIN task ON task.id = task_ref.external_id
+          WHERE routine_fire.routine_id = ?
+          ORDER BY routine_fire.id DESC LIMIT ?`,
+      )
+      .all(routineId, Math.max(1, Math.min(limit, 100)))
+      .map(row => ({
+        ...readRoutineFire(row),
+        instanceTaskId: row["instance_task_id"] === null || row["instance_task_id"] === undefined ? null : String(row["instance_task_id"]),
+        instanceState: row["instance_state"] === null || row["instance_state"] === undefined ? null : String(row["instance_state"]),
+      }));
+  }
+
+  /**
+   * What one routine's instances actually cost in a window, and whether any
+   * paid run in it is unmeasured. NULL costs are counted, not summed over:
+   * a sum that silently omits them reads as headroom that may not exist
+   * (finding 5 — the arithmetic behind failing closed).
+   */
+  routineSpend(routineId: number, sinceIso: string): { costUsd: number; unmeasuredRuns: number } {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(run.cost_usd), 0) AS cost,
+                SUM(CASE WHEN run.provider_started_at IS NOT NULL AND run.cost_usd IS NULL THEN 1 ELSE 0 END) AS unmeasured
+           FROM run
+           JOIN task_ref ON task_ref.id = run.task_ref
+          WHERE task_ref.routine_id = ? AND run.started_at >= ?`,
+      )
+      .get(routineId, sinceIso);
+    return {
+      costUsd: Number(row?.["cost"] ?? 0),
+      unmeasuredRuns: Number(row?.["unmeasured"] ?? 0),
+    };
+  }
+
+  /**
+   * The single-flight question: the oldest instance not successfully
+   * completed nor explicitly abandoned — queued, running, held, parked,
+   * and failed instances all block (finding 9's definition, verbatim).
+   */
+  routineBlocker(routineId: number): { taskId: string; state: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT task.id, task.state FROM task
+           JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+          WHERE task_ref.routine_id = ? AND task.state NOT IN ('done','cancelled')
+          ORDER BY task.created_at LIMIT 1`,
+      )
+      .get(BUILT_IN, routineId);
+    return row === undefined
+      ? null
+      : { taskId: String(row["id"]), state: String(row["state"]) };
+  }
+
+  /**
+   * Whether a slot is still unrecorded. Only sound inside the fire
+   * transaction — the IMMEDIATE lock is what makes read-then-insert atomic.
+   */
+  routineSlotOpen(routineId: number, scheduledFor: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 AS hit FROM routine_fire WHERE routine_id = ? AND scheduled_for = ?")
+        .get(routineId, scheduledFor) === undefined
+    );
+  }
+
+  /** Record one slot's outcome. False: the slot was already recorded — the caller lost the race. */
+  recordRoutineFire(
+    fire: {
+      routineId: number;
+      scheduledFor: string;
+      outcome: "fired" | "skipped";
+      reason: string | null;
+      instanceTaskRef: number | null;
+    },
+    now: Date,
+  ): boolean {
+    const { changes } = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO routine_fire
+           (routine_id, scheduled_for, outcome, reason, instance_task_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(fire.routineId, fire.scheduledFor, fire.outcome, fire.reason, fire.instanceTaskRef, now.toISOString());
+    return Number(changes) > 0;
+  }
+
+  /** Advance the schedule. The fire transaction is the only caller. */
+  setRoutineNextFire(id: number, nextFireAt: string, now: Date): void {
+    this.db
+      .prepare("UPDATE routine SET next_fire_at = ?, updated_at = ? WHERE id = ?")
+      .run(nextFireAt, now.toISOString(), id);
+  }
+
+  /** Stamp which routine a task is an instance of. Set at spawn, never after. */
+  linkRoutineInstance(taskRef: number, routineId: number): void {
+    this.db.prepare("UPDATE task_ref SET routine_id = ? WHERE id = ?").run(routineId, taskRef);
+  }
+
+  /**
+   * Close every blocked-track episode for a routine — called when a firing
+   * succeeds, because success is the proof the blocker is gone (budget
+   * cleared, blocking instance finished). Receipts stay; only the "wants a
+   * person" bit resolves.
+   */
+  resolveRoutineEpisodes(routineId: number, now: Date): void {
+    this.db
+      .prepare(
+        `UPDATE notification SET resolved_at = ?
+          WHERE resolved_at IS NULL
+            AND (dedupe_key = ? OR dedupe_key = ? OR dedupe_key LIKE ?)`,
+      )
+      .run(
+        now.toISOString(),
+        `routine-budget:${routineId}`,
+        `routine-unmeasured:${routineId}`,
+        `routine-singleflight:${routineId}:%`,
+      );
   }
 
   // ---- the outbox ---------------------------------------------------------
@@ -4868,7 +5246,46 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
         : (String(row["plan"]) as "requested" | "drafted"),
     planStrikes: Number(row["plan_strikes"] ?? 0),
     strikes: Number(row["strikes"] ?? 0),
+    routineId:
+      row["routine_id"] === null || row["routine_id"] === undefined
+        ? null
+        : Number(row["routine_id"]),
     origin: String(row["origin"]) === "ours" ? "ours" : "theirs",
+  };
+}
+
+function readRoutine(row: Record<string, unknown>): Routine {
+  return {
+    id: Number(row["id"]),
+    name: String(row["name"]),
+    repo: String(row["repo"]),
+    goal: String(row["goal"]),
+    outOfScope: row["out_of_scope"] === null ? null : String(row["out_of_scope"]),
+    touches: readJsonArray(row["touches"]),
+    requirements: readJsonArray(row["requirements"]),
+    schedule: String(row["schedule"]),
+    singleFlight: Number(row["single_flight"]) === 1,
+    costCeilingUsd: row["cost_ceiling_usd"] === null ? null : Number(row["cost_ceiling_usd"]),
+    paused: Number(row["paused"]) === 1,
+    digest: String(row["digest"]),
+    approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
+    approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
+    approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),
+    nextFireAt: row["next_fire_at"] === null ? null : String(row["next_fire_at"]),
+    createdAt: String(row["created_at"]),
+    updatedAt: String(row["updated_at"]),
+  };
+}
+
+function readRoutineFire(row: Record<string, unknown>): RoutineFire {
+  return {
+    id: Number(row["id"]),
+    routineId: Number(row["routine_id"]),
+    scheduledFor: String(row["scheduled_for"]),
+    outcome: String(row["outcome"]) as "fired" | "skipped",
+    reason: row["reason"] === null ? null : String(row["reason"]),
+    instanceTaskRef: row["instance_task_ref"] === null ? null : Number(row["instance_task_ref"]),
+    createdAt: String(row["created_at"]),
   };
 }
 
