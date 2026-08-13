@@ -1,8 +1,11 @@
 <div align="center">
 
-# standing·orders
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-dark.svg">
+  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-light.svg" alt="standing·orders — wake me only for these" width="480">
+</picture>
 
-**Standing orders for your agents. Wake me only for these.**
+**The control plane for coding agents you can safely leave alone.**
 
 Queue twelve tasks, walk away, come back to pull requests —
 with near-zero token spend across every idle hour.
@@ -13,7 +16,9 @@ with near-zero token spend across every idle hour.
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/media/demo.svg" alt="Queue tasks, install the daemon, leave; a parked decision is answered from a phone and the tasks come back as pull requests." width="760">
+[Design](docs/DESIGN.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
+
+<img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/demo.svg" alt="Queue tasks, install the daemon, leave; a parked decision is answered from a phone and the tasks come back as pull requests." width="760">
 
 </div>
 
@@ -27,7 +32,27 @@ An agent that hits a judgement call **parks a typed decision instead of
 guessing** — answer it from the terminal, the console, or a Telegram tap,
 and the freed build resumes in seconds. Built work leaves only as a pushed
 branch and a pull request, under a publication grant whose exact terms you
-approved. **No LLM sits in any approval path, and an LLM never polls.**
+approved.
+
+## Unattended is not auto-accept
+
+Every tool in this category has a mode where the agent stops asking —
+usually named something like *auto-accept*, or worse. Here the boundaries
+do not loosen when you leave the room:
+
+| An agent here can never | Enforced by |
+|---|---|
+| touch a default branch | builds land on `standing-orders/<task>` in a leased worktree; push + PR happen only under a publication grant naming the exact repo, branch prefix, and base |
+| approve its own work | approval nonces are minted only on screens that restate the digest-bound terms, and require your approver token typed again — **no LLM sits in any approval path** |
+| act on an irreversible option | `reversible` is a schema field; irreversible choices never auto-apply, and answering one from a phone takes a second minted confirmation tap |
+| see your credentials | bot tokens and API keys are stripped from every agent's environment; secrets live in 0600 files, never in the database, URLs, or logs |
+| spend while idle | **an LLM never polls** — the daemon does every no-judgement chore at zero token cost and wakes an agent only on a real event |
+| spend without being counted | every provider spawn is stamped *before* it spends, so cost is measured, never asserted |
+| guess at a judgement call | it parks a typed decision — recap, options with reversibility, recommendation, evidence — and the other eleven tasks keep going |
+
+The whole claim is executable: one test,
+[`src/unattended.test.ts`](src/unattended.test.ts), queues twelve tasks,
+walks away, and comes back to pull requests.
 
 The name comes from a captain's night orders — the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product, and it is not about the hour: it is for **long-running work that outlasts your attention** — an afternoon of errands, a weekend, or yes, a night.
 
@@ -250,9 +275,8 @@ And it costs nothing while idle. **An LLM never polls.** The daemon handles ever
 |---|---|
 | Expired key found at 3am after 40k wasted tokens | capabilities probed *before* dispatch; gaps ranked by tasks unblocked |
 | A runner dies holding a worktree | `Claim` with an immutable lease id and a fencing generation; late completions rejected |
-| Agent guesses on an irreversible call | `reversible` is a schema field; irreversible options never auto-apply |
+| A build fails, then fails the same way again | typed strikes with doubling backoff; three strikes stalls the task for a person, who exits it with `task requeue` |
 | You wake to five transcripts | one briefing: what ran, what is blocked, what needs deciding |
-| Secrets on a shared server | the control plane stores metadata only; values stay in the runner's keychain |
 
 ## Status
 
@@ -288,6 +312,18 @@ M4 is the product. M0 is what makes anyone install it long enough to reach M4.
 
 [**firstmate**](https://github.com/kunchenguid/firstmate) proves the orchestrator role works as conventions plus tmux, with no UI and no schema. Its event-driven bash watcher is where the zero-token supervision rule came from. Our bet is that the same role is better with a typed decision record and a browser you can answer from.
 
+## Contributing
+
+The most useful surface is a **provider adapter** — `src/provider.ts` is
+the only module that names an agent binary, and
+[CONTRIBUTING.md](CONTRIBUTING.md) walks the contract. Bug reports want
+`--json` output; the issue forms say what else. Every behavior lands with
+a test — the suite is the specification.
+
 ## Credits
 
 The workflow this formalizes comes from [Jason Ku's agentic engineering session](https://youtu.be/Ukju3maxbEQ) and his [`agents-md-snippets`](https://github.com/jasonku09/agents-md-snippets), plus Kun Chen's `treehouse`, `no-mistakes`, `gnhf`, `tasks-axi`, and `axi`. The design was reviewed adversarially by Codex; the appendix in `docs/DESIGN.md` lists every claim that review falsified, because the corrections are more useful than a clean spec would have been.
+
+## License
+
+[MIT](LICENSE).

@@ -1,5 +1,22 @@
 # Progress
 
+**2026-08-13 — front-page pass two, against the field.** Studied ten front
+pages (vite/bun/vhs/zod/ollama; OpenHands/aider/opencode/claude-squad/
+agor). The finding that mattered: nobody in the agent category presents
+their containment model with confidence — it's red warning boxes
+(OpenHands), buried bullets (agor), silence (opencode), or a feature
+literally named "yolo mode" (claude-squad). So trust leads here:
+"Unattended is not auto-accept" is now the first section — a
+can-never/enforced-by table (default branch, self-approval, irreversible
+options, credentials, idle spend, unmeasured spend, guessing), closed by
+the executable claim (unattended.test.ts). Also per the study: wordmark
+with dark/light variants, ≤7-word category tagline, nav row, absolute
+raw.githubusercontent media URLs (relative images break on npm's
+renderer), Contributing/License tail, overnight-failure table de-duped
+against the boundaries table. package.json: version 0.1.1, category-first
+description, 15 keywords — awaiting the operator's republish so the
+registry page catches up.
+
 **2026-08-13 — the repo is the product too.** Pre-publish front-door pass:
 GitHub Actions CI (ubuntu + macos × node 22/24: typecheck, build, the full
 suite) with badges; CONTRIBUTING.md (fail-closed rules, the adapter

@@ -1,7 +1,7 @@
 {
   "name": "standing-orders",
-  "version": "0.1.0",
-  "description": "Standing orders for your agents. Wake me only for these.",
+  "version": "0.1.1",
+  "description": "The control plane for coding agents you can safely leave alone — queue tasks, walk away, come back to pull requests. Standing orders for your agents: wake me only for these.",
   "directories": {
     "doc": "docs"
   },
@@ -20,7 +20,17 @@
     "orchestration",
     "claude-code",
     "codex",
-    "git-worktree"
+    "git-worktree",
+    "ai-agents",
+    "autonomous-agents",
+    "agent-orchestration",
+    "control-plane",
+    "cli",
+    "task-queue",
+    "llm",
+    "openrouter",
+    "telegram",
+    "unattended"
   ],
   "license": "MIT",
   "type": "module",
