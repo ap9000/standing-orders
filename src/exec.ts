@@ -45,6 +45,12 @@ export type RunOptions = {
    * grandchildren stops nothing. Timeout kills become group kills too.
    */
   processGroup?: boolean;
+  /**
+   * Called the moment the stream announces its session (codex:
+   * thread.started), so a crash mid-turn cannot lose the id (M6.9 —
+   * currently only the streaming transport can deliver this early).
+   */
+  onSessionId?: (id: string) => void;
 };
 
 /** Live provider children, for the deterministic stop. Registered only when `processGroup` was set. */
@@ -315,6 +321,16 @@ export function runStreamJsonl(
         const type = String(event["type"] ?? "");
         if (type === "thread.started" || type === "turn.completed" || type === "turn.failed") {
           kept.push(line);
+          if (type === "thread.started" && options.onSessionId !== undefined) {
+            const id = event["thread_id"];
+            if (typeof id === "string" && id !== "") {
+              try {
+                options.onSessionId(id);
+              } catch {
+                // A registry that cannot be written must not kill the turn.
+              }
+            }
+          }
         } else if (type === "item.completed") {
           const item = event["item"] as Record<string, unknown> | undefined;
           if (item !== undefined && String(item["type"] ?? "") === "agent_message") {

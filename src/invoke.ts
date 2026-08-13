@@ -102,6 +102,10 @@ export async function invokeAgent(
     // shells and tools of its own, and both the timeout and the watch's
     // hard stop must end the whole tree, not orphan the grandchildren.
     processGroup: true,
+    // The session registry's crash guarantee (M6.9): the id is stamped the
+    // moment the stream announces it, first write wins — a daemon that
+    // dies mid-turn still knows which session to offer the successor.
+    onSessionId: id => store.stampRun(runId, { sessionId: id }),
   });
 
   const envelope = adapter.parse(result.stdout);

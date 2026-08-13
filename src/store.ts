@@ -3472,14 +3472,52 @@ export class Store {
    * envelope comes back. COALESCE, never overwrite — the first stamp is the
    * true one.
    */
-  stampRun(id: number, facts: { baseRevision?: string; sessionId?: string }): void {
+  stampRun(id: number, facts: { baseRevision?: string; sessionId?: string; parentRun?: number }): void {
     this.db
       .prepare(
         `UPDATE run SET base_revision = COALESCE(base_revision, ?),
-                        session_id = COALESCE(session_id, ?)
+                        session_id = COALESCE(session_id, ?),
+                        parent_run = COALESCE(parent_run, ?)
           WHERE id = ?`,
       )
-      .run(facts.baseRevision ?? null, facts.sessionId ?? null, id);
+      .run(facts.baseRevision ?? null, facts.sessionId ?? null, facts.parentRun ?? null, id);
+  }
+
+  /**
+   * The warm-resume candidate (M6.9): the latest PARKED builder run whose
+   * session could carry this task's next attempt — same provider, same
+   * branch, session captured — with the disqualifiers the Codex slice
+   * names checked here, in one place: a newer accepted build supersedes
+   * the park, and `tried` says whether any attempt already resumed it
+   * (one warm try per park; after that the successor goes cold with the
+   * answered decisions rather than failing on a dead session forever).
+   */
+  resumeCandidate(
+    taskRef: number,
+    provider: string,
+    branch: string,
+  ): { run: Run; tried: boolean } | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM run
+          WHERE task_ref = ? AND outcome = 'parked' AND role = 'builder'
+            AND session_id IS NOT NULL AND provider = ? AND branch = ?
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(taskRef, provider, branch);
+    if (row === undefined) return null;
+    const parked = readRun(row);
+    const superseded = this.db
+      .prepare(
+        `SELECT 1 AS hit FROM run
+          WHERE task_ref = ? AND id > ? AND outcome IN ('built','no-change') LIMIT 1`,
+      )
+      .get(taskRef, parked.id);
+    if (superseded !== undefined) return null;
+    const child = this.db
+      .prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'builder' LIMIT 1")
+      .get(parked.id);
+    return { run: parked, tried: child !== undefined };
   }
 
   finishRun(

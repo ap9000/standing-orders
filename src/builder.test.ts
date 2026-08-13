@@ -268,6 +268,57 @@ describe("the builder's gates", () => {
     expect(again.ok).toBe(true);
   });
 
+  test("an answered park hands its session to exactly one warm attempt (M6.9)", async () => {
+    claimIt();
+    approveScope();
+    // The parked predecessor: same branch and provider, base matching what
+    // the scripted git will report, session captured.
+    const parked = store.startRun({
+      taskRef, leaseId: "l-park", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+    });
+    store.stampRun(parked, { baseRevision: "feat/a", sessionId: "sess-park-1" });
+    store.finishRun(parked, { outcome: "parked", now: T0 });
+    const decisionId = store.saveDecision(
+      {
+        run: parked,
+        urgency: "blocking",
+        recap: "two ways",
+        question: "which way?",
+        options: [{ id: "a", label: "way a", consequence: "fine", reversible: true }],
+        recommendation: "a",
+      },
+      T0,
+    );
+    store.answerDecision({ id: decisionId, choice: "a", by: "alex", via: "web" }, T0);
+
+    // First attempt after the answer: warm — the session rides --resume,
+    // and the record names its parent park before the spawn.
+    const first = request();
+    const built = await build(store, first);
+    expect(built).toMatchObject({ ok: true });
+    expect(agentCalls.some(args => args.includes("--resume") && args.includes("sess-park-1"))).toBe(true);
+    expect(store.getRun(first.runId as number)?.parentRun).toBe(parked);
+
+    // A second attempt at the same park goes cold: one warm try per park,
+    // because a dead session must never fail its way into a stall.
+    agentCalls.length = 0;
+    const decision2 = store.saveDecision(
+      {
+        run: first.runId as number,
+        urgency: "blocking",
+        recap: "again",
+        question: "again?",
+        options: [{ id: "b", label: "way b", consequence: "fine", reversible: true }],
+        recommendation: "b",
+      },
+      T0,
+    );
+    store.answerDecision({ id: decision2, choice: "b", by: "alex", via: "web" }, T0);
+    const second = request();
+    await build(store, second);
+    expect(agentCalls.some(args => args.includes("--resume"))).toBe(false);
+  });
+
   test("a committed build leaves its terminal diff behind — patch and stat, capture recorded (M5.3)", async () => {
     claimIt();
     approveScope();

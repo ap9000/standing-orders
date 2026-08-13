@@ -408,6 +408,31 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   const baseRevision = revision.stdout.trim();
   store.stampRun(request.runId, { baseRevision });
 
+  // The warm resume (M6.9), narrowly: an answered park may hand its SESSION
+  // to this attempt — but only when every condition re-proves right here.
+  // Same task, same provider, same branch (the candidate query); the branch
+  // still at the parked run's exact base (a moved base means the world
+  // changed and the session's memory is stale); answers actually attached
+  // (question-first parks are what warm resume exists for); and ONE warm
+  // try per park — a dead session must not fail three attempts into a
+  // stall, so the second attempt goes cold carrying the same answers.
+  // A cold start is honest; a stale resume is a lie about the present.
+  let resumeSession: string | null = null;
+  if (answers.length > 0) {
+    const candidate = store.resumeCandidate(taskRef, provider, branch);
+    if (
+      candidate !== null &&
+      !candidate.tried &&
+      candidate.run.sessionId !== null &&
+      candidate.run.baseRevision === baseRevision
+    ) {
+      resumeSession = candidate.run.sessionId;
+      // Causal parentage, stamped before the spawn: whatever happens next,
+      // the record says which park this attempt tried to carry forward.
+      store.stampRun(request.runId, { parentRun: candidate.run.id });
+    }
+  }
+
   // The protocol files: the park mailbox and the terminal handoff. Both
   // names carry nonces this attempt alone knows, and anything
   // protocol-shaped already in the worktree is swept to quarantine first —
@@ -495,7 +520,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         maxTurns,
         permissionMode,
         skipPermissions,
-        resumeSession: null,
+        resumeSession,
       },
       { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
     );
