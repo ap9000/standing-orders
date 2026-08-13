@@ -22,6 +22,8 @@ export type BoardFacts = {
   strikes: number;
   hasScope: boolean;
   approved: boolean;
+  /** Planning mode: requested = a planner will run; drafted = review it. */
+  plan: "requested" | "drafted" | null;
   /** First line of the scope's goal — the promise a queued card shows. */
   goal: string | null;
   /** An unanswered decision's id — open or expired; expiry never answers. */
@@ -42,6 +44,8 @@ export type BoardFacts = {
     model: string | null;
     branch: string | null;
     worktree: string | null;
+    /** The run's role when one exists — a planning session reads differently. */
+    role: string | null;
   } | null;
   /** The top-precedence live hold: operator > backoff > decision > incident. */
   hold: { ownerKind: "operator" | "decision" | "incident" | "backoff"; until: string | null } | null;
@@ -90,14 +94,15 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
   };
 
   if (facts.claim !== null) {
+    const doing = facts.claim.role === "planner" ? "planning — " : "";
     return {
       ...base,
       lane: "building",
       attempt: facts.strikes > 0 ? facts.strikes + 1 : null,
       reason:
         facts.claim.model === null && facts.claim.branch === null
-          ? `${facts.claim.runner} · preparing workspace`
-          : facts.claim.runner,
+          ? `${doing}${facts.claim.runner} · preparing workspace`
+          : `${doing}${facts.claim.runner}`,
     };
   }
   if (facts.openDecisionId !== null) {
@@ -122,11 +127,17 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
           : `failed${facts.strikes > 0 ? ` after ${facts.strikes} attempt${facts.strikes > 1 ? "s" : ""}` : ""}`,
     };
   }
-  if (!facts.hasScope) {
-    return { ...base, lane: "attention", reason: "write its scope", stalledSince: facts.updatedAt };
+  if (facts.plan === "drafted" && !facts.approved) {
+    // The planner concluded; the negotiation waits on the operator.
+    return { ...base, lane: "attention", reason: "review the plan", stalledSince: facts.updatedAt };
   }
-  if (!facts.approved) {
-    return { ...base, lane: "attention", reason: "approve its scope", stalledSince: facts.updatedAt };
+  if (facts.plan !== "requested") {
+    if (!facts.hasScope) {
+      return { ...base, lane: "attention", reason: "write its scope", stalledSince: facts.updatedAt };
+    }
+    if (!facts.approved) {
+      return { ...base, lane: "attention", reason: "approve its scope", stalledSince: facts.updatedAt };
+    }
   }
   if (facts.state === "running") {
     // Running with no live claim: the build vanished out from under the
@@ -169,6 +180,10 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
   // capacity, provider quota, the attention budget) are deliberately not
   // per-card claims — the board cannot know which runner would take this
   // task, so the queued lane's header speaks for the fleet (finding 6).
-  // The card at this stage IS the promise: show the goal, not "ready".
+  // The card at this stage IS the promise: show the goal, not "ready" —
+  // unless the promise is still being negotiated, in which case say so.
+  if (facts.plan === "requested") {
+    return { ...base, lane: "queued", reason: "planning next" };
+  }
   return { ...base, lane: "queued", reason: facts.goal ?? "ready" };
 }

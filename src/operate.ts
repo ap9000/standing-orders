@@ -195,6 +195,10 @@ Capabilities — what the work needs, recorded and probed, never valued
   nightorders gaps [--repo <path>]      what is missing, ranked by how many
                                         tasks filling it would start
 
+  nightorders task plan <id> --as <you> --token <t>
+                                        plan before building: an agent reads
+                                        the repo, asks you questions, and
+                                        proposes a scope you approve
   nightorders brief [--repo <path>] [--local] [--since <iso>]
                                         the report: recent runs, gaps,
                                         PRs (--local skips the network and

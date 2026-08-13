@@ -149,6 +149,32 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Planning mode (2026-08-13, Phase B; the round-2 findings are its spec)
+
+`task plan <id>` (CLI, authenticated) or "plan first" (console) marks the
+ask; the pass dispatches a **planner** — schema v7's third run role — into
+a disposable workspace on its own branch namespace. Its role precondition
+is re-proved inside the claim transaction (never an early return past the
+capability/capacity/quota/attention gates; above the attention budget a
+planner is refused outright), and the half-open quota probe is now
+consumed only WITH the claim it admits — a refusal no longer re-arms the
+quota with no probe in flight (findings 2–3, the latter a fix to shipped
+M4 behavior). The planner's only endings are a parked question (the
+existing decision surface — Telegram taps answer it, causal resume feeds
+the answer back) or a NIGHTORDERS-PLAN handoff; both are ingested only
+AFTER branch, HEAD, and clean tree are proven (finding 1 — the vandal
+test smuggles a file and gets nothing ingested, question included). A
+drafted plan lands as a PROPOSED scope plus a plan-document artifact; the
+inbox and board flip to "review the plan"; the approve step-up is
+unchanged and renders the document above the restated scope; the
+builder's brief quotes the approved plan fenced-inert. Planner failures
+take separate strikes and shorter backoff, malformed payloads go straight
+to a durable `malformed-plan` incident whose hold blocks redispatch, and
+exhaustion pages as `plan-attempts-exhausted` — builder strikes are never
+spent by planning (finding 6). The whole negotiation is one E2E against
+real git: ask → answer → draft → approve → build, with the plan in the
+builder's brief and the planner's branch never an ancestor. 723 tests.
+
 ## Card accretion (2026-08-13, Codex round 2: 13 findings; Phase A of three)
 
 The card now answers the question you would ask at its stage. Needs-you

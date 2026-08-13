@@ -1259,6 +1259,63 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(anonymous.headers.get("location")).toBe("/login");
   });
 
+  test("plan first: the console asks, the board says planning, the draft returns for review", async () => {
+    store.createTask({ id: "t-plan", title: "needs thought" }, T0);
+    const ref = store.refFor("built-in", "t-plan").id;
+    store.placeTask(ref, "/repo/main");
+
+    const cookie = await login();
+    const before = await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text();
+    expect(before).toContain("plan first");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(before)?.[1] ?? "";
+
+    const asked = await fetch(url("/t/t-plan/plan"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(asked.status).toBe(303);
+    expect(store.refFor("built-in", "t-plan").plan).toBe("requested");
+
+    const screen = await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text();
+    expect(screen).toContain("planning requested");
+    expect(screen).not.toContain(">plan first<");
+
+    const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
+    expect(board).toContain("planning next");
+
+    // The draft arrives: proposed scope + plan state; the board flips to
+    // review, and the task screen shows the document with the approve card.
+    store.saveScope({
+      taskId: "t-plan", goal: "The negotiated goal", outOfScope: null, touches: [],
+      proposedAt: new Date().toISOString(), digest: "dg-negotiated",
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    store.setPlanState(ref, "drafted");
+    const run = store.startRun({
+      taskRef: ref, leaseId: "plan-lease", runner: "b", role: "planner",
+      branch: "nightorders-plan/t-plan", worktree: "/pool/plan", now: new Date(),
+    });
+    const content = Buffer.from("## Approach\nDo the thing carefully.\n", "utf8");
+    const { mkdirSync: mkdirS, writeFileSync: writeS } = await import("node:fs");
+    mkdirS(join(evidenceRoot, String(run)), { recursive: true });
+    writeS(join(evidenceRoot, String(run), "plan.md"), content);
+    store.saveArtifact({
+      run, kind: "plan", key: `${run}/plan.md`,
+      bytesOriginal: content.length, bytesStored: content.length, truncated: false,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      capture: "planner handoff (verified tree)",
+    }, new Date());
+
+    const review = await (await fetch(url("/board"), { headers: { cookie } })).text();
+    expect(review).toContain("review the plan");
+    const drafted = await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text();
+    expect(drafted).toContain("Do the thing carefully.");
+    expect(drafted).toContain("approve exactly this:");
+    expect(drafted).toContain("The negotiated goal");
+  });
+
   test("the old morning route forwards to activity, which speaks of windows, not nights", async () => {
     const cookie = await login();
     const moved = await fetch(url("/morning"), { headers: { cookie }, redirect: "manual" });

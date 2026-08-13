@@ -3991,8 +3991,10 @@ export class Store {
                WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL) AS open_incidents,
              (SELECT MIN(incident.created_at) FROM incident JOIN run ON run.id = incident.run
                WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL) AS oldest_incident_at,
+             task_ref.plan AS plan_state,
              live.runner AS claim_runner, live.acquired_at AS claim_at, live.lease_id AS claim_lease,
              claim_run.model AS claim_model, claim_run.branch AS claim_branch, claim_run.worktree AS claim_worktree,
+             claim_run.role AS claim_role,
              (SELECT hold.owner_kind FROM hold
                WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
                ORDER BY CASE hold.owner_kind WHEN 'operator' THEN 0 WHEN 'backoff' THEN 1 WHEN 'decision' THEN 2 ELSE 3 END, hold.id
@@ -4085,6 +4087,10 @@ export class Store {
         strikes: Number(row["strikes"]),
         hasScope: Number(row["has_scope"]) === 1,
         approved: Number(row["approved"]) === 1,
+        plan:
+          row["plan_state"] === null || row["plan_state"] === undefined
+            ? null
+            : (String(row["plan_state"]) as "requested" | "drafted"),
         goal: text(row, "goal"),
         openDecisionId:
           row["open_decision"] === null || row["open_decision"] === undefined
@@ -4103,6 +4109,7 @@ export class Store {
                 model: text(row, "claim_model"),
                 branch: text(row, "claim_branch"),
                 worktree: text(row, "claim_worktree"),
+                role: text(row, "claim_role"),
               },
         hold:
           row["hold_kind"] === null || row["hold_kind"] === undefined

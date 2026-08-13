@@ -24,6 +24,7 @@ function facts(overrides: Partial<BoardFacts> = {}): BoardFacts {
     strikes: 0,
     hasScope: true,
     approved: true,
+    plan: null,
     goal: null,
     openDecisionId: null,
     question: null,
@@ -52,7 +53,7 @@ describe("the lane classifier", () => {
         state: "running",
         openDecisionId: 7,
         hold: { ownerKind: "decision", until: null },
-        claim: { runner: "builder-1", claimedAt: T0.toISOString(), model: "claude", branch: "nightorders/t-1", worktree: "/pool/t-1" },
+        claim: { runner: "builder-1", claimedAt: T0.toISOString(), model: "claude", branch: "nightorders/t-1", worktree: "/pool/t-1", role: "builder" },
       }),
       T0,
     );
@@ -62,7 +63,7 @@ describe("the lane classifier", () => {
 
   test("a claim before its run exists says it is preparing, not lying about a model", () => {
     const card = classify(
-      facts({ claim: { runner: "builder-1", claimedAt: T0.toISOString(), model: null, branch: null, worktree: null } }),
+      facts({ claim: { runner: "builder-1", claimedAt: T0.toISOString(), model: null, branch: null, worktree: null, role: null } }),
       T0,
     );
     expect(card.lane).toBe("building");
@@ -135,7 +136,7 @@ describe("the lane classifier", () => {
     const secondTry = classify(
       facts({
         strikes: 1,
-        claim: { runner: "r", claimedAt: T0.toISOString(), model: "claude", branch: "b", worktree: "/w" },
+        claim: { runner: "r", claimedAt: T0.toISOString(), model: "claude", branch: "b", worktree: "/w", role: "builder" },
       }),
       T0,
     );
@@ -146,7 +147,7 @@ describe("the lane classifier", () => {
     const holds: BoardFacts["hold"][] = [null, { ownerKind: "operator", until: null }];
     const claims: BoardFacts["claim"][] = [
       null,
-      { runner: "r", claimedAt: T0.toISOString(), model: null, branch: null, worktree: null },
+      { runner: "r", claimedAt: T0.toISOString(), model: null, branch: null, worktree: null, role: null },
     ];
     for (const state of ["queued", "running", "failed"] as const) {
       for (const hasScope of [true, false]) {
@@ -221,7 +222,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
       worktree: "/pool/t-run",
     });
     const other = board.tasks.find(row => row.taskId === "t-bare");
-    expect(other?.claim).toMatchObject({ runner: "builder-2", model: null, branch: null, worktree: null });
+    expect(other?.claim).toMatchObject({ runner: "builder-2", model: null, branch: null, worktree: null, role: null });
   });
 
   test("a parked task reports both the open decision and its hold — and classifies once", () => {

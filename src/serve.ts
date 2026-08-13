@@ -697,6 +697,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       taskPage(chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)), {
         task: found,
         strikes: ref?.strikes ?? 0,
+        plan: ref?.plan ?? null,
+        planDocument: ref === null ? null : planDocumentOf(ref.id),
         repo: ref?.repo ?? null,
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
@@ -835,7 +837,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/d/${id}`);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -901,6 +903,16 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         // Allow-listed return only — never an arbitrary URL from the form.
         return redirect(response, body.get("return") === "inbox" ? "/" : taskHref(taskId));
+      }
+      case "plan": {
+        // The operator's explicit ask, refused transactionally when the
+        // moment has passed — approved scope, live claim, or a plan
+        // already under way (Codex planning review's requestPlan guard).
+        const asked = store.requestPlan(ref.id, now);
+        if (!asked.ok) {
+          return taskScreen(response, who, taskId, `not planned: ${asked.reason}`, 409);
+        }
+        return redirect(response, taskHref(taskId));
       }
       case "cancel": {
         const cancelled = store.cancelTask(taskId, now);
@@ -992,6 +1004,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       return session;
     }
     return null;
+  }
+
+  /** The newest plan document for a task, verified before a byte renders. */
+  function planDocumentOf(taskRef: number): string | null {
+    const artifact = store.latestPlanArtifact(taskRef);
+    if (artifact === null) return null;
+    try {
+      const verified = readVerifiedArtifact(evidenceRoot, artifact);
+      return verified.ok ? verified.content.toString("utf8") : null;
+    } catch {
+      return null;
+    }
   }
 
   // ---- evidence ------------------------------------------------------------
@@ -1517,6 +1541,7 @@ const STYLE = `
   .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; }
   .lane-card .meta, .lane-card .mono { display: block; margin-top: .125rem; font-size: .75rem; }
   .lane-empty { margin: .75rem 0 .25rem; }
+  .plan-doc { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; max-height: 24rem; overflow-y: auto; }
   .lane-more { display: block; margin-top: .5rem; font-size: .75rem; }
 `;
 
@@ -2272,6 +2297,8 @@ function newTaskPage(
 function taskPage(chrome: Chrome, data: {
   task: Task;
   strikes: number;
+  plan: "requested" | "drafted" | null;
+  planDocument: string | null;
   repo: string | null;
   holds: Hold[];
   claimed: boolean;
@@ -2320,6 +2347,20 @@ function taskPage(chrome: Chrome, data: {
           approval.approved
             ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
             : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
+          `</div>`,
+        ].join("\n");
+
+  // The plan a planner drafted, when one exists: rendered inert above the
+  // approval it proposes. The scope stays the contract; this is the road.
+  const planCard =
+    data.planDocument === null
+      ? data.plan === "requested"
+        ? `<div class="card"><p><strong>planning requested</strong></p><p class="meta">a planner will read the repository and propose a scope \u2014 its questions reach you like any decision</p></div>`
+        : ""
+      : [
+          `<div class="card">`,
+          `<p><strong>the plan</strong> <span class="meta">drafted by a planning session \u2014 review it, then approve the scope it proposes</span></p>`,
+          `<pre class="recap plan-doc">${escape(data.planDocument)}</pre>`,
           `</div>`,
         ].join("\n");
 
@@ -2410,6 +2451,12 @@ function taskPage(chrome: Chrome, data: {
       ? `<p class="meta">a runner holds a live claim right now — holds prevent the <em>next</em> dispatch; cancel and requeue wait for the claim</p>`
       : "",
     `<div class="card">`,
+    data.plan === null && !approval.approved && !data.claimed && task.state === "queued"
+      ? act("plan", "plan first")
+      : "",
+    data.plan === null && !approval.approved && !data.claimed && task.state === "queued"
+      ? `<p class="meta">plan first sends an agent to read the repository, ask you questions, and propose a scope \u2014 nothing builds until you approve it</p>`
+      : "",
     act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" aria-label="hold reason" style="width:12rem">`),
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     stalled ? act("requeue", "requeue") : "",
@@ -2438,6 +2485,7 @@ function taskPage(chrome: Chrome, data: {
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     "<h2>scope</h2>",
     scopeCard,
+    planCard,
     approveForm,
     scopeForm,
     holds,
