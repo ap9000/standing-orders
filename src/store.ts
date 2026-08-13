@@ -1135,10 +1135,11 @@ CREATE TABLE IF NOT EXISTS diff_comment (
   consumed_by   TEXT,
   -- Where an ingested comment came from (M8.17): gh:<owner/name>:<id>.
   -- The GitHub comment id is the idempotency key — one ingest, ever.
+  -- Its unique index is created AFTER migration (see openStore): a
+  -- database whose diff_comment predates the column would die on an
+  -- index statement inside this schema block before addColumn could run.
   source_key    TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source
-  ON diff_comment (source_key) WHERE source_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS mutation (
   idempotency_key TEXT PRIMARY KEY,
@@ -1215,7 +1216,8 @@ CREATE INDEX IF NOT EXISTS incident_attention ON incident (run, id) WHERE resolv
 CREATE INDEX IF NOT EXISTS task_ref_repo ON task_ref (repo, id);
 CREATE INDEX IF NOT EXISTS run_task_outcome ON run (task_ref, outcome, id DESC);
 CREATE INDEX IF NOT EXISTS task_done_recent ON task (updated_at DESC, id DESC) WHERE state = 'done';
-CREATE INDEX IF NOT EXISTS run_started ON run (started_at, id);`);
+CREATE INDEX IF NOT EXISTS run_started ON run (started_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source ON diff_comment (source_key) WHERE source_key IS NOT NULL;`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -1403,8 +1405,8 @@ function migrate(db: Database): void {
   addColumn(db, "task_ref", "revision_brief_artifact", "INTEGER REFERENCES artifact(id)");
   // v11c (M8.17 PR-comment intake): the ingest idempotency key, additive —
   // a same-day v11 database gains it here; fresh ones carry it already.
+  // Its unique index rides the post-migration block in openStore.
   addColumn(db, "diff_comment", "source_key", "TEXT");
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source ON diff_comment (source_key) WHERE source_key IS NOT NULL");
   // v11 (M5 activity): the machine-authored phase — stamped by the control
   // plane at its own state-machine boundaries, never parsed out of a
   // provider stream. Transient in meaning (read while the run is open),
