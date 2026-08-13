@@ -50,7 +50,39 @@ export const LIMITS = {
   optionId: 40,
   assignee: 120,
   options: 6,
+  /** UTF-16 code units; the byte backstop lives in validateNote. */
+  note: 500,
 } as const;
+
+/** Bytes an operator's note may occupy — the UTF-8 backstop under LIMITS.note. */
+export const NOTE_BYTE_CAP = 2_000;
+
+/**
+ * Unicode that reorders or breaks lines invisibly: bidi controls and the
+ * line/paragraph separators. A note carrying these can spoof what a
+ * reviewer SEES agreeing to — rejected outright, never stripped
+ * (Codex free-text review, prescribed caps).
+ */
+const FORBIDDEN_INVISIBLES = /[\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+
+/**
+ * The one validator every note passes — before a draft persists AND inside
+ * the answer CAS, which stays the final gate. Trims, then refuses empty,
+ * oversized (units or bytes), control-carrying, or invisibly-reordering
+ * text. Ordinary Unicode with internal newlines and tabs passes untouched.
+ */
+export function validateNote(raw: string): { ok: true; note: string } | { ok: false; problem: string } {
+  const note = raw.trim();
+  if (note === "") return { ok: false, problem: "an empty note says nothing" };
+  if (note.length > LIMITS.note) return { ok: false, problem: `a note is at most ${LIMITS.note} characters` };
+  if (Buffer.byteLength(note, "utf8") > NOTE_BYTE_CAP) {
+    return { ok: false, problem: `a note is at most ${NOTE_BYTE_CAP} bytes` };
+  }
+  if (hasForbiddenControls(note) || FORBIDDEN_INVISIBLES.test(note)) {
+    return { ok: false, problem: "control and direction-override characters do not travel" };
+  }
+  return { ok: true, note };
+}
 
 /** Option ids travel in URLs, CLI arguments, and CAS updates — they are identifiers, not prose. */
 const OPTION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;

@@ -29,14 +29,14 @@
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { hasForbiddenControls } from "./decision.js";
+import { hasForbiddenControls, validateNote } from "./decision.js";
 import { digestOf } from "./scope.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -836,6 +836,39 @@ CREATE TABLE IF NOT EXISTS telegram_action (
 );
 CREATE INDEX IF NOT EXISTS telegram_action_by_decision ON telegram_action (decision);
 
+-- Which outbound Telegram message carries which decision (v10). A free-text
+-- reply is routed through the EXACT message it replies to — never "the
+-- latest decision", never "the only open one" (Codex free-text review,
+-- finding 1). Losing the send/record race fails closed: an unrecorded
+-- message routes nothing.
+CREATE TABLE IF NOT EXISTS telegram_decision_message (
+  binding    INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE CASCADE,
+  chat_id    TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  decision   INTEGER NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (binding, chat_id, message_id)
+);
+
+-- The free-text draft (v10): an operator's note, held immutable and
+-- expiring until a TAP commits it with the choice. One live draft per
+-- (binding, decision); a newer valid reply SUPERSEDES, never edits.
+CREATE TABLE IF NOT EXISTS telegram_note_draft (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  binding    INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE CASCADE,
+  decision   INTEGER NOT NULL REFERENCES decision(id) ON DELETE CASCADE,
+  update_id  INTEGER NOT NULL,
+  message_id TEXT NOT NULL,
+  reply_to   TEXT NOT NULL,
+  note       TEXT NOT NULL,
+  state      TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','armed','superseded','consumed','discarded')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_note_draft_live
+  ON telegram_note_draft (binding, decision) WHERE state IN ('pending','armed');
+
 -- The bridge's poll lease and cursor, per bot. One live poller at a time;
 -- the cursor only ever moves forward, and only under a live generation.
 CREATE TABLE IF NOT EXISTS bridge_lease (
@@ -1246,6 +1279,10 @@ function migrate(db: Database): void {
   // resolved under approved terms cannot be re-routed by later flags.
   addColumn(db, "task_ref", "agent_provider", "TEXT");
   addColumn(db, "task_ref", "agent_model", "TEXT");
+  // v10 (free-text answers): two new tables via the fresh SCHEMA, plus the
+  // digest that binds an irreversible confirmation to the EXACT note it
+  // confirmed (Codex free-text review, finding 3).
+  addColumn(db, "telegram_action", "note_digest", "TEXT");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -3627,8 +3664,8 @@ export class Store {
       return { ok: false as const, reason: "bad-option" as const };
     }
     // The note reaches web pages, terminals, and — quoted — a later
-    // agent's brief. Same discipline as everything else that travels.
-    if (answer.note !== undefined && (answer.note.length > 500 || hasForbiddenControls(answer.note))) {
+    // agent's brief. One shared validator, and this is its final gate.
+    if (answer.note !== undefined && !validateNote(answer.note).ok) {
       return { ok: false as const, reason: "bad-note" as const };
     }
 
@@ -3638,10 +3675,15 @@ export class Store {
                              answered_via = ?, choice = ?, note = ?
           WHERE id = ? AND state IN ('open','expired')`,
       )
-      .run(now.toISOString(), answer.by, answer.via, answer.choice, answer.note ?? null, answer.id);
+      .run(now.toISOString(), answer.by, answer.via, answer.choice, answer.note?.trim() ?? null, answer.id);
     if (Number(changes) === 0) {
+      // Duplicate success requires the whole TUPLE — choice AND note. The
+      // same option with a different note is not the same answer: reporting
+      // success while the racing note was silently dropped would tell the
+      // operator their constraint traveled when it never did (Codex
+      // free-text review, finding 4).
       const settled = this.getDecision(answer.id) as Decision;
-      return settled.choice === answer.choice
+      return settled.choice === answer.choice && (settled.note ?? null) === (answer.note?.trim() ?? null)
         ? { ok: true as const, decision: settled, duplicate: true }
         : { ok: false as const, reason: "already-answered" as const };
     }
@@ -3958,13 +4000,15 @@ export class Store {
       chatId: string;
       messageId?: string;
       ttlMs?: number;
+      /** Binds an irreversible confirmation to the EXACT note it showed. */
+      noteDigest?: string;
     },
     now: Date,
   ): void {
     this.db
       .prepare(
-        `INSERT INTO telegram_action (token, binding, decision, option_id, phase, chat_id, message_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO telegram_action (token, binding, decision, option_id, phase, chat_id, message_id, created_at, expires_at, note_digest)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         action.token,
@@ -3976,7 +4020,91 @@ export class Store {
         action.messageId ?? null,
         now.toISOString(),
         action.ttlMs === undefined ? null : new Date(now.getTime() + action.ttlMs).toISOString(),
+        action.noteDigest ?? null,
       );
+  }
+
+  // ---- free-text drafts (v10) ---------------------------------------------
+
+  /** Which decision an outbound Telegram message carried. Recorded after the
+   * send returns its id; a send whose record was lost routes nothing. */
+  recordTelegramDecisionMessage(binding: number, chatId: string, messageId: string, decision: number, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO telegram_decision_message (binding, chat_id, message_id, decision, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(binding, chatId, messageId, decision, now.toISOString());
+  }
+
+  /** The decision behind an exact replied-to message, or nothing. Never "the latest". */
+  decisionForTelegramMessage(binding: number, chatId: string, messageId: string): number | null {
+    const row = this.db
+      .prepare(
+        "SELECT decision FROM telegram_decision_message WHERE binding = ? AND chat_id = ? AND message_id = ?",
+      )
+      .get(binding, chatId, messageId);
+    return row === undefined ? null : Number(row["decision"]);
+  }
+
+  /** The one live, unexpired draft for a decision, if any. */
+  liveNoteDraft(binding: number, decision: number, now: Date): { id: number; note: string; updateId: number; state: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, note, update_id, state FROM telegram_note_draft
+          WHERE binding = ? AND decision = ? AND state IN ('pending','armed') AND expires_at > ?`,
+      )
+      .get(binding, decision, now.toISOString());
+    return row === undefined
+      ? null
+      : { id: Number(row["id"]), note: String(row["note"]), updateId: Number(row["update_id"]), state: String(row["state"]) };
+  }
+
+  /**
+   * Persist a validated note as the live draft. A newer update SUPERSEDES
+   * the old draft — drafts are immutable, and only a GREATER update_id may
+   * replace one, so out-of-order delivery cannot resurrect an older note
+   * (Codex free-text review, state machine). Returns false when an older
+   * or equal update tried.
+   */
+  saveNoteDraft(
+    draft: { binding: number; decision: number; updateId: number; messageId: string; replyTo: string; note: string },
+    now: Date,
+    ttlMs = 10 * 60_000,
+  ): boolean {
+    return this.transact(() => {
+      const live = this.db
+        .prepare(
+          `SELECT id, update_id FROM telegram_note_draft
+            WHERE binding = ? AND decision = ? AND state IN ('pending','armed')`,
+        )
+        .get(draft.binding, draft.decision);
+      if (live !== undefined) {
+        if (Number(live["update_id"]) >= draft.updateId) return false;
+        this.db.prepare("UPDATE telegram_note_draft SET state = 'superseded' WHERE id = ?").run(live["id"]);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO telegram_note_draft (binding, decision, update_id, message_id, reply_to, note, state, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        )
+        .run(
+          draft.binding,
+          draft.decision,
+          draft.updateId,
+          draft.messageId,
+          draft.replyTo,
+          draft.note,
+          now.toISOString(),
+          new Date(now.getTime() + ttlMs).toISOString(),
+        );
+      return true;
+    });
+  }
+
+  /** Move a draft between states; the caller owns the transaction story. */
+  setNoteDraftState(id: number, state: "pending" | "armed" | "superseded" | "consumed" | "discarded"): void {
+    this.db.prepare("UPDATE telegram_note_draft SET state = ? WHERE id = ?").run(state, id);
   }
 
   getTelegramAction(token: string): TelegramAction | null {
