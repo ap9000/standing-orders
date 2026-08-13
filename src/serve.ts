@@ -67,6 +67,7 @@ import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import {
   authorizedProject,
   canonicalProject,
+  isGitRepo,
   projectName,
   resolveCeiling,
   rowVisible,
@@ -612,8 +613,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       // Authorization is the ceiling, then the path must actually be a git
       // repository — validation with direct argv and a bound, never a shell.
+      // Both checks apply even to configured repos: naming a directory in
+      // config authorizes it; only being a repository makes it openable.
       if (!(await authorizedProject(ceiling, canonical))) {
         return void projectsScreen(response, who, "that path is outside what this server was configured to serve", 403);
+      }
+      if (!(await isGitRepo(canonical))) {
+        return void projectsScreen(response, who, "that path is not a git repository", 400);
       }
       store.upsertProject(canonical, projectName(canonical), now);
       who.session.project = canonical;
@@ -1237,7 +1243,7 @@ const STYLE = `
     padding: 1rem .875rem; display: flex; flex-direction: column; gap: .25rem;
     position: sticky; top: 0; height: 100vh; overflow-y: auto;
   }
-  .side .brand { padding: .25rem .5rem .75rem; font-size: 1rem; }
+  .side .brand { padding: .25rem .5rem .75rem; font-size: 1rem; height: auto; }
   .side-project {
     border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
     padding: .5rem .625rem; margin: 0 0 .75rem; background: var(--background);

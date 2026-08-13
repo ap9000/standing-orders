@@ -67,6 +67,7 @@ import {
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { ask, askHidden, confirm, interactive } from "./prompt.js";
+import { canonicalProject } from "./project.js";
 import { overnight, spendLine } from "./summary.js";
 import {
   bodyHashOf,
@@ -3150,7 +3151,7 @@ async function addTask(
   // run: a task filed from the wrong directory would silently bind to it.
   const placedIn = text(flags, "repo");
   if (placedIn !== undefined) {
-    const placed = store.placeTask(store.refFor(BUILT_IN, id).id, resolve(placedIn));
+    const placed = store.placeTask(store.refFor(BUILT_IN, id).id, canonicalProject(placedIn) ?? resolve(placedIn));
     if (typeof placed === "object" && !placed.ok) {
       return fail(write, json, "task add", "scoped", "this task already has a scope — placement is immutable once somebody could have approved it", EXIT.refused);
     }

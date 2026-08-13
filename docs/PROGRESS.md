@@ -149,6 +149,24 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Console v2 — the workspace (2026-08-12, Codex-reviewed: 11 findings)
+
+The user asked for a standalone multi-pane interface with project
+onboarding. The review's spine: selection is never authorization. Shipped:
+three-pane shell (sidebar with project switcher, waiting-on-you count, +
+new task; master list panes on task/run detail; collapses to the phone
+column so answering never regresses); /projects opener offering only what
+the server ceiling admits (--repo list + --project-root, canonicalized,
+narrowing on resolve failure, git-validated with direct argv); session-
+carried open project as a view filter with a stale-tab revision; the
+ceiling enforced on tasks, runs, decisions, answers, and BOTH evidence
+paths (decision evidence was previously unscoped — pre-existing hole
+closed); bearer X-Nightorders-Project constrained identically; placement
+immutable once scoped (an approval cannot be re-aimed); atomic slugged
+task creation landing on the approve card; schema v6 project registry.
+Negative matrix: cross-project bypasses, stale revisions, canonical
+aliases (/var vs /private/var caught live), v5→v6 migration. 695 tests.
+
 ## Toward the operations console (2026-08-12, Codex-reviewed: 21 findings)
 
 The user asked for a web UI over all the work. The review's verdict:

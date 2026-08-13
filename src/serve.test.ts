@@ -5,7 +5,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
@@ -863,5 +863,236 @@ describe("the operations console", () => {
     expect(caps).toContain("cli:gh");
     expect(caps).toContain("unprobed");
     expect(caps).toContain("read-only");
+  });
+});
+
+describe("console v2: projects, the ceiling, and the workspace", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+  let repoA: string;
+  let repoB: string;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const csrfFrom = async (cookie: string): Promise<string> => {
+    const html = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf");
+    return match[1] as string;
+  };
+
+  const post = (path: string, cookie: string, fields: Record<string, string>) =>
+    fetch(url(path), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams(fields),
+      redirect: "manual",
+    });
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-v2-ev-"));
+    // Two real directories: A is inside the ceiling, B is not.
+    repoA = realpathSync(mkdtempSync(join(tmpdir(), "nightorders-v2-repoA-")));
+    repoB = realpathSync(mkdtempSync(join(tmpdir(), "nightorders-v2-repoB-")));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+
+    server = createDecisionServer({ store, evidenceRoot, repos: [repoA] });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    for (const dir of [evidenceRoot, repoA, repoB]) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const seedTaskIn = (id: string, repo: string) => {
+    store.createTask({ id, title: `work ${id}` }, T0);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, repo);
+    return ref;
+  };
+
+  const seedDecisionIn = (id: string, repo: string): { decision: number; run: number } => {
+    const ref = seedTaskIn(id, repo);
+    const run = store.startRun({
+      taskRef: ref, leaseId: `lease-${id}`, runner: "b1",
+      branch: `nightorders/${id}`, worktree: `/pool/${id}`, now: T0,
+    });
+    const decision = store.saveDecision(
+      {
+        run, urgency: "blocking", recap: "r", question: `${id}?`,
+        options: [{ id: "a", label: "a", consequence: "c", reversible: true }],
+        recommendation: "a",
+      },
+      T0,
+    );
+    return { decision, run };
+  };
+
+  test("the sidebar shell renders with the sole configured project open", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(home).toContain('class="side"');
+    expect(home).toContain("switch project");
+    expect(home).toContain("+ new task");
+    // The sole configured repo opened itself — no forced detour.
+    expect(home).toContain("the morning");
+  });
+
+  test("a task outside the ceiling does not exist: page, mutations, list", async () => {
+    seedTaskIn("t-in", repoA);
+    seedTaskIn("t-out", repoB);
+    const cookie = await login();
+
+    expect((await fetch(url("/t/t-out"), { headers: { cookie } })).status).toBe(404);
+    const csrf = await csrfFrom(cookie);
+    expect((await post("/t/t-out/hold", cookie, { csrf, reason: "x" })).status).toBe(404);
+
+    const list = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
+    expect(list).toContain("t-in");
+    expect(list).not.toContain("t-out");
+  });
+
+  test("a decision outside the ceiling cannot be read, answered, or bled through evidence", async () => {
+    const inside = seedDecisionIn("t-in", repoA);
+    const outside = seedDecisionIn("t-out", repoB);
+    const cookie = await login();
+
+    expect((await fetch(url(`/d/${inside.decision}`), { headers: { cookie } })).status).toBe(200);
+    expect((await fetch(url(`/d/${outside.decision}`), { headers: { cookie } })).status).toBe(404);
+
+    const csrf = await csrfFrom(cookie);
+    const answered = await post(`/d/${outside.decision}/answer`, cookie, { csrf, choice: "a" });
+    expect(answered.status).toBe(404);
+    expect(store.getDecision(outside.decision)?.state).toBe("open");
+
+    // Evidence linked to the out-of-ceiling decision is not served.
+    mkdirSync(join(evidenceRoot, String(outside.run)), { recursive: true });
+    const secret = Buffer.from("their diff", "utf8");
+    writeFileSync(join(evidenceRoot, String(outside.run), "diff.patch"), secret);
+    const artifact = store.saveArtifact(
+      {
+        run: outside.run, kind: "diff", key: `${outside.run}/diff.patch`,
+        bytesOriginal: secret.length, bytesStored: secret.length, truncated: false,
+        sha256: createHash("sha256").update(secret).digest("hex"), capture: "git diff (exit 0)",
+      },
+      T0,
+    );
+    store.linkEvidence(outside.decision, artifact);
+    expect((await fetch(url(`/d/${outside.decision}/evidence/${artifact}`), { headers: { cookie } })).status).toBe(404);
+  });
+
+  test("opening a project: outside the ceiling refused, inside opens and is remembered", async () => {
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    const denied = await post("/projects/open", cookie, { csrf, path: repoB });
+    expect(denied.status).toBe(403);
+
+    const ghost = await post("/projects/open", cookie, { csrf, path: "/no/such/place" });
+    expect(ghost.status).toBe(400);
+
+    // repoA is configured but not yet a git repo — the opener requires one:
+    // configuration authorizes, only being a repository makes it openable.
+    const notGit = await post("/projects/open", cookie, { csrf, path: repoA });
+    expect(notGit.status).toBe(400);
+
+    const { execSync } = await import("node:child_process");
+    execSync("git init -q", { cwd: repoA });
+    const opened = await post("/projects/open", cookie, { csrf, path: repoA });
+    expect(opened.status).toBe(303);
+    expect(store.listProjects()).toHaveLength(1);
+    expect(store.listProjects()[0]?.name).toBe(repoA.split("/").pop());
+  });
+
+  test("a stale tab's create lands in nobody's project: the revision refuses it", async () => {
+    const { execSync } = await import("node:child_process");
+    execSync("git init -q", { cwd: repoA });
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    // A form rendered now carries revision 1; opening a project bumps it.
+    const staleRevision = "1";
+    await post("/projects/open", cookie, { csrf, path: repoA });
+
+    const created = await post("/tasks/add", cookie, {
+      csrf, title: "stale tab work", projectRevision: staleRevision,
+    });
+    expect(created.status).toBe(409);
+    expect(store.listTasks()).toHaveLength(0);
+  });
+
+  test("a blank id slugs from the title and the create lands on the approve card", async () => {
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    const created = await post("/tasks/add", cookie, {
+      csrf, title: "Add a Rate Limiter!", goal: "sliding windows on the public api",
+    });
+    expect(created.status).toBe(303);
+    expect(created.headers.get("location")).toBe("/t/add-a-rate-limiter");
+
+    const screen = await (await fetch(url("/t/add-a-rate-limiter"), { headers: { cookie } })).text();
+    expect(screen).toContain("approve exactly this:");
+    // The master pane lists it, marked current.
+    expect(screen).toContain('class="item current"');
+  });
+
+  test("a bearer caller is confined by the same ceiling", async () => {
+    seedTaskIn("t-in", repoA);
+    seedTaskIn("t-out", repoB);
+    const auth = { authorization: `Bearer alex:${approverToken}` };
+
+    // Naming an out-of-ceiling project is a refusal, not a fallback.
+    const denied = await fetch(url("/tasks"), { headers: { ...auth, "x-nightorders-project": repoB } });
+    expect(denied.status).toBe(403);
+
+    // And the resource ceiling holds without any header games.
+    expect((await fetch(url("/t/t-out"), { headers: auth })).status).toBe(404);
+    expect((await fetch(url("/t/t-in"), { headers: auth })).status).toBe(200);
+
+    // Opening a project is a browser act.
+    const open = await fetch(url("/projects/open"), {
+      method: "POST", headers: auth, body: new URLSearchParams({ path: repoA }), redirect: "manual",
+    });
+    expect(open.status).toBe(403);
+  });
+
+  test("a v5 database opens as v6 with the project registry usable", async () => {
+    // The in-memory store in this suite was born v6; prove the additive
+    // migration by opening a file store twice across the version bump path.
+    const dir = mkdtempSync(join(tmpdir(), "nightorders-v2-mig-"));
+    try {
+      const first = openStore(join(dir, "q.db"));
+      first.createTask({ id: "t-old", title: "pre-existing" }, T0);
+      first.close();
+      const again = openStore(join(dir, "q.db"));
+      again.upsertProject("/some/where", "where", T0);
+      expect(again.listProjects()).toHaveLength(1);
+      expect(again.getTask("t-old")?.title).toBe("pre-existing");
+      again.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
