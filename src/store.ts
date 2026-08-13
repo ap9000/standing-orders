@@ -1098,6 +1098,25 @@ CREATE TABLE IF NOT EXISTS run_note (
   created_at TEXT NOT NULL
 );
 
+-- The intake grant (M8.16): permission to turn labeled GitHub issues into
+-- LOCAL UNAPPROVED task proposals — and nothing else. Detection is not
+-- authorization; a grant names the exact repository, the exact label, and
+-- (for PR-comment intake) which reviewer logins may steer. No mutation of
+-- the remote in v1: reads make proposals, people approve them.
+CREATE TABLE IF NOT EXISTS intake_grant (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo        TEXT NOT NULL,
+  github      TEXT NOT NULL,
+  label       TEXT NOT NULL,
+  reviewers   TEXT,
+  approved_by TEXT NOT NULL,
+  approved_at TEXT NOT NULL,
+  revoked_at  TEXT,
+  revoked_by  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS intake_grant_live
+  ON intake_grant (repo) WHERE revoked_at IS NULL;
+
 -- A review comment on an IMMUTABLE terminal diff (M6.8). Bound to the exact
 -- artifact and its hash — a comment on bytes that can never change — plus
 -- the file and line it speaks to. Immutable themselves: an edit supersedes,
@@ -2414,6 +2433,46 @@ export class Store {
       .prepare("INSERT INTO run_note (run, author, note, created_at) VALUES (?, ?, ?, ?)")
       .run(runId, author, note, now.toISOString());
     return Number(inserted.lastInsertRowid);
+  }
+
+  // ---- intake grants (M8.16) ---------------------------------------------
+
+  setIntakeGrant(
+    args: { repo: string; github: string; label: string; reviewers: string[] | null; approvedBy: string },
+    now: Date,
+  ): IntakeGrant {
+    return this.transact(() => {
+      this.db
+        .prepare("UPDATE intake_grant SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+        .run(now.toISOString(), args.approvedBy, args.repo);
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO intake_grant (repo, github, label, reviewers, approved_by, approved_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          args.repo,
+          args.github,
+          args.label,
+          args.reviewers === null ? null : args.reviewers.join(","),
+          args.approvedBy,
+          now.toISOString(),
+        );
+      const row = this.db.prepare("SELECT * FROM intake_grant WHERE id = ?").get(Number(inserted.lastInsertRowid));
+      return readIntakeGrant(row as Record<string, unknown>);
+    });
+  }
+
+  liveIntakeGrant(repo: string): IntakeGrant | null {
+    const row = this.db.prepare("SELECT * FROM intake_grant WHERE repo = ? AND revoked_at IS NULL").get(repo);
+    return row === undefined ? null : readIntakeGrant(row);
+  }
+
+  clearIntakeGrant(repo: string, by: string, now: Date): boolean {
+    const done = this.db
+      .prepare("UPDATE intake_grant SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+      .run(now.toISOString(), by, repo);
+    return Number(done.changes) > 0;
   }
 
   // ---- diff comments and revision tasks (M6.8) ---------------------------
@@ -6050,6 +6109,21 @@ export type WorktreeRow = {
   setupDigest?: string | null;
 };
 
+/** Permission to turn labeled GitHub issues into local unapproved proposals. */
+export type IntakeGrant = {
+  id: number;
+  repo: string;
+  /** owner/name on GitHub. */
+  github: string;
+  label: string;
+  /** Reviewer logins whose PR comments may become revision drafts; null = none. */
+  reviewers: string[] | null;
+  approvedBy: string;
+  approvedAt: string;
+  revokedAt: string | null;
+  revokedBy: string | null;
+};
+
 /** A review comment bound to the exact bytes of an immutable terminal diff. */
 export type DiffComment = {
   id: number;
@@ -6118,6 +6192,24 @@ function readWorktree(row: Record<string, unknown>): WorktreeRow {
     verified: Number(row["verified"]) === 1,
     setupDigest:
       row["setup_digest"] === null || row["setup_digest"] === undefined ? null : String(row["setup_digest"]),
+  };
+}
+
+function readIntakeGrant(row: Record<string, unknown>): IntakeGrant {
+  const reviewers = row["reviewers"];
+  return {
+    id: Number(row["id"]),
+    repo: String(row["repo"]),
+    github: String(row["github"]),
+    label: String(row["label"]),
+    reviewers:
+      reviewers === null || reviewers === undefined || String(reviewers) === ""
+        ? null
+        : String(reviewers).split(",").map(one => one.trim()).filter(one => one !== ""),
+    approvedBy: String(row["approved_by"]),
+    approvedAt: String(row["approved_at"]),
+    revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
+    revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
   };
 }
 

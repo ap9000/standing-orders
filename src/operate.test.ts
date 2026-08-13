@@ -898,6 +898,87 @@ describe("providers — identification without spend", () => {
   });
 });
 
+describe("intake — labeled issues become unapproved proposals, preview-first (M8.16)", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-intake-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const ghAnswers = (issues: unknown[]) => async (_file: string, args: readonly string[]) => {
+    ghCalls.push([...args]);
+    return { code: 0, stdout: JSON.stringify(issues), stderr: "", timedOut: false, notFound: false };
+  };
+  let ghCalls: string[][] = [];
+  const run = (argv: string[], gh?: (file: string, args: readonly string[]) => Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean; notFound: boolean }>) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), {
+      databaseFile: db,
+      now: T0,
+      ...(gh === undefined ? {} : { gitRunner: gh }),
+    });
+  };
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  test("grant is authenticated, restates terms, and gates every read", async () => {
+    ghCalls = [];
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+
+    // No grant: preview refuses — detection is not authorization.
+    const ungated = await run(["intake", "preview", "--repo", "/code/thing", "--json"], ghAnswers([]));
+    expect(ungated).toBe(EXIT.refused);
+    expect(payload().reason).toBe("no-grant");
+    expect(ghCalls).toHaveLength(0);
+
+    // Unconfirmed grant states terms, stores nothing.
+    const unconfirmed = await run(["intake", "grant", "--repo", "/code/thing", "--github", "ap9000/thing", "--label", "agent-ok", "--as", "alex", "--token", token, "--json"]);
+    expect(unconfirmed).toBe(EXIT.refused);
+    expect(payload().reason).toBe("unconfirmed");
+
+    const granted = await run(["intake", "grant", "--repo", "/code/thing", "--github", "ap9000/thing", "--label", "agent-ok", "--as", "alex", "--token", token, "--yes", "--json"]);
+    expect(granted).toBe(EXIT.ok);
+  });
+
+  test("preview lists candidates without creating; run creates deduped unapproved proposals; titles with control characters refuse", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+    await run(["intake", "grant", "--repo", "/code/thing", "--github", "ap9000/thing", "--label", "agent-ok", "--as", "alex", "--token", token, "--yes", "--json"]);
+
+    const issues = [
+      { number: 7, title: "Fix the payouts rounding", updatedAt: "2026-08-13T00:00:00Z" },
+      { number: 9, title: "Sneaky ‮title", updatedAt: "2026-08-13T00:00:00Z" },
+    ];
+
+    const previewed = await run(["intake", "preview", "--repo", "/code/thing", "--json"], ghAnswers(issues));
+    expect(previewed).toBe(EXIT.ok);
+    expect(payload().candidates).toHaveLength(2);
+    await run(["task", "list", "--json"]);
+    expect(payload().count).toBe(0); // preview created nothing
+
+    const ran = await run(["intake", "run", "--repo", "/code/thing", "--json"], ghAnswers(issues));
+    expect(ran).toBe(EXIT.ok);
+    expect(payload().created).toEqual(["ghi-ap9000-thing-7"]);
+    expect(payload().skipped).toContainEqual({ id: "ghi-ap9000-thing-9", reason: "title-refused" });
+
+    // The proposal is unapproved by construction and says where it came from.
+    await run(["task", "show", "ghi-ap9000-thing-7", "--json"]);
+    expect(payload().task.title).toContain("GH#7");
+
+    // A second run is a no-op: existence is the dedupe.
+    const again = await run(["intake", "run", "--repo", "/code/thing", "--json"], ghAnswers(issues));
+    expect(again).toBe(EXIT.ok);
+    expect(payload().created).toEqual([]);
+  });
+});
+
 describe("the CLI router", () => {
   test("every verb the operate dispatcher knows is reachable from the binary", async () => {
     // routine/config/providers shipped reachable only through runOperate —

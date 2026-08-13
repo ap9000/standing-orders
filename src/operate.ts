@@ -40,7 +40,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { envelopeJson } from "./envelope.js";
-import { hasForbiddenControls } from "./decision.js";
+import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -320,6 +320,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
     "command", "timeout-seconds", "stop-grace",
+    "github", "label", "reviewers", "limit",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -460,6 +461,8 @@ async function dispatch(
       return configCommand(positional, flags, context);
     case "setup":
       return setupCommand(positional, flags, context);
+    case "intake":
+      return intakeCommand(positional, flags, context);
     case "providers":
       return providersCommand(flags, context);
     case "webhook":
@@ -2729,7 +2732,7 @@ async function setupCommand(
   if (command === undefined || command.trim() === "") {
     return fail(write, json, "setup set", "usage", "--command <cmd> is what every fresh checkout will run", EXIT.usage);
   }
-  if (command.length > 2000 || hasForbiddenControls(command)) {
+  if (command.length > 2000 || hasDisguisedText(command)) {
     return fail(write, json, "setup set", "invalid", "the command must be under 2000 characters with no control or bidi characters", EXIT.usage);
   }
   const timeoutSeconds = Number(text(flags, "timeout-seconds") ?? "300");
@@ -2764,6 +2767,194 @@ async function setupCommand(
   );
   return succeed(write, json, "setup set", { repo, digest: saved.digest, timeoutSeconds }, () => [
     `Approved: fresh checkouts of ${repo} run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) before any agent.`,
+  ]);
+}
+
+const GITHUB_REPO_SHAPE = /^[A-Za-z0-9_.-]{1,80}\/[A-Za-z0-9_.-]{1,100}$/;
+const LABEL_SHAPE = /^[A-Za-z0-9][A-Za-z0-9:_. -]{0,49}$/;
+
+/** `ghi-owner-name-123` — deterministic, so existence IS the dedupe. */
+function intakeTaskId(github: string, issueNumber: number): string {
+  const slug = github.replace(/[^A-Za-z0-9._-]+/g, "-");
+  return `ghi-${slug}-${issueNumber}`.slice(0, 64);
+}
+
+/**
+ * `standing-orders intake …` (M8.16) — labeled GitHub issues become LOCAL
+ * UNAPPROVED task proposals, preview-first, under an explicit grant.
+ *
+ * Detection is not authorization: enrolling a repo with four hundred open
+ * issues is not volunteering them, so the grant names the exact repository
+ * AND the exact label, and its terms are restated before --yes. The run
+ * pass mutates nothing remote — reads make proposals, people approve them,
+ * and external-backend dispatch remains unshipped and says so. Issue
+ * titles are untrusted text: control/bidi characters refuse the candidate
+ * rather than importing a disguise, and the issue BODY is never imported
+ * at all — the proposal links to GitHub where a person reads it.
+ */
+async function intakeCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const clock = context.clock ?? (() => new Date());
+  const gh = context.gitRunner ?? run;
+  const action = positional[0] ?? "show";
+  const repo = repoFrom(flags);
+
+  if (action === "show") {
+    const grant = store.liveIntakeGrant(repo);
+    if (json) {
+      write(envelopeJson({ ok: true, command: "intake show", repo, grant }));
+      return EXIT.ok;
+    }
+    write(
+      grant === null
+        ? `No intake grant for ${repo}. Nothing on GitHub becomes a proposal here.`
+        : `${repo} intakes GitHub issues from ${grant.github} labeled "${grant.label}"${grant.reviewers === null ? "" : `; PR comments from: ${grant.reviewers.join(", ")}`} — granted by ${grant.approvedBy} at ${grant.approvedAt}.`,
+    );
+    return EXIT.ok;
+  }
+
+  if (action === "grant" || action === "clear") {
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, `intake ${action}`, "usage", "an intake grant is standing authority — it takes `--as <you> --token <t>`", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, `intake ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, repo), EXIT.refused);
+    }
+    if (action === "clear") {
+      const cleared = store.clearIntakeGrant(repo, acting.name, clock());
+      return succeed(write, json, "intake clear", { repo, cleared }, () => [
+        cleared ? `Revoked — nothing on GitHub becomes a proposal for ${repo} now.` : `Nothing was granted for ${repo}.`,
+      ]);
+    }
+    const github = text(flags, "github");
+    const label = text(flags, "label");
+    if (github === undefined || !GITHUB_REPO_SHAPE.test(github)) {
+      return fail(write, json, "intake grant", "usage", "--github <owner/name> names the repository on GitHub", EXIT.usage);
+    }
+    if (label === undefined || !LABEL_SHAPE.test(label)) {
+      return fail(write, json, "intake grant", "usage", "--label <label> names the exact label that nominates an issue", EXIT.usage);
+    }
+    const reviewersRaw = text(flags, "reviewers");
+    const reviewers =
+      reviewersRaw === undefined
+        ? null
+        : reviewersRaw.split(",").map(one => one.trim()).filter(one => /^[A-Za-z0-9-]{1,39}$/.test(one));
+    if (flags.get("yes") !== true) {
+      if (json) {
+        write(envelopeJson({ ok: false, command: "intake grant", reason: "unconfirmed", repo, github, label, reviewers }));
+        return EXIT.refused;
+      }
+      for (const line of [
+        `The terms, exactly:`,
+        `  local repo   ${repo}`,
+        `  github       ${github}`,
+        `  label        ${label}`,
+        `  pr comments  ${reviewers === null || reviewers.length === 0 ? "nobody's — PR-comment intake stays off" : `from ${reviewers.join(", ")} only`}`,
+        ``,
+        `Open issues carrying exactly this label become LOCAL, UNAPPROVED task`,
+        `proposals when \`standing-orders intake run\` passes. Nothing builds`,
+        `without a scope you approve; nothing on GitHub is ever written to.`,
+        `Re-run with --yes to grant.`,
+      ]) {
+        write(line);
+      }
+      return EXIT.refused;
+    }
+    const granted = store.setIntakeGrant({ repo, github, label, reviewers, approvedBy: acting.name }, clock());
+    return succeed(write, json, "intake grant", { repo, github, label, reviewers: granted.reviewers }, () => [
+      `Granted: issues in ${github} labeled "${label}" become unapproved proposals for ${repo}.`,
+    ]);
+  }
+
+  if (action !== "preview" && action !== "run") {
+    return fail(write, json, "intake", "usage", "`standing-orders intake [show|grant|clear|preview|run] --repo <path> …`", EXIT.usage);
+  }
+
+  const grant = store.liveIntakeGrant(repo);
+  if (grant === null) {
+    return fail(write, json, `intake ${action}`, "no-grant", `no intake grant for ${repo} — \`standing-orders intake grant\` states the terms`, EXIT.refused);
+  }
+
+  const limit = Math.min(Math.max(Number(text(flags, "limit") ?? "50"), 1), 200);
+  const asked = await gh(
+    "gh",
+    ["issue", "list", "--repo", grant.github, "--label", grant.label, "--state", "open", "--limit", String(limit), "--json", "number,title,updatedAt"],
+    { timeoutMs: 20_000 },
+  );
+  if (asked.code !== 0) {
+    return fail(write, json, `intake ${action}`, "github-unreachable", `gh could not list ${grant.github}: ${(asked.stderr.split("\n")[0] ?? "").slice(0, 200)}`, EXIT.failed);
+  }
+  let issues: { number: number; title: string; updatedAt?: string }[];
+  try {
+    issues = JSON.parse(asked.stdout) as typeof issues;
+  } catch {
+    return fail(write, json, `intake ${action}`, "github-unreadable", "gh answered, but not with the JSON it promised", EXIT.failed);
+  }
+
+  const candidates = issues
+    .filter(issue => Number.isInteger(issue.number) && issue.number > 0)
+    .map(issue => {
+      const id = intakeTaskId(grant.github, issue.number);
+      const title = String(issue.title ?? "");
+      const clean = title.length > 0 && title.length <= 180 && !hasDisguisedText(title);
+      return {
+        id,
+        number: issue.number,
+        title,
+        clean,
+        exists: store.getTask(id) !== null,
+      };
+    });
+
+  if (action === "preview") {
+    if (json) {
+      write(envelopeJson({ ok: true, command: "intake preview", repo, github: grant.github, label: grant.label, candidates }));
+      return EXIT.ok;
+    }
+    if (candidates.length === 0) {
+      write(`Nothing open in ${grant.github} carries "${grant.label}".`);
+      return EXIT.ok;
+    }
+    write(`Would intake from ${grant.github} ("${grant.label}"):`);
+    for (const one of candidates) {
+      write(`  #${one.number}  ${one.exists ? "already here as" : one.clean ? "→" : "REFUSED (title carries control characters)"} ${one.id}${one.clean ? ` — ${one.title}` : ""}`);
+    }
+    write(`Nothing was created. \`standing-orders intake run\` makes the proposals.`);
+    return EXIT.ok;
+  }
+
+  // run: create the missing, clean proposals — local, unapproved, deduped
+  // by their deterministic id. The remote is never written.
+  const created: string[] = [];
+  const skipped: { id: string; reason: string }[] = [];
+  for (const one of candidates) {
+    if (one.exists) continue;
+    if (!one.clean) {
+      skipped.push({ id: one.id, reason: "title-refused" });
+      continue;
+    }
+    const made = store.createConsoleTask(
+      {
+        id: one.id,
+        title: `GH#${one.number}: ${one.title}`,
+        repo,
+        goal: `Imported from GitHub issue #${one.number} in ${grant.github} (label "${grant.label}"). Only the title was imported — read the issue at https://github.com/${grant.github}/issues/${one.number} for full context, then edit and approve this scope before anything builds.`,
+      },
+      clock(),
+    );
+    if (made.ok) created.push(made.id);
+    else skipped.push({ id: one.id, reason: made.reason });
+  }
+  return succeed(write, json, "intake run", { repo, github: grant.github, label: grant.label, created, skipped }, () => [
+    `${created.length} proposal(s) created${skipped.length > 0 ? `, ${skipped.length} skipped` : ""} — each awaits its own scope approval.`,
+    ...created.map(one => `  ${one}`),
+    ...skipped.map(one => `  skipped ${one.id}: ${one.reason}`),
   ]);
 }
 

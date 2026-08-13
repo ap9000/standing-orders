@@ -102,6 +102,16 @@ export function hasForbiddenControls(text: string): boolean {
   return FORBIDDEN_MULTILINE.test(text);
 }
 
+/**
+ * Controls OR direction-override invisibles — the full disguise kit. For
+ * text that becomes standing authority or a task identity (setup commands,
+ * imported issue titles): a title reading "fix docs" while spelled
+ * backwards is not a title, it is a costume.
+ */
+export function hasDisguisedText(text: string): boolean {
+  return FORBIDDEN_MULTILINE.test(text) || FORBIDDEN_INVISIBLES.test(text);
+}
+
 export function parseDecision(raw: string): ParseResult {
   if (Buffer.byteLength(raw, "utf8") > LIMITS.payload) {
     return refuse("too-large", `the payload is over ${LIMITS.payload} bytes — one screen does not need that`);
