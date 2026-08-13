@@ -509,7 +509,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<span class="mono">${escape(when(run.startedAt))}</span></span></a>`,
       )
       .join("\n");
-    return `<h2>runs</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
+    return `<h2>builds</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
   }
 
   /**
@@ -1127,6 +1127,7 @@ const STYLE = `
 
   .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
   .meta a { color: var(--muted-foreground); }
+  .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: -.375rem 0 .625rem; opacity: .8; }
   .num { font-variant-numeric: tabular-nums; }
 
   /* The morning ledger: the night's harvest as strong figures in a sentence,
@@ -1389,10 +1390,10 @@ function shell(
         : `<span class="name">${escape(projectName(chrome.project))}</span>`) +
       `<a href="/projects">switch project</a></div>`,
     `<nav>`,
-    item("morning", "/", "the morning", chrome.decisionCount),
+    item("morning", "/", "overview", chrome.decisionCount),
     item("tasks", "/tasks", "tasks"),
-    item("runs", "/runs", "runs"),
-    item("caps", "/caps", "capabilities"),
+    item("runs", "/runs", "builds"),
+    item("caps", "/caps", "requirements"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
     `<span class="grow"></span>`,
@@ -1472,7 +1473,7 @@ function homePage(chrome: Chrome, data: {
   const incidents =
     data.incidents.length === 0
       ? ""
-      : `<h2>incidents</h2>` +
+      : `<h2>incidents</h2><p class="hint">builds that stopped and need a person — open the task to resolve or retry</p>` +
         data.incidents
           .map(
             one =>
@@ -1483,7 +1484,7 @@ function homePage(chrome: Chrome, data: {
   const stranded =
     data.stranded.length === 0
       ? ""
-      : `<h2>stranded</h2>` +
+      : `<h2>blocked tasks</h2><p class="hint">queued behind something that failed — fix or retry the blocker and these start</p>` +
         data.stranded
           .map(
             one =>
@@ -1497,8 +1498,8 @@ function homePage(chrome: Chrome, data: {
     data.gaps === null
       ? ""
       : data.gaps.length === 0
-        ? `<h2>gaps</h2><p class="meta">none — everything recorded is verified</p>`
-        : `<h2>gaps</h2>` +
+        ? ""
+        : `<h2>missing requirements</h2><p class="hint">tools or credentials builds need — checked before any money is spent</p>` +
           data.gaps
             .map(gap => `<p class="row">${escape(gap.key)} — ${escape(gap.state)}</p>`)
             .join("\n") +
@@ -1513,7 +1514,7 @@ function homePage(chrome: Chrome, data: {
   const building =
     data.building.length === 0
       ? ""
-      : `<h2>building right now</h2><div class="cards">` +
+      : `<h2>building now</h2><p class="hint">live builds — this page refreshes itself every 10 seconds while anything runs</p><div class="cards">` +
         data.building
           .map(
             claim =>
@@ -1535,23 +1536,23 @@ function homePage(chrome: Chrome, data: {
       const busy = data.building.filter(claim => claim.runner === one.name).length;
       return (
         `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
-        `<span class="v">${said} \u00b7 ${busy}/${one.capacity} building</span></div>`
+        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building</span></div>`
       );
     });
   const worktreeCards = data.worktrees.map(tree => {
     const leased = tree.leasedAt !== null && tree.releasedAt === null;
     const dot = leased ? "dot-ok" : tree.verified ? "dot-off" : "dot-warn";
-    const state = leased ? "building" : tree.verified ? "free" : "back unverified";
+    const state = leased ? "building" : tree.verified ? "free" : "needs review";
     const name = tree.path.split("/").pop() ?? tree.path;
     return (
       `<div class="stat-card"><span class="k"><span class="dot ${dot}${leased ? " pulse" : ""}"></span><span class="mono">${escape(name)}</span></span>` +
-      `<span class="v">${escape(tree.branch)} \u00b7 ${state}</span></div>`
+      `<span class="v">workspace \u00b7 ${escape(tree.branch)} \u00b7 ${state}</span></div>`
     );
   });
   const watchCard =
     data.episode === null
       ? ""
-      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>the watch</span>` +
+      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>background service</span>` +
         `<span class="v">${
           data.episode.endedAt === null
             ? `running since ${escape(when(data.episode.startedAt))}`
@@ -1560,8 +1561,8 @@ function homePage(chrome: Chrome, data: {
   const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const fleet =
     fleetCards.length === 0
-      ? `<h2>the fleet</h2><p class="meta">no runner registered yet \u2014 <code>nightorders runner register &lt;name&gt;</code>, then <code>nightorders daemon install</code> keeps the loop running</p>`
-      : `<h2>the fleet</h2><div class="cards">${fleetCards.join("")}</div>`;
+      ? `<h2>system status</h2><p class="hint">no worker machine registered yet \u2014 <code>nightorders runner register &lt;name&gt;</code>, then <code>nightorders daemon install</code> keeps the background service running</p>`
+      : `<h2>system status</h2><p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p><div class="cards">${fleetCards.join("")}</div>`;
 
   const startHere =
     data.taskCount === 0
@@ -1577,16 +1578,16 @@ function homePage(chrome: Chrome, data: {
       : "";
 
   return shell("night orders", [
-    `<h1>the morning</h1>`,
+    `<h1>overview</h1>`,
     data.repo === null
       ? ""
-      : `<p class="meta">the overnight queue for <strong>${escape(projectName(data.repo))}</strong> — what got built, what broke, what waits on you</p>`,
+      : `<p class="meta"><strong>${escape(projectName(data.repo))}</strong> — what happened overnight, and what needs you</p>`,
     startHere,
     ledger,
     `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
     data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} pending delivery</p>` : "",
     building,
-    "<h2>waiting on you</h2>",
+    `<h2>needs your decision</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>`,
     decide,
     incidents,
     stranded,
@@ -1918,7 +1919,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
-  return shell("runs", ["<h1>runs</h1>", list, older].join("\n"), { chrome });
+  return shell("builds", [`<h1>builds</h1><p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
 }
 
 function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]): string {
@@ -1964,8 +1965,8 @@ function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]
           )
           .join("\n") +
         "</div>";
-  return shell(`run #${run.id}`, [
-    `<h1>run #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
+  return shell(`build #${run.id}`, [
+    `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     rows,
     handoff,
     evidence,
@@ -1974,9 +1975,9 @@ function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]
 
 function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): string {
   if (caps === null) {
-    return shell("capabilities", [
-      "<h1>capabilities</h1>",
-      `<p class="meta">open a project to see its capabilities — <a href="/projects">projects</a></p>`,
+    return shell("requirements", [
+      `<h1>requirements</h1>`,
+      `<p class="meta">open a project to see its requirements — <a href="/projects">projects</a></p>`,
     ].join("\n"), { chrome });
   }
   const list =
@@ -2007,10 +2008,11 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
               `<p class="meta">${escape(gap.instructions)}</p></div>`,
           )
           .join("\n");
-  return shell("capabilities", [
-    `<h1>capabilities <span class="meta">${escape(repo)}</span></h1>`,
+  return shell("requirements", [
+    `<h1>requirements</h1>`,
+    `<p class="hint">tools and credentials builds need — each is probed on the worker before any build spends money; values never leave your machine</p>`,
     list,
-    "<h2>gaps, ranked by what filling them frees</h2>",
+    `<h2>missing, ranked by what filling them frees</h2>`,
     blocked,
     `<p class="meta">read-only: probes are operator-authored shell, and a web button that runs shell is a different review</p>`,
   ].join("\n"), { chrome });

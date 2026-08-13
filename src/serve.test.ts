@@ -539,7 +539,7 @@ describe("the operations console", () => {
     expect(home).toContain("t-dead");
   });
 
-  test("the morning is live: refresh meta, building-now card, and the fleet", async () => {
+  test("the overview is live: refresh meta, building-now card, system status", async () => {
     store.createTask({ id: "t-live", title: "being built right now" }, T0);
     const ref = store.refFor("built-in", "t-live").id;
     const { register } = await import("./runner.js");
@@ -554,11 +554,11 @@ describe("the operations console", () => {
 
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
     // Building: the claim renders as a pulsing card, and the page refreshes fast.
-    expect(home).toContain("building right now");
+    expect(home).toContain("building now");
     expect(home).toContain("t-live");
     expect(home).toContain('http-equiv="refresh" content="10"');
     // The fleet: the runner with its occupancy, the worktree with its branch.
-    expect(home).toContain("the fleet");
+    expect(home).toContain("system status");
     expect(home).toContain("1/2 building");
     expect(home).toContain("nightorders-t-live-abc123");
   });
@@ -980,7 +980,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     expect(home).toContain("switch project");
     expect(home).toContain("+ new task");
     // The sole configured repo opened itself — no forced detour.
-    expect(home).toContain("the morning");
+    expect(home).toContain("overview");
   });
 
   test("a task outside the ceiling does not exist: page, mutations, list", async () => {
