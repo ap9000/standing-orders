@@ -47,6 +47,7 @@ import { readVerifiedArtifact, storeEvidence } from "./evidence.js";
 import {
   type Artifact,
   type DiffComment,
+  type Publication,
   type Capability,
   type Decision,
   type Hold,
@@ -538,6 +539,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/review") {
+      // The review queue (M8.19): READ-ONLY merge-order advice. The plane
+      // observes and recommends; the person merges on GitHub. Every row is
+      // ceiling-checked like any other run resource, and CI claims stay
+      // honest — an open episode is an OBSERVED failure, its absence is
+      // "no failing observation", never a green the machine did not see.
+      const rows = store
+        .openedPublications()
+        .filter(one => visible(taskRepoOf(one.taskRef)))
+        .map(one => ({
+          publication: one,
+          taskId: store.externalIdFor(one.taskRef) ?? "?",
+          failing: one.prNumber === null ? false : store.hasOpenCiEpisode(one.prNumber),
+        }))
+        .sort((a, b) =>
+          a.failing !== b.failing
+            ? (a.failing ? 1 : -1)
+            : a.publication.updatedAt.localeCompare(b.publication.updatedAt),
+        );
+      return page(response, 200, reviewPage(chromeFor(project, "review"), rows, now));
+    }
+
     if (url.pathname === "/activity") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       return page(
@@ -667,6 +690,12 @@ export function createDecisionServer(options: ServeOptions): Server {
           store.notesForRun(found.id),
           who.via === "cookie" ? who.session.csrf : "",
           store.liveDiffComments(found.id),
+          (() => {
+            const publication = store.publicationForRun(found.id);
+            return publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.prNumber)
+              ? { pr: publication.prNumber }
+              : null;
+          })(),
         ),
       );
     }
@@ -1324,6 +1353,75 @@ export function createDecisionServer(options: ServeOptions): Server {
       const newRef = store.lookupRef(made.id);
       if (newRef !== null) store.markRevision(newRef.id, sourceTaskId, artifactId);
       store.consumeDiffComments(id, comments.map(one => one.id), made.id);
+      return redirect(response, taskHref(made.id));
+    }
+
+    const draftRepair = /^\/r\/([0-9]{1,15})\/draft-repair$/.exec(url.pathname);
+    if (draftRepair !== null) {
+      // CI repair, suggestion-first (M8.18): a red episode never spawns an
+      // agent by itself — it EARNS a button, and the button creates one
+      // unapproved task through the same revision machinery as review
+      // comments. Deterministic id = one draft per task/PR, ever.
+      const id = Number(draftRepair[1]);
+      const found = store.getRun(id);
+      if (found === null || !visible(taskRepoOf(found.taskRef))) {
+        return refuse(response, who, 404, "no such run");
+      }
+      const publication = store.publicationForRun(id);
+      if (publication === null || publication.prNumber === null) {
+        return refuse(response, who, 400, "this run published no pull request", `/r/${id}`);
+      }
+      if (!store.hasOpenCiEpisode(publication.prNumber)) {
+        return refuse(response, who, 400, "no failing CI is observed on this PR right now", `/r/${id}`);
+      }
+      const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
+      const sourceScope = store.getScope(sourceTaskId);
+      const repo = taskRepoOf(found.taskRef);
+      const draftId = `${sourceTaskId}-ci-${publication.prNumber}`.slice(0, 64);
+      const made = store.createConsoleTask(
+        {
+          id: draftId,
+          title: `repair ${sourceTaskId}: CI failing on PR #${publication.prNumber}`,
+          ...(repo === null ? {} : { repo }),
+          goal:
+            `${sourceScope?.goal ?? `repair ${sourceTaskId}`}` +
+            ` — repair the failing CI on PR #${publication.prNumber} (head ${publication.headSha.slice(0, 12)}). ` +
+            `Read the failing checks on GitHub before approving; this draft carries no log content.`,
+        },
+        now,
+      );
+      if (!made.ok) {
+        return refuse(
+          response,
+          who,
+          made.reason === "duplicate" ? 409 : 400,
+          made.reason === "duplicate" ? `already drafted as ${draftId}` : `could not draft: ${made.reason}`,
+          `/r/${id}`,
+        );
+      }
+      const brief = {
+        schema: 1 as const,
+        kind: "ci-repair" as const,
+        targetTask: made.id,
+        sourceTask: sourceTaskId,
+        sourceRun: id,
+        pr: publication.prNumber,
+        prUrl: publication.prUrl,
+        headSha: publication.headSha,
+        observedAt: now.toISOString(),
+      };
+      const artifactId = storeEvidence(
+        store,
+        evidenceRoot,
+        id,
+        "revision-brief",
+        `ci-repair-brief-${made.id}.json`,
+        Buffer.from(JSON.stringify(brief, null, 2), "utf8"),
+        "machine-authored ci-repair brief (exit 0)",
+        now,
+      );
+      const newRef = store.lookupRef(made.id);
+      if (newRef !== null) store.markRevision(newRef.id, sourceTaskId, artifactId);
       return redirect(response, taskHref(made.id));
     }
 
@@ -2057,7 +2155,7 @@ const STYLE = `
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "work" | "done" | "activity" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "none";
+  active: "inbox" | "board" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -2154,6 +2252,7 @@ function shell(
     `<span class="grow"></span>`,
     `<nav class="foot">`,
     item("activity", "/activity", "activity"),
+    item("review", "/review", "review queue"),
     item("work", "/tasks", "task list"),
     item("system", "/system", "system"),
     item("runs", "/runs", "builds"),
@@ -3418,6 +3517,51 @@ function taskPage(chrome: Chrome, data: {
   ].join("\n"), { chrome });
 }
 
+/**
+ * The review queue (M8.19): the field parallelizes generation and lets
+ * review pile up; this page compresses it. Read-only by design — ranked
+ * advice and deep links, no merge button, because the PR is the terminus
+ * and the person merges on GitHub.
+ */
+function reviewPage(
+  chrome: Chrome,
+  rows: { publication: Publication; taskId: string; failing: boolean }[],
+  now: Date,
+): string {
+  const ageOf = (iso: string): string => {
+    const hours = Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / 3_600_000));
+    return hours < 1 ? "under an hour" : hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
+  };
+  const ready = rows.filter(one => !one.failing);
+  const list =
+    rows.length === 0
+      ? `<p class="meta">No open pull requests from this plane. Built work appears here the moment its PR opens.</p>`
+      : rows
+          .map((one, index) => {
+            const p = one.publication;
+            return (
+              `<div class="card">` +
+              `<p><strong>${index === 0 && !one.failing ? "review next — " : ""}PR #${p.prNumber ?? "?"}</strong> ` +
+              `<span class="mono">${escape(one.taskId)}</span>` +
+              `<span class="meta"> · ${escape(p.githubRepo)} · open ${ageOf(p.updatedAt)}</span></p>` +
+              `<p class="meta">${
+                one.failing
+                  ? "CI failing — observed; a repair can be drafted from the run page"
+                  : "no failing CI observation (the machine never calls silence green — verify on GitHub)"
+              }</p>` +
+              `<p class="row">${p.prUrl === null ? "" : `<a href="${escape(p.prUrl)}">review on GitHub →</a>`} ` +
+              `<a href="/r/${p.run}">the build</a></p>` +
+              `</div>`
+            );
+          })
+          .join("\n");
+  return shell("review queue", [
+    `<h1>review queue</h1>`,
+    `<p class="hint">what waits on a person's review, oldest reviewable first — the plane recommends, you merge on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
+    list,
+  ].join("\n"), { chrome });
+}
+
 function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor: number | null): string {
   const list =
     rows.length === 0
@@ -3574,6 +3718,7 @@ function runPage(
   notes: { id: number; author: string; note: string; createdAt: string }[] = [],
   csrf = "",
   comments: DiffComment[] = [],
+  ciRepair: { pr: number } | null = null,
 ): string {
   // [label, value, mono?] — identifiers and figures read in the data face.
   const facts: [string, string | null, boolean?][] = [
@@ -3657,10 +3802,19 @@ function runPage(
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<button type="submit">turn ${comments.length} comment(s) into a revision task</button>` +
         `<span class="meta"> — creates one unapproved task carrying exactly this batch; you approve its scope before anything builds</span></form>`;
-  const reviewCard =
-    commentRows === "" && commentForm === ""
+  // CI repair, suggestion-first (M8.18): the observed red episode earns a
+  // button; the button drafts ONE unapproved task; a person approves it.
+  const repairCard =
+    ciRepair === null || csrf === ""
       ? ""
-      : `<h2>review</h2>${commentRows}${commentForm}${reviseForm}`;
+      : `<div class="card"><p><strong>CI is failing on PR #${ciRepair.pr}</strong> <span class="meta">observed by the episode watcher</span></p>` +
+        `<form method="post" action="/r/${run.id}/draft-repair">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<button type="submit">draft a repair task</button>` +
+        `<span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form></div>`;
+
+  const reviewCard =
+    (commentRows === "" && commentForm === "" ? "" : `<h2>review</h2>${commentRows}${commentForm}${reviseForm}`) + repairCard;
 
   const noteRows =
     notes.length === 0

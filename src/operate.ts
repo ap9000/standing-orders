@@ -40,7 +40,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { envelopeJson } from "./envelope.js";
-import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
+import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -2872,13 +2872,85 @@ async function intakeCommand(
     ]);
   }
 
-  if (action !== "preview" && action !== "run") {
-    return fail(write, json, "intake", "usage", "`standing-orders intake [show|grant|clear|preview|run] --repo <path> …`", EXIT.usage);
+  if (action !== "preview" && action !== "run" && action !== "pr-comments") {
+    return fail(write, json, "intake", "usage", "`standing-orders intake [show|grant|clear|preview|run|pr-comments] --repo <path> …`", EXIT.usage);
   }
 
   const grant = store.liveIntakeGrant(repo);
   if (grant === null) {
     return fail(write, json, `intake ${action}`, "no-grant", `no intake grant for ${repo} — \`standing-orders intake grant\` states the terms`, EXIT.refused);
+  }
+
+  if (action === "pr-comments") {
+    // PR review comments become LOCAL diff comments (M8.17): own PRs only
+    // (the publication table IS the list of ours), named reviewers only,
+    // the GitHub comment id the idempotency key, every body through the
+    // shared validator. Nothing here authorizes a spawn — ingested
+    // comments wait on the run page for the same one-tap seal and the
+    // same scope approval as comments typed in the console.
+    if (grant.reviewers === null || grant.reviewers.length === 0) {
+      return fail(write, json, "intake pr-comments", "no-reviewers", "the grant names no reviewers — `intake grant --reviewers <logins>` is the authority for this", EXIT.refused);
+    }
+    const publications = store
+      .openedPublications()
+      .filter(one => one.prNumber !== null && store.refForId(one.taskRef)?.repo === repo);
+    let ingested = 0;
+    let duplicates = 0;
+    let refused = 0;
+    const skippedPrs: { pr: number; reason: string }[] = [];
+    for (const publication of publications) {
+      const pr = publication.prNumber as number;
+      const terminal = store.artifactsFor(publication.run).find(one => one.kind === "terminal-diff");
+      if (terminal === undefined) {
+        skippedPrs.push({ pr, reason: "no terminal diff to bind comments to" });
+        continue;
+      }
+      const asked = await gh("gh", ["api", `repos/${grant.github}/pulls/${pr}/comments`], { timeoutMs: 20_000 });
+      if (asked.code !== 0) {
+        skippedPrs.push({ pr, reason: "github unreachable" });
+        continue;
+      }
+      let remote: { id?: unknown; user?: { login?: unknown }; path?: unknown; line?: unknown; original_line?: unknown; body?: unknown }[];
+      try {
+        remote = JSON.parse(asked.stdout) as typeof remote;
+      } catch {
+        skippedPrs.push({ pr, reason: "github answered without its promised JSON" });
+        continue;
+      }
+      for (const comment of remote) {
+        const login = String(comment.user?.login ?? "");
+        if (!grant.reviewers.includes(login)) continue;
+        const id = Number(comment.id);
+        if (!Number.isInteger(id) || id <= 0) continue;
+        const body = validateNote(String(comment.body ?? ""));
+        if (!body.ok) {
+          refused += 1;
+          continue;
+        }
+        const rawPath = String(comment.path ?? "");
+        const lineRaw = comment.line ?? comment.original_line;
+        const line = typeof lineRaw === "number" && Number.isInteger(lineRaw) && lineRaw > 0 ? lineRaw : null;
+        const added = store.addDiffComment(
+          {
+            artifactId: terminal.id,
+            runId: publication.run,
+            path: rawPath !== "" && rawPath.length <= 300 && !hasDisguisedText(rawPath) ? rawPath : null,
+            line,
+            note: body.note,
+            author: `github:${login}`,
+            sourceKey: `gh:${grant.github}:${id}`,
+          },
+          clock(),
+        );
+        if (added === null) duplicates += 1;
+        else ingested += 1;
+      }
+    }
+    return succeed(write, json, "intake pr-comments", { repo, prs: publications.length, ingested, duplicates, refused, skippedPrs }, () => [
+      `${ingested} comment(s) ingested across ${publications.length} PR(s)${duplicates > 0 ? `, ${duplicates} already known` : ""}${refused > 0 ? `, ${refused} refused by the validator` : ""}.`,
+      ...skippedPrs.map(one => `  PR #${one.pr} skipped: ${one.reason}`),
+      ingested > 0 ? "Seal them into revision tasks from each build's page — every revision takes its own approval." : "",
+    ]);
   }
 
   const limit = Math.min(Math.max(Number(text(flags, "limit") ?? "50"), 1), 200);

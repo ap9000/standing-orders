@@ -1132,8 +1132,13 @@ CREATE TABLE IF NOT EXISTS diff_comment (
   author        TEXT NOT NULL,
   created_at    TEXT NOT NULL,
   superseded_by INTEGER REFERENCES diff_comment(id),
-  consumed_by   TEXT
+  consumed_by   TEXT,
+  -- Where an ingested comment came from (M8.17): gh:<owner/name>:<id>.
+  -- The GitHub comment id is the idempotency key — one ingest, ever.
+  source_key    TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source
+  ON diff_comment (source_key) WHERE source_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS mutation (
   idempotency_key TEXT PRIMARY KEY,
@@ -1396,6 +1401,10 @@ function migrate(db: Database): void {
   // the fresh SCHEMA's IF NOT EXISTS.
   addColumn(db, "task_ref", "revision_of", "TEXT");
   addColumn(db, "task_ref", "revision_brief_artifact", "INTEGER REFERENCES artifact(id)");
+  // v11c (M8.17 PR-comment intake): the ingest idempotency key, additive —
+  // a same-day v11 database gains it here; fresh ones carry it already.
+  addColumn(db, "diff_comment", "source_key", "TEXT");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source ON diff_comment (source_key) WHERE source_key IS NOT NULL");
   // v11 (M5 activity): the machine-authored phase — stamped by the control
   // plane at its own state-machine boundaries, never parsed out of a
   // provider stream. Transient in meaning (read while the run is open),
@@ -2484,19 +2493,42 @@ export class Store {
    * is a comment on something else, refused at read time by the verifier.
    */
   addDiffComment(
-    args: { artifactId: number; runId: number; path: string | null; line: number | null; note: string; author: string },
+    args: {
+      artifactId: number;
+      runId: number;
+      path: string | null;
+      line: number | null;
+      note: string;
+      author: string;
+      /** Ingested comments carry their origin id — the idempotency key (M8.17). */
+      sourceKey?: string;
+    },
     now: Date,
-  ): number {
+  ): number | null {
     const artifact = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
     if (artifact === undefined || artifact.kind !== "terminal-diff") {
       throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — comments bind to the exact bytes reviewed`);
     }
+    if (args.sourceKey !== undefined) {
+      const seen = this.db.prepare("SELECT 1 AS hit FROM diff_comment WHERE source_key = ?").get(args.sourceKey);
+      if (seen !== undefined) return null; // already ingested — one ingest, ever
+    }
     const inserted = this.db
       .prepare(
-        `INSERT INTO diff_comment (artifact, artifact_sha, run, path, line, note, author, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO diff_comment (artifact, artifact_sha, run, path, line, note, author, created_at, source_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(args.artifactId, artifact.sha256, args.runId, args.path, args.line, args.note, args.author, now.toISOString());
+      .run(
+        args.artifactId,
+        artifact.sha256,
+        args.runId,
+        args.path,
+        args.line,
+        args.note,
+        args.author,
+        now.toISOString(),
+        args.sourceKey ?? null,
+      );
     return Number(inserted.lastInsertRowid);
   }
 
@@ -4742,6 +4774,14 @@ export class Store {
       .map(readPublication);
   }
 
+  /** Whether an UNRESOLVED CI failure episode is open for this PR (M8.19). */
+  hasOpenCiEpisode(prNumber: number): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS hit FROM notification WHERE dedupe_key LIKE ? AND resolved_at IS NULL LIMIT 1")
+      .get(`ci:${prNumber}:%`);
+    return row !== undefined;
+  }
+
   /**
    * Resolve CI episodes for a PR whose failing head is gone — a new commit
    * superseded it, or the same head turned green. Episodes are keyed
@@ -6137,6 +6177,8 @@ export type DiffComment = {
   createdAt: string;
   supersededBy: number | null;
   consumedBy: string | null;
+  /** `gh:<owner/name>:<id>` for ingested comments; null for the console's own. */
+  sourceKey: string | null;
 };
 
 /** One repo's approved worktree setup — the command text, never secret values. */
@@ -6226,6 +6268,8 @@ function readDiffComment(row: Record<string, unknown>): DiffComment {
     createdAt: String(row["created_at"]),
     supersededBy: row["superseded_by"] === null ? null : Number(row["superseded_by"]),
     consumedBy: row["consumed_by"] === null ? null : String(row["consumed_by"]),
+    sourceKey:
+      row["source_key"] === null || row["source_key"] === undefined ? null : String(row["source_key"]),
   };
 }
 

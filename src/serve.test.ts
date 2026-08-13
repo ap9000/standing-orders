@@ -666,6 +666,75 @@ describe("the operations console", () => {
     expect(again.status).toBe(400);
   });
 
+  test("the review queue ranks reviewable PRs first and the plane never merges (M8.19); a red episode earns the repair draft (M8.18)", async () => {
+    // Two published PRs: one quiet, one with an observed CI failure.
+    store.createTask({ id: "t-pr1", title: "shipped one" }, T0);
+    const ref1 = store.refFor("built-in", "t-pr1").id;
+    const run1 = store.startRun({ taskRef: ref1, leaseId: "l-p1", runner: "b-1", branch: "so/t-pr1", worktree: "/w", now: T0 });
+    store.finishRun(run1, { outcome: "built", now: T0 });
+    const pub1 = store.createPublicationIntent(
+      { run: run1, taskRef: ref1, githubRepo: "ap9000/thing", remote: "origin", base: "main", head: "so/t-pr1", headSha: "a".repeat(40), bodyHash: "h1", draft: false },
+      T0,
+    );
+    store.markPublicationPushed(pub1, T0);
+    store.markPublicationOpened(pub1, 101, "https://github.com/ap9000/thing/pull/101", T0);
+
+    store.createTask({ id: "t-pr2", title: "shipped two" }, T0);
+    const ref2 = store.refFor("built-in", "t-pr2").id;
+    const run2 = store.startRun({ taskRef: ref2, leaseId: "l-p2", runner: "b-1", branch: "so/t-pr2", worktree: "/w", now: T0 });
+    store.finishRun(run2, { outcome: "built", now: T0 });
+    const pub2 = store.createPublicationIntent(
+      { run: run2, taskRef: ref2, githubRepo: "ap9000/thing", remote: "origin", base: "main", head: "so/t-pr2", headSha: "b".repeat(40), bodyHash: "h2", draft: false },
+      T0,
+    );
+    store.markPublicationPushed(pub2, T0);
+    store.markPublicationOpened(pub2, 102, "https://github.com/ap9000/thing/pull/102", T0);
+    store.enqueueNotification(
+      { dedupeKey: `ci:102:${"b".repeat(40)}`, kind: "ci-failed", subject: "checks failing on #102", body: "red" },
+      T0,
+    );
+
+    const cookie = await login();
+    const queue = await (await fetch(url("/review"), { headers: { cookie } })).text();
+    // The quiet PR is recommended; the failing one is labeled, not hidden.
+    expect(queue.indexOf("PR #101")).toBeLessThan(queue.indexOf("PR #102"));
+    expect(queue).toContain("review next");
+    expect(queue).toContain("CI failing — observed");
+    expect(queue).toContain("never calls silence green");
+    // Read-only: no merge button, no form on this page.
+    expect(queue).not.toContain("<form");
+
+    // The failing run's page carries the draft button; the quiet one does not.
+    const failingRun = await (await fetch(url(`/r/${run2}`), { headers: { cookie } })).text();
+    expect(failingRun).toContain("draft a repair task");
+    const quietRun = await (await fetch(url(`/r/${run1}`), { headers: { cookie } })).text();
+    expect(quietRun).not.toContain("draft a repair task");
+
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(failingRun)?.[1] ?? "";
+    const drafted = await fetch(url(`/r/${run2}/draft-repair`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(drafted.status).toBe(303);
+    expect(drafted.headers.get("location")).toBe("/t/t-pr2-ci-102");
+
+    // One draft per task/PR, ever: the second click is a 409, not a twin.
+    const twin = await fetch(url(`/r/${run2}/draft-repair`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    expect(twin.status).toBe(409);
+
+    // The draft is unapproved and says what it is.
+    const draftPage = await (await fetch(url("/t/t-pr2-ci-102"), { headers: { cookie } })).text();
+    expect(draftPage).toContain("CI failing on PR #102");
+    expect(draftPage).toContain("approve");
+  });
+
   test("the overview is live: refresh meta, building-now card, system status", async () => {
     store.createTask({ id: "t-live", title: "being built right now" }, T0);
     const ref = store.refFor("built-in", "t-live").id;
