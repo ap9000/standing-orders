@@ -3506,10 +3506,11 @@ export class Store {
   }
 
   /** What is being built right now: current, unexpired claims with their task and holder. */
-  liveClaims(repo: string | null, now: Date): { taskId: string; runner: string; claimedAt: string; expiresAt: string }[] {
+  liveClaims(repo: string | null, now: Date): { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null }[] {
     return this.db
       .prepare(
-        `SELECT task_ref.external_id AS task_id, claim.runner, claim.acquired_at, claim.expires_at
+        `SELECT task_ref.external_id AS task_id, claim.runner, claim.acquired_at, claim.expires_at,
+                (SELECT run.model FROM run WHERE run.lease_id = claim.lease_id LIMIT 1) AS model
          FROM claim JOIN task_ref ON task_ref.id = claim.task_ref
          WHERE claim.released_at IS NULL AND claim.expires_at > ?
            AND claim.lease_generation = (
@@ -3525,6 +3526,7 @@ export class Store {
         runner: String(row["runner"]),
         claimedAt: String(row["acquired_at"]),
         expiresAt: String(row["expires_at"]),
+        model: row["model"] === null || row["model"] === undefined ? null : String(row["model"]),
       }));
   }
 
@@ -3729,6 +3731,7 @@ export class Store {
     outcome: string | null;
     handoff: string | null;
     costUsd: number | null;
+    ranMinutes: number | null;
     prNumber: number | null;
     prUrl: string | null;
     publicationState: string | null;
@@ -3743,7 +3746,7 @@ export class Store {
            WHERE task.state = 'done'
              AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
          )
-         SELECT completed.*, run.outcome, run.handoff, run.cost_usd,
+         SELECT completed.*, run.outcome, run.handoff, run.cost_usd, run.started_at, run.finished_at,
                 publication.state AS pub_state, publication.pr_number, publication.pr_url
          FROM completed
          LEFT JOIN run ON run.id = (
@@ -3762,6 +3765,10 @@ export class Store {
         outcome: row["outcome"] === null ? null : String(row["outcome"]),
         handoff: row["handoff"] === null ? null : String(row["handoff"]),
         costUsd: row["cost_usd"] === null ? null : Number(row["cost_usd"]),
+        ranMinutes:
+          row["started_at"] === null || row["finished_at"] === null || row["started_at"] === undefined
+            ? null
+            : Math.max(1, Math.round((new Date(String(row["finished_at"])).getTime() - new Date(String(row["started_at"])).getTime()) / 60_000)),
         prNumber: row["pr_number"] === null ? null : Number(row["pr_number"]),
         prUrl: row["pr_url"] === null ? null : String(row["pr_url"]),
         publicationState: row["pub_state"] === null ? null : String(row["pub_state"]),

@@ -1601,7 +1601,7 @@ function inboxPage(chrome: Chrome, data: {
 
 /** System: the machinery — workers, background service, workspaces. */
 function systemPage(chrome: Chrome, data: {
-  building: { taskId: string; runner: string; claimedAt: string; expiresAt: string }[];
+  building: { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null }[];
   runners: Runner[];
   worktrees: WorktreeRow[];
   episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
@@ -1673,7 +1673,7 @@ function donePage(
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
               `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
-              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.costUsd === null ? "" : ` \u00b7 $${row.costUsd.toFixed(2)}`}</p></div>`
+              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.costUsd === null ? "" : ` \u00b7 $${row.costUsd.toFixed(2)}`}</p></div>`
             );
           })
           .join("\n");
@@ -1688,7 +1688,7 @@ function homePage(chrome: Chrome, data: {
   csrf: string;
   taskCount: number;
   repo: string | null;
-  building: { taskId: string; runner: string; claimedAt: string; expiresAt: string }[];
+  building: { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null }[];
   runners: Runner[];
   worktrees: WorktreeRow[];
   episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
@@ -1778,7 +1778,7 @@ function homePage(chrome: Chrome, data: {
             claim =>
               `<a class="stat-card" href="${taskHref(claim.taskId)}" style="text-decoration:none">` +
               `<span class="k"><span class="dot dot-ok pulse"></span>${escape(claim.taskId)}</span>` +
-              `<span class="v">${escape(claim.runner)} \u00b7 since ${escape(when(claim.claimedAt))}</span></a>`,
+              `<span class="v">${escape(claim.runner)} \u00b7 ${Math.max(1, Math.round((data.now.getTime() - new Date(claim.claimedAt).getTime()) / 60_000))}m elapsed${claim.model === null ? "" : ` \u00b7 ${escape(claim.model)}`}</span></a>`,
           )
           .join("") +
         `</div>`;
