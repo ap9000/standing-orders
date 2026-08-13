@@ -190,6 +190,9 @@ export async function bridgePass(
     transport: TelegramTransport;
     clock?: () => Date;
     owner?: string;
+    /** false: inbound only — another channel is primary and carries the
+     * pages; taps and replies still land here. */
+    deliver?: boolean;
   },
 ): Promise<{ ok: true; report: BridgeReport } | { ok: false; reason: "bridge-busy"; message: string }> {
   const clock = options.clock ?? (() => new Date());
@@ -208,7 +211,9 @@ export async function bridgePass(
   const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
 
   try {
-    await deliverOutbox(store, botId, transport, owner, clock, report);
+    if (options.deliver !== false) {
+      await deliverOutbox(store, botId, transport, owner, clock, report);
+    }
     await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report);
   } finally {
     // Handed back so the next cron firing is not told busy for the rest of
@@ -265,6 +270,8 @@ export async function followBridge(
     signal: AbortSignal;
     clock?: () => Date;
     owner?: string;
+    /** false: inbound only; another channel is primary. */
+    deliver?: boolean;
     pollSeconds?: number;
     /** One line per cycle that did something — the follower's narration hook. */
     onCycle?: (report: BridgeReport) => void;
@@ -306,7 +313,9 @@ export async function followBridge(
 
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
-      await deliverOutbox(store, botId, transport, owner, clock, report);
+      if (options.deliver !== false) {
+        await deliverOutbox(store, botId, transport, owner, clock, report);
+      }
       await drainUpdates(
         store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal,
       );

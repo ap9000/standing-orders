@@ -124,7 +124,7 @@ import {
   type RoutineTerms,
 } from "./routine.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import { clearWebhook, loadConsoleUrl, loadWebhookTargets, saveConsoleUrl, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
+import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { inspectionOf, isProviderId, PROVIDER_IDS, validateSpec } from "./provider.js";
 import {
   build,
@@ -252,6 +252,10 @@ The outbox — facts that want a person, durably
                                         stays in the console. Delivers when
                                         Telegram is not configured.
   nightorders webhook set console-url <http://host:port>
+  nightorders webhook primary telegram|slack|discord
+                                        which service carries the pages when
+                                        several are set up (asked once, the
+                                        first time you configure a second)
   nightorders webhook status | test | clear slack|discord
   nightorders outbox list [--all]
   nightorders outbox deliver --cmd <c>  runs once per pending row, reading
@@ -2178,6 +2182,7 @@ async function serveCommand(
     evidenceRoot: context.evidenceRoot,
     clock: context.clock,
     telegramTokenFile: context.telegramTokenFile,
+    configDir: dirname(context.databaseFile),
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
     ...(repoFlag === undefined ? {} : { repos: repoFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
     ...(rootFlag === undefined ? {} : { projectRoots: rootFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
@@ -2356,15 +2361,24 @@ async function webhookCommand(
   const dir = dirname(context.databaseFile);
   const [action, which, value] = positional;
 
+  const telegramConfigured = loadBotToken(process.env, context.telegramTokenFile) !== null;
+
   if (action === undefined || action === "status") {
     const targets = loadWebhookTargets(process.env, dir);
     const consoleUrl = loadConsoleUrl(process.env, dir);
+    const primary = effectivePrimary(process.env, dir, telegramConfigured);
     if (json) {
-      write(JSON.stringify({ ok: true, command: "webhook status", configured: targets.map(one => one.kind), consoleUrl }, null, 2));
+      write(JSON.stringify({ ok: true, command: "webhook status", configured: primary.configured, primary: primary.channel, implicit: primary.implicit, consoleUrl }, null, 2));
       return EXIT.ok;
     }
-    write(`Chat mirrors${targets.length === 0 ? ": none configured" : ""}`);
-    for (const target of targets) write(`  ${target.kind.padEnd(8)} configured (URL held privately)`);
+    write(`Messaging${primary.configured.length === 0 ? ": nothing configured" : ""}`);
+    for (const channel of primary.configured) {
+      write(`  ${channel.padEnd(8)} configured${channel === primary.channel ? "  ← carries the pages" : "  (silent — not primary)"}`);
+    }
+    if (primary.implicit && primary.channel !== null) {
+      write(`  ! several services are set up and none was chosen — ${primary.channel} pages by default.`);
+      write(`    Choose: nightorders webhook primary telegram|slack|discord`);
+    }
     write(`  links    ${consoleUrl ?? "NOT SET — messages will carry no console link; nightorders webhook set console-url http://host:port"}`);
     if (targets.length === 0) {
       write("");
@@ -2394,6 +2408,20 @@ async function webhookCommand(
     return succeed(write, json, "webhook test", { sent: report.sent }, () => [`Sent ${report.sent} message(s). Check the channel.`]);
   }
 
+  if (action === "primary") {
+    if (which === undefined || !isMessagingChannel(which)) {
+      return fail(write, json, "webhook primary", "usage", "primary is one of telegram, slack, discord", EXIT.usage);
+    }
+    const primary = effectivePrimary(process.env, dir, telegramConfigured);
+    if (!primary.configured.includes(which)) {
+      return fail(write, json, "webhook primary", "unconfigured", `${which} is not configured — set it up first, then choose it`, EXIT.refused);
+    }
+    savePrimary(dir, which);
+    return succeed(write, json, "webhook primary", { primary: which }, () => [
+      `${which} now carries the pages. ${which === "telegram" ? "Buttons and replies work there as always." : "Telegram (if configured) still accepts taps and replies — it just stops paging."}`,
+    ]);
+  }
+
   if (action === "clear" && (which === "slack" || which === "discord")) {
     clearWebhook(dir, which);
     return succeed(write, json, "webhook clear", { which }, () => [`${which} mirror cleared.`]);
@@ -2412,8 +2440,25 @@ async function webhookCommand(
   }
   const saved = saveWebhook(dir, which, value);
   if (!saved.ok) return fail(write, json, "webhook set", "invalid", saved.message, EXIT.usage);
-  return succeed(write, json, "webhook set", { which }, () => [
+
+  // The first moment more than one service exists is the moment to ask
+  // which one pages — once, right here, not at 3am when both fire.
+  const after = effectivePrimary(process.env, dir, telegramConfigured);
+  let chosen: string | null = null;
+  if (after.implicit && loadPrimary(process.env, dir) === null && after.configured.length > 1 && interactive() && !json) {
+    write(`You now have ${after.configured.join(" and ")} set up.`);
+    const answer = (await ask(`Which one should carry the pages? [${after.configured.join("/")}] `)).trim().toLowerCase();
+    if (isMessagingChannel(answer) && after.configured.includes(answer)) {
+      savePrimary(dir, answer);
+      chosen = answer;
+    } else {
+      write(`Left unchosen — ${after.channel} pages by default. Decide any time: nightorders webhook primary <service>`);
+    }
+  }
+  return succeed(write, json, "webhook set", { which, ...(chosen === null ? {} : { primary: chosen }) }, () => [
     `${which} mirror configured — the URL lives in a private file beside the database.`,
+    ...(chosen === null ? [] : [`${chosen} carries the pages.`]),
+    ...(after.implicit && chosen === null && !interactive() ? [`Several services are configured — choose the pager: nightorders webhook primary <service>`] : []),
     `Send yourself a proof: nightorders webhook test`,
   ]);
 }
@@ -3027,7 +3072,9 @@ async function watchCommand(
   const followSource = loadBotToken(process.env, context.telegramTokenFile);
   if (followSource !== null) {
     const transport = context.telegramTransport ?? createTransport(followSource.token);
+    const followerPrimary = effectivePrimary(process.env, dirname(context.databaseFile), true);
     follower = followBridge(store, {
+      ...(followerPrimary.channel === "telegram" ? {} : { deliver: false }),
       botId: followSource.botId,
       transport,
       signal: followController.signal,
@@ -3127,14 +3174,22 @@ async function watchCommand(
       if (follower === null && now - lastBridge >= bridgeEveryMs) {
         lastBridge = now;
         const source = loadBotToken(process.env, context.telegramTokenFile);
+        const dir = dirname(context.databaseFile);
+        // Exactly ONE service carries the pages — the chosen primary, or
+        // the sensible implicit one. Telegram keeps draining taps and
+        // replies even when another service is primary: answering is its
+        // job whether or not paging is.
+        const primary = effectivePrimary(process.env, dir, source !== null);
         if (source !== null) {
           quiet.length = 0;
-          await bridgeCommand(["telegram"], passFlags(), quietContext);
-        } else {
-          // UI-only mirrors: with no Telegram, Slack/Discord carry the
-          // pages — each a message with a console link, acting in the UI.
-          const dir = dirname(context.databaseFile);
-          const targets = loadWebhookTargets(process.env, dir);
+          await bridgeCommand(
+            ["telegram"],
+            passFlags(primary.channel === "telegram" ? {} : { "inbound-only": "1" }),
+            quietContext,
+          );
+        }
+        if (primary.channel !== null && primary.channel !== "telegram") {
+          const targets = loadWebhookTargets(process.env, dir).filter(one => one.kind === primary.channel);
           if (targets.length > 0) {
             await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock: context.clock });
           }
@@ -3359,7 +3414,12 @@ async function bridgeCommand(
     }
   }
 
-  const passed = await bridgePass(store, { botId: source.botId, transport, clock });
+  const passed = await bridgePass(store, {
+    botId: source.botId,
+    transport,
+    clock,
+    ...(flags.has("inbound-only") ? { deliver: false } : {}),
+  });
   if (!passed.ok) {
     return fail(write, json, "bridge", passed.reason, passed.message, EXIT.refused);
   }

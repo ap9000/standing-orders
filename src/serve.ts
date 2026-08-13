@@ -79,6 +79,7 @@ import { tally, spendLine } from "./summary.js";
 import { classify } from "./board.js";
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
+import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import type { Routine } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
@@ -94,6 +95,9 @@ export type ServeOptions = {
    * settings card renders; absent = no settings surface at all.
    */
   telegramTokenFile?: string;
+  /** Where messaging config files live (beside the database) — enables the
+   * primary-messenger selector on the settings screen. */
+  configDir?: string;
   /**
    * The repo this console serves. Scopes run evidence to that repo's tasks
    * (and unplaced ones) and turns on the gaps and capabilities views —
@@ -698,7 +702,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       const existing = loadBotToken({}, options.telegramTokenFile);
       const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
       const csrf = who.via === "cookie" ? who.session.csrf : "";
-      return page(response, 200, settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, null));
+      const messaging =
+        options.configDir === undefined
+          ? null
+          : effectivePrimary(process.env, options.configDir, loadBotToken(process.env, options.telegramTokenFile) !== null);
+      return page(response, 200, settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, null, messaging));
     }
 
     const one = /^\/d\/([0-9]{1,15})$/.exec(url.pathname);
@@ -981,6 +989,18 @@ export function createDecisionServer(options: ServeOptions): Server {
     // Any accepted mutation may change what the inbox owes; the badge
     // re-counts within five seconds either way, this just makes it exact.
     bustBadge();
+
+    if (url.pathname === "/settings/messaging" && options.configDir !== undefined && options.telegramTokenFile !== undefined) {
+      const wanted = (body.get("primary") ?? "").trim();
+      const facts = effectivePrimary(process.env, options.configDir, loadBotToken(process.env, options.telegramTokenFile) !== null);
+      // Only a CONFIGURED service may page — choosing silence is not a
+      // selection, and an unconfigured primary would page nobody.
+      if (!isMessagingChannel(wanted) || !facts.configured.includes(wanted)) {
+        return refuse(response, who, 400, "primary must be one of the configured services");
+      }
+      savePrimary(options.configDir, wanted);
+      return redirect(response, "/settings");
+    }
 
     if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {
       const value = body.get("token") ?? "";
@@ -3259,7 +3279,30 @@ function settingsPage(
   hasEnv: boolean,
   csrf: string,
   problem: string | null,
+  messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
 ): string {
+  const messagingCard =
+    messaging === null || messaging.configured.length === 0
+      ? ""
+      : [
+          "<h2>who pages you</h2>",
+          `<p class="meta">every alert goes out through ONE service — the others stay quiet so nothing pages twice${
+            messaging.implicit ? " · <strong>several are set up and none was chosen — pick one</strong>" : ""
+          }</p>`,
+          `<form method="post" action="/settings/messaging" class="card">`,
+          `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+          ...messaging.configured.map(
+            channel =>
+              `<label style="display:flex;gap:.5rem;align-items:center"><input type="radio" name="primary" value="${escape(channel)}"${
+                channel === messaging.channel ? " checked" : ""
+              }> ${escape(channel)}${channel === messaging.channel ? ` <span class="meta">— pages now${messaging.implicit ? " (by default, not by choice)" : ""}</span>` : ""}${
+                channel === "telegram" ? ` <span class="meta">· can carry answer buttons and reply-notes</span>` : ` <span class="meta">· messages with console links; acting stays here</span>`
+              }</label>`,
+          ),
+          `<button type="submit">page me there</button>`,
+          `</form>`,
+          `<p class="meta">Telegram keeps accepting taps and replies even when another service pages — answering is its job either way. Add services from the terminal: <code>nightorders webhook set slack|discord &lt;url&gt;</code>.</p>`,
+        ].join("\n");
   const current =
     hasEnv
       ? `set in the environment (${escape(TOKEN_ENV)}) — that takes precedence over anything saved here`
@@ -3268,6 +3311,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return shell("settings", [
     "<h1>settings</h1>",
+    messagingCard,
     "<h2>telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,
     problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,

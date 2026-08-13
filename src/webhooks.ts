@@ -24,6 +24,7 @@ import type { Notification, Store } from "./store.js";
 export const SLACK_ENV = "NIGHTORDERS_SLACK_WEBHOOK";
 export const DISCORD_ENV = "NIGHTORDERS_DISCORD_WEBHOOK";
 export const CONSOLE_URL_ENV = "NIGHTORDERS_CONSOLE_URL";
+export const PRIMARY_ENV = "NIGHTORDERS_MESSAGING_PRIMARY";
 
 export type WebhookKind = "slack" | "discord";
 
@@ -38,6 +39,14 @@ const FILE_OF: Record<WebhookKind, string> = {
   discord: "discord-webhook",
 };
 const CONSOLE_FILE = "console-url";
+const PRIMARY_FILE = "messaging-primary";
+
+export type MessagingChannel = "telegram" | "slack" | "discord";
+export const MESSAGING_CHANNELS: readonly MessagingChannel[] = ["telegram", "slack", "discord"];
+
+export function isMessagingChannel(value: string): value is MessagingChannel {
+  return (MESSAGING_CHANNELS as readonly string[]).includes(value);
+}
 
 /** The shapes each platform hands out; anything else is probably a paste error. */
 const URL_SHAPE: Record<WebhookKind, RegExp> = {
@@ -90,6 +99,43 @@ export function loadWebhookTargets(env: Record<string, string | undefined>, dir:
   if (slack !== null && slack !== undefined && slack !== "") targets.push({ kind: "slack", url: slack });
   if (discord !== null && discord !== undefined && discord !== "") targets.push({ kind: "discord", url: discord });
   return targets;
+}
+
+/** The operator's explicit choice of which service carries the pages. */
+export function savePrimary(dir: string, channel: MessagingChannel): void {
+  writeFileSync(join(dir, PRIMARY_FILE), `${channel}\n`, { mode: 0o600 });
+}
+
+export function loadPrimary(env: Record<string, string | undefined>, dir: string): MessagingChannel | null {
+  const configured = env[PRIMARY_ENV] ?? readTrimmed(join(dir, PRIMARY_FILE));
+  return configured !== undefined && configured !== null && isMessagingChannel(configured) ? configured : null;
+}
+
+/**
+ * Which service actually carries the pages, and whether that was chosen or
+ * merely fell out of what happens to be configured. Explicit choice wins
+ * WHEN its channel is actually configured (a primary pointing at nothing
+ * falls through rather than silencing every page); otherwise Telegram if
+ * present (it can hold buttons), else the mirrors. `implicit` is the flag
+ * every status surface uses to say "you have several — pick one".
+ */
+export function effectivePrimary(
+  env: Record<string, string | undefined>,
+  dir: string,
+  telegramConfigured: boolean,
+): { channel: MessagingChannel | null; implicit: boolean; configured: MessagingChannel[] } {
+  const targets = loadWebhookTargets(env, dir);
+  const configured: MessagingChannel[] = [
+    ...(telegramConfigured ? (["telegram"] as const) : []),
+    ...targets.map(one => one.kind),
+  ];
+  const chosen = loadPrimary(env, dir);
+  if (chosen !== null && configured.includes(chosen)) {
+    return { channel: chosen, implicit: false, configured };
+  }
+  if (telegramConfigured) return { channel: "telegram", implicit: configured.length > 1, configured };
+  const fallback = configured[0] ?? null;
+  return { channel: fallback, implicit: configured.length > 1, configured };
 }
 
 export function loadConsoleUrl(env: Record<string, string | undefined>, dir: string): string | null {

@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
-import { saveWebhook, saveConsoleUrl, loadWebhookTargets, loadConsoleUrl, linkFor, webhookPass } from "./webhooks.js";
+import { saveWebhook, saveConsoleUrl, loadWebhookTargets, loadConsoleUrl, linkFor, webhookPass, effectivePrimary, savePrimary, clearWebhook } from "./webhooks.js";
 
 const T0 = new Date("2026-08-13T22:00:00.000Z");
 
@@ -89,5 +89,35 @@ describe("the mirrors", () => {
     });
     expect(failed.problems.join(" ")).toContain("slack answered 403");
     expect(failed.problems.join(" ")).not.toContain("SECRET");
+  });
+});
+
+describe("the primary — one service pages, chosen or sensibly implied", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "nightorders-primary-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("implicit until chosen; explicit wins only while its service is configured", () => {
+    // Nothing configured: nobody pages, nothing implicit.
+    expect(effectivePrimary({}, dir, false)).toMatchObject({ channel: null, implicit: false });
+
+    // Telegram alone: it pages, no ambiguity.
+    expect(effectivePrimary({}, dir, true)).toMatchObject({ channel: "telegram", implicit: false });
+
+    // Telegram + slack, nothing chosen: telegram pages BY DEFAULT and the
+    // status is flagged implicit — the "pick one" moment.
+    saveWebhook(dir, "slack", "https://hooks.slack.com/services/T/B/x");
+    expect(effectivePrimary({}, dir, true)).toMatchObject({ channel: "telegram", implicit: true });
+
+    // The choice sticks.
+    savePrimary(dir, "slack");
+    expect(effectivePrimary({}, dir, true)).toMatchObject({ channel: "slack", implicit: false });
+
+    // A primary pointing at a service that is no longer configured falls
+    // through instead of silencing every page.
+    clearWebhook(dir, "slack");
+    expect(effectivePrimary({}, dir, true)).toMatchObject({ channel: "telegram" });
   });
 });
