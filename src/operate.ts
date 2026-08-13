@@ -134,7 +134,7 @@ import {
   type Runner as CommandRunner,
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
-import { run } from "./exec.js";
+import { run, terminateLiveProviders } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
@@ -319,7 +319,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
-    "command", "timeout-seconds",
+    "command", "timeout-seconds", "stop-grace",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -3127,8 +3127,10 @@ const WATCH_HEARTBEAT_MS = 30_000;
  *
  * Graceful stop: a signal stops admitting new passes; the in-flight one
  * finishes under its own bounded timeouts while the lease keeps beating,
- * then the lease is handed back. (A hard kill of the provider process
- * group on grace expiry is deferred, in the ledger, with this note.)
+ * then the lease is handed back. A second signal, or the grace clock
+ * (--stop-grace, default 30s), SIGKILLs every live provider's process
+ * group (M6.12): runs finalize as failures, worktrees are preserved, and
+ * fences keep late output out of every commit.
  */
 async function watchCommand(
   flags: Map<string, string | true>,
@@ -3178,12 +3180,29 @@ async function watchCommand(
   store.startWatchEpisode({ repo, runner, incarnation }, new Date());
 
   let stopping = false;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const stopGraceMs = Number(text(flags, "stop-grace") ?? 30_000);
   const followController = new AbortController();
+  const hardStop = () => {
+    const terminated = terminateLiveProviders();
+    if (terminated > 0) {
+      write(`Hard stop: ${terminated} provider process group(s) terminated. Their runs finalize as failures; worktrees are preserved; fences keep late output out of every commit.`);
+    }
+  };
   const stop = () => {
+    if (stopping) {
+      // Second signal: the operator has waited long enough. The provider
+      // process group dies now; the pass's own finalization still runs.
+      hardStop();
+      return;
+    }
     stopping = true;
     // First signal: stop admitting work AND abort the in-flight long poll,
     // so shutdown is not held hostage by a poll Telegram is still holding.
+    // The grace clock starts here: an agent that outlives it is killed as
+    // a group (M6.12) — deterministic stop is an unattended safety control.
     followController.abort();
+    graceTimer = setTimeout(hardStop, stopGraceMs);
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -3350,6 +3369,7 @@ async function watchCommand(
     }
   } finally {
     clearInterval(heartbeat);
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
     followController.abort();
     if (follower !== null) await follower;
     process.removeListener("SIGINT", stop);

@@ -37,7 +37,52 @@ export type RunOptions = {
    * would let the agent read and answer the operator's own decisions.
    */
   omitEnv?: readonly string[];
+  /**
+   * Run the child in its own process group and register it as a live
+   * provider (M6.12). Set by the invocation gateway and nowhere else: an
+   * agent harness spawns shells and tools of its own, and stopping "the
+   * provider" must mean the whole tree — a kill that orphans the
+   * grandchildren stops nothing. Timeout kills become group kills too.
+   */
+  processGroup?: boolean;
 };
+
+/** Live provider children, for the deterministic stop. Registered only when `processGroup` was set. */
+const liveProviders = new Set<import("node:child_process").ChildProcess>();
+
+/** SIGKILL the child's whole process group; fall back to the child alone. */
+function killGroup(child: import("node:child_process").ChildProcess): void {
+  const pid = child.pid;
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, "SIGKILL");
+      return;
+    } catch {
+      // No group of ours (not detached, already gone, or Windows) — fall through.
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // Already gone.
+  }
+}
+
+/**
+ * The hard stop (M6.12): SIGKILL every live provider's process group.
+ * Called by the watch when its stop grace expires — never on the first
+ * signal, which stays graceful. Late output cannot commit or publish:
+ * the killed process exits nonzero, the build finalizes as the failure
+ * it is, and every commit sits behind fences the corpse cannot pass.
+ */
+export function terminateLiveProviders(): number {
+  let terminated = 0;
+  for (const child of liveProviders) {
+    killGroup(child);
+    terminated += 1;
+  }
+  return terminated;
+}
 
 /** Conventions from the shell and from coreutils `timeout(1)`. */
 export const NOT_FOUND_CODE = 127;
@@ -65,6 +110,17 @@ export function run(file: string, args: readonly string[], options: RunOptions =
     for (const name of omitEnv ?? []) delete childEnv[name];
   }
 
+  // A provider run needs its own process group; execFile cannot give one,
+  // so the buffered path detours through spawn with identical semantics.
+  if (options.processGroup === true) {
+    return runBufferedGroup(file, args, {
+      timeoutMs,
+      maxBuffer,
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(childEnv === undefined ? {} : { childEnv }),
+    });
+  }
+
   return new Promise(resolve => {
     execFile(
       file,
@@ -86,6 +142,82 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         resolve(describeFailure(error as ExecError, stdout, stderr));
       },
     );
+  });
+}
+
+/**
+ * The buffered transport for process-group providers (claude): spawn
+ * detached so the harness and everything it launches share one killable
+ * group, collect output up to the same maxBuffer contract as execFile,
+ * and register as a live provider for the watch's hard stop.
+ */
+function runBufferedGroup(
+  file: string,
+  args: readonly string[],
+  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined> },
+): Promise<ExecResult> {
+  return new Promise(resolve => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(file, [...args], {
+        cwd: bag.cwd,
+        shell: false,
+        windowsHide: true,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(bag.childEnv === undefined ? {} : { env: bag.childEnv }),
+      });
+    } catch (error) {
+      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      return;
+    }
+    liveProviders.add(child);
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let overflowed = false;
+    let notFound = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup(child);
+    }, bag.timeoutMs);
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > bag.maxBuffer) {
+        overflowed = true;
+        killGroup(child);
+      }
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (stderr.length < bag.maxBuffer) stderr += chunk.slice(0, bag.maxBuffer - stderr.length);
+    });
+
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      liveProviders.delete(child);
+      resolve({
+        code: notFound ? NOT_FOUND_CODE : overflowed ? OVERFLOW_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+        stdout,
+        stderr,
+        // Overflow also killed the child; it is not a timeout and must not read as one.
+        timedOut: timedOut && !overflowed,
+        notFound,
+      });
+    };
+    child.on("error", error => {
+      notFound = (error as NodeJS.ErrnoException).code === "ENOENT";
+      if (stderr === "") stderr = String(error);
+      finish(null);
+    });
+    child.on("close", code => finish(code));
   });
 }
 
@@ -159,6 +291,7 @@ export function runStreamJsonl(
         cwd,
         shell: false,
         windowsHide: true,
+        detached: options.processGroup === true && process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
         ...(childEnv === undefined ? {} : { env: childEnv }),
       });
@@ -166,6 +299,7 @@ export function runStreamJsonl(
       resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
       return;
     }
+    if (options.processGroup === true) liveProviders.add(child);
 
     const kept: string[] = [];
     let lastMessage: string | null = null;
@@ -194,7 +328,8 @@ export function runStreamJsonl(
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      if (options.processGroup === true) killGroup(child);
+      else child.kill("SIGKILL");
     }, timeoutMs);
 
     child.stdout?.setEncoding("utf8");
@@ -218,6 +353,7 @@ export function runStreamJsonl(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      liveProviders.delete(child);
       if (partial.trim() !== "") keep(partial);
       const lines = lastMessage === null ? kept : [...kept, lastMessage];
       resolve({

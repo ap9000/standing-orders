@@ -98,6 +98,10 @@ export async function invokeAgent(
     ...runOptions,
     timeoutMs,
     omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
+    // Providers run in their own process group (M6.12): the harness spawns
+    // shells and tools of its own, and both the timeout and the watch's
+    // hard stop must end the whole tree, not orphan the grandchildren.
+    processGroup: true,
   });
 
   const envelope = adapter.parse(result.stdout);
