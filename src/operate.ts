@@ -114,7 +114,15 @@ import {
 } from "./runner.js";
 import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf } from "./scope.js";
 import { WorktreePool } from "./worktree.js";
-import { fireRoutine } from "./routine.js";
+import {
+  approveRoutine,
+  describeRoutine,
+  fireRoutine,
+  routineDigestOf,
+  validateRoutineTerms,
+  ROUTINE_NAME,
+  type RoutineTerms,
+} from "./routine.js";
 import {
   build,
   DEFAULT_BUILD_TIMEOUT_MS,
@@ -200,6 +208,18 @@ Capabilities — what the work needs, recorded and probed, never valued
                                         plan before building: an agent reads
                                         the repo, asks you questions, and
                                         proposes a scope you approve
+
+Routines — standing orders that fire on a schedule, each instance isolated
+  nightorders routine add <name> --repo <path> --goal <text>
+      --schedule every:<min>|daily:<HH:MM>   (UTC)
+      [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]
+  nightorders routine approve <name>    the step-up: approving means each
+                                        firing builds WITHOUT asking, inside
+                                        exactly the stated terms; editing any
+                                        term voids the approval
+  nightorders routine list | show <name>
+  nightorders routine pause|resume <name>
+  nightorders routine run-now <name> --as <you> --token <t>
   nightorders brief [--repo <path>] [--local] [--since <iso>]
                                         the report: recent runs, gaps,
                                         PRs (--local skips the network and
@@ -256,7 +276,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "choose", "note", "max-open-decisions", "port", "host", "allow-host",
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
     "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
-    "project-root",
+    "project-root", "schedule", "ceiling", "require",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -388,6 +408,8 @@ async function dispatch(
       return decideCommand(positional, flags, context);
     case "incident":
       return incidentCommand(positional, flags, context);
+    case "routine":
+      return routineCommand(positional, flags, context);
     case "serve":
       return serveCommand(flags, context);
     case "watch":
@@ -2256,6 +2278,187 @@ async function incidentCommand(
   return succeed(write, json, "incident resolve", { id, by: asWho }, () => [
     `Resolved incident ${id}, as ${asWho}. The task's hold is lifted; the next tick may take it.`,
   ]);
+}
+
+/**
+ * `nightorders routine …` — standing orders. Filing one is cheap; the
+ * expensive act is the approval, which restates every term including "each
+ * firing builds without asking" and takes the approver's credential, same
+ * as a scope. Pausing needs no ceremony because stopping spend never does.
+ */
+async function routineCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [action, name] = positional;
+
+  if (action === undefined || action === "list") {
+    const repoFilter = text(flags, "repo");
+    const routines = store.listRoutines(
+      repoFilter === undefined ? null : canonicalProject(repoFilter) ?? resolve(repoFilter),
+    );
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "routine list", routines }, null, 2));
+      return EXIT.ok;
+    }
+    if (routines.length === 0) {
+      write("No standing orders. `nightorders routine add <name> --repo <path> --goal <text> --schedule every:60` files one.");
+      return EXIT.ok;
+    }
+    for (const routine of routines) {
+      const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+      const status = routine.paused ? "paused" : approved ? "live" : "awaiting approval";
+      write(`  ${routine.name.padEnd(20)} ${status.padEnd(18)} ${routine.schedule.padEnd(14)} ${routine.repo}`);
+    }
+    return EXIT.ok;
+  }
+
+  if (action === "add") {
+    if (name === undefined || !ROUTINE_NAME.test(name)) {
+      return fail(write, json, "routine add", "usage", "a routine's name is lowercase letters, digits, and dashes — it becomes each instance's id", EXIT.usage);
+    }
+    const repoGiven = text(flags, "repo");
+    const goal = text(flags, "goal");
+    const schedule = text(flags, "schedule");
+    if (repoGiven === undefined || goal === undefined || schedule === undefined) {
+      return fail(write, json, "routine add", "usage", "`nightorders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]`", EXIT.usage);
+    }
+    const ceilingGiven = text(flags, "ceiling");
+    const terms: RoutineTerms = {
+      repo: canonicalProject(repoGiven) ?? resolve(repoGiven),
+      goal,
+      outOfScope: text(flags, "not") ?? null,
+      touches: (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
+      requirements: (text(flags, "require") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
+      schedule,
+      singleFlight: true,
+      costCeilingUsd: ceilingGiven === undefined ? null : Number(ceilingGiven),
+    };
+    const problems = validateRoutineTerms(terms);
+    if (problems.length > 0) {
+      return fail(write, json, "routine add", "invalid", problems.map(one => `${one.field}: ${one.problem}`).join("; "), EXIT.usage);
+    }
+    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, clock());
+    if (!created.ok) {
+      return fail(write, json, "routine add", "duplicate", `a routine named ${name} already exists`, EXIT.refused);
+    }
+    const routine = store.getRoutine(created.id);
+    return succeed(write, json, "routine add", { routine }, () => [
+      `Filed ${name}. Nothing fires until somebody approves the standing order:`,
+      ...(routine === null ? [] : describeRoutine(routine)),
+      "",
+      `  nightorders routine approve ${name}`,
+    ]);
+  }
+
+  if (name === undefined) {
+    return fail(write, json, `routine ${action}`, "usage", "which routine? give its name", EXIT.usage);
+  }
+  const routine = store.routineByName(name);
+  if (routine === null) {
+    return fail(write, json, `routine ${action}`, "unknown", `no routine named ${name}`, EXIT.refused);
+  }
+
+  switch (action) {
+    case "show": {
+      const fires = store.routineFires(routine.id, 14);
+      if (json) {
+        write(JSON.stringify({ ok: true, command: "routine show", routine, fires }, null, 2));
+        return EXIT.ok;
+      }
+      const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+      write(`${routine.name} — ${routine.paused ? "paused" : approved ? "live" : "awaiting approval"}`);
+      for (const line of describeRoutine(routine)) write(line);
+      if (routine.nextFireAt !== null && !routine.paused && approved) write(`  next fire    ${routine.nextFireAt}`);
+      if (fires.length > 0) {
+        write("");
+        write("  recent firings, newest first:");
+        for (const fire of fires) {
+          const said =
+            fire.outcome === "fired"
+              ? `${fire.instanceTaskId ?? "instance"}${fire.instanceState === null ? "" : ` (${fire.instanceState})`}`
+              : `skipped — ${fire.reason ?? ""}`;
+          write(`    ${fire.scheduledFor}  ${said}`);
+        }
+      }
+      return EXIT.ok;
+    }
+    case "approve": {
+      let saw = text(flags, "digest");
+      let asWho = text(flags, "as");
+      let token = text(flags, "token");
+      let confirmedAloud = false;
+      if ((!flags.has("yes") || saw === undefined || asWho === undefined || token === undefined) && interactive() && !json) {
+        write(`Approving ${name} makes it a STANDING order:`);
+        write("");
+        for (const line of describeRoutine(routine)) write(line);
+        write("");
+        const agreed = await confirm("Approve exactly this standing order?");
+        if (!agreed) {
+          write("Nothing approved.");
+          return EXIT.refused;
+        }
+        saw ??= routine.digest;
+        const acting = await askCredentials(flags, context);
+        if (acting === null) return fail(write, json, "routine approve", "usage", "approval needs who is agreeing", EXIT.usage);
+        asWho = acting.name;
+        token = acting.token;
+        confirmedAloud = true;
+      }
+      const armed = (flags.has("yes") || confirmedAloud) && saw !== undefined && asWho !== undefined && token !== undefined;
+      if (!armed) {
+        if (json) {
+          write(JSON.stringify({ ok: false, command: "routine approve", reason: "unconfirmed", routine }, null, 2));
+          return EXIT.refused;
+        }
+        write(`Would approve this standing order — every firing of it builds without asking:`);
+        write("");
+        for (const line of describeRoutine(routine)) write(line);
+        write("");
+        write("Nothing has been approved. Agree to exactly this with:");
+        write(`  nightorders routine approve ${name} --yes --digest ${routine.digest} --as <you> --token <your password>`);
+        return EXIT.ok;
+      }
+      const approved = approveRoutine(store, routine.id, asWho as string, clock(), saw as string, token as string);
+      if (!approved.ok) {
+        return fail(write, json, "routine approve", approved.reason, describeApproveFailure(approved.reason, name), EXIT.refused);
+      }
+      return succeed(write, json, "routine approve", { routine: approved.routine }, () => [
+        `Approved. ${name} fires on its schedule from now on; first at ${approved.routine.nextFireAt}.`,
+        `Pause it any time: nightorders routine pause ${name}`,
+      ]);
+    }
+    case "pause":
+    case "resume": {
+      store.setRoutinePaused(routine.id, action === "pause", clock());
+      return succeed(write, json, `routine ${action}`, { name }, () => [
+        action === "pause"
+          ? `${name} is paused — no firing until you resume it. Already-running instances finish.`
+          : `${name} resumed — the next due slot fires again.`,
+      ]);
+    }
+    case "run-now": {
+      const acting = await askCredentials(flags, context);
+      if (acting === null) {
+        return fail(write, json, "routine run-now", "usage", "run-now takes `--as <you> --token <t>` — it dispatches work that spends", EXIT.usage);
+      }
+      const authenticated = authenticateApprover(store, acting.name, acting.token);
+      if (!authenticated.ok) {
+        return fail(write, json, "routine run-now", authenticated.reason, describeApproveFailure(authenticated.reason, name), EXIT.refused);
+      }
+      const outcome = fireRoutine(store, routine.id, clock(), { manual: true });
+      if (!outcome.ok) {
+        return fail(write, json, "routine run-now", outcome.reason, outcome.detail ?? outcome.reason, EXIT.refused);
+      }
+      return succeed(write, json, "routine run-now", { taskId: outcome.taskId }, () => [
+        `Spawned ${outcome.taskId} — it builds on the next pass. The regular schedule is untouched.`,
+      ]);
+    }
+    default:
+      return fail(write, json, "routine", "usage", "`nightorders routine [add|list|show|approve|pause|resume|run-now]`", EXIT.usage);
+  }
 }
 
 /** A credential from a 0600 file, for units that must not carry it inline. */

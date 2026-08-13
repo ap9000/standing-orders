@@ -2840,6 +2840,32 @@ export class Store {
       );
   }
 
+  /**
+   * Everything the board's track rows need, in one snapshot: each routine
+   * with its recent firings, its rolling-window spend, and the instance
+   * blocking it, if any. The caller applies the ceiling row by row.
+   */
+  routineTracks(
+    repo: string | null,
+    now: Date,
+    admitted: string[] | null = null,
+  ): {
+    routine: Routine;
+    fires: ReturnType<Store["routineFires"]>;
+    spend: { costUsd: number; unmeasuredRuns: number };
+    blocker: { taskId: string; state: string } | null;
+  }[] {
+    const since = new Date(now.getTime() - 7 * 24 * 60 * 60_000).toISOString();
+    return this.transact(() =>
+      this.listRoutines(repo, admitted).map(routine => ({
+        routine,
+        fires: this.routineFires(routine.id, 14),
+        spend: this.routineSpend(routine.id, since),
+        blocker: this.routineBlocker(routine.id),
+      })),
+    );
+  }
+
   // ---- the outbox ---------------------------------------------------------
 
   /** True if this is a new fact; false if the episode already knows. */
@@ -4370,6 +4396,8 @@ export class Store {
              (SELECT MIN(incident.created_at) FROM incident JOIN run ON run.id = incident.run
                WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL) AS oldest_incident_at,
              task_ref.plan AS plan_state,
+             task_ref.routine_id AS routine_id,
+             (SELECT routine.name FROM routine WHERE routine.id = task_ref.routine_id) AS routine_name,
              live.runner AS claim_runner, live.acquired_at AS claim_at, live.lease_id AS claim_lease,
              claim_run.model AS claim_model, claim_run.branch AS claim_branch, claim_run.worktree AS claim_worktree,
              claim_run.role AS claim_role,
@@ -4500,6 +4528,11 @@ export class Store {
         blockerState: text(row, "blocker_state"),
         blockerRepo: text(row, "blocker_repo"),
         missingRequirement: text(row, "missing_requirement"),
+        routineId:
+          row["routine_id"] === null || row["routine_id"] === undefined
+            ? null
+            : Number(row["routine_id"]),
+        routineName: text(row, "routine_name"),
       }));
       return {
         tasks,

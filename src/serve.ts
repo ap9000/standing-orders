@@ -78,6 +78,8 @@ import {
 import { tally, spendLine } from "./summary.js";
 import { classify } from "./board.js";
 import type { BoardCard } from "./board.js";
+import { approveRoutine, describeSchedule, fireRoutine, parseSchedule } from "./routine.js";
+import type { Routine } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -407,8 +409,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         ),
       );
       const buildingCount = cards.filter(card => card.lane === "building").length;
+      // Instances belong to their track row, not the main lanes — the board
+      // is for one-off work; tracks are the heartbeat. The one exception is
+      // attention: anything needing a person surfaces, wearing its routine.
+      const laneCards = cards.filter(card => card.routineName === null || card.lane === "attention");
+      const tracks = store
+        .routineTracks(all ? null : project, now, admission)
+        .filter(track => visible(track.routine.repo));
       const body = boardBody(
-        { cards, done, saturated: snapshot.saturated, now, all, project },
+        { cards: laneCards, tracks, done, saturated: snapshot.saturated, now, all, project },
         pr => store.ciFailureObserved(pr),
       );
       if (url.searchParams.get("fragment") === "1") {
@@ -552,6 +561,24 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         capsPage(chromeFor(project, "caps"), store.listCapabilities(project), computeGaps(store, project, now), project, now),
       );
+    }
+
+    if (url.pathname === "/routines") {
+      // The ceiling row by row, exactly as everywhere: a routine placed in
+      // a repo this server may not serve does not exist here.
+      const tracks = store
+        .routineTracks(project, now)
+        .filter(track => visible(track.routine.repo));
+      return page(response, 200, routinesPage(chromeFor(project, "routines"), tracks, now));
+    }
+
+    const routineScreen = /^\/routines\/([0-9]{1,15})$/.exec(url.pathname);
+    if (routineScreen !== null) {
+      const routine = store.getRoutine(Number(routineScreen[1]));
+      if (routine === null || !visible(routine.repo)) {
+        return refuse(response, who, 404, "no such routine", "/routines");
+      }
+      return routinePage(response, who, routine.id, null, 200);
     }
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
@@ -714,6 +741,100 @@ export function createDecisionServer(options: ServeOptions): Server {
     );
   }
 
+  /** The routine screen: the standing order restated, its verbs, its ledger. */
+  function routinePage(
+    response: ServerResponse,
+    who: Who,
+    routineId: number,
+    problem: string | null,
+    status: number,
+  ): void {
+    const routine = store.getRoutine(routineId);
+    if (routine === null || !visible(routine.repo)) {
+      return refuse(response, who, 404, "no such routine", "/routines");
+    }
+    const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+    // Same rule as scope approval: the nonce exists only where the exact
+    // terms are restated, bound to who saw which digest of which order.
+    const nonce =
+      who.via === "cookie" && !approved
+        ? mintApprovalNonce(who.name, `routine:${routine.id}`, routine.digest)
+        : "";
+    const paneProject = who.via === "cookie" ? who.session.project : null;
+    return page(
+      response,
+      status,
+      routineScreenPage(chromeFor(paneProject, "routines"), {
+        routine,
+        fires: store.routineFires(routine.id, 14),
+        spend: store.routineSpend(routine.id, new Date(clock().getTime() - 7 * 24 * 60 * 60_000).toISOString()),
+        blocker: store.routineBlocker(routine.id),
+        csrf: who.via === "cookie" ? who.session.csrf : "",
+        nonce,
+        problem,
+        now: clock(),
+      }),
+    );
+  }
+
+  /**
+   * Routine verbs. The ceiling check is independent of authorizeMutation
+   * (Codex round 2, finding 7): the routine's repository is resolved
+   * server-side and proved against this server's configuration before any
+   * verb runs, whatever the request named.
+   */
+  function routineMutation(
+    response: ServerResponse,
+    who: Who,
+    routineId: number,
+    verb: string,
+    body: URLSearchParams,
+    now: Date,
+  ): void {
+    const routine = store.getRoutine(routineId);
+    if (routine === null || !visible(routine.repo)) {
+      return refuse(response, who, 404, "no such routine", "/routines");
+    }
+
+    switch (verb) {
+      case "approve": {
+        // Step-up, identical to a scope's: the session got you here; only
+        // the password agrees. The digest names what was seen.
+        const digest = body.get("digest") ?? "";
+        const token = body.get("token") ?? "";
+        if (who.via === "cookie") {
+          const nonce = body.get("nonce") ?? "";
+          if (!consumeApprovalNonce(nonce, who.name, `routine:${routine.id}`, digest)) {
+            return routinePage(response, who, routineId, "that approval form is stale — read it again", 409);
+          }
+        }
+        if (token === "") {
+          return routinePage(response, who, routineId, "approval requires your password, typed again", 400);
+        }
+        const approved = approveRoutine(store, routineId, who.name, now, digest, token);
+        if (!approved.ok) {
+          const status = approved.reason === "changed" ? 409 : 403;
+          return routinePage(response, who, routineId, `not approved: ${approved.reason}`, status);
+        }
+        return redirect(response, `/routines/${routineId}`);
+      }
+      case "pause":
+      case "resume": {
+        store.setRoutinePaused(routineId, verb === "pause", now);
+        return redirect(response, `/routines/${routineId}`);
+      }
+      case "run-now": {
+        const outcome = fireRoutine(store, routineId, now, { manual: true });
+        if (!outcome.ok) {
+          return routinePage(response, who, routineId, `not fired: ${outcome.detail ?? outcome.reason}`, 409);
+        }
+        return redirect(response, `/routines/${routineId}`);
+      }
+      default:
+        return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+    }
+  }
+
   // ---- mutations -----------------------------------------------------------
 
   async function handlePost(
@@ -840,6 +961,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
+    }
+
+    const routineAct = /^\/routines\/([0-9]{1,15})\/(approve|pause|resume|run-now)$/.exec(url.pathname);
+    if (routineAct !== null) {
+      return routineMutation(response, who, Number(routineAct[1]), routineAct[2] as string, body, now);
     }
 
     const resolve = /^\/i\/([0-9]{1,15})\/resolve$/.exec(url.pathname);
@@ -1543,11 +1669,23 @@ const STYLE = `
   .lane-empty { margin: .75rem 0 .25rem; }
   .plan-doc { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; max-height: 24rem; overflow-y: auto; }
   .lane-more { display: block; margin-top: .5rem; font-size: .75rem; }
+  .tracks { margin-top: 1.5rem; }
+  .tracks > .hint { margin-bottom: .75rem; }
+  .track-row { margin-bottom: .6rem; }
+  .track-strip { display: inline-flex; gap: .3rem; align-items: center; vertical-align: middle; }
+  .fire {
+    display: inline-block; width: .65rem; height: .65rem; border-radius: 50%;
+    background: var(--muted);
+  }
+  .fire-ok { background: var(--success); }
+  .fire-bad { background: var(--destructive-strong); }
+  .fire-live { background: var(--success); animation: pulse 1.6s ease-in-out infinite; }
+  .fire-skip { background: transparent; border: 1.5px solid var(--muted); }
 `;
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "work" | "done" | "activity" | "system" | "tasks" | "runs" | "caps" | "projects" | "settings" | "none";
+  active: "inbox" | "board" | "work" | "done" | "activity" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -1637,6 +1775,7 @@ function shell(
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
     item("board", "/board", "board"),
+    item("routines", "/routines", "routines"),
     item("done", "/done", "done"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
@@ -1843,6 +1982,7 @@ function systemPage(chrome: Chrome, data: {
 function boardBody(
   data: {
     cards: BoardCard[];
+    tracks: Track[];
     done: ReturnType<Store["listCompletedWorkScoped"]>;
     saturated: boolean;
     now: Date;
@@ -1891,7 +2031,9 @@ function boardBody(
   const plain = (card: BoardCard): string =>
     `<a class="lane-card" href="${card.href}">` +
     `<span class="t">${escape(card.title)}</span>` +
-    `<span class="meta">${escape(card.reason)}${chip(card.repo)}</span>` +
+    `<span class="meta">${escape(card.reason)}${
+      card.routineName === null ? "" : ` <span class="badge">${escape(card.routineName)}</span>`
+    }${chip(card.repo)}</span>` +
     `<span class="mono meta">${escape(card.taskId)}${
       card.stalledSince === null ? "" : ` \u00b7 waiting ${age(card.stalledSince)}`
     }</span></a>`;
@@ -1948,6 +2090,17 @@ function boardBody(
           : `<strong>${escape(projectName(data.project as string))}</strong> \u00b7 <a href="/board?scope=all">all projects</a>`) +
         `</p>`;
 
+  // The tracks: standing orders as rows under the lanes \u2014 the heartbeat
+  // below the one-off pipeline. Only routines with something to say render;
+  // the full list lives at /routines.
+  const tracksSection =
+    data.tracks.length === 0
+      ? ""
+      : `<section class="tracks"><h2><a href="/routines">routines</a></h2>` +
+        `<p class="hint">standing orders \u2014 each dot one firing, oldest left; instances surface above only when they need you</p>` +
+        data.tracks.map(track => trackRow(track, data.all)).join("\n") +
+        `</section>`;
+
   return [
     `<h1>board</h1>`,
     `<p class="meta">the whole pipeline at a glance, updating in place \u2014 open the <a href="/">inbox</a> to act on what needs you</p>`,
@@ -1959,6 +2112,7 @@ function boardBody(
     lane("building", "building", "live \u2014 each card is one agent in its own workspace", building),
     `<section class="lane lane-done"><h2><a href="/done">done recently</a></h2><p class="hint">the last few finished \u2014 the full ledger is under done</p>${doneCards}</section>`,
     `</div>`,
+    tracksSection,
   ].join("\n");
 }
 
@@ -1992,6 +2146,177 @@ function donePage(
     `<h1>done</h1>`,
     `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, what it cost, and its pull request</p>`,
     list,
+  ].join("\n"), { chrome });
+}
+
+/** One routine's board-facing snapshot — the store's routineTracks row. */
+type Track = {
+  routine: Routine;
+  fires: ReturnType<Store["routineFires"]>;
+  spend: { costUsd: number; unmeasuredRuns: number };
+  blocker: { taskId: string; state: string } | null;
+};
+
+const routineHref = (id: number): string => `/routines/${id}`;
+
+function routineStatus(routine: Routine): { text: string; badge: string } {
+  const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+  if (routine.paused) return { text: "paused", badge: "badge" };
+  if (!approved) {
+    return {
+      text: routine.approvedAt === null ? "awaiting approval" : "edited — approve again",
+      badge: "badge badge-failed",
+    };
+  }
+  return { text: "live", badge: "badge badge-open" };
+}
+
+/**
+ * The run-history strip: the last firings as dots, oldest on the left like
+ * a CI history. Fired slots wear their instance's fate; skipped slots are
+ * hollow — recorded absence, not silence.
+ */
+function trackStrip(fires: Track["fires"]): string {
+  const dots = [...fires].reverse().map(fire => {
+    if (fire.outcome === "skipped") {
+      return `<span class="fire fire-skip" title="${escape(fire.scheduledFor)} — skipped: ${escape(fire.reason ?? "")}"></span>`;
+    }
+    const state = fire.instanceState;
+    const kind =
+      state === "done" ? "fire-ok" : state === "failed" || state === "cancelled" ? "fire-bad" : "fire-live";
+    const title = `${fire.scheduledFor} — ${fire.instanceTaskId ?? "instance"}${state === null ? "" : ` (${state})`}`;
+    return fire.instanceTaskId === null
+      ? `<span class="fire ${kind}" title="${escape(title)}"></span>`
+      : `<a class="fire ${kind}" href="${taskHref(fire.instanceTaskId)}" title="${escape(title)}"></a>`;
+  });
+  return `<span class="track-strip">${dots.join("")}</span>`;
+}
+
+/** One track row — shared by the board's tracks section and /routines. */
+function trackRow(track: Track, all: boolean): string {
+  const { routine, fires, spend, blocker } = track;
+  const status = routineStatus(routine);
+  const schedule = parseSchedule(routine.schedule);
+  const latest = fires.find(fire => fire.outcome === "fired");
+  return (
+    `<div class="card track-row">` +
+    `<p><a href="${routineHref(routine.id)}"><strong>${escape(routine.name)}</strong></a> ` +
+    `<span class="${status.badge}">${escape(status.text)}</span>` +
+    `${all ? ` <span class="badge">${escape(projectName(routine.repo))}</span>` : ""}` +
+    `<span class="right meta">${escape(schedule === null ? routine.schedule : describeSchedule(schedule))}</span></p>` +
+    `<p class="meta">${escape(routine.goal.length > 110 ? routine.goal.slice(0, 110) + "…" : routine.goal)}</p>` +
+    `<p>${trackStrip(fires)}` +
+    `<span class="right meta">${spend.unmeasuredRuns > 0 ? `<strong>spend unmeasured</strong> · ` : ""}$${spend.costUsd.toFixed(2)} this week${routine.costCeilingUsd === null ? "" : ` of $${routine.costCeilingUsd.toFixed(2)}`}</span></p>` +
+    (blocker !== null && routine.singleFlight
+      ? `<p class="meta">stopped behind <a href="${taskHref(blocker.taskId)}" class="mono">${escape(blocker.taskId)}</a> (${escape(blocker.state)})</p>`
+      : latest?.instanceTaskId !== undefined && latest.instanceTaskId !== null
+        ? `<p class="meta">latest: <a href="${taskHref(latest.instanceTaskId)}" class="mono">${escape(latest.instanceTaskId)}</a>${latest.instanceState === null ? "" : ` (${escape(latest.instanceState)})`}</p>`
+        : "") +
+    `</div>`
+  );
+}
+
+function routinesPage(chrome: Chrome, tracks: Track[], now: Date): string {
+  void now;
+  const list =
+    tracks.length === 0
+      ? `<p class="meta">No standing orders${chrome.project === null ? "" : " in this project"}. File one from the terminal:</p>` +
+        `<pre class="recap">nightorders routine add nightly-deps --repo &lt;path&gt; \\\n  --goal "Refresh the lockfile and note anything major" \\\n  --schedule daily:03:30</pre>` +
+        `<p class="meta">then approve it here — approving a routine is what lets each firing build without asking.</p>`
+      : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
+  return shell("routines", [
+    `<h1>routines</h1>`,
+    `<p class="hint">standing orders — repeating work that fires on a schedule, each instance building alone in its own workspace; anything needing you bubbles to the inbox</p>`,
+    list,
+  ].join("\n"), { chrome });
+}
+
+function routineScreenPage(chrome: Chrome, data: {
+  routine: Routine;
+  fires: Track["fires"];
+  spend: Track["spend"];
+  blocker: Track["blocker"];
+  csrf: string;
+  nonce: string;
+  problem: string | null;
+  now: Date;
+}): string {
+  const { routine, fires } = data;
+  const status = routineStatus(routine);
+  const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
+  const schedule = parseSchedule(routine.schedule);
+  const scheduleSaid = schedule === null ? routine.schedule : describeSchedule(schedule);
+
+  const terms =
+    `<div class="card">` +
+    `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(routine.goal)}</p>` +
+    `<p class="meta">not this</p><p class="recap" style="margin-top:0">${routine.outOfScope === null ? "<em>no exclusions</em>" : escape(routine.outOfScope)}</p>` +
+    `<p class="meta">touches · ${routine.touches.length === 0 ? "anything" : routine.touches.map(one => escape(one)).join(", ")}</p>` +
+    `<p class="meta">needs · ${routine.requirements.length === 0 ? "nothing beyond the repository" : routine.requirements.map(one => escape(one)).join(", ")}</p>` +
+    `<p class="meta">schedule · ${escape(scheduleSaid)}</p>` +
+    `<p class="meta">budget · ${routine.costCeilingUsd === null ? "no ceiling" : `$${routine.costCeilingUsd.toFixed(2)} per rolling 7 days`}</p>` +
+    `<p class="meta">one at a time — a firing skips while the previous instance is unfinished</p>` +
+    `</div>`;
+
+  const approveForm = approved
+    ? ""
+    : [
+        `<form method="post" action="${routineHref(routine.id)}/approve" class="card approve-form">`,
+        `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+        `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
+        `<input type="hidden" name="digest" value="${escape(routine.digest)}">`,
+        `<p><strong>approve this standing order:</strong></p>`,
+        `<p class="recap">Each firing creates a task under exactly the terms above and BUILDS IT WITHOUT ASKING — ${escape(scheduleSaid)}, until you pause it. Questions and failures still reach you like any other work.</p>`,
+        `<label>your password, typed again — a signed-in session alone cannot agree to standing work<input type="password" name="token" autocomplete="current-password"></label>`,
+        `<button type="submit">approve this routine</button>`,
+        `</form>`,
+      ].join("\n");
+
+  const verb = (name: string, label: string, danger = false): string =>
+    `<form method="post" action="${routineHref(routine.id)}/${name}" class="inline">` +
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+    `<button type="submit"${danger ? ' class="danger"' : ""}>${label}</button></form>`;
+
+  const acts =
+    `<div class="card">` +
+    (routine.paused ? verb("resume", "resume") : verb("pause", "pause")) +
+    (approved && !routine.paused ? " " + verb("run-now", "run now") : "") +
+    `<p class="meta">${routine.paused ? "resuming fires again at the next due slot" : "pausing stops firing instantly; a running instance finishes"}${approved && !routine.paused ? " · run now spawns an extra instance without touching the schedule" : ""}</p>` +
+    `</div>`;
+
+  const ledger =
+    fires.length === 0
+      ? `<p class="meta">No firings yet${approved && routine.nextFireAt !== null ? ` — first at ${escape(when(routine.nextFireAt))}` : ""}.</p>`
+      : fires
+          .map(fire => {
+            const said =
+              fire.outcome === "fired"
+                ? fire.instanceTaskId === null
+                  ? "fired"
+                  : `<a href="${taskHref(fire.instanceTaskId)}" class="mono">${escape(fire.instanceTaskId)}</a>${fire.instanceState === null ? "" : ` <span class="badge badge-${escape(fire.instanceState)}">${escape(fire.instanceState)}</span>`}`
+                : `<span class="meta">skipped — ${escape(fire.reason ?? "")}</span>`;
+            return `<p class="row">${said}<span class="right meta mono">${escape(when(fire.scheduledFor))}</span></p>`;
+          })
+          .join("\n");
+
+  return shell(`routine · ${routine.name}`, [
+    `<h1>${escape(routine.name)} <span class="${status.badge}">${escape(status.text)}</span>` +
+      `<span class="meta"> · ${escape(projectName(routine.repo))}</span></h1>`,
+    data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
+    `<p>${trackStrip(fires)}<span class="right meta">$${data.spend.costUsd.toFixed(2)} this week${data.spend.unmeasuredRuns > 0 ? " · <strong>some spend unmeasured</strong>" : ""}</span></p>`,
+    data.blocker !== null && routine.singleFlight
+      ? `<div class="problem">stopped behind <a href="${taskHref(data.blocker.taskId)}" class="mono">${escape(data.blocker.taskId)}</a> (${escape(data.blocker.state)}) — the track resumes when it finishes or is cancelled</div>`
+      : "",
+    approved && !routine.paused && routine.nextFireAt !== null
+      ? `<p class="meta">next fire ${escape(when(routine.nextFireAt))}</p>`
+      : "",
+    "<h2>the standing order</h2>",
+    terms,
+    approveForm,
+    "<h2>acts</h2>",
+    acts,
+    "<h2>firings</h2>",
+    ledger,
   ].join("\n"), { chrome });
 }
 

@@ -660,3 +660,87 @@ describe("agreeing to a scope from the command line", () => {
     ).toBe(EXIT.refused);
   });
 });
+
+describe("routine — standing orders from the command line", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "nightorders-routine-cli-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  test("file, refuse to fire unapproved, approve with the credential, run now", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+
+    const filed = await run([
+      "routine", "add", "nightly-deps",
+      "--repo", dir, "--goal", "Refresh the lockfile",
+      "--schedule", "daily:03:30", "--ceiling", "5",
+    ]);
+    expect(filed).toBe(EXIT.ok);
+    expect(out()).toContain("Nothing fires until somebody approves");
+    expect(out()).toContain("BUILDS WITHOUT ASKING");
+
+    // Unarmed approve prints the order and the exact command — approves nothing.
+    const unarmed = await run(["routine", "approve", "nightly-deps", "--json"]);
+    expect(unarmed).toBe(EXIT.refused);
+    expect(payload().reason).toBe("unconfirmed");
+    const digest = payload().routine.digest as string;
+
+    // run-now before approval refuses: there is no standing order yet.
+    const early = await run(["routine", "run-now", "nightly-deps", "--as", "alex", "--token", token, "--json"]);
+    expect(early).toBe(EXIT.refused);
+    expect(payload().reason).toBe("not-approved");
+
+    const approved = await run([
+      "routine", "approve", "nightly-deps", "--yes", "--digest", digest, "--as", "alex", "--token", token, "--json",
+    ]);
+    expect(approved).toBe(EXIT.ok);
+    expect(payload().routine.approvedBy).toBe("alex");
+
+    const fired = await run(["routine", "run-now", "nightly-deps", "--as", "alex", "--token", token, "--json"]);
+    expect(fired).toBe(EXIT.ok);
+    expect(payload().taskId).toContain("nightly-deps-");
+
+    const shown = await run(["routine", "show", "nightly-deps"]);
+    expect(shown).toBe(EXIT.ok);
+    expect(out()).toContain("live");
+    expect(out()).toContain("$5.00 per rolling 7 days");
+    expect(out()).toContain("recent firings");
+
+    await run(["routine", "pause", "nightly-deps"]);
+    const listed = await run(["routine", "list"]);
+    expect(listed).toBe(EXIT.ok);
+    expect(out()).toContain("paused");
+  });
+
+  test("a bad definition names every problem at once and stores nothing", async () => {
+    const bad = await run([
+      "routine", "add", "bad-one",
+      "--repo", dir, "--goal", "", "--schedule", "hourly", "--ceiling", "-3",
+    ]);
+    expect(bad).toBe(EXIT.usage);
+    expect(out()).toContain("goal");
+    expect(out()).toContain("schedule");
+    expect(out()).toContain("costCeilingUsd");
+    const listed = await run(["routine", "list", "--json"]);
+    expect(payload().routines).toEqual([]);
+    expect(listed).toBe(EXIT.ok);
+  });
+});

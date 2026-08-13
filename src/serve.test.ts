@@ -12,6 +12,7 @@ import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 import { addApprover } from "./scope.js";
+import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { createDecisionServer } from "./serve.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -1427,5 +1428,196 @@ describe("the rolled-up board — every project, one ceiling", () => {
     expect(board).toContain("waits on t-secret");
     expect(board).not.toContain("waits on t-secret \u2014");
     expect(board).not.toContain("building now");
+  });
+});
+
+describe("routines — standing orders on the console", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const TERMS = {
+    repo: "/repo/main",
+    goal: "Refresh the notes",
+    outOfScope: null,
+    touches: [] as string[],
+    requirements: [] as string[],
+    schedule: "every:60",
+    singleFlight: true,
+    costCeilingUsd: null,
+  };
+
+  const file = (name: string, terms = TERMS): number => {
+    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, T0);
+    if (!created.ok) throw new Error("duplicate in setup");
+    return created.id;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-routine-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the ceiling rules every routine read and verb, whatever the request names", async () => {
+    const mine = file("mine");
+    const foreign = file("foreign", { ...TERMS, repo: "/repo/secret" });
+    const cookie = await login();
+
+    const list = await (await fetch(url("/routines"), { headers: { cookie } })).text();
+    expect(list).toContain("mine");
+    expect(list).not.toContain("foreign");
+
+    expect((await fetch(url(`/routines/${foreign}`), { headers: { cookie } })).status).toBe(404);
+    // The verb refuses independently of authorizeMutation (finding 7): a
+    // CSRF-valid, authenticated POST naming an out-of-ceiling routine is 404.
+    const screen = await (await fetch(url(`/routines/${mine}`), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(screen)?.[1] as string;
+    const denied = await fetch(url(`/routines/${foreign}/pause`), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf }),
+    });
+    expect(denied.status).toBe(404);
+    expect(store.getRoutine(foreign)?.paused).toBe(false);
+  });
+
+  test("approving is step-up: the restated order, the nonce, and the password again", async () => {
+    const id = file("deps");
+    const cookie = await login();
+
+    const screen = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    expect(screen).toContain("BUILDS IT WITHOUT ASKING");
+    expect(screen).toContain("every 1 hour(s)");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(screen)?.[1] as string;
+    const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(screen)?.[1] as string;
+    const digest = /name="digest" value="([0-9a-f]{32})"/.exec(screen)?.[1] as string;
+    expect(nonce).toBeDefined();
+
+    // The session alone cannot agree: a wrong password refuses.
+    const wrong = await fetch(url(`/routines/${id}/approve`), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, nonce, digest, token: "not-the-password" }),
+    });
+    expect(wrong.status).toBe(403);
+    expect(store.getRoutine(id)?.approvedAt).toBeNull();
+
+    // A fresh form (the nonce was spent either way), the real credential.
+    const again = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    const nonce2 = /name="nonce" value="([0-9a-f]{32})"/.exec(again)?.[1] as string;
+    const approved = await fetch(url(`/routines/${id}/approve`), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, nonce: nonce2, digest, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(approved.status).toBe(303);
+    const routine = store.getRoutine(id);
+    expect(routine?.approvedBy).toBe("alex");
+    expect(routine?.nextFireAt).not.toBeNull();
+  });
+
+  test("pause, resume, and run-now from the screen; run-now refuses while blocked", async () => {
+    const id = file("audit");
+    const cookie = await login();
+    const screen = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(screen)?.[1] as string;
+    const post = (verb: string) =>
+      fetch(url(`/routines/${id}/${verb}`), {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({ csrf }),
+        redirect: "manual",
+      });
+
+    expect((await post("pause")).status).toBe(303);
+    expect(store.getRoutine(id)?.paused).toBe(true);
+    expect((await post("resume")).status).toBe(303);
+    expect(store.getRoutine(id)?.paused).toBe(false);
+
+    // Unapproved: run-now refuses with the reason on the screen.
+    const refusedPage = await post("run-now");
+    expect(refusedPage.status).toBe(409);
+
+    const approvedNow = approveRoutine(store, id, "alex", T0, store.getRoutine(id)?.digest ?? "", approverToken);
+    expect(approvedNow.ok).toBe(true);
+    expect((await post("run-now")).status).toBe(303);
+    // One instance exists, linked and approved; a second run-now hits
+    // single-flight and refuses to the person's face.
+    const instances = store.listTasks().filter(one => one.id.startsWith("audit-"));
+    expect(instances).toHaveLength(1);
+    expect((await post("run-now")).status).toBe(409);
+  });
+
+  test("the board keeps instances in their track row, except when they need a person", async () => {
+    const id = file("notes");
+    approveRoutine(store, id, "alex", T0, store.getRoutine(id)?.digest ?? "", approverToken);
+    const fired = fireRoutine(store, id, new Date(T0.getTime() + 2 * 60 * 60_000));
+    expect(fired.ok).toBe(true);
+    if (!fired.ok) return;
+
+    const cookie = await login();
+    const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
+    // The track row renders: name, a dot, the week's spend.
+    expect(board).toContain("routines");
+    expect(board).toContain("notes");
+    expect(board).toContain("track-strip");
+    expect(board).toContain("this week");
+    // The queued instance does NOT sit in the main lanes...
+    expect(board).not.toContain(`lane-card" href="/t/${fired.taskId}`);
+    // ...and the board stays form-free, tracks included.
+    expect(board).not.toContain("<form");
+
+    // Now the instance needs a person: it fails. It surfaces in attention,
+    // wearing the routine's name.
+    store.setTaskState(fired.taskId, "failed", new Date(T0.getTime() + 3 * 60 * 60_000));
+    const after = await (await fetch(url("/board"), { headers: { cookie } })).text();
+    expect(after).toContain(`href="/t/${encodeURIComponent(fired.taskId)}"`);
+    expect(after).toContain("failed");
+  });
+
+  test("/routines names the empty state and shows the ledger once firings exist", async () => {
+    const cookie = await login();
+    const empty = await (await fetch(url("/routines"), { headers: { cookie } })).text();
+    expect(empty).toContain("No standing orders");
+    expect(empty).toContain("routine add");
+
+    const id = file("weekly");
+    approveRoutine(store, id, "alex", T0, store.getRoutine(id)?.digest ?? "", approverToken);
+    fireRoutine(store, id, new Date(T0.getTime() + 2 * 60 * 60_000));
+    const list = await (await fetch(url("/routines"), { headers: { cookie } })).text();
+    expect(list).toContain("weekly");
+    expect(list).toContain("live");
+    const screen = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
+    expect(screen).toContain("firings");
+    expect(screen).toContain("weekly-");
   });
 });

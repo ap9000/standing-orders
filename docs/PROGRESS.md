@@ -149,6 +149,42 @@ multi-chat routing, the CI-repair driver, external-backend dispatch.
 | Packaging (Node >=22.13 floor) | **done** | engines `>=22.13.0` (node:sqlite's floor — publishing `>=20` would ship a runtime that cannot open its own database); `files` allowlist ships dist + README + LICENSE + manifest only; LICENSE (MIT) added; the published build strips source maps (tsconfig.build.json); version 0.1.0; `npm pack --dry-run --json` inspected — 69 files, ~250KB, no tests, no maps, no databases, no evidence, no tokens; the exact tarball installed `--offline` in a clean temp project and its bin ran discovery and opened a database on Node v22.22 (the 22.13 exact-minimum run is noted as not yet performed — no such runtime on this machine) |
 | Operator publish + registry verify + tag `m4` | **open — the operator's act** | `npm publish` is deliberately not the machine's to run. When Alex publishes: verify the registry tarball/version (`npm view nightorders`), install it once from the registry, and only then `git tag m4` and mark this row done. The tag follows the verification, never precedes it |
 
+## Routines — standing orders as tracks (2026-08-13, Phase C; findings 4, 5, 9, 10 are its spec)
+
+A routine is a pre-approved template for repeating work: goal, exclusions,
+touches, requirements, schedule (`every:<minutes>` or `daily:<HH:MM>` UTC),
+single-flight, and a rolling 7-day cost ceiling — every term under ONE
+digest (schema v8: `routine`, the `routine_fire` ledger, and
+`task_ref.routine_id`, all additive). Approving the template — CLI
+`routine approve` or the console's step-up, both restating "each firing
+builds WITHOUT asking" — is what makes instances legitimately automatic;
+editing any term strands the yes. Firing is one store-owned transaction
+(`fireRoutine`) that re-proves approval-digest equality, unpaused,
+due-ness, single-flight, and budget before any write (finding 4): the
+instance spawns as an ordinary task placed in the routine's repo, its
+scope copied byte-for-byte from the row proven approved in that same
+transaction and stamped with the template's approver — no caller supplies
+approval fields. Budget FAILS CLOSED: a paid run with no recorded cost
+blocks the track as "unmeasured" rather than counting as headroom
+(finding 5). A due slot that cannot fire is recorded on the ledger —
+unique `(routine_id, scheduled_for)` is the idempotency — and the
+schedule advances aligned to cadence: one overdue firing after downtime,
+never a backfill burst, never drift (finding 10). A blocking instance
+pages once per instance (`routine-singleflight:<id>:<task>`), and a later
+successful firing resolves the episode (finding 9). The pass (`tick`,
+therefore `watch`) fires due routines before reading the ready set, so an
+instance builds in the window that spawned it — proved end to end against
+real git, including the stuck-instance-stops-the-track case. Surfaces:
+`routine add/list/show/approve/pause/resume/run-now` (run-now is manual —
+same proofs, refuses to your face, no ledger noise, schedule untouched);
+`/routines` + the routine screen with the same verbs, every read and verb
+proving the routine's repo against the ceiling independently of
+authorizeMutation (finding 7); the board grows **track rows** under the
+lanes — per routine: status, schedule, week's spend, and a run-history
+strip of dots (green built · red failed · pulsing building · hollow
+skipped), while instances stay OUT of the main lanes except attention,
+where they surface wearing the routine's name. 750 tests.
+
 ## Planning mode (2026-08-13, Phase B; the round-2 findings are its spec)
 
 `task plan <id>` (CLI, authenticated) or "plan first" (console) marks the

@@ -57,6 +57,11 @@ export type BoardFacts = {
   blockerState: string | null;
   /** The first required capability not currently verified, as "kind:name". */
   missingRequirement: string | null;
+  /** The standing order this task is an instance of, when it is one. The
+   * board keeps instances in their track row — they enter the main lanes
+   * only when they need a person, wearing the routine's name. */
+  routineId: number | null;
+  routineName: string | null;
 };
 
 export type BoardCard = {
@@ -74,6 +79,8 @@ export type BoardCard = {
   /** The live attempt's ordinal when earlier ones failed — building only. */
   attempt: number | null;
   overdue: boolean;
+  /** The routine this card is an instance of — the chip it wears in lanes. */
+  routineName: string | null;
 };
 
 /** ISO to the minute for chip text — "retrying 14:32". */
@@ -91,6 +98,7 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     stalledSince: null as string | null,
     attempt: null as number | null,
     overdue: false,
+    routineName: facts.routineName,
   };
 
   if (facts.claim !== null) {
