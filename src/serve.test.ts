@@ -1930,3 +1930,71 @@ describe("quick capture — from thought to the approve card in two steps", () =
     }
   });
 });
+
+describe("the roll-up inbox — every project, one ceiling, links only", () => {
+  test("a projectless session sees admitted rows with chips; foreign repos neither render nor count", async () => {
+    const store = openStore(":memory:");
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "nightorders-rollup-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+
+    const seed = (id: string, repo: string) => {
+      store.createTask({ id, title: `work in ${repo}` }, T0);
+      store.placeTask(store.refFor("built-in", id).id, repo);
+      store.saveScope({
+        taskId: id, goal: `goal of ${id}`, outOfScope: null, touches: [],
+        proposedAt: T0.toISOString(), digest: id.padEnd(32, "0").slice(0, 32),
+        approvedAt: null, approvedBy: null, approvedDigest: null,
+      });
+    };
+    seed("t-main", "/repo/main");
+    seed("t-side", "/repo/side");
+    seed("t-secret", "/repo/secret"); // outside the ceiling
+    store.createTask({ id: "t-free", title: "unplaced work" }, T0);
+    store.saveScope({
+      taskId: "t-free", goal: "anywhere", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "f".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+
+    // TWO repos in the ceiling: no default project, sessions start open.
+    const server = createDecisionServer({
+      store, evidenceRoot, clock: () => new Date(),
+      repos: ["/repo/main", "/repo/side"],
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const login = await fetch(`${base}/login`, {
+        method: "POST", body: new URLSearchParams({ name: "alex", token: added.token }), redirect: "manual",
+      });
+      const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] as string;
+
+      // "/" no longer bounces to /projects: it is the overall inbox.
+      const inbox = await (await fetch(`${base}/`, { headers: { cookie }, redirect: "manual" }));
+      expect(inbox.status).toBe(200);
+      const html = await inbox.text();
+      expect(html).toContain("t-main");
+      expect(html).toContain("t-side");
+      expect(html).not.toContain("t-secret");
+      // Rows wear their project; unplaced work says so instead of hiding it.
+      expect(html).toContain("main</span>");
+      expect(html).toContain("unplaced");
+      // Links only in the roll-up: no capture form, no inline verbs.
+      expect(html).not.toContain("/tasks/add");
+      expect(html).not.toMatch(/<form[^>]*requeue/);
+      // The badge counted 3 admitted approvals, never the secret one.
+      expect(html).toMatch(/class="count badge badge-open">3/);
+
+      // Everything else still requires opening a project.
+      const board = await fetch(`${base}/board`, { headers: { cookie }, redirect: "manual" });
+      expect(board.status).toBe(303);
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      store.close();
+      rmSync(evidenceRoot, { recursive: true, force: true });
+    }
+  });
+});

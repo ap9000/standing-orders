@@ -3489,10 +3489,13 @@ export class Store {
   }
 
   /** Unanswered decisions whose task belongs to this project (or is unplaced). */
-  listDecisionsScoped(repo: string | null): (Decision & { taskId: string })[] {
+  listDecisionsScoped(repo: string | null): (Decision & { taskId: string; repo: string | null })[] {
+    // The row's repo rides along so a roll-up caller can prove it against
+    // the ceiling per row (Codex roll-up inbox review, finding 1). No SQL
+    // LIMIT here, so post-filtering cannot be crowded out.
     return this.db
       .prepare(
-        `SELECT decision.*, task_ref.external_id AS task_id FROM decision
+        `SELECT decision.*, task_ref.external_id AS task_id, task_ref.repo AS task_repo FROM decision
          JOIN run ON run.id = decision.run
          JOIN task_ref ON task_ref.id = run.task_ref
          WHERE decision.state IN ('open','expired')
@@ -3500,7 +3503,11 @@ export class Store {
          ORDER BY decision.id`,
       )
       .all(repo, repo)
-      .map(row => ({ ...readDecision(row), taskId: String(row["task_id"]) }));
+      .map(row => ({
+        ...readDecision(row),
+        taskId: String(row["task_id"]),
+        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
+      }));
   }
 
   countUnansweredScoped(repo: string | null): number {
@@ -4287,27 +4294,36 @@ export class Store {
   scopesAwaitingApproval(
     repo: string | null,
     limit = 10,
-  ): { taskId: string; title: string; goal: string; digest: string; proposedAt: string }[] {
+    admitted: string[] | null = null,
+  ): { taskId: string; title: string; goal: string; digest: string; proposedAt: string; repo: string | null }[] {
     const page = Math.max(1, Math.min(Math.floor(limit), 50));
+    // Roll-up admission binds BEFORE the LIMIT (Codex roll-up review,
+    // finding 2): a repo outside the ceiling must not consume the page.
+    const admission =
+      admitted === null
+        ? "(? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)"
+        : `(task_ref.repo IS NULL${admitted.length === 0 ? "" : ` OR task_ref.repo IN (${admitted.map(() => "?").join(",")})`})`;
+    const params = admitted === null ? [repo, repo] : admitted;
     return this.db
       .prepare(
-        `SELECT task.id AS task_id, task.title, task_scope.goal, task_scope.digest, task_scope.proposed_at
+        `SELECT task.id AS task_id, task.title, task_scope.goal, task_scope.digest, task_scope.proposed_at, task_ref.repo AS task_repo
          FROM task_scope
          JOIN task ON task.id = task_scope.task_id
          JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
          WHERE task.state IN ('queued','running')
            AND (task_scope.approved_at IS NULL OR task_scope.approved_by IS NULL
                 OR task_scope.approved_digest IS NULL OR task_scope.approved_digest != task_scope.digest)
-           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+           AND ${admission}
          ORDER BY task_scope.proposed_at, task.id LIMIT ?`,
       )
-      .all(BUILT_IN, repo, repo, page)
+      .all(BUILT_IN, ...params, page)
       .map(row => ({
         taskId: String(row["task_id"]),
         title: String(row["title"]),
         goal: String(row["goal"]),
         digest: String(row["digest"]),
         proposedAt: String(row["proposed_at"]),
+        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
       }));
   }
 
@@ -4321,8 +4337,14 @@ export class Store {
     repo: string | null,
     now: Date,
     limit = 10,
-  ): { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number }[] {
+    admitted: string[] | null = null,
+  ): { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo: string | null }[] {
     const page = Math.max(1, Math.min(Math.floor(limit), 50));
+    const admission =
+      admitted === null
+        ? "(? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)"
+        : `(task_ref.repo IS NULL${admitted.length === 0 ? "" : ` OR task_ref.repo IN (${admitted.map(() => "?").join(",")})`})`;
+    const params = admitted === null ? [repo, repo] : admitted;
     return this.db
       .prepare(
         `WITH open_incidents AS (
@@ -4332,14 +4354,14 @@ export class Store {
            WHERE incident.resolved_at IS NULL
            GROUP BY run.task_ref
          )
-         SELECT task.id, task.title, task.state, task_ref.strikes,
+         SELECT task.id, task.title, task.state, task_ref.strikes, task_ref.repo AS task_repo,
                 COALESCE(open_incidents.incident_count, 0) AS incident_count,
                 COALESCE(open_incidents.oldest, task.updated_at) AS sort_at
          FROM task
          JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
          LEFT JOIN open_incidents ON open_incidents.task_ref = task_ref.id
          WHERE (task.state = 'failed' OR open_incidents.task_ref IS NOT NULL)
-           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+           AND ${admission}
            AND NOT EXISTS (
              SELECT 1 FROM claim
              WHERE claim.task_ref = task_ref.id AND claim.released_at IS NULL
@@ -4351,13 +4373,14 @@ export class Store {
            )
          ORDER BY sort_at, task_ref.id LIMIT ?`,
       )
-      .all(BUILT_IN, repo, repo, now.toISOString(), page)
+      .all(BUILT_IN, ...params, now.toISOString(), page)
       .map(row => ({
         taskId: String(row["id"]),
         title: String(row["title"]),
         state: String(row["state"]) as TaskState,
         strikes: Number(row["strikes"]),
         incidentCount: Number(row["incident_count"]),
+        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
       }));
   }
 
@@ -4369,23 +4392,40 @@ export class Store {
   listCancelledBlockersScoped(
     repo: string | null,
     limit = 10,
-  ): { blockerId: string; dependentCount: number; exampleDependent: string }[] {
+    admitted: string[] | null = null,
+  ): { blockerId: string; dependentCount: number; exampleDependent: string; repo: string | null; blockerRepo: string | null }[] {
     const page = Math.max(1, Math.min(Math.floor(limit), 50));
+    // Edges may cross projects, and "cancelled" is a fact about the
+    // BLOCKER's project (Codex roll-up review, finding 4): both refs are
+    // joined, both repos returned and admitted BEFORE aggregation, and the
+    // grouping carries the pair so one blocker's impact never aggregates
+    // across a ceiling the caller must re-prove row by row.
+    const admissionOf = (alias: string): string =>
+      admitted === null
+        ? `(? IS NULL OR ${alias}.repo IS NULL OR ${alias}.repo = ?)`
+        : `(${alias}.repo IS NULL${admitted.length === 0 ? "" : ` OR ${alias}.repo IN (${admitted.map(() => "?").join(",")})`})`;
+    const paramsOf = (): unknown[] => (admitted === null ? [repo, repo] : [...admitted]);
     return this.db
       .prepare(
-        `SELECT task_edge.blocker AS blocker, COUNT(*) AS dependents, MIN(task_edge.blocked) AS example
+        `SELECT task_edge.blocker AS blocker, COUNT(*) AS dependents, MIN(task_edge.blocked) AS example,
+                dependent_ref.repo AS dependent_repo, blocker_ref.repo AS blocker_repo
          FROM task_edge
          JOIN task AS blocker_task ON blocker_task.id = task_edge.blocker AND blocker_task.state = 'cancelled'
          JOIN task AS dependent ON dependent.id = task_edge.blocked AND dependent.state = 'queued'
-         JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task_edge.blocked
-         WHERE (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
-         GROUP BY task_edge.blocker ORDER BY task_edge.blocker LIMIT ?`,
+         JOIN task_ref AS dependent_ref ON dependent_ref.backend = ? AND dependent_ref.external_id = task_edge.blocked
+         JOIN task_ref AS blocker_ref ON blocker_ref.backend = ? AND blocker_ref.external_id = task_edge.blocker
+         WHERE ${admissionOf("dependent_ref")}
+           AND ${admissionOf("blocker_ref")}
+         GROUP BY task_edge.blocker, dependent_ref.repo, blocker_ref.repo
+         ORDER BY task_edge.blocker LIMIT ?`,
       )
-      .all(BUILT_IN, repo, repo, page)
+      .all(BUILT_IN, BUILT_IN, ...paramsOf(), ...paramsOf(), page)
       .map(row => ({
         blockerId: String(row["blocker"]),
         dependentCount: Number(row["dependents"]),
         exampleDependent: String(row["example"]),
+        repo: row["dependent_repo"] === null || row["dependent_repo"] === undefined ? null : String(row["dependent_repo"]),
+        blockerRepo: row["blocker_repo"] === null || row["blocker_repo"] === undefined ? null : String(row["blocker_repo"]),
       }));
   }
 
@@ -4722,7 +4762,21 @@ export class Store {
    * and the inbox page itself shows them; the badge under-counting a gap
    * is a smaller wrong than a full graph walk on every render.
    */
-  countInboxScoped(repo: string | null, now: Date, cap = 100): { count: number; saturated: boolean } {
+  countInboxScoped(
+    repo: string | null,
+    now: Date,
+    cap = 100,
+    admitted: string[] | null = null,
+  ): { count: number; saturated: boolean } {
+    // Roll-up admission binds inside EVERY union branch (Codex roll-up
+    // review, finding 11): with repo NULL the old predicate admitted every
+    // stored project, ceiling or not. An empty admitted list reduces to
+    // unplaced rows only — never IN ().
+    const admission =
+      admitted === null
+        ? "(? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)"
+        : `(task_ref.repo IS NULL${admitted.length === 0 ? "" : ` OR task_ref.repo IN (${admitted.map(() => "?").join(",")})`})`;
+    const params = (): unknown[] => (admitted === null ? [repo, repo] : [...admitted]);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM (
@@ -4730,7 +4784,7 @@ export class Store {
              JOIN run ON run.id = decision.run
              JOIN task_ref ON task_ref.id = run.task_ref
              WHERE decision.state IN ('open','expired')
-               AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+               AND ${admission}
            UNION ALL
            SELECT 'a' || task.id FROM task_scope
              JOIN task ON task.id = task_scope.task_id
@@ -4738,24 +4792,32 @@ export class Store {
              WHERE task.state IN ('queued','running')
                AND (task_scope.approved_at IS NULL OR task_scope.approved_by IS NULL
                     OR task_scope.approved_digest IS NULL OR task_scope.approved_digest != task_scope.digest)
-               AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+               AND ${admission}
            UNION ALL
            SELECT 'r' || task.id FROM task
              JOIN task_ref ON task_ref.backend = '${'built-in'}' AND task_ref.external_id = task.id
              WHERE (task.state = 'failed' OR EXISTS (
                  SELECT 1 FROM incident JOIN run ON run.id = incident.run
                  WHERE run.task_ref = task_ref.id AND incident.resolved_at IS NULL))
-               AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+               AND ${admission}
                AND NOT EXISTS (
                  SELECT 1 FROM claim
                  WHERE claim.task_ref = task_ref.id AND claim.released_at IS NULL AND claim.expires_at > ?
                    AND claim.lease_generation = (
                      SELECT MAX(newest.lease_generation) FROM claim AS newest
                      WHERE newest.task_ref = claim.task_ref))
+           UNION ALL
+           SELECT DISTINCT 'c' || task_edge.blocker FROM task_edge
+             JOIN task AS blocker_task ON blocker_task.id = task_edge.blocker AND blocker_task.state = 'cancelled'
+             JOIN task AS dependent ON dependent.id = task_edge.blocked AND dependent.state = 'queued'
+             JOIN task_ref ON task_ref.backend = '${"built-in"}' AND task_ref.external_id = task_edge.blocked
+             JOIN task_ref AS blocker_ref ON blocker_ref.backend = '${"built-in"}' AND blocker_ref.external_id = task_edge.blocker
+             WHERE ${admission}
+               AND ${admission.replace(/task_ref\./g, "blocker_ref.")}
            LIMIT ?
          )`,
       )
-      .get(repo, repo, repo, repo, repo, repo, now.toISOString(), cap);
+      .get(...params(), ...params(), ...params(), now.toISOString(), ...params(), ...params(), cap);
     const count = Number(row?.["n"] ?? 0);
     return { count, saturated: count >= cap };
   }

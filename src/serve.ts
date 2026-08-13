@@ -168,6 +168,11 @@ export function createDecisionServer(options: ServeOptions): Server {
   const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
   /** Per-row visibility under the ceiling — the authorization question for reads. */
   const visible = (repo: string | null): boolean => rowVisible(ceiling, repo);
+  /** The enumerable admission list for roll-up SQL: repos-only ceilings
+   * enumerate themselves; root ceilings enumerate the STORED repos that
+   * pass the ceiling (Codex roll-up review, finding 11); unscoped = null. */
+  const admissionList = (): string[] | null =>
+    unscopedMode ? null : ceiling.roots.length === 0 ? [...ceiling.repos] : store.knownRepos().filter(visible);
   /** The task behind a resource, for the ceiling check; null = no ref (visible). */
   const taskRepoOf = (taskRef: number): string | null => store.refForId(taskRef)?.repo ?? null;
 
@@ -354,6 +359,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // blocked by project state — and the opener itself must not loop.
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
+      url.pathname !== "/" &&
       !url.pathname.startsWith("/d/") && url.pathname !== "/projects" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
@@ -364,16 +370,27 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/") {
+      // With no project open in scoped mode this is the ROLL-UP inbox:
+      // admission binds inside the bounded queries, every row's repo is
+      // re-proved here, and rows render as links only (Codex roll-up
+      // review, findings 6–8). Gaps stay per-project — they are derived
+      // against one repo's capabilities and roll up dishonestly.
+      const rollup = project === null && !unscopedMode;
+      const admission = rollup ? admissionList() : null;
+      const cancelled = store
+        .listCancelledBlockersScoped(project, 10, admission)
+        .filter(one => visible(one.repo) && visible(one.blockerRepo));
       return page(
         response,
         200,
         inboxPage(chromeFor(project, "inbox"), {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           revision: who.via === "cookie" ? who.session.projectRevision : 0,
-          decisions: store.listDecisionsScoped(project).slice(0, 10),
-          approvals: store.scopesAwaitingApproval(project, 10),
-          requeueables: store.listRequeueablesScoped(project, now, 10),
-          cancelledBlockers: store.listCancelledBlockersScoped(project, 10),
+          rollup,
+          decisions: store.listDecisionsScoped(project).filter(one => visible(one.repo)).slice(0, 10),
+          approvals: store.scopesAwaitingApproval(project, 10, admission).filter(one => visible(one.repo)),
+          requeueables: store.listRequeueablesScoped(project, now, 10, admission).filter(one => visible(one.repo)),
+          cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
           now,
         }),
@@ -713,7 +730,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const cached = badgeCache.get(key);
     let badge = cached;
     if (badge === undefined || Date.now() - badge.at > 5_000) {
-      const counted = store.countInboxScoped(project, clock());
+      const counted = store.countInboxScoped(project, clock(), 100, project === null && !unscopedMode ? admissionList() : null);
       badge = { at: Date.now(), count: counted.count, saturated: counted.saturated };
       badgeCache.set(key, badge);
     }
@@ -1945,13 +1962,22 @@ function loginPage(problem: string | null): string {
 function inboxPage(chrome: Chrome, data: {
   csrf: string;
   revision: number;
-  decisions: (Decision & { taskId: string })[];
-  approvals: { taskId: string; title: string; goal: string; proposedAt: string }[];
-  requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number }[];
-  cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string }[];
+  /** No project open in scoped mode: every admitted project at once,
+   * chips on every row, links only — acting means opening the project. */
+  rollup: boolean;
+  decisions: (Decision & { taskId: string; repo?: string | null })[];
+  approvals: { taskId: string; title: string; goal: string; proposedAt: string; repo?: string | null }[];
+  requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo?: string | null }[];
+  cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string; repo?: string | null; blockerRepo?: string | null }[];
   gaps: Gap[];
   now: Date;
 }): string {
+  /** The row's project, worn openly in the roll-up — null is UNPLACED,
+   * said as such, never a silent missing chip (finding 13). */
+  const chip = (repo: string | null | undefined): string =>
+    !data.rollup ? "" : repo === null || repo === undefined
+      ? ` <span class="badge">unplaced</span>`
+      : ` <span class="badge">${escape(projectName(repo))}</span>`;
   const empty =
     data.decisions.length + data.approvals.length + data.requeueables.length +
     data.cancelledBlockers.length + data.gaps.length === 0;
@@ -1965,7 +1991,7 @@ function inboxPage(chrome: Chrome, data: {
             decision =>
               `<a class="decide-card" href="/d/${decision.id}">` +
               `<p class="q">${escape(decision.question)}</p>` +
-              `<span class="mono meta">${escape(decision.taskId)}</span>` +
+              `<span class="mono meta">${escape(decision.taskId)}</span>${chip(decision.repo)}` +
               `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
               `</a>`,
           )
@@ -1981,7 +2007,7 @@ function inboxPage(chrome: Chrome, data: {
               `<a class="decide-card" href="${taskHref(one.taskId)}">` +
               `<p class="q">${escape(one.title)}</p>` +
               `<span class="meta">${escape(one.goal.length > 120 ? one.goal.slice(0, 120) + "\u2026" : one.goal)}</span><br>` +
-              `<span class="mono meta">${escape(one.taskId)}</span> <span class="right meta">review &amp; approve \u2192</span>` +
+              `<span class="mono meta">${escape(one.taskId)}</span>${chip(one.repo)} <span class="right meta">review &amp; approve \u2192</span>` +
               `</a>`,
           )
           .join("\n");
@@ -1993,13 +2019,15 @@ function inboxPage(chrome: Chrome, data: {
         data.requeueables
           .map(
             one =>
-              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> ${escape(one.title)}` +
+              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> ${escape(one.title)}${chip(one.repo)}` +
               `${one.incidentCount > 0 ? ` <span class="badge badge-failed">${one.incidentCount} incident${one.incidentCount > 1 ? "s" : ""}</span>` : ""}` +
               `${one.strikes > 0 ? ` <span class="meta">${one.strikes} failed attempt${one.strikes > 1 ? "s" : ""}</span>` : ""}` +
-              `<span class="right"><form method="post" action="${taskHref(one.taskId)}/requeue" class="inline">` +
-              `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-              `<input type="hidden" name="return" value="inbox">` +
-              `<button type="submit">retry</button></form></span></p>`,
+              (data.rollup
+                ? `<span class="right meta">open its project to retry \u2192</span></p>`
+                : `<span class="right"><form method="post" action="${taskHref(one.taskId)}/requeue" class="inline">` +
+                  `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+                  `<input type="hidden" name="return" value="inbox">` +
+                  `<button type="submit">retry</button></form></span></p>`),
           )
           .join("\n");
 
@@ -2010,8 +2038,9 @@ function inboxPage(chrome: Chrome, data: {
         data.cancelledBlockers
           .map(
             one =>
-              `<p class="row"><a href="${taskHref(one.blockerId)}">${escape(one.blockerId)}</a> ` +
-              `<span class="meta">cancelled \u00b7 ${one.dependentCount} task${one.dependentCount > 1 ? "s" : ""} waiting (e.g. ${escape(one.exampleDependent)})</span></p>`,
+              `<p class="row"><a href="${taskHref(one.blockerId)}">${escape(one.blockerId)}</a>${chip(one.blockerRepo)} ` +
+              `<span class="meta">cancelled \u00b7 ${one.dependentCount} task${one.dependentCount > 1 ? "s" : ""} waiting (e.g. ${escape(one.exampleDependent)})` +
+              `${data.rollup && one.repo !== one.blockerRepo ? ` \u00b7 across projects${one.repo === null || one.repo === undefined ? "" : ` \u2014 waits in ${escape(projectName(one.repo))}`}` : ""}</span></p>`,
           )
           .join("\n");
 
@@ -2038,17 +2067,24 @@ function inboxPage(chrome: Chrome, data: {
     requeueables,
     cancelled,
     gaps,
+    data.rollup
+      ? `<p class="meta">requirement gaps are proved against one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
+      : "",
     // Quick capture: the shortest path from "I want this done" to the
     // approve card — title and goal here, the yes on the next screen. The
     // one-shot form posts to the same guarded handler as the full page.
-    `<h2>capture new work</h2>`,
-    `<form method="post" action="/tasks/add" class="card">`,
-    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<input type="hidden" name="projectRevision" value="${data.revision}">`,
-    `<label>what should get done<input type="text" name="title" placeholder="a title the board can wear" maxlength="200"></label>`,
-    `<label>what success looks like <span class="meta">(becomes the scope you approve on the next screen)</span><textarea name="goal" rows="2"></textarea></label>`,
-    `<button type="submit">queue it \u2192 approve its scope next</button>`,
-    `</form>`,
+    data.rollup ? "" : `<h2>capture new work</h2>`,
+    data.rollup ? "" : `<form method="post" action="/tasks/add" class="card">`,
+    ...(data.rollup
+      ? []
+      : [
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+          `<input type="hidden" name="projectRevision" value="${data.revision}">`,
+          `<label>what should get done<input type="text" name="title" placeholder="a title the board can wear" maxlength="200"></label>`,
+          `<label>what success looks like <span class="meta">(becomes the scope you approve on the next screen)</span><textarea name="goal" rows="2"></textarea></label>`,
+          `<button type="submit">queue it \u2192 approve its scope next</button>`,
+          `</form>`,
+        ]),
   ].join("\n"), { chrome });
 }
 

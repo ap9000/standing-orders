@@ -165,9 +165,22 @@ tabs cannot fight, a shared link shows the same queue) and the all-clear
 remembers what was set aside. The decision answer forms were extracted to
 ONE builder shared by /d and /next; return paths stay allow-listed. The
 inbox offers "clear the queue →" only when something waits. Phases B–E
-(roll-up inbox under per-row ceiling — Codex review in flight; phone-
-first stacked board; since-you-last-looked strip; quick capture) follow
-per scratchpad/design-push-brief.md. 783 tests.
+followed the same day — ALL FIVE SHIPPED. **B, the roll-up inbox**
+(Codex pre-implementation review: 13 findings, its prescriptions built
+exactly): with no project open, `/` is the overall inbox — every store
+read either binds a repo-list admission BEFORE its LIMIT or returns
+unbounded with the row's repo projected, serve re-proves every row with
+rowVisible, the badge's union admits inside every branch (and gained the
+cancelled-blocker branch it silently omitted), the cancelled-blocker
+aggregate joins BOTH refs so a cross-project edge cannot leak a foreign
+project's cancelled state, roll-up rows are LINKS ONLY (no forms, no
+nonces, no capture), unplaced work wears an explicit chip, and the
+needsProject exemption is exact-path `/`. **C**: below 40rem the board
+stacks needs-you → building → queued → waiting. **D**: "since you last
+looked" on the board — built/failed/asked since this session's previous
+full read, fragment polls never move the anchor. **E**: quick capture on
+the project inbox — title + goal straight to the approve step-up, two
+steps, through the same guarded handler. 786 tests.
 
 ## Providers + phase configuration (2026-08-13, Codex plan review: 1 crit, 6 high — its prescriptions ARE the spec)
 
