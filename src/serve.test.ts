@@ -543,6 +543,32 @@ describe("the operations console", () => {
     expect(inbox).toContain("t-1");
   });
 
+  test("evidence-first task page: attempts ledger, spend by provider, the unmeasured said in words (M5.5/6)", async () => {
+    store.createTask({ id: "t-spend", title: "spendy" }, T0);
+    const ref = store.refFor("built-in", "t-spend").id;
+    const claudeRun = store.startRun({ taskRef: ref, leaseId: "l-s1", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+    store.recordUsage(claudeRun, { tokensIn: 41_000, tokensOut: 3_000, costUsd: 1.23 });
+    store.finishRun(claudeRun, { outcome: "built", now: T0 });
+    const codexRun = store.startRun({ taskRef: ref, leaseId: "l-s2", runner: "b-1", branch: "b", worktree: "/w", provider: "codex", now: T0 });
+    store.recordUsage(codexRun, { tokensIn: 80_000, tokensOut: 9_000 });
+    store.finishRun(codexRun, { outcome: "failed", reason: "agent", now: T0 });
+
+    const cookie = await login();
+    const page = await (await fetch(url("/t/t-spend"), { headers: { cookie } })).text();
+    expect(page).toContain("attempts");
+    expect(page).toContain("spend");
+    expect(page).toContain("$1.23");
+    // Tokens without dollars are the unmeasured, in words — never $0.00.
+    expect(page).toContain("dollar cost unmeasured");
+    expect(page).not.toContain("$0.00");
+    // Evidence above mechanics: the ledger precedes the scope section.
+    expect(page.indexOf("attempts")).toBeLessThan(page.indexOf(">scope<"));
+
+    const runView = await (await fetch(url(`/r/${codexRun}`), { headers: { cookie } })).text();
+    expect(runView).toContain("unmeasured");
+    expect(runView).toContain("tokens, not prices");
+  });
+
   test("the overview is live: refresh meta, building-now card, system status", async () => {
     store.createTask({ id: "t-live", title: "being built right now" }, T0);
     const ref = store.refFor("built-in", "t-live").id;

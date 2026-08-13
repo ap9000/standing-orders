@@ -3084,19 +3084,75 @@ function taskPage(chrome: Chrome, data: {
     `</form></details>`,
   ].join("\n");
 
+  // 41_237 → "41k": token counts read at a glance; exactness lives on the run page.
+  const compactCount = (count: number): string =>
+    count >= 1000 ? `${Math.round(count / 1000)}k` : String(count);
+
+  // The attempt ledger (M5.5): every attempt with its provider, duration,
+  // tokens, and dollars — or the honest word "unmeasured" — so a retry
+  // storm reads as the spike it is instead of hiding inside a total.
+  const minutesOf = (run: Run): string | null => {
+    if (run.finishedAt === null) return null;
+    const ms = new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime();
+    return ms >= 0 ? `${Math.max(1, Math.round(ms / 60_000))}m` : null;
+  };
+  const tokensOf = (run: Run): string | null =>
+    run.tokensIn === null && run.tokensOut === null
+      ? null
+      : `${run.tokensIn === null ? "?" : compactCount(run.tokensIn)}/${run.tokensOut === null ? "?" : compactCount(run.tokensOut)} tok`;
   const runs =
     data.runs.length === 0
       ? ""
-      : `<h2>runs</h2>` +
+      : `<h2>attempts</h2>` +
         data.runs
-          .map(
-            run =>
+          .map(run => {
+            const bits = [
+              run.provider,
+              minutesOf(run),
+              tokensOf(run),
+              run.costUsd !== null ? `$${run.costUsd.toFixed(2)}` : run.tokensIn !== null || run.tokensOut !== null ? "unmeasured $" : null,
+              run.parentRun !== null ? `↳ of #${run.parentRun}` : null,
+            ].filter((bit): bit is string => bit !== null);
+            return (
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
               `${run.reason === null ? "" : ` <span class="meta">${escape(run.reason)}</span>`}` +
-              `<span class="right meta mono">${escape(when(run.startedAt))}</span></p>`,
-          )
+              ` <span class="meta mono">${escape(bits.join(" · "))}</span>` +
+              `<span class="right meta mono">${escape(when(run.startedAt))}</span></p>`
+            );
+          })
           .join("\n");
+
+  // Spend by provider, from the same rows — dollars only where a provider
+  // measured them, and the unmeasured said in words, never summed as $0.
+  const spendCard = (() => {
+    if (data.runs.length === 0) return "";
+    const byProvider = new Map<string, { runs: number; tokensIn: number; tokensOut: number; costUsd: number; measured: number }>();
+    for (const run of data.runs) {
+      const entry = byProvider.get(run.provider) ?? { runs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, measured: 0 };
+      entry.runs += 1;
+      entry.tokensIn += run.tokensIn ?? 0;
+      entry.tokensOut += run.tokensOut ?? 0;
+      if (run.costUsd !== null) {
+        entry.costUsd += run.costUsd;
+        entry.measured += 1;
+      }
+      byProvider.set(run.provider, entry);
+    }
+    const lines = [...byProvider.entries()].map(([provider, spend]) => {
+      const dollars =
+        spend.measured === spend.runs
+          ? `$${spend.costUsd.toFixed(2)}`
+          : spend.measured === 0
+            ? "dollar cost unmeasured"
+            : `$${spend.costUsd.toFixed(2)} across ${spend.measured}/${spend.runs} measured`;
+      return (
+        `<p class="row"><span class="mono">${escape(provider)}</span> ` +
+        `<span class="meta">${spend.runs} attempt(s) · ${compactCount(spend.tokensIn)} in / ${compactCount(spend.tokensOut)} out · ${escape(dollars)}</span></p>`
+      );
+    });
+    return `<h2>spend</h2>` + lines.join("\n");
+  })();
 
   const decisions =
     data.decisions.length === 0
@@ -3166,6 +3222,13 @@ function taskPage(chrome: Chrome, data: {
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}</span></h1>`,
     `<p>${escape(task.title)}</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
+    // Evidence-first (M5.5): what needs you, then what happened — decisions
+    // and incidents above the attempt ledger and spend, the mechanics
+    // (scope, holds, acts) after. Only trustworthy facts moved up.
+    decisions,
+    incidents,
+    runs,
+    spendCard,
     "<h2>scope</h2>",
     scopeCard,
     planCard,
@@ -3173,9 +3236,6 @@ function taskPage(chrome: Chrome, data: {
     scopeForm,
     holds,
     acts,
-    runs,
-    decisions,
-    incidents,
   ].join("\n"), { chrome });
 }
 
@@ -3189,8 +3249,15 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
               `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
+              `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
               `<span class="right meta mono">${escape(when(run.startedAt))}` +
-              `${run.costUsd === null ? "" : ` \u00b7 $${run.costUsd.toFixed(2)}`}</span></p>`,
+              `${
+                run.costUsd !== null
+                  ? ` \u00b7 $${run.costUsd.toFixed(2)}`
+                  : run.tokensIn !== null || run.tokensOut !== null
+                    ? " \u00b7 unmeasured $"
+                    : ""
+              }</span></p>`,
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
@@ -3337,7 +3404,17 @@ function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]
     ["provider started", when(run.providerStartedAt), true],
     ["tokens in", run.tokensIn === null ? null : run.tokensIn.toLocaleString(), true],
     ["tokens out", run.tokensOut === null ? null : run.tokensOut.toLocaleString(), true],
-    ["cost", run.costUsd === null ? null : `$${run.costUsd.toFixed(2)}`, true],
+    // The unmeasured is said in words (M5.6): tokens without dollars means
+    // this provider reports no prices, and a hidden row would read as free.
+    [
+      "cost",
+      run.costUsd !== null
+        ? `$${run.costUsd.toFixed(2)}`
+        : run.tokensIn !== null || run.tokensOut !== null
+          ? "dollar cost unmeasured — this provider reports tokens, not prices"
+          : null,
+      run.costUsd !== null,
+    ],
   ];
   const rows = facts
     .filter((fact): fact is [string, string, boolean?] => fact[1] !== null && fact[1] !== "")
