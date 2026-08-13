@@ -247,6 +247,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "choose", "note", "max-open-decisions", "port", "host", "allow-host",
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
     "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
+    "project-root",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -1939,9 +1940,11 @@ async function serveCommand(
   const port = Number(text(flags, "port") ?? 4180);
   const host = text(flags, "host") ?? "127.0.0.1";
   const allow = text(flags, "allow-host");
-  // --repo turns on the gaps and capabilities views and scopes run evidence
-  // to that repo's tasks; without it those pages say so instead of guessing.
-  const repo = text(flags, "repo");
+  // The authorization ceiling: --repo (comma-separable) names repos this
+  // server may show; --project-root authorizes any git repo under a
+  // directory. Neither given = legacy unscoped mode, everything visible.
+  const repoFlag = text(flags, "repo");
+  const rootFlag = text(flags, "project-root");
 
   const server = createDecisionServer({
     store,
@@ -1949,7 +1952,8 @@ async function serveCommand(
     clock: context.clock,
     telegramTokenFile: context.telegramTokenFile,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
-    ...(repo === undefined ? {} : { repo }),
+    ...(repoFlag === undefined ? {} : { repos: repoFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
+    ...(rootFlag === undefined ? {} : { projectRoots: rootFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
   });
 
   await new Promise<void>((resolve, reject) => {

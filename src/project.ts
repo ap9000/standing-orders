@@ -57,22 +57,25 @@ export type ProjectCeiling = {
   roots: readonly string[];
 };
 
-/** Resolve the startup configuration once; paths that do not exist are dropped loudly by the caller. */
+/**
+ * Resolve the startup configuration once. A configured path that does not
+ * currently resolve is kept in its normalized form rather than dropped —
+ * dropping would silently *widen* the server toward unscoped mode, and a
+ * ceiling that loosens itself when a disk is unmounted is not a ceiling.
+ */
 export function resolveCeiling(
   repos: readonly string[],
   roots: readonly string[],
-): { ceiling: ProjectCeiling; dropped: string[] } {
-  const dropped: string[] = [];
-  const keep = (paths: readonly string[]): string[] => {
-    const out: string[] = [];
-    for (const path of paths) {
+): { ceiling: ProjectCeiling; unresolved: string[] } {
+  const unresolved: string[] = [];
+  const keep = (paths: readonly string[]): string[] =>
+    paths.map(path => {
       const canonical = canonicalProject(path);
-      if (canonical === null) dropped.push(path);
-      else out.push(canonical);
-    }
-    return out;
-  };
-  return { ceiling: { repos: keep(repos), roots: keep(roots) }, dropped };
+      if (canonical !== null) return canonical;
+      unresolved.push(path);
+      return resolve(path);
+    });
+  return { ceiling: { repos: keep(repos), roots: keep(roots) }, unresolved };
 }
 
 /** Whether the ceiling is even configured. Unconfigured = legacy unscoped mode. */

@@ -64,6 +64,13 @@ import {
 } from "./scope.js";
 import { hasForbiddenControls } from "./decision.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
+import {
+  authorizedProject,
+  canonicalProject,
+  projectName,
+  resolveCeiling,
+  rowVisible,
+} from "./project.js";
 import { overnight, spendLine } from "./summary.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -84,6 +91,15 @@ export type ServeOptions = {
    * without it those pages say so instead of guessing.
    */
   repo?: string;
+  /**
+   * The full authorization ceiling (v2 review, finding 1): `repos` this
+   * server may show and operate on, plus `projectRoots` under which any git
+   * repository qualifies. `repo` above is sugar for one entry in `repos`.
+   * No configuration at all is the legacy unscoped mode — everything
+   * visible, and stated as such where the code decides.
+   */
+  repos?: readonly string[];
+  projectRoots?: readonly string[];
 };
 
 const SESSION_COOKIE = "nightorders_session";
@@ -105,6 +121,10 @@ type Session = {
   generation: number;
   createdAt: number;
   lastSeen: number;
+  /** The open project — a VIEW FILTER chosen inside the ceiling, never authorization. */
+  project: string | null;
+  /** Bumped on every open: stale tabs carry the revision they were rendered under. */
+  projectRevision: number;
 };
 
 /** One rendered approval form: who saw which digest of which task, once. */
@@ -122,6 +142,22 @@ export function createDecisionServer(options: ServeOptions): Server {
   const clock = options.clock ?? (() => new Date());
   const sessions = new Map<string, Session>();
   const approvalNonces = new Map<string, ApprovalNonce>();
+
+  // The ceiling, resolved once at startup. Paths that do not exist are
+  // dropped here rather than silently failing every later check.
+  const { ceiling } = resolveCeiling(
+    [...(options.repo === undefined ? [] : [options.repo]), ...(options.repos ?? [])],
+    options.projectRoots ?? [],
+  );
+  /** The project every fresh session opens with: the sole configured repo, else none. */
+  const defaultProject = ceiling.repos.length === 1 && ceiling.roots.length === 0 ? ceiling.repos[0] as string : null;
+
+  /** No ceiling configured at all: the legacy trust-everything mode, named. */
+  const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
+  /** Per-row visibility under the ceiling — the authorization question for reads. */
+  const visible = (repo: string | null): boolean => rowVisible(ceiling, repo);
+  /** The task behind a resource, for the ceiling check; null = no ref (visible). */
+  const taskRepoOf = (taskRef: number): string | null => store.refForId(taskRef)?.repo ?? null;
 
   const server = createServer((request, response) => {
     void handle(request, response).catch(() => {
@@ -198,6 +234,22 @@ export function createDecisionServer(options: ServeOptions): Server {
     );
   }
 
+  /**
+   * The project a request views through — cookie sessions carry their open
+   * project; bearer callers may name one per request, constrained by the
+   * ceiling. Returns undefined when a named project is outside the ceiling:
+   * that is a refusal, not a fallback.
+   */
+  function projectOf(who: Who, request: IncomingMessage): string | null | undefined {
+    if (who.via === "cookie") return who.session.project;
+    const header = request.headers["x-nightorders-project"];
+    if (header === undefined) return defaultProject;
+    if (Array.isArray(header)) return undefined;
+    const canonical = canonicalProject(header);
+    if (canonical === null || !visible(canonical)) return undefined;
+    return canonical;
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!allowedHost(request.headers.host)) {
       return respond(response, 421, "text/plain; charset=utf-8", "wrong host");
@@ -232,6 +284,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         generation: store.approverGeneration(name as string) ?? 1,
         createdAt: Date.now(),
         lastSeen: Date.now(),
+        project: defaultProject,
+        projectRevision: 1,
       });
       response.setHeader(
         "Set-Cookie",
@@ -254,29 +308,46 @@ export function createDecisionServer(options: ServeOptions): Server {
         : respond(response, 401, "text/plain; charset=utf-8", "authenticate first");
     }
 
-    if (method === "GET") return handleGet(url, who, response);
+    if (method === "GET") return handleGet(url, who, request, response);
     if (method === "POST") return handlePost(url, who, request, response);
     return respond(response, 405, "text/plain; charset=utf-8", "no such method here");
   }
 
   // ---- reads ---------------------------------------------------------------
 
-  function handleGet(url: URL, who: Who, response: ServerResponse): void {
+  function handleGet(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): void {
     const now = clock();
+    const project = projectOf(who, request);
+    if (project === undefined) {
+      return refuse(response, who, 403, "that project is outside what this server was configured to show");
+    }
+
+    // Nothing open and more than one thing to choose: land on the opener.
+    // Decisions and their evidence stay reachable — answering must never be
+    // blocked by project state — and the opener itself must not loop.
+    const needsProject =
+      who.via === "cookie" && project === null && !unscopedMode &&
+      !url.pathname.startsWith("/d/") && url.pathname !== "/projects" &&
+      url.pathname !== "/settings" && url.pathname !== "/logout";
+    if (needsProject) return redirect(response, "/projects");
+
+    if (url.pathname === "/projects") {
+      return void projectsScreen(response, who, null, 200);
+    }
 
     if (url.pathname === "/") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       return page(
         response,
         200,
-        homePage({
-          taskCount: store.listTasks().length,
-          repo: options.repo ?? null,
-          summary: overnight(store.runsSince(since)),
-          decisions: store.listDecisions("unanswered"),
-          incidents: store.openIncidents(),
-          stranded: store.strandedTasks(),
-          gaps: options.repo === undefined ? null : computeGaps(store, options.repo, now),
+        homePage(chromeFor(project, "morning"), {
+          taskCount: store.listTasksScoped(project, undefined, 1, null).length,
+          repo: project,
+          summary: overnight(store.runsSinceScoped(since, project)),
+          decisions: store.listDecisionsScoped(project),
+          incidents: store.openIncidents(project),
+          stranded: store.strandedTasks(project),
+          gaps: project === null ? null : computeGaps(store, project, now),
           outboxPending: store.listNotifications("pending").length,
           settings: options.telegramTokenFile !== undefined,
           now,
@@ -294,13 +365,20 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         200,
         tasksPage(
-          store.listTasks(wanted === null ? undefined : (wanted as TaskState)),
+          chromeFor(project, "tasks"),
+          store.listTasksScoped(project, wanted === null ? undefined : (wanted as TaskState), 200, null),
           wanted as TaskState | null,
           csrf,
           null,
-          options.repo ?? null,
+          project,
         ),
       );
+    }
+
+    if (url.pathname === "/tasks/new") {
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const revision = who.via === "cookie" ? who.session.projectRevision : 0;
+      return page(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null));
     }
 
     const task = matchTaskPath(url.pathname, "");
@@ -317,8 +395,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         before = Number(raw);
       }
-      const rows = store.listRunsBefore(before, RUNS_PAGE);
-      return page(response, 200, runsPage(rows, rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
+      const rows = store.listRunsBefore(before, RUNS_PAGE, project);
+      return page(response, 200, runsPage(chromeFor(project, "runs"), rows, rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
     }
 
     const run = /^\/r\/([0-9]{1,15})$/.exec(url.pathname);
@@ -328,7 +406,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such run", "/runs");
       }
       const taskId = store.externalIdFor(found.taskRef) ?? "?";
-      return page(response, 200, runPage(found, taskId, store.artifactsFor(found.id)));
+      return page(
+        response,
+        200,
+        runPage(chromeFor(project, "runs", runListPane(project, found.id)), found, taskId, store.artifactsFor(found.id)),
+      );
     }
 
     const runArtifact = /^\/r\/([0-9]{1,15})\/evidence\/([0-9]{1,15})$/.exec(url.pathname);
@@ -337,13 +419,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/caps") {
-      if (options.repo === undefined) {
-        return page(response, 200, capsPage(null, [], ""));
+      if (project === null) {
+        return page(response, 200, capsPage(chromeFor(project, "caps"), null, [], ""));
       }
       return page(
         response,
         200,
-        capsPage(store.listCapabilities(options.repo), computeGaps(store, options.repo, now), options.repo, now),
+        capsPage(chromeFor(project, "caps"), store.listCapabilities(project), computeGaps(store, project, now), project, now),
       );
     }
 
@@ -351,15 +433,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       const existing = loadBotToken({}, options.telegramTokenFile);
       const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
       const csrf = who.via === "cookie" ? who.session.csrf : "";
-      return page(response, 200, settingsPage(existing, hasEnv, csrf, null));
+      return page(response, 200, settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, null));
     }
 
     const one = /^\/d\/([0-9]{1,15})$/.exec(url.pathname);
     if (one !== null) {
       const decision = store.getDecision(Number(one[1]));
       if (decision === null) return refuse(response, who, 404, "no such decision");
+      const run = store.getRun(decision.run);
+      if (run !== null && !visible(taskRepoOf(run.taskRef))) {
+        return refuse(response, who, 404, "no such decision");
+      }
       const taskId = taskOf(store, decision);
-      return page(response, 200, decisionPage(decision, taskId, store.evidenceFor(decision.id), who, now));
+      return page(response, 200, decisionPage(chromeFor(project, "none"), decision, taskId, store.evidenceFor(decision.id), who, now));
     }
 
     const artifact = /^\/d\/([0-9]{1,15})\/evidence\/([0-9]{1,15})$/.exec(url.pathname);
@@ -368,6 +454,80 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+  }
+
+  /** The sidebar's facts for this request. */
+  function chromeFor(
+    project: string | null,
+    active: Chrome["active"],
+    listPane?: string,
+  ): Chrome {
+    return {
+      active,
+      project,
+      decisionCount: store.countUnansweredScoped(project),
+      settings: options.telegramTokenFile !== undefined,
+      ...(listPane === undefined ? {} : { listPane }),
+    };
+  }
+
+  /** The compact task list for the master pane, the current row marked. */
+  function taskListPane(project: string | null, currentId: string | null): string {
+    const rows = store.listTasksScoped(project, undefined, 100, currentId);
+    const items = rows
+      .map(
+        task =>
+          `<a class="item${task.id === currentId ? " current" : ""}" href="${taskHref(task.id)}">` +
+          `<span class="t">${escape(task.title)}</span>` +
+          `<span class="m"><span class="mono">${escape(task.id)}</span>` +
+          `<span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></span></a>`,
+      )
+      .join("\n");
+    return `<h2>tasks</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
+  }
+
+  /** The compact recent-runs list for the master pane. */
+  function runListPane(project: string | null, currentId: number | null): string {
+    const rows = store.listRunsBefore(null, 50, project);
+    const items = rows
+      .map(
+        run =>
+          `<a class="item${run.id === currentId ? " current" : ""}" href="/r/${run.id}">` +
+          `<span class="t">#${run.id} \u00b7 ${escape(run.taskId)}</span>` +
+          `<span class="m"><span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
+          `<span class="mono">${escape(when(run.startedAt))}</span></span></a>`,
+      )
+      .join("\n");
+    return `<h2>runs</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
+  }
+
+  /**
+   * The opener: every project inside the ceiling, most recently opened
+   * first, plus repos the queue has seen — shown only when the ceiling
+   * admits them — and an open-by-path field validated server-side. A
+   * registry row never confers access; this page only offers what the
+   * server was configured to allow.
+   */
+  async function projectsScreen(
+    response: ServerResponse,
+    who: Who,
+    problem: string | null,
+    status: number,
+  ): Promise<void> {
+    const recent = store.listProjects().filter(one => visible(one.path));
+    const recentPaths = new Set(recent.map(one => one.path));
+    const candidates = new Set<string>();
+    for (const path of [...ceiling.repos, ...store.knownRepos()]) {
+      const canonical = canonicalProject(path) ?? path;
+      if (!recentPaths.has(canonical) && visible(canonical)) candidates.add(canonical);
+    }
+    const open = who.via === "cookie" ? who.session.project : null;
+    const csrf = who.via === "cookie" ? who.session.csrf : "";
+    return page(
+      response,
+      status,
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode),
+    );
   }
 
   /** The task screen, shared by the GET and by every refusal that re-renders it. */
@@ -381,6 +541,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     const found = store.getTask(taskId);
     if (found === null) return respond(response, 404, "text/plain; charset=utf-8", "no such task");
     const ref = store.lookupRef(taskId);
+    if (ref !== null && !visible(ref.repo)) {
+      return respond(response, 404, "text/plain; charset=utf-8", "no such task");
+    }
     const now = clock();
     const scope = store.getScope(taskId);
     // The nonce is minted at render, per viewer, bound to the digest being
@@ -389,10 +552,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       who.via === "cookie" && scope !== null && !approvalOf(scope).approved
         ? mintApprovalNonce(who.name, taskId, scope.digest)
         : "";
+    const paneProject = who.via === "cookie" ? who.session.project : null;
     return page(
       response,
       status,
-      taskPage({
+      taskPage(chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)), {
         task: found,
         strikes: ref?.strikes ?? 0,
         repo: ref?.repo ?? null,
@@ -430,25 +594,63 @@ export function createDecisionServer(options: ServeOptions): Server {
         const existing = loadBotToken({}, options.telegramTokenFile);
         const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
         const csrf = who.via === "cookie" ? who.session.csrf : "";
-        return page(response, 400, settingsPage(existing, hasEnv, csrf, saved.message));
+        return page(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message));
       }
       return redirect(response, "/settings");
     }
 
+    if (url.pathname === "/projects/open") {
+      // Sessions only: a bearer caller names its project per request and has
+      // no session to mutate — refusing here keeps that boundary legible.
+      if (who.via !== "cookie") {
+        return refuse(response, who, 403, "opening a project is a browser session's act");
+      }
+      const asked = (body.get("path") ?? "").trim();
+      const canonical = asked === "" ? null : canonicalProject(asked);
+      if (canonical === null) {
+        return void projectsScreen(response, who, "that path does not exist on this server", 400);
+      }
+      // Authorization is the ceiling, then the path must actually be a git
+      // repository — validation with direct argv and a bound, never a shell.
+      if (!(await authorizedProject(ceiling, canonical))) {
+        return void projectsScreen(response, who, "that path is outside what this server was configured to serve", 403);
+      }
+      store.upsertProject(canonical, projectName(canonical), now);
+      who.session.project = canonical;
+      who.session.projectRevision++;
+      return redirect(response, "/");
+    }
+
     if (url.pathname === "/tasks/add") {
+      const project = projectOf(who, request);
+      if (project === undefined) {
+        return refuse(response, who, 403, "that project is outside what this server was configured to show");
+      }
+      // Stale-tab guard: a form rendered under one open project must not
+      // create into a different one switched-to since (finding 6).
+      if (who.via === "cookie") {
+        const seen = body.get("projectRevision");
+        if (seen !== null && seen !== String(who.session.projectRevision)) {
+          return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", "/tasks");
+        }
+      }
       const id = (body.get("id") ?? "").trim();
       const title = body.get("title") ?? "";
-      const repo = (body.get("repo") ?? "").trim();
+      const repo = (body.get("repo") ?? "").trim() || (project ?? "");
       const goal = (body.get("goal") ?? "").trim();
       const made = store.createConsoleTask(
-        { id, title, ...(repo === "" ? {} : { repo }), ...(goal === "" ? {} : { goal }) },
+        { ...(id === "" ? {} : { id }), title, ...(repo === "" ? {} : { repo }), ...(goal === "" ? {} : { goal }) },
         now,
       );
       if (!made.ok) {
         const csrf = who.via === "cookie" ? who.session.csrf : "";
-        return page(response, made.reason === "backlog-full" ? 429 : 400, tasksPage(store.listTasks(), null, csrf, made.reason, options.repo ?? null));
+        return page(
+          response,
+          made.reason === "backlog-full" ? 429 : 400,
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.reason, project),
+        );
       }
-      return redirect(response, taskHref(id));
+      return redirect(response, taskHref(made.id));
     }
 
     const answer = /^\/d\/([0-9]{1,15})\/answer$/.exec(url.pathname);
@@ -456,6 +658,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       const id = Number(answer[1]);
       const decision = store.getDecision(id);
       if (decision === null) return refuse(response, who, 404, "no such decision");
+      const answeringRun = store.getRun(decision.run);
+      if (answeringRun !== null && !visible(taskRepoOf(answeringRun.taskRef))) {
+        return refuse(response, who, 404, "no such decision");
+      }
       const choice = body.get("choice") ?? "";
       const chosen = decision.options.find(option => option.id === choice);
       // Irreversible options never ride one accidental tap: the form arms
@@ -509,6 +715,9 @@ export function createDecisionServer(options: ServeOptions): Server {
   ): void {
     const ref = store.lookupRef(taskId);
     if (ref === null || store.getTask(taskId) === null) {
+      return refuse(response, who, 404, "no such task", "/tasks");
+    }
+    if (!visible(ref.repo)) {
       return refuse(response, who, 404, "no such task", "/tasks");
     }
 
@@ -639,6 +848,14 @@ export function createDecisionServer(options: ServeOptions): Server {
   // ---- evidence ------------------------------------------------------------
 
   function decisionEvidence(response: ServerResponse, decisionId: number, artifactId: number): void {
+    // The ceiling applies to decision evidence exactly as to run evidence
+    // (v2 review, finding 2): a decision whose task belongs to a repo this
+    // server may not serve does not exist here, and neither do its bytes.
+    const decision = store.getDecision(decisionId);
+    const decisionRun = decision === null ? null : store.getRun(decision.run);
+    if (decisionRun !== null && !visible(taskRepoOf(decisionRun.taskRef))) {
+      return respond(response, 404, "text/plain; charset=utf-8", "no such evidence");
+    }
     // Only through the decision's own relation — an artifact id from another
     // run simply is not in this list, whatever the URL claims.
     const linked = store.evidenceFor(decisionId).find(one => one.id === artifactId);
@@ -668,9 +885,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * repo's diffs, and one console instance is one trust domain.
    */
   function runVisible(run: Run): boolean {
-    if (options.repo === undefined) return true;
-    const ref = store.refForId(run.taskRef);
-    return ref === null || ref.repo === null || ref.repo === options.repo;
+    return visible(taskRepoOf(run.taskRef));
   }
 
   function sendArtifact(response: ServerResponse, linked: Artifact): void {
@@ -1013,6 +1228,76 @@ const STYLE = `
   .filters strong { background: var(--secondary); color: var(--secondary-foreground); }
   .filters a:hover { color: var(--foreground); }
 
+  /* The workspace shell: sidebar + content, an optional list pane between.
+     One grid, collapsing to the phone column below 760px — the answering
+     flow keeps its single-column ritual. */
+  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+  .side {
+    border-right: 1px solid var(--border); background: var(--card);
+    padding: 1rem .875rem; display: flex; flex-direction: column; gap: .25rem;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  }
+  .side .brand { padding: .25rem .5rem .75rem; font-size: 1rem; }
+  .side-project {
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+    padding: .5rem .625rem; margin: 0 0 .75rem; background: var(--background);
+  }
+  .side-project .name { font-weight: 600; font-size: .875rem; display: block; }
+  .side-project a { font-size: .75rem; }
+  .side nav { display: flex; flex-direction: column; gap: .125rem; }
+  .side nav a {
+    display: flex; align-items: center; gap: .5rem; padding: .5rem .625rem; min-height: 2.25rem;
+    border-radius: calc(var(--radius) - 2px); text-decoration: none;
+    color: var(--muted-foreground); font-size: .875rem; font-weight: 500;
+  }
+  .side nav a:hover { background: var(--accent); color: var(--foreground); }
+  .side nav a.active { background: var(--accent); color: var(--foreground); }
+  .side nav a .count { margin-left: auto; }
+  .side .grow { flex: 1; }
+  .side .new-task {
+    display: block; text-align: center; text-decoration: none; font-weight: 600; font-size: .875rem;
+    background: var(--primary); color: var(--primary-foreground);
+    border-radius: calc(var(--radius) - 2px); padding: .625rem; margin: .75rem 0 .25rem;
+  }
+  .side .new-task:hover { opacity: .9; }
+  .content { min-width: 0; }
+  .content > main { max-width: 52rem; margin: 0; padding: 1.75rem 2rem 4rem; }
+  .split { display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr); min-height: 100vh; }
+  .list-pane {
+    border-right: 1px solid var(--border); overflow-y: auto; height: 100vh;
+    position: sticky; top: 0; padding: 1rem .75rem;
+  }
+  .list-pane h2 { margin-top: .25rem; }
+  .list-pane a.item {
+    display: block; padding: .5rem .625rem; border-radius: calc(var(--radius) - 2px);
+    text-decoration: none; font-size: .8125rem; margin-bottom: .125rem;
+  }
+  .list-pane a.item:hover { background: var(--accent); }
+  .list-pane a.item.current { background: var(--accent); }
+  .list-pane a.item .t { display: block; font-weight: 550; color: var(--foreground);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .list-pane a.item .m { display: flex; gap: .375rem; align-items: center; color: var(--muted-foreground);
+    font-size: .75rem; margin-top: .125rem; }
+  .split > .detail { min-width: 0; }
+  .split > .detail > main { max-width: 52rem; padding: 1.75rem 2rem 4rem; }
+  @media (max-width: 980px) { .split { grid-template-columns: 1fr; } .list-pane { display: none; } }
+  @media (max-width: 760px) {
+    .app { display: block; }
+    .side { position: sticky; height: auto; flex-direction: row; align-items: center;
+            border-right: none; border-bottom: 1px solid var(--border); padding: .5rem .75rem;
+            gap: .375rem; z-index: 10; overflow-x: auto; overflow-y: hidden; }
+    .side .brand { padding: 0 .375rem; }
+    .side-project { margin: 0; padding: .25rem .5rem; }
+    .side-project .name { font-size: .75rem; }
+    .side-project a { display: none; }
+    .side nav { flex-direction: row; }
+    .side nav a { padding: .375rem .5rem; }
+    .side .grow { display: none; }
+    .side .new-task { margin: 0; padding: .375rem .625rem; white-space: nowrap; }
+    .side .foot { display: none; }
+    .content > main, .split > .detail > main { padding: 1.25rem 1.25rem 4rem; }
+  }
+
   .login-shell { max-width: 22rem; margin: 14vh auto 0; padding: 0 1.25rem; }
   .login-shell h1 { text-align: center; margin-bottom: .25rem; }
   .login-shell .hint { text-align: center; margin-bottom: 1rem; }
@@ -1024,24 +1309,69 @@ const STYLE = `
   }
 `;
 
-function shell(title: string, body: string, options: { nav?: boolean } = {}): string {
-  const bar =
-    options.nav === false
-      ? ""
-      : `<div class="topbar"><div class="topbar-inner">` +
-        `<a class="brand" href="/">night<span class="dot">·</span>orders</a>` +
-        `<nav><a href="/">home</a><a href="/tasks">tasks</a><a href="/runs">runs</a><a href="/caps">caps</a></nav>` +
-        `</div></div>`;
-  return [
+/** Everything the sidebar needs to draw itself for one request. */
+type Chrome = {
+  active: "morning" | "tasks" | "runs" | "caps" | "projects" | "settings" | "none";
+  project: string | null;
+  decisionCount: number;
+  settings: boolean;
+  /** A rendered list pane makes the page master-detail. */
+  listPane?: string;
+};
+
+function shell(
+  title: string,
+  body: string,
+  options: { nav?: boolean; chrome?: Chrome } = {},
+): string {
+  const head = [
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8">`,
     `<meta name="viewport" content="width=device-width, initial-scale=1">`,
     `<title>${escape(title)}</title><style>${STYLE}</style></head><body>`,
-    bar,
-    `<main>`,
-    body,
-    `</main></body></html>`,
   ].join("\n");
+
+  if (options.chrome === undefined) {
+    // Chromeless: the login page and refusal pages.
+    return [head, `<main>`, body, `</main></body></html>`].join("\n");
+  }
+
+  const chrome = options.chrome;
+  const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
+    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}>${label}` +
+    `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}</span>` : ""}</a>`;
+
+  const side = [
+    `<aside class="side">`,
+    `<a class="brand" href="/">night<span class="dot">·</span>orders</a>`,
+    `<div class="side-project">` +
+      (chrome.project === null
+        ? `<span class="name meta">no project open</span>`
+        : `<span class="name">${escape(projectName(chrome.project))}</span>`) +
+      `<a href="/projects">switch project</a></div>`,
+    `<nav>`,
+    item("morning", "/", "the morning", chrome.decisionCount),
+    item("tasks", "/tasks", "tasks"),
+    item("runs", "/runs", "runs"),
+    item("caps", "/caps", "capabilities"),
+    `</nav>`,
+    `<a class="new-task" href="/tasks/new">+ new task</a>`,
+    `<span class="grow"></span>`,
+    `<nav class="foot">`,
+    ...(chrome.settings ? [item("settings", "/settings", "settings")] : []),
+    `</nav>`,
+    `</aside>`,
+  ].join("\n");
+
+  const content =
+    chrome.listPane === undefined
+      ? `<div class="content"><main>${body}</main></div>`
+      : `<div class="content"><div class="split">` +
+        `<div class="list-pane">${chrome.listPane}</div>` +
+        `<div class="detail"><main>${body}</main></div>` +
+        `</div></div>`;
+
+  return [head, `<div class="app">`, side, content, `</div></body></html>`].join("\n");
 }
 
 
@@ -1060,7 +1390,7 @@ function loginPage(problem: string | null): string {
   ].join("\n"), { nav: false });
 }
 
-function homePage(data: {
+function homePage(chrome: Chrome, data: {
   taskCount: number;
   repo: string | null;
   summary: ReturnType<typeof overnight<Run & { taskId: string }>>;
@@ -1161,10 +1491,11 @@ function homePage(data: {
     stranded,
     gaps,
     footer,
-  ].join("\n"));
+  ].join("\n"), { chrome });
 }
 
 function tasksPage(
+  chrome: Chrome,
   tasks: Task[],
   state: TaskState | null,
   csrf: string,
@@ -1203,10 +1534,96 @@ function tasksPage(
     `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3"></textarea></label>`,
     `<button type="submit">add</button>`,
     `</form></details>`,
-  ].join("\n"));
+  ].join("\n"), { chrome });
 }
 
-function taskPage(data: {
+function projectsPage(
+  chrome: Chrome,
+  recent: { path: string; name: string; lastOpenedAt: string }[],
+  candidates: string[],
+  open: string | null,
+  csrf: string,
+  problem: string | null,
+  unscopedMode: boolean,
+): string {
+  const openForm = (path: string, label: string): string =>
+    [
+      `<form method="post" action="/projects/open" class="inline">`,
+      `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+      `<input type="hidden" name="path" value="${escape(path)}">`,
+      `<button type="submit">${escape(label)}</button>`,
+      `</form>`,
+    ].join("");
+
+  const rows = (paths: { path: string; name: string; note: string }[]): string =>
+    paths
+      .map(
+        one =>
+          `<p class="row"><strong>${escape(one.name)}</strong> <span class="mono meta">${escape(one.path)}</span>` +
+          `${one.note === "" ? "" : ` <span class="meta">${escape(one.note)}</span>`}` +
+          `<span class="right">${
+            open !== null && open === one.path
+              ? `<span class="badge badge-done">open</span>`
+              : openForm(one.path, "open")
+          }</span></p>`,
+      )
+      .join("\n");
+
+  const recentRows = recent.map(one => ({ path: one.path, name: one.name, note: `last opened ${when(one.lastOpenedAt)}` }));
+  const candidateRows = candidates.map(path => ({ path, name: projectName(path), note: "seen in the queue" }));
+
+  return shell("projects", [
+    `<h1>projects</h1>`,
+    `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its mornings, and its runs</p>`,
+    unscopedMode
+      ? `<p class="meta">this server was started without a project ceiling, so every path in the queue is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`
+      : "",
+    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
+    recentRows.length === 0 && candidateRows.length === 0
+      ? `<div class="card"><p><strong>Nothing to open yet.</strong></p><p class="meta">Type the path of a git repository below \u2014 opening it registers it here for next time.</p></div>`
+      : "",
+    recentRows.length > 0 ? `<h2>recent</h2>${rows(recentRows)}` : "",
+    candidateRows.length > 0 ? `<h2>available</h2>${rows(candidateRows)}` : "",
+    `<h2>open by path</h2>`,
+    `<form method="post" action="/projects/open" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
+    `<button type="submit">open project</button>`,
+    `</form>`,
+  ].join("\n"), { chrome });
+}
+
+/**
+ * Creating work is the product's first verb, so it gets a whole calm page:
+ * a title, the goal that becomes the scope draft, and the project it lands
+ * in — then straight to the approve card, which is the aha the flow serves.
+ */
+function newTaskPage(
+  chrome: Chrome,
+  project: string | null,
+  csrf: string,
+  projectRevision: number,
+  problem: string | null,
+): string {
+  return shell("new task", [
+    `<h1>new task</h1>`,
+    `<p class="meta">plain words for work you want done${
+      project === null ? "" : ` in <span class="mono">${escape(project)}</span>`
+    } — it builds overnight once you approve its scope on the next screen</p>`,
+    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
+    `<form method="post" action="/tasks/add" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<input type="hidden" name="projectRevision" value="${projectRevision}">`,
+    `<label>title<input type="text" name="title" placeholder="Add a sliding-window rate limiter to the public API"></label>`,
+    `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
+      `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
+    `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
+    `<button type="submit">create task</button>`,
+    `</form>`,
+  ].join("\n"), { chrome });
+}
+
+function taskPage(chrome: Chrome, data: {
   task: Task;
   strikes: number;
   repo: string | null;
@@ -1382,11 +1799,10 @@ function taskPage(data: {
     runs,
     decisions,
     incidents,
-    `<p class="meta"><a href="/tasks">← all tasks</a></p>`,
-  ].join("\n"));
+  ].join("\n"), { chrome });
 }
 
-function runsPage(rows: (Run & { taskId: string })[], nextCursor: number | null): string {
+function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor: number | null): string {
   const list =
     rows.length === 0
       ? `<p class="meta">No runs yet \u2014 a run is one overnight build attempt; they appear once the watch dispatches an approved task.</p>`
@@ -1401,10 +1817,10 @@ function runsPage(rows: (Run & { taskId: string })[], nextCursor: number | null)
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
-  return shell("runs", ["<h1>runs</h1>", list, older].join("\n"));
+  return shell("runs", ["<h1>runs</h1>", list, older].join("\n"), { chrome });
 }
 
-function runPage(run: Run, taskId: string, artifacts: Artifact[]): string {
+function runPage(chrome: Chrome, run: Run, taskId: string, artifacts: Artifact[]): string {
   // [label, value, mono?] — identifiers and figures read in the data face.
   const facts: [string, string | null, boolean?][] = [
     ["task", taskId, true],
@@ -1452,16 +1868,15 @@ function runPage(run: Run, taskId: string, artifacts: Artifact[]): string {
     rows,
     handoff,
     evidence,
-    `<p class="meta"><a href="/runs">← runs</a></p>`,
-  ].join("\n"));
+  ].join("\n"), { chrome });
 }
 
-function capsPage(caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): string {
+function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): string {
   if (caps === null) {
     return shell("capabilities", [
       "<h1>capabilities</h1>",
-      `<p class="meta">this console was started without a repo scope — <code>nightorders serve --repo &lt;path&gt;</code> turns this page on</p>`,
-    ].join("\n"));
+      `<p class="meta">open a project to see its capabilities — <a href="/projects">projects</a></p>`,
+    ].join("\n"), { chrome });
   }
   const list =
     caps.length === 0
@@ -1497,10 +1912,11 @@ function capsPage(caps: Capability[] | null, gaps: Gap[], repo: string, now?: Da
     "<h2>gaps, ranked by what filling them frees</h2>",
     blocked,
     `<p class="meta">read-only: probes are operator-authored shell, and a web button that runs shell is a different review</p>`,
-  ].join("\n"));
+  ].join("\n"), { chrome });
 }
 
 function settingsPage(
+  chrome: Chrome,
   existing: TokenSource | null,
   hasEnv: boolean,
   csrf: string,
@@ -1524,11 +1940,11 @@ function settingsPage(
     "</form>",
     `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
     ` <code>nightorders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
-    `<p class="meta"><a href="/">← everything waiting</a></p>`,
-  ].join("\n"));
+  ].join("\n"), { chrome });
 }
 
 function decisionPage(
+  chrome: Chrome,
   decision: Decision,
   taskId: string,
   artifacts: Artifact[],
@@ -1591,7 +2007,7 @@ function decisionPage(
     decision.state === "answered" ? answered : options,
     evidence,
     `<p class="meta"><a href="/">← everything waiting</a></p>`,
-  ].join("\n"));
+  ].join("\n"), { chrome });
 }
 
 function taskOf(store: Store, decision: Decision): string {
