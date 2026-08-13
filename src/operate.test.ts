@@ -744,3 +744,60 @@ describe("routine — standing orders from the command line", () => {
     expect(listed).toBe(EXIT.ok);
   });
 });
+
+describe("config — spend routing is authenticated authority", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "nightorders-config-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  test("set requires the credential, records who, and show explains the layers", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+
+    // No credential, no routing change.
+    const bare = await run(["config", "set", "build", "--provider", "codex", "--json"]);
+    expect(bare).toBe(EXIT.usage);
+
+    const wrong = await run(["config", "set", "build", "--provider", "codex", "--as", "alex", "--token", "nope", "--json"]);
+    expect(wrong).toBe(EXIT.refused);
+
+    const set = await run(["config", "set", "build", "--provider", "codex", "--model", "gpt-5-codex", "--as", "alex", "--token", token, "--json"]);
+    expect(set).toBe(EXIT.ok);
+    // The unmeasured-cost consequence is said at set time, not discovered at 3am.
+    expect(payload().warnings.join(" ")).toContain("UNMEASURED");
+
+    const shown = await run(["config", "show", "--json"]);
+    expect(shown).toBe(EXIT.ok);
+    expect(payload().resolved).toContainEqual(
+      expect.objectContaining({ phase: "build", provider: "codex", model: "gpt-5-codex", source: "installation" }),
+    );
+    expect(payload().installation).toContainEqual(expect.objectContaining({ updatedBy: "alex" }));
+
+    // openrouter without a model is refused as invalid, not stored broken.
+    const incomplete = await run(["config", "set", "plan", "--provider", "openrouter", "--as", "alex", "--token", token, "--json"]);
+    expect(incomplete).toBe(EXIT.usage);
+
+    const cleared = await run(["config", "clear", "build", "--as", "alex", "--token", token, "--json"]);
+    expect(cleared).toBe(EXIT.ok);
+    await run(["config", "show", "--json"]);
+    expect(payload().resolved).toContainEqual(
+      expect.objectContaining({ phase: "build", provider: "claude", source: "default" }),
+    );
+  });
+});

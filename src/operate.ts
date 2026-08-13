@@ -123,6 +123,8 @@ import {
   ROUTINE_NAME,
   type RoutineTerms,
 } from "./routine.js";
+import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { isProviderId, PROVIDER_IDS, validateSpec, reportsCost } from "./provider.js";
 import {
   build,
   DEFAULT_BUILD_TIMEOUT_MS,
@@ -277,6 +279,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
     "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
     "project-root", "schedule", "ceiling", "require",
+    "provider", "plan-model", "plan-provider",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -410,6 +413,8 @@ async function dispatch(
       return incidentCommand(positional, flags, context);
     case "routine":
       return routineCommand(positional, flags, context);
+    case "config":
+      return configCommand(positional, flags, context);
     case "serve":
       return serveCommand(flags, context);
     case "watch":
@@ -1072,6 +1077,9 @@ async function tickCommand(
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
   const model = text(flags, "model");
   const repairModel = text(flags, "repair-model");
+  const providerFlag = text(flags, "provider");
+  const planModel = text(flags, "plan-model");
+  const planProvider = text(flags, "plan-provider");
   const turns = text(flags, "turns");
   const timeoutMs = DEFAULT_BUILD_TIMEOUT_MS;
   // The ordinary lease is enough: the build's own pulse extends it while the
@@ -1149,12 +1157,29 @@ async function tickCommand(
       continue;
     }
 
+    // The phase agent, resolved BEFORE anything is claimed and snapshotted
+    // into the run: pin > flags > project > installation > default. Planner
+    // flags fall back to the pass flags, which is exactly today's behavior
+    // when no plan-specific flag is given.
+    const resolution = wantsPlan
+      ? resolvePhaseAgent(store, "plan", repo, {
+          provider: planProvider ?? providerFlag,
+          model: planModel ?? model,
+        })
+      : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
+    if (!resolution.ok) {
+      dispatched.push({ id, outcome: "skipped", reason: "agent-config", detail: resolution.problem });
+      continue;
+    }
+    const spec = resolution.spec;
+
     const claimed = acquireIfReady(store, ref.id, runner, {
       ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
       now: clock(),
       ttlMs: leaseTtlMs,
       repo,
-      ...(model === undefined ? {} : { model }),
+      provider: spec.provider,
+      ...(spec.model === null ? {} : { model: spec.model }),
       ...(text(flags, "incarnation") === undefined ? {} : { incarnation: text(flags, "incarnation") as string }),
       ...(text(flags, "max-open-decisions") === undefined
         ? {}
@@ -1218,9 +1243,10 @@ async function tickCommand(
         leaseId: lease,
         runner,
         role: "planner",
+        provider: spec.provider,
         branch: planBranch,
         worktree: planLeased.worktree.path,
-        ...(model === undefined ? {} : { model }),
+        ...(spec.model === null ? {} : { model: spec.model }),
         now: clock(),
       });
       const answers = store
@@ -1239,7 +1265,8 @@ async function tickCommand(
         clock,
         evidenceRoot: context.evidenceRoot,
         answers,
-        ...(model === undefined ? {} : { model }),
+        provider: spec.provider,
+        ...(spec.model === null ? {} : { model: spec.model }),
         ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
         ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
       });
@@ -1274,7 +1301,7 @@ async function tickCommand(
           now: clock(),
         });
         if (sealed.ok) {
-          store.clearQuota(runner, "claude", model ?? "");
+          store.clearQuota(runner, spec.provider, spec.model ?? "");
           dispatched.push({ id, outcome: "planned" });
         } else {
           dispatched.push({ id, outcome: "failed", reason: "fenced" });
@@ -1332,7 +1359,8 @@ async function tickCommand(
       runner,
       branch,
       worktree: leased.worktree.path,
-      ...(model === undefined ? {} : { model }),
+      provider: spec.provider,
+      ...(spec.model === null ? {} : { model: spec.model }),
       now: clock(),
     });
 
@@ -1348,7 +1376,8 @@ async function tickCommand(
       now: clock(),
       clock,
       timeoutMs,
-      ...(model === undefined ? {} : { model }),
+      provider: spec.provider,
+      ...(spec.model === null ? {} : { model: spec.model }),
       ...(repairModel === undefined ? {} : { repairModel }),
       ...(turns === undefined ? {} : { maxTurns: Number(turns) }),
       ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
@@ -1444,7 +1473,7 @@ async function tickCommand(
         // and proves the credential, clearing any quota stamp it was
         // dispatched through as a half-open probe.
         store.resetStrikes(ref.id);
-        store.clearQuota(runner, "claude", model ?? "");
+        store.clearQuota(runner, spec.provider, spec.model ?? "");
         dispatched.push({
           id,
           outcome: "built",
@@ -2281,6 +2310,104 @@ async function incidentCommand(
 }
 
 /**
+ * `nightorders config …` — which provider and model each phase runs on.
+ *
+ * Two scopes: the installation, and one project's override. Mutations are
+ * AUTHENTICATED and AUDITED — spend routing is authority, not preference
+ * (Codex provider review, Q4): an unauthenticated verb here would let
+ * anything that can run a shell reroute every future build. Rows are
+ * complete pairs; `show` prints what each phase actually resolves to.
+ */
+async function configCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [action, phase] = positional;
+  const repoGiven = text(flags, "repo");
+  const scope = repoGiven === undefined ? INSTALLATION_SCOPE : canonicalProject(repoGiven) ?? resolve(repoGiven);
+
+  if (action === undefined || action === "show") {
+    const installation = store.listPhaseConfig(INSTALLATION_SCOPE);
+    const project = scope === INSTALLATION_SCOPE ? [] : store.listPhaseConfig(scope);
+    const resolved = (["plan", "build", "repair"] as const).map(one => {
+      const answer = resolvePhaseAgent(store, one, scope === INSTALLATION_SCOPE ? null : scope, {});
+      return {
+        phase: one,
+        ...(answer.ok
+          ? { provider: answer.spec.provider, model: answer.spec.model, source: answer.source }
+          : { problem: answer.problem }),
+      };
+    });
+    if (json) {
+      write(JSON.stringify({ ok: true, command: "config show", installation, project, resolved }, null, 2));
+      return EXIT.ok;
+    }
+    write(`Effective phase agents${scope === INSTALLATION_SCOPE ? "" : ` for ${scope}`}:`);
+    for (const one of resolved) {
+      if ("problem" in one) {
+        write(`  ${one.phase.padEnd(8)} MISCONFIGURED — ${one.problem}`);
+      } else {
+        write(`  ${one.phase.padEnd(8)} ${one.provider}${one.model === null ? " (harness default model)" : ` · ${one.model}`}  [${one.source}]`);
+      }
+    }
+    write("");
+    write("  repair note: the repair PROVIDER always inherits the build it mends — only its model is configurable.");
+    if (installation.length === 0 && project.length === 0) {
+      write("  nothing configured — every phase runs the default (claude).");
+      write("  nightorders config set build --provider claude --model sonnet --as <you> --token <t>");
+    }
+    return EXIT.ok;
+  }
+
+  if (action !== "set" && action !== "clear") {
+    return fail(write, json, "config", "usage", "`nightorders config [show|set <phase> --provider <p> [--model <m>]|clear <phase>] [--repo <path>] --as <you> --token <t>`", EXIT.usage);
+  }
+  if (phase === undefined || !["plan", "build", "repair"].includes(phase)) {
+    return fail(write, json, `config ${action}`, "usage", "which phase? plan, build, or repair", EXIT.usage);
+  }
+
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, `config ${action}`, "usage", "changing spend routing takes `--as <you> --token <t>`", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, `config ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, phase), EXIT.refused);
+  }
+
+  if (action === "clear") {
+    const cleared = store.clearPhaseConfig(scope, phase);
+    return succeed(write, json, "config clear", { scope, phase, cleared }, () => [
+      cleared ? `Cleared ${phase} at ${scope} — it resolves one layer down now.` : `Nothing was configured for ${phase} at ${scope}.`,
+    ]);
+  }
+
+  const providerGiven = text(flags, "provider");
+  if (providerGiven === undefined || !isProviderId(providerGiven)) {
+    return fail(write, json, "config set", "usage", `--provider is one of ${PROVIDER_IDS.join(", ")}`, EXIT.usage);
+  }
+  const modelGiven = text(flags, "model") ?? null;
+  const valid = validateSpec({ provider: providerGiven, model: modelGiven });
+  if (!valid.ok) {
+    return fail(write, json, "config set", "invalid", valid.problem, EXIT.usage);
+  }
+  store.setPhaseConfig(scope, phase, providerGiven, modelGiven, acting.name, clock());
+  const warnings: string[] = [];
+  if (providerGiven === "openrouter" && (process.env["OPENROUTER_API_KEY"] ?? "") === "") {
+    warnings.push("OPENROUTER_API_KEY is not present in this environment — runs will fail until the runner exports it.");
+  }
+  if (providerGiven !== "claude") {
+    warnings.push(`${providerGiven} does not report dollar cost: its runs land as UNMEASURED, and any routine with a cost ceiling fails closed on them by design.`);
+  }
+  return succeed(write, json, "config set", { scope, phase, provider: providerGiven, model: modelGiven, warnings }, () => [
+    `${phase} at ${scope === INSTALLATION_SCOPE ? "the installation" : scope} now runs ${providerGiven}${modelGiven === null ? "" : ` · ${modelGiven}`}, set by ${acting.name}.`,
+    ...warnings.map(one => `  ! ${one}`),
+  ]);
+}
+
+/**
  * `nightorders routine …` — standing orders. Filing one is cheap; the
  * expensive act is the approval, which restates every term including "each
  * firing builds without asking" and takes the approver's credential, same
@@ -2526,7 +2653,7 @@ async function daemonCommand(
     }
 
     const watchFlags: string[] = [];
-    for (const name of ["pool", "model", "repair-model", "max", "turns", "tick-every", "bridge-every", "reconcile-every", "max-open-decisions"]) {
+    for (const name of ["pool", "model", "repair-model", "provider", "plan-model", "plan-provider", "max", "turns", "tick-every", "bridge-every", "reconcile-every", "max-open-decisions"]) {
       const value = text(flags, name);
       if (value !== undefined) watchFlags.push(`--${name}`, value);
     }

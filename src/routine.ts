@@ -22,6 +22,8 @@ import { createHash } from "node:crypto";
 import { hasForbiddenControls } from "./decision.js";
 import { BUILT_IN, parseCapabilityKey, type Routine, type Store } from "./store.js";
 import { authenticateApprover, digestOf } from "./scope.js";
+import { resolvePhaseAgent } from "./agentconfig.js";
+import { reportsCost } from "./provider.js";
 
 export type Schedule =
   | { kind: "every"; minutes: number }
@@ -257,7 +259,8 @@ export type FireOutcome =
         | "slot-taken"
         | "single-flight"
         | "budget"
-        | "unmeasured";
+        | "unmeasured"
+        | "agent-config";
       detail?: string;
     };
 
@@ -384,6 +387,44 @@ export function fireRoutine(
       );
     }
 
+    // The instance's agent, resolved INSIDE the fire transaction and pinned
+    // onto the instance below — a firing that resolved under approved terms
+    // must never be re-routed by later flags (Codex provider review,
+    // critical finding). Misconfiguration does not burn the slot: the
+    // refusal pages once and the slot stays due until a person fixes it.
+    const agent = resolvePhaseAgent(store, "build", routine.repo, {});
+    if (!agent.ok) {
+      if (!manual) {
+        store.enqueueRoutineEpisode(
+          `routine-agent:${routineId}`,
+          {
+            kind: "routine-blocked",
+            subject: `${routine.name} cannot fire: its agent is misconfigured`,
+            body: `${agent.problem}. Fix it with \`nightorders config\`; the due slot fires on the next pass.`,
+          },
+          scheduledFor,
+          now,
+        );
+      }
+      return { ok: false as const, reason: "agent-config" as const, detail: agent.problem };
+    }
+    // A ceiling against a provider that reports no dollars would fail
+    // closed on the SECOND firing anyway — refuse the first, say why, and
+    // skip the slot honestly (Codex provider review, Q6: re-proved at
+    // dispatch, not only at approval).
+    if (routine.costCeilingUsd !== null && !reportsCost(agent.spec.provider)) {
+      return skip(
+        "unmeasured",
+        `unmeasured-provider:${agent.spec.provider}`,
+        {
+          prefix: `routine-unmeasured:${routineId}`,
+          subject: `${routine.name} is blocked: ${agent.spec.provider} cannot honor a cost ceiling`,
+          body: `The track's $${routine.costCeilingUsd.toFixed(2)} ceiling needs a provider that reports dollar cost, and ${agent.spec.provider} does not. Drop the ceiling, or run the track on claude.`,
+        },
+        `${agent.spec.provider} reports no dollar cost against a $${routine.costCeilingUsd.toFixed(2)} ceiling`,
+      );
+    }
+
     if (routine.costCeilingUsd !== null) {
       const spend = store.routineSpend(
         routineId,
@@ -431,6 +472,9 @@ export function fireRoutine(
     // work, and this ordering is what keeps that guard out of the way here.
     store.placeTask(ref.id, routine.repo);
     store.linkRoutineInstance(ref.id, routine.id);
+    // The pin: this instance builds on exactly this agent, whatever flags a
+    // later pass carries.
+    store.pinTaskAgent(ref.id, agent.spec.provider, agent.spec.model);
     if (routine.requirements.length > 0) {
       store.setRequirements(ref.id, routine.requirements);
     }
