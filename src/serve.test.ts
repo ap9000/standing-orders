@@ -530,13 +530,16 @@ describe("the operations console", () => {
     store.setTaskState("t-dead", "failed", T0);
 
     const cookie = await login();
-    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    const brief = await (await fetch(url("/morning"), { headers: { cookie } })).text();
+    expect(brief).toContain("<b>1</b> built");
+    expect(brief).toContain("$1.25");
+    expect(brief).toContain("t-blocked");
+    expect(brief).toContain("t-dead");
 
-    expect(home).toContain("<b>1</b> built");
-    expect(home).toContain("$1.25");
-    expect(home).toContain("attempts-exhausted");
-    expect(home).toContain("t-blocked");
-    expect(home).toContain("t-dead");
+    // The stall is the inbox's business now: one retry card per task.
+    const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(inbox).toContain("retry stalled work");
+    expect(inbox).toContain("t-1");
   });
 
   test("the overview is live: refresh meta, building-now card, system status", async () => {
@@ -552,15 +555,13 @@ describe("the operations console", () => {
     });
     const cookie = await login();
 
-    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
-    // Building: the claim renders as a pulsing card, and the page refreshes fast.
-    expect(home).toContain("building now");
-    expect(home).toContain("t-live");
-    expect(home).toContain('http-equiv="refresh" content="10"');
-    // The fleet: the runner with its occupancy, the worktree with its branch.
-    expect(home).toContain("system status");
-    expect(home).toContain("1/2 building");
-    expect(home).toContain("nightorders-t-live-abc123");
+    const system = await (await fetch(url("/system"), { headers: { cookie } })).text();
+    expect(system).toContain('http-equiv="refresh" content="10"');
+    expect(system).toContain("1/2 building");
+    expect(system).toContain("nightorders-t-live-abc123");
+    // The inbox never auto-refreshes: it can hold typed input.
+    const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(inbox).not.toContain('http-equiv="refresh"');
   });
 
   test("tasks: list, validated filter, and atomic add from the console", async () => {
@@ -706,6 +707,29 @@ describe("the operations console", () => {
     const blocked = await post("/t/t-r/cancel", cookie, { csrf });
     expect(blocked.status).toBe(409);
     expect(store.getTask("t-r")?.state).not.toBe("cancelled");
+  });
+
+  test("inbox: approvals link (never forms), retry acts inline and returns home", async () => {
+    store.createTask({ id: "t-stalled", title: "stalled work" }, T0);
+    store.setTaskState("t-stalled", "failed", T0);
+    store.createTask({ id: "t-approve", title: "awaiting yes" }, T0);
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await post("/t/t-approve/scope", cookie, { csrf, sawDigest: "", goal: "a goal", not: "", touches: "" });
+
+    const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+    // The approval card links to the step-up screen; it never carries a
+    // password field or a nonce of its own.
+    expect(inbox).toContain("approve a scope");
+    expect(inbox).toContain("awaiting yes");
+    expect(inbox).not.toContain('name="nonce"');
+    expect(inbox).not.toContain('type="password"');
+
+    // Inline retry returns to the inbox, and the stall is gone from it.
+    const retried = await post("/t/t-stalled/requeue", cookie, { csrf, return: "inbox" });
+    expect(retried.status).toBe(303);
+    expect(retried.headers.get("location")).toBe("/");
+    expect(store.getTask("t-stalled")?.state).toBe("queued");
   });
 
   test("runs paginate by cursor and a run page shows the money and the conclusion", async () => {
@@ -980,7 +1004,8 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     expect(home).toContain("switch project");
     expect(home).toContain("+ new task");
     // The sole configured repo opened itself — no forced detour.
-    expect(home).toContain("overview");
+    expect(home).toContain("inbox");
+    expect(home).toContain(">done<");
   });
 
   test("a task outside the ceiling does not exist: page, mutations, list", async () => {

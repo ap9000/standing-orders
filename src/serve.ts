@@ -341,6 +341,22 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/") {
+      return page(
+        response,
+        200,
+        inboxPage(chromeFor(project, "inbox"), {
+          csrf: who.via === "cookie" ? who.session.csrf : "",
+          decisions: store.listDecisionsScoped(project).slice(0, 10),
+          approvals: store.scopesAwaitingApproval(project, 10),
+          requeueables: store.listRequeueablesScoped(project, now, 10),
+          cancelledBlockers: store.listCancelledBlockersScoped(project, 10),
+          gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
+          now,
+        }),
+      );
+    }
+
+    if (url.pathname === "/morning") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       return page(
         response,
@@ -362,6 +378,31 @@ export function createDecisionServer(options: ServeOptions): Server {
             .listWorktrees()
             .filter(one => project === null || sameRepo(one.repo, project)),
           episode: project === null ? null : store.latestWatchEpisode(project),
+          now,
+        }),
+      );
+    }
+
+    if (url.pathname === "/done") {
+      return page(
+        response,
+        200,
+        donePage(chromeFor(project, "done"), store.listCompletedWorkScoped(project, 50), pr => store.ciFailureObserved(pr)),
+      );
+    }
+
+    if (url.pathname === "/system") {
+      const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
+      void since;
+      return page(
+        response,
+        200,
+        systemPage(chromeFor(project, "system"), {
+          building: store.liveClaims(project, now),
+          runners: store.listRunners(),
+          worktrees: store.listWorktrees().filter(one => project === null || sameRepo(one.repo, project)),
+          episode: project === null ? null : store.latestWatchEpisode(project),
+          outboxPending: store.listNotifications("pending").length,
           now,
         }),
       );
@@ -468,16 +509,29 @@ export function createDecisionServer(options: ServeOptions): Server {
     return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
   }
 
+  /** The badge cache: five seconds per project — mutations invalidate it. */
+  const badgeCache = new Map<string, { at: number; count: number; saturated: boolean }>();
+  const bustBadge = (): void => badgeCache.clear();
+
   /** The sidebar's facts for this request. */
   function chromeFor(
     project: string | null,
     active: Chrome["active"],
     listPane?: string,
   ): Chrome {
+    const key = project ?? "";
+    const cached = badgeCache.get(key);
+    let badge = cached;
+    if (badge === undefined || Date.now() - badge.at > 5_000) {
+      const counted = store.countInboxScoped(project, clock());
+      badge = { at: Date.now(), count: counted.count, saturated: counted.saturated };
+      badgeCache.set(key, badge);
+    }
     return {
       active,
       project,
-      decisionCount: store.countUnansweredScoped(project),
+      inboxCount: badge.count,
+      inboxSaturated: badge.saturated,
       settings: options.telegramTokenFile !== undefined,
       ...(listPane === undefined ? {} : { listPane }),
     };
@@ -598,6 +652,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
     const now = clock();
+    // Any accepted mutation may change what the inbox owes; the badge
+    // re-counts within five seconds either way, this just makes it exact.
+    bustBadge();
 
     if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {
       const value = body.get("token") ?? "";
@@ -770,7 +827,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!requeued.ok) {
           return taskScreen(response, who, taskId, `not requeued: ${requeued.reason}`, 409);
         }
-        return redirect(response, taskHref(taskId));
+        // Allow-listed return only — never an arbitrary URL from the form.
+        return redirect(response, body.get("return") === "inbox" ? "/" : taskHref(taskId));
       }
       case "cancel": {
         const cancelled = store.cancelTask(taskId, now);
@@ -1348,9 +1406,11 @@ const STYLE = `
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "morning" | "tasks" | "runs" | "caps" | "projects" | "settings" | "none";
+  active: "inbox" | "work" | "done" | "morning" | "system" | "tasks" | "runs" | "caps" | "projects" | "settings" | "none";
   project: string | null;
-  decisionCount: number;
+  /** The saturated inbox count — never a sum of unbounded list reads. */
+  inboxCount: number;
+  inboxSaturated: boolean;
   settings: boolean;
   /** A rendered list pane makes the page master-detail. */
   listPane?: string;
@@ -1382,7 +1442,7 @@ function shell(
   const chrome = options.chrome;
   const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
     `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}>${label}` +
-    `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}</span>` : ""}</a>`;
+    `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
   const side = [
     `<aside class="side">`,
@@ -1393,14 +1453,17 @@ function shell(
         : `<span class="name">${escape(projectName(chrome.project))}</span>`) +
       `<a href="/projects">switch project</a></div>`,
     `<nav>`,
-    item("morning", "/", "overview", chrome.decisionCount),
-    item("tasks", "/tasks", "tasks"),
-    item("runs", "/runs", "builds"),
-    item("caps", "/caps", "requirements"),
+    item("inbox", "/", "inbox", chrome.inboxCount),
+    item("work", "/tasks", "work"),
+    item("done", "/done", "done"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
     `<span class="grow"></span>`,
     `<nav class="foot">`,
+    item("morning", "/morning", "morning brief"),
+    item("system", "/system", "system"),
+    item("runs", "/runs", "builds"),
+    item("caps", "/caps", "requirements"),
     ...(chrome.settings ? [item("settings", "/settings", "settings")] : []),
     `</nav>`,
     `</aside>`,
@@ -1431,6 +1494,194 @@ function loginPage(problem: string | null): string {
     "</form>",
     `</div>`,
   ].join("\n"), { nav: false });
+}
+
+/**
+ * The inbox (v3): only things stalling progress without a person, one card
+ * per underlying stall, each with its verb inline or one step away. No
+ * auto-refresh — approval links lead to the step-up screen, and a page
+ * that might hold typed input never re-renders itself.
+ */
+function inboxPage(chrome: Chrome, data: {
+  csrf: string;
+  decisions: (Decision & { taskId: string })[];
+  approvals: { taskId: string; title: string; goal: string; proposedAt: string }[];
+  requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number }[];
+  cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string }[];
+  gaps: Gap[];
+  now: Date;
+}): string {
+  const empty =
+    data.decisions.length + data.approvals.length + data.requeueables.length +
+    data.cancelledBlockers.length + data.gaps.length === 0;
+
+  const decisions =
+    data.decisions.length === 0
+      ? ""
+      : `<h2>answer a question</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>` +
+        data.decisions
+          .map(
+            decision =>
+              `<a class="decide-card" href="/d/${decision.id}">` +
+              `<p class="q">${escape(decision.question)}</p>` +
+              `<span class="mono meta">${escape(decision.taskId)}</span>` +
+              `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
+              `</a>`,
+          )
+          .join("\n");
+
+  const approvals =
+    data.approvals.length === 0
+      ? ""
+      : `<h2>approve a scope</h2><p class="hint">work waiting for your yes — review exactly what it may become, then agree with your password</p>` +
+        data.approvals
+          .map(
+            one =>
+              `<a class="decide-card" href="${taskHref(one.taskId)}">` +
+              `<p class="q">${escape(one.title)}</p>` +
+              `<span class="meta">${escape(one.goal.length > 120 ? one.goal.slice(0, 120) + "\u2026" : one.goal)}</span><br>` +
+              `<span class="mono meta">${escape(one.taskId)}</span> <span class="right meta">review &amp; approve \u2192</span>` +
+              `</a>`,
+          )
+          .join("\n");
+
+  const requeueables =
+    data.requeueables.length === 0
+      ? ""
+      : `<h2>retry stalled work</h2><p class="hint">builds that gave up and now wait for a person — retry resolves the incidents, resets the strikes, and requeues</p>` +
+        data.requeueables
+          .map(
+            one =>
+              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> ${escape(one.title)}` +
+              `${one.incidentCount > 0 ? ` <span class="badge badge-failed">${one.incidentCount} incident${one.incidentCount > 1 ? "s" : ""}</span>` : ""}` +
+              `${one.strikes > 0 ? ` <span class="meta">${one.strikes} failed attempt${one.strikes > 1 ? "s" : ""}</span>` : ""}` +
+              `<span class="right"><form method="post" action="${taskHref(one.taskId)}/requeue" class="inline">` +
+              `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+              `<input type="hidden" name="return" value="inbox">` +
+              `<button type="submit">retry</button></form></span></p>`,
+          )
+          .join("\n");
+
+  const cancelled =
+    data.cancelledBlockers.length === 0
+      ? ""
+      : `<h2>repair a dependency</h2><p class="hint">these were cancelled, but other tasks still wait on them — re-create the blocker or remove the dependency</p>` +
+        data.cancelledBlockers
+          .map(
+            one =>
+              `<p class="row"><a href="${taskHref(one.blockerId)}">${escape(one.blockerId)}</a> ` +
+              `<span class="meta">cancelled \u00b7 ${one.dependentCount} task${one.dependentCount > 1 ? "s" : ""} waiting (e.g. ${escape(one.exampleDependent)})</span></p>`,
+          )
+          .join("\n");
+
+  const gaps =
+    data.gaps.length === 0
+      ? ""
+      : `<h2>supply a requirement</h2><p class="hint">approved work is ready except for these — fill one and its tasks start</p>` +
+        data.gaps
+          .map(
+            gap =>
+              `<p class="row"><a href="/caps">${escape(gap.key)}</a> ` +
+              `<span class="meta">frees ${gap.unblocks.length} task${gap.unblocks.length > 1 ? "s" : ""}</span>` +
+              `<span class="right meta">how to fix \u2192</span></p>`,
+          )
+          .join("\n");
+
+  return shell("inbox", [
+    `<h1>inbox</h1>`,
+    `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, the machine needs nothing</p>`,
+    empty ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/morning">Read the morning brief</a> or <a href="/tasks">see what is in flight</a>.</p></div>` : "",
+    decisions,
+    approvals,
+    requeueables,
+    cancelled,
+    gaps,
+  ].join("\n"), { chrome });
+}
+
+/** System: the machinery — workers, background service, workspaces. */
+function systemPage(chrome: Chrome, data: {
+  building: { taskId: string; runner: string; claimedAt: string; expiresAt: string }[];
+  runners: Runner[];
+  worktrees: WorktreeRow[];
+  episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
+  outboxPending: number;
+  now: Date;
+}): string {
+  const nowMs = data.now.getTime();
+  const runnerCards = data.runners
+    .filter(one => one.retiredAt === null)
+    .map(one => {
+      const age = nowMs - new Date(one.heartbeatAt).getTime();
+      const dot = age < 5 * 60_000 ? "dot-ok" : age < 60 * 60_000 ? "dot-warn" : "dot-off";
+      const said = age < 5 * 60_000 ? "alive" : age < 60 * 60_000 ? `quiet ${Math.round(age / 60_000)}m` : "not heard from";
+      const busy = data.building.filter(claim => claim.runner === one.name).length;
+      return (
+        `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
+        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building</span></div>`
+      );
+    });
+  const worktreeCards = data.worktrees.map(tree => {
+    const leased = tree.leasedAt !== null && tree.releasedAt === null;
+    const dot = leased ? "dot-ok" : tree.verified ? "dot-off" : "dot-warn";
+    const state = leased ? "building" : tree.verified ? "free" : "needs review";
+    const name = tree.path.split("/").pop() ?? tree.path;
+    return (
+      `<div class="stat-card"><span class="k"><span class="dot ${dot}${leased ? " pulse" : ""}"></span><span class="mono">${escape(name)}</span></span>` +
+      `<span class="v">workspace \u00b7 ${escape(tree.branch)} \u00b7 ${state}</span></div>`
+    );
+  });
+  const watchCard =
+    data.episode === null
+      ? ""
+      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>background service</span>` +
+        `<span class="v">${
+          data.episode.endedAt === null
+            ? `running since ${escape(when(data.episode.startedAt))}`
+            : `last run: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${escape(when(data.episode.endedAt))}`
+        }</span></div>`;
+  const cards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
+  return shell("system", [
+    `<h1>system</h1>`,
+    `<p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p>`,
+    cards.length === 0
+      ? `<p class="meta">no worker machine registered yet \u2014 <code>nightorders runner register &lt;name&gt;</code>, then <code>nightorders daemon install</code> keeps the background service running</p>`
+      : `<div class="cards">${cards.join("")}</div>`,
+    data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} notification(s) pending delivery</p>` : "",
+  ].join("\n"), { chrome, refreshSeconds: data.building.length > 0 ? 10 : 60 });
+}
+
+/** Completed work: one row per done task, its final run and PR attached. */
+function donePage(
+  chrome: Chrome,
+  rows: ReturnType<Store["listCompletedWorkScoped"]>,
+  ciRed: (pr: number) => boolean,
+): string {
+  const list =
+    rows.length === 0
+      ? `<p class="meta">Nothing completed yet \u2014 finished tasks land here with their final build, cost, and pull request.</p>`
+      : rows
+          .map(row => {
+            const pr =
+              row.prNumber === null
+                ? row.publicationState === null
+                  ? ""
+                  : ` <span class="badge">${escape(row.publicationState)}</span>`
+                : ` <a href="${escape(row.prUrl ?? "#")}" class="badge badge-open">PR #${row.prNumber}</a>` +
+                  (ciRed(row.prNumber) ? ` <span class="badge badge-failed">CI failing</span>` : "");
+            return (
+              `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
+              `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}</p>` +
+              `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
+              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.costUsd === null ? "" : ` \u00b7 $${row.costUsd.toFixed(2)}`}</p></div>`
+            );
+          })
+          .join("\n");
+  return shell("done", [
+    `<h1>done</h1>`,
+    `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, what it cost, and its pull request</p>`,
+    list,
+  ].join("\n"), { chrome });
 }
 
 function homePage(chrome: Chrome, data: {
@@ -1584,11 +1835,11 @@ function homePage(chrome: Chrome, data: {
         ].join("\n")
       : "";
 
-  return shell("night orders", [
-    `<h1>overview</h1>`,
+  return shell("morning brief", [
+    `<h1>morning brief</h1>`,
     data.repo === null
       ? ""
-      : `<p class="meta"><strong>${escape(projectName(data.repo))}</strong> — what happened overnight, and what needs you</p>`,
+      : `<p class="meta"><strong>${escape(projectName(data.repo))}</strong> — the last 24 hours, honestly labeled: a rolling window, not a calendar night</p>`,
     startHere,
     ledger,
     `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
