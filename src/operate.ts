@@ -114,6 +114,7 @@ import {
 } from "./runner.js";
 import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf } from "./scope.js";
 import { WorktreePool } from "./worktree.js";
+import { fireRoutine } from "./routine.js";
 import {
   build,
   DEFAULT_BUILD_TIMEOUT_MS,
@@ -1081,6 +1082,25 @@ async function tickCommand(
   // what acts on them.
   await probeRepo(store, repo, runner, clock());
 
+  // Standing orders fire before the ready set is read, so a fresh instance
+  // joins THIS pass. dueRoutines only nominates; every proof — approval
+  // digest, pause, due, single-flight, budget — is re-made inside
+  // fireRoutine's own transaction, and skipped slots ledger and page
+  // themselves there. This loop just reports.
+  const routines: { routine: string; outcome: string; taskId?: string; detail?: string }[] = [];
+  for (const routine of store.dueRoutines(repo, clock())) {
+    const outcome = fireRoutine(store, routine.id, clock());
+    routines.push(
+      outcome.ok
+        ? { routine: routine.name, outcome: "fired", taskId: outcome.taskId }
+        : {
+            routine: routine.name,
+            outcome: outcome.reason,
+            ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
+          },
+    );
+  }
+
   const ready = store.listReady(clock());
   const considered = ready.length;
   const dispatched: TickOutcome[] = [];
@@ -1533,6 +1553,13 @@ async function tickCommand(
 
   const summary = () => {
     const lines = [`Considered ${considered}, built ${built}, parked ${parked}, broke ${broke}.`];
+    for (const entry of routines) {
+      lines.push(
+        entry.outcome === "fired"
+          ? `  routine ${entry.routine.padEnd(16)} fired  ${entry.taskId ?? ""}`.trimEnd()
+          : `  routine ${entry.routine.padEnd(16)} skipped  ${entry.detail ?? entry.outcome}`,
+      );
+    }
     for (const entry of dispatched) {
       const detail =
         entry.outcome === "built"
@@ -1559,18 +1586,20 @@ async function tickCommand(
     return fail(write, json, "tick", "build-failed", `${broke} of ${dispatched.length} dispatched tasks broke`, EXIT.failed, {
       considered,
       dispatched,
+      routines,
     });
   }
   // A pass whose only events were parks or drafted plans exits 0: nothing
   // broke, nothing needs code — the questions and the plan are in the
   // attention surface where they belong, which is the system working.
   if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned")) {
-    return succeed(write, json, "tick", { considered, dispatched }, summary);
+    return succeed(write, json, "tick", { considered, dispatched, routines }, summary);
   }
   if (considered === 0) {
     return fail(write, json, "tick", "empty", "nothing is ready", EXIT.refused, {
       considered,
       dispatched,
+      routines,
     });
   }
   return fail(
@@ -1580,7 +1609,7 @@ async function tickCommand(
     "nothing-dispatched",
     "everything ready is waiting on a person or held by somebody else",
     EXIT.refused,
-    { considered, dispatched },
+    { considered, dispatched, routines },
   );
 }
 
