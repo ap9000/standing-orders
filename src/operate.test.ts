@@ -1011,8 +1011,15 @@ describe("intake pr-comments — named reviewers only, idempotent by comment id 
     store.placeTask(ref, "/code/thing");
     const runId = store.startRun({ taskRef: ref, leaseId: "l-1", runner: "b-1", branch: "so/t-pub", worktree: "/w", now: T0 });
     store.finishRun(runId, { outcome: "built", now: T0 });
+    // A REAL evidence file: ingestion now verifies bytes before binding
+    // words to them (audit IV-10), so the fixture earns its hash.
+    const { mkdirSync: mkdirSync2, writeFileSync: writeFileSync2 } = await import("node:fs");
+    const { createHash: createHash2 } = await import("node:crypto");
+    const patchBytes = Buffer.from("diff --git a/x b/x\n+guard\n", "utf8");
+    mkdirSync2(join(dir, "evidence", String(runId)), { recursive: true });
+    writeFileSync2(join(dir, "evidence", String(runId), "terminal-diff.patch"), patchBytes);
     store.saveArtifact(
-      { run: runId, kind: "terminal-diff", key: `${runId}/terminal-diff.patch`, bytesOriginal: 5, bytesStored: 5, truncated: false, sha256: "f".repeat(64), capture: "git diff (exit 0)" },
+      { run: runId, kind: "terminal-diff", key: `${runId}/terminal-diff.patch`, bytesOriginal: patchBytes.length, bytesStored: patchBytes.length, truncated: false, sha256: createHash2("sha256").update(patchBytes).digest("hex"), capture: "git diff (exit 0)" },
       T0,
     );
     const pub = store.createPublicationIntent(

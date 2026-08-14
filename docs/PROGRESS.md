@@ -227,6 +227,61 @@ diff, because during the agent turn HEAD must equal base by design.
 | Operator note + honest requeue label | **done** — late entry, shipped in 8dbdbba | run_note (v11 additive): immutable, bounded by the decision-note validator (500u/2000B, control/bidi refused), ordinary authenticated mutation with CSRF — NO nonce, nothing here approves anything; ceiling-checked like every run resource; rendered beside the machine's record. The requeue act now says what it keeps: "retry — branch and workspace kept", because runs and evidence are audit history and nothing destructive hides behind one tap. Fresh-retry-from-clean-base stays a future designed workflow with branch generations, per the Codex cut |
 | Deterministic hard stop | **done** — late entry, shipped in 719f2d0 | providers spawn detached in their own process group, set by the invocation gateway and nowhere else; the streaming AND buffered transports both register live providers and both kill the GROUP on timeout (the execFile path detours through spawn when a group is required, same contract: output caps, overflow≠timeout, ENOENT). Watch: first signal graceful + starts --stop-grace (default 30s); expiry or a second signal SIGKILLs every live group via terminateLiveProviders. Runs finalize as failures, worktrees preserved, fences keep late output out of commits. The test spawns a grandchild and proves the corpse: kill(pid, 0) must throw |
 
+## The M5–M8 post-build audit (2026-08-13, Codex: 0 critical, 6 high IV, 10 bugs, 6 deviations, 10 test gaps — scratchpad codex-m5m8-audit.md is the full report)
+
+**Fixed this pass** (audit ids): IV-2 revisions and CI repairs INHERIT the
+source scope's outOfScope and touches (createConsoleTask takes a full
+scope draft; the approval screen stops claiming "no exclusions" over work
+that had them). IV-3 revision approval FAILS CLOSED: no nonce and no
+approve form over a brief that does not verify, the POST re-proves the
+brief at the moment of the yes, briefs are size-checked BEFORE any task
+exists (structured JSON is never byte-truncated), and the builder refuses
+typed `revision-brief` instead of silently building comment-free. C-3
+sealing is ONE transaction (store.sealRevision: task + artifact + relation
++ exactly the expected comment batch or rollback; the brief file is
+written first under a nonce name — an orphan file is not authority). IV-4
+the planner brief fences its inputs (inert(): controls collapse, protocol
+prefixes break, fences cannot terminate — GitHub issue titles reach the
+planner as quoted data). IV-5 partial: setup runs under an extended
+denylist, setup stderr is REDACTED and bounded before touching SQLite or
+the outbox, and `setup set` refuses credential-shaped commands (a `$VAR`
+reference passes; a literal value does not). IV-6 Windows kills the tree
+via taskkill /T /F (stated untested on physical Windows, like the
+daemon). IV-8 `-o` writes 0600, never through a symlink or onto a
+non-regular file. IV-9 PR bodies neutralize agent text (inline prose
+flattens newlines; conclusions ride INDENTED, which no backtick can
+terminate; template v2). IV-10 comments, seals, and PR-comment ingestion
+all VERIFY the diff bytes before words attach to them. IV-11 only an
+https github.com pull URL earns an anchor. C-1 watch --json sends every
+progress line to stderr — stdout is one envelope. C-2 CI episodes are
+keyed repo+PR+head (PR #55 in repo A can no longer light repo B's repair
+button); repair briefs bind the OBSERVED failing head and its observation
+time, never the click. C-6 merged/closed PRs leave the watch and the
+review queue (publication.remote_state, additive). C-5 pr-comments
+requires publication.githubRepo === grant.github, paginates, validates
+the array, matches logins case-insensitively. C-7 deterministic ids
+truncate the prefix, never the identity-bearing suffix. C-8 initFailed
+requires finalMessage === null — a failed turn WITH words is an agent
+failure. C-9 source_key races land in ON CONFLICT DO NOTHING. C-10 skills
+ownership = exact header + mark; damaged AGENTS.md blocks refuse typed
+instead of false-success. IV-1 partial: Context.shouldStop fences routine
+fires and every claim admission mid-pass, and a stopping watch publishes
+nothing more. Tests: +IV-2/IV-3 revision integrity E2E, +same-day-v11
+migration fixture (the exact e2a08c5 shape), +C-8 nonzero-with-message.
+
+**Deferred, named**: IV-1's durable stopping fence re-proved post-provider
+(the in-memory fence covers admissions; a crash mid-stop is the successor
+recovery's case). IV-7 secret scanning of terminal diffs before evidence/
+publication (needs a detector worth trusting; `redacted` column already
+exists). IV-5's full allowlisted setup environment. SD-1 comment
+side/context + supersede-on-edit UI. SD-2 handoff-artifact CONSUMPTION by
+successors (written, verified, not yet read into cold briefs). SD-3
+repo+runner setup scoping. SD-4 observed-green/dependency/conflict
+ranking for /review (needs persisted check state). SD-5 remainder
+(task-page publication/diff summaries). SD-6 selector/mutation classes on
+intake grants. TG-1 watch-level signal tests, TG-3 full envelope sweep,
+TG-4/5/6/7/10 remainders. Windows remains code-complete, machine-untested.
+
 ## M7 — agent citizenship · M8 — the outer loop (2026-08-13, same roadmap)
 
 | Item | State | Proof |

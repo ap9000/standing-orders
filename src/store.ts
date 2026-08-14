@@ -374,6 +374,8 @@ export type Publication = {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  /** GitHub's observed verdict — MERGED/CLOSED means done, whatever local state says. */
+  remoteState: string | null;
 };
 
 /** Every mutation takes one. A repeat returns the first answer, unchanged. */
@@ -1024,7 +1026,10 @@ CREATE TABLE IF NOT EXISTS publication (
   attempts    INTEGER NOT NULL DEFAULT 0,
   last_error  TEXT,
   created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL
+  updated_at  TEXT NOT NULL,
+  -- The remote's own verdict, observed (M8 audit C-6): MERGED/CLOSED ends
+  -- the watch without widening the local state CHECK.
+  remote_state TEXT
 );
 
 -- A machine that may be given work.
@@ -1403,6 +1408,8 @@ function migrate(db: Database): void {
   // the fresh SCHEMA's IF NOT EXISTS.
   addColumn(db, "task_ref", "revision_of", "TEXT");
   addColumn(db, "task_ref", "revision_brief_artifact", "INTEGER REFERENCES artifact(id)");
+  // v11c (M8 audit C-6): the remote's observed PR verdict, additive.
+  addColumn(db, "publication", "remote_state", "TEXT");
   // v11c (M8.17 PR-comment intake): the ingest idempotency key, additive —
   // a same-day v11 database gains it here; fresh ones carry it already.
   // Its unique index rides the post-migration block in openStore.
@@ -2511,14 +2518,13 @@ export class Store {
     if (artifact === undefined || artifact.kind !== "terminal-diff") {
       throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — comments bind to the exact bytes reviewed`);
     }
-    if (args.sourceKey !== undefined) {
-      const seen = this.db.prepare("SELECT 1 AS hit FROM diff_comment WHERE source_key = ?").get(args.sourceKey);
-      if (seen !== undefined) return null; // already ingested — one ingest, ever
-    }
+    // The unique index is the real concurrent guard (audit C-9): a race on
+    // the same source key lands in DO NOTHING, not in a thrown constraint.
     const inserted = this.db
       .prepare(
         `INSERT INTO diff_comment (artifact, artifact_sha, run, path, line, note, author, created_at, source_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO NOTHING`,
       )
       .run(
         args.artifactId,
@@ -2531,7 +2537,7 @@ export class Store {
         now.toISOString(),
         args.sourceKey ?? null,
       );
-    return Number(inserted.lastInsertRowid);
+    return Number(inserted.changes) === 0 ? null : Number(inserted.lastInsertRowid);
   }
 
   /** Live (unsuperseded, unconsumed) comments on a run's terminal diff. */
@@ -2569,6 +2575,48 @@ export class Store {
     this.db
       .prepare("UPDATE task_ref SET revision_of = ?, revision_brief_artifact = ? WHERE id = ?")
       .run(revisionOf, briefArtifact, taskRef);
+  }
+
+  /**
+   * Seal a revision in ONE transaction (Codex M5-M8 audit, C-3): the task
+   * with its INHERITED scope limits, the brief's artifact row, the
+   * revision relation, and — when comments are being consumed — exactly
+   * the expected batch, or the whole seal rolls back. The brief FILE is
+   * written by the caller before this runs; a file whose transaction
+   * failed is an orphan on disk, not authority — no artifact row points
+   * at it. Two concurrent seals race on the comment consumption count and
+   * exactly one wins.
+   */
+  sealRevision(
+    args: {
+      task: { id?: string; title: string; repo?: string; goal: string; outOfScope?: string | null; touches?: string[] };
+      artifact: { run: number; kind: Artifact["kind"]; key: string; bytesOriginal: number; bytesStored: number; truncated: boolean; sha256: string; capture: string };
+      revisionOf: string;
+      /** Comments to consume, or null when the brief has no comment batch (CI repair). */
+      commentIds: readonly number[] | null;
+      sourceRun: number;
+    },
+    now: Date,
+  ): { ok: true; id: string; artifactId: number } | { ok: false; reason: string } {
+    try {
+      return this.transact(() => {
+        const made = this.createConsoleTask(args.task, now);
+        if (!made.ok) return { ok: false as const, reason: made.reason };
+        const artifactId = this.saveArtifact(args.artifact, now);
+        const ref = this.lookupRef(made.id);
+        if (ref === null) throw new Error("the task this transaction just created has no ref — impossible, roll back");
+        this.markRevision(ref.id, args.revisionOf, artifactId);
+        if (args.commentIds !== null) {
+          const consumed = this.consumeDiffComments(args.sourceRun, args.commentIds, made.id);
+          if (consumed !== args.commentIds.length) {
+            throw new Error("another seal took part of this batch — nothing is half-sealed, roll back");
+          }
+        }
+        return { ok: true as const, id: made.id, artifactId };
+      });
+    } catch (error) {
+      return { ok: false, reason: String((error as Error).message ?? error) };
+    }
   }
 
   notesForRun(runId: number): { id: number; author: string; note: string; createdAt: string }[] {
@@ -2823,7 +2871,18 @@ export class Store {
    * scope together or not at all.
    */
   createConsoleTask(
-    spec: { id?: string; title: string; repo?: string; goal?: string },
+    spec: {
+      id?: string;
+      title: string;
+      repo?: string;
+      goal?: string;
+      /** Revision tasks inherit these from the source scope (Codex M5-M8
+       * audit, IV-2): a revision that silently drops the original's
+       * exclusions and path limits is an approval screen claiming "no
+       * exclusions" over work that had them. */
+      outOfScope?: string | null;
+      touches?: string[];
+    },
     now: Date,
     cap = 500,
   ):
@@ -2864,7 +2923,11 @@ export class Store {
       // in placeTask never fires here — atomic create, place, then scope.
       if (spec.repo !== undefined && spec.repo !== "") this.placeTask(ref.id, spec.repo);
       if (spec.goal !== undefined) {
-        const draft = { goal: spec.goal.trim(), outOfScope: null, touches: [] as string[] };
+        const draft = {
+          goal: spec.goal.trim(),
+          outOfScope: spec.outOfScope ?? null,
+          touches: spec.touches ?? ([] as string[]),
+        };
         this.saveScope({
           taskId: id,
           ...draft,
@@ -4768,35 +4831,61 @@ export class Store {
       .run(now.toISOString(), id);
   }
 
-  /** PRs this control plane opened and should keep watching. */
+  /** PRs this control plane opened and should keep watching — remotely
+   * merged/closed ones have left the watch (audit C-6). */
   openedPublications(): Publication[] {
     return this.db
-      .prepare("SELECT * FROM publication WHERE state = 'opened' ORDER BY id")
+      .prepare(
+        "SELECT * FROM publication WHERE state = 'opened' AND (remote_state IS NULL OR remote_state NOT IN ('MERGED','CLOSED')) ORDER BY id",
+      )
       .all()
       .map(readPublication);
   }
 
-  /** Whether an UNRESOLVED CI failure episode is open for this PR (M8.19). */
-  hasOpenCiEpisode(prNumber: number): boolean {
-    const row = this.db
-      .prepare("SELECT 1 AS hit FROM notification WHERE dedupe_key LIKE ? AND resolved_at IS NULL LIMIT 1")
-      .get(`ci:${prNumber}:%`);
-    return row !== undefined;
+  /** Whether an UNRESOLVED CI failure episode is open for exactly this repository's PR (M8.19; audit C-2). */
+  hasOpenCiEpisode(githubRepo: string, prNumber: number): boolean {
+    return this.latestOpenCiEpisode(githubRepo, prNumber) !== null;
+  }
+
+  /** The remote's own verdict on a PR — MERGED/CLOSED ends the watch (audit C-6). */
+  recordPublicationRemoteState(id: number, remoteState: string, now: Date): void {
+    this.db
+      .prepare("UPDATE publication SET remote_state = ?, updated_at = ? WHERE id = ?")
+      .run(remoteState, now.toISOString(), id);
   }
 
   /**
    * Resolve CI episodes for a PR whose failing head is gone — a new commit
    * superseded it, or the same head turned green. Episodes are keyed
-   * `ci:<pr>:<headOid>`; only the surviving key (if any) stays open.
+   * `ci:<githubRepo>:<pr>:<headOid>` (the repository is part of the
+   * identity — Codex M5-M8 audit, C-2); the legacy `ci:<pr>:<head>` shape
+   * is swept too, so pre-rename rows cannot linger open forever.
    */
-  resolveCiEpisodes(prNumber: number, exceptKey: string | null, now: Date): number {
+  resolveCiEpisodes(githubRepo: string, prNumber: number, exceptKey: string | null, now: Date): number {
     const { changes } = this.db
       .prepare(
         `UPDATE notification SET resolved_at = ?
-          WHERE dedupe_key LIKE ? AND resolved_at IS NULL AND dedupe_key != COALESCE(?, '')`,
+          WHERE (dedupe_key LIKE ? OR dedupe_key LIKE ?) AND resolved_at IS NULL AND dedupe_key != COALESCE(?, '')`,
       )
-      .run(now.toISOString(), `ci:${prNumber}:%`, exceptKey);
+      .run(now.toISOString(), `ci:${githubRepo}:${prNumber}:%`, `ci:${prNumber}:%`, exceptKey);
     return Number(changes);
+  }
+
+  /**
+   * The latest OPEN failing episode for exactly this repository's PR —
+   * head and observation time included, because a repair brief binds the
+   * head the failure was SEEN on, never the click (audit C-2).
+   */
+  latestOpenCiEpisode(githubRepo: string, prNumber: number): { headSha: string; createdAt: string } | null {
+    const row = this.db
+      .prepare(
+        "SELECT dedupe_key, created_at FROM notification WHERE dedupe_key LIKE ? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1",
+      )
+      .get(`ci:${githubRepo}:${prNumber}:%`);
+    if (row === undefined) return null;
+    const key = String(row["dedupe_key"]);
+    const headSha = key.slice(key.lastIndexOf(":") + 1);
+    return { headSha, createdAt: String(row["created_at"]) };
   }
 
   /** What is being built right now: current, unexpired claims with their task and holder. */
@@ -6033,6 +6122,8 @@ function readPublication(row: Record<string, unknown>): Publication {
     lastError: row["last_error"] === null ? null : String(row["last_error"]),
     createdAt: String(row["created_at"]),
     updatedAt: String(row["updated_at"]),
+    remoteState:
+      row["remote_state"] === null || row["remote_state"] === undefined ? null : String(row["remote_state"]),
   };
 }
 

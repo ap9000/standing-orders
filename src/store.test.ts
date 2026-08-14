@@ -1431,3 +1431,60 @@ describe("migration from a v6 database (planning, v7)", () => {
     }
   });
 });
+
+describe("the same-day upgrade shape (audit TG-8)", () => {
+  test("a v11 database whose diff_comment predates source_key opens, gains the column, and gets its index", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { createRequire } = await import("node:module");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "standing-orders-sameday-"));
+    const file = join(dir, "orders.db");
+    try {
+      // The exact e2a08c5 regression shape: diff_comment exists WITHOUT
+      // source_key, so the fresh schema's CREATE TABLE IF NOT EXISTS skips
+      // it — and a partial index inside the schema block would die before
+      // addColumn could run. The index lives in the post-migration block
+      // precisely so this file opens.
+      const require = createRequire(import.meta.url);
+      const { DatabaseSync } = require("node:sqlite");
+      const old = new DatabaseSync(file);
+      old.exec(`
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (11);
+        CREATE TABLE diff_comment (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          artifact      INTEGER NOT NULL,
+          artifact_sha  TEXT NOT NULL,
+          run           INTEGER NOT NULL,
+          path          TEXT,
+          line          INTEGER,
+          note          TEXT NOT NULL,
+          author        TEXT NOT NULL,
+          created_at    TEXT NOT NULL,
+          superseded_by INTEGER,
+          consumed_by   TEXT
+        );
+      `);
+      old.close();
+
+      const store = openStore(file);
+      try {
+        const columns = store.handle
+          .prepare("PRAGMA table_info(diff_comment)")
+          .all()
+          .map((row: Record<string, unknown>) => String(row["name"]));
+        expect(columns).toContain("source_key");
+        const index = store.handle
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'diff_comment_source'")
+          .get();
+        expect(index).toBeDefined();
+      } finally {
+        store.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+

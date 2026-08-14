@@ -42,8 +42,8 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readVerifiedArtifact, storeEvidence } from "./evidence.js";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile } from "./evidence.js";
 import {
   type Artifact,
   type DiffComment,
@@ -551,7 +551,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         .map(one => ({
           publication: one,
           taskId: store.externalIdFor(one.taskRef) ?? "?",
-          failing: one.prNumber === null ? false : store.hasOpenCiEpisode(one.prNumber),
+          failing: one.prNumber === null ? false : store.hasOpenCiEpisode(one.githubRepo, one.prNumber),
         }))
         .sort((a, b) =>
           a.failing !== b.failing
@@ -692,7 +692,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           store.liveDiffComments(found.id),
           (() => {
             const publication = store.publicationForRun(found.id);
-            return publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.prNumber)
+            return publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber)
               ? { pr: publication.prNumber }
               : null;
           })(),
@@ -905,10 +905,14 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const now = clock();
     const scope = store.getScope(taskId);
+    const revision = revisionViewOf(ref);
+    // A broken revision brief blocks the whole approval surface (audit
+    // IV-3): no nonce is minted over a batch nobody can verify.
+    const revisionBroken = revision !== null && "problem" in revision;
     // The nonce is minted at render, per viewer, bound to the digest being
     // shown — the browser approval flow starts here and nowhere else.
     const nonce =
-      who.via === "cookie" && scope !== null && !approvalOf(scope).approved
+      who.via === "cookie" && scope !== null && !approvalOf(scope).approved && !revisionBroken
         ? mintApprovalNonce(who.name, taskId, scope.digest)
         : "";
     const paneProject = who.via === "cookie" ? who.session.project : null;
@@ -924,7 +928,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
         planDocument: ref === null ? null : planDocumentOf(ref.id),
-        revision: revisionViewOf(ref),
+        revision,
         repo: ref?.repo ?? null,
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
@@ -1276,6 +1280,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (terminal === undefined) {
         return refuse(response, who, 400, "this run has no terminal diff to comment on", `/r/${id}`);
       }
+      // The bytes must VERIFY before words attach to them (audit IV-10):
+      // "a comment on the exact reviewed bytes" is a lie if the bytes are
+      // gone or no longer hash to their record.
+      const proven = readVerifiedArtifact(evidenceRoot, terminal);
+      if (!proven.ok) {
+        return refuse(response, who, 409, `the terminal diff no longer verifies (${proven.problem}) — nothing to comment on`, `/r/${id}`);
+      }
       const note = validateNote(body.get("note") ?? "");
       if (!note.ok) return refuse(response, who, 400, note.problem, `/r/${id}`);
       const rawPath = (body.get("path") ?? "").trim();
@@ -1313,20 +1324,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       const sourceScope = store.getScope(sourceTaskId);
       const repo = taskRepoOf(found.taskRef);
       const terminal = store.artifactsFor(id).find(one => one.kind === "terminal-diff");
-      const made = store.createConsoleTask(
-        {
-          title: `revise ${sourceTaskId}: ${comments.length} review comment(s) on build #${id}`,
-          ...(repo === null ? {} : { repo }),
-          goal:
-            `${sourceScope?.goal ?? `revise ${sourceTaskId}`}` +
-            ` — apply the review comments recorded on build #${id}; the revision brief carries the exact batch`,
-        },
-        now,
-      );
-      if (!made.ok) return refuse(response, who, 400, `could not create the revision task: ${made.reason}`, `/r/${id}`);
+      if (terminal !== undefined) {
+        const proven = readVerifiedArtifact(evidenceRoot, terminal);
+        if (!proven.ok) {
+          return refuse(response, who, 409, `the reviewed diff no longer verifies (${proven.problem}) — the batch cannot seal against it`, `/r/${id}`);
+        }
+      }
+      // The brief is serialized and size-checked BEFORE anything is created
+      // (Codex M5-M8 audit, IV-3): a structured artifact must never pass
+      // through byte truncation — truncated JSON is not a smaller brief,
+      // it is no brief wearing one's name.
       const brief = {
         schema: 1 as const,
-        targetTask: made.id,
         sourceTask: sourceTaskId,
         sourceRun: id,
         head: found.headRevision,
@@ -1340,20 +1349,46 @@ export function createDecisionServer(options: ServeOptions): Server {
           createdAt: one.createdAt,
         })),
       };
-      const artifactId = storeEvidence(
-        store,
-        evidenceRoot,
-        id,
-        "revision-brief",
-        `revision-brief-${made.id}.json`,
-        Buffer.from(JSON.stringify(brief, null, 2), "utf8"),
-        "machine-authored revision brief (exit 0)",
+      const briefBytes = Buffer.from(JSON.stringify(brief, null, 2), "utf8");
+      if (briefBytes.length > EVIDENCE_CAPS["revision-brief"]) {
+        return refuse(response, who, 400, "this batch is too large for one brief — seal it in parts", `/r/${id}`);
+      }
+      // The file first, under a nonce name — a file whose seal fails is an
+      // orphan on disk, never authority. Then ONE transaction: task with
+      // the source scope's limits INHERITED (audit IV-2 — a revision that
+      // drops the exclusions is an approval screen telling a lie), the
+      // artifact row, the relation, and exactly this comment batch.
+      const briefName = `revision-brief-${randomBytes(6).toString("hex")}.json`;
+      const key = writeEvidenceFile(evidenceRoot, id, briefName, briefBytes);
+      const sealed = store.sealRevision(
+        {
+          task: {
+            title: `revise ${sourceTaskId}: ${comments.length} review comment(s) on build #${id}`,
+            ...(repo === null ? {} : { repo }),
+            goal:
+              `${sourceScope?.goal ?? `revise ${sourceTaskId}`}` +
+              ` — apply the review comments recorded on build #${id}; the revision brief carries the exact batch`,
+            outOfScope: sourceScope?.outOfScope ?? null,
+            touches: sourceScope?.touches ?? [],
+          },
+          artifact: {
+            run: id,
+            kind: "revision-brief",
+            key,
+            bytesOriginal: briefBytes.length,
+            bytesStored: briefBytes.length,
+            truncated: false,
+            sha256: createHash("sha256").update(briefBytes).digest("hex"),
+            capture: "machine-authored revision brief (exit 0)",
+          },
+          revisionOf: sourceTaskId,
+          commentIds: comments.map(one => one.id),
+          sourceRun: id,
+        },
         now,
       );
-      const newRef = store.lookupRef(made.id);
-      if (newRef !== null) store.markRevision(newRef.id, sourceTaskId, artifactId);
-      store.consumeDiffComments(id, comments.map(one => one.id), made.id);
-      return redirect(response, taskHref(made.id));
+      if (!sealed.ok) return refuse(response, who, 409, `could not seal the revision: ${sealed.reason}`, `/r/${id}`);
+      return redirect(response, taskHref(sealed.id));
     }
 
     const draftRepair = /^\/r\/([0-9]{1,15})\/draft-repair$/.exec(url.pathname);
@@ -1371,58 +1406,73 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (publication === null || publication.prNumber === null) {
         return refuse(response, who, 400, "this run published no pull request", `/r/${id}`);
       }
-      if (!store.hasOpenCiEpisode(publication.prNumber)) {
+      if (!store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber)) {
         return refuse(response, who, 400, "no failing CI is observed on this PR right now", `/r/${id}`);
       }
       const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
       const sourceScope = store.getScope(sourceTaskId);
       const repo = taskRepoOf(found.taskRef);
-      const draftId = `${sourceTaskId}-ci-${publication.prNumber}`.slice(0, 64);
-      const made = store.createConsoleTask(
-        {
-          id: draftId,
-          title: `repair ${sourceTaskId}: CI failing on PR #${publication.prNumber}`,
-          ...(repo === null ? {} : { repo }),
-          goal:
-            `${sourceScope?.goal ?? `repair ${sourceTaskId}`}` +
-            ` — repair the failing CI on PR #${publication.prNumber} (head ${publication.headSha.slice(0, 12)}). ` +
-            `Read the failing checks on GitHub before approving; this draft carries no log content.`,
-        },
-        now,
-      );
-      if (!made.ok) {
-        return refuse(
-          response,
-          who,
-          made.reason === "duplicate" ? 409 : 400,
-          made.reason === "duplicate" ? `already drafted as ${draftId}` : `could not draft: ${made.reason}`,
-          `/r/${id}`,
-        );
-      }
+      // The observed episode, not the click: the brief binds the head the
+      // failure was SEEN on and when (audit C-2) — a PR that advanced since
+      // is a different failure, and the click time is not an observation.
+      const episode = store.latestOpenCiEpisode(publication.githubRepo, publication.prNumber as number);
+      // Suffixes survive truncation (audit C-7): the prefix gives way, the
+      // identity-bearing tail never does.
+      const suffix = `-ci-${publication.prNumber}`;
+      const draftId = `${sourceTaskId.slice(0, 64 - suffix.length)}${suffix}`;
       const brief = {
         schema: 1 as const,
         kind: "ci-repair" as const,
-        targetTask: made.id,
         sourceTask: sourceTaskId,
         sourceRun: id,
         pr: publication.prNumber,
         prUrl: publication.prUrl,
-        headSha: publication.headSha,
-        observedAt: now.toISOString(),
+        publishedHeadSha: publication.headSha,
+        observedFailingHead: episode?.headSha ?? null,
+        observedAt: episode?.createdAt ?? null,
       };
-      const artifactId = storeEvidence(
-        store,
-        evidenceRoot,
-        id,
-        "revision-brief",
-        `ci-repair-brief-${made.id}.json`,
-        Buffer.from(JSON.stringify(brief, null, 2), "utf8"),
-        "machine-authored ci-repair brief (exit 0)",
+      const briefBytes = Buffer.from(JSON.stringify(brief, null, 2), "utf8");
+      const briefName = `ci-repair-brief-${randomBytes(6).toString("hex")}.json`;
+      const key = writeEvidenceFile(evidenceRoot, id, briefName, briefBytes);
+      const sealed = store.sealRevision(
+        {
+          task: {
+            id: draftId,
+            title: `repair ${sourceTaskId}: CI failing on PR #${publication.prNumber}`,
+            ...(repo === null ? {} : { repo }),
+            goal:
+              `${sourceScope?.goal ?? `repair ${sourceTaskId}`}` +
+              ` — repair the failing CI on PR #${publication.prNumber} (failing head ${(episode?.headSha ?? publication.headSha).slice(0, 12)}). ` +
+              `Read the failing checks on GitHub before approving; this draft carries no log content.`,
+            outOfScope: sourceScope?.outOfScope ?? null,
+            touches: sourceScope?.touches ?? [],
+          },
+          artifact: {
+            run: id,
+            kind: "revision-brief",
+            key,
+            bytesOriginal: briefBytes.length,
+            bytesStored: briefBytes.length,
+            truncated: false,
+            sha256: createHash("sha256").update(briefBytes).digest("hex"),
+            capture: "machine-authored ci-repair brief (exit 0)",
+          },
+          revisionOf: sourceTaskId,
+          commentIds: null,
+          sourceRun: id,
+        },
         now,
       );
-      const newRef = store.lookupRef(made.id);
-      if (newRef !== null) store.markRevision(newRef.id, sourceTaskId, artifactId);
-      return redirect(response, taskHref(made.id));
+      if (!sealed.ok) {
+        return refuse(
+          response,
+          who,
+          sealed.reason === "duplicate" ? 409 : 400,
+          sealed.reason === "duplicate" ? `already drafted as ${draftId}` : `could not draft: ${sealed.reason}`,
+          `/r/${id}`,
+        );
+      }
+      return redirect(response, taskHref(sealed.id));
     }
 
     const resolve = /^\/i\/([0-9]{1,15})\/resolve$/.exec(url.pathname);
@@ -1535,6 +1585,18 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         if (token === "") {
           return taskScreen(response, who, taskId, "approval requires your password, typed again", 400);
+        }
+        // A revision approves ONLY against a brief that still verifies
+        // (Codex M5-M8 audit, IV-3): the batch the screen restated must be
+        // provably the batch on disk at the moment of the yes — a brief
+        // deleted or corrupted between render and click blocks the
+        // approval instead of silently approving comment-free work.
+        const approvingRef = store.lookupRef(taskId);
+        if (approvingRef !== null && approvingRef.revisionBriefArtifact !== null) {
+          const view = revisionViewOf(approvingRef);
+          if (view !== null && "problem" in view) {
+            return taskScreen(response, who, taskId, `approval is blocked: ${view.problem}`, 409);
+          }
         }
         const approved = approveScope(store, taskId, who.name, now, digest, token);
         if (!approved.ok) {
@@ -3331,7 +3393,9 @@ function taskPage(chrome: Chrome, data: {
   const approveForm =
     scope === null || approval.approved
       ? ""
-      : [
+      : data.revision !== null && data.revision !== undefined && "problem" in data.revision
+        ? `<div class="card"><p><strong>approval is blocked</strong></p><p class="meta">${escape(data.revision.problem)} — a revision approves only against a brief that verifies</p></div>`
+        : [
           `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
@@ -3523,6 +3587,20 @@ function taskPage(chrome: Chrome, data: {
  * advice and deep links, no merge button, because the PR is the terminus
  * and the person merges on GitHub.
  */
+/** Only an https github.com pull URL earns an anchor (audit IV-11) — a
+ * corrupted row renders as text, never as navigation. */
+function safePrUrl(url: string | null): string | null {
+  if (url === null) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") return null;
+    if (!/^\/[^/]+\/[^/]+\/pull\/[0-9]+$/.test(parsed.pathname)) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
 function reviewPage(
   chrome: Chrome,
   rows: { publication: Publication; taskId: string; failing: boolean }[],
@@ -3549,7 +3627,7 @@ function reviewPage(
                   ? "CI failing — observed; a repair can be drafted from the run page"
                   : "no failing CI observation (the machine never calls silence green — verify on GitHub)"
               }</p>` +
-              `<p class="row">${p.prUrl === null ? "" : `<a href="${escape(p.prUrl)}">review on GitHub →</a>`} ` +
+              `<p class="row">${safePrUrl(p.prUrl) === null ? "" : `<a href="${escape(safePrUrl(p.prUrl) as string)}">review on GitHub →</a>`} ` +
               `<a href="/r/${p.run}">the build</a></p>` +
               `</div>`
             );

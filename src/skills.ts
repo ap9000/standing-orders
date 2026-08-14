@@ -103,7 +103,7 @@ export type InstallPlan = {
 
 export type InstallResult =
   | { ok: true; plan: InstallPlan; wrote: string[] }
-  | { ok: false; reason: "foreign-skill"; message: string };
+  | { ok: false; reason: "foreign-skill" | "broken-markers"; message: string };
 
 /** What install would do, computed without writing anything. */
 export function planInstall(repo: string, writeContext: boolean): InstallPlan {
@@ -111,7 +111,10 @@ export function planInstall(repo: string, writeContext: boolean): InstallPlan {
   let skillAction: InstallPlan["skillAction"] = "create";
   if (existsSync(skillPath)) {
     const current = readFileSync(skillPath, "utf8");
-    skillAction = current.includes(MANAGED_MARK) ? "replace" : "refuse-foreign";
+    // Ownership is the exact header AND the managed mark — a foreign file
+    // that merely quotes the mark somewhere is not ours (audit C-10).
+    const ours = current.startsWith("---\nname: standing-orders\n") && current.includes(MANAGED_MARK);
+    skillAction = ours ? "replace" : "refuse-foreign";
   }
 
   const contextPath = writeContext ? join(repo, "AGENTS.md") : null;
@@ -148,13 +151,22 @@ export function applyInstall(repo: string, writeContext: boolean): InstallResult
     } else {
       const current = readFileSync(plan.contextPath, "utf8");
       if (plan.contextAction === "replace") {
+        // Exactly one well-ordered pair, or a typed refusal — a half block
+        // must never produce a silent false success (audit C-10).
+        const begins = current.split(CONTEXT_BEGIN).length - 1;
+        const ends = current.split(CONTEXT_END).length - 1;
         const begin = current.indexOf(CONTEXT_BEGIN);
         const end = current.indexOf(CONTEXT_END);
-        if (begin !== -1 && end !== -1 && end > begin) {
-          const next = current.slice(0, begin) + contextBlock() + current.slice(end + CONTEXT_END.length);
-          writeFileSync(plan.contextPath, next);
-          wrote.push(plan.contextPath);
+        if (begins !== 1 || ends !== 1 || end <= begin) {
+          return {
+            ok: false,
+            reason: "broken-markers",
+            message: `${plan.contextPath} carries a damaged managed block (${begins} begin, ${ends} end marker(s)) — repair or remove it by hand; nothing was written`,
+          };
         }
+        const next = current.slice(0, begin) + contextBlock() + current.slice(end + CONTEXT_END.length);
+        writeFileSync(plan.contextPath, next);
+        wrote.push(plan.contextPath);
       } else {
         // insert: append after existing content, never rewriting a word of it.
         const next = `${current.replace(/\n*$/, "\n\n")}${contextBlock()}\n`;

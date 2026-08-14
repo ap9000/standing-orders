@@ -469,6 +469,27 @@ export function storeHandoffArtifact(
 }
 
 /**
+ * Fit a DiffStat under its cap by shedding FILES, never bytes (audit C-4):
+ * a structured artifact cut mid-token is not a smaller stat, it is no stat.
+ * Aggregate counts always survive; the file list shrinks until the encoded
+ * JSON fits, and filesTruncated says so.
+ */
+export function budgetedStatJson(stat: DiffStat): Buffer {
+  const cap = EVIDENCE_CAPS["diff-stat"];
+  let files = stat.files;
+  for (;;) {
+    const candidate: DiffStat = {
+      ...stat,
+      files,
+      filesTruncated: stat.filesTruncated || files.length < stat.files.length,
+    };
+    const encoded = Buffer.from(JSON.stringify(candidate), "utf8");
+    if (encoded.length <= cap || files.length === 0) return encoded;
+    files = files.slice(0, Math.floor(files.length / 2));
+  }
+}
+
+/**
  * Capture the TERMINAL diff — the immutable base→head patch of a run that
  * committed, taken before its worktree is released (M5.3; the Codex scope
  * cut is the spec). Two artifacts: the bounded plain patch, and a
@@ -500,7 +521,7 @@ export async function captureTerminalDiff(
   const statCommand = `git ${statArgs.filter(a => a !== "--no-optional-locks").join(" ")} (exit ${stat.code})`;
   const statContent =
     stat.code === 0
-      ? Buffer.from(JSON.stringify(parseNumstat(stat.stdout, base, head)), "utf8")
+      ? budgetedStatJson(parseNumstat(stat.stdout, base, head))
       : Buffer.from(stat.stderr, "utf8");
   const statId = storeEvidence(store, root, runId, "diff-stat", "terminal-diff-stat.json", statContent, statCommand, now);
 

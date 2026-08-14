@@ -128,11 +128,14 @@ export async function invokeAgent(
       tokensOut: envelope.tokensOut,
       costUsd: envelope.costUsd,
     },
-    // Gated on the run ALSO having nothing to show: a harness that renamed
-    // its init event but completed the turn must not read as broken.
+    // Gated on the run having NOTHING to show (Codex M5-M8 audit, C-8):
+    // "nothing to show" means no final message, full stop. A nonzero exit
+    // WITH an agent message is a failed agent turn — the agent ran, spoke,
+    // and failed — and must be classified as that, never as the harness
+    // failing to come up.
     initFailed:
       envelope.initObserved === false &&
-      (result.code !== 0 || envelope.finalMessage === null) &&
+      envelope.finalMessage === null &&
       !result.timedOut &&
       !result.notFound,
   };

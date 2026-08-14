@@ -41,6 +41,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
+import { readVerifiedArtifact } from "./evidence.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -412,6 +413,13 @@ type Context = {
   telegramTransport?: TelegramTransport;
   /** Injected by tests: what `publish` runs for git and gh. */
   publishExec?: PublishExec;
+  /**
+   * The stop fence (Codex M5-M8 audit, IV-1): set by the watch when a
+   * signal lands. A pass that sees true admits NOTHING more — no routine
+   * fires, no claim, no run, no spawn. The in-flight build finishes under
+   * its own bounds (or the grace kill); admission is what stops.
+   */
+  shouldStop?: () => boolean;
 };
 
 async function dispatch(
@@ -1171,6 +1179,9 @@ async function tickCommand(
   // themselves there. This loop just reports.
   const routines: { routine: string; outcome: string; taskId?: string; detail?: string }[] = [];
   for (const routine of store.dueRoutines(repo, clock())) {
+    // The stop fence (audit IV-1): a signal that landed mid-pass stops
+    // every further admission — a routine not yet fired stays unfired.
+    if (context.shouldStop?.() === true) break;
     const outcome = fireRoutine(store, routine.id, clock());
     routines.push(
       outcome.ok
@@ -1192,6 +1203,10 @@ async function tickCommand(
 
   for (const ref of ready) {
     if (built >= max) break;
+    // The stop fence (audit IV-1): checked before every claim. The build
+    // already in flight finishes under its own bounds; nothing NEW is
+    // admitted once the operator has said stop.
+    if (context.shouldStop?.() === true) break;
     const id = ref.externalId;
 
     // A task placed in another repository is not this pass's to build.
@@ -1606,7 +1621,8 @@ async function tickCommand(
       result.reason === "git" ||
       result.reason === "commit-failure" ||
       result.reason === "provider-init" ||
-      result.reason === "setup"
+      result.reason === "setup" ||
+      result.reason === "revision-brief"
     ) {
       // The attempt itself broke. One fenced transaction decides what that
       // means — a strike and a doubling backoff, a stall after three, or a
@@ -2735,6 +2751,16 @@ async function setupCommand(
   if (command.length > 2000 || hasDisguisedText(command)) {
     return fail(write, json, "setup set", "invalid", "the command must be under 2000 characters with no control or bidi characters", EXIT.usage);
   }
+  // Literal credentials never become standing rows (audit IV-5): a command
+  // that embeds a token is stored forever in plain text. Reference an
+  // environment variable the runner already exports instead. `$TOKEN` is
+  // a reference and passes; `=secret123` is a value and refuses.
+  const credentialShaped =
+    /([A-Za-z0-9_-]*(?:token|secret|password|passwd|apikey|api_key|authorization|bearer|credential)[A-Za-z0-9_-]*\s*[=:]\s*)(?![$"']?\$)\S+/i.test(command) ||
+    /\/\/[^\s/@]+:[^\s/@]+@/.test(command);
+  if (credentialShaped) {
+    return fail(write, json, "setup set", "credential-shaped", "the command appears to embed a credential — reference an environment variable the runner exports (e.g. $NPM_TOKEN) instead of a literal value", EXIT.usage);
+  }
   const timeoutSeconds = Number(text(flags, "timeout-seconds") ?? "300");
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 3600) {
     return fail(write, json, "setup set", "invalid", "--timeout-seconds is 1..3600", EXIT.usage);
@@ -2775,8 +2801,12 @@ const LABEL_SHAPE = /^[A-Za-z0-9][A-Za-z0-9:_. -]{0,49}$/;
 
 /** `ghi-owner-name-123` — deterministic, so existence IS the dedupe. */
 function intakeTaskId(github: string, issueNumber: number): string {
+  // The suffix IS the identity; the slug gives way to it (audit C-7) —
+  // truncating the issue number off a long owner/repo would silently map
+  // distinct issues onto one task id.
+  const suffix = `-${issueNumber}`;
   const slug = github.replace(/[^A-Za-z0-9._-]+/g, "-");
-  return `ghi-${slug}-${issueNumber}`.slice(0, 64);
+  return `ghi-${slug}`.slice(0, 64 - suffix.length) + suffix;
 }
 
 /**
@@ -2893,7 +2923,15 @@ async function intakeCommand(
     }
     const publications = store
       .openedPublications()
-      .filter(one => one.prNumber !== null && store.refForId(one.taskRef)?.repo === repo);
+      .filter(
+        one =>
+          one.prNumber !== null &&
+          store.refForId(one.taskRef)?.repo === repo &&
+          // The grant names ONE GitHub repository; a publication opened
+          // against another must not have that repo's PR numbers fetched
+          // onto its runs (audit C-5).
+          one.githubRepo === grant.github,
+      );
     let ingested = 0;
     let duplicates = 0;
     let refused = 0;
@@ -2905,7 +2943,12 @@ async function intakeCommand(
         skippedPrs.push({ pr, reason: "no terminal diff to bind comments to" });
         continue;
       }
-      const asked = await gh("gh", ["api", `repos/${grant.github}/pulls/${pr}/comments`], { timeoutMs: 20_000 });
+      const proven = readVerifiedArtifact(context.evidenceRoot, terminal);
+      if (!proven.ok) {
+        skippedPrs.push({ pr, reason: `the terminal diff no longer verifies — ${proven.problem}` });
+        continue;
+      }
+      const asked = await gh("gh", ["api", "--paginate", `repos/${grant.github}/pulls/${pr}/comments`], { timeoutMs: 60_000 });
       if (asked.code !== 0) {
         skippedPrs.push({ pr, reason: "github unreachable" });
         continue;
@@ -2917,9 +2960,14 @@ async function intakeCommand(
         skippedPrs.push({ pr, reason: "github answered without its promised JSON" });
         continue;
       }
+      if (!Array.isArray(remote)) {
+        skippedPrs.push({ pr, reason: "github answered with JSON that is not the promised array" });
+        continue;
+      }
       for (const comment of remote) {
         const login = String(comment.user?.login ?? "");
-        if (!grant.reviewers.includes(login)) continue;
+        // GitHub logins are case-insensitive; the allowlist match is too.
+        if (!grant.reviewers.some(one => one.toLowerCase() === login.toLowerCase())) continue;
         const id = Number(comment.id);
         if (!Number.isInteger(id) || id <= 0) continue;
         const body = validateNote(String(comment.body ?? ""));
@@ -3418,6 +3466,14 @@ async function watchCommand(
   const reconcileEveryMs = Number(text(flags, "reconcile-every") ?? 5 * 60_000);
   const runFor = text(flags, "for") === undefined ? null : Number(text(flags, "for"));
 
+  // The envelope contract holds for long commands too (Codex M5-M8 audit,
+  // C-1): in --json mode every progress line goes to stderr, and stdout
+  // receives exactly the final envelope.
+  const progress = (line: string): void => {
+    if (json) process.stderr.write(`${line}\n`);
+    else write(line);
+  };
+
   const incarnation = randomUUID();
   const lease = store.acquireWatchLease(runner, repo, incarnation, WATCH_LEASE_MS, new Date());
   if (!lease.ok) {
@@ -3433,7 +3489,7 @@ async function watchCommand(
   if (lease.superseded !== null) {
     const recovered = store.recoverIncarnation(runner, lease.superseded, new Date());
     if (recovered > 0) {
-      write(`Recovered ${recovered} claim(s) from the previous watch (${lease.superseded.slice(0, 8)}…) before dispatching anything.`);
+      progress(`Recovered ${recovered} claim(s) from the previous watch (${lease.superseded.slice(0, 8)}…) before dispatching anything.`);
     }
   }
 
@@ -3449,7 +3505,7 @@ async function watchCommand(
   const hardStop = () => {
     const terminated = terminateLiveProviders();
     if (terminated > 0) {
-      write(`Hard stop: ${terminated} provider process group(s) terminated. Their runs finalize as failures; worktrees are preserved; fences keep late output out of every commit.`);
+      progress(`Hard stop: ${terminated} provider process group(s) terminated. Their runs finalize as failures; worktrees are preserved; fences keep late output out of every commit.`);
     }
   };
   const stop = () => {
@@ -3497,7 +3553,7 @@ async function watchCommand(
         );
       },
     }).catch(error => {
-      write(`watch: the telegram follower died — ${describe(error)}; taps wait for the next watch`);
+      progress(`watch: the telegram follower died — ${describe(error)}; taps wait for the next watch`);
       return null;
     });
   }
@@ -3513,7 +3569,8 @@ async function watchCommand(
     for (const [key, value] of Object.entries(extra)) copy.set(key, value);
     return copy;
   };
-  const quietContext: Context = { ...context, write: sink, json: true };
+  const quietContext: Context = { ...context, write: sink, json: true, shouldStop: () => stopping };
+
 
   const startedAt = Date.now();
   const deadline = runFor === null ? null : startedAt + runFor;
@@ -3541,7 +3598,7 @@ async function watchCommand(
           const checks = await observeChecks(store, {
             ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
           });
-          if (checks.failing > 0) write(`watch: CI is red on ${checks.failing} published PR(s) — the outbox has it`);
+          if (checks.failing > 0) progress(`watch: CI is red on ${checks.failing} published PR(s) — the outbox has it`);
         }
       }
 
@@ -3558,23 +3615,26 @@ async function watchCommand(
         if (code === EXIT.ok) {
           tickDidWork = true;
           built++;
-          write(`watch: pass ${ticks} did work (${new Date().toISOString()})`);
+          progress(`watch: pass ${ticks} did work (${new Date().toISOString()})`);
         } else if (code === EXIT.failed) {
           tickDidWork = true;
           brokeCount++;
-          write(`watch: pass ${ticks} broke something — the run records have it`);
+          progress(`watch: pass ${ticks} broke something — the run records have it`);
         }
       }
 
       // Built work goes out in the same window it was built: the pass is one
       // SELECT when nothing is owed, and each phase is durable if we crash.
-      if (store.pendingPublications().length > 0) {
+      // Except under a stop (audit IV-1): once the signal lands, nothing
+      // more is published this incarnation — the durable intent keeps the
+      // work safe for the successor.
+      if (!stopping && store.pendingPublications().length > 0) {
         const published = await publishPass(store, {
           repo,
           ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
         });
         if (published.pushed + published.opened + published.adopted + published.failed > 0) {
-          write(
+          progress(
             `watch: published — pushed ${published.pushed}, opened ${published.opened}, adopted ${published.adopted}` +
               (published.failed > 0 ? `, gave up on ${published.failed}` : ""),
           );

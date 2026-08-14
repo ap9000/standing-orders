@@ -600,6 +600,56 @@ describe("the operations console", () => {
     expect(blank.status).toBe(400);
   });
 
+  test("a revision inherits the source scope's limits, and a broken brief blocks its approval (audit IV-2/IV-3)", async () => {
+    const { propose } = await import("./scope.js");
+    store.createTask({ id: "t-lim", title: "bounded work" }, T0);
+    const ref = store.refFor("built-in", "t-lim").id;
+    propose(store, { taskId: "t-lim", goal: "fix the rounding", outOfScope: "authentication", touches: ["src/payments/"], now: T0 });
+    const run = store.startRun({ taskRef: ref, leaseId: "l-lim", runner: "b-1", branch: "so/t-lim", worktree: "/w", now: T0 });
+    store.finishRun(run, { outcome: "built", now: T0 });
+    mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
+    const patch = Buffer.from("diff --git a/p b/p\n+x\n", "utf8");
+    writeFileSync(join(evidenceRoot, String(run), "terminal-diff.patch"), patch);
+    store.saveArtifact(
+      { run, kind: "terminal-diff", key: `${run}/terminal-diff.patch`, bytesOriginal: patch.length, bytesStored: patch.length, truncated: false, sha256: createHash("sha256").update(patch).digest("hex"), capture: "git diff base head (exit 0)" },
+      T0,
+    );
+
+    const cookie = await login();
+    const taskHtml = await (await fetch(url("/t/t-lim"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(taskHtml)?.[1] ?? "";
+    await fetch(url(`/r/${run}/comment`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, note: "narrow this" }),
+      redirect: "manual",
+    });
+    const revised = await fetch(url(`/r/${run}/revise`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf }),
+      redirect: "manual",
+    });
+    const target = revised.headers.get("location") ?? "";
+    const newTaskId = decodeURIComponent(target.replace("/t/", ""));
+
+    // IV-2: the exclusions and path limits SURVIVED into the revision scope.
+    const revScope = store.getScope(newTaskId);
+    expect(revScope?.outOfScope).toBe("authentication");
+    expect(revScope?.touches).toEqual(["src/payments/"]);
+    const page1 = await (await fetch(url(target), { headers: { cookie } })).text();
+    expect(page1).toContain("authentication");
+    expect(page1).not.toContain("<em>no exclusions</em>");
+
+    // IV-3: corrupt the brief on disk — the approval surface closes.
+    const newRef = store.lookupRef(newTaskId);
+    const briefArtifact = store.getArtifact(newRef?.revisionBriefArtifact as number);
+    writeFileSync(join(evidenceRoot, briefArtifact?.key as string), "tampered");
+    const page2 = await (await fetch(url(target), { headers: { cookie } })).text();
+    expect(page2).toContain("approval is blocked");
+    expect(page2).not.toContain("approve this scope");
+  });
+
   test("review comments on the terminal diff seal into one revision task that must be approved (M6.8)", async () => {
     store.createTask({ id: "t-rev", title: "original work" }, T0);
     const ref = store.refFor("built-in", "t-rev").id;
@@ -690,7 +740,7 @@ describe("the operations console", () => {
     store.markPublicationPushed(pub2, T0);
     store.markPublicationOpened(pub2, 102, "https://github.com/ap9000/thing/pull/102", T0);
     store.enqueueNotification(
-      { dedupeKey: `ci:102:${"b".repeat(40)}`, kind: "ci-failed", subject: "checks failing on #102", body: "red" },
+      { dedupeKey: `ci:ap9000/thing:102:${"b".repeat(40)}`, kind: "ci-failed", subject: "checks failing on #102", body: "red" },
       T0,
     );
 

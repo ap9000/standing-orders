@@ -28,7 +28,7 @@ import { run as execRun, type ExecResult, type RunOptions } from "./exec.js";
 import { summarizeChecks } from "./pulls.js";
 import type { Publication, PublicationGrant, Store } from "./store.js";
 
-export const BODY_TEMPLATE_VERSION = 1;
+export const BODY_TEMPLATE_VERSION = 2;
 /** After this many failed attempts a publication stops retrying and pages instead. */
 export const MAX_PUBLISH_ATTEMPTS = 5;
 const EXEC_TIMEOUT_MS = 60_000;
@@ -66,6 +66,19 @@ export function describePublicationGrant(grant: {
  * The PR body, from durable state only — the same rows produce the same
  * bytes after any crash, which is what lets the intent carry a hash of it.
  */
+/** One line of untrusted prose, kept inline: newlines flatten so no agent
+ * text can START a Markdown line and gain semantics (audit IV-9) —
+ * `Closes #123` at line start closes; mid-sentence it is words. */
+function mdInline(text: string): string {
+  return text.replace(/[\r\n\u2028\u2029]+/g, " ").trim();
+}
+
+/** Untrusted multi-line prose as an INDENTED code block: backticks cannot
+ * terminate indentation, so no conclusion escapes its quoting (audit IV-9). */
+function mdIndented(text: string): string[] {
+  return text.replace(/\r\n?/g, "\n").split("\n").map(line => `    ${line}`);
+}
+
 export function publicationBody(store: Store, publication: Publication): string {
   const run = store.getRun(publication.run);
   const taskId = store.externalIdFor(publication.taskRef) ?? "?";
@@ -74,9 +87,9 @@ export function publicationBody(store: Store, publication: Publication): string 
   const answers = store.answersFor(publication.run);
 
   const lines: string[] = [
-    `## ${task?.title ?? taskId}`,
+    `## ${mdInline(task?.title ?? taskId)}`,
     "",
-    ...(scope === null ? [] : [`**Goal:** ${scope.goal}`, ""]),
+    ...(scope === null ? [] : [`**Goal:** ${mdInline(scope.goal)}`, ""]),
     `Built unattended by standing-orders (task \`${taskId}\`, run #${publication.run}).`,
     `Base \`${run?.baseRevision ?? "?"}\` → head \`${publication.headSha}\`.`,
   ];
@@ -85,15 +98,15 @@ export function publicationBody(store: Store, publication: Publication): string 
     lines.push("", "**Decisions a person answered along the way:**");
     for (const answer of answers) {
       lines.push(
-        `- ${answer.decision.question} → **${answer.choice}** (${answer.decision.answeredBy ?? "?"})`,
+        `- ${mdInline(answer.decision.question)} → **${mdInline(answer.choice)}** (${mdInline(answer.decision.answeredBy ?? "?")})`,
       );
     }
   }
 
-  // The agent's own words ride in a quote fence: prose, never semantics.
-  // Outside it, nothing in this body mentions or closes anything.
+  // The agent's own words ride INDENTED: an indented code block has no
+  // terminator an agent's text could supply, so prose stays prose.
   if (run?.handoff !== null && run?.handoff !== undefined) {
-    lines.push("", "**The agent's conclusion, quoted:**", "", "```text", run.handoff, "```");
+    lines.push("", "**The agent's conclusion, quoted:**", "", ...mdIndented(run.handoff));
   }
 
   lines.push("", `*Template v${BODY_TEMPLATE_VERSION} — generated from run records, reproducible.*`);
@@ -312,7 +325,7 @@ export async function observeChecks(
       );
       continue;
     }
-    let payload: { statusCheckRollup?: unknown; headRefOid?: unknown };
+    let payload: { statusCheckRollup?: unknown; headRefOid?: unknown; state?: unknown };
     try {
       payload = JSON.parse(viewed.stdout) as typeof payload;
     } catch {
@@ -326,15 +339,31 @@ export async function observeChecks(
     }
 
     report.observed++;
+
+    // A merged or closed PR leaves the watch (Codex M5-M8 audit, C-6): its
+    // remote state is recorded, its episodes resolve, and neither the
+    // review queue nor the next observation pass carries it forever.
+    const remoteState = typeof payload.state === "string" ? payload.state.toUpperCase() : null;
+    if (remoteState === "MERGED" || remoteState === "CLOSED") {
+      store.transact(() => {
+        store.recordPublicationRemoteState(publication.id, remoteState, clock());
+        report.resolved += store.resolveCiEpisodes(publication.githubRepo, publication.prNumber as number, null, clock());
+      });
+      continue;
+    }
+
     const state = summarizeChecks(payload.statusCheckRollup);
-    const key = `ci:${publication.prNumber}:${headOid}`;
+    // The episode identity carries the REPOSITORY (audit C-2): PR #55 in
+    // repo A and PR #55 in repo B are different worlds, and one's failure
+    // must never light the other's repair button.
+    const key = `ci:${publication.githubRepo}:${publication.prNumber}:${headOid}`;
     const taskId = store.externalIdFor(publication.taskRef) ?? publication.head;
 
     if (state === "failing") {
       report.failing++;
       store.transact(() => {
         // Older heads' episodes die with their commits; this head's opens once.
-        store.resolveCiEpisodes(publication.prNumber as number, key, clock());
+        store.resolveCiEpisodes(publication.githubRepo, publication.prNumber as number, key, clock());
         store.enqueueNotification(
           {
             dedupeKey: key,
@@ -346,12 +375,12 @@ export async function observeChecks(
         );
       });
     } else if (state === "passing") {
-      report.resolved += store.resolveCiEpisodes(publication.prNumber, null, clock());
+      report.resolved += store.resolveCiEpisodes(publication.githubRepo, publication.prNumber, null, clock());
     } else {
       // running / none: not good news, not bad news — old episodes for
       // *other* heads still resolve (their commit is gone), this head's
       // verdict stays open.
-      store.resolveCiEpisodes(publication.prNumber, key, clock());
+      store.resolveCiEpisodes(publication.githubRepo, publication.prNumber, key, clock());
     }
   }
 

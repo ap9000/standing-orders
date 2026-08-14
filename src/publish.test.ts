@@ -118,7 +118,9 @@ describe("publication", () => {
     expect(body).toContain("abc123def");
     expect(body).toContain("base999");
     // The agent's words are inside a fence — never bare markdown semantics.
-    expect(body).toContain("```text\nAdded the guard. Fixes #1 should stay prose.\n```");
+    // Indented, not fenced (audit IV-9): no agent text can terminate indentation.
+    expect(body).toContain("    Added the guard. Fixes #1 should stay prose.");
+    expect(body).not.toContain("```");
 
     expect(publicationBody(store, publication)).toBe(body);
     expect(bodyHashOf(body)).toBe(bodyHashOf(publicationBody(store, publication)));
@@ -273,7 +275,7 @@ describe("watching CI on opened PRs", () => {
     await observeChecks(store, { clock: () => T0, exec: red.exec });
     await observeChecks(store, { clock: () => T0, exec: red.exec });
 
-    expect(ciRows()).toEqual([{ key: "ci:9:oid-1", resolved: false }]);
+    expect(ciRows()).toEqual([{ key: "ci:alex/thing:9:oid-1", resolved: false }]);
     const page = store.listNotifications("pending").find(one => one.kind === "ci-failing");
     expect(page?.subject).toContain("t-1");
     expect(page?.body).toContain("oid-1");
@@ -291,7 +293,7 @@ describe("watching CI on opened PRs", () => {
       clock: () => T0,
       exec: ghSaying({ headRefOid: "oid-2", statusCheckRollup: [{ status: "IN_PROGRESS" }] }).exec,
     });
-    expect(ciRows()).toEqual([{ key: "ci:9:oid-1", resolved: true }]);
+    expect(ciRows()).toEqual([{ key: "ci:alex/thing:9:oid-1", resolved: true }]);
 
     // The new head fails too: a fresh page, its own key.
     await observeChecks(store, {
@@ -299,8 +301,8 @@ describe("watching CI on opened PRs", () => {
       exec: ghSaying({ headRefOid: "oid-2", statusCheckRollup: [{ conclusion: "FAILURE" }] }).exec,
     });
     expect(ciRows()).toEqual([
-      { key: "ci:9:oid-1", resolved: true },
-      { key: "ci:9:oid-2", resolved: false },
+      { key: "ci:alex/thing:9:oid-1", resolved: true },
+      { key: "ci:alex/thing:9:oid-2", resolved: false },
     ]);
 
     // And green closes it.
@@ -321,6 +323,6 @@ describe("watching CI on opened PRs", () => {
     const report = await observeChecks(store, { clock: () => T0, exec: dead.exec });
 
     expect(report.problems[0]).toContain("not read");
-    expect(ciRows()).toEqual([{ key: "ci:9:oid-1", resolved: false }]);
+    expect(ciRows()).toEqual([{ key: "ci:alex/thing:9:oid-1", resolved: false }]);
   });
 });

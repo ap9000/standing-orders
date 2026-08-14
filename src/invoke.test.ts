@@ -163,6 +163,16 @@ describe("the invocation gateway", () => {
     expect(result.initFailed).toBe(false);
   });
 
+  test("a nonzero exit WITH an agent message is a failed turn, never an init failure (audit C-8)", async () => {
+    const id = codexRunFor("t-init-4");
+    const jsonl = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "I tried and failed" } });
+    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+      runner: async () => ({ ...OK, code: 1, stdout: jsonl, stderr: "turn failed" }),
+    });
+    expect(result.initFailed).toBe(false);
+    expect(result.finalMessage).toBe("I tried and failed");
+  });
+
   test("a timeout is a timeout, not an init failure — even with no init event seen", async () => {
     const id = codexRunFor("t-init-3");
     const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {

@@ -11,7 +11,7 @@
  * should not have to parse a column layout.
  */
 
-import { existsSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -249,7 +249,25 @@ export async function main(
 
   if (outputFile !== undefined) {
     const captured = capturedEnvelope();
-    if (captured !== null) writeFileSync(outputFile, `${captured}\n`);
+    if (captured !== null) {
+      // Envelopes can carry one-time credentials (runner register, approver
+      // add), so the file is written 0600 and never through a symlink or
+      // onto a non-regular target (Codex M5-M8 audit, IV-8).
+      try {
+        const existing = lstatSync(outputFile, { throwIfNoEntry: false });
+        if (existing !== undefined) {
+          if (!existing.isFile()) {
+            write(`-o refuses ${outputFile}: not a regular file`);
+            return USAGE_EXIT;
+          }
+          unlinkSync(outputFile);
+        }
+        writeFileSync(outputFile, `${captured}\n`, { mode: 0o600, flag: "wx" });
+      } catch (error) {
+        write(`-o could not write ${outputFile}: ${String((error as Error).message ?? error)}`);
+        return 1;
+      }
+    }
   }
   return code;
 }

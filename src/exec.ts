@@ -59,12 +59,23 @@ const liveProviders = new Set<import("node:child_process").ChildProcess>();
 /** SIGKILL the child's whole process group; fall back to the child alone. */
 function killGroup(child: import("node:child_process").ChildProcess): void {
   const pid = child.pid;
-  if (pid !== undefined) {
+  if (pid !== undefined && process.platform === "win32") {
+    // Windows has no process groups to signal (Codex M5-M8 audit, IV-6):
+    // taskkill /T walks the tree, so a harness's shell grandchildren die
+    // with it instead of writing to the worktree after "stopped". Untested
+    // on physical Windows, like the daemon — stated, not hidden.
+    try {
+      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    } catch {
+      // taskkill missing or refused — the direct kill below still runs.
+    }
+  }
+  if (pid !== undefined && process.platform !== "win32") {
     try {
       process.kill(-pid, "SIGKILL");
       return;
     } catch {
-      // No group of ours (not detached, already gone, or Windows) — fall through.
+      // No group of ours (not detached, or already gone) — fall through.
     }
   }
   try {

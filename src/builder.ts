@@ -39,6 +39,7 @@ import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
 import { invokeAgent, type AgentOutcome } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
+import { OPENROUTER_ENV_KEY } from "./provider.js";
 import {
   captureParkEvidence,
   captureTerminalDiff,
@@ -154,7 +155,8 @@ export type BuildRefusal =
   | "commit-failure"
   | "malformed-decision"
   | "provider-init"
-  | "setup";
+  | "setup"
+  | "revision-brief";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -188,6 +190,26 @@ const GIT = "git";
  * exported it globally is exactly who this protects.
  */
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
+
+/** Setup shells get the agent's denylist PLUS the transport keys the agent
+ * itself never sees in its shells — an approved `npm ci` is not an
+ * approved read of any credential this plane knows about (audit IV-5). */
+const SETUP_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV, OPENROUTER_ENV_KEY];
+
+/**
+ * A bounded, redacted diagnostic from untrusted tool output (audit IV-5):
+ * assignments and URL userinfo that look credential-shaped are blanked
+ * before a byte reaches SQLite, a page, or a webhook. Coarse on purpose —
+ * over-redacting a diagnostic costs a glance at the real log; under-
+ * redacting costs a secret.
+ */
+export function redactSecretText(text: string): string {
+  return text
+    .replace(/([A-Za-z0-9_-]*(?:token|secret|password|passwd|apikey|api_key|authorization|bearer|credential)[A-Za-z0-9_-]*\s*[=:]\s*)\S+/gi, "$1[redacted]")
+    .replace(/\/\/[^\s/@]+:[^\s/@]+@/g, "//[redacted]@")
+    .replace(/([?&](?:token|key|secret|password|access_token|auth)[^=\s]*=)[^&\s]+/gi, "$1[redacted]")
+    .slice(0, 200);
+}
 
 /**
  * Build one task, if everything says it may.
@@ -315,13 +337,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     const made = await runSetup("/bin/sh", ["-c", setupWanted.command], {
       cwd: worktree,
       timeoutMs: setupWanted.timeoutMs,
-      omitEnv: AGENT_ENV_DENYLIST,
+      omitEnv: SETUP_ENV_DENYLIST,
     });
     if (made.timedOut || made.code !== 0) {
+      // Setup stderr can carry registry tokens and credentialed URLs
+      // (Codex M5-M8 audit, IV-5): what reaches the database and the
+      // outbox is a REDACTED, bounded diagnostic, never raw tool output.
       return {
         ok: false,
         reason: "setup",
-        message: `the approved setup for ${leased.repo} ${made.timedOut ? `ran past ${Math.round(setupWanted.timeoutMs / 60_000)}m` : `exited ${made.code}`} — ${firstLine(made.stderr) || "no stderr"}; no agent spawns in a checkout whose setup failed`,
+        message: `the approved setup for ${leased.repo} ${made.timedOut ? `ran past ${Math.round(setupWanted.timeoutMs / 60_000)}m` : `exited ${made.code}`} — ${redactSecretText(firstLine(made.stderr)) || "no stderr"}; no agent spawns in a checkout whose setup failed`,
       };
     }
     store.stampWorktreeSetup(worktree, setupWanted.digest);
@@ -494,14 +519,27 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   let revisionBrief: string | null = null;
   const refRow = store.refForId(taskRef);
   if (refRow !== null && refRow.revisionBriefArtifact !== null) {
+    // FAIL CLOSED (Codex M5-M8 audit, IV-3): a task that IS a revision
+    // must not build without the batch its approval restated. Unlike the
+    // advisory plan above, the brief is half the contract here.
     const briefArtifact = store.getArtifact(refRow.revisionBriefArtifact);
-    if (briefArtifact !== null) {
-      try {
-        const verified = readVerifiedArtifact(root, briefArtifact);
-        if (verified.ok) revisionBrief = verified.content.toString("utf8");
-      } catch {
-        revisionBrief = null;
-      }
+    if (briefArtifact === null) {
+      return { ok: false, reason: "revision-brief", message: "this revision's brief artifact is missing — nothing builds against a batch nobody can produce" };
+    }
+    let verified: ReturnType<typeof readVerifiedArtifact>;
+    try {
+      verified = readVerifiedArtifact(root, briefArtifact);
+    } catch (error) {
+      return { ok: false, reason: "revision-brief", message: `this revision's brief cannot be read: ${String(error)}` };
+    }
+    if (!verified.ok) {
+      return { ok: false, reason: "revision-brief", message: `this revision's brief no longer verifies — ${verified.problem}` };
+    }
+    revisionBrief = verified.content.toString("utf8");
+    try {
+      JSON.parse(revisionBrief);
+    } catch {
+      return { ok: false, reason: "revision-brief", message: "this revision's brief is not the JSON it was sealed as" };
     }
   }
 
