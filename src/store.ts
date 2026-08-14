@@ -100,6 +100,22 @@ export type TaskRef = {
  * harness providers, by design (Codex v3 review, change 1). */
 export type ChatProviderId = "anthropic-api" | "openrouter-api";
 
+/** What chat may know (v3 change 9): repo-indexed, path-free items. The
+ * repos list itself stays server-side; only indexes leave as opaque ids. */
+export type ChatSnapshot = {
+  repos: string[];
+  tasks: { repoIndex: number; id: string; title: string; state: string; ageHours: number; strikes: number }[];
+  tasksSaturated: boolean;
+  decisions: { repoIndex: number; id: number; question: string; optionLabels: string[] }[];
+  decisionsSaturated: boolean;
+  incidents: { repoIndex: number; kind: string; ageHours: number }[];
+  incidentsSaturated: boolean;
+  routines: { repoIndex: number; name: string; schedule: string; status: string; lastFire: string | null }[];
+  routinesSaturated: boolean;
+  publications: { repoIndex: number; pr: number | null; checkState: string | null }[];
+  publicationsSaturated: boolean;
+};
+
 export type ChatConfig = {
   provider: ChatProviderId;
   model: string;
@@ -3371,6 +3387,118 @@ export class Store {
   }
 
   // ----- fleet chat (v13) -------------------------------------------------
+
+  /**
+   * The chat context, read by DEDICATED queries only (Codex v3 review,
+   * change 9): a non-empty explicit repo list is REQUIRED, admission binds
+   * inside every query before its LIMIT, repo-null rows are excluded from
+   * rows AND aggregates, and each item carries its repo as an INDEX into
+   * the caller's list — the serializer turns that into an opaque id; full
+   * paths never leave this process. Everything here is intentional
+   * provider egress: titles and questions are operator text and go as-is.
+   */
+  chatSnapshot(admittedRepos: readonly string[], now: Date): ChatSnapshot {
+    if (admittedRepos.length === 0) {
+      throw new Error("chatSnapshot requires the explicit non-empty repo list — an empty ceiling has nothing to say");
+    }
+    const marks = admittedRepos.map(() => "?").join(",");
+    const repoIndex = new Map(admittedRepos.map((repo, index) => [repo, index]));
+    const indexOf = (repo: unknown): number => repoIndex.get(String(repo)) ?? -1;
+    const hours = (iso: unknown): number => Math.max(0, Math.round((now.getTime() - Date.parse(String(iso))) / 3_600_000));
+    return this.transact(() => {
+      const taskRows = this.db
+        .prepare(
+          `SELECT task.id AS id, task.title AS title, task.state AS state, task.updated_at AS updated_at, task_ref.repo AS repo, task_ref.strikes AS strikes
+             FROM task JOIN task_ref ON task_ref.backend = '${BUILT_IN}' AND task_ref.external_id = task.id
+            WHERE task_ref.repo IN (${marks})
+            ORDER BY task.updated_at DESC LIMIT 61`,
+        )
+        .all(...admittedRepos);
+      const decisionRows = this.db
+        .prepare(
+          `SELECT decision.id AS id, decision.question AS question, decision.options AS options, task_ref.repo AS repo
+             FROM decision JOIN run ON run.id = decision.run JOIN task_ref ON task_ref.id = run.task_ref
+            WHERE decision.state IN ('open','expired') AND task_ref.repo IN (${marks})
+            ORDER BY decision.id DESC LIMIT 21`,
+        )
+        .all(...admittedRepos);
+      const incidentRows = this.db
+        .prepare(
+          `SELECT incident.kind AS kind, incident.created_at AS created_at, task_ref.repo AS repo
+             FROM incident JOIN run ON run.id = incident.run JOIN task_ref ON task_ref.id = run.task_ref
+            WHERE incident.resolved_at IS NULL AND task_ref.repo IN (${marks})
+            ORDER BY incident.id DESC LIMIT 21`,
+        )
+        .all(...admittedRepos);
+      const routineRows = this.db
+        .prepare(
+          `SELECT id, name, schedule, paused, digest, approved_at, approved_digest, repo
+             FROM routine WHERE repo IN (${marks}) ORDER BY id LIMIT 31`,
+        )
+        .all(...admittedRepos);
+      const publicationRows = this.db
+        .prepare(
+          `SELECT publication.pr_number AS pr, publication.last_check_state AS check_state, task_ref.repo AS repo
+             FROM publication JOIN task_ref ON task_ref.id = publication.task_ref
+            WHERE publication.state = 'opened'
+              AND (publication.remote_state IS NULL OR publication.remote_state NOT IN ('MERGED','CLOSED'))
+              AND task_ref.repo IN (${marks})
+            ORDER BY publication.id DESC LIMIT 21`,
+        )
+        .all(...admittedRepos);
+      const optionLabelsOf = (raw: unknown): string[] => {
+        try {
+          const parsed = JSON.parse(String(raw)) as { label?: unknown }[];
+          return Array.isArray(parsed) ? parsed.map(one => String(one?.label ?? "")).slice(0, 6) : [];
+        } catch {
+          return [];
+        }
+      };
+      return {
+        repos: [...admittedRepos],
+        tasks: taskRows.slice(0, 60).map(row => ({
+          repoIndex: indexOf(row["repo"]),
+          id: String(row["id"]),
+          title: String(row["title"]),
+          state: String(row["state"]),
+          ageHours: hours(row["updated_at"]),
+          strikes: Number(row["strikes"] ?? 0),
+        })),
+        tasksSaturated: taskRows.length > 60,
+        decisions: decisionRows.slice(0, 20).map(row => ({
+          repoIndex: indexOf(row["repo"]),
+          id: Number(row["id"]),
+          question: String(row["question"]),
+          optionLabels: optionLabelsOf(row["options"]),
+        })),
+        decisionsSaturated: decisionRows.length > 20,
+        incidents: incidentRows.slice(0, 20).map(row => ({
+          repoIndex: indexOf(row["repo"]),
+          kind: String(row["kind"]),
+          ageHours: hours(row["created_at"]),
+        })),
+        incidentsSaturated: incidentRows.length > 20,
+        routines: routineRows.slice(0, 30).map(row => {
+          const approved = row["approved_at"] !== null && row["approved_digest"] === row["digest"];
+          const fires = this.routineFires(Number(row["id"]), 1);
+          return {
+            repoIndex: indexOf(row["repo"]),
+            name: String(row["name"]),
+            schedule: String(row["schedule"]),
+            status: Number(row["paused"]) === 1 ? "paused" : approved ? "live" : "awaiting approval",
+            lastFire: fires.length === 0 ? null : `${fires[0]?.outcome}${fires[0]?.reason === null ? "" : `: ${fires[0]?.reason}`}`,
+          };
+        }),
+        routinesSaturated: routineRows.length > 30,
+        publications: publicationRows.slice(0, 20).map(row => ({
+          repoIndex: indexOf(row["repo"]),
+          pr: row["pr"] === null ? null : Number(row["pr"]),
+          checkState: row["check_state"] === null ? null : String(row["check_state"]),
+        })),
+        publicationsSaturated: publicationRows.length > 20,
+      };
+    });
+  }
 
   setChatConfig(
     config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number },

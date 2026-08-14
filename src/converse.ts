@@ -337,6 +337,55 @@ export function parseProviderWrapper(
   return { ok: true, answer: { text: message["content"], tokensIn, tokensOut } };
 }
 
+// ---------------------------------------------------------------- data document
+
+export const DATA_DOCUMENT_BUDGET_BYTES = 24_576;
+
+/**
+ * The snapshot, serialized for the model: repos as opaque ids only (no
+ * paths, no basenames — change 9), items shed WHOLE (never fields) until
+ * the byte budget holds, and every shed declared in-band so a trimmed
+ * list can never read as a complete one.
+ */
+export function buildDataDocument(
+  snapshot: import("./store.js").ChatSnapshot,
+  budgetBytes = DATA_DOCUMENT_BUDGET_BYTES,
+): { document: string; shed: number } {
+  const id = (repoIndex: number): string => (repoIndex >= 0 ? `r${repoIndex + 1}` : "r0");
+  const lists = {
+    tasks: snapshot.tasks.map(one => ({ repo: id(one.repoIndex), id: one.id, title: one.title, state: one.state, ageHours: one.ageHours, strikes: one.strikes })),
+    decisions: snapshot.decisions.map(one => ({ repo: id(one.repoIndex), id: one.id, question: one.question, optionLabels: one.optionLabels })),
+    incidents: snapshot.incidents.map(one => ({ repo: id(one.repoIndex), kind: one.kind, ageHours: one.ageHours })),
+    routines: snapshot.routines.map(one => ({ repo: id(one.repoIndex), name: one.name, schedule: one.schedule, status: one.status, lastFire: one.lastFire })),
+    publications: snapshot.publications.map(one => ({ repo: id(one.repoIndex), pr: one.pr, checkState: one.checkState })),
+  };
+  const notShown = {
+    tasks: snapshot.tasksSaturated ? "more exist" : "",
+    decisions: snapshot.decisionsSaturated ? "more exist" : "",
+    incidents: snapshot.incidentsSaturated ? "more exist" : "",
+    routines: snapshot.routinesSaturated ? "more exist" : "",
+    publications: snapshot.publicationsSaturated ? "more exist" : "",
+  };
+  let shed = 0;
+  const serialize = (): string =>
+    JSON.stringify({
+      snapshotVersion: 1,
+      repos: snapshot.repos.map((_, index) => ({ id: `r${index + 1}` })),
+      ...lists,
+      shedForSize: shed,
+      saturated: notShown,
+    });
+  let document = serialize();
+  while (Buffer.byteLength(document, "utf8") > budgetBytes) {
+    const longest = (Object.keys(lists) as (keyof typeof lists)[]).sort((a, b) => lists[b].length - lists[a].length)[0];
+    if (longest === undefined || lists[longest].length === 0) break;
+    lists[longest].pop();
+    shed++;
+    document = serialize();
+  }
+  return { document, shed };
+}
+
 // ---------------------------------------------------------------- request
 
 const SYSTEM_RULES = [
