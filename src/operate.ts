@@ -559,7 +559,7 @@ async function readyCommand(
 
     const tasks = result.value;
     if (json) {
-      write(envelopeJson({ ok: tasks.length > 0, command: "ready", backend: backendName, count: tasks.length, tasks }));
+      write(envelopeJson({ ok: tasks.length > 0, command: "ready", ...(tasks.length > 0 ? {} : { reason: "empty", message: "nothing is ready to dispatch" }), backend: backendName, count: tasks.length, tasks }));
       return tasks.length > 0 ? EXIT.ok : EXIT.refused;
     }
     if (tasks.length === 0) {
@@ -574,7 +574,7 @@ async function readyCommand(
   const ready = store.listReady(now);
 
   if (json) {
-    write(envelopeJson({ ok: ready.length > 0, command: "ready", count: ready.length, tasks: ready.map(ref => describeRef(store, ref, now)) }));
+    write(envelopeJson({ ok: ready.length > 0, command: "ready", ...(ready.length > 0 ? {} : { reason: "empty", message: "nothing is ready to dispatch" }), count: ready.length, tasks: ready.map(ref => describeRef(store, ref, now)) }));
     return ready.length > 0 ? EXIT.ok : EXIT.refused;
   }
 

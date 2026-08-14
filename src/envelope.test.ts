@@ -109,4 +109,99 @@ describe("the machine envelope", () => {
     const code = await main(["contract", "--json", "-o"], write);
     expect(code).toBe(2);
   });
+
+  /**
+   * The FULL sweep (audit TG-3): every routed command answers --json with
+   * exactly one envelope — successes, refusals, and usage failures alike,
+   * because an agent's parser meets all three. The drift guard below reads
+   * OPERATE_COMMANDS from source: a new command cannot ship without either
+   * joining this table or being exempted BY NAME with its reason.
+   */
+  test("every routed command answers --json with exactly one envelope", async () => {
+    const quickGit = async () => ({ code: 1, stdout: "", stderr: "", timedOut: false, notFound: true });
+    // One terminating --json invocation per verb. Usage and refusal paths
+    // are deliberate: the contract must hold on the road an agent actually
+    // hits first, not only on the happy one.
+    const operateTable: Record<string, string[]> = {
+      ready: ["--json"],
+      task: ["list", "--json"],
+      claim: ["--json"],
+      heartbeat: ["--json"],
+      release: ["--json"],
+      reap: ["--json"],
+      enroll: ["--json"],
+      grants: ["--json"],
+      revoke: ["--json"],
+      runner: ["list", "--json"],
+      approver: ["list", "--json"],
+      build: ["--json"],
+      tick: ["--json"],
+      cap: ["list", "--json"],
+      gaps: ["--json"],
+      outbox: ["list", "--json"],
+      brief: ["--json"],
+      decide: ["--json"],
+      incident: ["list", "--json"],
+      serve: ["--port", "99999999", "--json"], // invalid port: throws into the catch-all, which must envelope
+      watch: ["--json"],
+      daemon: ["--json"],
+      bridge: ["--json"],
+      publish: ["status", "--json"],
+      reconcile: ["--json"],
+      routine: ["list", "--json"],
+      config: ["show", "--json"],
+      setup: ["show", "--json"],
+      intake: ["show", "--json"],
+      providers: ["--json"],
+      webhook: ["status", "--json"],
+    };
+
+    // The drift guard: the routed set, read from source, must be covered.
+    const cliSource = readFileSync(join(here, "cli.ts"), "utf8");
+    const routed = /const OPERATE_COMMANDS = new Set\(\[([^\]]+)\]\)/.exec(cliSource)?.[1] ?? "";
+    const routedVerbs = [...routed.matchAll(/"([a-z-]+)"/g)].map(one => one[1] as string);
+    const missing = routedVerbs.filter(verb => operateTable[verb] === undefined);
+    expect(missing, "every routed command joins the sweep or is exempted by name").toEqual([]);
+
+    for (const [verb, argv] of Object.entries(operateTable)) {
+      lines = [];
+      await runOperate(verb, argv, write, { databaseFile: db, now: T0, gitRunner: quickGit });
+      const wire = out();
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(wire) as Record<string, unknown>;
+      } catch {
+        throw new Error(`${verb} --json wrote something that is not one JSON document:\n${wire.slice(0, 400)}`);
+      }
+      expect(body["envelopeVersion"], `${verb} lacks envelopeVersion`).toBe(ENVELOPE_VERSION);
+      expect(typeof body["ok"], `${verb} lacks ok`).toBe("boolean");
+      expect(typeof body["command"], `${verb} lacks command`).toBe("string");
+      if (body["ok"] === false) {
+        expect(typeof body["reason"], `${verb} failure lacks a stable reason`).toBe("string");
+      }
+    }
+
+    // The cli-level commands hold the same contract.
+    const cliTable: string[][] = [
+      ["contract", "--json"],
+      ["skills", "--json"],
+      ["repos", "--json"],
+      ["pulls", dir, "--json"],
+      ["graph", dir, "--json"],
+      [dir, "--json", "--local"], // the scan itself
+    ];
+    for (const argv of cliTable) {
+      lines = [];
+      await main(argv, write);
+      const wire = out();
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(wire) as Record<string, unknown>;
+      } catch {
+        throw new Error(`${argv.join(" ")} wrote something that is not one JSON document:\n${wire.slice(0, 400)}`);
+      }
+      expect(body["envelopeVersion"], `${argv.join(" ")} lacks envelopeVersion`).toBe(ENVELOPE_VERSION);
+      expect(typeof body["ok"], `${argv.join(" ")} lacks ok`).toBe("boolean");
+    }
+  });
 });

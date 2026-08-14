@@ -419,22 +419,50 @@ function describeMissing(missing: readonly string[]): string {
  * at it — rather than being something you have to remember a flag for.
  */
 async function runReposCommand(argv: readonly string[], write: Write): Promise<number> {
-  const [action, ...paths] = argv;
+  // `repos` honors the machine contract like everything else (audit TG-3):
+  // --json answers with one envelope, whatever the outcome.
+  const json = argv.includes("--json");
+  const bare = argv.filter(argument => argument !== "--json");
+  const [action, ...paths] = bare;
   const file = configFile();
   const loaded = await loadRepos(file);
   if ("error" in loaded) {
-    write(loaded.error);
+    write(json ? envelopeJson({ ok: false, command: "repos", reason: "unreadable", message: loaded.error }) : loaded.error);
     return 1;
   }
 
-  if (action === undefined) return listRepos(loaded.repos, file, write);
+  if (action === undefined) {
+    if (json) {
+      write(envelopeJson({ ok: true, command: "repos", count: loaded.repos.length, repos: loaded.repos, file }));
+      return 0;
+    }
+    return listRepos(loaded.repos, file, write);
+  }
   if (action !== "add" && action !== "remove") {
-    write(`unknown command \`repos ${action}\` — try \`repos\`, \`repos add\`, or \`repos remove\``);
+    const message = `unknown command \`repos ${action}\` — try \`repos\`, \`repos add\`, or \`repos remove\``;
+    write(json ? envelopeJson({ ok: false, command: "repos", reason: "usage", message }) : message);
     return USAGE_EXIT;
   }
 
   // `repos add` with no path means the repository you are standing in.
   const targets = (paths.length > 0 ? paths : [process.cwd()]).map(path => resolve(path));
+  if (json) {
+    const lines: string[] = [];
+    const code =
+      action === "add"
+        ? await addToRepos(loaded.repos, targets, file, line => lines.push(line))
+        : await removeFromRepos(loaded.repos, targets, file, line => lines.push(line));
+    write(
+      envelopeJson({
+        ok: code === 0,
+        command: `repos ${action}`,
+        ...(code === 0 ? {} : { reason: "usage" }),
+        message: lines.join(" "),
+        targets,
+      }),
+    );
+    return code;
+  }
   return action === "add"
     ? addToRepos(loaded.repos, targets, file, write)
     : removeFromRepos(loaded.repos, targets, file, write);

@@ -294,12 +294,26 @@ next" goes only to an observed pass. SD-5 partial — the task page carries
 its publication line (PR, local+remote state, observed CI). TG-1-lite,
 secret-scan, and observed-ranking tests added.
 
+**TG-3 CLOSED (2026-08-13, prioritized as the top remaining deferral —
+the machine contract is the spine of agent usability, and it is the gap
+C-1 escaped through)**: the full envelope sweep — every routed command
+invoked with --json (successes, refusals, and usage failures alike,
+because an agent's parser meets all three) and proven to answer with
+EXACTLY one versioned envelope; a drift guard reads OPERATE_COMMANDS
+from source, so a new command cannot ship without joining the sweep or
+being exempted by name. The sweep earned its keep on its first run:
+`ready --json` on an empty queue answered ok:false with NO stable reason
+token (fixed: reason "empty"), and `repos` ignored --json entirely and
+printed prose (fixed: enveloped across list/add/remove). serve is swept
+through its throwing path — the catch-all envelopes it, which is itself
+part of the contract now proven.
+
 **Still deferred, named**: SD-1 comment side/context + supersede-on-edit
 (schema + UI round). SD-3 repo+runner setup scoping (authority-model
 change). SD-6 intake selector/mutation classes (ditto). SD-4 dependency/
-conflict ordering (needs mergeability observation). TG-3 full envelope
-sweep, TG-1's subprocess-level signal tests, remaining TG matrices.
-Windows: code-complete, physically untested — as the README already says.
+conflict ordering (needs mergeability observation). TG-1's
+subprocess-level signal tests, remaining TG matrices. Windows:
+code-complete, physically untested — as the README already says.
 
 ## M7 — agent citizenship · M8 — the outer loop (2026-08-13, same roadmap)
 
