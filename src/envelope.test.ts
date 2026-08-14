@@ -153,6 +153,7 @@ describe("the machine envelope", () => {
       setup: ["show", "--json"],
       intake: ["show", "--json"],
       providers: ["--json"],
+      template: ["list", "--json"],
       webhook: ["status", "--json"],
     };
 

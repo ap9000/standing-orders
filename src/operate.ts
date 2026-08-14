@@ -127,6 +127,7 @@ import {
   type RoutineTerms,
 } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
+import { TEMPLATES, templateByName } from "./templates.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
@@ -219,6 +220,12 @@ Capabilities — what the work needs, recorded and probed, never valued
                                         proposes a scope you approve
 
 Routines — standing orders that fire on a schedule, each instance isolated
+  standing-orders template list             common standing orders, shipped
+  standing-orders template show <name>      the full prefill + what to edit
+  standing-orders template apply <name> --repo <path> [--file]
+      previews the exact filing; --file files it UNAPPROVED through the
+      same door as a manual filing — a template carries no authority
+
   standing-orders routine add <name> --repo <path> --goal <text>
       --schedule every:<min>|daily:<HH:MM>   (UTC)
       [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]
@@ -323,7 +330,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
-    "command", "timeout-seconds", "stop-grace",
+    "command", "timeout-seconds", "stop-grace", "title", "name",
     "github", "label", "reviewers", "limit",
   ]);
 
@@ -477,6 +484,8 @@ async function dispatch(
       return intakeCommand(positional, flags, context);
     case "providers":
       return providersCommand(flags, context);
+    case "template":
+      return templateCommand(positional, flags, context);
     case "webhook":
       return webhookCommand(positional, flags, context);
     case "serve":
@@ -3086,6 +3095,211 @@ async function intakeCommand(
     `${created.length} proposal(s) created${skipped.length > 0 ? `, ${skipped.length} skipped` : ""} — each awaits its own scope approval.`,
     ...created.map(one => `  ${one}`),
     ...skipped.map(one => `  skipped ${one.id}: ${one.reason}`),
+  ]);
+}
+
+/**
+ * `standing-orders template …` — the shipped library of common standing
+ * orders (adoption track, step 2). A template is a pre-filled form:
+ * `apply` PREVIEWS by default and files only under `--file`, through the
+ * same one door as every manual filing, landing UNAPPROVED. Recipes
+ * (issue-intake, ci-babysitter) display existing ceremonies and cannot be
+ * applied — the authority they would need is a separate authenticated act
+ * a template must never perform (adoption review, finding 10).
+ */
+function templateCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json, clock } = context;
+  const [action, name] = positional;
+
+  if (action === undefined || action === "list") {
+    if (json) {
+      write(envelopeJson({
+        ok: true,
+        command: "template list",
+        templates: TEMPLATES.map(one => ({ name: one.name, kind: one.kind, purpose: one.purpose })),
+      }));
+      return EXIT.ok;
+    }
+    write("Templates — common standing orders you edit to fit. Nothing a template");
+    write("files is approved; recipes only show existing ceremonies.");
+    write("");
+    for (const one of TEMPLATES) {
+      write(`  ${one.name.padEnd(16)} ${one.kind.padEnd(9)} ${one.purpose}`);
+    }
+    write("");
+    write("`standing-orders template show <name>` · `template apply <name> --repo <path>`");
+    return EXIT.ok;
+  }
+
+  if (action !== "show" && action !== "apply") {
+    return fail(write, json, `template ${action}`, "usage", "`standing-orders template list | show <name> | apply <name> --repo <path> [--file]`", EXIT.usage);
+  }
+  if (name === undefined) {
+    return fail(write, json, `template ${action}`, "usage", "which template? `standing-orders template list` names them", EXIT.usage);
+  }
+  const template = templateByName(name);
+  if (template === null) {
+    return fail(write, json, `template ${action}`, "unknown", `no template named ${name} — \`standing-orders template list\``, EXIT.refused);
+  }
+
+  if (action === "show") {
+    if (json) {
+      write(envelopeJson({ ok: true, command: "template show", template }));
+      return EXIT.ok;
+    }
+    write(`${template.name} — ${template.purpose}`);
+    if (template.kind === "recipe") {
+      write("");
+      write(`This one is a recipe, not an application: ${template.why}`);
+      for (const step of template.steps) {
+        write("");
+        write(`  ${step.say}`);
+        write(`    ${step.run}`);
+      }
+      return EXIT.ok;
+    }
+    write("");
+    if (template.kind === "task") {
+      write(`  files      one task (unapproved until you approve its scope)`);
+      write(`  title      ${template.title}`);
+    } else {
+      write(`  files      one routine (cannot fire until you approve its terms)`);
+      write(`  name       ${template.routineName}`);
+      write(`  schedule   ${template.schedule}`);
+    }
+    write(`  goal       ${template.goal}`);
+    if (template.outOfScope !== null) write(`  not        ${template.outOfScope}`);
+    if (template.touches.length > 0) write(`  touches    ${template.touches.join(", ")}`);
+    write("");
+    write("You will probably edit:");
+    for (const hint of template.edit) write(`  - ${hint}`);
+    write("");
+    write(`\`standing-orders template apply ${template.name} --repo <path>\` previews the exact filing.`);
+    return EXIT.ok;
+  }
+
+  // apply
+  if (template.kind === "recipe") {
+    return fail(
+      write,
+      json,
+      "template apply",
+      "recipe",
+      `${template.name} cannot be applied: ${template.why} \`standing-orders template show ${template.name}\` walks the ceremonies.`,
+      EXIT.refused,
+    );
+  }
+  const repoGiven = text(flags, "repo");
+  if (repoGiven === undefined) {
+    return fail(write, json, "template apply", "usage", "which repository? --repo <path> — a template never guesses where work lands", EXIT.usage);
+  }
+  const goal = text(flags, "goal") ?? template.goal;
+  const outOfScope = text(flags, "not") ?? template.outOfScope;
+  const touches =
+    text(flags, "touches") === undefined
+      ? template.touches
+      : (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(one => one !== "");
+
+  if (template.kind === "task") {
+    const title = text(flags, "title") ?? template.title;
+    const draft = {
+      kind: "task" as const,
+      title,
+      repo: canonicalProject(repoGiven) ?? resolve(repoGiven),
+      goal,
+      outOfScope,
+      touches,
+      filedVia: `template:${template.name}`,
+    };
+    if (!flags.has("file")) {
+      if (json) {
+        write(envelopeJson({ ok: false, command: "template apply", reason: "unconfirmed", draft }));
+        return 3;
+      }
+      write("Would file, exactly (edit with --title/--goal/--not/--touches):");
+      write("");
+      write(`  task    ${draft.title}`);
+      write(`  repo    ${draft.repo}`);
+      write(`  goal    ${draft.goal}`);
+      if (draft.outOfScope !== null) write(`  not     ${draft.outOfScope}`);
+      if (draft.touches.length > 0) write(`  touches ${draft.touches.join(", ")}`);
+      write("");
+      write("Nothing was filed. Re-run with --file to file it — UNAPPROVED either way.");
+      return 3;
+    }
+    const made = fileTaskProposal(
+      store,
+      { title, repo: repoGiven, goal, outOfScope, touches, filedVia: `template:${template.name}` },
+      clock(),
+    );
+    if (!made.ok) return fail(write, json, "template apply", made.reason, made.message, made.reason === "duplicate" ? EXIT.refused : EXIT.usage);
+    return succeed(write, json, "template apply", { filed: "task", id: made.id, approved: false }, () => [
+      `Filed ${made.id} from template ${template.name}.`,
+      "",
+      "UNAPPROVED — NO AUTHORITY GRANTED. It builds only after you approve its scope:",
+      `  standing-orders task show ${made.id}`,
+    ]);
+  }
+
+  const routineName = text(flags, "name") ?? template.routineName;
+  const schedule = text(flags, "schedule") ?? template.schedule;
+  const ceilingGiven = text(flags, "ceiling");
+  const costCeilingUsd = ceilingGiven === undefined ? template.costCeilingUsd : Number(ceilingGiven);
+  if (!flags.has("file")) {
+    const draft = {
+      kind: "routine" as const,
+      name: routineName,
+      repo: canonicalProject(repoGiven) ?? resolve(repoGiven),
+      goal,
+      outOfScope,
+      touches,
+      requirements: template.requirements,
+      schedule,
+      costCeilingUsd,
+      filedVia: `template:${template.name}`,
+    };
+    if (json) {
+      write(envelopeJson({ ok: false, command: "template apply", reason: "unconfirmed", draft }));
+      return 3;
+    }
+    write("Would file, exactly (edit with --name/--goal/--not/--touches/--schedule/--ceiling):");
+    write("");
+    write(`  routine  ${draft.name}`);
+    write(`  repo     ${draft.repo}`);
+    write(`  schedule ${draft.schedule}${draft.schedule.startsWith("every:10080") ? "  (weekly)" : ""}`);
+    write(`  goal     ${draft.goal}`);
+    if (draft.outOfScope !== null) write(`  not      ${draft.outOfScope}`);
+    if (draft.touches.length > 0) write(`  touches  ${draft.touches.join(", ")}`);
+    if (draft.costCeilingUsd !== null) write(`  ceiling  $${draft.costCeilingUsd}/week`);
+    write("");
+    write("Nothing was filed. Re-run with --file to file it — UNAPPROVED either way; it cannot fire until you approve it.");
+    return 3;
+  }
+  const made = fileRoutineProposal(
+    store,
+    {
+      name: routineName,
+      repo: repoGiven,
+      goal,
+      outOfScope,
+      touches,
+      requirements: template.requirements,
+      schedule,
+      costCeilingUsd,
+      filedVia: `template:${template.name}`,
+    },
+    clock(),
+  );
+  if (!made.ok) return fail(write, json, "template apply", made.reason, made.message, made.reason === "duplicate" ? EXIT.refused : EXIT.usage);
+  return succeed(write, json, "template apply", { filed: "routine", id: made.id, approved: false }, () => [
+    `Filed routine ${routineName} from template ${template.name}.`,
+    "",
+    "UNAPPROVED — NO AUTHORITY GRANTED. It cannot fire until you approve the standing order:",
+    `  standing-orders routine approve ${routineName}`,
   ]);
 }
 

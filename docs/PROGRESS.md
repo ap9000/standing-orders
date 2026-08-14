@@ -1,5 +1,21 @@
 # Progress
 
+**2026-08-14 — templates (adoption track, step 2).** Six common use cases
+ship as STATIC DATA (src/templates.ts): nightly-deps, test-coverage,
+docs-drift (weekly via every:10080), lint-sweep — plus issue-intake and
+ci-babysitter as RECIPES: show-only walkthroughs of the existing grant and
+repair ceremonies, refused at apply (reason "recipe"), because a template
+must never create a grant or arm autonomous repair (finding 10). `template
+apply <name> --repo <path>` PREVIEWS the exact filing (exit 3, reason
+"unconfirmed" — the skills-install convention); `--file` (NOT --yes, which
+reads like approval — finding 11) files it through the one door with
+provenance `template:<name>`, and the output says UNAPPROVED — NO
+AUTHORITY GRANTED in so many words. Edits: --title/--name/--goal/--not/
+--touches/--schedule/--ceiling override at apply; a filed draft is a COPY
+— editing the library later changes nothing anybody filed. A library test
+proves every applyable template passes the exact validators manual input
+passes. `template` joins OPERATE_COMMANDS and the TG-3 sweep. Suite 862.
+
 **2026-08-14 — the one filing door (adoption track, step 1).** The
 adoption-track + fleet-chat briefs went through Codex review (16 findings,
 scratchpad codex-adoption-chat-findings.md — the findings are the spec;
