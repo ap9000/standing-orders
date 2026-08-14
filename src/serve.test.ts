@@ -5,7 +5,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
@@ -2689,7 +2689,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
     // The setup form is right there, and it says where the key lives.
     expect(html).toContain('action="/chat/config"');
-    expect(html).toContain("never entered here and never stored");
+    expect(html).toContain("never INTO the database");
     expect(html).toContain("claude-sonnet-5");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
 
@@ -2741,6 +2741,77 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     });
     expect(off.status).toBe(303);
     expect(store.getChatConfig()).toBeNull();
+  });
+
+
+  test("key onboarding lives in the UI: pasted once, stored 0600, never echoed, env wins, forgettable", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "standing-orders-chat-cfg-"));
+    try {
+      store.clearChatConfig();
+      await boot({ chatEnv: {}, configDir });
+      const cookie = await login();
+      let html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+      expect(html).toContain("none yet");
+      const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+
+      // A password pasted as a "key" is refused loudly, nothing stored.
+      const badKey = await fetch(url("/chat/config"), {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({ csrf, provider: "anthropic-api", model: "claude-sonnet-5", "weekly-usd": "5", key: "hunter2", token: approverToken }),
+        redirect: "manual",
+      });
+      expect(decodeURIComponent(badKey.headers.get("location") ?? "")).toContain("does not look like an API key");
+      expect(existsSync(join(configDir, "chat-key-anthropic-api"))).toBe(false);
+
+      // The real thing: config + key in one authenticated save.
+      const secret = "sk-ant-" + "a".repeat(40);
+      const set = await fetch(url("/chat/config"), {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({ csrf, provider: "anthropic-api", model: "claude-sonnet-5", "weekly-usd": "5", key: secret, token: approverToken }),
+        redirect: "manual",
+      });
+      expect(set.status).toBe(303);
+      const keyFile = join(configDir, "chat-key-anthropic-api");
+      expect(readFileSync(keyFile, "utf8").trim()).toBe(secret);
+      expect((statSync(keyFile).mode & 0o777).toString(8)).toBe("600");
+
+      // Chat is ON with the stored key; the page shows a tail, never the key.
+      html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+      expect(html).toContain("answering with");
+      expect(html).toContain("stored");
+      expect(html).not.toContain(secret);
+      // The database carries no key anywhere.
+      expect(store.installationFact("chat-key")).toBeNull();
+
+      // Forgetting removes the file (password again).
+      const forget = await fetch(url("/chat/config"), {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({ csrf, "forget-key": "anthropic-api", token: approverToken }),
+        redirect: "manual",
+      });
+      expect(forget.status).toBe(303);
+      expect(existsSync(keyFile)).toBe(false);
+      html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+      expect(html).toContain("no anthropic-api key");
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("an environment key always wins over a stored one", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "standing-orders-chat-cfg2-"));
+    try {
+      writeFileSync(join(configDir, "chat-key-anthropic-api"), "sk-ant-" + "b".repeat(40), { mode: 0o600 });
+      await boot({ chatEnv: { ANTHROPIC_API_KEY: "sk-test-key" }, configDir });
+      const cookie = await login();
+      const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+      expect(html).toContain("from the environment");
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 
   test("bearer callers are refused — drafts have nowhere to live", async () => {

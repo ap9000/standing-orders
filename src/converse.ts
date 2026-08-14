@@ -173,6 +173,18 @@ export function credentialKeyOf(provider: ChatProviderId, key: string): string {
   return createHash("sha256").update(`standing-orders/chat/v1\u0000${provider}\u0000${key}`).digest("hex");
 }
 
+/** Rough shape checks so a pasted password or sentence is refused loudly
+ * instead of stored as a "key". Deliberately loose otherwise — vendors
+ * change prefixes; the API itself is the real validator. */
+const KEY_SHAPES: Record<ChatProviderId, RegExp> = {
+  "anthropic-api": /^sk-[A-Za-z0-9_-]{20,200}$/,
+  "openrouter-api": /^sk-[A-Za-z0-9_-]{20,200}$/,
+};
+
+export function plausibleChatKey(provider: ChatProviderId, key: string): boolean {
+  return KEY_SHAPES[provider].test(key.trim());
+}
+
 // ---------------------------------------------------------------- strict JSON
 
 export type StrictParse = { ok: true; value: unknown } | { ok: false; problem: string };

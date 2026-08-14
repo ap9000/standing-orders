@@ -1,5 +1,22 @@
 # Progress
 
+**2026-08-14 — key onboarding joins the console (operator request:
+"shouldn't the key entry be part of the onboarding on the ui").** The
+chat setup card gains an API-key field, on the TELEGRAM BOT-TOKEN
+PRECEDENT exactly: pasted once inside the authenticated (password-again)
+save, shape-checked (a pasted password is refused loudly, not stored as
+a "key"), written to a mode-0600 file beside the database
+(chat-key-<provider> under serve's config dir), asserted 0600 even when
+the file pre-existed, NEVER written into the database, and never echoed
+beyond redactToken's tail. Resolution order is environment first —
+ANTHROPIC_API_KEY / OPENROUTER_API_KEY always win when set — then the
+stored file; the card names each provider's key source (environment /
+stored …tail / none yet). A stored key is forgettable from the settings
+block (password again); storing or forgetting invalidates the catalog
+cache. The CLI serve passes configDir (beside the db) already, so the
+whole chat onboarding — key, provider, model from the live catalog,
+ceiling — now happens on one screen with one password. Suite 919.
+
 **2026-08-14 — the whole OpenRouter catalog, priced by the party that
 bills it (operator request).** With OPENROUTER_API_KEY in the serve
 environment, the chat setup card's model list becomes OpenRouter's LIVE

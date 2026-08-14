@@ -43,7 +43,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile, scanForSecrets } from "./evidence.js";
@@ -58,6 +58,7 @@ import {
   worstCaseForPrice,
   settleForPrice,
   fetchOpenRouterCatalog,
+  plausibleChatKey,
   PRICED_MODELS,
   settleMicrousd,
   worstCaseMicrousd,
@@ -105,7 +106,7 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import type { Routine, ChatTurn } from "./store.js";
+import type { Routine, ChatTurn, ChatProviderId } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -829,6 +830,14 @@ export function createDecisionServer(options: ServeOptions): Server {
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
           repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
           config: store.getChatConfig(),
+          keyFacts: (["anthropic-api", "openrouter-api"] as const).map(one => {
+            const found = chatKeyFor(one);
+            return {
+              provider: one,
+              state: found === null ? "none" : found.source,
+              tail: found === null || found.source === "environment" ? null : redactToken(found.key),
+            };
+          }),
           openrouterModels: (await chatCatalog())?.map(one => one.id) ?? null,
           csrf: who.session.csrf,
           problem: url.searchParams.get("said"),
@@ -966,7 +975,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     createHash("sha256").update([...ceiling.repos].sort().join("\n")).digest("hex");
 
   type ChatEnablement =
-    | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; price: import("./converse.js").ModelPrice; credentialKey: string }
+    | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; keySource: "environment" | "stored"; price: import("./converse.js").ModelPrice; credentialKey: string }
     | { ok: false; code: "demo" | "unscoped" | "roots" | "unresolved" | "empty" | "unconfigured" | "unpriced" | "no-key"; why: string };
 
   /** Every condition re-proved per request — the render and the POST each
@@ -981,9 +990,53 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: standing-orders config set chat" };
     const price = priceForConfig(config);
     if (price === null) return { ok: false, code: "unpriced", why: `no pinned price for ${config.model} — re-save the configuration to pin one` };
-    const key = chatEnv[CHAT_KEY_ENV[config.provider]];
-    if (key === undefined || key === "") return { ok: false, code: "no-key", why: `chat needs ${CHAT_KEY_ENV[config.provider]} in the serve environment this console runs under — export it and restart serve; the key never goes in this database` };
-    return { ok: true, config, key, price, credentialKey: credentialKeyOf(config.provider, key) };
+    const key = chatKeyFor(config.provider);
+    if (key === null) return { ok: false, code: "no-key", why: `no ${config.provider} key — paste one below (stored 0600 beside the database, never in it), or export ${CHAT_KEY_ENV[config.provider]} in the serve environment` };
+    return { ok: true, config, key: key.key, keySource: key.source, price, credentialKey: credentialKeyOf(config.provider, key.key) };
+  }
+
+  /**
+   * Where a chat key comes from, in priority order: the serve process
+   * environment, then the 0600 key file under the config directory (the
+   * Telegram bot-token precedent — settable from the console, never the
+   * database, never echoed whole). The file exists so onboarding lives
+   * in the UI; the environment exists so operators who prefer it keep it.
+   */
+  function chatKeyFor(provider: ChatProviderId): { key: string; source: "environment" | "stored" } | null {
+    const fromEnv = chatEnv[CHAT_KEY_ENV[provider]];
+    if (fromEnv !== undefined && fromEnv !== "") return { key: fromEnv, source: "environment" };
+    if (options.configDir === undefined) return null;
+    try {
+      const read = readFileSync(join(options.configDir, `chat-key-${provider}`), "utf8").trim();
+      return read === "" ? null : { key: read, source: "stored" };
+    } catch {
+      return null;
+    }
+  }
+
+  function storeChatKey(provider: ChatProviderId, key: string): { ok: true } | { ok: false; message: string } {
+    if (options.configDir === undefined) {
+      return { ok: false, message: "this server has no config directory — export the key in the serve environment instead" };
+    }
+    if (!plausibleChatKey(provider, key)) {
+      return { ok: false, message: "that does not look like an API key (expected sk-…) — nothing was stored" };
+    }
+    const file = join(options.configDir, `chat-key-${provider}`);
+    writeFsFileSync(file, `${key.trim()}\n`, { mode: 0o600 });
+    // writeFileSync applies the mode only on creation; assert it regardless.
+    chmodSync(file, 0o600);
+    catalogCache = null; // a new key may see a different catalog
+    return { ok: true };
+  }
+
+  function forgetChatKey(provider: ChatProviderId): void {
+    if (options.configDir === undefined) return;
+    try {
+      rmFileSync(join(options.configDir, `chat-key-${provider}`));
+    } catch {
+      // never stored — nothing to forget
+    }
+    catalogCache = null;
   }
 
   /** OpenRouter's live catalog, cached briefly: every selectable model
@@ -992,8 +1045,8 @@ export function createDecisionServer(options: ServeOptions): Server {
    * catalog is unreachable; callers fall back to the compiled table. */
   let catalogCache: { at: number; models: import("./converse.js").CatalogModel[] } | null = null;
   async function chatCatalog(): Promise<import("./converse.js").CatalogModel[] | null> {
-    const key = chatEnv[CHAT_KEY_ENV["openrouter-api"]];
-    if (key === undefined || key === "") return null;
+    const key = chatKeyFor("openrouter-api")?.key;
+    if (key === undefined) return null;
     if (catalogCache !== null && Date.now() - catalogCache.at < 600_000) return catalogCache.models;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5_000);
@@ -1613,12 +1666,25 @@ export function createDecisionServer(options: ServeOptions): Server {
         store.clearChatConfig();
         return redirect(response, `/chat?said=${encodeURIComponent("chat is off — the config row is gone")}`);
       }
+      const forget = body.get("forget-key") ?? "";
+      if (forget === "anthropic-api" || forget === "openrouter-api") {
+        forgetChatKey(forget);
+        return redirect(response, `/chat?said=${encodeURIComponent("the stored key file is gone (an environment variable, if set, still applies)")}`);
+      }
       const provider = body.get("provider") ?? "";
       const model = body.get("model") ?? "";
       const weekly = Number(body.get("weekly-usd") ?? "");
       const daily = (body.get("daily-turns") ?? "").trim() === "" ? 50 : Number(body.get("daily-turns"));
       if (provider !== "anthropic-api" && provider !== "openrouter-api") {
         return redirect(response, `/chat?said=${encodeURIComponent("pick a chat provider")}`);
+      }
+      // The key, when pasted, is stored FIRST (0600 file, Telegram-token
+      // precedent) so the catalog fetch below can already use it. It never
+      // touches the database and is never echoed back.
+      const pastedKey = (body.get("key") ?? "").trim();
+      if (pastedKey !== "") {
+        const stored = storeChatKey(provider, pastedKey);
+        if (!stored.ok) return redirect(response, `/chat?said=${encodeURIComponent(stored.message)}`);
       }
       // The pin: anthropic models come from the compiled table; openrouter
       // models come from OpenRouter's OWN catalog, priced by the authority
@@ -3527,6 +3593,8 @@ function chatPage(chrome: Chrome, data: {
   weeklySpent: number;
   repoLabels: { id: string; label: string }[];
   config: import("./store.js").ChatConfig | null;
+  /** Where each provider's key comes from — never the key itself. */
+  keyFacts: { provider: string; state: "environment" | "stored" | "none"; tail: string | null }[];
   /** OpenRouter's live catalog when the key is present and reachable. */
   openrouterModels: string[] | null;
   csrf: string;
@@ -3555,13 +3623,22 @@ function chatPage(chrome: Chrome, data: {
         `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
       `<label>daily turns <span class="meta">(default 50)</span>` +
         `<input type="text" name="daily-turns" inputmode="numeric" style="width:8rem" value="${current === null ? "" : String(current.dailyTurns)}"></label>`,
+      `<label>API key <span class="meta">(${data.keyFacts
+        .map(one =>
+          one.state === "none"
+            ? `${escape(one.provider)}: none yet`
+            : one.state === "environment"
+              ? `${escape(one.provider)}: from the environment`
+              : `${escape(one.provider)}: stored ${escape(one.tail ?? "")}`,
+        )
+        .join(" · ")})</span>` +
+        `<input type="password" name="key" placeholder="paste to set or replace — leave empty to keep" autocomplete="off"></label>`,
       `<label>your password <span class="meta">(this routes spend — typed again, like every spend act)</span>` +
         `<input type="password" name="token" autocomplete="current-password"></label>`,
       `<button type="submit">${current === null ? "turn chat on" : "save"}</button>`,
       `</form>`,
-      `<p class="meta">the API key is never entered here and never stored: export ` +
-        `<span class="mono">ANTHROPIC_API_KEY</span> (or <span class="mono">OPENROUTER_API_KEY</span>) ` +
-        `in the environment that runs <span class="mono">standing-orders serve</span>, then restart it</p>`,
+      `<p class="meta">a pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
+        `<span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">OPENROUTER_API_KEY</span>) always wins when set</p>`,
     ].join("\n");
   };
   const parts: string[] = [
@@ -3644,6 +3721,17 @@ function chatPage(chrome: Chrome, data: {
     `<input type="password" name="token" placeholder="your password" autocomplete="current-password">`,
     `<button type="submit">turn chat off</button>`,
     `</form>`,
+    data.keyFacts
+      .filter(one => one.state === "stored")
+      .map(
+        one =>
+          `<form method="post" action="/chat/config" class="inline">` +
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+          `<input type="hidden" name="forget-key" value="${escape(one.provider)}">` +
+          `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
+          `<button type="submit">forget the stored ${escape(one.provider)} key</button></form>`,
+      )
+      .join("\n"),
     `</details>`,
   );
   if (data.recent.length > 0) {
