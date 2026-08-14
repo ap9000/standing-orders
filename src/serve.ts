@@ -54,6 +54,10 @@ import {
   parseAssistantEnvelope,
   performChatRequest,
   priceOf,
+  priceForConfig,
+  worstCaseForPrice,
+  settleForPrice,
+  fetchOpenRouterCatalog,
   PRICED_MODELS,
   settleMicrousd,
   worstCaseMicrousd,
@@ -390,14 +394,14 @@ export function createDecisionServer(options: ServeOptions): Server {
         : respond(response, 401, "text/plain; charset=utf-8", "authenticate first");
     }
 
-    if (method === "GET") return handleGet(url, who, request, response);
+    if (method === "GET") return void (await handleGet(url, who, request, response));
     if (method === "POST") return handlePost(url, who, request, response);
     return respond(response, 405, "text/plain; charset=utf-8", "no such method here");
   }
 
   // ---- reads ---------------------------------------------------------------
 
-  function handleGet(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): void {
+  async function handleGet(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): Promise<void> {
     const now = clock();
     const project = projectOf(who, request);
     if (project === undefined) {
@@ -825,6 +829,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
           repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
           config: store.getChatConfig(),
+          openrouterModels: (await chatCatalog())?.map(one => one.id) ?? null,
           csrf: who.session.csrf,
           problem: url.searchParams.get("said"),
         }),
@@ -961,7 +966,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     createHash("sha256").update([...ceiling.repos].sort().join("\n")).digest("hex");
 
   type ChatEnablement =
-    | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; credentialKey: string }
+    | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; price: import("./converse.js").ModelPrice; credentialKey: string }
     | { ok: false; code: "demo" | "unscoped" | "roots" | "unresolved" | "empty" | "unconfigured" | "unpriced" | "no-key"; why: string };
 
   /** Every condition re-proved per request — the render and the POST each
@@ -974,10 +979,34 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (ceiling.repos.length === 0) return { ok: false, code: "empty", why: "the ceiling is empty — chat has nothing it may see" };
     const config = store.getChatConfig();
     if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: standing-orders config set chat" };
-    if (priceOf(config.model) === null) return { ok: false, code: "unpriced", why: `no pinned price for ${config.model} — chat cannot reserve spend it cannot bound` };
+    const price = priceForConfig(config);
+    if (price === null) return { ok: false, code: "unpriced", why: `no pinned price for ${config.model} — re-save the configuration to pin one` };
     const key = chatEnv[CHAT_KEY_ENV[config.provider]];
     if (key === undefined || key === "") return { ok: false, code: "no-key", why: `chat needs ${CHAT_KEY_ENV[config.provider]} in the serve environment this console runs under — export it and restart serve; the key never goes in this database` };
-    return { ok: true, config, key, credentialKey: credentialKeyOf(config.provider, key) };
+    return { ok: true, config, key, price, credentialKey: credentialKeyOf(config.provider, key) };
+  }
+
+  /** OpenRouter's live catalog, cached briefly: every selectable model
+   * arrives WITH the price the config will pin (operator request — the
+   * whole catalog, not a hand-pinned shortlist). null = no key or the
+   * catalog is unreachable; callers fall back to the compiled table. */
+  let catalogCache: { at: number; models: import("./converse.js").CatalogModel[] } | null = null;
+  async function chatCatalog(): Promise<import("./converse.js").CatalogModel[] | null> {
+    const key = chatEnv[CHAT_KEY_ENV["openrouter-api"]];
+    if (key === undefined || key === "") return null;
+    if (catalogCache !== null && Date.now() - catalogCache.at < 600_000) return catalogCache.models;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    try {
+      const got = await fetchOpenRouterCatalog(key, chatFetcher, controller.signal);
+      if (!got.ok) return null;
+      catalogCache = { at: Date.now(), models: got.models };
+      return got.models;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Session-memory hygiene: drafts age out; a filed or dead session frees
@@ -1068,7 +1097,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return;
     }
-    const settled = settleMicrousd(enabled.config.model, result.answer.tokensIn, result.answer.tokensOut);
+    // The pinned math, or the provider's own reported charge when that is
+    // HIGHER — the ledger never undercounts what actually left the wallet.
+    const pinnedSettle = settleForPrice(enabled.price, result.answer.tokensIn, result.answer.tokensOut);
+    const settled = Math.max(pinnedSettle, result.answer.reportedCostMicrousd ?? 0);
     const envelope = parseAssistantEnvelope(result.answer.text);
     if (!envelope.ok) {
       finish({
@@ -1588,8 +1620,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (provider !== "anthropic-api" && provider !== "openrouter-api") {
         return redirect(response, `/chat?said=${encodeURIComponent("pick a chat provider")}`);
       }
-      if (priceOf(model) === null) {
-        return redirect(response, `/chat?said=${encodeURIComponent("that model has no pinned price — chat cannot reserve spend it cannot bound")}`);
+      // The pin: anthropic models come from the compiled table; openrouter
+      // models come from OpenRouter's OWN catalog, priced by the authority
+      // that will bill them. No price found anywhere = refused, not guessed.
+      let pin = priceOf(model);
+      if (provider === "openrouter-api") {
+        const catalog = await chatCatalog();
+        const hit = catalog?.find(one => one.id === model);
+        if (hit !== undefined) pin = hit.price;
+      }
+      if (pin === null) {
+        return redirect(response, `/chat?said=${encodeURIComponent(provider === "openrouter-api" ? "that model is not in OpenRouter's catalog (or the catalog is unreachable) — chat cannot reserve spend it cannot bound" : "that model has no pinned price — chat cannot reserve spend it cannot bound")}`);
       }
       if (!Number.isFinite(weekly) || weekly <= 0) {
         return redirect(response, `/chat?said=${encodeURIComponent("the weekly ceiling is a positive dollar amount — chat without one is unbounded, not configured")}`);
@@ -1598,7 +1639,14 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `/chat?said=${encodeURIComponent("daily turns is a whole number between 1 and 1000")}`);
       }
       store.setChatConfig(
-        { provider, model, dailyTurns: daily, weeklyCeilingMicrousd: Math.round(weekly * 1_000_000) },
+        {
+          provider,
+          model,
+          dailyTurns: daily,
+          weeklyCeilingMicrousd: Math.round(weekly * 1_000_000),
+          priceInMicrousd: pin.inMicrousd,
+          priceOutMicrousd: pin.outMicrousd,
+        },
         who.name,
         now,
       );
@@ -1640,8 +1688,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (scanForSecrets(composed.body).length > 0) {
         return redirect(response, `/chat?said=${encodeURIComponent("fleet context contains something credential-shaped — chat refuses to send it; find and remove it first")}`);
       }
-      const reserved = worstCaseMicrousd(enabled.config.model, Buffer.byteLength(composed.body, "utf8"));
-      if (reserved === null) return redirect(response, `/chat?said=${encodeURIComponent("no pinned price for the configured model")}`);
+      const reserved = worstCaseForPrice(enabled.price, Buffer.byteLength(composed.body, "utf8"));
       const opened = store.openChatTurn(
         {
           approver: who.name,
@@ -3480,12 +3527,14 @@ function chatPage(chrome: Chrome, data: {
   weeklySpent: number;
   repoLabels: { id: string; label: string }[];
   config: import("./store.js").ChatConfig | null;
+  /** OpenRouter's live catalog when the key is present and reachable. */
+  openrouterModels: string[] | null;
   csrf: string;
   problem: string | null;
 }): string {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
-    const openrouterModels = PRICED_MODELS.filter(one => one.includes("/"));
+    const openrouterModels = data.openrouterModels ?? PRICED_MODELS.filter(one => one.includes("/"));
     const option = (model: string): string =>
       `<option value="${escape(model)}"${current?.model === model ? " selected" : ""}>${escape(model)}</option>`;
     return [
@@ -3499,6 +3548,9 @@ function chatPage(chrome: Chrome, data: {
       `<optgroup label="anthropic-api">${anthropicModels.map(option).join("")}</optgroup>`,
       `<optgroup label="openrouter-api">${openrouterModels.map(option).join("")}</optgroup>`,
       `</select></label>`,
+      data.openrouterModels === null
+        ? `<p class="meta">with OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
+        : `<p class="meta">${data.openrouterModels.length} models live from OpenRouter's catalog; saving pins today's price — re-save to re-pin</p>`,
       `<label>weekly ceiling <span class="meta">(dollars per rolling 7 days — required; enforced before every turn)</span>` +
         `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
       `<label>daily turns <span class="meta">(default 50)</span>` +

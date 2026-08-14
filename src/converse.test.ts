@@ -8,6 +8,7 @@ import {
   worstCaseMicrousd,
   settleMicrousd,
   credentialKeyOf,
+  fetchOpenRouterCatalog,
   MAX_OUTPUT_TOKENS,
   REPLY_CAP_BYTES,
 } from "./converse.js";
@@ -192,5 +193,45 @@ describe("the one network call", () => {
     expect(request.headers["x-api-key"]).toBe("k");
     // The operator message rides as JSON-encoded data, not instructions.
     expect(body.messages[0].content).toContain('"hi"');
+  });
+});
+
+describe("the OpenRouter catalog — every model arrives with the price that will be pinned", () => {
+  const catalog = (data: unknown) =>
+    new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
+
+  test("models parse with ceil'd micro-dollar prices; dynamic pricing is excluded, not guessed", async () => {
+    const got = await fetchOpenRouterCatalog("sk-or-test", async () =>
+      catalog([
+        { id: "anthropic/claude-sonnet-5", pricing: { prompt: "0.000003", completion: "0.000015" } },
+        { id: "cheap/model", pricing: { prompt: "0.0000001", completion: "0.0000002" } },
+        { id: "free/model", pricing: { prompt: "0", completion: "0" } },
+        { id: "openrouter/auto", pricing: { prompt: "-1", completion: "-1" } },
+        { id: "broken/model", pricing: { prompt: "soon", completion: "0.001" } },
+      ]),
+    );
+    if (!got.ok) throw new Error(got.problem);
+    const ids = got.models.map(one => one.id);
+    expect(ids).toContain("anthropic/claude-sonnet-5");
+    expect(ids).toContain("free/model");
+    expect(ids).not.toContain("openrouter/auto");
+    expect(ids).not.toContain("broken/model");
+    const sonnet = got.models.find(one => one.id === "anthropic/claude-sonnet-5");
+    expect(sonnet?.price).toEqual({ inMicrousd: 3, outMicrousd: 15 });
+    // Sub-micro-dollar prices round UP to 1 — a paid model never reads free.
+    const cheap = got.models.find(one => one.id === "cheap/model");
+    expect(cheap?.price).toEqual({ inMicrousd: 1, outMicrousd: 1 });
+    const free = got.models.find(one => one.id === "free/model");
+    expect(free?.price).toEqual({ inMicrousd: 0, outMicrousd: 0 });
+  });
+
+  test("a broken catalog refuses typed — never an empty 'everything is free' list", async () => {
+    expect(await fetchOpenRouterCatalog("k", async () => new Response("nope", { status: 500 }))).toMatchObject({
+      ok: false,
+      problem: "status-500",
+    });
+    expect(
+      await fetchOpenRouterCatalog("k", async () => catalog("not-an-array")),
+    ).toMatchObject({ ok: false, problem: "wrong-shape" });
   });
 });

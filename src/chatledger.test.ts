@@ -24,9 +24,9 @@ describe("the chat turn ledger", () => {
 
   test("config is an installation singleton, written whole", () => {
     expect(store.getChatConfig()).toBeNull();
-    store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000 }, "alex", T0);
+    store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, priceInMicrousd: 3, priceOutMicrousd: 15 }, "alex", T0);
     expect(store.getChatConfig()).toMatchObject({ provider: "anthropic-api", dailyTurns: 50 });
-    store.setChatConfig({ provider: "openrouter-api", model: "x", dailyTurns: 10, weeklyCeilingMicrousd: 1_000_000 }, "alex", T0);
+    store.setChatConfig({ provider: "openrouter-api", model: "x", dailyTurns: 10, weeklyCeilingMicrousd: 1_000_000, priceInMicrousd: 2, priceOutMicrousd: 8 }, "alex", T0);
     expect(store.getChatConfig()?.provider).toBe("openrouter-api");
     store.clearChatConfig();
     expect(store.getChatConfig()).toBeNull();

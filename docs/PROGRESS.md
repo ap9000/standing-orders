@@ -1,5 +1,25 @@
 # Progress
 
+**2026-08-14 — the whole OpenRouter catalog, priced by the party that
+bills it (operator request).** With OPENROUTER_API_KEY in the serve
+environment, the chat setup card's model list becomes OpenRouter's LIVE
+/api/v1/models catalog (cached 10 min, 5s timeout, 4MB cap, fatal-decode)
+— every model selectable, each arriving WITH its price. The spend
+discipline the Codex v3 review demanded is preserved by moving the pin to
+the authenticated save: chat_config now carries price_in/out_microusd
+(v13b, additive), snapshotted at `save` from the catalog (openrouter) or
+the compiled table (anthropic/CLI), so reservations stay fixed-price and
+an upstream price change never silently moves the ledger — re-saving
+re-pins, and the card says so. Excluded rather than guessed: dynamic
+pricing (openrouter/auto advertises -1) and unparseable rows; sub-micro
+prices round UP to 1 so a paid model never reads free. Settlement now
+takes MAX(pinned math, OpenRouter's own reported usage.cost) — the
+ledger never undercounts. FLAGGED for the next Codex audit round: the
+price-pin authority moved from compile time to the authenticated config
+act reading the biller's catalog over TLS — same trust as the billing
+itself, but it deviates from the reviewed "compiled table" wording and
+deserves adversarial eyes. Suite 917.
+
 **2026-08-14 — chat setup lives in the console (operator request: "this
 will likely be mainly in the webui").** /chat now carries its own setup
 card when unconfigured (and a quiet settings block when configured):

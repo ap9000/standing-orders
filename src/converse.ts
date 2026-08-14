@@ -59,6 +59,92 @@ export function priceOf(model: string): { inMicrousd: number; outMicrousd: numbe
 /** For the config error message: what CAN be configured today. */
 export const PRICED_MODELS: readonly string[] = Object.keys(PRICES);
 
+export type ModelPrice = { inMicrousd: number; outMicrousd: number };
+export type CatalogModel = { id: string; price: ModelPrice };
+
+/** Dollars-per-token (the catalog's unit) to integer micro-dollars,
+ * rounded UP — a paid model never rounds to free. */
+function toMicrousd(dollarsPerToken: number): number | null {
+  if (!Number.isFinite(dollarsPerToken) || dollarsPerToken < 0) return null;
+  if (dollarsPerToken === 0) return 0;
+  return Math.max(1, Math.ceil(dollarsPerToken * 1_000_000));
+}
+
+/**
+ * OpenRouter's own model catalog — the authority on what OpenRouter
+ * bills, read live so every selectable model arrives WITH the price the
+ * config will pin. Models with dynamic or unparseable pricing (the auto
+ * router advertises -1) are excluded rather than guessed: spend that
+ * cannot be bounded up front cannot be reserved, so it cannot run.
+ */
+export async function fetchOpenRouterCatalog(
+  key: string,
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<{ ok: true; models: CatalogModel[] } | { ok: false; problem: string }> {
+  let response: Response;
+  try {
+    response = await fetcher("https://openrouter.ai/api/v1/models", {
+      headers: { authorization: `Bearer ${key}` },
+      redirect: "error",
+      ...(signal === undefined ? {} : { signal }),
+    });
+  } catch {
+    return { ok: false, problem: "network" };
+  }
+  if (response.status !== 200) return { ok: false, problem: `status-${response.status}` };
+  const body = await readCappedBody(response, 4_194_304);
+  if (body === null) return { ok: false, problem: "over-size" };
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+  } catch {
+    return { ok: false, problem: "not-utf8" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, problem: "not-json" };
+  }
+  const rows = (parsed as { data?: unknown })?.data;
+  if (!Array.isArray(rows)) return { ok: false, problem: "wrong-shape" };
+  const models: CatalogModel[] = [];
+  for (const row of rows) {
+    const id = (row as { id?: unknown })?.id;
+    const pricing = (row as { pricing?: { prompt?: unknown; completion?: unknown } })?.pricing;
+    if (typeof id !== "string" || id.length > 128 || pricing === undefined) continue;
+    const inMicrousd = toMicrousd(Number(pricing.prompt));
+    const outMicrousd = toMicrousd(Number(pricing.completion));
+    if (inMicrousd === null || outMicrousd === null) continue;
+    models.push({ id, price: { inMicrousd, outMicrousd } });
+    if (models.length >= 500) break;
+  }
+  models.sort((a, b) => a.id.localeCompare(b.id));
+  return { ok: true, models };
+}
+
+/** The price a configured chat actually runs on: the pin when present,
+ * the compiled table for pre-v13b rows, nothing otherwise. */
+export function priceForConfig(config: {
+  model: string;
+  priceInMicrousd: number | null;
+  priceOutMicrousd: number | null;
+}): ModelPrice | null {
+  if (config.priceInMicrousd !== null && config.priceOutMicrousd !== null) {
+    return { inMicrousd: config.priceInMicrousd, outMicrousd: config.priceOutMicrousd };
+  }
+  return priceOf(config.model);
+}
+
+export function worstCaseForPrice(price: ModelPrice, promptBytes: number): number {
+  return Math.ceil(promptBytes / 3) * price.inMicrousd + MAX_OUTPUT_TOKENS * price.outMicrousd;
+}
+
+export function settleForPrice(price: ModelPrice, tokensIn: number, tokensOut: number): number {
+  return tokensIn * price.inMicrousd + tokensOut * price.outMicrousd;
+}
+
 /** The worst a turn can cost, in integer micro-dollars: every prompt byte
  * as a token-third (generous) plus the full output allowance. */
 export function worstCaseMicrousd(model: string, promptBytes: number): number | null {
@@ -296,6 +382,9 @@ export type ProviderAnswer = {
   text: string;
   tokensIn: number;
   tokensOut: number;
+  /** OpenRouter reports the actual charge; settlement takes the HIGHER of
+   * this and the pinned math — the ledger never undercounts. */
+  reportedCostMicrousd: number | null;
 };
 
 /** Strict parse of the PROVIDER response body (layer one). */
@@ -321,7 +410,7 @@ export function parseProviderWrapper(
     const tokensIn = usage === undefined ? NaN : Number(usage["input_tokens"]);
     const tokensOut = usage === undefined ? NaN : Number(usage["output_tokens"]);
     if (!Number.isFinite(tokensIn) || !Number.isFinite(tokensOut)) return { ok: false, problem: "no-usage" };
-    return { ok: true, answer: { text: block["text"], tokensIn, tokensOut } };
+    return { ok: true, answer: { text: block["text"], tokensIn, tokensOut, reportedCostMicrousd: null } };
   }
 
   // openrouter-api (OpenAI-compatible)
@@ -337,7 +426,16 @@ export function parseProviderWrapper(
   const tokensIn = usage === undefined ? NaN : Number(usage["prompt_tokens"]);
   const tokensOut = usage === undefined ? NaN : Number(usage["completion_tokens"]);
   if (!Number.isFinite(tokensIn) || !Number.isFinite(tokensOut)) return { ok: false, problem: "no-usage" };
-  return { ok: true, answer: { text: message["content"], tokensIn, tokensOut } };
+  const reportedCost = usage === undefined ? NaN : Number(usage["cost"]);
+  return {
+    ok: true,
+    answer: {
+      text: message["content"],
+      tokensIn,
+      tokensOut,
+      reportedCostMicrousd: Number.isFinite(reportedCost) && reportedCost >= 0 ? Math.ceil(reportedCost * 1_000_000) : null,
+    },
+  };
 }
 
 // ---------------------------------------------------------------- data document

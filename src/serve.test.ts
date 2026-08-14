@@ -2483,7 +2483,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
     store.setChatConfig(
-      { provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000 },
+      { provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, priceInMicrousd: 3, priceOutMicrousd: 15 },
       "alex",
       T0,
     );
@@ -2502,7 +2502,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     const cookie = await login();
     const off = await (await fetch(url("/chat"), { headers: { cookie } })).text();
     expect(off).toContain("chat is not configured");
-    store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 1_000_000 }, "alex", T0);
+    store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 1_000_000, priceInMicrousd: 3, priceOutMicrousd: 15 }, "alex", T0);
     const noKey = await new Promise<string>(resolve => {
       server.close(() => resolve(""));
     }).then(async () => {

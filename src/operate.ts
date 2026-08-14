@@ -2710,8 +2710,21 @@ async function configCommand(
     if (!Number.isInteger(daily) || daily <= 0 || daily > 1_000) {
       return fail(write, json, "config set", "usage", "--daily-turns is a whole number between 1 and 1000", EXIT.usage);
     }
+    // The CLI pins from the compiled table (the console additionally offers
+    // OpenRouter's live catalog — priced by the party that bills it).
+    const pinned = priceOf(model);
+    if (pinned === null) {
+      return fail(write, json, "config set", "unpriced-model", `no compiled price for ${model}`, EXIT.refused);
+    }
     store.setChatConfig(
-      { provider, model, dailyTurns: daily, weeklyCeilingMicrousd: Math.round(weekly * 1_000_000) },
+      {
+        provider,
+        model,
+        dailyTurns: daily,
+        weeklyCeilingMicrousd: Math.round(weekly * 1_000_000),
+        priceInMicrousd: pinned.inMicrousd,
+        priceOutMicrousd: pinned.outMicrousd,
+      },
       acting.name,
       clock(),
     );

@@ -121,6 +121,9 @@ export type ChatConfig = {
   model: string;
   dailyTurns: number;
   weeklyCeilingMicrousd: number;
+  /** Pinned at the authenticated save; null only on pre-v13b rows. */
+  priceInMicrousd: number | null;
+  priceOutMicrousd: number | null;
   updatedAt: string;
   updatedBy: string;
 };
@@ -602,6 +605,14 @@ CREATE TABLE IF NOT EXISTS chat_config (
   -- reservations count against it transactionally; NOT NULL because a
   -- chat without a ceiling is not configured, it is unbounded.
   weekly_ceiling_microusd INTEGER NOT NULL,
+  -- The PINNED price (v13b): snapshotted from the provider's own catalog
+  -- (or the compiled table) at the authenticated save, integer
+  -- micro-dollars per token. Reservations and settlement use THESE, so an
+  -- upstream price change never silently moves the ledger math —
+  -- re-saving re-pins. NULL only on rows written before the columns
+  -- existed; readers fall back to the compiled table then.
+  price_in_microusd       INTEGER,
+  price_out_microusd      INTEGER,
   updated_at              TEXT NOT NULL,
   updated_by              TEXT NOT NULL
 );
@@ -1621,6 +1632,9 @@ function migrate(db: Database): void {
   addColumn(db, "routine", "filed_via", "TEXT");
   // v13 (fleet chat): purely additive — chat_config and chat_turn arrive
   // through the fresh SCHEMA's IF NOT EXISTS; no existing table changes.
+  // v13b: the pinned per-token price joins the config row, additive.
+  addColumn(db, "chat_config", "price_in_microusd", "INTEGER");
+  addColumn(db, "chat_config", "price_out_microusd", "INTEGER");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -3501,19 +3515,36 @@ export class Store {
   }
 
   setChatConfig(
-    config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number },
+    config: {
+      provider: ChatProviderId;
+      model: string;
+      dailyTurns: number;
+      weeklyCeilingMicrousd: number;
+      priceInMicrousd: number;
+      priceOutMicrousd: number;
+    },
     by: string,
     now: Date,
   ): void {
     this.db
       .prepare(
-        `INSERT INTO chat_config (id, provider, model, daily_turns, weekly_ceiling_microusd, updated_at, updated_by)
-         VALUES (1, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO chat_config (id, provider, model, daily_turns, weekly_ceiling_microusd, price_in_microusd, price_out_microusd, updated_at, updated_by)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, model = excluded.model,
            daily_turns = excluded.daily_turns, weekly_ceiling_microusd = excluded.weekly_ceiling_microusd,
+           price_in_microusd = excluded.price_in_microusd, price_out_microusd = excluded.price_out_microusd,
            updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
       )
-      .run(config.provider, config.model, config.dailyTurns, config.weeklyCeilingMicrousd, now.toISOString(), by);
+      .run(
+        config.provider,
+        config.model,
+        config.dailyTurns,
+        config.weeklyCeilingMicrousd,
+        config.priceInMicrousd,
+        config.priceOutMicrousd,
+        now.toISOString(),
+        by,
+      );
   }
 
   getChatConfig(): ChatConfig | null {
@@ -3524,6 +3555,8 @@ export class Store {
       model: String(row["model"]),
       dailyTurns: Number(row["daily_turns"]),
       weeklyCeilingMicrousd: Number(row["weekly_ceiling_microusd"]),
+      priceInMicrousd: row["price_in_microusd"] === null || row["price_in_microusd"] === undefined ? null : Number(row["price_in_microusd"]),
+      priceOutMicrousd: row["price_out_microusd"] === null || row["price_out_microusd"] === undefined ? null : Number(row["price_out_microusd"]),
       updatedAt: String(row["updated_at"]),
       updatedBy: String(row["updated_by"]),
     };
