@@ -56,6 +56,9 @@ export function priceOf(model: string): { inMicrousd: number; outMicrousd: numbe
   return PRICES[model] ?? null;
 }
 
+/** For the config error message: what CAN be configured today. */
+export const PRICED_MODELS: readonly string[] = Object.keys(PRICES);
+
 /** The worst a turn can cost, in integer micro-dollars: every prompt byte
  * as a token-third (generous) plus the full output allowance. */
 export function worstCaseMicrousd(model: string, promptBytes: number): number | null {

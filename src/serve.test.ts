@@ -2403,3 +2403,287 @@ describe("the first-run checklist (adoption track, step 3)", () => {
     expect(plain).not.toContain("pre-filled");
   });
 });
+
+describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+  let repoDir: string;
+  let fetcherResult: () => Promise<Response>;
+  let clockNow: Date;
+
+  const url = (path: string) => `${base}${path}`;
+  const T0 = new Date("2026-08-14T12:00:00.000Z");
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const csrfFrom = async (cookie: string): Promise<string> => {
+    const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf on /chat");
+    return match[1] as string;
+  };
+
+  const envelope = (reply: string, proposals: unknown[] = []) =>
+    JSON.stringify({ chatEnvelope: 1, reply, proposals });
+
+  const anthropicWrapper = (text: string) =>
+    new Response(
+      JSON.stringify({
+        type: "message",
+        content: [{ type: "text", text }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 500, output_tokens: 100 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 100; i++) {
+      const busy = store.recentChatTurns("alex", 5).some(one => one.state === "queued" || one.state === "running");
+      if (!busy) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error("turn never settled");
+  };
+
+  const boot = async (options: Record<string, unknown> = {}) => {
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => clockNow,
+      repo: repoDir,
+      chatEnv: { ANTHROPIC_API_KEY: "sk-test-key" },
+      chatFetcher: (async () => fetcherResult()) as typeof fetch,
+      ...options,
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-chat-ev-"));
+    repoDir = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-chat-repo-")));
+    clockNow = T0;
+    fetcherResult = async () => anthropicWrapper(envelope("all quiet"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    store.setChatConfig(
+      { provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000 },
+      "alex",
+      T0,
+    );
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  test("enablement refusals are distinct and stated", async () => {
+    store.clearChatConfig();
+    await boot();
+    const cookie = await login();
+    const off = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(off).toContain("chat is not configured");
+    store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 1_000_000 }, "alex", T0);
+    const noKey = await new Promise<string>(resolve => {
+      server.close(() => resolve(""));
+    }).then(async () => {
+      await boot({ chatEnv: {} });
+      const freshCookie = await login();
+      return (await fetch(url("/chat"), { headers: { cookie: freshCookie } })).text();
+    });
+    expect(noKey).toContain("ANTHROPIC_API_KEY");
+  });
+
+  test("a demo database refuses chat outright", async () => {
+    store.recordInstallationFact("demo", "1", T0);
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(html).toContain("demo database");
+  });
+
+  test("the whole loop: password-gated ask, reply, draft card, password-gated file through the door", async () => {
+    fetcherResult = async () =>
+      anthropicWrapper(
+        envelope("One draft ready.", [
+          { kind: "task", repoId: "r1", title: "Deflake the webhook test", goal: "Pin the clock in the retry test.", outOfScope: null, touches: [] },
+        ]),
+      );
+    await boot();
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    // No password → no turn.
+    const refused = await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, message: "anything stuck?" }),
+      redirect: "manual",
+    });
+    expect(refused.headers.get("location") ?? "").toContain("password");
+    expect(store.recentChatTurns("alex", 5)).toHaveLength(0);
+
+    const asked = await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, message: "anything stuck?", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(asked.status).toBe(303);
+    await settle();
+    const turn = store.recentChatTurns("alex", 1)[0];
+    expect(turn?.state).toBe("answered");
+    expect(turn?.settledMicrousd).toBe(500 * 3 + 100 * 15);
+
+    const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(html).toContain("One draft ready.");
+    expect(html).toContain("Deflake the webhook test");
+    const fileAction = /action="(\/chat\/file\/[0-9a-f]{32})"/.exec(html)?.[1];
+    if (fileAction === undefined) throw new Error("no file form");
+
+    // Filing also takes the password; then the door files it UNAPPROVED.
+    const filed = await fetch(url(fileAction), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    const where = filed.headers.get("location") as string;
+    expect(where).toMatch(/^\/t\//);
+    const taskId = where.slice(3);
+    expect(store.getScope(taskId)?.approvedAt).toBeNull();
+    expect(store.filedViaOf(taskId)).toBe("chat:anthropic-api");
+    // The draft is spent: filing again 404s.
+    const again = await fetch(url(fileAction), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(again.status).toBe(404);
+  });
+
+  test("a credential-shaped message refuses BEFORE any row or request", async () => {
+    let called = 0;
+    fetcherResult = async () => {
+      called++;
+      return anthropicWrapper(envelope("x"));
+    };
+    await boot();
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    const posted = await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, message: "my token is ghp_" + "a".repeat(36), token: approverToken }),
+      redirect: "manual",
+    });
+    expect(posted.headers.get("location") ?? "").toContain("credential");
+    expect(store.recentChatTurns("alex", 5)).toHaveLength(0);
+    expect(called).toBe(0);
+  });
+
+  test("a malformed reply renders ONLY the static line, and script tags in replies stay inert", async () => {
+    fetcherResult = async () => anthropicWrapper("here is my answer, no JSON");
+    await boot();
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, message: "hello", token: approverToken }),
+      redirect: "manual",
+    });
+    await settle();
+    let html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(html).toContain("malformed and was discarded");
+    expect(html).not.toContain("here is my answer");
+
+    fetcherResult = async () => anthropicWrapper(envelope('<script>alert(1)</script>'));
+    const csrf2 = await csrfFrom(cookie);
+    await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf: csrf2, message: "again", token: approverToken }),
+      redirect: "manual",
+    });
+    await settle();
+    html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>alert");
+  });
+
+  test("a network failure after dispatch LATCHES the credential; the nonce ceremony lifts it", async () => {
+    fetcherResult = async () => {
+      throw new Error("connection reset");
+    };
+    await boot();
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, message: "hello", token: approverToken }),
+      redirect: "manual",
+    });
+    await settle();
+    const turn = store.recentChatTurns("alex", 1)[0];
+    expect(turn?.unknownSpend).toBe(true);
+
+    // Latched: the next ask refuses.
+    const blocked = await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, message: "again", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(blocked.headers.get("location") ?? "").toContain("unknown");
+
+    // The ceremony: read the terms, nonce + password, acknowledged.
+    const screen = await (await fetch(url(`/chat/ack/${turn?.id}`), { headers: { cookie } })).text();
+    expect(screen).toContain("worst case");
+    const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(screen)?.[1] as string;
+    const acked = await fetch(url(`/chat/ack/${turn?.id}`), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, nonce, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(acked.status).toBe(303);
+    expect(store.getChatTurn(turn?.id as number)?.settledMicrousd).toBe(turn?.reservedMicrousd);
+    fetcherResult = async () => anthropicWrapper(envelope("back"));
+    const unblocked = await fetch(url("/chat"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, message: "back?", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(unblocked.headers.get("location")).toBe("/chat");
+  });
+
+  test("bearer callers are refused — drafts have nowhere to live", async () => {
+    await boot();
+    const bearer = await fetch(url("/chat"), { headers: { authorization: `Bearer alex:${approverToken}` } });
+    expect([401, 403]).toContain(bearer.status);
+  });
+});

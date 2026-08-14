@@ -1,5 +1,52 @@
 # Progress
 
+**2026-08-14 — FLEET CHAT SHIPS (v13), three Codex rounds deep.** The
+design went v1 → REDESIGN → v2 → REDESIGN → v3 → approve-with-changes,
+and the ten required changes are built exactly (the findings files in the
+session scratchpad are the specs). What shipped: chat is a DIRECT no-tool
+API call (src/converse.ts — anthropic-api / openrouter-api over fetch,
+zero deps; no CLI spawn means no filesystem, no inherited AGENTS.md, no
+hooks, no argv leaks, and max_tokens as a hard budget by construction);
+`chat_config` is its own installation-scoped singleton, deliberately NOT
+a phase row (change 1), set by the authenticated
+`config set chat --provider … --model … --weekly-usd …` which refuses
+--repo and unpriced models; every turn is a `chat_turn` ledger row —
+metadata only, closed failure enum, integer micro-dollar WORST-CASE
+RESERVATION counted transactionally against the rolling 7-day ceiling
+(changes 4/10), dispatched exactly once via generation-checked CAS; a
+turn that may have started but has no provable cost LATCHES its
+credential (timeout, network-after-dispatch, malformed wrapper, crash
+sweep) until the nonce'd, digest-bound, password-taking acknowledgement
+screen charges the reserved worst case to a named approver (changes 5/6
+— the ONE nonce in chat, because that screen restates financial terms
+and re-enables spend). The snapshot is dedicated SQL (store.chatSnapshot,
+change 9): explicit non-empty --repo list required (unscoped, root-based,
+and unresolved-at-startup ceilings all refuse), admission inside every
+query before its LIMIT, repo-null rows excluded from rows AND aggregates,
+opaque r1/r2 ids with paths never leaving the process, decision
+recaps/consequences/recommendations excluded, canary tests grepping the
+serialized document for forbidden content, and the /chat page states
+plainly what DOES leave (intentional provider egress, not a leak-proof
+summary). Two-layer parsing (change 2): stream-capped fatally-decoded
+provider wrapper (one text block, usage required, tool calls rejected,
+redirect:"error") then the strict assistant envelope — duplicate-key
+lexer, depth cap, exact keys, model-only DTOs with opaque repoId (change
+3), at most 3 proposals, all-or-nothing; transport failures render a
+static line and no model text ever. Drafts are EPHEMERAL session memory
+(change 7): random 128-bit keys, 9 per approver across sessions with LRU
+eviction, 30-minute TTL, gone on restart — the first durable copy of any
+model text is the unapproved task/routine the operator files with a
+password through the proposal door (filed_via `chat:<provider>`, single-
+use in-memory CAS with no await before the claim), and the approve
+ceremony is byte-identical to manual filing. The password is typed again
+on EVERY message and every filing (v2 ruling 2). Door validators gained
+byte caps + disguised-text on touches/requirements (change 8). Chat keys:
+ANTHROPIC_API_KEY is stripped from every child process env unless a
+caller re-supplies it explicitly (change 10 — it would also silently
+flip claude builds to API billing). Chat refuses demo databases and
+bearer callers. Suite 914 (chatledger 8, converse 13, chatsnapshot 5,
+serve chat 7, all over mock transports — no network in tests).
+
 **2026-08-14 — the demo sandbox (adoption track, step 4; the track is
 COMPLETE).** `standing-orders demo`: one mkdtemp directory holding two
 tiny git repos, a database, and evidence; seeded mid-flight (an approval

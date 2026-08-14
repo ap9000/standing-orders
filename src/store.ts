@@ -3683,6 +3683,27 @@ export class Store {
       .map(readChatTurn);
   }
 
+  /** Rolling 7-day spend for the caps line: settled where known, reserved
+   * where not — the same arithmetic the admission transaction uses. */
+  chatWeeklySpendMicrousd(credentialKey: string, now: Date): number {
+    const since = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(COALESCE(settled_microusd, reserved_microusd)), 0) AS spent
+           FROM chat_turn WHERE credential_key = ? AND created_at >= ?`,
+      )
+      .get(credentialKey, since);
+    return Number(row?.["spent"] ?? 0);
+  }
+
+  chatTurnsToday(approver: string, now: Date): number {
+    const dayStart = `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM chat_turn WHERE approver = ? AND created_at >= ?")
+      .get(approver, dayStart);
+    return Number(row?.["n"] ?? 0);
+  }
+
   /** Turns blocking this credential until somebody owns the worst case. */
   latchedChatTurns(credentialKey: string): ChatTurn[] {
     return this.db

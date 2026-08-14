@@ -128,6 +128,7 @@ import {
 } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { TEMPLATES, templateByName } from "./templates.js";
+import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
@@ -241,6 +242,10 @@ Agents — which provider and model each phase runs on
   standing-orders providers                 what is installed, logged in, and
                                         configured on this machine — without
                                         spending anything to find out
+  standing-orders config set chat --provider anthropic-api|openrouter-api
+      --model <m> --weekly-usd <n> [--daily-turns <n>] --as <you> --token <t>
+      the fleet chat engine: a direct no-tool API call; the key rides the
+      serve environment, the ceiling is enforced in integer micro-dollars
   standing-orders config show [--repo <path>]
   standing-orders config set <phase> --provider claude|codex|openrouter
       [--model <m>] [--repo <path>] --as <you> --token <t>
@@ -331,7 +336,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
     "command", "timeout-seconds", "stop-grace", "title", "name",
-    "github", "label", "reviewers", "limit",
+    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -2666,8 +2671,58 @@ async function configCommand(
   if (action !== "set" && action !== "clear") {
     return fail(write, json, "config", "usage", "`standing-orders config [show|set <phase> --provider <p> [--model <m>]|clear <phase>] [--repo <path>] --as <you> --token <t>`", EXIT.usage);
   }
+
+  // Chat is its OWN configuration, deliberately not a phase (Codex v3
+  // review, change 1): a shared table would admit build+anthropic-api.
+  // Installation-scoped only — a per-repo chat would splinter the spend
+  // ceiling that makes the ledger a ceiling at all.
+  if (phase === "chat") {
+    if (repoGiven !== undefined) {
+      return fail(write, json, `config ${action}`, "usage", "chat is installation-scoped — no --repo", EXIT.usage);
+    }
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, `config ${action}`, "usage", "changing chat spend takes `--as <you> --token <t>`", EXIT.usage);
+    }
+    const authedChat = authenticateApprover(store, acting.name, acting.token);
+    if (!authedChat.ok) {
+      return fail(write, json, `config ${action}`, "unauthenticated", "that is not an approver, or the token does not match", EXIT.refused);
+    }
+    if (action === "clear") {
+      store.clearChatConfig();
+      return succeed(write, json, "config clear", { chat: null }, () => ["Chat is off — the config row is gone."]);
+    }
+    const provider = text(flags, "provider");
+    const model = text(flags, "model");
+    const weeklyUsd = text(flags, "weekly-usd");
+    const dailyGiven = text(flags, "daily-turns");
+    if (provider !== "anthropic-api" && provider !== "openrouter-api") {
+      return fail(write, json, "config set", "usage", "chat providers are direct API adapters: --provider anthropic-api|openrouter-api", EXIT.usage);
+    }
+    if (model === undefined || priceOf(model) === null) {
+      return fail(write, json, "config set", "unpriced-model", `chat reserves worst-case spend up front, so the model needs a pinned price — priced today: ${PRICED_MODELS.join(", ")}`, EXIT.refused);
+    }
+    const weekly = Number(weeklyUsd);
+    if (weeklyUsd === undefined || !Number.isFinite(weekly) || weekly <= 0) {
+      return fail(write, json, "config set", "usage", "--weekly-usd <dollars> is required — chat without a ceiling is not configured, it is unbounded", EXIT.usage);
+    }
+    const daily = dailyGiven === undefined ? 50 : Number(dailyGiven);
+    if (!Number.isInteger(daily) || daily <= 0 || daily > 1_000) {
+      return fail(write, json, "config set", "usage", "--daily-turns is a whole number between 1 and 1000", EXIT.usage);
+    }
+    store.setChatConfig(
+      { provider, model, dailyTurns: daily, weeklyCeilingMicrousd: Math.round(weekly * 1_000_000) },
+      acting.name,
+      clock(),
+    );
+    return succeed(write, json, "config set", { chat: store.getChatConfig() }, () => [
+      `Chat answers with ${provider} · ${model}, at most ${daily} turns/day, at most $${weekly.toFixed(2)} per rolling week.`,
+      `The key rides the serve environment (${provider === "anthropic-api" ? "ANTHROPIC_API_KEY" : "OPENROUTER_API_KEY"}) — never this database.`,
+    ]);
+  }
+
   if (phase === undefined || !["plan", "build", "repair"].includes(phase)) {
-    return fail(write, json, `config ${action}`, "usage", "which phase? plan, build, or repair", EXIT.usage);
+    return fail(write, json, `config ${action}`, "usage", "which phase? plan, build, repair — or chat", EXIT.usage);
   }
 
   const acting = await askCredentials(flags, context);

@@ -109,6 +109,17 @@ export function terminateLiveProviders(): number {
 }
 
 /** The one place a child's environment is decided (audit IV-5). */
+/**
+ * Chat credentials never reach a child process (Codex chat v3 review,
+ * change 10): ANTHROPIC_API_KEY is the chat key AND would silently flip
+ * the claude harness from subscription auth to API billing if inherited.
+ * A caller that genuinely needs it re-supplies it via `env` explicitly.
+ * (OPENROUTER_API_KEY is not listed: the openrouter BUILD adapter reads
+ * it from the child env by design, and the agent-facing shell excludes
+ * it separately via the provider's own config.)
+ */
+const CHAT_KEYS_NEVER_INHERITED: readonly string[] = ["ANTHROPIC_API_KEY"];
+
 function resolveChildEnv(options: RunOptions): Record<string, string | undefined> | undefined {
   const { env, omitEnv, envAllowlist } = options;
   if (envAllowlist !== undefined) {
@@ -119,11 +130,16 @@ function resolveChildEnv(options: RunOptions): Record<string, string | undefined
     }
     Object.assign(picked, env ?? {});
     for (const name of omitEnv ?? []) delete picked[name];
+    for (const name of CHAT_KEYS_NEVER_INHERITED) {
+      if (env?.[name] === undefined) delete picked[name];
+    }
     return picked;
   }
-  if (env === undefined && (omitEnv === undefined || omitEnv.length === 0)) return undefined;
   const merged: Record<string, string | undefined> = { ...process.env, ...(env ?? {}) };
   for (const name of omitEnv ?? []) delete merged[name];
+  for (const name of CHAT_KEYS_NEVER_INHERITED) {
+    if (env?.[name] === undefined) delete merged[name];
+  }
   return merged;
 }
 

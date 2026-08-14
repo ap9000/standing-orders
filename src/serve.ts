@@ -46,7 +46,20 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile } from "./evidence.js";
+import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile, scanForSecrets } from "./evidence.js";
+import {
+  buildDataDocument,
+  composeRequest,
+  credentialKeyOf,
+  parseAssistantEnvelope,
+  performChatRequest,
+  priceOf,
+  settleMicrousd,
+  worstCaseMicrousd,
+  CHAT_KEY_ENV,
+  TURN_WALL_CLOCK_MS,
+  type ChatDraft,
+} from "./converse.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import {
   type Artifact,
@@ -87,7 +100,7 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import type { Routine } from "./store.js";
+import type { Routine, ChatTurn } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -119,6 +132,10 @@ export type ServeOptions = {
    */
   repos?: readonly string[];
   projectRoots?: readonly string[];
+  /** Injected by tests: the fetch chat turns use, and where chat keys are
+   * read from (defaults to process.env). Chat never spawns anything. */
+  chatFetcher?: typeof fetch;
+  chatEnv?: Record<string, string | undefined>;
 };
 
 const SESSION_COOKIE = "standing-orders_session";
@@ -147,6 +164,28 @@ type Session = {
   /** When this session last READ the board — the anchor for "since you
    * last looked". Full page loads move it; fragment polls never do. */
   sawBoardAt: number | null;
+  /** Fleet chat (v13): drafts and the last reply live HERE and nowhere
+   * durable — restart or logout loses them by design (v2 finding 12). */
+  chat?: SessionChat;
+};
+
+type ChatCandidate = {
+  key: string;
+  draft: ChatDraft;
+  /** Resolved server-side at parse time from the opaque repoId. */
+  repoPath: string;
+  provider: string;
+  approver: string;
+  /** Digest of the frozen explicit repo list at turn time — filing
+   * re-proves it (v2 new finding 5). */
+  ceilingDigest: string;
+  createdAt: number;
+  state: "pending" | "filing";
+};
+
+type SessionChat = {
+  candidates: Map<string, ChatCandidate>;
+  lastTurn: { id: number; reply: string | null; staticError: string | null; proposalsDiscarded: boolean } | null;
 };
 
 /** One rendered approval form: who saw which digest of which task, once. */
@@ -167,7 +206,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   // The ceiling, resolved once at startup. Paths that do not exist are
   // dropped here rather than silently failing every later check.
-  const { ceiling } = resolveCeiling(
+  const { ceiling, unresolved: unresolvedRepos } = resolveCeiling(
     [...(options.repo === undefined ? [] : [options.repo]), ...(options.repos ?? [])],
     options.projectRoots ?? [],
   );
@@ -763,6 +802,46 @@ export function createDecisionServer(options: ServeOptions): Server {
       }));
     }
 
+    if (url.pathname === "/chat") {
+      // Cookie sessions only (Codex v3 review, change 7): drafts live in
+      // THIS session's memory; a bearer caller has nowhere to keep them.
+      if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface — it keeps your drafts in the session");
+      store.sweepStaleChatTurns(now);
+      sweepChatDrafts(Date.now());
+      const enabled = chatEnablement();
+      const pending = store.liveChatTurnFor(who.name);
+      const latched = enabled.ok ? store.latchedChatTurns(enabled.credentialKey) : [];
+      return page(
+        response,
+        200,
+        chatPage(chromeFor(project, "chat"), {
+          enabled,
+          pending,
+          latched,
+          chat: who.session.chat ?? null,
+          recent: store.recentChatTurns(who.name, 10),
+          turnsToday: store.chatTurnsToday(who.name, now),
+          weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
+          repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
+          csrf: who.session.csrf,
+          problem: url.searchParams.get("said"),
+        }),
+      );
+    }
+
+    const chatAck = /^\/chat\/ack\/([0-9]{1,15})$/.exec(url.pathname);
+    if (chatAck !== null) {
+      if (who.via !== "cookie") return refuse(response, who, 403, "acknowledgement is a browser ceremony");
+      const turn = store.getChatTurn(Number(chatAck[1]));
+      if (turn === null || !turn.unknownSpend || turn.acknowledgedAt !== null) {
+        return refuse(response, who, 404, "no acknowledgement is waiting there", "/chat");
+      }
+      // The one nonce in chat — this screen restates exact financial terms
+      // and re-enables spend, which is precisely what nonces are for.
+      const nonce = mintApprovalNonce(who.name, `chat-ack-${turn.id}`, String(turn.reservedMicrousd));
+      return page(response, 200, chatAckPage(chromeFor(project, "chat"), turn, nonce, who.session.csrf));
+    }
+
     const routineScreen = /^\/routines\/([0-9]{1,15})$/.exec(url.pathname);
     if (routineScreen !== null) {
       const routine = store.getRoutine(Number(routineScreen[1]));
@@ -866,6 +945,172 @@ export function createDecisionServer(options: ServeOptions): Server {
     ];
   }
 
+
+  // ---- fleet chat (v13) ----------------------------------------------------
+
+  const chatFetcher = options.chatFetcher ?? fetch;
+  const chatEnv = options.chatEnv ?? process.env;
+  const CHAT_CANDIDATES_PER_APPROVER = 9;
+  const CHAT_CANDIDATE_TTL_MS = 30 * 60_000;
+
+  /** The frozen explicit repo list, digested canonically (sorted) — every
+   * candidate binds to it and filing re-proves it (v2 new finding 5). */
+  const chatCeilingDigest = (): string =>
+    createHash("sha256").update([...ceiling.repos].sort().join("\n")).digest("hex");
+
+  type ChatEnablement =
+    | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; credentialKey: string }
+    | { ok: false; why: string };
+
+  /** Every condition re-proved per request — the render and the POST each
+   * ask again; nothing is cached into authority. */
+  function chatEnablement(): ChatEnablement {
+    if (store.isDemo()) return { ok: false, why: "this is a demo database — chat spends money and refuses it" };
+    if (unscopedMode) return { ok: false, why: "chat needs an explicit ceiling: restart serve naming repos with --repo" };
+    if (ceiling.roots.length > 0) return { ok: false, why: "chat refuses root-derived ceilings — name each repo explicitly with --repo" };
+    if (unresolvedRepos.length > 0) return { ok: false, why: "a --repo path did not resolve at startup — fix it and restart before chat will run" };
+    if (ceiling.repos.length === 0) return { ok: false, why: "the ceiling is empty — chat has nothing it may see" };
+    const config = store.getChatConfig();
+    if (config === null) return { ok: false, why: "chat is not configured: standing-orders config set chat --provider anthropic-api --model <m> --weekly-usd <n> --as <you> --token <t>" };
+    if (priceOf(config.model) === null) return { ok: false, why: `no pinned price for ${config.model} — chat cannot reserve spend it cannot bound` };
+    const key = chatEnv[CHAT_KEY_ENV[config.provider]];
+    if (key === undefined || key === "") return { ok: false, why: `chat needs ${CHAT_KEY_ENV[config.provider]} in the serve environment` };
+    return { ok: true, config, key, credentialKey: credentialKeyOf(config.provider, key) };
+  }
+
+  /** Session-memory hygiene: drafts age out; a filed or dead session frees
+   * its bytes; the per-approver cap spans ALL that approver's sessions. */
+  function sweepChatDrafts(nowMs: number): void {
+    for (const session of sessions.values()) {
+      if (session.chat === undefined) continue;
+      for (const [key, candidate] of session.chat.candidates) {
+        if (nowMs - candidate.createdAt > CHAT_CANDIDATE_TTL_MS) session.chat.candidates.delete(key);
+      }
+    }
+  }
+
+  function approverCandidateCount(approver: string): number {
+    let count = 0;
+    for (const session of sessions.values()) {
+      if (session.chat === undefined) continue;
+      for (const candidate of session.chat.candidates.values()) {
+        if (candidate.approver === approver) count++;
+      }
+    }
+    return count;
+  }
+
+  function evictOldestCandidate(approver: string): void {
+    let oldest: { session: Session; key: string; at: number } | null = null;
+    for (const session of sessions.values()) {
+      if (session.chat === undefined) continue;
+      for (const candidate of session.chat.candidates.values()) {
+        if (candidate.approver !== approver) continue;
+        if (oldest === null || candidate.createdAt < oldest.at) {
+          oldest = { session, key: candidate.key, at: candidate.createdAt };
+        }
+      }
+    }
+    if (oldest !== null) oldest.session.chat?.candidates.delete(oldest.key);
+  }
+
+  /** The one network call a turn makes, run detached from the request that
+   * opened it. Every failure maps to the closed enum BEFORE anything can
+   * log it; a turn that may have started but has no usable usage LATCHES
+   * (unknown spend blocks the credential until acknowledged).  */
+  async function runChatTurn(turnId: number, session: Session, enabled: ChatEnablement & { ok: true }, userMessage: string, dataDocument: string): Promise<void> {
+    const started = store.startChatTurn(turnId, new Date());
+    if (!started.ok) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TURN_WALL_CLOCK_MS);
+    let result: Awaited<ReturnType<typeof performChatRequest>>;
+    try {
+      result = await performChatRequest(
+        {
+          provider: enabled.config.provider,
+          model: enabled.config.model,
+          key: enabled.key,
+          dataDocument,
+          userMessage,
+          signal: controller.signal,
+        },
+        chatFetcher,
+      );
+    } catch {
+      result = { ok: false, problem: "network" };
+    } finally {
+      clearTimeout(timer);
+    }
+    const finish = (outcome: Parameters<Store["finalizeChatTurn"]>[2]): boolean =>
+      store.finalizeChatTurn(turnId, started.generation, outcome, new Date());
+    const tell = (reply: string | null, staticError: string | null, proposalsDiscarded = false): void => {
+      const chat = session.chat ?? { candidates: new Map(), lastTurn: null };
+      chat.lastTurn = { id: turnId, reply, staticError, proposalsDiscarded };
+      session.chat = chat;
+    };
+    if (!result.ok) {
+      if (result.problem.startsWith("status-")) {
+        // The provider ANSWERED with an error: nothing billed.
+        finish({ state: "failed", failureReason: "provider-error", settledMicrousd: 0 });
+        tell(null, "the provider refused the request — nothing was billed");
+      } else if (result.problem === "timeout") {
+        finish({ state: "failed", failureReason: "timeout", settledMicrousd: null, unknownSpend: true });
+        tell(null, "the turn timed out; its cost is unknown and chat is blocked until you acknowledge it");
+      } else if (result.problem === "network") {
+        finish({ state: "failed", failureReason: "provider-error", settledMicrousd: null, unknownSpend: true });
+        tell(null, "the provider could not be reached after dispatch; cost unknown — acknowledge to re-enable chat");
+      } else {
+        // 200 with an unusable wrapper: billed, amount unproven.
+        finish({ state: "failed", failureReason: "malformed-reply", settledMicrousd: null, unknownSpend: true });
+        tell(null, "the provider's response was malformed and was discarded; cost unknown — acknowledge to re-enable chat");
+      }
+      return;
+    }
+    const settled = settleMicrousd(enabled.config.model, result.answer.tokensIn, result.answer.tokensOut);
+    const envelope = parseAssistantEnvelope(result.answer.text);
+    if (!envelope.ok) {
+      finish({
+        state: "failed",
+        failureReason: "malformed-reply",
+        tokensIn: result.answer.tokensIn,
+        tokensOut: result.answer.tokensOut,
+        settledMicrousd: settled,
+      });
+      tell(null, "the model's answer was malformed and was discarded");
+      return;
+    }
+    const chat = session.chat ?? { candidates: new Map<string, ChatCandidate>(), lastTurn: null };
+    session.chat = chat;
+    let kept = 0;
+    for (const draft of envelope.envelope.proposals) {
+      const repoIndex = Number(draft.repoId.slice(1)) - 1;
+      const repoPath = ceiling.repos[repoIndex];
+      if (repoPath === undefined) continue;
+      while (approverCandidateCount(session.name) >= CHAT_CANDIDATES_PER_APPROVER) evictOldestCandidate(session.name);
+      const key = randomBytes(16).toString("hex");
+      chat.candidates.set(key, {
+        key,
+        draft,
+        repoPath,
+        provider: enabled.config.provider,
+        approver: session.name,
+        ceilingDigest: chatCeilingDigest(),
+        createdAt: Date.now(),
+        state: "pending",
+      });
+      kept++;
+    }
+    finish({
+      state: "answered",
+      tokensIn: result.answer.tokensIn,
+      tokensOut: result.answer.tokensOut,
+      settledMicrousd: settled,
+      replyBytes: Buffer.byteLength(envelope.envelope.reply, "utf8"),
+      candidateCount: kept,
+    });
+    tell(envelope.envelope.reply, null, envelope.proposalsDiscarded);
+  }
+
   /** The badge cache: five seconds per project — mutations invalidate it. */
   const badgeCache = new Map<string, { at: number; count: number; saturated: boolean }>();
   const bustBadge = (): void => badgeCache.clear();
@@ -891,6 +1136,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       inboxSaturated: badge.saturated,
       settings: options.telegramTokenFile !== undefined,
       ...(store.isDemo() ? { demo: true } : {}),
+      ...(!unscopedMode && ceiling.roots.length === 0 && ceiling.repos.length > 0 ? { chat: true } : {}),
       ...(listPane === undefined ? {} : { listPane }),
     };
   }
@@ -1316,6 +1562,167 @@ export function createDecisionServer(options: ServeOptions): Server {
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
+    }
+
+    if (url.pathname === "/chat") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
+      const enabled = chatEnablement();
+      if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
+      // The password, typed again, on EVERY message (v2 ruling 2): chat is
+      // spend, and a seven-day cookie is not a spend credential.
+      const password = body.get("token") ?? "";
+      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+        return redirect(response, `/chat?said=${encodeURIComponent("chat spends — your password, typed again, with every message")}`);
+      }
+      const message = (body.get("message") ?? "").trim();
+      if (message === "" || message.length > 2_000) {
+        return redirect(response, `/chat?said=${encodeURIComponent("a message is 1 to 2000 characters")}`);
+      }
+      // Secrets refuse BEFORE any row or request exists — nothing stored,
+      // nothing sent (v3 brief; scanForSecrets is the same high-confidence
+      // set the evidence path trusts).
+      if (scanForSecrets(message).length > 0) {
+        return redirect(response, `/chat?said=${encodeURIComponent("that looks like a credential — chat never forwards or stores those")}`);
+      }
+      store.sweepStaleChatTurns(now);
+      const snapshot = store.chatSnapshot(ceiling.repos, now);
+      const { document } = buildDataDocument(snapshot);
+      // The WHOLE outbound body is scanned — a token in a task title
+      // refuses the turn exactly like one typed in the box (v2 ruling 4).
+      const composed = composeRequest({
+        provider: enabled.config.provider,
+        model: enabled.config.model,
+        key: "",
+        dataDocument: document,
+        userMessage: message,
+      });
+      if (scanForSecrets(composed.body).length > 0) {
+        return redirect(response, `/chat?said=${encodeURIComponent("fleet context contains something credential-shaped — chat refuses to send it; find and remove it first")}`);
+      }
+      const reserved = worstCaseMicrousd(enabled.config.model, Buffer.byteLength(composed.body, "utf8"));
+      if (reserved === null) return redirect(response, `/chat?said=${encodeURIComponent("no pinned price for the configured model")}`);
+      const opened = store.openChatTurn(
+        {
+          approver: who.name,
+          credentialKey: enabled.credentialKey,
+          provider: enabled.config.provider,
+          model: enabled.config.model,
+          reservedMicrousd: reserved,
+          dailyTurns: enabled.config.dailyTurns,
+          weeklyCeilingMicrousd: enabled.config.weeklyCeilingMicrousd,
+          deadlineMs: TURN_WALL_CLOCK_MS + 10_000,
+        },
+        now,
+      );
+      if (!opened.ok) {
+        const said =
+          opened.reason === "latched"
+            ? "a turn with unknown cost blocks this credential — acknowledge it below first"
+            : opened.reason === "concurrent"
+              ? "one turn at a time — this one is still running"
+              : opened.reason === "daily-cap"
+                ? "the daily turn cap is reached"
+                : "the weekly spend ceiling would be exceeded";
+        return redirect(response, `/chat?said=${encodeURIComponent(said)}`);
+      }
+      void runChatTurn(opened.id, who.session, enabled, message, document);
+      return redirect(response, "/chat");
+    }
+
+    const chatFile = /^\/chat\/file\/([0-9a-f]{32})$/.exec(url.pathname);
+    if (chatFile !== null) {
+      if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
+      const key = chatFile[1] as string;
+      const chat = who.session.chat;
+      const candidate = chat?.candidates.get(key);
+      // The filing act creates durable rows from model text: password again.
+      const password = body.get("token") ?? "";
+      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+        return redirect(response, `/chat?said=${encodeURIComponent("filing a draft takes your password, typed again")}`);
+      }
+      if (chat === undefined || candidate === undefined) {
+        return refuse(response, who, 404, "that draft is gone — drafts live in the session and do not survive restarts", "/chat");
+      }
+      // Single-use CAS with no await between check and claim (v2 new 3).
+      if (candidate.state !== "pending") return refuse(response, who, 409, "that draft is already being filed", "/chat");
+      candidate.state = "filing";
+      const enabled = chatEnablement();
+      if (!enabled.ok || candidate.approver !== who.name || candidate.ceilingDigest !== chatCeilingDigest()) {
+        candidate.state = "pending";
+        return refuse(response, who, 409, "the world changed since this draft was made — it cannot be filed", "/chat");
+      }
+      // Re-validated at the act: the door runs every field check again, and
+      // the fields are scanned for secrets before they become durable.
+      const fields = candidate.draft.kind === "task"
+        ? [candidate.draft.title, candidate.draft.goal, candidate.draft.outOfScope ?? "", ...candidate.draft.touches]
+        : [candidate.draft.name, candidate.draft.goal, candidate.draft.outOfScope ?? "", ...candidate.draft.touches];
+      if (scanForSecrets(fields.join("\n")).length > 0) {
+        chat.candidates.delete(key);
+        return refuse(response, who, 400, "that draft contains something credential-shaped — discarded", "/chat");
+      }
+      const filedVia = `chat:${enabled.config.provider}`;
+      if (candidate.draft.kind === "task") {
+        const made = fileTaskProposal(
+          store,
+          {
+            title: candidate.draft.title,
+            repo: candidate.repoPath,
+            goal: candidate.draft.goal,
+            outOfScope: candidate.draft.outOfScope,
+            touches: candidate.draft.touches,
+            filedVia,
+            admittedRepos: [...ceiling.repos],
+          },
+          now,
+        );
+        if (!made.ok) {
+          candidate.state = "pending";
+          return refuse(response, who, 400, `the door refused it: ${made.message}`, "/chat");
+        }
+        chat.candidates.delete(key);
+        return redirect(response, taskHref(made.id));
+      }
+      const made = fileRoutineProposal(
+        store,
+        {
+          name: candidate.draft.name,
+          repo: candidate.repoPath,
+          goal: candidate.draft.goal,
+          outOfScope: candidate.draft.outOfScope,
+          touches: candidate.draft.touches,
+          requirements: [],
+          schedule: candidate.draft.schedule,
+          costCeilingUsd: null,
+          filedVia,
+          admittedRepos: [...ceiling.repos],
+        },
+        now,
+      );
+      if (!made.ok) {
+        candidate.state = "pending";
+        return refuse(response, who, 400, `the door refused it: ${made.message}`, "/chat");
+      }
+      chat.candidates.delete(key);
+      return redirect(response, `/routines/${made.id}`);
+    }
+
+    const chatAckPost = /^\/chat\/ack\/([0-9]{1,15})$/.exec(url.pathname);
+    if (chatAckPost !== null) {
+      if (who.via !== "cookie") return refuse(response, who, 403, "acknowledgement is a browser ceremony");
+      const turn = store.getChatTurn(Number(chatAckPost[1]));
+      if (turn === null) return refuse(response, who, 404, "no such turn", "/chat");
+      const password = body.get("token") ?? "";
+      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+        return refuse(response, who, 403, "acknowledging unknown spend takes your password", "/chat");
+      }
+      const nonce = body.get("nonce") ?? "";
+      if (!consumeApprovalNonce(nonce, who.name, `chat-ack-${turn.id}`, String(turn.reservedMicrousd))) {
+        return refuse(response, who, 409, "this screen expired — reopen it and read the terms again", "/chat");
+      }
+      if (!store.acknowledgeChatTurn(turn.id, who.name, now)) {
+        return refuse(response, who, 409, "already acknowledged", "/chat");
+      }
+      return redirect(response, "/chat");
     }
 
     if (url.pathname === "/routines/add") {
@@ -2340,7 +2747,7 @@ const STYLE = `
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "none";
+  active: "inbox" | "board" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -2348,6 +2755,8 @@ type Chrome = {
   settings: boolean;
   /** This database is a demo sandbox: banner every page, spend fenced. */
   demo?: boolean;
+  /** The chat tab renders only where chat could ever be allowed. */
+  chat?: boolean;
   /** A rendered list pane makes the page master-detail. */
   listPane?: string;
 };
@@ -2440,6 +2849,7 @@ function shell(
     `<nav class="foot">`,
     item("activity", "/activity", "activity"),
     item("review", "/review", "review queue"),
+    ...(chrome.chat === true ? [item("chat", "/chat", "chat")] : []),
     item("work", "/tasks", "task list"),
     item("system", "/system", "system"),
     item("runs", "/runs", "builds"),
@@ -3012,6 +3422,119 @@ function trackRow(track: Track, all: boolean): string {
         : "") +
     `</div>`
   );
+}
+
+
+function chatMoney(microusd: number | null): string {
+  return microusd === null ? "unknown" : `$${(microusd / 1_000_000).toFixed(2)}`;
+}
+
+function chatPage(chrome: Chrome, data: {
+  enabled: { ok: true } & Record<string, unknown> | { ok: false; why: string };
+  pending: ChatTurn | null;
+  latched: ChatTurn[];
+  chat: { candidates: Map<string, { key: string; draft: ChatDraft; repoPath: string }>; lastTurn: { id: number; reply: string | null; staticError: string | null; proposalsDiscarded: boolean } | null } | null;
+  recent: ChatTurn[];
+  turnsToday: number;
+  weeklySpent: number;
+  repoLabels: { id: string; label: string }[];
+  csrf: string;
+  problem: string | null;
+}): string {
+  const parts: string[] = [
+    "<h1>chat</h1>",
+    `<p class="meta">the fleet assistant — it reads a bounded snapshot of this ceiling and may draft work; drafts carry no authority, live only in this session, and file through the same door as every manual filing</p>`,
+  ];
+  if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
+  if (!data.enabled.ok) {
+    parts.push(`<div class="card"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`);
+    return shell("chat", parts.join("\n"), { chrome });
+  }
+  const config = (data.enabled as unknown as { config: { provider: string; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
+  parts.push(
+    `<p class="meta">answering with <span class="mono">${escape(config.provider)} · ${escape(config.model)}</span>` +
+      ` — ${data.turnsToday} of ${config.dailyTurns} turns today · ${chatMoney(data.weeklySpent)} of ${chatMoney(config.weeklyCeilingMicrousd)} this rolling week` +
+      ` · repos: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
+    `<p class="meta">what leaves this machine: task ids/titles/states, open questions and option labels, incident kinds, routine names/schedules, PR numbers and observed check states — deliberately, to the configured provider. Paths, branches, diffs, notes, decision details, and identities never do.</p>`,
+  );
+  for (const turn of data.latched) {
+    parts.push(
+      `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
+        `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
+    );
+  }
+  if (data.pending !== null) {
+    parts.push(`<div class="card"><p><strong>asking…</strong> <span class="meta">turn #${data.pending.id}, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
+    parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
+    return shell("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
+  }
+  const last = data.chat?.lastTurn ?? null;
+  if (last !== null) {
+    if (last.staticError !== null) {
+      parts.push(`<div class="card"><p class="meta">${escape(last.staticError)}</p></div>`);
+    } else if (last.reply !== null) {
+      parts.push(`<div class="card"><p style="white-space:pre-wrap">${escape(last.reply)}</p>` +
+        (last.proposalsDiscarded ? `<p class="meta">a draft block in this answer was malformed and was discarded whole</p>` : "") +
+        `</div>`);
+    }
+  }
+  const candidates = data.chat === null ? [] : [...data.chat.candidates.values()];
+  for (const one of candidates) {
+    const draft = one.draft;
+    parts.push(
+      `<div class="card">` +
+        `<p><strong>${draft.kind === "task" ? escape(draft.title) : escape(draft.name)}</strong> <span class="badge">draft ${escape(draft.kind)}</span></p>` +
+        `<p class="meta">drafted by the model from fleet context — nothing is filed; drafts do not survive a restart</p>` +
+        `<p style="white-space:pre-wrap">${escape(draft.goal)}</p>` +
+        (draft.outOfScope === null ? "" : `<p class="meta">not: ${escape(draft.outOfScope)}</p>`) +
+        (draft.touches.length > 0 ? `<p class="meta">touches: ${escape(draft.touches.join(", "))}</p>` : "") +
+        (draft.kind === "routine" ? `<p class="meta">schedule: ${escape(draft.schedule)}</p>` : "") +
+        `<p class="meta">repo: <span class="mono">${escape(projectName(one.repoPath))}</span></p>` +
+        `<form method="post" action="/chat/file/${escape(one.key)}" class="inline">` +
+        `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+        `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
+        `<button type="submit">file it — UNAPPROVED</button></form>` +
+        `</div>`,
+    );
+  }
+  parts.push(
+    `<h2>ask</h2>`,
+    `<form method="post" action="/chat" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<label>message<textarea name="message" rows="3" maxlength="2000"></textarea></label>`,
+    `<label>your password <span class="meta">(every message — chat spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">ask</button>`,
+    `</form>`,
+  );
+  if (data.recent.length > 0) {
+    parts.push(`<h2>recent turns</h2>`);
+    for (const turn of data.recent) {
+      parts.push(
+        `<p class="row"><span class="mono">#${turn.id}</span> ${escape(turn.state)}` +
+          `${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`}` +
+          ` <span class="right meta">${turn.tokensIn ?? "–"} in / ${turn.tokensOut ?? "–"} out · ${chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}${turn.settledMicrousd === null ? " reserved" : ""}</span></p>`,
+      );
+    }
+  }
+  return shell("chat", parts.join("\n"), { chrome });
+}
+
+function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): string {
+  return shell("chat", [
+    `<h1>unknown spend</h1>`,
+    `<div class="card">`,
+    `<p>Turn <span class="mono">#${turn.id}</span> on <span class="mono">${escape(turn.provider)} · ${escape(turn.model)}</span> ` +
+      `may have started before it failed (${escape(turn.failureReason ?? "crashed")}), and its cost could not be measured.</p>`,
+    `<p><strong>Acknowledging charges the reserved worst case, ${chatMoney(turn.reservedMicrousd)}, to the ledger and re-enables chat on this credential.</strong></p>`,
+    `<p class="meta">check the provider's own usage dashboard if you want the exact figure first; the ledger keeps whichever is known.</p>`,
+    `<form method="post" action="/chat/ack/${turn.id}">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<input type="hidden" name="nonce" value="${escape(nonce)}">`,
+    `<label>your password<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">I own this charge — re-enable chat</button>`,
+    `</form>`,
+    `</div>`,
+  ].join("\n"), { chrome });
 }
 
 function routinesPage(
