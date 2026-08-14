@@ -1028,6 +1028,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         planDocument: ref === null ? null : planDocumentOf(ref.id),
         revision,
         repo: ref?.repo ?? null,
+        filedVia: store.filedViaOf(taskId),
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
         scope,
@@ -3477,6 +3478,9 @@ function taskPage(chrome: Chrome, data: {
   revision?: RevisionView | null;
   publication?: Publication | null;
   repo: string | null;
+  /** Immutable filing provenance (v12) — the approver sees which door
+   * filed this (console, cli, intake, template:<name>) at the yes. */
+  filedVia?: string | null;
   holds: Hold[];
   claimed: boolean;
   scope: Scope | null;
@@ -3737,7 +3741,8 @@ function taskPage(chrome: Chrome, data: {
   return shell(`task \u00b7 ${task.id}`, [
     `<h1>${escape(task.id)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span>` +
       `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} strike(s)` : ""}` +
-      `${data.repo === null ? "" : ` · ${escape(data.repo)}`}</span></h1>`,
+      `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
+      `${data.filedVia === null || data.filedVia === undefined ? "" : ` · filed via ${escape(data.filedVia)}`}</span></h1>`,
     `<p>${escape(task.title)}</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     // Evidence-first (M5.5): what needs you, then what happened — decisions
