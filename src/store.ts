@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -96,6 +96,53 @@ export type TaskRef = {
 };
 
 /** A standing order: a pre-approved template whose instances build unattended. */
+/** Chat providers are direct API adapters — a DISJOINT type from the build
+ * harness providers, by design (Codex v3 review, change 1). */
+export type ChatProviderId = "anthropic-api" | "openrouter-api";
+
+export type ChatConfig = {
+  provider: ChatProviderId;
+  model: string;
+  dailyTurns: number;
+  weeklyCeilingMicrousd: number;
+  updatedAt: string;
+  updatedBy: string;
+};
+
+export type ChatFailureReason =
+  | "provider-error"
+  | "timeout"
+  | "over-budget"
+  | "malformed-reply"
+  | "secret-refused"
+  | "crashed"
+  | "over-cap"
+  | "unknown-spend";
+
+export type ChatTurn = {
+  id: number;
+  approver: string;
+  credentialKey: string;
+  provider: ChatProviderId;
+  model: string;
+  state: "queued" | "running" | "answered" | "failed";
+  generation: number;
+  createdAt: string;
+  startedAt: string | null;
+  deadlineAt: string | null;
+  finishedAt: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  reservedMicrousd: number;
+  settledMicrousd: number | null;
+  failureReason: ChatFailureReason | null;
+  unknownSpend: boolean;
+  acknowledgedAt: string | null;
+  acknowledgedBy: string | null;
+  replyBytes: number | null;
+  candidateCount: number | null;
+};
+
 export type Routine = {
   id: number;
   name: string;
@@ -525,6 +572,62 @@ CREATE TABLE IF NOT EXISTS installation_fact (
   value      TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- Fleet chat (v13). Chat providers are DIRECT API adapters, deliberately a
+-- separate type from the build harnesses (Codex v3 review, change 1): a
+-- shared table would admit invalid pairs like build+anthropic-api. One
+-- installation-scoped row; written only by the authenticated config verb.
+CREATE TABLE IF NOT EXISTS chat_config (
+  id                      INTEGER PRIMARY KEY CHECK (id = 1),
+  provider                TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  model                   TEXT NOT NULL,
+  daily_turns             INTEGER NOT NULL DEFAULT 50,
+  -- The rolling 7-day spend ceiling, integer micro-dollars (change 4):
+  -- reservations count against it transactionally; NOT NULL because a
+  -- chat without a ceiling is not configured, it is unbounded.
+  weekly_ceiling_microusd INTEGER NOT NULL,
+  updated_at              TEXT NOT NULL,
+  updated_by              TEXT NOT NULL
+);
+
+-- One chat turn = one possible API request. METADATA ONLY — no prompt, no
+-- reply, no free text (v2 finding 12); failure_reason is a CLOSED enum.
+-- Spend is accounted in integer micro-dollars: reserved worst-case at
+-- insert (input estimate + max_tokens at the pinned price), settled from
+-- the provider's usage block. A turn that MAY have started but whose cost
+-- is unknown latches unknown_spend=1 and blocks its credential until the
+-- acknowledgement ceremony records who accepted the worst case (change 5/6).
+CREATE TABLE IF NOT EXISTS chat_turn (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  approver          TEXT NOT NULL,
+  -- Domain-separated sha256 over provider+key, full hex — a stable,
+  -- non-secret accounting identity (128+ bits per change 6).
+  credential_key    TEXT NOT NULL,
+  provider          TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  model             TEXT NOT NULL,
+  state             TEXT NOT NULL CHECK (state IN ('queued','running','answered','failed')),
+  -- Terminal transitions are generation-checked CAS: a late response
+  -- cannot resurrect a swept row (change 5).
+  generation        INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL,
+  started_at        TEXT,
+  deadline_at       TEXT,
+  finished_at       TEXT,
+  tokens_in         INTEGER,
+  tokens_out        INTEGER,
+  reserved_microusd INTEGER NOT NULL,
+  settled_microusd  INTEGER,
+  failure_reason    TEXT CHECK (failure_reason IN
+    ('provider-error','timeout','over-budget','malformed-reply','secret-refused','crashed','over-cap','unknown-spend')),
+  unknown_spend     INTEGER NOT NULL DEFAULT 0,
+  acknowledged_at   TEXT,
+  acknowledged_by   TEXT,
+  reply_bytes       INTEGER,
+  candidate_count   INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS chat_turn_credential ON chat_turn (credential_key, created_at);
+CREATE INDEX IF NOT EXISTS chat_turn_approver ON chat_turn (approver, created_at);
 
 -- The firing ledger (v8): one row per scheduled slot, fired or skipped.
 -- UNIQUE (routine_id, scheduled_for) is the idempotency — two passes both
@@ -1500,6 +1603,8 @@ function migrate(db: Database): void {
   // installation_fact arrives through the fresh SCHEMA's IF NOT EXISTS.
   addColumn(db, "task_ref", "filed_via", "TEXT");
   addColumn(db, "routine", "filed_via", "TEXT");
+  // v13 (fleet chat): purely additive — chat_config and chat_turn arrive
+  // through the fresh SCHEMA's IF NOT EXISTS; no existing table changes.
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -3263,6 +3368,215 @@ export class Store {
    * entry point fails closed on it (adoption review, finding 8). */
   isDemo(): boolean {
     return this.installationFact("demo") !== null;
+  }
+
+  // ----- fleet chat (v13) -------------------------------------------------
+
+  setChatConfig(
+    config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number },
+    by: string,
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO chat_config (id, provider, model, daily_turns, weekly_ceiling_microusd, updated_at, updated_by)
+         VALUES (1, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET provider = excluded.provider, model = excluded.model,
+           daily_turns = excluded.daily_turns, weekly_ceiling_microusd = excluded.weekly_ceiling_microusd,
+           updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      )
+      .run(config.provider, config.model, config.dailyTurns, config.weeklyCeilingMicrousd, now.toISOString(), by);
+  }
+
+  getChatConfig(): ChatConfig | null {
+    const row = this.db.prepare("SELECT * FROM chat_config WHERE id = 1").get();
+    if (row === undefined) return null;
+    return {
+      provider: String(row["provider"]) as ChatProviderId,
+      model: String(row["model"]),
+      dailyTurns: Number(row["daily_turns"]),
+      weeklyCeilingMicrousd: Number(row["weekly_ceiling_microusd"]),
+      updatedAt: String(row["updated_at"]),
+      updatedBy: String(row["updated_by"]),
+    };
+  }
+
+  clearChatConfig(): void {
+    this.db.prepare("DELETE FROM chat_config WHERE id = 1").run();
+  }
+
+  /**
+   * Admit one turn, transactionally: the unknown-spend latch, the
+   * one-live-turn-per-approver rule, the daily turn cap, and the rolling
+   * 7-day ceiling (reservations count until settled — change 4) are all
+   * proved inside the same write, so two concurrent posts cannot both
+   * slip under a cap.
+   */
+  openChatTurn(
+    args: {
+      approver: string;
+      credentialKey: string;
+      provider: ChatProviderId;
+      model: string;
+      reservedMicrousd: number;
+      dailyTurns: number;
+      weeklyCeilingMicrousd: number;
+      deadlineMs: number;
+    },
+    now: Date,
+  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "daily-cap" | "over-budget" } {
+    return this.transact(() => {
+      const latched = this.db
+        .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
+        .get(args.credentialKey);
+      if (latched !== undefined) return { ok: false as const, reason: "latched" as const };
+      const live = this.db
+        .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
+        .get(args.approver);
+      if (live !== undefined) return { ok: false as const, reason: "concurrent" as const };
+      const dayStart = `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
+      const today = this.db
+        .prepare("SELECT COUNT(*) AS n FROM chat_turn WHERE approver = ? AND created_at >= ?")
+        .get(args.approver, dayStart);
+      if (Number(today?.["n"] ?? 0) >= args.dailyTurns) return { ok: false as const, reason: "daily-cap" as const };
+      const since = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
+      const spent = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(COALESCE(settled_microusd, reserved_microusd)), 0) AS spent
+             FROM chat_turn WHERE credential_key = ? AND created_at >= ?`,
+        )
+        .get(args.credentialKey, since);
+      if (Number(spent?.["spent"] ?? 0) + args.reservedMicrousd > args.weeklyCeilingMicrousd) {
+        return { ok: false as const, reason: "over-budget" as const };
+      }
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO chat_turn (approver, credential_key, provider, model, state, created_at, deadline_at, reserved_microusd)
+           VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
+        )
+        .run(
+          args.approver,
+          args.credentialKey,
+          args.provider,
+          args.model,
+          now.toISOString(),
+          new Date(now.getTime() + args.deadlineMs).toISOString(),
+          args.reservedMicrousd,
+        );
+      return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+    });
+  }
+
+  /** queued → running, exactly once. The dispatch CAS: whoever wins this
+   * write sends the ONE request this row will ever describe. */
+  startChatTurn(id: number, now: Date): { ok: true; generation: number } | { ok: false } {
+    const changed = this.db
+      .prepare("UPDATE chat_turn SET state = 'running', generation = generation + 1, started_at = ? WHERE id = ? AND state = 'queued'")
+      .run(now.toISOString(), id);
+    if (Number(changed.changes) !== 1) return { ok: false };
+    const row = this.db.prepare("SELECT generation FROM chat_turn WHERE id = ?").get(id);
+    return { ok: true, generation: Number(row?.["generation"] ?? 0) };
+  }
+
+  /** Terminal CAS, generation-checked: a response arriving after the sweep
+   * already judged this row loses and changes nothing (change 5). */
+  finalizeChatTurn(
+    id: number,
+    generation: number,
+    outcome: {
+      state: "answered" | "failed";
+      failureReason?: ChatFailureReason;
+      tokensIn?: number;
+      tokensOut?: number;
+      settledMicrousd: number | null;
+      unknownSpend?: boolean;
+      replyBytes?: number;
+      candidateCount?: number;
+    },
+    now: Date,
+  ): boolean {
+    const changed = this.db
+      .prepare(
+        `UPDATE chat_turn SET state = ?, failure_reason = ?, tokens_in = ?, tokens_out = ?,
+           settled_microusd = ?, unknown_spend = ?, reply_bytes = ?, candidate_count = ?, finished_at = ?
+         WHERE id = ? AND generation = ? AND state IN ('queued','running')`,
+      )
+      .run(
+        outcome.state,
+        outcome.failureReason ?? null,
+        outcome.tokensIn ?? null,
+        outcome.tokensOut ?? null,
+        outcome.settledMicrousd,
+        outcome.unknownSpend === true ? 1 : 0,
+        outcome.replyBytes ?? null,
+        outcome.candidateCount ?? null,
+        now.toISOString(),
+        id,
+        generation,
+      );
+    return Number(changed.changes) === 1;
+  }
+
+  /**
+   * The crash sweep: turns past their deadline become failed('crashed'),
+   * generation-bumped so a late finalize loses. A turn that STARTED may
+   * have billed — it latches unknown spend and blocks its credential; a
+   * queued one never dispatched and settles at zero.
+   */
+  sweepStaleChatTurns(now: Date): number {
+    const swept = this.db
+      .prepare(
+        `UPDATE chat_turn SET state = 'failed', failure_reason = 'crashed', generation = generation + 1,
+           unknown_spend = CASE WHEN started_at IS NOT NULL THEN 1 ELSE 0 END,
+           settled_microusd = CASE WHEN started_at IS NOT NULL THEN settled_microusd ELSE 0 END,
+           finished_at = ?
+         WHERE state IN ('queued','running') AND deadline_at < ?`,
+      )
+      .run(now.toISOString(), now.toISOString());
+    return Number(swept.changes);
+  }
+
+  getChatTurn(id: number): ChatTurn | null {
+    const row = this.db.prepare("SELECT * FROM chat_turn WHERE id = ?").get(id);
+    return row === undefined ? null : readChatTurn(row);
+  }
+
+  liveChatTurnFor(approver: string): ChatTurn | null {
+    const row = this.db
+      .prepare("SELECT * FROM chat_turn WHERE approver = ? AND state IN ('queued','running') ORDER BY id DESC LIMIT 1")
+      .get(approver);
+    return row === undefined ? null : readChatTurn(row);
+  }
+
+  recentChatTurns(approver: string, limit = 20): ChatTurn[] {
+    return this.db
+      .prepare("SELECT * FROM chat_turn WHERE approver = ? ORDER BY id DESC LIMIT ?")
+      .all(approver, Math.max(1, Math.min(limit, 100)))
+      .map(readChatTurn);
+  }
+
+  /** Turns blocking this credential until somebody owns the worst case. */
+  latchedChatTurns(credentialKey: string): ChatTurn[] {
+    return this.db
+      .prepare("SELECT * FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL ORDER BY id")
+      .all(credentialKey)
+      .map(readChatTurn);
+  }
+
+  /**
+   * The acknowledgement (change 6): append-only, names who accepted, and
+   * charges the reserved worst case unless an authoritative settled cost
+   * already exists — the ledger never shows unknown spend as free.
+   */
+  acknowledgeChatTurn(id: number, by: string, now: Date): boolean {
+    const changed = this.db
+      .prepare(
+        `UPDATE chat_turn SET acknowledged_at = ?, acknowledged_by = ?,
+           settled_microusd = COALESCE(settled_microusd, reserved_microusd)
+         WHERE id = ? AND unknown_spend = 1 AND acknowledged_at IS NULL`,
+      )
+      .run(now.toISOString(), by, id);
+    return Number(changed.changes) === 1;
   }
 
   /** Provenance for filing paths that create their ref outside
@@ -6358,6 +6672,34 @@ function readRoutine(row: Record<string, unknown>): Routine {
     filedVia: row["filed_via"] === null || row["filed_via"] === undefined ? null : String(row["filed_via"]),
     createdAt: String(row["created_at"]),
     updatedAt: String(row["updated_at"]),
+  };
+}
+
+function readChatTurn(row: Record<string, unknown>): ChatTurn {
+  const maybe = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  const maybeN = (key: string): number | null => (row[key] === null || row[key] === undefined ? null : Number(row[key]));
+  return {
+    id: Number(row["id"]),
+    approver: String(row["approver"]),
+    credentialKey: String(row["credential_key"]),
+    provider: String(row["provider"]) as ChatProviderId,
+    model: String(row["model"]),
+    state: String(row["state"]) as ChatTurn["state"],
+    generation: Number(row["generation"]),
+    createdAt: String(row["created_at"]),
+    startedAt: maybe("started_at"),
+    deadlineAt: maybe("deadline_at"),
+    finishedAt: maybe("finished_at"),
+    tokensIn: maybeN("tokens_in"),
+    tokensOut: maybeN("tokens_out"),
+    reservedMicrousd: Number(row["reserved_microusd"]),
+    settledMicrousd: maybeN("settled_microusd"),
+    failureReason: maybe("failure_reason") as ChatFailureReason | null,
+    unknownSpend: Number(row["unknown_spend"]) === 1,
+    acknowledgedAt: maybe("acknowledged_at"),
+    acknowledgedBy: maybe("acknowledged_by"),
+    replyBytes: maybeN("reply_bytes"),
+    candidateCount: maybeN("candidate_count"),
   };
 }
 

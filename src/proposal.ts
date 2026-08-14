@@ -99,6 +99,15 @@ function dishonest(text: string): boolean {
   return hasForbiddenControls(text) || hasDisguisedText(text);
 }
 
+/** Byte caps beside the character caps (Codex v3 review, change 8): a
+ * 2000-character goal of astral-plane text is 8000 bytes — model-authored
+ * fields must bound STORAGE, not just what a screen shows. */
+const BYTE_CAPS = { title: 800, name: 200, text: 8_000, path: 800, requirement: 400 } as const;
+
+function overBytes(text: string, cap: number): boolean {
+  return Buffer.byteLength(text, "utf8") > cap;
+}
+
 function checkRepo(
   given: string | undefined,
   admitted: readonly string[] | undefined,
@@ -126,21 +135,24 @@ export function validateTaskText(fields: {
   outOfScope?: string | null;
   touches?: string[];
 }): ProposalRefusal | null {
-  if (fields.title.trim() === "" || fields.title.length > 200 || dishonest(fields.title)) {
+  if (fields.title.trim() === "" || fields.title.length > 200 || overBytes(fields.title, BYTE_CAPS.title) || dishonest(fields.title)) {
     return refuse("bad-title", "a title is required, at most 200 characters, with no control or disguised text");
   }
   if (
     fields.goal !== undefined &&
-    (fields.goal.trim() === "" || fields.goal.length > 2_000 || dishonest(fields.goal))
+    (fields.goal.trim() === "" || fields.goal.length > 2_000 || overBytes(fields.goal, BYTE_CAPS.text) || dishonest(fields.goal))
   ) {
     return refuse("bad-goal", "a goal is at most 2000 characters, with no control or disguised text");
   }
   const outOfScope = fields.outOfScope ?? null;
-  if (outOfScope !== null && (outOfScope.length > 2_000 || dishonest(outOfScope))) {
+  if (outOfScope !== null && (outOfScope.length > 2_000 || overBytes(outOfScope, BYTE_CAPS.text) || dishonest(outOfScope))) {
     return refuse("bad-goal", "out-of-scope text is at most 2000 characters, with no control or disguised text");
   }
   const touches = fields.touches ?? [];
-  if (touches.length > 50 || touches.some(one => one.trim() === "" || one.length > 200 || dishonest(one))) {
+  if (
+    touches.length > 50 ||
+    touches.some(one => one.trim() === "" || one.length > 200 || overBytes(one, BYTE_CAPS.path) || dishonest(one))
+  ) {
     return refuse("bad-goal", "touches: at most 50 paths, each non-empty, under 200 characters, honest text");
   }
   return null;
@@ -216,8 +228,20 @@ export function fileRoutineProposal(
   if (!ROUTINE_NAME.test(input.name)) {
     problems.unshift({ field: "name", problem: "lowercase letters, digits, and dashes — it becomes each instance's id" });
   }
-  if (dishonest(input.goal) || (input.outOfScope !== null && dishonest(input.outOfScope))) {
-    problems.push({ field: "goal", problem: "no control or disguised text" });
+  if (
+    dishonest(input.goal) ||
+    overBytes(input.goal, BYTE_CAPS.text) ||
+    (input.outOfScope !== null && (dishonest(input.outOfScope) || overBytes(input.outOfScope, BYTE_CAPS.text)))
+  ) {
+    problems.push({ field: "goal", problem: "no control or disguised text, bounded bytes" });
+  }
+  // The v3 review, change 8: touches and requirements are approver-read
+  // text too — the door holds them to the same honesty everywhere.
+  if (input.touches.some(one => dishonest(one) || overBytes(one, BYTE_CAPS.path))) {
+    problems.push({ field: "touches", problem: "no control or disguised text, bounded bytes" });
+  }
+  if (input.requirements.some(one => dishonest(one) || overBytes(one, BYTE_CAPS.requirement))) {
+    problems.push({ field: "requirements", problem: "no control or disguised text, bounded bytes" });
   }
   if (problems.length > 0) {
     const named = problems.map(one => `${one.field}: ${one.problem}`).join("; ");
