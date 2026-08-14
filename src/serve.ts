@@ -890,6 +890,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       inboxCount: badge.count,
       inboxSaturated: badge.saturated,
       settings: options.telegramTokenFile !== undefined,
+      ...(store.isDemo() ? { demo: true } : {}),
       ...(listPane === undefined ? {} : { listPane }),
     };
   }
@@ -2344,6 +2345,8 @@ type Chrome = {
   inboxCount: number;
   inboxSaturated: boolean;
   settings: boolean;
+  /** This database is a demo sandbox: banner every page, spend fenced. */
+  demo?: boolean;
   /** A rendered list pane makes the page master-detail. */
   listPane?: string;
 };
@@ -2445,10 +2448,17 @@ function shell(
     `</aside>`,
   ].join("\n");
 
+  // The sandbox banner: every page, no dismissal — a screenshot of a demo
+  // must not pass as production (adoption review, finding 8; the FENCE is
+  // the refuseDemo gate in operate.ts, this is the honest label).
+  const demoBanner =
+    chrome.demo === true
+      ? `<div style="background:hsl(45 90% 55% / .18);border-bottom:1px solid hsl(45 60% 45% / .5);padding:.4rem .9rem;font-size:.85rem">sandbox data \u2014 this is a demo database; nothing here spends money or reaches a remote</div>`
+      : "";
   const content =
     chrome.listPane === undefined
-      ? `<div class="content"><main>${body}</main></div>`
-      : `<div class="content"><div class="split">` +
+      ? `<div class="content">${demoBanner}<main>${body}</main></div>`
+      : `<div class="content">${demoBanner}<div class="split">` +
         `<div class="list-pane">${chrome.listPane}</div>` +
         `<div class="detail"><main>${body}</main></div>` +
         `</div></div>`;

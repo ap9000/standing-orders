@@ -1,5 +1,25 @@
 # Progress
 
+**2026-08-14 — the demo sandbox (adoption track, step 4; the track is
+COMPLETE).** `standing-orders demo`: one mkdtemp directory holding two
+tiny git repos, a database, and evidence; seeded mid-flight (an approval
+waiting, a blocking decision, a live claim in agent-running phase, a
+finished run whose terminal diff + stat + handoff VERIFY byte-for-byte,
+a failed attempt, a dependency, a hold, an approved routine with a fire
+and an honest single-flight skip, and an opened PR observed passing);
+served on localhost with the throwaway login printed to the TTY and a
+0600 file — NEVER the --json envelope (finding 9). The honesty contract
+(finding 8): the `demo` installation fact is stamped BEFORE any row and
+has no unset API; `refuseDemo` fails closed in tick, watch, build,
+publish, reconcile, daemon, bridge, outbox deliver, and all gh-touching
+intake actions (reason "demo-database"), proven by a test matrix — a KEPT
+sandbox pointed at by a real worker refuses to spend, forever. seedDemo
+itself refuses an unfenced database, so synthetic history cannot land
+anywhere real. Every page wears the sandbox banner (decoration; the fence
+is the enforcement). Ctrl-C tears down, --keep preserves. Booted live:
+login, inbox with decision card, roll-up board, banner — all verified
+over real HTTP. README quickstart leads with the demo. Suite 881.
+
 **2026-08-14 — the first-run checklist (adoption track, step 3).** serve's
 inbox, while the installation has never finished a run successfully,
 replaces the empty-queue card with a checklist DERIVED FROM LIVE STATE on

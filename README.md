@@ -21,6 +21,7 @@ interrupted only for decisions that genuinely need a human.**
 </div>
 
 ```sh
+npx standing-orders demo               # a seeded sandbox — see it working in 90 seconds, zero spend
 npx standing-orders                    # what's in flight across your repos — read-only, zero config
 npx standing-orders serve --repo .     # the whole queue, phone-first, on a local console
 npx standing-orders daemon install …   # the unattended loop, as an OS service — no crontab

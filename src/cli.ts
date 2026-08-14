@@ -76,6 +76,7 @@ Usage
   standing-orders unlink           take it off again
   standing-orders contract         the machine contract: envelope version + capabilities
   standing-orders skills install   teach a repo's agents this queue exists (preview first)
+  standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
 
 Operating the queue — see \`standing-orders task\` for the whole surface
   standing-orders ready            what could be dispatched right now
@@ -283,6 +284,7 @@ async function dispatch(
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
   if (first === "contract") return runContractCommand(rest, write);
+  if (first === "demo") return runDemoCommand(rest, write);
   if (first === "skills") return runSkillsCommand(rest, write);
   if (first === "repos") return runReposCommand(rest, write);
   if (first === "pulls") return runPullsCommand(rest, write);
@@ -872,6 +874,85 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
   }
   for (const file of result.wrote) write(`wrote ${file}`);
   write("Agents that read Agent Skills (claude, codex, gemini, opencode) will discover the queue on their next session here.");
+  return 0;
+}
+
+/**
+ * `standing-orders demo` (adoption track, step 4): a seeded throwaway
+ * sandbox served on localhost — ninety seconds from npx to seeing the
+ * product mid-flight. Everything under one temp directory; the database
+ * is stamped `demo` before any row exists, so every spending or
+ * external-effect command fails closed on it forever, kept or not. The
+ * throwaway password prints to the terminal and to a 0600 file in the
+ * sandbox — never into the --json envelope.
+ */
+async function runDemoCommand(argv: readonly string[], write: Write): Promise<number> {
+  const json = argv.includes("--json");
+  const keep = argv.includes("--keep");
+  const portIndex = argv.indexOf("--port");
+  const portGiven = portIndex === -1 ? "0" : (argv[portIndex + 1] ?? "");
+  const port = Number(portGiven);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    write(
+      json
+        ? envelopeJson({ ok: false, command: "demo", reason: "usage", message: "`standing-orders demo [--port <n>] [--keep]` — the port is a number under 65536; absent, a free one is picked" })
+        : "`standing-orders demo [--port <n>] [--keep]` — the port is a number under 65536; absent, a free one is picked",
+    );
+    return 2;
+  }
+
+  const { createDemoSandbox } = await import("./demo.js");
+  const { createDecisionServer } = await import("./serve.js");
+  const now = new Date();
+  const { sandbox, store, seed, evidenceRoot, passwordFile } = createDemoSandbox(now);
+  const server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repos: seed.repos });
+  await new Promise<void>((ready, failed) => {
+    server.once("error", failed);
+    server.listen(port, "127.0.0.1", ready);
+  });
+  const address = server.address();
+  const boundPort = typeof address === "object" && address !== null ? address.port : port;
+  const url = `http://127.0.0.1:${boundPort}`;
+
+  if (json) {
+    // The password is deliberately NOT here (adoption review, finding 9):
+    // envelopes land in logs. It lives in the 0600 file and on the TTY.
+    write(envelopeJson({ ok: true, command: "demo", url, sandbox, login: { name: seed.login.name, passwordFile }, keep }));
+  } else {
+    write("Demo sandbox is up — seeded fleet, zero spend, zero remotes.");
+    write("");
+    write(`  open      ${url}`);
+    write(`  login     ${seed.login.name} / ${seed.login.password}`);
+    write(`  sandbox   ${sandbox}`);
+    write("");
+    write("Two projects are seeded. The inbox works project-free; the board and");
+    write("routines ask you to open one first — pick payments-api.");
+    write("");
+    write(
+      keep
+        ? "Ctrl-C stops the server; the sandbox is KEPT. It stays a demo forever — every spending command refuses it."
+        : "Ctrl-C stops the server and deletes the sandbox. --keep preserves it (still fenced from spending).",
+    );
+  }
+
+  await new Promise<void>(done => {
+    const stop = (): void => {
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      done();
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+  });
+  await new Promise<void>(closed => server.close(() => closed()));
+  store.close();
+  if (!keep) {
+    const { rmSync } = await import("node:fs");
+    rmSync(sandbox, { recursive: true, force: true });
+    if (!json) write("Sandbox deleted.");
+  } else if (!json) {
+    write(`Sandbox kept at ${sandbox} — reopen it any time: standing-orders serve --db ${join(sandbox, "orders.db")}`);
+  }
   return 0;
 }
 

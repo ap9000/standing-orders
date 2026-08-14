@@ -185,6 +185,8 @@ describe("the machine envelope", () => {
     // The cli-level commands hold the same contract.
     const cliTable: string[][] = [
       ["contract", "--json"],
+      ["demo", "--port", "99999999", "--json"], // invalid port: the fast, non-serving path
+
       ["skills", "--json"],
       ["repos", "--json"],
       ["pulls", dir, "--json"],

@@ -920,6 +920,8 @@ async function buildCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json, now } = context;
+  const demoFence = refuseDemo(context, "build");
+  if (demoFence !== null) return demoFence;
   const id = positional[0];
   const runner = text(flags, "runner");
   const token = text(flags, "token");
@@ -1126,6 +1128,8 @@ async function tickCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json, clock } = context;
+  const demoFence = refuseDemo(context, "tick");
+  if (demoFence !== null) return demoFence;
   const runner = text(flags, "runner");
   const token = text(flags, "token");
 
@@ -1774,6 +1778,8 @@ async function reconcileCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json, clock } = context;
+  const demoFence = refuseDemo(context, "reconcile");
+  if (demoFence !== null) return demoFence;
   const repo = repoFrom(flags);
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
 
@@ -2851,6 +2857,12 @@ async function intakeCommand(
   const action = positional[0] ?? "show";
   const repo = repoFrom(flags);
 
+  if (action === "pr-comments" || action === "preview" || action === "run") {
+    // Reads too: a demo sandbox makes no gh call at all (finding 8).
+    const demoFence = refuseDemo(context, `intake ${action}`);
+    if (demoFence !== null) return demoFence;
+  }
+
   if (action === "show") {
     const grant = store.liveIntakeGrant(repo);
     if (json) {
@@ -3514,6 +3526,8 @@ async function daemonCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json } = context;
+  const demoFence = refuseDemo(context, "daemon");
+  if (demoFence !== null) return demoFence;
   const [action = "status"] = positional;
   const repo = repoFrom(flags);
   const configDir = dirname(context.telegramTokenFile);
@@ -3676,6 +3690,8 @@ async function watchCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json } = context;
+  const demoFence = refuseDemo(context, "watch");
+  if (demoFence !== null) return demoFence;
   const runner = text(flags, "runner");
   const token = text(flags, "token") ?? readTokenFile(text(flags, "token-file"));
   if (runner === undefined || token === undefined) {
@@ -3959,6 +3975,8 @@ async function bridgeCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json, clock } = context;
+  const demoFence = refuseDemo(context, "bridge");
+  if (demoFence !== null) return demoFence;
   const [channel, action] = positional;
   if (channel !== "telegram") {
     return fail(write, json, "bridge", "usage", "`standing-orders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
@@ -4163,6 +4181,8 @@ async function publishCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json, clock } = context;
+  const demoFence = refuseDemo(context, "publish");
+  if (demoFence !== null) return demoFence;
   const repo = repoFrom(flags);
   const [action] = positional;
 
@@ -4311,6 +4331,8 @@ async function outboxCommand(
   }
 
   if (action === "deliver") {
+    const demoFence = refuseDemo(context, "outbox deliver");
+    if (demoFence !== null) return demoFence;
     const command = text(flags, "cmd");
     if (command === undefined) {
       return fail(write, json, "outbox deliver", "usage", "--cmd says how: it runs once per notification, reading $STANDING_ORDERS_KIND, $STANDING_ORDERS_SUBJECT, $STANDING_ORDERS_BODY", EXIT.usage);
@@ -5278,6 +5300,26 @@ function fail(
 function text(flags: Map<string, string | true>, name: string): string | undefined {
   const value = flags.get(name);
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * The demo fence (Codex adoption review, finding 8): a database stamped as
+ * a demo sandbox NEVER spends money or touches the world outside — no
+ * agent spawns, no PR, no message, no gh call. The stamp is an append-only
+ * installation fact, so a kept sandbox stays fenced forever even when a
+ * real worker is pointed at it by mistake. A banner is decoration; this
+ * is the enforcement.
+ */
+function refuseDemo(context: Context, command: string): number | null {
+  if (!context.store.isDemo()) return null;
+  return fail(
+    context.write,
+    context.json,
+    command,
+    "demo-database",
+    "this database is a demo sandbox — it never spends money or touches a remote; point this command at a real database",
+    EXIT.refused,
+  );
 }
 
 /** null means it was given and was not a whole number of seconds. */
