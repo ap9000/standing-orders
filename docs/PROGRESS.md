@@ -1,5 +1,18 @@
 # Progress
 
+**2026-08-14 — chat setup lives in the console (operator request: "this
+will likely be mainly in the webui").** /chat now carries its own setup
+card when unconfigured (and a quiet settings block when configured):
+provider, model (only pinned-price models, grouped per provider), the
+required weekly dollar ceiling, daily turns — submitted with the
+password typed again and written whole under the session's name, the
+same ceremony weight as the CLI's `config set chat`. The refusals that
+need a restart (unscoped/root/unresolved ceilings, demo) stay prose;
+the ones configuration can fix render the form. The API key is still
+environment-only and the form says so in as many words — no key field
+exists, nothing credential-shaped can reach the database from this
+screen. Suite 915.
+
 **2026-08-14 — FLEET CHAT SHIPS (v13), three Codex rounds deep.** The
 design went v1 → REDESIGN → v2 → REDESIGN → v3 → approve-with-changes,
 and the ten required changes are built exactly (the findings files in the

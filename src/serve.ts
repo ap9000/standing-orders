@@ -54,6 +54,7 @@ import {
   parseAssistantEnvelope,
   performChatRequest,
   priceOf,
+  PRICED_MODELS,
   settleMicrousd,
   worstCaseMicrousd,
   CHAT_KEY_ENV,
@@ -823,6 +824,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           turnsToday: store.chatTurnsToday(who.name, now),
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
           repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
+          config: store.getChatConfig(),
           csrf: who.session.csrf,
           problem: url.searchParams.get("said"),
         }),
@@ -960,21 +962,21 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   type ChatEnablement =
     | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; credentialKey: string }
-    | { ok: false; why: string };
+    | { ok: false; code: "demo" | "unscoped" | "roots" | "unresolved" | "empty" | "unconfigured" | "unpriced" | "no-key"; why: string };
 
   /** Every condition re-proved per request — the render and the POST each
    * ask again; nothing is cached into authority. */
   function chatEnablement(): ChatEnablement {
-    if (store.isDemo()) return { ok: false, why: "this is a demo database — chat spends money and refuses it" };
-    if (unscopedMode) return { ok: false, why: "chat needs an explicit ceiling: restart serve naming repos with --repo" };
-    if (ceiling.roots.length > 0) return { ok: false, why: "chat refuses root-derived ceilings — name each repo explicitly with --repo" };
-    if (unresolvedRepos.length > 0) return { ok: false, why: "a --repo path did not resolve at startup — fix it and restart before chat will run" };
-    if (ceiling.repos.length === 0) return { ok: false, why: "the ceiling is empty — chat has nothing it may see" };
+    if (store.isDemo()) return { ok: false, code: "demo", why: "this is a demo database — chat spends money and refuses it" };
+    if (unscopedMode) return { ok: false, code: "unscoped", why: "chat needs an explicit ceiling: restart serve naming repos with --repo" };
+    if (ceiling.roots.length > 0) return { ok: false, code: "roots", why: "chat refuses root-derived ceilings — name each repo explicitly with --repo" };
+    if (unresolvedRepos.length > 0) return { ok: false, code: "unresolved", why: "a --repo path did not resolve at startup — fix it and restart before chat will run" };
+    if (ceiling.repos.length === 0) return { ok: false, code: "empty", why: "the ceiling is empty — chat has nothing it may see" };
     const config = store.getChatConfig();
-    if (config === null) return { ok: false, why: "chat is not configured: standing-orders config set chat --provider anthropic-api --model <m> --weekly-usd <n> --as <you> --token <t>" };
-    if (priceOf(config.model) === null) return { ok: false, why: `no pinned price for ${config.model} — chat cannot reserve spend it cannot bound` };
+    if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: standing-orders config set chat" };
+    if (priceOf(config.model) === null) return { ok: false, code: "unpriced", why: `no pinned price for ${config.model} — chat cannot reserve spend it cannot bound` };
     const key = chatEnv[CHAT_KEY_ENV[config.provider]];
-    if (key === undefined || key === "") return { ok: false, why: `chat needs ${CHAT_KEY_ENV[config.provider]} in the serve environment` };
+    if (key === undefined || key === "") return { ok: false, code: "no-key", why: `chat needs ${CHAT_KEY_ENV[config.provider]} in the serve environment this console runs under — export it and restart serve; the key never goes in this database` };
     return { ok: true, config, key, credentialKey: credentialKeyOf(config.provider, key) };
   }
 
@@ -1562,6 +1564,45 @@ export function createDecisionServer(options: ServeOptions): Server {
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
+    }
+
+    if (url.pathname === "/chat/config") {
+      // The console's own door into `config set chat` (operator request:
+      // chat lives mainly in the web UI). Same ceremony weight as the CLI
+      // verb: the password typed again authenticates the approver, the
+      // write is audited under their name, and the KEY still never
+      // touches a form or this database — environment only.
+      if (who.via !== "cookie") return refuse(response, who, 403, "chat setup is a browser surface");
+      const password = body.get("token") ?? "";
+      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+        return redirect(response, `/chat?said=${encodeURIComponent("configuring chat spend takes your password, typed again")}`);
+      }
+      if (body.get("off") === "1") {
+        store.clearChatConfig();
+        return redirect(response, `/chat?said=${encodeURIComponent("chat is off — the config row is gone")}`);
+      }
+      const provider = body.get("provider") ?? "";
+      const model = body.get("model") ?? "";
+      const weekly = Number(body.get("weekly-usd") ?? "");
+      const daily = (body.get("daily-turns") ?? "").trim() === "" ? 50 : Number(body.get("daily-turns"));
+      if (provider !== "anthropic-api" && provider !== "openrouter-api") {
+        return redirect(response, `/chat?said=${encodeURIComponent("pick a chat provider")}`);
+      }
+      if (priceOf(model) === null) {
+        return redirect(response, `/chat?said=${encodeURIComponent("that model has no pinned price — chat cannot reserve spend it cannot bound")}`);
+      }
+      if (!Number.isFinite(weekly) || weekly <= 0) {
+        return redirect(response, `/chat?said=${encodeURIComponent("the weekly ceiling is a positive dollar amount — chat without one is unbounded, not configured")}`);
+      }
+      if (!Number.isInteger(daily) || daily <= 0 || daily > 1_000) {
+        return redirect(response, `/chat?said=${encodeURIComponent("daily turns is a whole number between 1 and 1000")}`);
+      }
+      store.setChatConfig(
+        { provider, model, dailyTurns: daily, weeklyCeilingMicrousd: Math.round(weekly * 1_000_000) },
+        who.name,
+        now,
+      );
+      return redirect(response, "/chat");
     }
 
     if (url.pathname === "/chat") {
@@ -3438,9 +3479,39 @@ function chatPage(chrome: Chrome, data: {
   turnsToday: number;
   weeklySpent: number;
   repoLabels: { id: string; label: string }[];
+  config: import("./store.js").ChatConfig | null;
   csrf: string;
   problem: string | null;
 }): string {
+  const configForm = (current: import("./store.js").ChatConfig | null): string => {
+    const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
+    const openrouterModels = PRICED_MODELS.filter(one => one.includes("/"));
+    const option = (model: string): string =>
+      `<option value="${escape(model)}"${current?.model === model ? " selected" : ""}>${escape(model)}</option>`;
+    return [
+      `<form method="post" action="/chat/config" class="card">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<label>provider<select name="provider">`,
+      `<option value="anthropic-api"${current?.provider === "anthropic-api" ? " selected" : ""}>anthropic-api (direct API)</option>`,
+      `<option value="openrouter-api"${current?.provider === "openrouter-api" ? " selected" : ""}>openrouter-api (direct API)</option>`,
+      `</select></label>`,
+      `<label>model <span class="meta">(only models with a pinned price — chat reserves worst-case spend up front)</span><select name="model">`,
+      `<optgroup label="anthropic-api">${anthropicModels.map(option).join("")}</optgroup>`,
+      `<optgroup label="openrouter-api">${openrouterModels.map(option).join("")}</optgroup>`,
+      `</select></label>`,
+      `<label>weekly ceiling <span class="meta">(dollars per rolling 7 days — required; enforced before every turn)</span>` +
+        `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
+      `<label>daily turns <span class="meta">(default 50)</span>` +
+        `<input type="text" name="daily-turns" inputmode="numeric" style="width:8rem" value="${current === null ? "" : String(current.dailyTurns)}"></label>`,
+      `<label>your password <span class="meta">(this routes spend — typed again, like every spend act)</span>` +
+        `<input type="password" name="token" autocomplete="current-password"></label>`,
+      `<button type="submit">${current === null ? "turn chat on" : "save"}</button>`,
+      `</form>`,
+      `<p class="meta">the API key is never entered here and never stored: export ` +
+        `<span class="mono">ANTHROPIC_API_KEY</span> (or <span class="mono">OPENROUTER_API_KEY</span>) ` +
+        `in the environment that runs <span class="mono">standing-orders serve</span>, then restart it</p>`,
+    ].join("\n");
+  };
   const parts: string[] = [
     "<h1>chat</h1>",
     `<p class="meta">the fleet assistant — it reads a bounded snapshot of this ceiling and may draft work; drafts carry no authority, live only in this session, and file through the same door as every manual filing</p>`,
@@ -3448,6 +3519,12 @@ function chatPage(chrome: Chrome, data: {
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
     parts.push(`<div class="card"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`);
+    // The ceiling refusals need a restart to fix; configuration does not —
+    // it is a first-class act of this console (operator request).
+    const code = (data.enabled as { code?: string }).code;
+    if (code === "unconfigured" || code === "unpriced" || code === "no-key") {
+      parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
+    }
     return shell("chat", parts.join("\n"), { chrome });
   }
   const config = (data.enabled as unknown as { config: { provider: string; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
@@ -3505,6 +3582,17 @@ function chatPage(chrome: Chrome, data: {
     `<label>your password <span class="meta">(every message — chat spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">ask</button>`,
     `</form>`,
+  );
+  parts.push(
+    `<details><summary class="meta">chat settings</summary>`,
+    configForm(data.config),
+    `<form method="post" action="/chat/config" class="inline">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<input type="hidden" name="off" value="1">`,
+    `<input type="password" name="token" placeholder="your password" autocomplete="current-password">`,
+    `<button type="submit">turn chat off</button>`,
+    `</form>`,
+    `</details>`,
   );
   if (data.recent.length > 0) {
     parts.push(`<h2>recent turns</h2>`);

@@ -2681,6 +2681,68 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     expect(unblocked.headers.get("location")).toBe("/chat");
   });
 
+
+  test("chat is configurable from the console itself — password-gated, key stays environment-only", async () => {
+    store.clearChatConfig();
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    // The setup form is right there, and it says where the key lives.
+    expect(html).toContain('action="/chat/config"');
+    expect(html).toContain("never entered here and never stored");
+    expect(html).toContain("claude-sonnet-5");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+
+    // Wrong password: nothing written.
+    const refused = await fetch(url("/chat/config"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, provider: "anthropic-api", model: "claude-sonnet-5", "weekly-usd": "10", token: "wrong" }),
+      redirect: "manual",
+    });
+    expect(refused.headers.get("location") ?? "").toContain("password");
+    expect(store.getChatConfig()).toBeNull();
+
+    // Unpriced model: refused with the reason.
+    const unpriced = await fetch(url("/chat/config"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, provider: "anthropic-api", model: "gpt-99", "weekly-usd": "10", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(unpriced.headers.get("location") ?? "").toContain("pinned");
+    expect(store.getChatConfig()).toBeNull();
+
+    // The real thing: written whole, audited under the session's name.
+    const set = await fetch(url("/chat/config"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, provider: "anthropic-api", model: "claude-sonnet-5", "weekly-usd": "12.50", "daily-turns": "25", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(set.status).toBe(303);
+    expect(store.getChatConfig()).toMatchObject({
+      provider: "anthropic-api",
+      model: "claude-sonnet-5",
+      dailyTurns: 25,
+      weeklyCeilingMicrousd: 12_500_000,
+      updatedBy: "alex",
+    });
+    // And chat now answers on this very page.
+    const on = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(on).toContain("answering with");
+
+    // Off again — password too.
+    const off = await fetch(url("/chat/config"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, off: "1", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(off.status).toBe(303);
+    expect(store.getChatConfig()).toBeNull();
+  });
+
   test("bearer callers are refused — drafts have nowhere to live", async () => {
     await boot();
     const bearer = await fetch(url("/chat"), { headers: { authorization: `Bearer alex:${approverToken}` } });
