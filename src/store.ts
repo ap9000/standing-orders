@@ -3271,6 +3271,37 @@ export class Store {
     this.db.prepare("UPDATE task_ref SET filed_via = ? WHERE id = ? AND filed_via IS NULL").run(via, refId);
   }
 
+  /**
+   * When this installation first finished a run successfully — the
+   * moment the first-run checklist retires, permanently. Derived from run
+   * history the first time it is observed, then stamped as an append-only
+   * installation fact so later pruning of those rows cannot resurrect the
+   * checklist (adoption review, finding 14).
+   */
+  firstSuccessAt(now: Date): string | null {
+    const fact = this.installationFact("first-success-at");
+    if (fact !== null) return fact;
+    const row = this.db
+      .prepare("SELECT finished_at FROM run WHERE outcome IN ('built','no-change') AND finished_at IS NOT NULL ORDER BY id LIMIT 1")
+      .get();
+    if (row === undefined) return null;
+    const when = String(row["finished_at"]);
+    this.recordInstallationFact("first-success-at", when, now);
+    return when;
+  }
+
+  /** Whether ANY spend routing is configured — a fact about this database,
+   * not about any machine's binaries or authentication. */
+  hasPhaseConfig(): boolean {
+    return this.db.prepare("SELECT 1 AS hit FROM phase_config LIMIT 1").get() !== undefined;
+  }
+
+  /** Whether any work was ever filed — task or routine. */
+  hasAnyWork(): boolean {
+    if (this.db.prepare("SELECT 1 AS hit FROM task LIMIT 1").get() !== undefined) return true;
+    return this.db.prepare("SELECT 1 AS hit FROM routine LIMIT 1").get() !== undefined;
+  }
+
   /** Which door filed a task; null for history from before v12. */
   filedViaOf(taskId: string): string | null {
     const row = this.db

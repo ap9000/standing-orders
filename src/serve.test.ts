@@ -2292,3 +2292,114 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
     }
   });
 });
+
+describe("the first-run checklist (adoption track, step 3)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const boot = async (options: Record<string, unknown> = {}) => {
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), ...options });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-wizard-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("a young installation gets the checklist, derived from live state", async () => {
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+    const html = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(html).toContain("Getting started");
+    // The empty-queue card yields to the checklist.
+    expect(html).not.toContain("Nothing needs you.");
+    // Scoped: the ceiling step is done and names the repo.
+    expect(html).toContain("name what this console may see");
+    // No spend routing yet: the exact command, and the four-facts honesty.
+    expect(html).toContain("standing-orders config set build");
+    expect(html).toContain("four separate facts");
+    // No work yet: the templates are offered.
+    expect(html).toContain("/routines?template=nightly-deps");
+    expect(html).toContain("/tasks?template=lint-sweep");
+  });
+
+  test("unscoped mode is named, not normalized — the step instructs the restart", async () => {
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(html).toContain("no ceiling is configured");
+    expect(html).toContain("serve --repo");
+  });
+
+  test("the first successful run retires the checklist PERMANENTLY", async () => {
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+    store.createTask({ id: "w-1", title: "the work" }, T0);
+    const run = store.startRun({
+      taskRef: store.refFor("built-in", "w-1").id,
+      leaseId: "lease-w",
+      runner: "builder-1",
+      branch: "standing-orders/w-1",
+      worktree: "/pool/w-1",
+      now: T0,
+    });
+    store.finishRun(run, { outcome: "built", committed: true, now: new Date("2026-08-14T13:00:00.000Z") });
+    const html = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(html).not.toContain("Getting started");
+    // The retirement is an append-only installation fact, so pruning run
+    // history later cannot resurrect the checklist.
+    expect(store.installationFact("first-success-at")).toBe("2026-08-14T13:00:00.000Z");
+  });
+
+  test("filing work checks the step off but keeps the checklist until success", async () => {
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+    store.createTask({ id: "w-2", title: "queued work" }, T0);
+    const html = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(html).toContain("Getting started");
+    expect(html).toContain("work is filed");
+  });
+
+  test("template prefill: the forms carry the library's exact text, editable", async () => {
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+    const routines = await (await fetch(url("/routines?template=nightly-deps"), { headers: { cookie } })).text();
+    expect(routines).toContain('value="nightly-deps"');
+    expect(routines).toContain('value="daily:03:30"');
+    expect(routines).toContain("pre-filled from a template");
+    const tasks = await (await fetch(url("/tasks?template=lint-sweep"), { headers: { cookie } })).text();
+    expect(tasks).toContain('value="One lint-clean sweep"');
+    expect(tasks).toContain("pre-filled from a template");
+    // An unknown template name is just an unfilled form, not an error.
+    const plain = await (await fetch(url("/tasks?template=nope"), { headers: { cookie } })).text();
+    expect(plain).not.toContain("pre-filled");
+  });
+});

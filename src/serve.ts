@@ -43,6 +43,9 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile } from "./evidence.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import {
@@ -400,6 +403,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           requeueables: store.listRequeueablesScoped(project, now, 10, admission).filter(one => visible(one.repo)),
           cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
+          wizard: wizardSteps(now),
           now,
         }),
       );
@@ -637,6 +641,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (wanted !== null && !TASK_STATES.includes(wanted as TaskState)) {
         return refuse(response, who, 400, "no such state", "/tasks");
       }
+      // ?template=<name> pre-fills the add form from the shipped library —
+      // a pre-filled form and nothing more; the submission path is the
+      // same guarded handler either way.
+      const fromTemplate = url.searchParams.get("template");
+      const picked = fromTemplate === null ? null : templateByName(fromTemplate);
+      const prefill =
+        picked !== null && picked.kind === "task"
+          ? { title: picked.title, goal: picked.goal, not: picked.outOfScope ?? "", touches: picked.touches.join(", ") }
+          : null;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       return page(
         response,
@@ -648,6 +661,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           csrf,
           null,
           project,
+          prefill,
         ),
       );
     }
@@ -728,10 +742,24 @@ export function createDecisionServer(options: ServeOptions): Server {
       const tracks = store
         .routineTracks(project, now)
         .filter(track => visible(track.routine.repo));
+      // ?template=<name> pre-fills the filing form from the shipped
+      // library — a pre-filled form, same guarded submission path.
+      const fromTemplate = url.searchParams.get("template");
+      const picked = fromTemplate === null ? null : templateByName(fromTemplate);
       return page(response, 200, routinesPage(chromeFor(project, "routines"), tracks, {
         csrf: who.via === "cookie" ? who.session.csrf : "",
         revision: who.via === "cookie" ? who.session.projectRevision : 0,
         problem: null,
+        prefill:
+          picked !== null && picked.kind === "routine"
+            ? {
+                name: picked.routineName,
+                goal: picked.goal,
+                not: picked.outOfScope ?? "",
+                touches: picked.touches.join(", "),
+                schedule: picked.schedule,
+              }
+            : null,
       }));
     }
 
@@ -773,6 +801,69 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+  }
+
+  /**
+   * The first-run checklist (adoption track, step 3) — derived from live
+   * state on every render, never a stored cursor, and retired PERMANENTLY
+   * by the first-success installation fact (Codex adoption review,
+   * finding 14). Every step is either something this console already has
+   * authority for, or the exact command where the CLI owns the act — the
+   * checklist instructs, it never gains authority (finding e).
+   */
+  function wizardSteps(now: Date): { done: boolean; title: string; detail: string }[] | null {
+    if (store.firstSuccessAt(now) !== null) return null;
+    const repos = admissionList() ?? [];
+    const setupDone = repos.filter(one => store.liveWorktreeSetup(one) !== null).length;
+    const skillDone = repos.filter(one =>
+      existsSync(join(one, ".claude", "skills", "standing-orders", "SKILL.md")),
+    ).length;
+    const counted = (done: number): string =>
+      repos.length <= 1 ? "" : ` (${done} of ${repos.length} repos)`;
+    return [
+      {
+        done: !unscopedMode,
+        title: "name what this console may see",
+        detail: unscopedMode
+          ? `no ceiling is configured — this server currently shows everything. Restart it naming the repos: <code>standing-orders serve --repo &lt;path&gt; --port …</code>`
+          : repos.length === 0
+            ? `the ceiling is configured but empty — no repository is visible here`
+            : `ceiling: ${repos.map(one => escape(projectName(one))).join(", ")}`,
+      },
+      {
+        // A fact about THIS DATABASE only: binaries and authentication live
+        // on the worker's machine, which may not be this one — the console
+        // never claims to have checked them (finding 15).
+        done: store.hasPhaseConfig(),
+        title: "route the spend to a provider",
+        detail: store.hasPhaseConfig()
+          ? `spend routing is configured in this database. Binary and authentication facts stay machine-side: run <code>standing-orders providers</code> where the workers run`
+          : `nothing routes builds to a provider yet: <code>standing-orders config set build --provider claude --as &lt;you&gt; --token &lt;t&gt;</code> — then check <code>standing-orders providers</code> on the worker's machine (installed, configured, historically-successful, and authenticated are four separate facts there)`,
+      },
+      {
+        done: repos.length > 0 && setupDone === repos.length,
+        title: "say how a fresh checkout gets ready",
+        detail:
+          setupDone > 0
+            ? `setup command set${counted(setupDone)}`
+            : `agents build in throwaway worktrees; give them the preparation step: <code>standing-orders setup set --repo &lt;path&gt; --command "npm ci"</code>`,
+      },
+      {
+        done: repos.length > 0 && skillDone === repos.length,
+        title: "teach the repo's agents this queue exists",
+        detail:
+          skillDone > 0
+            ? `skill installed${counted(skillDone)}`
+            : `<code>standing-orders skills install --repo &lt;path&gt;</code> previews; add <code>--yes</code> to write the skill file`,
+      },
+      {
+        done: store.hasAnyWork(),
+        title: "file the first standing order",
+        detail: store.hasAnyWork()
+          ? `work is filed — approve its scope and the machine takes it from there`
+          : `start from a template below, capture a one-off task underneath, or browse <a href="/routines">routines</a>`,
+      },
+    ];
   }
 
   /** The badge cache: five seconds per project — mutations invalidate it. */
@@ -1153,6 +1244,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       const title = body.get("title") ?? "";
       const repo = (body.get("repo") ?? "").trim() || (project ?? "");
       const goal = (body.get("goal") ?? "").trim();
+      const notThis = (body.get("not") ?? "").trim();
+      const touchesGiven = (body.get("touches") ?? "")
+        .split(/[\n,]/)
+        .map(one => one.trim())
+        .filter(one => one !== "");
       // One filing door for every surface (Codex adoption review, finding 7).
       const made = fileTaskProposal(
         store,
@@ -1161,6 +1257,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           title,
           ...(repo === "" ? {} : { repo }),
           ...(goal === "" ? {} : { goal }),
+          outOfScope: notThis === "" ? null : notThis,
+          touches: touchesGiven,
           filedVia: "console",
           ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
         },
@@ -2391,6 +2489,8 @@ function inboxPage(chrome: Chrome, data: {
   requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo?: string | null }[];
   cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string; repo?: string | null; blockerRepo?: string | null }[];
   gaps: Gap[];
+  /** The first-run checklist; null once the installation has succeeded once. */
+  wizard: { done: boolean; title: string; detail: string }[] | null;
   now: Date;
 }): string {
   /** The row's project, worn openly in the roll-up — null is UNPLACED,
@@ -2478,11 +2578,37 @@ function inboxPage(chrome: Chrome, data: {
           )
           .join("\n");
 
+  // The first-run checklist replaces the empty-queue card while the
+  // installation has never succeeded; each step is live state, and the
+  // whole card retires permanently on the first successful run.
+  const wizard =
+    data.wizard === null
+      ? ""
+      : `<div class="card">` +
+        `<p><strong>Getting started</strong> <span class="meta">\u2014 live state, not a saved step; this card retires itself after the first successful unattended run</span></p>` +
+        data.wizard
+          .map(
+            step =>
+              `<p class="row"><span class="mono">${step.done ? "\u2713" : "\u25cb"}</span> <strong>${escape(step.title)}</strong><br>` +
+              `<span class="meta">${step.detail}</span></p>`,
+          )
+          .join("\n") +
+        `<p class="meta">templates \u2014 edit, then approve; nothing a template files carries authority: ` +
+        TEMPLATES.map(one =>
+          one.kind === "routine"
+            ? `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`
+            : one.kind === "task"
+              ? `<a href="/tasks?template=${escape(one.name)}">${escape(one.name)}</a>`
+              : `<span title="a recipe \u2014 walk it in the terminal: standing-orders template show ${escape(one.name)}">${escape(one.name)} (recipe)</span>`,
+        ).join(" \u00b7 ") +
+        `</p></div>`;
+
   return shell("inbox", [
     `<h1>inbox</h1>`,
     `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, the machine needs nothing</p>`,
+    wizard,
     empty ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
-    empty ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
+    empty && data.wizard === null ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
     decisions,
     approvals,
     requeueables,
@@ -2880,8 +3006,14 @@ function trackRow(track: Track, all: boolean): string {
 function routinesPage(
   chrome: Chrome,
   tracks: Track[],
-  form: { csrf: string; revision: number; problem: string | null },
+  form: {
+    csrf: string;
+    revision: number;
+    problem: string | null;
+    prefill?: { name: string; goal: string; not: string; touches: string; schedule: string } | null;
+  },
 ): string {
+  const fill = form.prefill ?? null;
   const capture =
     chrome.project === null
       ? ""
@@ -2891,11 +3023,16 @@ function routinesPage(
           `<form method="post" action="/routines/add" class="card">`,
           `<input type="hidden" name="csrf" value="${escape(form.csrf)}">`,
           `<input type="hidden" name="projectRevision" value="${form.revision}">`,
-          `<label>name <span class="meta">(lowercase-with-dashes — it names each instance)</span><input type="text" name="name" placeholder="nightly-deps" maxlength="41"></label>`,
-          `<label>goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2"></textarea></label>`,
-          `<label>not this <span class="meta">(optional)</span><input type="text" name="not"></label>`,
-          `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches"></label>`,
-          `<label>schedule <span class="meta">(every:&lt;minutes&gt; or daily:&lt;HH:MM&gt; UTC)</span><input type="text" name="schedule" placeholder="daily:03:30"></label>`,
+          fill === null
+            ? `<p class="meta">start from a template: ${TEMPLATES.filter(one => one.kind === "routine")
+                .map(one => `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`)
+                .join(" · ")}</p>`
+            : `<p class="meta">pre-filled from a template — edit anything; nothing fires until you approve the standing order</p>`,
+          `<label>name <span class="meta">(lowercase-with-dashes — it names each instance)</span><input type="text" name="name" placeholder="nightly-deps" maxlength="41" value="${fill === null ? "" : escape(fill.name)}"></label>`,
+          `<label>goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2">${fill === null ? "" : escape(fill.goal)}</textarea></label>`,
+          `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${fill === null ? "" : escape(fill.not)}"></label>`,
+          `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${fill === null ? "" : escape(fill.touches)}"></label>`,
+          `<label>schedule <span class="meta">(every:&lt;minutes&gt; or daily:&lt;HH:MM&gt; UTC)</span><input type="text" name="schedule" placeholder="daily:03:30" value="${fill === null ? "" : escape(fill.schedule)}"></label>`,
           `<label>budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem"></label>`,
           `<button type="submit">file it \u2192 approve the standing order next</button>`,
           `<p class="meta">filing is cheap — nothing fires until you approve the template on the next screen, password and all</p>`,
@@ -3189,6 +3326,7 @@ function tasksPage(
   csrf: string,
   problem: string | null,
   repo: string | null = null,
+  prefill: { title: string; goal: string; not: string; touches: string } | null = null,
 ): string {
   const filters = TASK_STATES.map(
     one => (one === state ? `<strong>${one}</strong>` : `<a href="/tasks?state=${one}">${one}</a>`),
@@ -3216,10 +3354,15 @@ function tasksPage(
     `<h2>add a task</h2>`,
     `<form method="post" action="/tasks/add" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    prefill === null
+      ? ""
+      : `<p class="meta">pre-filled from a template — edit anything; it files UNAPPROVED like every task</p>`,
     `<label>id<input type="text" name="id" placeholder="fix-payout-guard"></label>`,
-    `<label>title<input type="text" name="title"></label>`,
+    `<label>title<input type="text" name="title" value="${prefill === null ? "" : escape(prefill.title)}"></label>`,
     `<label>repo <span class="meta">(optional)</span><input type="text" name="repo"></label>`,
-    `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3"></textarea></label>`,
+    `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
+    `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
+    `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
     `<button type="submit">add</button>`,
     `</form></details>`,
   ].join("\n"), { chrome });

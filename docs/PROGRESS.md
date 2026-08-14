@@ -1,5 +1,24 @@
 # Progress
 
+**2026-08-14 — the first-run checklist (adoption track, step 3).** serve's
+inbox, while the installation has never finished a run successfully,
+replaces the empty-queue card with a checklist DERIVED FROM LIVE STATE on
+every render — never a stored cursor (finding 14): ceiling named (or, in
+unscoped mode, named AS unscoped with the exact `serve --repo` restart
+line — the wizard instructs where the console lacks authority, finding e),
+spend routing (a fact about THIS DATABASE only; binaries/auth are the
+worker machine's four separate facts via `standing-orders providers` —
+the console never claims to have checked them, finding 15), worktree setup
+command, skill installed (filesystem check per ceiling repo), first
+standing order. Retirement is PERMANENT: store.firstSuccessAt derives the
+first built/no-change finish from run history once, stamps it as the
+append-only `first-success-at` installation fact, and later pruning cannot
+resurrect the card. Template picker: /routines?template=<name> and
+/tasks?template=<name> pre-fill the EXISTING forms from the library —
+same guarded submission paths, nothing new to approve through; the task
+form gained the not-this/touches fields the full scope always had. Suite
+867.
+
 **2026-08-14 — templates (adoption track, step 2).** Six common use cases
 ship as STATIC DATA (src/templates.ts): nightly-deps, test-coverage,
 docs-drift (weekly via every:10080), lint-sweep — plus issue-intake and
