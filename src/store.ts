@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -117,6 +117,8 @@ export type Routine = {
   approvedDigest: string | null;
   /** The next scheduled occurrence; null until approved. */
   nextFireAt: string | null;
+  /** Immutable filing provenance (v12); null on rows from before it existed. */
+  filedVia: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -458,6 +460,10 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- revision requires its own approval; nothing is inherited.
   revision_of             TEXT,
   revision_brief_artifact INTEGER REFERENCES artifact(id),
+  -- Immutable provenance (v12): which door filed this work — 'cli',
+  -- 'console', 'intake', 'template:<name>', 'revision'. Stamped once at
+  -- filing, never updated; NULL is history from before the column existed.
+  filed_via               TEXT,
   UNIQUE (backend, external_id)
 );
 
@@ -504,7 +510,20 @@ CREATE TABLE IF NOT EXISTS routine (
   -- fire transaction and nothing else, aligned to cadence (finding 10).
   next_fire_at     TEXT,
   created_at       TEXT NOT NULL,
-  updated_at       TEXT NOT NULL
+  updated_at       TEXT NOT NULL,
+  -- Immutable provenance (v12), same contract as task_ref.filed_via.
+  filed_via        TEXT
+);
+
+-- Append-only installation facts (v12): set-once markers about THIS
+-- database file — 'demo' stamps a sandbox no worker may spend against;
+-- 'first-success-at' retires the first-run checklist permanently. Writes
+-- go through recordInstallationFact (INSERT OR IGNORE); nothing updates
+-- or deletes a fact, so a marker can never be quietly unset.
+CREATE TABLE IF NOT EXISTS installation_fact (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 -- The firing ledger (v8): one row per scheduled slot, fired or skipped.
@@ -1477,6 +1496,10 @@ function migrate(db: Database): void {
      )`,
     ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted"],
   );
+  // v12 (adoption review, finding 7): immutable filing provenance, additive.
+  // installation_fact arrives through the fresh SCHEMA's IF NOT EXISTS.
+  addColumn(db, "task_ref", "filed_via", "TEXT");
+  addColumn(db, "routine", "filed_via", "TEXT");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2610,7 +2633,7 @@ export class Store {
   ): { ok: true; id: string; artifactId: number } | { ok: false; reason: string } {
     try {
       return this.transact(() => {
-        const made = this.createConsoleTask(args.task, now);
+        const made = this.createConsoleTask({ ...args.task, filedVia: "revision" }, now);
         if (!made.ok) return { ok: false as const, reason: made.reason };
         const artifactId = this.saveArtifact(args.artifact, now);
         const ref = this.lookupRef(made.id);
@@ -2892,6 +2915,9 @@ export class Store {
        * exclusions" over work that had them. */
       outOfScope?: string | null;
       touches?: string[];
+      /** Immutable provenance (v12): which door filed this. Stamped in the
+       * same transaction as the create; there is no API to change it. */
+      filedVia?: string;
     },
     now: Date,
     cap = 500,
@@ -2929,6 +2955,9 @@ export class Store {
 
       this.createTask({ id, title: spec.title.trim() }, now);
       const ref = this.refFor(BUILT_IN, id, "ours");
+      if (spec.filedVia !== undefined) {
+        this.db.prepare("UPDATE task_ref SET filed_via = ? WHERE id = ? AND filed_via IS NULL").run(spec.filedVia, ref.id);
+      }
       // Placement happens BEFORE the scope exists, so the immutability guard
       // in placeTask never fires here — atomic create, place, then scope.
       if (spec.repo !== undefined && spec.repo !== "") this.placeTask(ref.id, spec.repo);
@@ -3178,6 +3207,8 @@ export class Store {
       singleFlight: boolean;
       costCeilingUsd: number | null;
       digest: string;
+      /** Immutable provenance (v12), same contract as createConsoleTask's. */
+      filedVia?: string;
     },
     now: Date,
   ): { ok: true; id: number } | { ok: false; reason: "duplicate" } {
@@ -3189,8 +3220,8 @@ export class Store {
         .prepare(
           `INSERT INTO routine
              (name, repo, goal, out_of_scope, touches, requirements, schedule,
-              single_flight, cost_ceiling_usd, digest, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              single_flight, cost_ceiling_usd, digest, created_at, updated_at, filed_via)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           spec.name,
@@ -3205,9 +3236,47 @@ export class Store {
           spec.digest,
           stamp,
           stamp,
+          spec.filedVia ?? null,
         );
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
     });
+  }
+
+  /**
+   * Set-once installation markers (v12). INSERT OR IGNORE is the whole
+   * contract: the first write wins forever, there is no update and no
+   * delete, so 'demo' can never be quietly unset and 'first-success-at'
+   * survives any later pruning of the rows it was derived from.
+   */
+  recordInstallationFact(key: string, value: string, now: Date): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO installation_fact (key, value, created_at) VALUES (?, ?, ?)")
+      .run(key, value, now.toISOString());
+  }
+
+  installationFact(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM installation_fact WHERE key = ?").get(key);
+    return row === undefined ? null : String(row["value"]);
+  }
+
+  /** A database stamped as a demo sandbox: every spending or external-effect
+   * entry point fails closed on it (adoption review, finding 8). */
+  isDemo(): boolean {
+    return this.installationFact("demo") !== null;
+  }
+
+  /** Provenance for filing paths that create their ref outside
+   * createConsoleTask. Set-once: an already-stamped row never changes. */
+  stampFiledVia(refId: number, via: string): void {
+    this.db.prepare("UPDATE task_ref SET filed_via = ? WHERE id = ? AND filed_via IS NULL").run(via, refId);
+  }
+
+  /** Which door filed a task; null for history from before v12. */
+  filedViaOf(taskId: string): string | null {
+    const row = this.db
+      .prepare("SELECT filed_via FROM task_ref WHERE backend = ? AND external_id = ?")
+      .get(BUILT_IN, taskId);
+    return row === undefined || row["filed_via"] === null ? null : String(row["filed_via"]);
   }
 
   getRoutine(id: number): Routine | null {
@@ -6255,6 +6324,7 @@ function readRoutine(row: Record<string, unknown>): Routine {
     approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
     approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),
     nextFireAt: row["next_fire_at"] === null ? null : String(row["next_fire_at"]),
+    filedVia: row["filed_via"] === null || row["filed_via"] === undefined ? null : String(row["filed_via"]),
     createdAt: String(row["created_at"]),
     updatedAt: String(row["updated_at"]),
   };

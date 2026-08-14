@@ -44,6 +44,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile } from "./evidence.js";
+import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import {
   type Artifact,
   type DiffComment,
@@ -1152,8 +1153,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       const title = body.get("title") ?? "";
       const repo = (body.get("repo") ?? "").trim() || (project ?? "");
       const goal = (body.get("goal") ?? "").trim();
-      const made = store.createConsoleTask(
-        { ...(id === "" ? {} : { id }), title, ...(repo === "" ? {} : { repo }), ...(goal === "" ? {} : { goal }) },
+      // One filing door for every surface (Codex adoption review, finding 7).
+      const made = fileTaskProposal(
+        store,
+        {
+          ...(id === "" ? {} : { id }),
+          title,
+          ...(repo === "" ? {} : { repo }),
+          ...(goal === "" ? {} : { goal }),
+          filedVia: "console",
+          ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
+        },
         now,
       );
       if (!made.ok) {
@@ -1161,7 +1171,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return page(
           response,
           made.reason === "backlog-full" ? 429 : 400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.reason, project),
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project),
         );
       }
       return redirect(response, taskHref(made.id));
@@ -1225,35 +1235,32 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const name = (body.get("name") ?? "").trim();
       const ceilingGiven = (body.get("ceiling") ?? "").trim();
-      const terms: RoutineTerms = {
-        repo: project,
-        goal: (body.get("goal") ?? "").trim(),
-        outOfScope: (body.get("not") ?? "").trim() || null,
-        touches: (body.get("touches") ?? "").split(/[\n,]/).map(one => one.trim()).filter(one => one !== ""),
-        requirements: [],
-        schedule: (body.get("schedule") ?? "").trim(),
-        singleFlight: true,
-        costCeilingUsd: ceilingGiven === "" ? null : Number(ceilingGiven),
-      };
-      const problems = validateRoutineTerms(terms);
-      if (!ROUTINE_NAME.test(name)) {
-        problems.unshift({ field: "name", problem: "lowercase letters, digits, and dashes — it becomes each instance's id" });
-      }
-      if (problems.length > 0) {
-        const tracks = store.routineTracks(project, now).filter(track => visible(track.routine.repo));
-        return page(response, 400, routinesPage(chromeFor(project, "routines"), tracks, {
-          csrf: who.via === "cookie" ? who.session.csrf : "",
-          revision: who.via === "cookie" ? who.session.projectRevision : 0,
-          problem: problems.map(one => `${one.field}: ${one.problem}`).join(" · "),
-        }));
-      }
-      const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, now);
+      // One filing door for every surface (Codex adoption review, finding
+      // 7): the service validates, canonicalizes, digests, and stamps
+      // provenance; the admission list makes the ceiling explicit even
+      // though `project` was already proved inside it.
+      const created = fileRoutineProposal(
+        store,
+        {
+          name,
+          repo: project,
+          goal: (body.get("goal") ?? "").trim(),
+          outOfScope: (body.get("not") ?? "").trim() || null,
+          touches: (body.get("touches") ?? "").split(/[\n,]/).map(one => one.trim()).filter(one => one !== ""),
+          requirements: [],
+          schedule: (body.get("schedule") ?? "").trim(),
+          costCeilingUsd: ceilingGiven === "" ? null : Number(ceilingGiven),
+          filedVia: "console",
+          ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
+        },
+        now,
+      );
       if (!created.ok) {
         const tracks = store.routineTracks(project, now).filter(track => visible(track.routine.repo));
-        return page(response, 409, routinesPage(chromeFor(project, "routines"), tracks, {
+        return page(response, created.reason === "duplicate" ? 409 : 400, routinesPage(chromeFor(project, "routines"), tracks, {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           revision: who.via === "cookie" ? who.session.projectRevision : 0,
-          problem: `a routine named ${name} already exists`,
+          problem: created.message,
         }));
       }
       return redirect(response, `/routines/${created.id}`);

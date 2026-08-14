@@ -126,6 +126,7 @@ import {
   ROUTINE_NAME,
   type RoutineTerms,
 } from "./routine.js";
+import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
@@ -3067,12 +3068,14 @@ async function intakeCommand(
       skipped.push({ id: one.id, reason: "title-refused" });
       continue;
     }
-    const made = store.createConsoleTask(
+    const made = fileTaskProposal(
+      store,
       {
         id: one.id,
         title: `GH#${one.number}: ${one.title}`,
         repo,
         goal: `Imported from GitHub issue #${one.number} in ${grant.github} (label "${grant.label}"). Only the title was imported — read the issue at https://github.com/${grant.github}/issues/${one.number} for full context, then edit and approve this scope before anything builds.`,
+        filedVia: "intake",
       },
       clock(),
     );
@@ -3132,23 +3135,26 @@ async function routineCommand(
       return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]`", EXIT.usage);
     }
     const ceilingGiven = text(flags, "ceiling");
-    const terms: RoutineTerms = {
-      repo: canonicalProject(repoGiven) ?? resolve(repoGiven),
-      goal,
-      outOfScope: text(flags, "not") ?? null,
-      touches: (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
-      requirements: (text(flags, "require") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
-      schedule,
-      singleFlight: true,
-      costCeilingUsd: ceilingGiven === undefined ? null : Number(ceilingGiven),
-    };
-    const problems = validateRoutineTerms(terms);
-    if (problems.length > 0) {
-      return fail(write, json, "routine add", "invalid", problems.map(one => `${one.field}: ${one.problem}`).join("; "), EXIT.usage);
-    }
-    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, clock());
+    // One filing door for every surface (Codex adoption review, finding 7):
+    // validation, canonicalization, digest, and provenance live in the
+    // service, not here.
+    const created = fileRoutineProposal(
+      store,
+      {
+        name,
+        repo: repoGiven,
+        goal,
+        outOfScope: text(flags, "not") ?? null,
+        touches: (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
+        requirements: (text(flags, "require") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
+        schedule,
+        costCeilingUsd: ceilingGiven === undefined ? null : Number(ceilingGiven),
+        filedVia: "cli",
+      },
+      clock(),
+    );
     if (!created.ok) {
-      return fail(write, json, "routine add", "duplicate", `a routine named ${name} already exists`, EXIT.refused);
+      return fail(write, json, "routine add", created.reason, created.message, created.reason === "duplicate" ? EXIT.refused : EXIT.usage);
     }
     const routine = store.getRoutine(created.id);
     return succeed(write, json, "routine add", { routine }, () => [
@@ -4346,6 +4352,11 @@ async function addTask(
   const { store, write, json, now } = context;
   const title = positional.join(" ").trim();
   if (title === "") return fail(write, json, "task add", "usage", "a task needs a title", EXIT.usage);
+  // The same text rules every filing door applies (Codex adoption review,
+  // finding 7): the bare CLI path must not accept a title the console or a
+  // template would refuse.
+  const badText = validateTaskText({ title });
+  if (badText !== null) return fail(write, json, "task add", badText.reason, badText.message, EXIT.usage);
 
   const backendName = text(flags, "backend") ?? BUILT_IN;
   if (backendName !== BUILT_IN) {
@@ -4391,6 +4402,8 @@ async function addTask(
   if (!outcome.ok) {
     return fail(write, json, "task add", "exists", `\`${id}\` already exists`, EXIT.refused);
   }
+
+  store.stampFiledVia(store.refFor(BUILT_IN, id).id, "cli");
 
   // Placement is explicit, never inferred from where the command happened to
   // run: a task filed from the wrong directory would silently bind to it.

@@ -1,5 +1,28 @@
 # Progress
 
+**2026-08-14 — the one filing door (adoption track, step 1).** The
+adoption-track + fleet-chat briefs went through Codex review (16 findings,
+scratchpad codex-adoption-chat-findings.md — the findings are the spec;
+verdicts: adoption approve-with-changes, fleet chat REDESIGN). Step 1 is
+finding 7: before this, each filing surface validated what it happened to
+think of — the console checked controls but not disguised text, nothing
+ceiling-checked a typed repo, nothing recorded who filed what. Now
+src/proposal.ts is the one door: `fileTaskProposal` / `fileRoutineProposal`
+with an exact field allowlist (no spread — a template or model object
+CANNOT smuggle approval metadata into scope rows), disguised-text refusal
+on every field an approver reads, best-effort canonicalization with an
+explicit-ceiling membership check (an EMPTY ceiling refuses every repo —
+fail closed; an absent one is the CLI's honest none), digests computed
+inside the door, and immutable `filed_via` provenance (schema v12:
+task_ref.filed_via + routine.filed_via, set-once by construction — no
+update API exists). Wired through: CLI `task add` (same text rules via
+validateTaskText + provenance stamp, replay idempotency untouched), CLI
+`routine add`, console quick capture, console routine form, intake run
+(filedVia "intake"), revision seals ("revision"). Also v12:
+`installation_fact` — append-only set-once markers (INSERT OR IGNORE is
+the whole API) that the demo stamp and the wizard's retirement milestone
+will both rest on. Suite 852.
+
 **2026-08-13 — front-page pass two, against the field.** Studied ten front
 pages (vite/bun/vhs/zod/ollama; OpenHands/aider/opencode/claude-squad/
 agor). The finding that mattered: nobody in the agent category presents
