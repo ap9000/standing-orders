@@ -166,6 +166,8 @@ export type OperateOptions = {
   /** Injected by tests: the Telegram Bot API. Production dials the real one. */
   telegramTransport?: TelegramTransport;
   publishExec?: PublishExec;
+  /** Injected by tests: the stop fence a watch would set. */
+  shouldStop?: () => boolean;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
@@ -390,6 +392,7 @@ export async function runOperate(
       ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
       ...(options.telegramTransport === undefined ? {} : { telegramTransport: options.telegramTransport }),
       ...(options.publishExec === undefined ? {} : { publishExec: options.publishExec }),
+      ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
     });
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
@@ -1449,6 +1452,10 @@ async function tickCommand(
       ...(turns === undefined ? {} : { maxTurns: Number(turns) }),
       ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
       ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+      // The stop fence rides into the builder (audit IV-1): re-proved at
+      // the last gate before the commit, so an operator's stop beats an
+      // agent's finish even mid-build.
+      ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
     });
 
     // Handed back either way; a tree with somebody's work in it comes back
@@ -1622,7 +1629,8 @@ async function tickCommand(
       result.reason === "commit-failure" ||
       result.reason === "provider-init" ||
       result.reason === "setup" ||
-      result.reason === "revision-brief"
+      result.reason === "revision-brief" ||
+      result.reason === "stopped"
     ) {
       // The attempt itself broke. One fenced transaction decides what that
       // means — a strike and a doubling backoff, a stall after three, or a
@@ -1637,7 +1645,7 @@ async function tickCommand(
           ? "agent-reported"
           : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
             ? "no-op"
-            : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup"
+            : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "stopped"
               ? "retryable-infra"
               : result.reason === "commit-failure"
                 ? "commit-failure"
@@ -2778,9 +2786,9 @@ async function setupCommand(
       `  timeout  ${timeoutSeconds}s`,
       ``,
       `Every FUTURE worktree of this repo runs this command unattended,`,
-      `before any agent spawns in it, with the same scrubbed environment`,
-      `the agent gets. A failed setup blocks the build as an environment`,
-      `problem. Re-run with --yes to approve.`,
+      `before any agent spawns in it, under an ALLOWLISTED environment`,
+      `(PATH, HOME, locale, temp — no credentials). A failed setup blocks`,
+      `the build as an environment problem. Re-run with --yes to approve.`,
     ]) {
       write(line);
     }

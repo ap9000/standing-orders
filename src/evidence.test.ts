@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseNumstat, readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
+import { parseNumstat, readVerifiedArtifact, redactSecretLines, scanForSecrets, writeEvidenceFile } from "./evidence.js";
 import type { Artifact } from "./store.js";
 
 describe("reading evidence back, believing nothing", () => {
@@ -148,5 +148,32 @@ describe("parseNumstat — filenames come NUL-delimited from git, never from pat
     expect(stat.additions).toBe(500);
     expect(stat.files.length).toBe(400);
     expect(stat.filesTruncated).toBe(true);
+  });
+});
+
+describe("the secret scan (audit IV-7) — high confidence only", () => {
+  test("known credential shapes hit; ordinary source lines do not", () => {
+    const patch = [
+      "diff --git a/.env b/.env",
+      "+AWS_KEY=AKIAIOSFODNN7EXAMPLE",
+      "+github = ghp_" + "a".repeat(36),
+      "+-----BEGIN RSA PRIVATE KEY-----",
+      '+const password = process.env.PASSWORD; // fine',
+      "+// slack docs mention xoxb-tokens generically",
+    ].join("\n");
+    const hits = scanForSecrets(patch);
+    expect(hits.map(one => one.name).sort()).toEqual(["aws-access-key", "github-token", "private-key"]);
+
+    const redacted = redactSecretLines(patch, hits);
+    expect(redacted).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(redacted).not.toContain("ghp_");
+    expect(redacted).toContain("[redacted: aws-access-key detected on this line]");
+    // The innocent lines survive untouched.
+    expect(redacted).toContain("process.env.PASSWORD");
+  });
+
+  test("clean text produces no hits and no changes", () => {
+    const clean = "diff --git a/x b/x\n+export const guarded = true;\n";
+    expect(scanForSecrets(clean)).toEqual([]);
   });
 });

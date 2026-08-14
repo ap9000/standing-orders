@@ -728,6 +728,9 @@ describe("the operations console", () => {
     );
     store.markPublicationPushed(pub1, T0);
     store.markPublicationOpened(pub1, 101, "https://github.com/ap9000/thing/pull/101", T0);
+    // Green is a FACT the watcher saw (audit SD-4): only an observed pass
+    // earns "review next".
+    store.recordPublicationCheckState(pub1, "passing", T0);
 
     store.createTask({ id: "t-pr2", title: "shipped two" }, T0);
     const ref2 = store.refFor("built-in", "t-pr2").id;
@@ -749,8 +752,8 @@ describe("the operations console", () => {
     // The quiet PR is recommended; the failing one is labeled, not hidden.
     expect(queue.indexOf("PR #101")).toBeLessThan(queue.indexOf("PR #102"));
     expect(queue).toContain("review next");
+    expect(queue).toContain("CI passing — observed");
     expect(queue).toContain("CI failing — observed");
-    expect(queue).toContain("never calls silence green");
     // Read-only: no merge button, no form on this page.
     expect(queue).not.toContain("<form");
 

@@ -545,6 +545,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       // ceiling-checked like any other run resource, and CI claims stay
       // honest — an open episode is an OBSERVED failure, its absence is
       // "no failing observation", never a green the machine did not see.
+      // Rank by what was OBSERVED (audit SD-4): passing first, silence in
+      // the middle and labeled as silence, failing last. Green is a fact
+      // the watcher saw, never an inference from quiet.
+      const rankOf = (failing: boolean, checkState: string | null): number =>
+        failing ? 2 : checkState === "passing" ? 0 : 1;
       const rows = store
         .openedPublications()
         .filter(one => visible(taskRepoOf(one.taskRef)))
@@ -553,11 +558,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           taskId: store.externalIdFor(one.taskRef) ?? "?",
           failing: one.prNumber === null ? false : store.hasOpenCiEpisode(one.githubRepo, one.prNumber),
         }))
-        .sort((a, b) =>
-          a.failing !== b.failing
-            ? (a.failing ? 1 : -1)
-            : a.publication.updatedAt.localeCompare(b.publication.updatedAt),
-        );
+        .sort((a, b) => {
+          const rankA = rankOf(a.failing, a.publication.lastCheckState);
+          const rankB = rankOf(b.failing, b.publication.lastCheckState);
+          return rankA !== rankB ? rankA - rankB : a.publication.updatedAt.localeCompare(b.publication.updatedAt);
+        });
       return page(response, 200, reviewPage(chromeFor(project, "review"), rows, now));
     }
 
@@ -933,6 +938,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
         scope,
+        publication: (() => {
+          // The latest publication across this task's runs, with its
+          // OBSERVED CI state (audit SD-5): the reviewer learns PR and CI
+          // here instead of spelunking run pages.
+          if (ref === null) return null;
+          for (const one of store.runsFor(ref.id)) {
+            const found = store.publicationForRun(one.id);
+            if (found !== null) return found;
+          }
+          return null;
+        })(),
         runs: ref === null ? [] : store.runsFor(ref.id),
         decisions: ref === null ? [] : store.decisionsForTask(ref.id),
         incidents: ref === null ? [] : store.incidentsForTask(ref.id),
@@ -3299,6 +3315,7 @@ function taskPage(chrome: Chrome, data: {
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
   revision?: RevisionView | null;
+  publication?: Publication | null;
   repo: string | null;
   holds: Hold[];
   claimed: boolean;
@@ -3568,6 +3585,17 @@ function taskPage(chrome: Chrome, data: {
     // (scope, holds, acts) after. Only trustworthy facts moved up.
     decisions,
     incidents,
+    data.publication === null || data.publication === undefined
+      ? ""
+      : `<p class="row"><span class="meta">published</span> ` +
+        `${safePrUrl(data.publication.prUrl) === null ? `<span class="mono">PR #${data.publication.prNumber ?? "?"}</span>` : `<a href="${escape(safePrUrl(data.publication.prUrl) as string)}" class="mono">PR #${data.publication.prNumber ?? "?"}</a>`}` +
+        ` <span class="meta">${escape(data.publication.state)}${
+          data.publication.remoteState !== null ? ` · ${data.publication.remoteState.toLowerCase()} on GitHub` : ""
+        }${
+          data.publication.lastCheckState !== null
+            ? ` · CI ${data.publication.lastCheckState} at last observation`
+            : " · no checks observed"
+        }</span></p>`,
     runs,
     spendCard,
     "<h2>scope</h2>",
@@ -3610,7 +3638,7 @@ function reviewPage(
     const hours = Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / 3_600_000));
     return hours < 1 ? "under an hour" : hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
   };
-  const ready = rows.filter(one => !one.failing);
+  const ready = rows.filter(one => !one.failing && one.publication.lastCheckState === "passing");
   const list =
     rows.length === 0
       ? `<p class="meta">No open pull requests from this plane. Built work appears here the moment its PR opens.</p>`
@@ -3619,13 +3647,17 @@ function reviewPage(
             const p = one.publication;
             return (
               `<div class="card">` +
-              `<p><strong>${index === 0 && !one.failing ? "review next — " : ""}PR #${p.prNumber ?? "?"}</strong> ` +
+              `<p><strong>${index === 0 && !one.failing && p.lastCheckState === "passing" ? "review next — " : ""}PR #${p.prNumber ?? "?"}</strong> ` +
               `<span class="mono">${escape(one.taskId)}</span>` +
               `<span class="meta"> · ${escape(p.githubRepo)} · open ${ageOf(p.updatedAt)}</span></p>` +
               `<p class="meta">${
                 one.failing
                   ? "CI failing — observed; a repair can be drafted from the run page"
-                  : "no failing CI observation (the machine never calls silence green — verify on GitHub)"
+                  : p.lastCheckState === "passing"
+                    ? `CI passing — observed ${escape(when(p.lastCheckAt ?? p.updatedAt))}`
+                    : p.lastCheckState === "running"
+                      ? "CI still running at the last observation"
+                      : "no checks observed (the machine never calls silence green — verify on GitHub)"
               }</p>` +
               `<p class="row">${safePrUrl(p.prUrl) === null ? "" : `<a href="${escape(safePrUrl(p.prUrl) as string)}">review on GitHub →</a>`} ` +
               `<a href="/r/${p.run}">the build</a></p>` +

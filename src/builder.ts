@@ -110,6 +110,12 @@ export type BuildRequest = {
   git?: Runner;
   /** Runs the approved worktree setup command (M5.7). Tests inject; production uses exec. */
   setup?: Runner;
+  /**
+   * The stop fence (audit IV-1, completed): re-proved AFTER the agent and
+   * BEFORE the commit. A stop that lands while the agent runs preserves
+   * the work uncommitted for the successor — late output cannot commit.
+   */
+  shouldStop?: () => boolean;
 };
 
 /**
@@ -156,7 +162,8 @@ export type BuildRefusal =
   | "malformed-decision"
   | "provider-init"
   | "setup"
-  | "revision-brief";
+  | "revision-brief"
+  | "stopped";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -191,9 +198,20 @@ const GIT = "git";
  */
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
 
-/** Setup shells get the agent's denylist PLUS the transport keys the agent
- * itself never sees in its shells — an approved `npm ci` is not an
- * approved read of any credential this plane knows about (audit IV-5). */
+/**
+ * Setup shells run under an ALLOWLIST, not the operator's shell minus two
+ * names (audit IV-5, completed): the deterministic basics a package
+ * manager needs and nothing that could carry a credential. A setup that
+ * needs more exports it inside its own approved command text — visibly,
+ * on the approval screen.
+ */
+const SETUP_ENV_ALLOWLIST: readonly string[] = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL",
+  "TMPDIR", "TMP", "TEMP",
+  "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
+];
+
+/** Belt over the allowlist's suspenders: even if these ever appear in `env`, they die here. */
 const SETUP_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV, OPENROUTER_ENV_KEY];
 
 /**
@@ -337,6 +355,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     const made = await runSetup("/bin/sh", ["-c", setupWanted.command], {
       cwd: worktree,
       timeoutMs: setupWanted.timeoutMs,
+      envAllowlist: SETUP_ENV_ALLOWLIST,
       omitEnv: SETUP_ENV_DENYLIST,
     });
     if (made.timedOut || made.code !== 0) {
@@ -543,6 +562,39 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     }
   }
 
+  // The previous attempt's handoff, CONSUMED at last (audit SD-2): read
+  // verified, parsed, and included only when its freshness PROVES — same
+  // branch, and the branch still exactly at the head the handoff stamped.
+  // A handoff describing a world that moved is omitted, silently: stale
+  // context spent as truth costs more than no context. Warm resumes skip
+  // it — the session already remembers better than a summary of itself.
+  let previousHandoff: string | null = null;
+  if (resumeSession === null) {
+    const handoffArtifact = store.latestHandoffArtifact(taskRef);
+    if (handoffArtifact !== null) {
+      try {
+        const verified = readVerifiedArtifact(root, handoffArtifact);
+        if (verified.ok) {
+          const parsed = JSON.parse(verified.content.toString("utf8")) as {
+            branch?: unknown;
+            conclusion?: unknown;
+            outcome?: unknown;
+            freshness?: { currentAsOf?: unknown };
+          };
+          if (
+            parsed.branch === branch &&
+            typeof parsed.conclusion === "string" &&
+            parsed.freshness?.currentAsOf === baseRevision
+          ) {
+            previousHandoff = `A previous attempt (${String(parsed.outcome ?? "finished")}) left the branch exactly where it now stands and concluded: ${parsed.conclusion}`;
+          }
+        }
+      } catch {
+        previousHandoff = null; // advisory context; unreadable simply means absent
+      }
+    }
+  }
+
   // The machine's own boundary, stamped by the machine: the spawn follows
   // within this same tick, and no provider stream is ever consulted (M5.4).
   store.setRunPhase(request.runId, "agent-running");
@@ -554,7 +606,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       { provider, model: model ?? null },
       {
         phase: "build",
-        brief: brief(scope as Scope, branch, mailbox, done, answers, planDocument, revisionBrief),
+        brief: brief(scope as Scope, branch, mailbox, done, answers, planDocument, revisionBrief, previousHandoff),
         maxTurns,
         permissionMode,
         skipPermissions,
@@ -780,6 +832,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ok: false,
       reason: "no-op",
       message: "the handoff said completed but nothing changed — a claim of work with no work is the no-op gnhf warns about",
+    };
+  }
+  // The stop fence, re-proved at the last gate before anything commits
+  // (audit IV-1): an operator's stop beats an agent's finish. The work
+  // stays in the worktree, uncommitted, preserved for the successor.
+  if (request.shouldStop?.() === true) {
+    return {
+      ok: false,
+      reason: "stopped",
+      message: `the operator stopped this watch while the agent ran — the work is preserved uncommitted in ${worktree}`,
     };
   }
   store.setRunPhase(request.runId, "committing");
@@ -1028,6 +1090,7 @@ function brief(
   answers: readonly { decision: Decision; choice: string; note: string | null }[] = [],
   planDocument: string | null = null,
   revisionBrief: string | null = null,
+  previousHandoff: string | null = null,
 ): string {
   return [
     "You are building one task, unattended, in an isolated git worktree.",
@@ -1055,6 +1118,17 @@ function brief(
           "--- BEGIN APPROVED PLAN ---",
           fence(planDocument),
           "--- END APPROVED PLAN ---",
+          "",
+        ]),
+    // The previous attempt's handoff, freshness-proven by the caller and
+    // fenced like everything agent-written: context about where the branch
+    // stands, never an instruction.
+    ...(previousHandoff === null
+      ? []
+      : [
+          "--- BEGIN PREVIOUS ATTEMPT (proven current) ---",
+          fence(previousHandoff),
+          "--- END PREVIOUS ATTEMPT ---",
           "",
         ]),
     // The revision brief: review comments an operator wrote on a finished

@@ -376,6 +376,9 @@ export type Publication = {
   updatedAt: string;
   /** GitHub's observed verdict — MERGED/CLOSED means done, whatever local state says. */
   remoteState: string | null;
+  /** What CI was last SEEN doing (passing/failing/running/none) — never inferred. */
+  lastCheckState: string | null;
+  lastCheckAt: string | null;
 };
 
 /** Every mutation takes one. A repeat returns the first answer, unchanged. */
@@ -1029,7 +1032,11 @@ CREATE TABLE IF NOT EXISTS publication (
   updated_at  TEXT NOT NULL,
   -- The remote's own verdict, observed (M8 audit C-6): MERGED/CLOSED ends
   -- the watch without widening the local state CHECK.
-  remote_state TEXT
+  remote_state TEXT,
+  -- What CI was last SEEN doing, and when (audit SD-4): the review queue
+  -- ranks observed-passing first and never upgrades silence to green.
+  last_check_state TEXT,
+  last_check_at    TEXT
 );
 
 -- A machine that may be given work.
@@ -1410,6 +1417,9 @@ function migrate(db: Database): void {
   addColumn(db, "task_ref", "revision_brief_artifact", "INTEGER REFERENCES artifact(id)");
   // v11c (M8 audit C-6): the remote's observed PR verdict, additive.
   addColumn(db, "publication", "remote_state", "TEXT");
+  // v11c (audit SD-4): the last OBSERVED check state, additive.
+  addColumn(db, "publication", "last_check_state", "TEXT");
+  addColumn(db, "publication", "last_check_at", "TEXT");
   // v11c (M8.17 PR-comment intake): the ingest idempotency key, additive —
   // a same-day v11 database gains it here; fresh ones carry it already.
   // Its unique index rides the post-migration block in openStore.
@@ -4196,13 +4206,15 @@ export class Store {
       truncated: boolean;
       sha256: string;
       capture: string;
+      /** Set when the stored bytes were REDACTED before storage (audit IV-7). */
+      redacted?: boolean;
     },
     now: Date,
   ): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, truncated, sha256, capture, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, truncated, sha256, capture, created_at, redacted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         artifact.run,
@@ -4214,8 +4226,30 @@ export class Store {
         artifact.sha256,
         artifact.capture,
         now.toISOString(),
+        artifact.redacted === true ? 1 : 0,
       );
     return Number(inserted.lastInsertRowid);
+  }
+
+  /** The latest handoff artifact for a task's runs — what a successor reads (audit SD-2). */
+  latestHandoffArtifact(taskRef: number): Artifact | null {
+    const row = this.db
+      .prepare(
+        `SELECT artifact.* FROM artifact
+         JOIN run ON run.id = artifact.run
+         WHERE run.task_ref = ? AND artifact.kind = 'handoff'
+         ORDER BY artifact.id DESC LIMIT 1`,
+      )
+      .get(taskRef);
+    return row === undefined ? null : readArtifact(row);
+  }
+
+  /** Whether a run's terminal diff was redacted for secrets (audit IV-7) — the publication gate reads this. */
+  hasRedactedTerminalDiff(run: number): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS hit FROM artifact WHERE run = ? AND kind = 'terminal-diff' AND redacted = 1 LIMIT 1")
+      .get(run);
+    return row !== undefined;
   }
 
   getArtifact(id: number): Artifact | null {
@@ -4845,6 +4879,13 @@ export class Store {
   /** Whether an UNRESOLVED CI failure episode is open for exactly this repository's PR (M8.19; audit C-2). */
   hasOpenCiEpisode(githubRepo: string, prNumber: number): boolean {
     return this.latestOpenCiEpisode(githubRepo, prNumber) !== null;
+  }
+
+  /** Record what CI was last SEEN doing (audit SD-4). Observation only. */
+  recordPublicationCheckState(id: number, state: string, now: Date): void {
+    this.db
+      .prepare("UPDATE publication SET last_check_state = ?, last_check_at = ? WHERE id = ?")
+      .run(state, now.toISOString(), id);
   }
 
   /** The remote's own verdict on a PR — MERGED/CLOSED ends the watch (audit C-6). */
@@ -6124,6 +6165,10 @@ function readPublication(row: Record<string, unknown>): Publication {
     updatedAt: String(row["updated_at"]),
     remoteState:
       row["remote_state"] === null || row["remote_state"] === undefined ? null : String(row["remote_state"]),
+    lastCheckState:
+      row["last_check_state"] === null || row["last_check_state"] === undefined ? null : String(row["last_check_state"]),
+    lastCheckAt:
+      row["last_check_at"] === null || row["last_check_at"] === undefined ? null : String(row["last_check_at"]),
   };
 }
 

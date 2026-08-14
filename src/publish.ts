@@ -143,6 +143,14 @@ export async function publishPass(
   const report: PublishReport = { pushed: 0, opened: 0, adopted: 0, failed: 0, problems: [] };
 
   for (const publication of store.pendingPublications()) {
+    // The secret gate (audit IV-7): a run whose accepted diff carried a
+    // high-confidence secret shape publishes NOTHING — pushing the branch
+    // would hand the credential to the remote. Fail closed, say why once,
+    // and leave the person to rewrite the branch and requeue.
+    if (store.hasRedactedTerminalDiff(publication.run)) {
+      concede(store, publication, "the accepted diff carries a detected secret — rewrite the branch before anything publishes", report, clock);
+      continue;
+    }
     // The grant is re-read per publication, live: revocation is immediate,
     // and an intent created under a grant that has since died goes nowhere.
     const grant = store.publicationGrantFor(options.repo);
@@ -353,6 +361,7 @@ export async function observeChecks(
     }
 
     const state = summarizeChecks(payload.statusCheckRollup);
+    store.recordPublicationCheckState(publication.id, state, clock());
     // The episode identity carries the REPOSITORY (audit C-2): PR #55 in
     // repo A and PR #55 in repo B are different worlds, and one's failure
     // must never light the other's repair button.

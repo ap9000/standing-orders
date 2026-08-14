@@ -163,6 +163,27 @@ describe("tick, against real git", () => {
     expect(payload().runs[0].finishedAt).not.toBeNull();
   });
 
+  test("a stop fence admits nothing — ready work stays queued, no agent spawns (audit IV-1)", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-stop", approverToken);
+
+    lines = [];
+    const code = await runOperate(
+      "tick",
+      ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"],
+      line => lines.push(line),
+      { databaseFile: db, now: T0, agentRunner: agent, shouldStop: () => true },
+    );
+
+    // Nothing admitted, nothing spent, nothing dispatched — the pass is a
+    // correct "no", and the task waits for the successor.
+    expect(payload().dispatched).toEqual([]);
+    expect(agentRan).toHaveLength(0);
+    expect(code).toBe(EXIT.refused);
+    await run(["task", "show", "t-stop", "--json"]);
+    expect(payload().task.state).toBe("queued");
+  });
+
   test("an empty queue is exit 3, not an error", async () => {
     const { runnerToken } = await credentials();
 

@@ -38,6 +38,13 @@ export type RunOptions = {
    */
   omitEnv?: readonly string[];
   /**
+   * When set, the child's environment is EXACTLY these names, taken from
+   * the parent where present, plus whatever `env` merges on top (audit
+   * IV-5): the approved worktree setup sees an allowlist, never a clone
+   * of the operator's shell with two names scrubbed.
+   */
+  envAllowlist?: readonly string[];
+  /**
    * Run the child in its own process group and register it as a live
    * provider (M6.12). Set by the invocation gateway and nowhere else: an
    * agent harness spawns shells and tools of its own, and stopping "the
@@ -101,6 +108,25 @@ export function terminateLiveProviders(): number {
   return terminated;
 }
 
+/** The one place a child's environment is decided (audit IV-5). */
+function resolveChildEnv(options: RunOptions): Record<string, string | undefined> | undefined {
+  const { env, omitEnv, envAllowlist } = options;
+  if (envAllowlist !== undefined) {
+    const picked: Record<string, string | undefined> = {};
+    for (const name of envAllowlist) {
+      const value = process.env[name];
+      if (value !== undefined) picked[name] = value;
+    }
+    Object.assign(picked, env ?? {});
+    for (const name of omitEnv ?? []) delete picked[name];
+    return picked;
+  }
+  if (env === undefined && (omitEnv === undefined || omitEnv.length === 0)) return undefined;
+  const merged: Record<string, string | undefined> = { ...process.env, ...(env ?? {}) };
+  for (const name of omitEnv ?? []) delete merged[name];
+  return merged;
+}
+
 /** Conventions from the shell and from coreutils `timeout(1)`. */
 export const NOT_FOUND_CODE = 127;
 export const TIMEOUT_CODE = 124;
@@ -119,13 +145,8 @@ type ExecError = Error & {
 };
 
 export function run(file: string, args: readonly string[], options: RunOptions = {}): Promise<ExecResult> {
-  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER, env, omitEnv } = options;
-
-  let childEnv: Record<string, string | undefined> | undefined;
-  if (env !== undefined || (omitEnv !== undefined && omitEnv.length > 0)) {
-    childEnv = { ...process.env, ...(env ?? {}) };
-    for (const name of omitEnv ?? []) delete childEnv[name];
-  }
+  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER } = options;
+  const childEnv = resolveChildEnv(options);
 
   // A provider run needs its own process group; execFile cannot give one,
   // so the buffered path detours through spawn with identical semantics.
@@ -293,13 +314,8 @@ export function runStreamJsonl(
   args: readonly string[],
   options: RunOptions = {},
 ): Promise<ExecResult> {
-  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, env, omitEnv } = options;
-
-  let childEnv: Record<string, string | undefined> | undefined;
-  if (env !== undefined || (omitEnv !== undefined && omitEnv.length > 0)) {
-    childEnv = { ...process.env, ...(env ?? {}) };
-    for (const name of omitEnv ?? []) delete childEnv[name];
-  }
+  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const childEnv = resolveChildEnv(options);
 
   return new Promise(resolve => {
     let child: ReturnType<typeof spawn>;

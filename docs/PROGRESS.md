@@ -269,18 +269,37 @@ fires and every claim admission mid-pass, and a stopping watch publishes
 nothing more. Tests: +IV-2/IV-3 revision integrity E2E, +same-day-v11
 migration fixture (the exact e2a08c5 shape), +C-8 nonzero-with-message.
 
-**Deferred, named**: IV-1's durable stopping fence re-proved post-provider
-(the in-memory fence covers admissions; a crash mid-stop is the successor
-recovery's case). IV-7 secret scanning of terminal diffs before evidence/
-publication (needs a detector worth trusting; `redacted` column already
-exists). IV-5's full allowlisted setup environment. SD-1 comment
-side/context + supersede-on-edit UI. SD-2 handoff-artifact CONSUMPTION by
-successors (written, verified, not yet read into cold briefs). SD-3
-repo+runner setup scoping. SD-4 observed-green/dependency/conflict
-ranking for /review (needs persisted check state). SD-5 remainder
-(task-page publication/diff summaries). SD-6 selector/mutation classes on
-intake grants. TG-1 watch-level signal tests, TG-3 full envelope sweep,
-TG-4/5/6/7/10 remainders. Windows remains code-complete, machine-untested.
+**Deferrals closed in the follow-up pass (840 tests)**: IV-1 COMPLETED —
+the stop fence rides into the builder (BuildRequest.shouldStop) and is
+re-proved at the LAST gate before the commit: an operator's stop beats an
+agent's finish, the work stays uncommitted and preserved; typed `stopped`
+→ retryable-infra; tick test proves a fenced pass admits nothing and
+spawns nothing. IV-7 COMPLETED — high-confidence secret scan (private-key
+PEM, AKIA, gh tokens, slack, npm _authToken, sk- keys; deliberately NO
+generic password= shapes — a detector that cries wolf trains people to
+approve wolves) runs on every terminal diff: hit lines are redacted in
+the stored artifact, the row says redacted, a page names the branch, and
+publishPass REFUSES to push a redacted run — the branch holds the real
+bytes and a person rewrites it. IV-5 COMPLETED — setup shells run under
+an explicit ALLOWLIST (PATH/HOME/locale/temp; exec gains envAllowlist,
+resolved in one place), the terms restate it. SD-2 COMPLETED — the
+handoff is finally CONSUMED: cold successors read the latest handoff
+verified, and include it ONLY when freshness proves (same branch, branch
+exactly at the stamped head) — stale context is omitted because context
+spent as stale truth costs more than none; warm resumes skip it, the
+session remembers better than a summary of itself. SD-4 CORE —
+publications persist the last OBSERVED check state + time; /review ranks
+observed-passing → silence (labeled as silence) → failing, and "review
+next" goes only to an observed pass. SD-5 partial — the task page carries
+its publication line (PR, local+remote state, observed CI). TG-1-lite,
+secret-scan, and observed-ranking tests added.
+
+**Still deferred, named**: SD-1 comment side/context + supersede-on-edit
+(schema + UI round). SD-3 repo+runner setup scoping (authority-model
+change). SD-6 intake selector/mutation classes (ditto). SD-4 dependency/
+conflict ordering (needs mergeability observation). TG-3 full envelope
+sweep, TG-1's subprocess-level signal tests, remaining TG matrices.
+Windows: code-complete, physically untested — as the README already says.
 
 ## M7 — agent citizenship · M8 — the outer loop (2026-08-13, same roadmap)
 

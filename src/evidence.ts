@@ -155,6 +155,7 @@ export function storeEvidence(
   content: Buffer,
   capture: string,
   now: Date,
+  options: { redacted?: boolean } = {},
 ): number {
   const cap = EVIDENCE_CAPS[kind];
   const stored = content.subarray(0, cap);
@@ -169,6 +170,7 @@ export function storeEvidence(
       truncated: content.length > stored.length,
       sha256: createHash("sha256").update(stored).digest("hex"),
       capture,
+      ...(options.redacted === true ? { redacted: true } : {}),
     },
     now,
   );
@@ -469,6 +471,50 @@ export function storeHandoffArtifact(
 }
 
 /**
+ * High-confidence secret shapes ONLY (audit IV-7): a detector that cries
+ * wolf trains people to approve wolves. Each pattern is a format no
+ * ordinary source line matches by accident; generic "password=" shapes
+ * are deliberately absent — test fixtures would drown the signal.
+ */
+const SECRET_PATTERNS: readonly { name: string; pattern: RegExp }[] = [
+  { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  { name: "aws-access-key", pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: "github-token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|github_pat_[A-Za-z0-9_]{22,}/ },
+  { name: "slack-token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
+  { name: "npm-auth-token", pattern: /_authToken\s*=\s*[^\s$][^\s]*/ },
+  { name: "openai-key", pattern: /\bsk-[A-Za-z0-9_-]{32,}\b/ },
+];
+
+export type SecretHit = { name: string; line: number };
+
+/** Scan text line by line; every hit names its pattern and line. */
+export function scanForSecrets(text: string): SecretHit[] {
+  const hits: SecretHit[] = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    for (const { name, pattern } of SECRET_PATTERNS) {
+      if (pattern.test(lines[index] as string)) {
+        hits.push({ name, line: index + 1 });
+        break;
+      }
+    }
+  }
+  return hits;
+}
+
+/** Replace every hit line with a marker naming what was found — the display copy holds no secret. */
+export function redactSecretLines(text: string, hits: readonly SecretHit[]): string {
+  const flagged = new Map(hits.map(hit => [hit.line, hit.name]));
+  return text
+    .split("\n")
+    .map((line, index) => {
+      const name = flagged.get(index + 1);
+      return name === undefined ? line : `[redacted: ${name} detected on this line]`;
+    })
+    .join("\n");
+}
+
+/**
  * Fit a DiffStat under its cap by shedding FILES, never bytes (audit C-4):
  * a structured artifact cut mid-token is not a smaller stat, it is no stat.
  * Aggregate counts always survive; the file list shrinks until the encoded
@@ -513,8 +559,29 @@ export async function captureTerminalDiff(
   const patchArgs = ["--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv", "--no-color", base, head];
   const patch = await git("git", patchArgs, { cwd: worktree });
   const patchCommand = `git ${patchArgs.filter(a => a !== "--no-optional-locks").join(" ")} (exit ${patch.code})`;
-  const patchContent = Buffer.from(patch.code === 0 ? patch.stdout : patch.stderr, "utf8");
-  const diffId = storeEvidence(store, root, runId, "terminal-diff", "terminal-diff.patch", patchContent, patchCommand, now);
+  // The secret scan (audit IV-7): a committed credential must not gain a
+  // SECOND durable, console-served copy. Hit lines are redacted in the
+  // stored artifact, the row says redacted, a page names the branch — and
+  // the publication gate refuses to push a redacted run's branch anywhere.
+  const rawPatch = patch.code === 0 ? patch.stdout : patch.stderr;
+  const hits = patch.code === 0 ? scanForSecrets(rawPatch) : [];
+  const patchContent = Buffer.from(hits.length > 0 ? redactSecretLines(rawPatch, hits) : rawPatch, "utf8");
+  const diffId = storeEvidence(store, root, runId, "terminal-diff", "terminal-diff.patch", patchContent, patchCommand, now, {
+    redacted: hits.length > 0,
+  });
+  if (hits.length > 0) {
+    store.enqueueNotification(
+      {
+        dedupeKey: `secret:${runId}`,
+        kind: "secret-detected",
+        subject: `possible committed secret: run #${runId}`,
+        body:
+          `${hits.length} high-confidence secret shape(s) in the accepted diff (${[...new Set(hits.map(one => one.name))].join(", ")}). ` +
+          `The branch holds the real bytes — rewrite it before anything merges. Publication of this run is blocked.`,
+      },
+      now,
+    );
+  }
 
   const statArgs = ["--no-optional-locks", "diff", "--numstat", "-z", base, head];
   const stat = await git("git", statArgs, { cwd: worktree });
