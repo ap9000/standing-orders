@@ -43,7 +43,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile, scanForSecrets } from "./evidence.js";
@@ -417,9 +418,71 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && url.pathname !== "/projects" &&
+      url.pathname !== "/projects/browse" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
+
+    if (url.pathname === "/projects/browse") {
+      // The filesystem browser (operator request): pick a project folder by
+      // looking, not typing. CONFINED to exactly what opening allows —
+      // explicit --repo mode has an enumerable list and gets no browser at
+      // all; --project-root mode browses its roots; unscoped mode (trust-
+      // everything, named as such) browses from the home directory.
+      // Directory NAMES only, never file contents; symlinks are resolved
+      // and re-checked so a link cannot walk out of the fence.
+      if (who.via !== "cookie") return refuse(response, who, 403, "browsing feeds a browser session's act");
+      const browseRoots =
+        ceiling.roots.length > 0 ? [...ceiling.roots] : unscopedMode ? [realpathSync(homedir())] : [];
+      if (browseRoots.length === 0) {
+        return refuse(response, who, 404, "this server was configured with an explicit repo list — the openable projects are all on the projects page", "/projects");
+      }
+      const asked = url.searchParams.get("at") ?? browseRoots[0] as string;
+      const canonical = canonicalProject(asked);
+      const inside =
+        canonical !== null &&
+        browseRoots.some(root => canonical === root || canonical.startsWith(`${root}/`));
+      if (canonical === null || !inside) {
+        return refuse(response, who, 403, "that path is outside what this server may browse", "/projects/browse");
+      }
+      let entries: { name: string; path: string; git: boolean }[] = [];
+      try {
+        entries = readdirSync(canonical, { withFileTypes: true })
+          .filter(one => one.isDirectory() || one.isSymbolicLink())
+          .filter(one => !one.name.startsWith(".") && one.name !== "node_modules")
+          .slice(0, 400)
+          .map(one => {
+            const path = join(canonical, one.name);
+            // Resolve NOW so a symlink pointing outside the fence renders
+            // as nothing rather than as a door.
+            const resolved = canonicalProject(path);
+            if (resolved === null || !browseRoots.some(root => resolved === root || resolved.startsWith(`${root}/`))) {
+              return null;
+            }
+            return { name: one.name, path: resolved, git: existsSync(join(resolved, ".git")) };
+          })
+          .filter((one): one is { name: string; path: string; git: boolean } => one !== null)
+          .sort((a, b) => Number(b.git) - Number(a.git) || a.name.localeCompare(b.name))
+          .slice(0, 200);
+      } catch {
+        return refuse(response, who, 404, "that directory cannot be read", "/projects/browse");
+      }
+      const root = browseRoots.find(one => canonical === one || canonical.startsWith(`${one}/`)) as string;
+      const parent = canonical === root ? null : canonical.slice(0, canonical.lastIndexOf("/")) || root;
+      const csrf = who.session.csrf;
+      return page(
+        response,
+        200,
+        browsePage(chromeFor(who.session.project, "projects"), {
+          at: canonical,
+          root,
+          roots: browseRoots,
+          parent,
+          entries,
+          csrf,
+        }),
+      );
+    }
 
     if (url.pathname === "/projects") {
       return void projectsScreen(response, who, null, 200);
@@ -1283,7 +1346,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return page(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode),
     );
   }
 
@@ -4147,6 +4210,52 @@ function tasksPage(
   ].join("\n"), { chrome });
 }
 
+
+function browsePage(chrome: Chrome, data: {
+  at: string;
+  root: string;
+  roots: string[];
+  parent: string | null;
+  entries: { name: string; path: string; git: boolean }[];
+  csrf: string;
+}): string {
+  const crumb = data.at === data.root ? projectName(data.root) : `${projectName(data.root)}${data.at.slice(data.root.length)}`;
+  const openForm = (path: string): string =>
+    [
+      `<form method="post" action="/projects/open" class="inline">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<input type="hidden" name="path" value="${escape(path)}">`,
+      `<button type="submit">open</button>`,
+      `</form>`,
+    ].join("");
+  return shell("projects", [
+    `<h1>choose a folder</h1>`,
+    `<p class="meta">git repositories float to the top and can be opened; anything else can be entered — only folders under ${
+      data.roots.length === 1 ? `<span class="mono">${escape(projectName(data.root))}</span>` : "the configured roots"
+    } are visible here</p>`,
+    data.roots.length > 1
+      ? `<p class="meta">roots: ${data.roots.map(one => `<a href="/projects/browse?at=${encodeURIComponent(one)}" class="mono">${escape(projectName(one))}</a>`).join(" · ")}</p>`
+      : "",
+    `<p class="mono meta">${escape(crumb)}</p>`,
+    data.parent === null
+      ? ""
+      : `<p class="row"><a href="/projects/browse?at=${encodeURIComponent(data.parent)}">\u2190 up one level</a></p>`,
+    data.entries.length === 0
+      ? `<p class="meta">no folders here</p>`
+      : data.entries
+          .map(
+            one =>
+              `<p class="row">` +
+              `<a href="/projects/browse?at=${encodeURIComponent(one.path)}"><strong>${escape(one.name)}</strong></a>` +
+              `${one.git ? ` <span class="badge badge-done">git</span>` : ""}` +
+              `<span class="right">${one.git ? openForm(one.path) : `<a class="meta" href="/projects/browse?at=${encodeURIComponent(one.path)}">enter \u2192</a>`}</span>` +
+              `</p>`,
+          )
+          .join("\n"),
+    `<p class="meta"><a href="/projects">\u2190 back to projects</a></p>`,
+  ].join("\n"), { chrome });
+}
+
 function projectsPage(
   chrome: Chrome,
   recent: { path: string; name: string; lastOpenedAt: string }[],
@@ -4155,6 +4264,7 @@ function projectsPage(
   csrf: string,
   problem: string | null,
   unscopedMode: boolean,
+  browsable = false,
 ): string {
   const openForm = (path: string, label: string): string =>
     [
@@ -4195,6 +4305,7 @@ function projectsPage(
     recentRows.length > 0 ? `<h2>recent</h2>${rows(recentRows)}` : "",
     candidateRows.length > 0 ? `<h2>available</h2>${rows(candidateRows)}` : "",
     `<h2>open by path</h2>`,
+    browsable ? `<p class="meta"><a href="/projects/browse">browse the filesystem \u2192</a> or type a path:</p>` : "",
     `<form method="post" action="/projects/open" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,

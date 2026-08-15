@@ -2820,3 +2820,93 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     expect([401, 403]).toContain(bearer.status);
   });
 });
+
+describe("the filesystem browser — confined to what opening allows", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+  let root: string;
+
+  const url = (path: string) => `${base}${path}`;
+  const T0 = new Date("2026-08-14T12:00:00.000Z");
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const boot = async (options: Record<string, unknown>) => {
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), ...options });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-browse-ev-"));
+    root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-browse-root-")));
+    mkdirSync(join(root, "payments-api", ".git"), { recursive: true });
+    mkdirSync(join(root, "notes"), { recursive: true });
+    mkdirSync(join(root, ".hidden-things"), { recursive: true });
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a root ceiling browses its roots: repos first with open buttons, plain folders enterable, dotfiles hidden", async () => {
+    await boot({ projectRoots: [root] });
+    const cookie = await login();
+    const html = await (await fetch(url("/projects/browse"), { headers: { cookie } })).text();
+    expect(html).toContain("payments-api");
+    expect(html).toContain("badge-done\">git");
+    expect(html).toContain("notes");
+    expect(html).not.toContain("hidden-things");
+    // The projects page offers the door.
+    const projects = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+    expect(projects).toContain("/projects/browse");
+  });
+
+  test("containment: outside paths and symlink escapes are refused, not resolved", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-outside-")));
+    try {
+      const { symlinkSync } = await import("node:fs");
+      symlinkSync(outside, join(root, "escape-hatch"));
+      await boot({ projectRoots: [root] });
+      const cookie = await login();
+      const direct = await fetch(url(`/projects/browse?at=${encodeURIComponent(outside)}`), { headers: { cookie }, redirect: "manual" });
+      expect(direct.status).toBe(403);
+      const etc = await fetch(url("/projects/browse?at=/etc"), { headers: { cookie }, redirect: "manual" });
+      expect(etc.status).toBe(403);
+      // The symlink pointing out of the fence simply does not render.
+      const listing = await (await fetch(url("/projects/browse"), { headers: { cookie } })).text();
+      expect(listing).not.toContain("escape-hatch");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("an explicit repo list gets no browser — the openable set is already on the page", async () => {
+    await boot({ repo: root });
+    const cookie = await login();
+    const browse = await fetch(url("/projects/browse"), { headers: { cookie }, redirect: "manual" });
+    expect(browse.status).toBe(404);
+    const projects = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+    expect(projects).not.toContain("/projects/browse");
+  });
+});
