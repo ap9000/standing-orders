@@ -2832,10 +2832,24 @@ const STYLE = `
   .pulse { animation: pulse 2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .35; } }
 
-  .login-shell { max-width: 22rem; margin: 14vh auto 0; padding: 0 1.25rem; }
-  .login-shell h1 { text-align: center; margin-bottom: .25rem; }
-  .login-shell .hint { text-align: center; margin-bottom: 1rem; }
-  .login-shell button { width: 100%; margin-top: 1rem; background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+  .login-viewport { min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem 1.25rem; }
+  .login-shell { width: 100%; max-width: 23rem; }
+  .login-shell h1 { text-align: center; margin: 0 0 .375rem; font-size: 1.75rem; letter-spacing: -0.02em; }
+  .login-shell > .hint { text-align: center; margin: 0 0 2rem; font-size: 0.875rem; opacity: 1; }
+  .login-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1.5rem 1.5rem 1.625rem;
+    box-shadow: 0 1px 2px hsl(240 10% 3.9% / .06), 0 8px 24px -12px hsl(240 10% 3.9% / .18);
+  }
+  .login-card label:first-child { margin-top: 0; }
+  .login-card .problem { margin: 0 0 1rem; }
+  .login-shell button {
+    width: 100%; margin-top: 1.25rem;
+    background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
+  }
+  .login-shell button:hover { background: color-mix(in srgb, var(--primary) 88%, var(--background)); }
+  .login-foot { text-align: center; margin: 1.5rem 0 0; font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.9; }
+  .login-foot code { background: none; padding: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
 
   @media (max-width: 640px) {
     button, form.option button { min-height: 2.75rem; }
@@ -3034,17 +3048,19 @@ function shell(
 
 function loginPage(problem: string | null): string {
   return shell("standing-orders", [
-    `<div class="login-shell">`,
+    `<div class="login-viewport"><div class="login-shell">`,
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
     `<p class="meta hint">your fleet's control plane \u2014 sign in to see it</p>`,
+    `<div class="login-card">`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
-    `<label>username<input type="text" name="name" autocomplete="username"></label>`,
+    `<label>username<input type="text" name="name" autocomplete="username" autofocus></label>`,
     `<label>password<input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">sign in</button>`,
     "</form>",
-    `<p class="meta hint">no account? one is created where the server runs: <code>standing-orders approver add &lt;name&gt; --password &hellip;</code></p>`,
     `</div>`,
+    `<p class="login-foot">no account? one is created where the server runs:<br><code>standing-orders approver add &lt;name&gt; --password &hellip;</code></p>`,
+    `</div></div>`,
   ].join("\n"), { nav: false });
 }
 
