@@ -1664,7 +1664,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       if (body.get("off") === "1") {
         store.clearChatConfig();
-        return redirect(response, `/chat?said=${encodeURIComponent("chat is off — the config row is gone")}`);
+        return redirect(response, `/chat?said=${encodeURIComponent("chat is off — its settings were removed")}`);
       }
       const forget = body.get("forget-key") ?? "";
       if (forget === "anthropic-api" || forget === "openrouter-api") {
@@ -3181,7 +3181,7 @@ function inboxPage(chrome: Chrome, data: {
 
   return shell("inbox", [
     `<h1>inbox</h1>`,
-    `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, the machine needs nothing</p>`,
+    `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, nothing needs your attention</p>`,
     wizard,
     empty ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
     empty && data.wizard === null ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
@@ -3191,7 +3191,7 @@ function inboxPage(chrome: Chrome, data: {
     cancelled,
     gaps,
     data.rollup
-      ? `<p class="meta">requirement gaps are proved against one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
+      ? `<p class="meta">requirement gaps are checked one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
       : "",
     // Quick capture: the shortest path from "I want this done" to the
     // approve card — title and goal here, the yes on the next screen. The
@@ -3289,7 +3289,7 @@ function systemPage(chrome: Chrome, data: {
     .join("\n");
   const agentsCard =
     `<h2>agents</h2>` +
-    `<p class="meta">who does the thinking, phase by phase — changing this is an authenticated act at the terminal (<code>standing-orders config</code>), never a browser click</p>` +
+    `<p class="meta">which AI provider runs each phase — changed from the terminal with your credentials (<code>standing-orders config</code>), never by a browser click</p>` +
     `<div class="card">${agentLines}` +
     `<p class="meta">repair always stays on the provider that built — only its model can differ. A routine pins its agent the moment it fires; nothing after that can re-route it.</p>` +
     `</div>`;
@@ -3301,7 +3301,7 @@ function systemPage(chrome: Chrome, data: {
     cards.length === 0
       ? `<p class="meta">no worker machine registered yet \u2014 <code>standing-orders runner register &lt;name&gt;</code>, then <code>standing-orders daemon install</code> keeps the background service running</p>`
       : `<div class="cards">${cards.join("")}</div>`,
-    data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} notification(s) pending delivery</p>` : "",
+    data.outboxPending > 0 ? `<p class="meta">notifications: ${data.outboxPending} pending delivery</p>` : "",
   ].join("\n"), { chrome, refreshSeconds: data.building.length > 0 ? 10 : 60 });
 }
 
@@ -3644,7 +3644,7 @@ function chatPage(chrome: Chrome, data: {
   };
   const parts: string[] = [
     "<h1>chat</h1>",
-    `<p class="meta">the fleet assistant — it reads a bounded snapshot of this ceiling and may draft work; drafts carry no authority, live only in this session, and file through the same door as every manual filing</p>`,
+    `<p class="meta">ask about your fleet in plain language — it reads a limited summary of the projects this console serves and can draft work; drafts have no authority, live only in this browser session, and are filed and approved by you like everything else</p>`,
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
@@ -3941,7 +3941,7 @@ function homePage(chrome: Chrome, data: {
 
   const decide =
     data.decisions.length === 0
-      ? `<p class="meta">Nothing waits on you. No decisions were parked.</p>`
+      ? `<p class="meta">Nothing waits on you. No questions came up.</p>`
       : data.decisions
           .map(
             decision =>
@@ -4071,7 +4071,7 @@ function homePage(chrome: Chrome, data: {
     startHere,
     ledger,
     `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
-    data.outboxPending > 0 ? `<p class="meta">outbox: ${data.outboxPending} pending delivery</p>` : "",
+    data.outboxPending > 0 ? `<p class="meta">notifications: ${data.outboxPending} pending delivery</p>` : "",
     building,
     `<h2>needs your decision</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>`,
     decide,
@@ -4170,7 +4170,7 @@ function projectsPage(
     `<h1>projects</h1>`,
     `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its board, and its runs</p>`,
     unscopedMode
-      ? `<p class="meta">this server was started without a project ceiling, so every path in the queue is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`
+      ? `<p class="meta">this server was started without a project list, so everything is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`
       : "",
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     recentRows.length === 0 && candidateRows.length === 0
@@ -4265,7 +4265,7 @@ function taskPage(chrome: Chrome, data: {
               `${hold.until === null ? "" : ` <span class="meta">until ${escape(when(hold.until))}</span>`}</p>`,
           )
           .join("\n") +
-        `<p class="meta">only the operator hold lifts from here; decisions, incidents, and backoff lift themselves</p>`;
+        `<p class="meta">only your hold can be lifted here — waits caused by questions, incidents, or retry delays clear on their own</p>`;
 
   const approval = approvalOf(scope);
   const scopeCard =
@@ -4276,7 +4276,7 @@ function taskPage(chrome: Chrome, data: {
           `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
           scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
           scope.touches.length === 0 ? "" : `<p><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
-          `<p class="meta">digest <span class="mono">${escape(scope.digest)}</span></p>`,
+          `<p class="meta">terms fingerprint <span class="mono">${escape(scope.digest)}</span> — approval binds to this exact wording</p>`,
           approval.approved
             ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
             : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
@@ -4461,7 +4461,7 @@ function taskPage(chrome: Chrome, data: {
   const acts = [
     `<h2>acts</h2>`,
     data.claimed
-      ? `<p class="meta">a runner holds a live claim right now — holds prevent the <em>next</em> dispatch; cancel and requeue wait for the claim</p>`
+      ? `<p class="meta">a worker is building this right now — a hold prevents the <em>next</em> start; cancel and requeue wait for the current build to finish</p>`
       : "",
     `<div class="card">`,
     data.plan === null && !approval.approved && !data.claimed && task.state === "queued"
@@ -4474,7 +4474,7 @@ function taskPage(chrome: Chrome, data: {
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     stalled ? act("requeue", "retry — branch and workspace kept") : "",
     stalled
-      ? `<p class="meta">resolves the incidents, resets the strikes, and queues the task again; the preserved branch and workspace state are NOT erased</p>`
+      ? `<p class="meta">resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased</p>`
       : "",
     `</div>`,
     // Cancel gets the same ceremony as an irreversible answer: armed behind
@@ -4492,7 +4492,7 @@ function taskPage(chrome: Chrome, data: {
 
   return shell(`task \u00b7 ${task.id}`, [
     `<h1>${escape(task.id)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span>` +
-      `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} strike(s)` : ""}` +
+      `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} failed attempt(s)` : ""}` +
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
       `${data.filedVia === null || data.filedVia === undefined ? "" : ` · filed via ${escape(data.filedVia)}`}</span></h1>`,
     `<p>${escape(task.title)}</p>`,
@@ -4584,7 +4584,7 @@ function reviewPage(
           .join("\n");
   return shell("review queue", [
     `<h1>review queue</h1>`,
-    `<p class="hint">what waits on a person's review, oldest reviewable first — the plane recommends, you merge on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
+    `<p class="hint">what waits on your review, oldest reviewable first — this console recommends; merging stays yours, on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
     list,
   ].join("\n"), { chrome });
 }
@@ -4687,7 +4687,7 @@ function terminalDiffCard(view: TerminalDiffView, runId: number): string {
   const parts: string[] = ["<h2>what changed</h2>"];
 
   if (view.stat === null) {
-    parts.push(`<p class="meta">no stat was captured for this run</p>`);
+    parts.push(`<p class="meta">no change summary was captured for this build</p>`);
   } else if ("problem" in view.stat) {
     parts.push(`<p class="meta">stat: ${escape(view.stat.problem)}</p>`);
   } else {
@@ -4720,11 +4720,11 @@ function terminalDiffCard(view: TerminalDiffView, runId: number): string {
   }
 
   if (view.patch === null) {
-    parts.push(`<p class="meta">terminal diff not captured for this run</p>`);
+    parts.push(`<p class="meta">the final diff was not captured for this build</p>`);
   } else if ("problem" in view.patch) {
     parts.push(`<p class="meta">patch: ${escape(view.patch.problem)}</p>`);
   } else if (view.patch.text.trim() === "") {
-    parts.push(`<p class="meta">empty patch — captured successfully, nothing changed</p>`);
+    parts.push(`<p class="meta">empty diff — captured successfully, nothing changed</p>`);
   } else {
     parts.push(
       `<details><summary>the patch${view.patch.truncated ? " (TRUNCATED — the raw artifact says how much was cut)" : ""}</summary>` +
@@ -4914,7 +4914,7 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
     list,
     `<h2>missing, ranked by what filling them frees</h2>`,
     blocked,
-    `<p class="meta">read-only: probes are operator-authored shell, and a web button that runs shell is a different review</p>`,
+    `<p class="meta">read-only here: checks are shell commands you wrote, and a web button that runs shell would need its own security review</p>`,
   ].join("\n"), { chrome });
 }
 
@@ -5046,7 +5046,7 @@ function nextPage(chrome: Chrome, data: {
       `<form method="post" action="${taskHref(item.stalled.taskId)}/requeue" class="card">` +
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
       `<input type="hidden" name="return" value="next">` +
-      `<p class="meta">requeue resolves the incidents, resets the strikes, and puts it back in line</p>` +
+      `<p class="meta">requeue resolves the incidents, clears the failed attempts, and puts it back in line</p>` +
       `<button type="submit">retry this work</button>` +
       `</form>` +
       `<p class="meta"><a href="${taskHref(item.stalled.taskId)}">open the full task</a> to read the runs first</p>`;
