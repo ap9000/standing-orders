@@ -4470,7 +4470,7 @@ function taskPage(chrome: Chrome, data: {
         ].join("\n");
 
   const scopeForm = [
-    `<details><summary>${scope === null ? "propose a scope" : "edit the scope"}${
+    `<details${scope === null ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
       approval.approved ? " (editing voids the approval)" : ""
     }</summary>`,
     `<form method="post" action="${taskHref(task.id)}/scope">`,
@@ -4624,6 +4624,19 @@ function taskPage(chrome: Chrome, data: {
       `${data.filedVia === null || data.filedVia === undefined ? "" : ` · filed via ${escape(data.filedVia)}`}</span></h1>`,
     `<p>${escape(task.title)}</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
+    // The board sent them here saying "needs you" — the page must open by
+    // saying WHY and pointing at the act, not read as a fact sheet
+    // (operator finding: clicking a needs-you card landed with no context).
+    scope === null && data.plan === null && task.state === "queued"
+      ? `<div class="card"><p><strong>This task is waiting on you: it has no scope.</strong></p>` +
+        `<p class="meta">A scope is the contract an agent builds against — the goal, what is off-limits, which paths it may touch. ` +
+        `Nothing builds until one is written and approved. Write it in the open form below, or use <strong>plan first</strong> ` +
+        `(under acts) to send an agent to read the repository and draft it for you.</p></div>`
+      : "",
+    scope !== null && !approval.approved && data.plan !== "requested" && task.state === "queued" && data.decisions.length === 0
+      ? `<div class="card"><p><strong>This task is waiting on you: its scope needs your approval.</strong></p>` +
+        `<p class="meta">Read the goal and limits below — approving is what lets an agent build this unattended.</p></div>`
+      : "",
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up.
