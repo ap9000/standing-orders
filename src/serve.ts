@@ -361,7 +361,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const authenticated =
         name !== null && token !== null ? authenticateApprover(store, name, token) : null;
       if (authenticated === null || !authenticated.ok) {
-        return page(response, 403, loginPage("that is not an approver, or the token does not match"));
+        return page(response, 403, loginPage("wrong username or password"));
       }
       const id = randomBytes(32).toString("hex");
       sessions.set(id, {
@@ -3033,16 +3033,17 @@ function shell(
 
 
 function loginPage(problem: string | null): string {
-  return shell("night orders", [
+  return shell("standing-orders", [
     `<div class="login-shell">`,
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
-    `<p class="meta hint">users are added on the server: <code>standing-orders approver add &lt;name&gt; --password &hellip;</code></p>`,
+    `<p class="meta hint">your fleet's control plane \u2014 sign in to see it</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
     `<label>username<input type="text" name="name" autocomplete="username"></label>`,
     `<label>password<input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">sign in</button>`,
     "</form>",
+    `<p class="meta hint">no account? one is created where the server runs: <code>standing-orders approver add &lt;name&gt; --password &hellip;</code></p>`,
     `</div>`,
   ].join("\n"), { nav: false });
 }
