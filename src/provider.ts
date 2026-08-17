@@ -333,6 +333,76 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
 };
 
 /** Read-only facts about a provider — safe anywhere, spawns nothing. */
+
+/**
+ * The tournament capability matrix (design v3 finding 14): what each
+ * harness can PROVE about money, stated as data. Eligibility is derived,
+ * never asserted: a provider races only when its own machinery can hold
+ * a dollar cap. Codex and OpenRouter report billable usage only at turn
+ * end (cumulative across resumed sessions), so no mid-run cap exists to
+ * hold — ineligible until their harnesses grow one.
+ */
+export type ProviderMoneyCapabilities = {
+  /** Usage events arrive during the run, not only at the end. */
+  incrementalUsage: boolean;
+  /** The harness's own dollar-cap flag, when one exists. */
+  nativeDollarCapFlag: string | null;
+  usageSemantics: "per-invocation" | "cumulative-session";
+  /** Whether this harness may race in a dollar-capped tournament. */
+  tournamentEligible: boolean;
+  /** Said in words on refusal screens. */
+  whyIneligible: string | null;
+};
+
+export const MONEY_CAPABILITIES: Record<ProviderId, ProviderMoneyCapabilities> = {
+  claude: {
+    incrementalUsage: true,
+    nativeDollarCapFlag: "--max-budget-usd",
+    usageSemantics: "per-invocation",
+    tournamentEligible: true,
+    whyIneligible: null,
+  },
+  codex: {
+    incrementalUsage: false,
+    nativeDollarCapFlag: null,
+    usageSemantics: "cumulative-session",
+    tournamentEligible: false,
+    whyIneligible: "codex reports billable usage only when a turn completes — no mid-run dollar cap exists to enforce",
+  },
+  openrouter: {
+    incrementalUsage: false,
+    nativeDollarCapFlag: null,
+    usageSemantics: "cumulative-session",
+    tournamentEligible: false,
+    whyIneligible: "openrouter rides the codex harness here and shares its turn-end-only usage reporting",
+  },
+};
+
+/**
+ * The fail-closed budget-flag probe (finding 24's amendment): resolve
+ * the EXACT executable that will spawn, read its version, and prove the
+ * flag exists in that binary's own help — presence is a feature check
+ * and nothing more; pricing and semantics stay pinned in pricing.ts.
+ */
+export async function probeBudgetCap(
+  provider: ProviderId,
+  runner: (command: string, argv: readonly string[], options: { timeoutMs?: number }) => Promise<ExecResult>,
+): Promise<{ ok: true; executable: string; version: string } | { ok: false; problem: string }> {
+  const flag = MONEY_CAPABILITIES[provider].nativeDollarCapFlag;
+  if (flag === null) return { ok: false, problem: `${provider} has no native dollar cap` };
+  const binary = provider === "claude" ? "claude" : provider;
+  const where = await runner("which", [binary], { timeoutMs: 5_000 });
+  if (where.code !== 0) return { ok: false, problem: `${binary} is not on PATH` };
+  const executable = where.stdout.trim().split("\n")[0] ?? "";
+  const version = await runner(executable, ["--version"], { timeoutMs: 10_000 });
+  if (version.code !== 0) return { ok: false, problem: `${executable} did not answer --version` };
+  const help = await runner(executable, ["--help"], { timeoutMs: 10_000 });
+  if (help.code !== 0 || !help.stdout.includes(flag)) {
+    return { ok: false, problem: `${executable} does not advertise ${flag} — the dollar cap cannot be enforced` };
+  }
+  return { ok: true, executable, version: version.stdout.trim() };
+}
+
 export function auditOf(provider: ProviderId): ProviderAudit {
   return AUDITS[provider];
 }

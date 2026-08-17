@@ -1,5 +1,36 @@
 # Progress
 
+**2026-08-17 — tournament builds: three design rounds to APPROVE WITH
+CHANGES; stage 1 ships.** The A3 design arc ran v1 → redesign (13
+findings: shared finalizers would release the parent claim; dollar
+ceilings unenforceable, the waiver rejected) → v2 metered kill-switch →
+redesign (findings 14–23: codex/openrouter report billable usage only at
+turn end — tournament-INELIGIBLE; claude's own --max-budget-usd + a
+reserved one-call tail is the enforcement; monotonic persisted spend
+with an unknown-spend latch; a uniform execution-slot ledger; child
+finalizers embedding aggregation; decision-wait; typed capture status;
+durable ceremony nonces; co-approved tournament terms) → v3 adopting
+every ruling verbatim → **approve with changes** (findings 24–31: the
+tail must be bounded by a pinned request ENVELOPE — quantities, not just
+rates; measured vs accounted spend kept apart; slots get
+reserved/running/released with incarnation; dispatching-state recovery;
+decision.contestant column for SQLite-valid uniqueness; workspace
+CUSTODY through decision-wait; nonce minting off GET; a joint
+scope+race approval digest). The findings files are the spec
+(scratchpad codex-tournament-findings.md / -v2- / -v3-). STAGE 1
+SHIPPED: src/pricing.ts — pinned build-model prices with the cache
+token classes priced separately and the request envelope's quantity
+bounds per model, so `oneCallTailMicrousd` is the worst LEGAL call
+(dearest input class × the whole window) rather than a rate with no
+quantity; `settleBuildMicrousd` itemizes cache classes and returns null
+on missing totals (the caller latches, never guesses). provider.ts
+gains MONEY_CAPABILITIES (incremental usage, native cap flag, usage
+semantics, derived tournamentEligible with the refusal said in words)
+and `probeBudgetCap` — resolves the exact executable, reads its
+version, and proves the flag in THAT binary's help, fail closed.
+Stages 2–6 (schema v14, finalizers, decision-wait, ceremonies, cleanup)
+follow the approved order. Suite 932.
+
 **2026-08-17 — the attended track ships its first slice (workbench,
 palette, live substrate, deep links).** Roadmap
 (scratchpad/roadmap-attended.md, seeded by the Orca competitive read) went
