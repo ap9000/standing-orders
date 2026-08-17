@@ -1,5 +1,43 @@
 # Progress
 
+**2026-08-17 — the attended track ships its first slice (workbench,
+palette, live substrate, deep links).** Roadmap
+(scratchpad/roadmap-attended.md, seeded by the Orca competitive read) went
+through Codex review — approve with changes, 13 findings
+(codex-attended-findings.md = the spec), which INVERTED the build order:
+the named-region liveness substrate first, because the old fragment
+swapper could only replace the whole `<main>` and would have refreshed
+form-bearing panes. Shipped: (1) `regionScript` — swaps exactly one named
+element, visible freshness ("updated Ns ago"), stale-state wording,
+exponential backoff, hidden-tab pause, one poll in flight (findings 2/5/
+6); the board migrated onto it. (2) **/workbench** (A1): the sit-and-watch
+screen — a polling rail of needs-you (cap 100) and building-now (live
+claims with plain-words phase, provider, client-ticking elapsed) plus a
+just-finished tail, with the SELECTED task's full detail (banners, forms,
+acts — never polled) in the main pane via the master-detail split;
+admission before every LIMIT + per-row visible() re-check (finding 3),
+which also fixed two pre-existing board holes: rolled-up done rows now
+join the admission set inside boardScoped, and root ceilings enumerate
+through admissionList instead of post-filtering. (3) The jump palette
+(finding 4's exact contract): `g b/i/w/r/d` + `/` filter over a
+server-rendered non-executable JSON index (200 tasks, saturation
+declared), navigation ONLY — no key posts, ceremonies untouched; ignores
+editable targets, modifiers, repeats, IME; dialog/listbox semantics; CSP
+script nonce per response (never confused with approval nonces). (4) A4:
+run pages poll their facts region while the run is open — elapsed ticks,
+phase updates; a finished run's fragment says "finished — reload for the
+final record" instead of growing forms (finding 5). (5) A5: console-URL
+validator parses with URL and refuses userinfo/query/fragment (finding
+11); `task add` and `template apply --file` print the console link beside
+the id and carry a structured `links` object in JSON. Verified in a real
+browser: rail, freshness stamp, selection, palette. **A2 (live worktree
+peek) is BLOCKED per finding 7** — git clean/process filters mean diffing
+an agent-controlled worktree can execute repo-configured commands; it
+ships only after a hermetic-capture design passes review (park capture
+flagged for the same audit). A3 (tournament builds) awaits its own
+authority-bearing brief (finding 12 enumerates what it must answer).
+Suite 927.
+
 **2026-08-14 — key onboarding joins the console (operator request:
 "shouldn't the key entry be part of the onboarding on the ui").** The
 chat setup card gains an API-key field, on the TELEGRAM BOT-TOKEN

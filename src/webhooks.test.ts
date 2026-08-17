@@ -121,3 +121,23 @@ describe("the primary — one service pages, chosen or sensibly implied", () => 
     expect(effectivePrimary({}, dir, true)).toMatchObject({ channel: "telegram" });
   });
 });
+
+describe("the console URL is parsed, not pattern-matched (attended A5)", () => {
+  test("credentials, queries, fragments, and odd schemes refuse; a clean base normalizes", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "console-url-"));
+    try {
+      expect(saveConsoleUrl(dir, "http://user:secret@host:4180")).toMatchObject({ ok: false });
+      expect(saveConsoleUrl(dir, "http://host:4180/?q=1")).toMatchObject({ ok: false });
+      expect(saveConsoleUrl(dir, "http://host:4180/#frag")).toMatchObject({ ok: false });
+      expect(saveConsoleUrl(dir, "ftp://host:4180")).toMatchObject({ ok: false });
+      expect(saveConsoleUrl(dir, "not a url")).toMatchObject({ ok: false });
+      expect(saveConsoleUrl(dir, "http://host:4180/base/")).toMatchObject({ ok: true });
+      expect(loadConsoleUrl({}, dir)).toBe("http://host:4180/base");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

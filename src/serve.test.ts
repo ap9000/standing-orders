@@ -2910,3 +2910,111 @@ describe("the filesystem browser — confined to what opening allows", () => {
     expect(projects).not.toContain("/projects/browse");
   });
 });
+
+describe("the workbench (attended A1) and the live substrate", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const url = (path: string) => `${base}${path}`;
+  const T0 = new Date("2026-08-17T12:00:00.000Z");
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-wb-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+
+    // One attention task (no scope) and one building task (live claim + run).
+    store.createTask({ id: "needs-scope", title: "Needs a scope written" }, T0);
+    store.refFor("built-in", "needs-scope", "ours");
+    store.createTask({ id: "building-now", title: "Being built right now" }, T0);
+    const ref = store.refFor("built-in", "building-now", "ours").id;
+    const taken = acquire(store, ref, "night-shift-1", { now: new Date(), ttlMs: 60 * 60_000 });
+    if (!taken.ok) throw new Error("claim failed in setup");
+    const run = store.startRun({
+      taskRef: ref,
+      leaseId: taken.claim.leaseId,
+      runner: "night-shift-1",
+      branch: "standing-orders/building-now",
+      worktree: "/pool/building-now",
+      now: new Date(),
+    });
+    store.setRunPhase(run, "agent-running");
+    store.setTaskState("building-now", "running", T0);
+
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the rail carries needs-you and building sections, with the palette index and elapsed tickers", async () => {
+    const cookie = await login();
+    const html = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
+    expect(html).toContain("needs you");
+    expect(html).toContain("Needs a scope written");
+    expect(html).toContain("building");
+    expect(html).toContain("Being built right now");
+    expect(html).toContain("agent-running");
+    expect(html).toContain("data-elapsed-since=");
+    expect(html).toContain('id="palette-index"');
+    expect(html).toContain('id="wb-rail"');
+    // The CSP carries the script nonce.
+    const response = await fetch(url("/workbench"), { headers: { cookie } });
+    expect(response.headers.get("content-security-policy") ?? "").toContain("nonce-");
+  });
+
+  test("the rail fragment is the rail alone — no shell, no scripts, same auth", async () => {
+    const cookie = await login();
+    const fragment = await (await fetch(url("/workbench?fragment=rail"), { headers: { cookie } })).text();
+    expect(fragment).toContain("Needs a scope written");
+    expect(fragment).not.toContain("<html");
+    expect(fragment).not.toContain("<script");
+    // Unauthenticated: the fragment refuses like any page.
+    const bare = await fetch(url("/workbench?fragment=rail"), { redirect: "manual" });
+    expect([303, 401, 403]).toContain(bare.status);
+  });
+
+  test("selection renders the full task detail — forms and all — in the main pane, never polled", async () => {
+    const cookie = await login();
+    const html = await (await fetch(url("/workbench?t=needs-scope"), { headers: { cookie } })).text();
+    expect(html).toContain("This task is waiting on you: it has no scope.");
+    expect(html).toContain("write the scope");
+    // The poll targets the rail region, not the pane.
+    expect(html).toContain('"wb-rail"');
+    expect(html).not.toContain('"wb-detail"');
+  });
+
+  test("an open run's facts fragment answers live; a finished run's says to reload", async () => {
+    const cookie = await login();
+    const open = await (await fetch(url("/r/1?fragment=facts"), { headers: { cookie } })).text();
+    expect(open).toContain("agent-running");
+    expect(open).toContain("data-elapsed-since=");
+    store.finishRun(1, { outcome: "built", committed: true, now: new Date() });
+    const closed = await (await fetch(url("/r/1?fragment=facts"), { headers: { cookie } })).text();
+    expect(closed).toContain("finished");
+    expect(closed).toContain("reload for the final record");
+    expect(closed).not.toContain("<form");
+  });
+});

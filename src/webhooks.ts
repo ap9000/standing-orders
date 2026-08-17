@@ -73,12 +73,27 @@ export function clearWebhook(dir: string, kind: WebhookKind): void {
 }
 
 export function saveConsoleUrl(dir: string, url: string): { ok: true } | { ok: false; message: string } {
-  const trimmed = url.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\/\S+$/.test(trimmed)) {
+  // Parsed, not pattern-matched (attended review, finding 11): the stored
+  // value becomes every deep link's base, so userinfo, queries, and
+  // fragments are refused rather than smuggled into each link.
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
     return { ok: false, message: "the console URL is the address the links open — http(s)://host[:port]" };
   }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, message: "the console URL must be http or https" };
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return { ok: false, message: "the console URL must not carry credentials — they would ride every link" };
+  }
+  if (parsed.search !== "" || parsed.hash !== "") {
+    return { ok: false, message: "the console URL is a base address — no query or fragment" };
+  }
+  const normalized = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
   const file = join(dir, CONSOLE_FILE);
-  writeFileSync(file, `${trimmed}\n`, { mode: 0o600 });
+  writeFileSync(file, `${normalized}\n`, { mode: 0o600 });
   return { ok: true };
 }
 

@@ -3792,6 +3792,32 @@ export class Store {
     return this.db.prepare("SELECT 1 AS hit FROM phase_config LIMIT 1").get() !== undefined;
   }
 
+  /** The jump palette's food: open (queued/running/failed) tasks, admission
+   * inside the query before its LIMIT, newest first. */
+  paletteTasks(
+    repo: string | null,
+    limit: number,
+    admitted: string[] | null = null,
+  ): { id: string; title: string; repo: string | null }[] {
+    const admission =
+      admitted === null ? "" : `AND (task_ref.repo IS NULL OR task_ref.repo IN (${admitted.map(() => "?").join(",")}))`;
+    return this.db
+      .prepare(
+        `SELECT task.id AS id, task.title AS title, task_ref.repo AS repo
+           FROM task JOIN task_ref ON task_ref.backend = '${BUILT_IN}' AND task_ref.external_id = task.id
+          WHERE task.state IN ('queued','running','failed')
+            AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+            ${admission}
+          ORDER BY task.updated_at DESC LIMIT ?`,
+      )
+      .all(repo, repo, ...(admitted ?? []), Math.max(1, Math.min(limit, 500)))
+      .map(row => ({
+        id: String(row["id"]),
+        title: String(row["title"]),
+        repo: row["repo"] === null || row["repo"] === undefined ? null : String(row["repo"]),
+      }));
+  }
+
   /** Whether any work was ever filed — task or routine. */
   hasAnyWork(): boolean {
     if (this.db.prepare("SELECT 1 AS hit FROM task LIMIT 1").get() !== undefined) return true;
@@ -4363,7 +4389,7 @@ export class Store {
   /**
    * Stamp the machine's current phase on an OPEN run. A closed run's phase
    * is history and stays put; an unknown phase is a caller bug and throws.
-   * Bounded writes by construction: the vocabulary has five values and the
+   * Bounded writes by construction: the vocabulary has four values and the
    * state machine passes each boundary once.
    */
   setRunPhase(id: number, phase: RunPhase): void {
@@ -5777,6 +5803,7 @@ export class Store {
   listCompletedWorkScoped(
     repo: string | null,
     limit = 50,
+    admitted: string[] | null = null,
   ): {
     taskId: string;
     title: string;
@@ -5791,6 +5818,11 @@ export class Store {
     publicationState: string | null;
   }[] {
     const page = Math.max(1, Math.min(Math.floor(limit), 100));
+    // Admission binds BEFORE the LIMIT here exactly as in the board's
+    // task query (attended review, finding 3): rolled-up done rows must
+    // not spend the page on repos the ceiling hides.
+    const admission =
+      admitted === null ? "" : `AND (task_ref.repo IS NULL OR task_ref.repo IN (${admitted.map(() => "?").join(",")}))`;
     return this.db
       .prepare(
         `WITH completed AS (
@@ -5800,6 +5832,7 @@ export class Store {
            JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
            WHERE task.state = 'done'
              AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+             ${admission}
          )
          SELECT completed.*, run.outcome, run.handoff, run.cost_usd, run.started_at, run.finished_at,
                 publication.state AS pub_state, publication.pr_number, publication.pr_url
@@ -5812,7 +5845,7 @@ export class Store {
          LEFT JOIN publication ON publication.run = run.id
          ORDER BY completed.completed_at DESC, completed.id DESC LIMIT ?`,
       )
-      .all(BUILT_IN, repo, repo, page)
+      .all(BUILT_IN, repo, repo, ...(admitted ?? []), page)
       .map(row => ({
         taskId: String(row["id"]),
         title: String(row["title"]),
@@ -6031,7 +6064,7 @@ export class Store {
       return {
         tasks,
         saturated: newest.length === page,
-        done: this.listCompletedWorkScoped(repo, 10),
+        done: this.listCompletedWorkScoped(repo, 10, admitted),
       };
     });
   }

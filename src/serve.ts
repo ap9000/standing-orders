@@ -418,7 +418,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && url.pathname !== "/projects" &&
-      url.pathname !== "/projects/browse" &&
+      url.pathname !== "/projects/browse" && url.pathname !== "/workbench" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
@@ -570,6 +570,50 @@ export function createDecisionServer(options: ServeOptions): Server {
       return;
     }
 
+    if (url.pathname === "/workbench") {
+      // The fleet under one gaze (attended A1): the rail rolls up the whole
+      // ceiling regardless of the open project — watching is cross-project
+      // by nature; acting happens on task screens that re-prove everything.
+      const admission = admissionList();
+      const snapshot = store.boardScoped(null, now, 200, admission);
+      const rows = snapshot.tasks.filter(facts => facts.repo === null || visible(facts.repo));
+      const cards = rows.map(facts =>
+        classify(facts.blockerRepo !== null && !visible(facts.blockerRepo) ? { ...facts, blockerState: null } : facts, now),
+      );
+      const attention = cards.filter(card => card.lane === "attention").slice(0, 100);
+      const building = cards.filter(card => card.lane === "building");
+      const done = snapshot.done
+        .filter(one => one.repo === null || visible(one.repo))
+        .slice(0, 5)
+        .map(one => ({ taskId: one.taskId, title: one.title, outcome: one.outcome }));
+      const selected = url.searchParams.get("t");
+      const rail = workbenchRail({ attention, building, done, selected, saturated: snapshot.saturated });
+      if (url.searchParams.get("fragment") === "rail") {
+        // The rail alone: same auth, same ceiling, no shell, no scripts.
+        return respond(response, 200, "text/html; charset=utf-8", rail);
+      }
+      let detail = `<div class="card"><p><strong>Pick something on the left.</strong></p>` +
+        `<p class="meta">the rail updates itself; whatever you select renders here in full — approvals, evidence, acts</p></div>`;
+      if (selected !== null) {
+        const view = taskViewData(selected, who, null);
+        detail = view === null ? `<div class="card"><p class="meta">no such task — it may have been outside this console's view</p></div>` : taskBody(view);
+      }
+      const nonce = randomBytes(16).toString("base64");
+      return page(
+        response,
+        200,
+        shell("workbench", `${detail}\n${paletteIndexTag(project)}`, {
+          chrome: chromeFor(
+            project,
+            "workbench",
+            `<div id="wb-rail">${rail}</div><p class="meta" id="wb-rail-stamp"></p>`,
+          ),
+          live: { nonce, script: regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30) + chromeScript() },
+        }),
+        nonce,
+      );
+    }
+
     if (url.pathname === "/board") {
       // scope=all is the rolled-up view: every project this server was
       // allowed to serve, on one board. The ceiling still rules row by row
@@ -578,12 +622,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       // database holds. Unplaced work (repo NULL) appears: it dispatches
       // anywhere, so every board honestly owns it.
       const all = url.searchParams.get("scope") === "all";
-      // Roll-up admission happens BEFORE the query limit when the ceiling
-      // is an enumerable repo list — unauthorized rows must not consume
-      // the page (Codex round 2, finding 11). Root-based ceilings cannot
-      // be enumerated into SQL; they keep the post-filter alone.
-      const admission =
-        all && ceiling.roots.length === 0 && ceiling.repos.length > 0 ? [...ceiling.repos] : null;
+      // Roll-up admission happens BEFORE the query limit (Codex round 2,
+      // finding 11) — and root ceilings enumerate too, through the STORED
+      // repos that pass the ceiling (attended review, finding 3); the
+      // per-row visible() re-check below stays either way.
+      const admission = all ? admissionList() : null;
       const snapshot = store.boardScoped(all ? null : project, now, 200, admission);
       const admitted = all
         ? snapshot.tasks.filter(facts => facts.repo === null || visible(facts.repo))
@@ -637,16 +680,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
       if (url.searchParams.get("fragment") === "1") {
         // The live region alone — the in-page swapper's diet. Same auth,
-        // same ceiling, no shell.
+        // same ceiling, no shell, no scripts (finding 2).
         return respond(response, 200, "text/html; charset=utf-8", body);
       }
       const nonce = randomBytes(16).toString("base64");
+      const regionBody = `<div id="board-region">${body}</div><p class="meta" id="board-region-stamp"></p>${paletteIndexTag(project)}`;
       return page(
         response,
         200,
-        shell("board", body, {
+        shell("board", regionBody, {
           chrome: chromeFor(project, "board"),
-          live: { everySeconds: buildingCount > 0 ? 10 : 30, nonce },
+          live: { nonce, script: regionScript("board-region", "1", buildingCount > 0 ? 10 : 30) + chromeScript() },
         }),
         nonce,
       );
@@ -805,6 +849,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such run", "/runs");
       }
       const taskId = store.externalIdFor(found.taskRef) ?? "?";
+      if (url.searchParams.get("fragment") === "facts") {
+        // The facts region alone — same auth and ceiling as the page; a
+        // finished run says so rather than growing forms (finding 5).
+        return respond(response, 200, "text/html; charset=utf-8", runFactsFragment(found, taskId));
+      }
+      const liveNonce = found.outcome === null ? randomBytes(16).toString("base64") : undefined;
       const artifacts = store.artifactsFor(found.id);
       return page(
         response,
@@ -824,7 +874,11 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? { pr: publication.prNumber }
               : null;
           })(),
+          liveNonce === undefined
+            ? undefined
+            : { nonce: liveNonce, script: regionScript("run-facts", "facts", 10) + chromeScript() },
         ),
+        liveNonce,
       );
     }
 
@@ -1261,6 +1315,32 @@ export function createDecisionServer(options: ServeOptions): Server {
     tell(envelope.envelope.reply, null, envelope.proposalsDiscarded);
   }
 
+  /**
+   * The palette's server-rendered index (attended review, finding 4): a
+   * non-executable JSON block on an already-authorized page — the same
+   * titles the page itself may render, bounded, saturation declared.
+   */
+  function paletteIndexTag(project: string | null): string {
+    const admitted = project === null && !unscopedMode ? admissionList() : null;
+    const entries: { label: string; href: string }[] = [
+      { label: "inbox", href: "/" },
+      { label: "board", href: "/board?scope=all" },
+      { label: "workbench", href: "/workbench" },
+      { label: "routines", href: "/routines" },
+      { label: "done", href: "/done" },
+      { label: "review queue", href: "/review" },
+      { label: "task list", href: "/tasks" },
+    ];
+    const open = store.paletteTasks(project, 201, admitted).filter(one => one.repo === null || visible(one.repo));
+    for (const one of open.slice(0, 200)) {
+      entries.push({ label: `${one.id} — ${one.title}`, href: `/t/${encodeURIComponent(one.id)}` });
+    }
+    const saturated = open.length > 200;
+    const json = JSON.stringify(saturated ? [...entries, { label: "… more in the task list", href: "/tasks" }] : entries)
+      .replace(/</g, "\\u003c");
+    return `<script type="application/json" id="palette-index">${json}</script>`;
+  }
+
   /** The badge cache: five seconds per project — mutations invalidate it. */
   const badgeCache = new Map<string, { at: number; count: number; saturated: boolean }>();
   const bustBadge = (): void => badgeCache.clear();
@@ -1384,19 +1464,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   }
 
-  function taskScreen(
-    response: ServerResponse,
-    who: Who,
-    taskId: string,
-    problem: string | null,
-    status: number,
-  ): void {
+  /** The task view's facts, shared by the full screen and the workbench
+   * pane (attended A1): one assembly, one authorization story. */
+  function taskViewData(taskId: string, who: Who, problem: string | null): Parameters<typeof taskBody>[0] | null {
     const found = store.getTask(taskId);
-    if (found === null) return respond(response, 404, "text/plain; charset=utf-8", "no such task");
+    if (found === null) return null;
     const ref = store.lookupRef(taskId);
-    if (ref !== null && !visible(ref.repo)) {
-      return respond(response, 404, "text/plain; charset=utf-8", "no such task");
-    }
+    if (ref !== null && !visible(ref.repo)) return null;
     const now = clock();
     const scope = store.getScope(taskId);
     const revision = revisionViewOf(ref);
@@ -1409,15 +1483,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       who.via === "cookie" && scope !== null && !approvalOf(scope).approved && !revisionBroken
         ? mintApprovalNonce(who.name, taskId, scope.digest)
         : "";
-    const paneProject = who.via === "cookie" ? who.session.project : null;
-    return page(
-      response,
-      status,
-      taskPage(
-        paneProject === null && !unscopedMode
-          ? chromeFor(paneProject, "tasks")
-          : chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)),
-        {
+    return {
         task: found,
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
@@ -1446,7 +1512,28 @@ export function createDecisionServer(options: ServeOptions): Server {
         nonce,
         problem,
         now,
-      }),
+      };
+  }
+
+  function taskScreen(
+    response: ServerResponse,
+    who: Who,
+    taskId: string,
+    problem: string | null,
+    status: number,
+  ): void {
+    const data = taskViewData(taskId, who, problem);
+    if (data === null) return respond(response, 404, "text/plain; charset=utf-8", "no such task");
+    const paneProject = who.via === "cookie" ? who.session.project : null;
+    return page(
+      response,
+      status,
+      taskPage(
+        paneProject === null && !unscopedMode
+          ? chromeFor(paneProject, "tasks")
+          : chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)),
+        data,
+      ),
     );
   }
 
@@ -2692,6 +2779,17 @@ const STYLE = `
   .meta a { color: var(--muted-foreground); }
   .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: -.375rem 0 .625rem; opacity: .8; }
   .num { font-variant-numeric: tabular-nums; }
+  .wb-selected { background: var(--accent); border-radius: calc(var(--radius) - 4px); }
+  .palette {
+    position: fixed; top: 18vh; left: 50%; transform: translateX(-50%); width: min(32rem, 90vw);
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 1px 2px hsl(240 10% 3.9% / .08), 0 16px 40px -16px hsl(240 10% 3.9% / .3);
+    padding: .625rem; z-index: 50;
+  }
+  .palette input { width: 100%; margin: 0; }
+  .palette ul { list-style: none; margin: .5rem 0 0; padding: 0; max-height: 40vh; overflow-y: auto; }
+  .palette li { padding: .4375rem .625rem; border-radius: calc(var(--radius) - 4px); cursor: pointer; font-size: .875rem; }
+  .palette li[aria-selected="true"] { background: var(--accent); }
 
   /* The ledger: the window's harvest as strong figures in a sentence,
      not a metric-card grid. */
@@ -2978,7 +3076,7 @@ const STYLE = `
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
+  active: "inbox" | "board" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -3003,18 +3101,90 @@ type Chrome = {
  * escaped at the sink like every page, fetched same-origin — and the
  * nonce'd CSP refuses to execute anything the region could smuggle.
  */
-function liveScript(everySeconds: number): string {
+function regionScript(regionId: string, fragmentName: string, everySeconds: number): string {
   const ms = Math.max(5, Math.floor(everySeconds)) * 1000;
+  // The named-region poller (attended review, finding 2): swaps exactly one
+  // element, never a form-bearing pane. Failures are VISIBLE — a frozen
+  // page must never look live (finding 6): the stamp says how old the
+  // region is, retries back off exponentially, and a hidden tab stops
+  // polling entirely. One poll in flight at a time.
   return (
-    `(function(){var main=document.querySelector("main");if(!main)return;` +
-    `function cycle(){var q=location.search?location.search+"&fragment=1":"?fragment=1";` +
+    `(function(){var region=document.getElementById(${JSON.stringify(regionId)});if(!region)return;` +
+    `var stamp=document.getElementById(${JSON.stringify(regionId)}+"-stamp");` +
+    `var wait=${ms};var last=Date.now();var busy=false;` +
+    `function tell(){if(!stamp)return;var s=Math.round((Date.now()-last)/1000);` +
+    `stamp.textContent=wait>${ms}?"stale — retrying ("+s+"s old)":"updated "+s+"s ago";}` +
+    `setInterval(tell,1000);` +
+    `function cycle(){if(document.hidden||busy){setTimeout(cycle,wait);return;}busy=true;` +
+    `var q=location.search?location.search+"&fragment="+${JSON.stringify(fragmentName)}:"?fragment="+${JSON.stringify(fragmentName)};` +
     `fetch(location.pathname+q,{redirect:"manual",cache:"no-store"})` +
     `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return null;}` +
     `return r.ok?r.text():null;})` +
-    `.then(function(t){if(t)main.innerHTML=t;})` +
-    `.catch(function(){})` +
-    `.then(function(){setTimeout(cycle,${ms});});}` +
-    `setTimeout(cycle,${ms});})();`
+    `.then(function(t){if(t){region.innerHTML=t;last=Date.now();wait=${ms};}else{wait=Math.min(wait*2,${ms}*8);}})` +
+    `.catch(function(){wait=Math.min(wait*2,${ms}*8);})` +
+    `.then(function(){busy=false;tell();setTimeout(cycle,wait);});}` +
+    `setTimeout(cycle,wait);})();`
+  );
+}
+
+/**
+ * The attended chrome layer: the jump palette and elapsed tickers. Pure
+ * navigation — no key ever posts, so the palette cannot approve anything;
+ * ceremonies stay POST + password + CSRF, untouched. Reads its index from
+ * a non-executable JSON script tag rendered by the same authorized page.
+ */
+function chromeScript(): string {
+  return (
+    `(function(){` +
+    // elapsed tickers: server timestamps, client arithmetic, display only
+    `function tick(){var nodes=document.querySelectorAll("time[data-elapsed-since]");` +
+    `for(var i=0;i<nodes.length;i++){var t=Date.parse(nodes[i].getAttribute("data-elapsed-since"));` +
+    `if(!isFinite(t))continue;var s=Math.max(0,Math.floor((Date.now()-t)/1000));` +
+    `var m=Math.floor(s/60);var h=Math.floor(m/60);` +
+    `nodes[i].textContent=h>0?h+"h "+(m%60)+"m":m>0?m+"m "+(s%60)+"s":s+"s";}}` +
+    `setInterval(tick,1000);tick();` +
+    // the palette
+    `var raw=document.getElementById("palette-index");if(!raw)return;` +
+    `var index;try{index=JSON.parse(raw.textContent||"[]");}catch(e){return;}` +
+    `var open=false,box=null,list=null,input=null,items=[];` +
+    `function close(){if(!open)return;open=false;box.remove();box=null;}` +
+    `function go(href){location.href=href;}` +
+    `function render(filter){list.textContent="";items=[];var n=0;` +
+    `for(var i=0;i<index.length&&n<12;i++){var e=index[i];` +
+    `if(filter&&(e.label.toLowerCase().indexOf(filter.toLowerCase())===-1))continue;` +
+    `var li=document.createElement("li");li.setAttribute("role","option");li.textContent=e.label;` +
+    `li.setAttribute("data-href",e.href);if(n===0)li.setAttribute("aria-selected","true");` +
+    `li.addEventListener("click",function(ev){go(ev.currentTarget.getAttribute("data-href"));});` +
+    `list.appendChild(li);items.push(li);n++;}}` +
+    `function pick(delta){var at=-1;for(var i=0;i<items.length;i++)if(items[i].getAttribute("aria-selected")==="true")at=i;` +
+    `if(at>=0)items[at].removeAttribute("aria-selected");var next=Math.max(0,Math.min(items.length-1,at+delta));` +
+    `if(items[next])items[next].setAttribute("aria-selected","true");}` +
+    `function show(){if(open)return;open=true;` +
+    `box=document.createElement("div");box.className="palette";box.setAttribute("role","dialog");box.setAttribute("aria-label","jump to");` +
+    `input=document.createElement("input");input.type="text";input.placeholder="jump to\u2026";input.setAttribute("autocomplete","off");` +
+    `list=document.createElement("ul");list.setAttribute("role","listbox");` +
+    `box.appendChild(input);box.appendChild(list);document.body.appendChild(box);` +
+    `input.addEventListener("input",function(){render(input.value);});` +
+    `input.addEventListener("keydown",function(ev){` +
+    `if(ev.key==="Escape"){close();ev.preventDefault();}` +
+    `else if(ev.key==="ArrowDown"){pick(1);ev.preventDefault();}` +
+    `else if(ev.key==="ArrowUp"){pick(-1);ev.preventDefault();}` +
+    `else if(ev.key==="Enter"){for(var i=0;i<items.length;i++)if(items[i].getAttribute("aria-selected")==="true")go(items[i].getAttribute("data-href"));ev.preventDefault();}});` +
+    `render("");input.focus();}` +
+    // key routing: never inside editable targets, no modifiers, no repeats,
+    // no IME composition (finding 4)
+    `var pending=null;` +
+    `document.addEventListener("keydown",function(ev){` +
+    `if(ev.isComposing||ev.repeat||ev.metaKey||ev.ctrlKey||ev.altKey)return;` +
+    `var t=ev.target;var tag=t&&t.tagName?t.tagName.toLowerCase():"";` +
+    `if(tag==="input"||tag==="textarea"||tag==="select"||tag==="button"||(t&&t.isContentEditable))return;` +
+    `if(ev.key==="/"){show();ev.preventDefault();return;}` +
+    `if(ev.key==="Escape"){close();return;}` +
+    `if(pending==="g"){pending=null;` +
+    `var map={b:"/board",i:"/",w:"/workbench",r:"/routines",d:"/done"};` +
+    `if(map[ev.key]){go(map[ev.key]);ev.preventDefault();}return;}` +
+    `if(ev.key==="g"){pending="g";setTimeout(function(){pending=null;},800);}});` +
+    `})();`
   );
 }
 
@@ -3025,8 +3195,9 @@ function shell(
     nav?: boolean;
     chrome?: Chrome;
     refreshSeconds?: number;
-    /** In-place fragment refresh — read-only pages only, one nonce per response. */
-    live?: { everySeconds: number; nonce: string };
+    /** The page's one nonce'd script: region pollers + the chrome layer,
+     * composed by the caller. Read-only regions only; one nonce per response. */
+    live?: { nonce: string; script: string };
   } = {},
 ): string {
   const head = [
@@ -3043,13 +3214,13 @@ function shell(
     // the no-JavaScript fallback.
     ...(options.live === undefined
       ? []
-      : [`<noscript><meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.live.everySeconds))}"></noscript>`]),
+      : [`<noscript><meta http-equiv="refresh" content="30"></noscript>`]),
     `<title>${escape(title)}</title><style>${STYLE}</style></head><body>`,
   ].join("\n");
   const tail =
     options.live === undefined
       ? `</body></html>`
-      : `<script nonce="${options.live.nonce}">${liveScript(options.live.everySeconds)}</script></body></html>`;
+      : `<script nonce="${options.live.nonce}">${options.live.script}</script></body></html>`;
 
   if (options.chrome === undefined) {
     // Chromeless: the login page and refusal pages.
@@ -3072,6 +3243,7 @@ function shell(
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
     item("board", "/board", "board"),
+    item("workbench", "/workbench", "workbench"),
     item("routines", "/routines", "routines"),
     item("done", "/done", "done"),
     `</nav>`,
@@ -4256,6 +4428,63 @@ function browsePage(chrome: Chrome, data: {
   ].join("\n"), { chrome });
 }
 
+
+/**
+ * The workbench rail (attended A1): needs-you first, then what is building
+ * right now, then a short just-finished tail — the sit-and-watch complement
+ * to the board's lanes. Links only; every act happens in the detail pane
+ * or on the task's own screen. Selection is the URL, nothing else.
+ */
+function workbenchRail(data: {
+  attention: BoardCard[];
+  building: BoardCard[];
+  done: { taskId: string; title: string; outcome: string | null }[];
+  selected: string | null;
+  saturated: boolean;
+}): string {
+  const row = (card: BoardCard, extra: string): string =>
+    `<a class="row${card.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(card.taskId)}"` +
+    `${card.taskId === data.selected ? ` aria-current="true"` : ""}>` +
+    `<strong>${escape(card.title)}</strong><br><span class="mono meta">${escape(card.taskId)}</span> ${extra}</a>`;
+  const parts: string[] = [];
+  parts.push(`<h2>needs you ${data.attention.length > 0 ? data.attention.length : ""}</h2>`);
+  parts.push(
+    data.attention.length === 0
+      ? `<p class="meta">nothing — the fleet is running on its own</p>`
+      : data.attention.slice(0, 100).map(card => row(card, `<span class="meta">${escape(card.reason)}</span>`)).join("\n"),
+  );
+  parts.push(`<h2>building ${data.building.length > 0 ? data.building.length : ""}</h2>`);
+  parts.push(
+    data.building.length === 0
+      ? `<p class="meta">no builds running</p>`
+      : data.building
+          .map(card =>
+            row(
+              card,
+              `<span class="meta">${escape(card.claim?.phase ?? "working")}` +
+                `${card.claim?.provider ? ` · ${escape(card.claim.provider)}` : ""}` +
+                `${card.claim?.claimedAt ? ` · <time data-elapsed-since="${escape(card.claim.claimedAt)}"></time>` : ""}</span>`,
+            ),
+          )
+          .join("\n"),
+  );
+  if (data.done.length > 0) {
+    parts.push(`<h2>just finished</h2>`);
+    parts.push(
+      data.done
+        .map(
+          one =>
+            `<a class="row${one.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(one.taskId)}">` +
+            `<strong>${escape(one.title)}</strong><br><span class="mono meta">${escape(one.taskId)}</span> ` +
+            `<span class="badge badge-${one.outcome === "built" || one.outcome === "no-change" ? "done" : "failed"}">${escape(one.outcome ?? "?")}</span></a>`,
+        )
+        .join("\n"),
+    );
+  }
+  if (data.saturated) parts.push(`<p class="meta">more exists — this rail is capped; the <a href="/board?scope=all">board</a> holds the rest</p>`);
+  return parts.join("\n");
+}
+
 function projectsPage(
   chrome: Chrome,
   recent: { path: string; name: string; lastOpenedAt: string }[],
@@ -4349,7 +4578,7 @@ type RevisionView =
   | { sourceTask: string; sourceRun: number; comments: { path: string | null; line: number | null; note: string; author: string }[] }
   | { problem: string };
 
-function taskPage(chrome: Chrome, data: {
+function taskBody(data: {
   task: Task;
   strikes: number;
   plan: "requested" | "drafted" | null;
@@ -4617,7 +4846,7 @@ function taskPage(chrome: Chrome, data: {
       : "",
   ].join("\n");
 
-  return shell(`task \u00b7 ${task.id}`, [
+  return [
     `<h1>${escape(task.id)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span>` +
       `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} failed attempt(s)` : ""}` +
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
@@ -4663,7 +4892,11 @@ function taskPage(chrome: Chrome, data: {
     scopeForm,
     holds,
     acts,
-  ].join("\n"), { chrome });
+  ].join("\n");
+}
+
+function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): string {
+  return shell(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome });
 }
 
 /**
@@ -4876,18 +5109,10 @@ function terminalDiffCard(view: TerminalDiffView, runId: number): string {
   return parts.join("\n");
 }
 
-function runPage(
-  chrome: Chrome,
-  run: Run,
-  taskId: string,
-  artifacts: Artifact[],
-  terminal: TerminalDiffView | null = null,
-  notes: { id: number; author: string; note: string; createdAt: string }[] = [],
-  csrf = "",
-  comments: DiffComment[] = [],
-  ciRepair: { pr: number } | null = null,
-): string {
-  // [label, value, mono?] — identifiers and figures read in the data face.
+
+/** The run's facts as rows — one renderer for the page and its live
+ * fragment (A4). Elapsed ticks client-side while the run is open. */
+function runFactsRows(run: Run, taskId: string): string {
   const facts: [string, string | null, boolean?][] = [
     ["task", taskId, true],
     ["role", run.role],
@@ -4916,14 +5141,35 @@ function runPage(
       run.costUsd !== null,
     ],
   ];
-  const rows = facts
-    .filter((fact): fact is [string, string, boolean?] => fact[1] !== null && fact[1] !== "")
-    .map(
-      ([label, value, mono]) =>
-        `<p class="row"><span class="meta" style="min-width:8.5rem">${escape(label)}</span> ` +
-        `<span${mono === true ? ` class="mono"` : ""}>${escape(value)}</span></p>`,
-    )
-    .join("\n");
+  const elapsed =
+    run.outcome === null && run.startedAt !== null
+      ? `<p class="row"><span class="meta" style="min-width:8.5rem">elapsed</span> <time class="mono" data-elapsed-since="${escape(run.startedAt)}"></time></p>`
+      : "";
+  return (
+    facts
+      .filter((fact): fact is [string, string, boolean?] => fact[1] !== null && fact[1] !== "")
+      .map(
+        ([label, value, mono]) =>
+          `<p class="row"><span class="meta" style="min-width:8.5rem">${escape(label)}</span> ` +
+          `<span${mono === true ? ` class="mono"` : ""}>${escape(value)}</span></p>`,
+      )
+      .join("\n") + elapsed
+  );
+}
+
+function runPage(
+  chrome: Chrome,
+  run: Run,
+  taskId: string,
+  artifacts: Artifact[],
+  terminal: TerminalDiffView | null = null,
+  notes: { id: number; author: string; note: string; createdAt: string }[] = [],
+  csrf = "",
+  comments: DiffComment[] = [],
+  ciRepair: { pr: number } | null = null,
+  live?: { nonce: string; script: string },
+): string {
+  const rows = runFactsRows(run, taskId);
   const handoff =
     run.handoff === null
       ? ""
@@ -5004,13 +5250,23 @@ function runPage(
 
   return shell(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
-    rows,
+    `<div id="run-facts">${rows}</div>`,
+    run.outcome === null ? `<p class="meta" id="run-facts-stamp"></p>` : "",
     terminal === null ? "" : terminalDiffCard(terminal, run.id),
     reviewCard,
     handoff,
     evidence,
     notesCard,
-  ].join("\n"), { chrome });
+  ].join("\n"), { chrome, ...(live === undefined ? {} : { live }) });
+}
+
+/** The facts region alone, for the open-run poll (A4). A finished run's
+ * fragment says so instead of quietly growing forms (finding 5). */
+export function runFactsFragment(run: Run, taskId: string): string {
+  if (run.outcome !== null) {
+    return `<p class="meta">finished — <a href="/r/${run.id}">reload for the final record</a></p>`;
+  }
+  return runFactsRows(run, taskId);
 }
 
 function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): string {

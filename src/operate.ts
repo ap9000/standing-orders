@@ -3317,12 +3317,20 @@ function templateCommand(
       clock(),
     );
     if (!made.ok) return fail(write, json, "template apply", made.reason, made.message, made.reason === "duplicate" ? EXIT.refused : EXIT.usage);
-    return succeed(write, json, "template apply", { filed: "task", id: made.id, approved: false }, () => [
-      `Filed ${made.id} from template ${template.name}.`,
-      "",
-      "UNAPPROVED — NO AUTHORITY GRANTED. It builds only after you approve its scope:",
-      `  standing-orders task show ${made.id}`,
-    ]);
+    const filedLink = consoleLinkFor(context, `/t/${encodeURIComponent(made.id)}`);
+    return succeed(
+      write,
+      json,
+      "template apply",
+      { filed: "task", id: made.id, approved: false, ...(filedLink === null ? {} : { links: { task: filedLink } }) },
+      () => [
+        `Filed ${made.id} from template ${template.name}.`,
+        "",
+        "UNAPPROVED — NO AUTHORITY GRANTED. It builds only after you approve its scope:",
+        `  standing-orders task show ${made.id}`,
+        ...(filedLink === null ? [] : [`  ${filedLink}`]),
+      ],
+    );
   }
 
   const routineName = text(flags, "name") ?? template.routineName;
@@ -4719,9 +4727,18 @@ async function addTask(
     }
   }
 
-  return succeed(write, json, "task add", { task: outcome.task, repo: placedIn === undefined ? null : resolve(placedIn) }, () => [
-    `Queued ${outcome.task.id} — ${outcome.task.title}`,
-  ]);
+  const link = consoleLinkFor(context, `/t/${encodeURIComponent(outcome.task.id)}`);
+  return succeed(
+    write,
+    json,
+    "task add",
+    {
+      task: outcome.task,
+      repo: placedIn === undefined ? null : resolve(placedIn),
+      ...(link === null ? {} : { links: { task: link } }),
+    },
+    () => [`Queued ${outcome.task.id} — ${outcome.task.title}`, ...(link === null ? [] : [`  ${link}`])],
+  );
 }
 
 /**
@@ -5378,6 +5395,18 @@ function text(flags: Map<string, string | true>, name: string): string | undefin
  * real worker is pointed at it by mistake. A banner is decoration; this
  * is the enforcement.
  */
+/**
+ * Deep links (attended A5): when a console URL is configured (`webhook set
+ * console-url`), CLI answers print it beside ids so the attended eye can
+ * jump. Absent configuration prints nothing — a link nobody configured is
+ * a guess, and stale guesses are worse than none.
+ */
+function consoleLinkFor(context: Context, path: string): string | null {
+  const base = loadConsoleUrl(process.env, dirname(context.databaseFile));
+  if (base === null) return null;
+  return `${base}${path}`;
+}
+
 function refuseDemo(context: Context, command: string): number | null {
   if (!context.store.isDemo()) return null;
   return fail(
