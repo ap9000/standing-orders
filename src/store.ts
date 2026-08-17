@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -96,6 +96,97 @@ export type TaskRef = {
 };
 
 /** A standing order: a pre-approved template whose instances build unattended. */
+
+// ---- tournaments (v14) ----------------------------------------------------
+
+export type TournamentTerms = {
+  id: number;
+  taskRef: number;
+  generation: number;
+  active: boolean;
+  raceDigest: string;
+  /** Ordered agents: exact model ids, resolved at filing. */
+  agents: { provider: string; model: string; repairModel: string }[];
+  n: number;
+  perAgentBudgetMicrousd: number;
+  overrunReserveMicrousd: number;
+  totalBudgetMicrousd: number;
+  priceVersion: number;
+  retries: number;
+  publicationPolicy: string;
+  createdAt: string;
+  approvedAt: string | null;
+  approvedBy: string | null;
+  approvedDigest: string | null;
+};
+
+export type ContestState =
+  | "dispatching"
+  | "racing"
+  | "pick-wait"
+  | "decision-wait"
+  | "picked"
+  | "abandoned"
+  | "interrupted"
+  | "exhausted";
+
+export type Contest = {
+  id: number;
+  taskRef: number;
+  terms: number;
+  generation: number;
+  state: ContestState;
+  scopeDigest: string;
+  raceDigest: string;
+  baseSha: string | null;
+  setupDigest: string | null;
+  currentLeaseId: string | null;
+  runner: string | null;
+  incarnation: string | null;
+  createdAt: string;
+  pickedAt: string | null;
+  pickedBy: string | null;
+  winnerContestant: number | null;
+};
+
+export type ContestantState = "pending" | "ready" | "building" | "parked" | "built" | "failed" | "stopped";
+
+export type Contestant = {
+  id: number;
+  contest: number;
+  ordinal: number;
+  provider: string;
+  model: string;
+  repairModel: string;
+  branch: string;
+  worktree: string | null;
+  generation: number;
+  state: ContestantState;
+  activeRun: number | null;
+  budgetMicrousd: number;
+  reserveMicrousd: number;
+  /** What the provider reported — monotonic, never guessed. */
+  measuredMicrousd: number;
+  /** What the ledger charges — the full reservation when unknowable. */
+  accountedMicrousd: number;
+  unknownSpend: boolean;
+  cleanup: "pending" | "done" | "attention" | null;
+  custody: string | null;
+};
+
+export type ExecutionSlot = {
+  id: number;
+  runner: string;
+  state: "reserved" | "running" | "released";
+  run: number | null;
+  contestant: number | null;
+  incarnation: string | null;
+  processGroup: number | null;
+  reservedAt: string;
+  runningAt: string | null;
+  releasedAt: string | null;
+};
+
 /** Chat providers are direct API adapters — a DISJOINT type from the build
  * harness providers, by design (Codex v3 review, change 1). */
 export type ChatProviderId = "anthropic-api" | "openrouter-api";
@@ -592,6 +683,139 @@ CREATE TABLE IF NOT EXISTS installation_fact (
   created_at TEXT NOT NULL
 );
 
+
+-- Tournament builds (v14). Internal names stay technical; every screen
+-- says "tournament", "agents", and "worker processes" in plain words.
+--
+-- The approved terms are a durable row of their own (round-3 finding 31):
+-- immutable once written, one ACTIVE row per task, approved by the same
+-- ceremony that approves the scope — the approval binds a joint digest
+-- over both. Money is integer micro-dollars; the overrun reserve is the
+-- worst one API call the pinned envelope permits, held apart from the
+-- spendable budget and never granted to a later invocation.
+CREATE TABLE IF NOT EXISTS tournament_terms (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref                  INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  generation                INTEGER NOT NULL,
+  active                    INTEGER NOT NULL DEFAULT 1,
+  race_digest               TEXT NOT NULL,
+  -- The ordered agents, JSON: [{provider, model, repairModel}] — exact
+  -- model ids, resolved at filing, priced at price_version.
+  agents                    TEXT NOT NULL,
+  n                         INTEGER NOT NULL CHECK (n BETWEEN 2 AND 4),
+  per_agent_budget_microusd INTEGER NOT NULL CHECK (per_agent_budget_microusd > 0),
+  overrun_reserve_microusd  INTEGER NOT NULL CHECK (overrun_reserve_microusd > 0),
+  total_budget_microusd     INTEGER NOT NULL CHECK (total_budget_microusd > 0),
+  price_version             INTEGER NOT NULL,
+  retries                   INTEGER NOT NULL CHECK (retries = 0),
+  -- 'none', or the JSON of the publication grant constraints in force.
+  publication_policy        TEXT NOT NULL,
+  created_at                TEXT NOT NULL,
+  approved_at               TEXT,
+  approved_by               TEXT,
+  approved_digest           TEXT
+);
+
+-- One active terms row per task (the whole table is new, so this partial
+-- index may live here — the v11c trap only bites indexes over columns
+-- that older files gain later by addColumn).
+CREATE UNIQUE INDEX IF NOT EXISTS tournament_terms_one_active
+  ON tournament_terms (task_ref) WHERE active = 1;
+
+-- A running tournament. States are stable machine tokens (envelopes need
+-- them); screens translate to plain words at render. The current lease
+-- identity lives HERE so aggregation, reaping, and crash recovery all
+-- fence on the same facts (finding 17/27).
+CREATE TABLE IF NOT EXISTS contest (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref           INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  terms              INTEGER NOT NULL REFERENCES tournament_terms(id),
+  generation         INTEGER NOT NULL DEFAULT 1,
+  state              TEXT NOT NULL CHECK (state IN
+    ('dispatching','racing','pick-wait','decision-wait','picked','abandoned','interrupted','exhausted')),
+  scope_digest       TEXT NOT NULL,
+  race_digest        TEXT NOT NULL,
+  base_sha           TEXT,
+  setup_digest       TEXT,
+  current_lease_id   TEXT,
+  runner             TEXT,
+  incarnation        TEXT,
+  created_at         TEXT NOT NULL,
+  picked_at          TEXT,
+  picked_by          TEXT,
+  winner_contestant  INTEGER,
+  overdue_paged      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS contest_by_task ON contest (task_ref, id DESC);
+
+-- One racing agent. Money is three columns kept deliberately apart
+-- (finding 25): measured = what the provider reported, monotonic;
+-- accounted = what the ledger charges (the full reservation when the
+-- real figure is unknowable); unknown_spend = the honest flag that the
+-- two differ. Custody (finding 29) records who owns the checkout while
+-- a parked agent waits on an answer.
+CREATE TABLE IF NOT EXISTS contestant (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  contest             INTEGER NOT NULL REFERENCES contest(id) ON DELETE CASCADE,
+  ordinal             INTEGER NOT NULL,
+  provider            TEXT NOT NULL,
+  model               TEXT NOT NULL,
+  repair_model        TEXT NOT NULL,
+  branch              TEXT NOT NULL,
+  worktree            TEXT,
+  generation          INTEGER NOT NULL DEFAULT 1,
+  state               TEXT NOT NULL DEFAULT 'pending' CHECK (state IN
+    ('pending','ready','building','parked','built','failed','stopped')),
+  active_run          INTEGER REFERENCES run(id),
+  budget_microusd     INTEGER NOT NULL,
+  reserve_microusd    INTEGER NOT NULL,
+  measured_microusd   INTEGER NOT NULL DEFAULT 0,
+  accounted_microusd  INTEGER NOT NULL DEFAULT 0,
+  unknown_spend       INTEGER NOT NULL DEFAULT 0,
+  cleanup             TEXT CHECK (cleanup IN ('pending','done','attention')),
+  custody             TEXT,
+  UNIQUE (contest, ordinal)
+);
+
+-- One row per worker process, ordinary builds and tournaments alike
+-- (finding 26): reserved before anything spawns, running once the
+-- process exists (with its group id, so recovery can check the OS
+-- before calling the capacity back), released on observed exit. The
+-- capacity a runner enforces in 'processes' mode counts these rows.
+CREATE TABLE IF NOT EXISTS execution_slot (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  runner        TEXT NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'reserved' CHECK (state IN ('reserved','running','released')),
+  run           INTEGER REFERENCES run(id),
+  contestant    INTEGER REFERENCES contestant(id),
+  incarnation   TEXT,
+  process_group INTEGER,
+  reserved_at   TEXT NOT NULL,
+  running_at    TEXT,
+  released_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS execution_slot_live ON execution_slot (runner, state);
+
+-- Durable ceremony nonces (finding 21/30): minted by a POST (never a
+-- GET), stored hashed, consumed CONDITIONALLY inside the same
+-- transaction as the act they authorize — which the in-memory map could
+-- never promise. Scope-approval nonces stay in memory this release, by
+-- ruling.
+CREATE TABLE IF NOT EXISTS ceremony_nonce (
+  hash        TEXT PRIMARY KEY,
+  approver    TEXT NOT NULL,
+  subject     TEXT NOT NULL,
+  subject_id  INTEGER NOT NULL,
+  digest      TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ceremony_nonce_expiry ON ceremony_nonce (expires_at);
+
 -- Fleet chat (v13). Chat providers are DIRECT API adapters, deliberately a
 -- separate type from the build harnesses (Codex v3 review, change 1): a
 -- shared table would admit invalid pairs like build+anthropic-api. One
@@ -686,7 +910,7 @@ CREATE INDEX IF NOT EXISTS routine_fire_recent ON routine_fire (routine_id, id D
 CREATE TABLE IF NOT EXISTS hold (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
-  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff')),
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest')),
   owner_id   TEXT NOT NULL,
   reason     TEXT NOT NULL,
   until      TEXT,
@@ -830,6 +1054,9 @@ CREATE TABLE IF NOT EXISTS decision (
   created_at     TEXT NOT NULL,
   answered_at    TEXT,
   answered_by    TEXT,
+  -- Which racing agent asked (v14); lets one-open-question-per-agent be a
+  -- real database rule instead of a hope (finding 28). NULL = ordinary.
+  contestant     INTEGER REFERENCES contestant(id),
   answered_via   TEXT CHECK (answered_via IN ('cli','web','telegram')),
   choice         TEXT,
   note           TEXT
@@ -851,7 +1078,10 @@ CREATE TABLE IF NOT EXISTS artifact (
   sha256         TEXT NOT NULL,
   capture        TEXT NOT NULL,
   created_at     TEXT NOT NULL,
-  redacted       INTEGER NOT NULL DEFAULT 0
+  redacted       INTEGER NOT NULL DEFAULT 0,
+  -- Typed capture verdict (v14, finding 20): authority never parses the
+  -- prose capture description again. NULL = recorded before v14.
+  capture_status TEXT CHECK (capture_status IN ('ok','failed'))
 );
 
 -- Which artifacts a decision shows. A relation rather than JSON ids in the
@@ -1198,6 +1428,11 @@ CREATE TABLE IF NOT EXISTS runner (
   host            TEXT NOT NULL,
   credential_hash TEXT NOT NULL,
   capacity        INTEGER NOT NULL,
+  -- What capacity bounds (v14, finding 26): 'tasks' is the original
+  -- contract (live claims) and stays the default; 'processes' counts
+  -- worker processes via execution_slot and is an explicit opt-in —
+  -- an upgrade never silently changes what an operator's number means.
+  capacity_mode   TEXT NOT NULL DEFAULT 'tasks' CHECK (capacity_mode IN ('tasks','processes')),
   repos           TEXT NOT NULL DEFAULT '[]',
   agents          TEXT NOT NULL DEFAULT '[]',
   registered_at   TEXT NOT NULL,
@@ -1635,6 +1870,32 @@ function migrate(db: Database): void {
   // v13b: the pinned per-token price joins the config row, additive.
   addColumn(db, "chat_config", "price_in_microusd", "INTEGER");
   addColumn(db, "chat_config", "price_out_microusd", "INTEGER");
+  // v14 (tournaments): five new tables ride the fresh SCHEMA's IF NOT
+  // EXISTS; existing tables gain nullable columns here; and hold's
+  // owner_kind CHECK is WIDENED by the recognized-exactly rebuild — v14
+  // is deliberately NOT purely additive, and this is the one place that
+  // says so.
+  addColumn(db, "run", "contestant", "INTEGER REFERENCES contestant(id)");
+  addColumn(db, "decision", "contestant", "INTEGER REFERENCES contestant(id)");
+  addColumn(db, "artifact", "capture_status", "TEXT CHECK (capture_status IN ('ok','failed'))");
+  addColumn(db, "runner", "capacity_mode", "TEXT NOT NULL DEFAULT 'tasks'");
+  rebuildForV4(
+    db,
+    "hold",
+    "'operator','decision','incident','backoff'",
+    "'contest'",
+    `CREATE TABLE hold_next (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+       owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest')),
+       owner_id   TEXT NOT NULL,
+       reason     TEXT NOT NULL,
+       until      TEXT,
+       held_at    TEXT NOT NULL,
+       UNIQUE (owner_kind, owner_id)
+     )`,
+    ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
+  );
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -3398,6 +3659,334 @@ export class Store {
    * entry point fails closed on it (adoption review, finding 8). */
   isDemo(): boolean {
     return this.installationFact("demo") !== null;
+  }
+
+  // ---- tournaments (v14): persistence + the CAS primitives ---------------
+
+  /**
+   * File a new terms row: the previous active row (if any) deactivates in
+   * the same transaction — rows are immutable, the ACTIVE pointer moves.
+   * Approval lands later, by the same ceremony that approves the scope.
+   */
+  fileTournamentTerms(
+    spec: {
+      taskRef: number;
+      raceDigest: string;
+      agents: { provider: string; model: string; repairModel: string }[];
+      perAgentBudgetMicrousd: number;
+      overrunReserveMicrousd: number;
+      totalBudgetMicrousd: number;
+      priceVersion: number;
+      publicationPolicy: string;
+    },
+    now: Date,
+  ): number {
+    return this.transact(() => {
+      const previous = this.db
+        .prepare("SELECT id, generation FROM tournament_terms WHERE task_ref = ? AND active = 1")
+        .get(spec.taskRef);
+      if (previous !== undefined) {
+        this.db.prepare("UPDATE tournament_terms SET active = 0 WHERE id = ?").run(Number(previous["id"]));
+      }
+      const generation = previous === undefined ? 1 : Number(previous["generation"]) + 1;
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO tournament_terms
+             (task_ref, generation, active, race_digest, agents, n, per_agent_budget_microusd,
+              overrun_reserve_microusd, total_budget_microusd, price_version, retries,
+              publication_policy, created_at)
+           VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        )
+        .run(
+          spec.taskRef,
+          generation,
+          spec.raceDigest,
+          JSON.stringify(spec.agents),
+          spec.agents.length,
+          spec.perAgentBudgetMicrousd,
+          spec.overrunReserveMicrousd,
+          spec.totalBudgetMicrousd,
+          spec.priceVersion,
+          spec.publicationPolicy,
+          now.toISOString(),
+        );
+      return Number(inserted.lastInsertRowid);
+    });
+  }
+
+  activeTournamentTerms(taskRef: number): TournamentTerms | null {
+    const row = this.db.prepare("SELECT * FROM tournament_terms WHERE task_ref = ? AND active = 1").get(taskRef);
+    return row === undefined ? null : readTournamentTerms(row);
+  }
+
+  /** Approval persistence only — the restating ceremony wires in later. */
+  approveTournamentTerms(id: number, by: string, sawDigest: string, now: Date): boolean {
+    const changed = this.db
+      .prepare(
+        "UPDATE tournament_terms SET approved_at = ?, approved_by = ?, approved_digest = ? WHERE id = ? AND active = 1 AND race_digest = ?",
+      )
+      .run(now.toISOString(), by, sawDigest, id, sawDigest);
+    return Number(changed.changes) === 1;
+  }
+
+  createContest(
+    spec: { taskRef: number; terms: number; scopeDigest: string; raceDigest: string },
+    now: Date,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO contest (task_ref, terms, state, scope_digest, race_digest, created_at)
+         VALUES (?, ?, 'dispatching', ?, ?, ?)`,
+      )
+      .run(spec.taskRef, spec.terms, spec.scopeDigest, spec.raceDigest, now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  getContest(id: number): Contest | null {
+    const row = this.db.prepare("SELECT * FROM contest WHERE id = ?").get(id);
+    return row === undefined ? null : readContest(row);
+  }
+
+  /** The one non-finished tournament for a task, when one exists. */
+  openContestFor(taskRef: number): Contest | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM contest WHERE task_ref = ?
+           AND state IN ('dispatching','racing','pick-wait','decision-wait')
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(taskRef);
+    return row === undefined ? null : readContest(row);
+  }
+
+  /**
+   * Every state change is a compare-and-swap on (state, generation): the
+   * caller proves what it believes, the write bumps the generation, and
+   * whichever of aggregation, reaping, or crash recovery loses the race
+   * changes nothing (finding 17/27).
+   */
+  casContestState(id: number, from: readonly ContestState[], to: ContestState, expectedGeneration: number): boolean {
+    const marks = from.map(() => "?").join(",");
+    const changed = this.db
+      .prepare(
+        `UPDATE contest SET state = ?, generation = generation + 1
+          WHERE id = ? AND generation = ? AND state IN (${marks})`,
+      )
+      .run(to, id, expectedGeneration, ...from);
+    return Number(changed.changes) === 1;
+  }
+
+  stampContestLease(id: number, leaseId: string, runner: string, incarnation: string | null): void {
+    this.db
+      .prepare("UPDATE contest SET current_lease_id = ?, runner = ?, incarnation = ? WHERE id = ?")
+      .run(leaseId, runner, incarnation, id);
+  }
+
+  stampContestDispatch(id: number, baseSha: string, setupDigest: string | null): void {
+    this.db.prepare("UPDATE contest SET base_sha = ?, setup_digest = ? WHERE id = ?").run(baseSha, setupDigest, id);
+  }
+
+  createContestants(
+    contest: number,
+    agents: { provider: string; model: string; repairModel: string; branch: string; budgetMicrousd: number; reserveMicrousd: number }[],
+  ): number[] {
+    return this.transact(() =>
+      agents.map((agent, index) => {
+        const inserted = this.db
+          .prepare(
+            `INSERT INTO contestant
+               (contest, ordinal, provider, model, repair_model, branch, budget_microusd, reserve_microusd)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(contest, index + 1, agent.provider, agent.model, agent.repairModel, agent.branch, agent.budgetMicrousd, agent.reserveMicrousd);
+        return Number(inserted.lastInsertRowid);
+      }),
+    );
+  }
+
+  contestants(contest: number): Contestant[] {
+    return this.db.prepare("SELECT * FROM contestant WHERE contest = ? ORDER BY ordinal").all(contest).map(readContestant);
+  }
+
+  getContestant(id: number): Contestant | null {
+    const row = this.db.prepare("SELECT * FROM contestant WHERE id = ?").get(id);
+    return row === undefined ? null : readContestant(row);
+  }
+
+  casContestantState(
+    id: number,
+    from: readonly ContestantState[],
+    to: ContestantState,
+    expectedGeneration: number,
+  ): boolean {
+    const marks = from.map(() => "?").join(",");
+    const changed = this.db
+      .prepare(
+        `UPDATE contestant SET state = ?, generation = generation + 1
+          WHERE id = ? AND generation = ? AND state IN (${marks})`,
+      )
+      .run(to, id, expectedGeneration, ...from);
+    return Number(changed.changes) === 1;
+  }
+
+  /** Exactly one live run per agent (finding 22): claiming the pointer
+   * requires it empty; a second claimant loses cleanly. */
+  claimContestantRun(id: number, runId: number, expectedGeneration: number): boolean {
+    const changed = this.db
+      .prepare(
+        "UPDATE contestant SET active_run = ?, generation = generation + 1 WHERE id = ? AND generation = ? AND active_run IS NULL",
+      )
+      .run(runId, id, expectedGeneration);
+    return Number(changed.changes) === 1;
+  }
+
+  releaseContestantRun(id: number, runId: number): void {
+    this.db.prepare("UPDATE contestant SET active_run = NULL WHERE id = ? AND active_run = ?").run(id, runId);
+  }
+
+  setContestantWorktree(id: number, worktree: string): void {
+    this.db.prepare("UPDATE contestant SET worktree = ? WHERE id = ?").run(worktree, id);
+  }
+
+  /** Money moves in one direction (finding 25): measured never decreases,
+   * accounted tracks the larger of itself and measured. */
+  recordContestantSpend(id: number, measuredMicrousd: number): void {
+    this.db
+      .prepare(
+        `UPDATE contestant SET
+           measured_microusd = MAX(measured_microusd, ?),
+           accounted_microusd = MAX(accounted_microusd, MAX(measured_microusd, ?))
+         WHERE id = ?`,
+      )
+      .run(measuredMicrousd, measuredMicrousd, id);
+  }
+
+  /** A started invocation that never reported: the ledger charges the FULL
+   * reservation — never the remaining amount — and says the real figure is
+   * unknown (finding 25). Idempotent; never lowers a larger accounting. */
+  latchContestantUnknownSpend(id: number): void {
+    this.db
+      .prepare(
+        `UPDATE contestant SET
+           accounted_microusd = MAX(accounted_microusd, budget_microusd + reserve_microusd),
+           unknown_spend = 1
+         WHERE id = ?`,
+      )
+      .run(id);
+  }
+
+  setContestantCustody(id: number, custody: string | null): void {
+    this.db.prepare("UPDATE contestant SET custody = ? WHERE id = ?").run(custody, id);
+  }
+
+  setContestantCleanup(id: number, cleanup: "pending" | "done" | "attention"): void {
+    this.db.prepare("UPDATE contestant SET cleanup = ? WHERE id = ?").run(cleanup, id);
+  }
+
+  // ---- worker-process slots (v14, finding 26) ----------------------------
+
+  reserveExecutionSlots(runner: string, count: number, now: Date): number[] {
+    return this.transact(() => {
+      const ids: number[] = [];
+      for (let index = 0; index < count; index++) {
+        const inserted = this.db
+          .prepare("INSERT INTO execution_slot (runner, reserved_at) VALUES (?, ?)")
+          .run(runner, now.toISOString());
+        ids.push(Number(inserted.lastInsertRowid));
+      }
+      return ids;
+    });
+  }
+
+  /** reserved → running happens in the stamp-before-spawn moment, carrying
+   * the process group so recovery can ask the OS before freeing capacity. */
+  markSlotRunning(
+    id: number,
+    facts: { run: number; contestant?: number | null; incarnation?: string | null; processGroup?: number | null },
+    now: Date,
+  ): boolean {
+    const changed = this.db
+      .prepare(
+        `UPDATE execution_slot SET state = 'running', run = ?, contestant = ?, incarnation = ?, process_group = ?, running_at = ?
+          WHERE id = ? AND state = 'reserved'`,
+      )
+      .run(facts.run, facts.contestant ?? null, facts.incarnation ?? null, facts.processGroup ?? null, now.toISOString(), id);
+    return Number(changed.changes) === 1;
+  }
+
+  releaseExecutionSlot(id: number, now: Date): boolean {
+    const changed = this.db
+      .prepare("UPDATE execution_slot SET state = 'released', released_at = ? WHERE id = ? AND state IN ('reserved','running')")
+      .run(now.toISOString(), id);
+    return Number(changed.changes) === 1;
+  }
+
+  liveSlotCount(runner: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM execution_slot WHERE runner = ? AND state IN ('reserved','running')")
+      .get(runner);
+    return Number(row?.["n"] ?? 0);
+  }
+
+  getExecutionSlot(id: number): ExecutionSlot | null {
+    const row = this.db.prepare("SELECT * FROM execution_slot WHERE id = ?").get(id);
+    return row === undefined ? null : readExecutionSlot(row);
+  }
+
+  // ---- durable ceremony nonces (v14, findings 21/30) ---------------------
+
+  /** Minted from a POST, never a GET. Bounded per approver; expired rows
+   * are swept rather than accumulating. */
+  mintCeremonyNonce(
+    spec: { hash: string; approver: string; subject: string; subjectId: number; digest: string; ttlMs: number },
+    now: Date,
+  ): { ok: true } | { ok: false; reason: "too-many" } {
+    return this.transact(() => {
+      const open = this.db
+        .prepare("SELECT COUNT(*) AS n FROM ceremony_nonce WHERE approver = ? AND consumed_at IS NULL AND expires_at >= ?")
+        .get(spec.approver, now.toISOString());
+      if (Number(open?.["n"] ?? 0) >= 50) return { ok: false as const, reason: "too-many" as const };
+      this.db
+        .prepare(
+          `INSERT INTO ceremony_nonce (hash, approver, subject, subject_id, digest, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          spec.hash,
+          spec.approver,
+          spec.subject,
+          spec.subjectId,
+          spec.digest,
+          now.toISOString(),
+          new Date(now.getTime() + spec.ttlMs).toISOString(),
+        );
+      return { ok: true as const };
+    });
+  }
+
+  /** Single use, inside whatever transaction the act runs in: the same
+   * write that authorizes the act consumes its nonce, or neither happens. */
+  consumeCeremonyNonce(
+    hash: string,
+    approver: string,
+    subject: string,
+    subjectId: number,
+    digest: string,
+    now: Date,
+  ): boolean {
+    const changed = this.db
+      .prepare(
+        `UPDATE ceremony_nonce SET consumed_at = ?
+          WHERE hash = ? AND approver = ? AND subject = ? AND subject_id = ? AND digest = ?
+            AND consumed_at IS NULL AND expires_at >= ?`,
+      )
+      .run(now.toISOString(), hash, approver, subject, subjectId, digest, now.toISOString());
+    return Number(changed.changes) === 1;
+  }
+
+  sweepCeremonyNonces(now: Date): number {
+    const swept = this.db.prepare("DELETE FROM ceremony_nonce WHERE expires_at < ?").run(now.toISOString());
+    return Number(swept.changes);
   }
 
   // ----- fleet chat (v13) -------------------------------------------------
@@ -6887,6 +7476,90 @@ function readRoutine(row: Record<string, unknown>): Routine {
     filedVia: row["filed_via"] === null || row["filed_via"] === undefined ? null : String(row["filed_via"]),
     createdAt: String(row["created_at"]),
     updatedAt: String(row["updated_at"]),
+  };
+}
+
+
+function readTournamentTerms(row: Record<string, unknown>): TournamentTerms {
+  return {
+    id: Number(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    generation: Number(row["generation"]),
+    active: Number(row["active"]) === 1,
+    raceDigest: String(row["race_digest"]),
+    agents: JSON.parse(String(row["agents"])) as TournamentTerms["agents"],
+    n: Number(row["n"]),
+    perAgentBudgetMicrousd: Number(row["per_agent_budget_microusd"]),
+    overrunReserveMicrousd: Number(row["overrun_reserve_microusd"]),
+    totalBudgetMicrousd: Number(row["total_budget_microusd"]),
+    priceVersion: Number(row["price_version"]),
+    retries: Number(row["retries"]),
+    publicationPolicy: String(row["publication_policy"]),
+    createdAt: String(row["created_at"]),
+    approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
+    approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
+    approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),
+  };
+}
+
+function readContest(row: Record<string, unknown>): Contest {
+  const maybe = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  return {
+    id: Number(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    terms: Number(row["terms"]),
+    generation: Number(row["generation"]),
+    state: String(row["state"]) as ContestState,
+    scopeDigest: String(row["scope_digest"]),
+    raceDigest: String(row["race_digest"]),
+    baseSha: maybe("base_sha"),
+    setupDigest: maybe("setup_digest"),
+    currentLeaseId: maybe("current_lease_id"),
+    runner: maybe("runner"),
+    incarnation: maybe("incarnation"),
+    createdAt: String(row["created_at"]),
+    pickedAt: maybe("picked_at"),
+    pickedBy: maybe("picked_by"),
+    winnerContestant: row["winner_contestant"] === null ? null : Number(row["winner_contestant"]),
+  };
+}
+
+function readContestant(row: Record<string, unknown>): Contestant {
+  return {
+    id: Number(row["id"]),
+    contest: Number(row["contest"]),
+    ordinal: Number(row["ordinal"]),
+    provider: String(row["provider"]),
+    model: String(row["model"]),
+    repairModel: String(row["repair_model"]),
+    branch: String(row["branch"]),
+    worktree: row["worktree"] === null ? null : String(row["worktree"]),
+    generation: Number(row["generation"]),
+    state: String(row["state"]) as ContestantState,
+    activeRun: row["active_run"] === null ? null : Number(row["active_run"]),
+    budgetMicrousd: Number(row["budget_microusd"]),
+    reserveMicrousd: Number(row["reserve_microusd"]),
+    measuredMicrousd: Number(row["measured_microusd"]),
+    accountedMicrousd: Number(row["accounted_microusd"]),
+    unknownSpend: Number(row["unknown_spend"]) === 1,
+    cleanup: row["cleanup"] === null ? null : (String(row["cleanup"]) as "pending" | "done" | "attention"),
+    custody: row["custody"] === null ? null : String(row["custody"]),
+  };
+}
+
+function readExecutionSlot(row: Record<string, unknown>): ExecutionSlot {
+  const maybe = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  return {
+    id: Number(row["id"]),
+    runner: String(row["runner"]),
+    state: String(row["state"]) as ExecutionSlot["state"],
+    run: row["run"] === null ? null : Number(row["run"]),
+    contestant: row["contestant"] === null ? null : Number(row["contestant"]),
+    incarnation: maybe("incarnation"),
+    processGroup: row["process_group"] === null ? null : Number(row["process_group"]),
+    reservedAt: String(row["reserved_at"]),
+    runningAt: maybe("running_at"),
+    releasedAt: maybe("released_at"),
   };
 }
 

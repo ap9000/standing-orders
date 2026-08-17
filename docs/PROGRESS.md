@@ -1,5 +1,40 @@
 # Progress
 
+**2026-08-17 — tournament stage 2: the v14 schema, in plain words.**
+Five new tables (the internals keep technical names; every screen will
+say "tournament", "agents", and "worker processes"): tournament_terms —
+immutable approved-terms rows, one ACTIVE pointer per task, money as
+integer micro-dollars with the overrun reserve held apart from the
+spendable budget; contest — the running tournament, whose current lease
+identity lives ON the row so aggregation, reaping, and crash recovery
+all fence on the same facts; contestant — one racing agent, with money
+deliberately split three ways (measured = what the provider reported,
+monotonic; accounted = what the ledger charges, the FULL reservation
+when unknowable; unknown_spend = the honest flag that they differ) plus
+checkout-custody and cleanup columns; execution_slot — one row per
+worker process with a reserved/running/released life and the process
+group recorded so recovery can ask the OS before freeing capacity;
+ceremony_nonce — durable, hashed, single-use, consumed inside the same
+transaction as the act it authorizes. Columns: run.contestant,
+decision.contestant (the one-open-question-per-agent rule becomes a
+real index later), artifact.capture_status (typed 'ok'/'failed' — prose
+never carries authority again), runner.capacity_mode ('tasks' stays
+the default; 'processes' is the explicit opt-in — an upgrade never
+silently changes what an operator's capacity number means). The hold
+rule widens to admit tournament ownership via the recognized-exactly
+rebuild — v14 is deliberately NOT purely additive and says so where it
+happens. THE CATCH OF THE DAY: the migration tail initially failed to
+land (a silent no-op text replacement) while the version stamp still
+advanced — the live console caught it (v14 stamp, missing columns), the
+tail was landed with an assertion, the live database was rolled back a
+version and re-migrated correctly, and the suite gained a
+doctored-database regression test that rebuilds a genuine pre-v14 hold
+shape and proves the upgrade fires. Store methods shipped for every
+table: filing/approval persistence, generation-CAS state moves for
+contest and contestant, the single-live-run pointer, monotonic spend +
+the unknown-spend latch, the slot lifecycle, and mint/consume/sweep for
+ceremony nonces — all covered by tests. Suite 940.
+
 **2026-08-17 — tournament builds: three design rounds to APPROVE WITH
 CHANGES; stage 1 ships.** The A3 design arc ran v1 → redesign (13
 findings: shared finalizers would release the parent claim; dollar
