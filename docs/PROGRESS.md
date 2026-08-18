@@ -1,5 +1,34 @@
 # Progress
 
+**2026-08-17 — tournament stage 6 + the agent-count knob (v16, operator
+request: "configure number of competing agents").** The count, three
+ways: `task scope --race claude:claude-sonnet-5 --race-count 3`
+replicates one named agent (a count that contradicts an explicit lineup
+refuses — a count is never an instruction to invent agents); `config
+set budgets --race-agents N` sets the installation default, applied
+only where a filing names ONE agent and no count; and the console scope
+form grew the whole tournament section — how many agents compete
+(one/2/3/4), the competing model from the pinned price list, per-agent
+and total dollars prefilled from defaults — plus the v15 budget field
+it was owed. A console-filed race lands as terms beside the scope, the
+approval card restates agents-and-dollars and binds the JOINT
+fingerprint (finding 31 now holds on the web path too: one yes, both
+documents, one transaction), and saving the form back to "one agent"
+retracts the standing race. Routines gained their per-run ceiling:
+`routine add --budget-usd N` is digest-bound (conditional inclusion —
+existing routines digest unchanged) and lands in every instance's scope
+as its own digest-bound budget term, enforced by the same native-cap
+plumbing. Stage 6 housekeeping in the tick: sweepContestCleanup returns
+DECIDED tournaments' checkouts to the pool — this runner's custody
+only, winners and losers alike (branches and evidence survive), and a
+checkout that will not release cleanly is marked attention and paged
+once, never force-cleaned; escalateOverdueContests pages exactly once
+at fourteen days (overdue_paged CAS), and never abandons anything on
+its own. Schema v16: spend_defaults.race_agents,
+routine.budget_per_run_microusd. Live console migrated and verified.
+Suite 971.
+
+
 **2026-08-17 — tournament stage 5: the comparison screen and the pick.**
 The payoff surface. `/contest/<id>` lays every agent's result side by
 side — outcome, duration, questions asked, its own conclusion, the

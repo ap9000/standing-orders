@@ -119,6 +119,57 @@ describe("the web decision view", () => {
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
+  test("the console files a tournament from the scope form, and ONE yes approves scope and race together", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    // Save a scope asking two agents to compete.
+    const saved = await fetch(url("/t/t-1/scope"), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrf, sawDigest: "", goal: "build it twice and let me pick", not: "", touches: "",
+        "budget-usd": "2.50", "race-count": "2", "race-model": "claude-sonnet-5",
+        "race-per-usd": "5", "race-total-usd": "14",
+      }),
+      redirect: "manual",
+    });
+    expect(saved.status).toBe(303);
+    const terms = store.activeTournamentTerms(taskRef);
+    expect(terms?.n).toBe(2);
+    expect(store.getScope("t-1")?.budgetMicrousd).toBe(2_500_000);
+
+    // The approval card restates the tournament and binds the JOINT digest.
+    const page = await (await fetch(url("/t/t-1"), { headers: { cookie } })).text();
+    expect(page).toContain("and this tournament:");
+    expect(page).toContain("2 agents build this independently");
+    const digest = /name="digest" value="([0-9a-f]{64})"/.exec(page)?.[1];
+    const nonce = /name="nonce" value="([^"]+)"/.exec(page)?.[1];
+    if (digest === undefined || nonce === undefined) throw new Error(`no approval form: ${page.slice(page.indexOf("approve-form"), page.indexOf("approve-form") + 600)}`);
+    const approved = await fetch(url("/t/t-1/approve"), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, digest, nonce, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(approved.status).toBe(303);
+    expect(store.activeTournamentTerms(taskRef)?.approvedBy).toBe("alex");
+    const scope = store.getScope("t-1");
+    expect(scope?.approvedDigest).toBe(scope?.digest);
+
+    // Saving the form back to "one agent" withdraws the standing race.
+    const csrf2 = await csrfOf(cookie);
+    const single = await fetch(url("/t/t-1/scope"), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrf: csrf2, sawDigest: scope?.digest ?? "", goal: "just build it once", not: "", touches: "", "race-count": "",
+      }),
+      redirect: "manual",
+    });
+    expect(single.status).toBe(303);
+    expect(store.activeTournamentTerms(taskRef)).toBeNull();
+  });
+
   test("the milestone sentence: one screen, answerable", async () => {
     const cookie = await login();
 

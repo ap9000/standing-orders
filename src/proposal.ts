@@ -85,6 +85,8 @@ export type RoutineProposalInput = {
   requirements: string[];
   schedule: string;
   costCeilingUsd: number | null;
+  /** Per-instance dollar cap in micro-USD (v16); optional, digest-bound. */
+  budgetPerRunMicrousd?: number | null;
   filedVia: string;
   admittedRepos?: readonly string[];
 };
@@ -221,6 +223,7 @@ export function fileRoutineProposal(
     // v1 routines run one instance at a time, period — hardcoded, not accepted.
     singleFlight: true,
     costCeilingUsd: input.costCeilingUsd,
+    ...(input.budgetPerRunMicrousd == null ? {} : { budgetPerRunMicrousd: input.budgetPerRunMicrousd }),
   };
   // EVERY problem at once — an operator fixing a form deserves the whole
   // list, not one complaint per submission.

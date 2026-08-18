@@ -677,3 +677,94 @@ export function abandonContest(
     return { ok: true as const };
   });
 }
+
+// ---------------------------------------------------------------- stage 6
+
+/** Fourteen days: the escalation threshold for an undecided tournament. */
+export const CONTEST_OVERDUE_MS = 14 * 24 * 60 * 60_000;
+
+/**
+ * The cleanup pass (stage 6): once a tournament is DECIDED — picked or
+ * abandoned — every agent's checkout goes back to the pool, winners and
+ * losers alike (branches and evidence survive; a checkout is only a
+ * checkout). Custody holds: only the runner that owns a checkout releases
+ * it, and one that will not release cleanly (dirty, uninspectable) is
+ * marked for attention and paged once rather than cleaned by force.
+ */
+export async function sweepContestCleanup(
+  store: Store,
+  releaseWorktree: (path: string) => Promise<{ ok: boolean; reason?: string; message?: string }>,
+  runner: string,
+  now: Date,
+): Promise<{ released: number; attention: number }> {
+  let released = 0;
+  let attention = 0;
+  for (const contestant of store.contestantsForCleanup()) {
+    if (contestant.worktree === null) {
+      store.setContestantCleanup(contestant.id, "done");
+      continue;
+    }
+    const row = store.getWorktree(contestant.worktree);
+    if (row === null) {
+      // The pool never knew it, or the row is gone (reimage): nothing to
+      // release, nothing to keep waiting on.
+      store.setContestantCleanup(contestant.id, "done");
+      continue;
+    }
+    if (row.runner !== null && row.runner !== runner) continue; // another machine's custody
+    const freed = await releaseWorktree(contestant.worktree);
+    if (freed.ok) {
+      store.setContestantCleanup(contestant.id, "done");
+      released += 1;
+      continue;
+    }
+    store.setContestantCleanup(contestant.id, "attention");
+    attention += 1;
+    store.enqueueNotification(
+      {
+        dedupeKey: `contest-cleanup:${contestant.id}`,
+        kind: "contest-cleanup",
+        subject: `a tournament checkout needs a look: agent ${contestant.ordinal}`,
+        body:
+          `The checkout at ${contestant.worktree} would not go back to the pool` +
+          ` (${freed.message ?? freed.reason ?? "unknown"}). It was kept, not cleaned — look before anything is removed.`,
+      },
+      now,
+    );
+  }
+  return { released, attention };
+}
+
+/**
+ * Overdue escalation (stage 6): a tournament waiting on a person for
+ * fourteen days pages ONCE more — never auto-abandons, never re-pages.
+ * The age is derived from the moment the contest-owned hold took the
+ * task's stillness, which is exactly when the waiting began.
+ */
+export function escalateOverdueContests(store: Store, now: Date): number {
+  let paged = 0;
+  for (const contest of store.contestsInStates(["pick-wait", "exhausted", "interrupted"])) {
+    if (contest.overduePaged) continue;
+    const hold = store
+      .activeHolds(contest.taskRef, now)
+      .find(one => one.ownerKind === "contest" && one.ownerId === String(contest.id));
+    const since = hold?.heldAt ?? contest.createdAt;
+    if (now.getTime() - new Date(since).getTime() < CONTEST_OVERDUE_MS) continue;
+    if (!store.markContestOverduePaged(contest.id)) continue; // someone else paged first
+    const taskId = store.externalIdFor(contest.taskRef) ?? `ref ${contest.taskRef}`;
+    const days = Math.floor((now.getTime() - new Date(since).getTime()) / 86_400_000);
+    store.enqueueNotification(
+      {
+        dedupeKey: `contest-overdue:${contest.id}`,
+        kind: "contest-overdue",
+        subject: `a tournament has waited ${days} days: ${taskId}`,
+        body:
+          `The tournament on ${taskId} has been waiting for your decision for ${days} days. ` +
+          `Nothing happens on its own — compare and decide at /contest/${contest.id}, or abandon it there.`,
+      },
+      now,
+    );
+    paged += 1;
+  }
+  return paged;
+}

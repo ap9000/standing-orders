@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -147,6 +147,8 @@ export type Contest = {
   pickedAt: string | null;
   pickedBy: string | null;
   winnerContestant: number | null;
+  /** One escalation page per tournament, ever — set with the page. */
+  overduePaged: boolean;
 };
 
 export type ContestantState = "pending" | "ready" | "building" | "parked" | "built" | "failed" | "stopped";
@@ -266,6 +268,8 @@ export type Routine = {
   singleFlight: boolean;
   /** Rolling 7-day dollar ceiling; null = none. Enforcement fails closed. */
   costCeilingUsd: number | null;
+  /** Per-instance dollar cap (v16); copied into each instance's scope. */
+  budgetPerRunMicrousd: number | null;
   paused: boolean;
   /** Of every term above. Approval binds to this exact value. */
   digest: string;
@@ -662,6 +666,10 @@ CREATE TABLE IF NOT EXISTS routine (
   -- Rolling 7-day ceiling in dollars. NULL is honestly "no ceiling";
   -- enforcement FAILS CLOSED on unmeasured paid runs (finding 5).
   cost_ceiling_usd REAL,
+  -- Per-INSTANCE dollar cap (v16): copied into each instance's scope as
+  -- its digest-bound budget term, enforced by the same native-cap
+  -- plumbing as any scope budget. NULL = only the global backstop.
+  budget_per_run_microusd INTEGER,
   paused           INTEGER NOT NULL DEFAULT 0,
   digest           TEXT NOT NULL,
   approved_at      TEXT,
@@ -829,6 +837,11 @@ CREATE TABLE IF NOT EXISTS spend_defaults (
   build_per_run_microusd   INTEGER,
   race_per_agent_microusd  INTEGER,
   race_total_microusd      INTEGER,
+  -- How many agents compete by default (v16, operator request). Applies
+  -- only where a filing names ONE agent and no explicit count — an
+  -- explicit list or count always wins, and the race digest binds the
+  -- actual lineup either way.
+  race_agents              INTEGER CHECK (race_agents BETWEEN 2 AND 4),
   updated_at               TEXT NOT NULL,
   updated_by               TEXT NOT NULL
 );
@@ -1928,6 +1941,10 @@ function migrate(db: Database): void {
   // v15 (budgets, operator request): the per-attempt dollar cap joins the
   // scope, and spend_defaults arrives via the fresh SCHEMA's IF NOT EXISTS.
   addColumn(db, "task_scope", "budget_microusd", "INTEGER");
+  // v16 (stage 6 + operator request): the default competing-agent count,
+  // and the per-instance dollar cap on standing orders.
+  addColumn(db, "spend_defaults", "race_agents", "INTEGER CHECK (race_agents BETWEEN 2 AND 4)");
+  addColumn(db, "routine", "budget_per_run_microusd", "INTEGER");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -3637,6 +3654,7 @@ export class Store {
       schedule: string;
       singleFlight: boolean;
       costCeilingUsd: number | null;
+      budgetPerRunMicrousd?: number | null;
       digest: string;
       /** Immutable provenance (v12), same contract as createConsoleTask's. */
       filedVia?: string;
@@ -3651,8 +3669,8 @@ export class Store {
         .prepare(
           `INSERT INTO routine
              (name, repo, goal, out_of_scope, touches, requirements, schedule,
-              single_flight, cost_ceiling_usd, digest, created_at, updated_at, filed_via)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              single_flight, cost_ceiling_usd, budget_per_run_microusd, digest, created_at, updated_at, filed_via)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           spec.name,
@@ -3664,6 +3682,7 @@ export class Store {
           spec.schedule,
           spec.singleFlight ? 1 : 0,
           spec.costCeilingUsd,
+          spec.budgetPerRunMicrousd ?? null,
           spec.digest,
           stamp,
           stamp,
@@ -3699,24 +3718,25 @@ export class Store {
   // ---- spend defaults (v15) ----------------------------------------------
 
   setSpendDefaults(
-    defaults: { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null },
+    defaults: { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; raceAgents?: number | null },
     by: string,
     now: Date,
   ): void {
     this.db
       .prepare(
-        `INSERT INTO spend_defaults (id, build_per_run_microusd, race_per_agent_microusd, race_total_microusd, updated_at, updated_by)
-         VALUES (1, ?, ?, ?, ?, ?)
+        `INSERT INTO spend_defaults (id, build_per_run_microusd, race_per_agent_microusd, race_total_microusd, race_agents, updated_at, updated_by)
+         VALUES (1, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            build_per_run_microusd = excluded.build_per_run_microusd,
            race_per_agent_microusd = excluded.race_per_agent_microusd,
            race_total_microusd = excluded.race_total_microusd,
+           race_agents = excluded.race_agents,
            updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
       )
-      .run(defaults.buildPerRunMicrousd, defaults.racePerAgentMicrousd, defaults.raceTotalMicrousd, now.toISOString(), by);
+      .run(defaults.buildPerRunMicrousd, defaults.racePerAgentMicrousd, defaults.raceTotalMicrousd, defaults.raceAgents ?? null, now.toISOString(), by);
   }
 
-  getSpendDefaults(): { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; updatedBy: string } | null {
+  getSpendDefaults(): { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; raceAgents: number | null; updatedBy: string } | null {
     const row = this.db.prepare("SELECT * FROM spend_defaults WHERE id = 1").get();
     if (row === undefined) return null;
     const maybe = (key: string): number | null => (row[key] === null || row[key] === undefined ? null : Number(row[key]));
@@ -3724,6 +3744,7 @@ export class Store {
       buildPerRunMicrousd: maybe("build_per_run_microusd"),
       racePerAgentMicrousd: maybe("race_per_agent_microusd"),
       raceTotalMicrousd: maybe("race_total_microusd"),
+      raceAgents: maybe("race_agents"),
       updatedBy: String(row["updated_by"]),
     };
   }
@@ -3735,6 +3756,16 @@ export class Store {
    * the same transaction — rows are immutable, the ACTIVE pointer moves.
    * Approval lands later, by the same ceremony that approves the scope.
    */
+  /** Withdraw the standing race: the row survives deactivated, exactly as
+   * a superseding filing would leave it — the task returns to the ordinary
+   * one-agent path. */
+  retractTournamentTerms(taskRef: number): boolean {
+    const changed = this.db
+      .prepare("UPDATE tournament_terms SET active = 0 WHERE task_ref = ? AND active = 1")
+      .run(taskRef);
+    return Number(changed.changes) > 0;
+  }
+
   fileTournamentTerms(
     spec: {
       taskRef: number;
@@ -3959,6 +3990,29 @@ export class Store {
 
   setContestantCustody(id: number, custody: string | null): void {
     this.db.prepare("UPDATE contestant SET custody = ? WHERE id = ?").run(custody, id);
+  }
+
+  /** The cleanup queue (stage 6): agents of DECIDED tournaments whose
+   * checkouts still sit outside the pool. Terminal contest states only —
+   * an undecided tournament's evidence is never touched. */
+  contestantsForCleanup(): Contestant[] {
+    return this.db
+      .prepare(
+        `SELECT contestant.* FROM contestant
+         JOIN contest ON contest.id = contestant.contest
+         WHERE contest.state IN ('picked','abandoned') AND contestant.cleanup = 'pending'
+         ORDER BY contestant.id`,
+      )
+      .all()
+      .map(readContestant);
+  }
+
+  /** Exactly-once overdue escalation: the mark rides the page (stage 6). */
+  markContestOverduePaged(contestId: number): boolean {
+    const changed = this.db
+      .prepare("UPDATE contest SET overdue_paged = 1 WHERE id = ? AND overdue_paged = 0")
+      .run(contestId);
+    return Number(changed.changes) === 1;
   }
 
   /** The pick, stamped: who chose, when, and which agent won. */
@@ -7661,6 +7715,10 @@ function readRoutine(row: Record<string, unknown>): Routine {
     schedule: String(row["schedule"]),
     singleFlight: Number(row["single_flight"]) === 1,
     costCeilingUsd: row["cost_ceiling_usd"] === null ? null : Number(row["cost_ceiling_usd"]),
+    budgetPerRunMicrousd:
+      row["budget_per_run_microusd"] === null || row["budget_per_run_microusd"] === undefined
+        ? null
+        : Number(row["budget_per_run_microusd"]),
     paused: Number(row["paused"]) === 1,
     digest: String(row["digest"]),
     approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
@@ -7715,6 +7773,7 @@ function readContest(row: Record<string, unknown>): Contest {
     pickedAt: maybe("picked_at"),
     pickedBy: maybe("picked_by"),
     winnerContestant: row["winner_contestant"] === null ? null : Number(row["winner_contestant"]),
+    overduePaged: Number(row["overdue_paged"] ?? 0) === 1,
   };
 }
 

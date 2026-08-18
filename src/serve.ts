@@ -48,6 +48,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile, scanForSecrets } from "./evidence.js";
+import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
   composeRequest,
@@ -90,7 +91,7 @@ import {
   type Scope,
 } from "./scope.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest } from "./contest.js";
+import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, jointApprovalDigest } from "./contest.js";
 import type { AgentView } from "./contest.js";
 import type { Runner } from "./runner.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
@@ -109,7 +110,7 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import type { Routine, ChatTurn, ChatProviderId, Contest } from "./store.js";
+import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -1485,11 +1486,17 @@ export function createDecisionServer(options: ServeOptions): Server {
     // A broken revision brief blocks the whole approval surface (audit
     // IV-3): no nonce is minted over a batch nobody can verify.
     const revisionBroken = revision !== null && "problem" in revision;
+    // A tournament task's yes covers BOTH documents (finding 31): where
+    // race terms are filed, the digest being shown — and bound by the
+    // nonce — is the joint fingerprint, never the scope's alone.
+    const raceTerms = ref === null ? null : store.activeTournamentTerms(ref.id);
+    const approvalDigest =
+      scope === null ? null : raceTerms === null ? scope.digest : jointApprovalDigest(scope.digest, raceTerms.raceDigest);
     // The nonce is minted at render, per viewer, bound to the digest being
     // shown — the browser approval flow starts here and nowhere else.
     const nonce =
-      who.via === "cookie" && scope !== null && !approvalOf(scope).approved && !revisionBroken
-        ? mintApprovalNonce(who.name, taskId, scope.digest)
+      who.via === "cookie" && scope !== null && approvalDigest !== null && !approvalOf(scope).approved && !revisionBroken
+        ? mintApprovalNonce(who.name, taskId, approvalDigest)
         : "";
     return {
         task: found,
@@ -1507,6 +1514,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         })(),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
         scope,
+        raceTerms,
+        approvalDigest,
+        spendDefaults: store.getSpendDefaults(),
         publication: (() => {
           // The latest publication across this task's runs, with its
           // OBSERVED CI state (audit SD-5): the reviewer learns PR and CI
@@ -2552,11 +2562,41 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       case "scope": {
         const sawDigest = body.get("sawDigest");
+        // The optional per-attempt dollar cap (v15) rides the same form.
+        const budgetGiven = (body.get("budget-usd") ?? "").trim();
+        const budgetUsd = budgetGiven === "" ? null : Number(budgetGiven);
+        if (budgetUsd !== null && (!Number.isFinite(budgetUsd) || budgetUsd <= 0)) {
+          return taskScreen(response, who, taskId, "the dollar cap is a positive amount", 400);
+        }
+        // The tournament controls (operator request): a count of 2–4 files
+        // race terms BESIDE the scope — validated and priced BEFORE anything
+        // saves, so a bad tournament never half-lands on a good scope.
+        const raceCountGiven = (body.get("race-count") ?? "").trim();
+        let plannedRace: { agents: { provider: string; model: string; repairModel: string }[]; perAgentBudgetMicrousd: number; overrunReserveMicrousd: number; totalBudgetMicrousd: number; priceVersion: number; publicationPolicy: string; raceDigest: string } | null = null;
+        if (raceCountGiven !== "") {
+          const count = Number(raceCountGiven);
+          const model = body.get("race-model") ?? "";
+          if (!Number.isInteger(count) || count < 2 || count > 4) {
+            return taskScreen(response, who, taskId, "a tournament races 2 to 4 agents", 400);
+          }
+          const perUsd = Number((body.get("race-per-usd") ?? "").trim());
+          const totalUsd = Number((body.get("race-total-usd") ?? "").trim());
+          const planned = planTournament({
+            agents: Array.from({ length: count }, () => ({ provider: "claude", model })),
+            perAgentBudgetUsd: perUsd,
+            totalBudgetUsd: totalUsd,
+          });
+          if (!planned.ok) {
+            return taskScreen(response, who, taskId, `tournament not filed: ${planned.message}`, 400);
+          }
+          plannedRace = planned.plan;
+        }
         const proposed = proposeGuarded(store, {
           taskId,
           goal: body.get("goal") ?? "",
           outOfScope: body.get("not") ?? null,
           touches: (body.get("touches") ?? "").split(/[\n,]/),
+          ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
           sawDigest: sawDigest === null || sawDigest === "" ? null : sawDigest,
           taskRef: ref.id,
           now,
@@ -2564,6 +2604,27 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!proposed.ok) {
           const status = proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400;
           return taskScreen(response, who, taskId, `scope not saved: ${proposed.reason}`, status);
+        }
+        if (plannedRace === null) {
+          // Switching back to "one agent" withdraws a standing race — the
+          // deactivated row survives as history, and the approval card
+          // returns to the scope alone.
+          store.retractTournamentTerms(ref.id);
+        }
+        if (plannedRace !== null) {
+          store.fileTournamentTerms(
+            {
+              taskRef: ref.id,
+              raceDigest: plannedRace.raceDigest,
+              agents: plannedRace.agents,
+              perAgentBudgetMicrousd: plannedRace.perAgentBudgetMicrousd,
+              overrunReserveMicrousd: plannedRace.overrunReserveMicrousd,
+              totalBudgetMicrousd: plannedRace.totalBudgetMicrousd,
+              priceVersion: plannedRace.priceVersion,
+              publicationPolicy: plannedRace.publicationPolicy,
+            },
+            now,
+          );
         }
         return redirect(response, taskHref(taskId));
       }
@@ -2593,6 +2654,29 @@ export function createDecisionServer(options: ServeOptions): Server {
           if (view !== null && "problem" in view) {
             return taskScreen(response, who, taskId, `approval is blocked: ${view.problem}`, 409);
           }
+        }
+        // A tournament task's yes covers BOTH documents (finding 31): the
+        // form bound the joint fingerprint, and the scope and race terms
+        // approve together, in one transaction, or not at all.
+        const raceTerms = store.activeTournamentTerms(ref.id);
+        if (raceTerms !== null) {
+          const scopeRow = store.getScope(taskId);
+          if (scopeRow === null || digest !== jointApprovalDigest(scopeRow.digest, raceTerms.raceDigest)) {
+            return taskScreen(response, who, taskId, "this task races a tournament — the form was stale; read it again", 409);
+          }
+          const both = store.transact(() => {
+            const scopeApproved = approveScope(store, taskId, who.name, now, scopeRow.digest, token);
+            if (!scopeApproved.ok) return scopeApproved;
+            if (!store.approveTournamentTerms(raceTerms.id, who.name, raceTerms.raceDigest, now)) {
+              throw new Error("the race terms changed while you were reading — nothing was approved");
+            }
+            return scopeApproved;
+          });
+          if (!both.ok) {
+            const status = both.reason === "changed" ? 409 : 403;
+            return taskScreen(response, who, taskId, `not approved: ${both.reason}`, status);
+          }
+          return redirect(response, body.get("return") === "next" ? "/next" : taskHref(taskId));
         }
         const approved = approveScope(store, taskId, who.name, now, digest, token);
         if (!approved.ok) {
@@ -4946,6 +5030,11 @@ function taskBody(data: {
   contest?: { id: number; state: string; agents: number } | null;
   claimed: boolean;
   scope: Scope | null;
+  /** Filed race terms (v14) — the approval restates them; one yes covers both. */
+  raceTerms?: TournamentTerms | null;
+  /** What the approval nonce/digest bind: scope digest, or the joint fingerprint. */
+  approvalDigest?: string | null;
+  spendDefaults?: { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; raceAgents: number | null } | null;
   runs: Run[];
   decisions: Decision[];
   incidents: Incident[];
@@ -5056,13 +5145,27 @@ function taskBody(data: {
           `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
-          `<input type="hidden" name="digest" value="${escape(scope.digest)}">`,
+          `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
           `<p><strong>approve exactly this:</strong></p>`,
           `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          scope.budgetMicrousd === null
+            ? ""
+            : `<p class="meta">each build attempt may spend $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} — the agent is stopped at this figure</p>`,
+          // One yes covers BOTH documents (finding 31): the race terms are
+          // restated on the same card the password signs, or they are not
+          // approved at all.
+          data.raceTerms === null || data.raceTerms === undefined
+            ? ""
+            : `<p><strong>and this tournament:</strong></p>` +
+              `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
+              `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
+              `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
+              `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
+              `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
           `<label>your password, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>`,
-          `<button type="submit">approve this scope</button>`,
+          `<button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : "approve scope and tournament — one yes covers both"}</button>`,
           `</form>`,
         ].join("\n");
 
@@ -5078,6 +5181,51 @@ function taskBody(data: {
     `<label>touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
       (scope?.touches ?? []).join("\n"),
     )}</textarea></label>`,
+    (() => {
+      const defaults = data.spendDefaults ?? null;
+      const budgetPrefill =
+        scope?.budgetMicrousd != null
+          ? (scope.budgetMicrousd / 1_000_000).toFixed(2)
+          : defaults?.buildPerRunMicrousd != null
+            ? (defaults.buildPerRunMicrousd / 1_000_000).toFixed(2)
+            : "";
+      return `<label>dollar cap per build attempt <span class="meta">(optional — the agent is stopped at this figure)</span>` +
+        `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(budgetPrefill)}" placeholder="no cap beyond the installation backstop"></label>`;
+    })(),
+    (() => {
+      // The tournament controls (operator request): how many agents compete,
+      // on which model, under which dollars. "One agent" is the ordinary
+      // path; anything more files race terms beside the scope, and the ONE
+      // approval above restates and covers both.
+      const defaults = data.spendDefaults ?? null;
+      const terms = data.raceTerms ?? null;
+      const selectedCount = terms !== null ? terms.n : defaults?.raceAgents ?? 0;
+      const selectedModel = terms?.agents[0]?.model ?? "claude-sonnet-5";
+      const perPrefill =
+        terms !== null
+          ? (terms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)
+          : defaults?.racePerAgentMicrousd != null
+            ? (defaults.racePerAgentMicrousd / 1_000_000).toFixed(2)
+            : "";
+      const totalPrefill =
+        terms !== null
+          ? (terms.totalBudgetMicrousd / 1_000_000).toFixed(2)
+          : defaults?.raceTotalMicrousd != null
+            ? (defaults.raceTotalMicrousd / 1_000_000).toFixed(2)
+            : "";
+      return [
+        `<label>how many agents compete <span class="meta">(a tournament builds the task independently N times — you compare and pick one)</span>` +
+          `<select name="race-count">` +
+          `<option value=""${selectedCount === 0 ? " selected" : ""}>one agent — no tournament</option>` +
+          [2, 3, 4].map(count => `<option value="${count}"${selectedCount === count ? " selected" : ""}>${count} agents</option>`).join("") +
+          `</select></label>`,
+        `<label>competing model <select name="race-model">` +
+          PRICED_BUILD_MODELS.map(model => `<option value="${escape(model)}"${model === selectedModel ? " selected" : ""}>${escape(model)}</option>`).join("") +
+          `</select></label>`,
+        `<label>each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(perPrefill)}"></label>`,
+        `<label>the whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(totalPrefill)}"></label>`,
+      ].join("\n");
+    })(),
     `<button type="submit">save scope</button>`,
     `</form></details>`,
   ].join("\n");

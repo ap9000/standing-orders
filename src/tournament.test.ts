@@ -1186,3 +1186,205 @@ describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremo
     expect(card.reason).toContain("compare");
   });
 });
+
+describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and the 14-day escalation", () => {
+  test("--race-count replicates one named agent; a contradictory count refuses; count without --race refuses", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const dir = mkdtempSync(join(tmpdir(), "race-count-"));
+    const db = join(dir, "orders.db");
+    const lines: string[] = [];
+    const write = (line: string) => lines.push(line);
+    const { runOperate, EXIT } = await import("./operate.js");
+    const run = (argv: string[]) => runOperate(argv[0] as string, argv.slice(1), write, { databaseFile: db, now: T0 });
+    try {
+      const bootstrap = openStore(db);
+      const { addApprover } = await import("./scope.js");
+      if (!addApprover(bootstrap, "alex", T0).ok) throw new Error("bootstrap");
+      bootstrap.close();
+      expect(await run(["task", "add", "count-cli", "--id", "count-cli", "--json"])).toBe(EXIT.ok);
+
+      lines.length = 0;
+      expect(await run([
+        "task", "scope", "count-cli", "--goal", "g",
+        "--race", "claude:claude-sonnet-5", "--race-count", "3",
+        "--race-per-usd", "5", "--race-total-usd", "30", "--json",
+      ])).toBe(EXIT.ok);
+      expect(JSON.parse(lines.join("\n")).race.agents).toHaveLength(3);
+
+      lines.length = 0;
+      expect(await run([
+        "task", "scope", "count-cli", "--goal", "g",
+        "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--race-count", "3",
+        "--race-per-usd", "5", "--race-total-usd", "30", "--json",
+      ])).toBe(EXIT.usage);
+      expect(JSON.parse(lines.join("\n")).message).toContain("make them agree");
+
+      lines.length = 0;
+      expect(await run(["task", "scope", "count-cli", "--goal", "g", "--race-count", "3", "--json"])).toBe(EXIT.usage);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the configured default count replicates a single named agent — an explicit lineup is always itself", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const dir = mkdtempSync(join(tmpdir(), "race-default-"));
+    const db = join(dir, "orders.db");
+    const lines: string[] = [];
+    const write = (line: string) => lines.push(line);
+    const { runOperate, EXIT } = await import("./operate.js");
+    const run = (argv: string[]) => runOperate(argv[0] as string, argv.slice(1), write, { databaseFile: db, now: T0 });
+    try {
+      const bootstrap = openStore(db);
+      const { addApprover } = await import("./scope.js");
+      const added = addApprover(bootstrap, "alex", T0);
+      if (!added.ok) throw new Error("bootstrap");
+      bootstrap.close();
+      expect(await run([
+        "config", "set", "budgets", "--race-agents", "3",
+        "--race-per-usd", "5", "--race-total-usd", "30",
+        "--as", "alex", "--token", added.token, "--json",
+      ])).toBe(EXIT.ok);
+      expect(await run(["task", "add", "default-cli", "--id", "default-cli", "--json"])).toBe(EXIT.ok);
+
+      // One named agent, no count: the default replicates it to three.
+      lines.length = 0;
+      expect(await run([
+        "task", "scope", "default-cli", "--goal", "g",
+        "--race", "claude:claude-sonnet-5", "--json",
+      ])).toBe(EXIT.ok);
+      expect(JSON.parse(lines.join("\n")).race.agents).toHaveLength(3);
+
+      // An explicit two-agent lineup stays two — the default never edits it.
+      lines.length = 0;
+      expect(await run([
+        "task", "scope", "default-cli", "--goal", "g",
+        "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--json",
+      ])).toBe(EXIT.ok);
+      expect(JSON.parse(lines.join("\n")).race.agents).toHaveLength(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a routine's per-run cap lands in each instance's scope, digest-bound; a routine without one digests as before", async () => {
+    const store = openStore(":memory:");
+    try {
+      const { routineDigestOf, approveRoutine, fireRoutine } = await import("./routine.js");
+      const { fileRoutineProposal } = await import("./proposal.js");
+      const { addApprover } = await import("./scope.js");
+      const added = addApprover(store, "alex", T0);
+      if (!added.ok) throw new Error("bootstrap");
+
+      // The conditional-inclusion rule: absent term, identical digest.
+      const bare = { repo: "/r", goal: "g", outOfScope: null, touches: [], requirements: [], schedule: "every:60", singleFlight: true, costCeilingUsd: null };
+      expect(routineDigestOf({ ...bare, budgetPerRunMicrousd: null })).toBe(routineDigestOf(bare));
+      expect(routineDigestOf({ ...bare, budgetPerRunMicrousd: 2_000_000 })).not.toBe(routineDigestOf(bare));
+
+      const filed = fileRoutineProposal(
+        store,
+        { name: "capped", repo: "/r", goal: "keep deps fresh", outOfScope: null, touches: [], requirements: [], schedule: "every:60", costCeilingUsd: null, budgetPerRunMicrousd: 2_500_000, filedVia: "cli" },
+        T0,
+      );
+      if (!filed.ok) throw new Error(filed.reason);
+      const routine = store.getRoutine(filed.id);
+      expect(routine?.budgetPerRunMicrousd).toBe(2_500_000);
+      const okd = approveRoutine(store, filed.id, "alex", T0, filed.digest, added.token);
+      if (!okd.ok) throw new Error(okd.reason);
+      const fired = fireRoutine(store, filed.id, new Date(T0.getTime() + 3_600_000));
+      if (!fired.ok) throw new Error(fired.reason);
+      const scope = store.getScope(fired.taskId);
+      expect(scope?.budgetMicrousd).toBe(2_500_000);
+      expect(scope?.approvedDigest).toBe(scope?.digest); // instance born approved, cap inside the digest
+    } finally {
+      store.close();
+    }
+  });
+
+  test("cleanup: a decided tournament's checkouts go home; one that will not release cleanly is flagged and paged, not forced", async () => {
+    const store = openStore(":memory:");
+    try {
+      const { sweepContestCleanup } = await import("./contest.js");
+      // Two contestants of a picked contest, worktrees recorded to this runner.
+      store.createTask({ id: "clean-me", title: "cleaned" }, T0);
+      const taskRef = store.refFor("built-in", "clean-me", "ours").id;
+      const terms = store.fileTournamentTerms(
+        { taskRef, raceDigest: "d", agents: [
+          { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5" },
+          { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5" },
+        ], perAgentBudgetMicrousd: 5_000_000, overrunReserveMicrousd: 1_760_000, totalBudgetMicrousd: 20_000_000, priceVersion: 1, publicationPolicy: "none" },
+        T0,
+      );
+      store.saveRunner(
+        { name: "night-shift-1", host: "here", capacity: 4, capacityMode: "tasks", repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
+        "hash",
+      );
+      const contest = store.createContest({ taskRef, terms, scopeDigest: "s", raceDigest: "d" }, T0);
+      const [a, b] = store.createContestants(contest, [
+        { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5", branch: "b/c1", budgetMicrousd: 5_000_000, reserveMicrousd: 1_760_000 },
+        { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5", branch: "b/c2", budgetMicrousd: 5_000_000, reserveMicrousd: 1_760_000 },
+      ]) as [number, number];
+      store.casContestState(contest, ["dispatching"], "picked", 1);
+      for (const [id, path] of [[a, "/pool/c1"], [b, "/pool/c2"]] as const) {
+        store.setContestantWorktree(id, path);
+        store.setContestantCleanup(id, "pending");
+        store.saveWorktree({ path, repo: "/r", branch: `b/${id}`, runner: "night-shift-1", taskRef, createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: false, setupDigest: null, setupAt: null });
+      }
+      const released: string[] = [];
+      const outcome = await sweepContestCleanup(
+        store,
+        async path => {
+          released.push(path);
+          return path === "/pool/c1" ? { ok: true } : { ok: false, reason: "dirty", message: "uncommitted work" };
+        },
+        "night-shift-1",
+        T0,
+      );
+      expect(outcome).toEqual({ released: 1, attention: 1 });
+      expect(store.getContestant(a)?.cleanup).toBe("done");
+      expect(store.getContestant(b)?.cleanup).toBe("attention");
+      const paged = store.listNotifications("pending").find(one => one.kind === "contest-cleanup");
+      expect(paged?.body).toContain("/pool/c2");
+      // Another machine's custody is left alone entirely.
+      store.setContestantCleanup(b, "pending");
+      const foreign = await sweepContestCleanup(store, async () => ({ ok: true }), "other-machine", T0);
+      expect(foreign.released).toBe(0);
+      expect(store.getContestant(b)?.cleanup).toBe("pending");
+    } finally {
+      store.close();
+    }
+  });
+
+  test("a tournament waiting fourteen days pages exactly once, and never abandons itself", async () => {
+    const store = openStore(":memory:");
+    try {
+      const { escalateOverdueContests } = await import("./contest.js");
+      store.createTask({ id: "slow-pick", title: "waiting" }, T0);
+      const taskRef = store.refFor("built-in", "slow-pick", "ours").id;
+      const terms = store.fileTournamentTerms(
+        { taskRef, raceDigest: "d", agents: [
+          { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5" },
+          { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5" },
+        ], perAgentBudgetMicrousd: 5_000_000, overrunReserveMicrousd: 1_760_000, totalBudgetMicrousd: 20_000_000, priceVersion: 1, publicationPolicy: "none" },
+        T0,
+      );
+      const contest = store.createContest({ taskRef, terms, scopeDigest: "s", raceDigest: "d" }, T0);
+      store.casContestState(contest, ["dispatching"], "racing", 1);
+      store.casContestState(contest, ["racing"], "pick-wait", 2);
+      store.holdOwned({ taskRef, ownerKind: "contest", ownerId: String(contest), reason: "tournament finished — compare the results and pick one", until: null }, T0);
+
+      const thirteenDays = new Date(T0.getTime() + 13 * 86_400_000);
+      expect(escalateOverdueContests(store, thirteenDays)).toBe(0);
+      const fifteenDays = new Date(T0.getTime() + 15 * 86_400_000);
+      expect(escalateOverdueContests(store, fifteenDays)).toBe(1);
+      expect(store.getContest(contest)?.overduePaged).toBe(true);
+      expect(store.getContest(contest)?.state).toBe("pick-wait"); // never auto-abandoned
+      const paged = store.listNotifications("pending").find(one => one.kind === "contest-overdue");
+      expect(paged?.body).toContain(`/contest/${contest}`);
+      // Once, ever.
+      expect(escalateOverdueContests(store, new Date(T0.getTime() + 30 * 86_400_000))).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+});

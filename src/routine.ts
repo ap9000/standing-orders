@@ -114,6 +114,8 @@ export type RoutineTerms = {
   schedule: string;
   singleFlight: boolean;
   costCeilingUsd: number | null;
+  /** Per-instance dollar cap in micro-USD (v16); null = only the backstop. */
+  budgetPerRunMicrousd?: number | null;
 };
 
 /**
@@ -133,6 +135,7 @@ export function routineDigestOf(terms: RoutineTerms): string {
         schedule: terms.schedule,
         singleFlight: terms.singleFlight,
         costCeilingUsd: terms.costCeilingUsd,
+        ...(terms.budgetPerRunMicrousd == null ? {} : { budgetPerRun: terms.budgetPerRunMicrousd }),
       }),
       "utf8",
     )
@@ -193,6 +196,7 @@ export function termsOf(routine: Routine): RoutineTerms {
     schedule: routine.schedule,
     singleFlight: routine.singleFlight,
     costCeilingUsd: routine.costCeilingUsd,
+    budgetPerRunMicrousd: routine.budgetPerRunMicrousd,
   };
 }
 
@@ -487,13 +491,14 @@ export function fireRoutine(
       goal: routine.goal,
       outOfScope: routine.outOfScope,
       touches: [...routine.touches],
+      ...(routine.budgetPerRunMicrousd == null ? {} : { budgetMicrousd: routine.budgetPerRunMicrousd }),
     };
     store.saveScope({
       taskId,
       ...draft,
       proposedAt: now.toISOString(),
       digest: digestOf(draft),
-      budgetMicrousd: null,
+      budgetMicrousd: routine.budgetPerRunMicrousd ?? null,
       approvedAt: routine.approvedAt,
       approvedBy: routine.approvedBy,
       approvedDigest: digestOf(draft),

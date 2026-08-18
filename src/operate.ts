@@ -128,7 +128,7 @@ import {
 } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate } from "./contest.js";
+import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
@@ -337,7 +337,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
     "command", "timeout-seconds", "stop-grace", "title", "name",
-    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "budget-usd", "build-usd",
+    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -1228,6 +1228,11 @@ async function tickCommand(
   // the mint refuses past 50 open per approver, so the sweep keeps the
   // ceiling meaningful rather than letting dead rows consume it.
   store.sweepCeremonyNonces(clock());
+  // Decided tournaments give their checkouts back (stage 6) — this runner's
+  // custody only; a checkout that will not release cleanly is flagged and
+  // paged, never force-cleaned. Undecided ones escalate once at 14 days.
+  await sweepContestCleanup(store, path => worktrees.release(path, clock()), runner, clock());
+  escalateOverdueContests(store, clock());
   const resumed: TickOutcome[] = [];
   for (const waiting of store.contestsInStates(["decision-wait"])) {
     for (const racer of store.contestants(waiting.id).filter(one => one.state === "parked")) {
@@ -3066,14 +3071,23 @@ async function configCommand(
     const racePer = parseUsd("race-per-usd");
     const raceTotal = parseUsd("race-total-usd");
     if (build === false || racePer === false || raceTotal === false) {
-      return fail(write, json, "config set", "usage", "budgets are positive dollar amounts: `config set budgets [--build-usd N] [--race-per-usd N] [--race-total-usd N] --as <you> --token <t>`", EXIT.usage);
+      return fail(write, json, "config set", "usage", "budgets are positive dollar amounts: `config set budgets [--build-usd N] [--race-per-usd N] [--race-total-usd N] [--race-agents N] --as <you> --token <t>`", EXIT.usage);
     }
-    store.setSpendDefaults({ buildPerRunMicrousd: build, racePerAgentMicrousd: racePer, raceTotalMicrousd: raceTotal }, acting.name, clock());
+    // The default competing-agent count (operator request): applied only
+    // where a filing names one agent and no explicit count; a race digest
+    // always binds the actual lineup.
+    const agentsGiven = text(flags, "race-agents");
+    const raceAgents = agentsGiven === undefined ? null : Number(agentsGiven);
+    if (raceAgents !== null && (!Number.isInteger(raceAgents) || raceAgents < 2 || raceAgents > 4)) {
+      return fail(write, json, "config set", "usage", "--race-agents is how many agents compete by default: a whole number from 2 to 4", EXIT.usage);
+    }
+    store.setSpendDefaults({ buildPerRunMicrousd: build, racePerAgentMicrousd: racePer, raceTotalMicrousd: raceTotal, raceAgents }, acting.name, clock());
     return succeed(write, json, "config set", { budgets: store.getSpendDefaults() }, () => [
       "Spend defaults set. New filings pre-fill from these; every approval still restates its own numbers:",
       ...(build === null ? [] : [`  each ordinary build attempt: $${(build / 1_000_000).toFixed(2)} (also the installation backstop)`]),
       ...(racePer === null ? [] : [`  each tournament agent: $${(racePer / 1_000_000).toFixed(2)}`]),
       ...(raceTotal === null ? [] : [`  each tournament total: $${(raceTotal / 1_000_000).toFixed(2)}`]),
+      ...(raceAgents === null ? [] : [`  tournaments race ${raceAgents} agents unless a filing says otherwise`]),
     ]);
   }
 
@@ -3909,6 +3923,13 @@ async function routineCommand(
       return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]`", EXIT.usage);
     }
     const ceilingGiven = text(flags, "ceiling");
+    // --budget-usd on a routine caps EACH instance (v16): it becomes the
+    // instance scope's digest-bound budget term, enforced by the same
+    // native-cap plumbing as any other scope budget.
+    const perRunGiven = text(flags, "budget-usd");
+    if (perRunGiven !== undefined && (!Number.isFinite(Number(perRunGiven)) || Number(perRunGiven) <= 0)) {
+      return fail(write, json, "routine add", "bad-budget", "--budget-usd is a positive dollar amount — what each firing may spend", EXIT.usage);
+    }
     // One filing door for every surface (Codex adoption review, finding 7):
     // validation, canonicalization, digest, and provenance live in the
     // service, not here.
@@ -3923,6 +3944,7 @@ async function routineCommand(
         requirements: (text(flags, "require") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
         schedule,
         costCeilingUsd: ceilingGiven === undefined ? null : Number(ceilingGiven),
+        ...(perRunGiven === undefined ? {} : { budgetPerRunMicrousd: Math.round(Number(perRunGiven) * 1_000_000) }),
         filedVia: "cli",
       },
       clock(),
@@ -5569,18 +5591,41 @@ function scopeTask(
     return fail(write, json, "task scope", "bad-budget", "--budget-usd is a positive dollar amount", EXIT.usage);
   }
   const raceGiven = text(flags, "race");
+  const raceCountGiven = text(flags, "race-count");
   let plannedRace: ReturnType<typeof planTournament> | null = null;
+  if (raceCountGiven !== undefined && raceGiven === undefined) {
+    return fail(write, json, "task scope", "usage", "--race-count needs --race to name the competing agent, e.g. `--race claude:claude-sonnet-5 --race-count 3`", EXIT.usage);
+  }
   if (raceGiven !== undefined) {
     // Explicit flags win; absent ones fall back to the configured defaults
     // (operator request) — the digest binds the ACTUAL numbers either way,
     // and the approval restates them.
     const perUsd = Number(text(flags, "race-per-usd") ?? (defaults?.racePerAgentMicrousd == null ? Number.NaN : defaults.racePerAgentMicrousd / 1_000_000));
     const totalUsd = Number(text(flags, "race-total-usd") ?? (defaults?.raceTotalMicrousd == null ? Number.NaN : defaults.raceTotalMicrousd / 1_000_000));
+    let agents = raceGiven.split(",").map(one => {
+      const [provider = "", model = ""] = one.trim().split(":");
+      return { provider, model };
+    });
+    // The competing-agent COUNT (operator request): an explicit --race-count
+    // replicates a single named agent; with several named agents it may only
+    // agree with the list — a count that contradicts an explicit lineup is a
+    // question, not an instruction. Absent both, the configured default
+    // count replicates a single agent; an explicit list is always itself.
+    if (raceCountGiven !== undefined) {
+      const count = Number(raceCountGiven);
+      if (!Number.isInteger(count) || count < 2 || count > 4) {
+        return fail(write, json, "task scope", "usage", "--race-count is how many agents compete: a whole number from 2 to 4", EXIT.usage);
+      }
+      if (agents.length === 1) {
+        agents = Array.from({ length: count }, () => ({ ...(agents[0] as { provider: string; model: string }) }));
+      } else if (agents.length !== count) {
+        return fail(write, json, "task scope", "usage", `--race names ${agents.length} agents but --race-count says ${count} — make them agree, or name one agent and let the count replicate it`, EXIT.usage);
+      }
+    } else if (agents.length === 1 && defaults?.raceAgents != null) {
+      agents = Array.from({ length: defaults.raceAgents }, () => ({ ...(agents[0] as { provider: string; model: string }) }));
+    }
     plannedRace = planTournament({
-      agents: raceGiven.split(",").map(one => {
-        const [provider = "", model = ""] = one.trim().split(":");
-        return { provider, model };
-      }),
+      agents,
       perAgentBudgetUsd: perUsd,
       totalBudgetUsd: totalUsd,
     });
