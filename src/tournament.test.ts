@@ -808,3 +808,72 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
     store.close();
   });
 });
+
+describe("v15 — dollar thresholds: per-task terms, global defaults, real enforcement", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+  let alexToken: string;
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import("node:fs");
+    dir = mkdtempSync(join(tmpdir(), "budgets-"));
+    db = join(dir, "orders.db");
+    lines = [];
+    const store = openStore(db);
+    const { addApprover } = await import("./scope.js");
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+    alexToken = added.token;
+    store.close();
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const write = (line: string) => lines.push(line);
+  const run = async (argv: string[]) => {
+    const { runOperate } = await import("./operate.js");
+    return runOperate(argv[0] as string, argv.slice(1), write, { databaseFile: db, now: T0 });
+  };
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  test("a per-task budget is a digest-bound scope term the description says out loud", async () => {
+    const { EXIT } = await import("./operate.js");
+    await run(["task", "add", "capped", "--id", "capped", "--json"]);
+    lines = [];
+    expect(await run(["task", "scope", "capped", "--goal", "do the thing", "--budget-usd", "3.50", "--json"])).toBe(EXIT.ok);
+    const scoped = payload().scope;
+    expect(scoped.budgetMicrousd).toBe(3_500_000);
+    // Editing the budget changes the digest — the old approval strands.
+    lines = [];
+    await run(["task", "scope", "capped", "--goal", "do the thing", "--budget-usd", "9", "--json"]);
+    expect(payload().scope.digest).not.toBe(scoped.digest);
+    // And a scope WITHOUT a budget digests exactly as it always did.
+    lines = [];
+    await run(["task", "add", "plain", "--id", "plain", "--json"]);
+    lines = [];
+    await run(["task", "scope", "plain", "--goal", "do the thing", "--json"]);
+    expect(payload().scope.budgetMicrousd).toBeNull();
+  });
+
+  test("global defaults pre-fill filings; explicit flags always win", async () => {
+    lines = [];
+    await run(["config", "set", "budgets", "--build-usd", "2", "--race-per-usd", "4", "--race-total-usd", "16", "--as", "alex", "--token", alexToken, "--json"]);
+    expect(payload().budgets.buildPerRunMicrousd).toBe(2_000_000);
+
+    // A filing with no flags inherits; the race digest binds the numbers.
+    await run(["task", "add", "defaulted", "--id", "defaulted", "--json"]);
+    lines = [];
+    await run(["task", "scope", "defaulted", "--goal", "g", "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--json"]);
+    const filed = payload();
+    expect(filed.scope.budgetMicrousd).toBe(2_000_000);
+    expect(filed.race.perAgentBudgetMicrousd).toBe(4_000_000);
+    expect(filed.race.totalBudgetMicrousd).toBe(16_000_000);
+
+    // Explicit beats default.
+    await run(["task", "add", "explicit", "--id", "explicit", "--json"]);
+    lines = [];
+    await run(["task", "scope", "explicit", "--goal", "g", "--budget-usd", "7", "--json"]);
+    expect(payload().scope.budgetMicrousd).toBe(7_000_000);
+  });
+});

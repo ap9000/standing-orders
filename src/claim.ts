@@ -987,6 +987,7 @@ export function finalizePlanFenced(
       touches: plan.touches,
       proposedAt: now.toISOString(),
       digest: digestOf({ goal: plan.goal, outOfScope: plan.outOfScope, touches: plan.touches }),
+      budgetMicrousd: null,
       approvedAt: null,
       approvedBy: null,
       approvedDigest: null,

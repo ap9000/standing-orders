@@ -493,6 +493,7 @@ export function fireRoutine(
       ...draft,
       proposedAt: now.toISOString(),
       digest: digestOf(draft),
+      budgetMicrousd: null,
       approvedAt: routine.approvedAt,
       approvedBy: routine.approvedBy,
       approvedDigest: digestOf(draft),

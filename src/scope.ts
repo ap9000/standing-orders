@@ -76,6 +76,10 @@ export type Scope = {
   outOfScope: string | null;
   /** Paths the work is expected to touch. Advisory, and worth stating. */
   touches: string[];
+  /** The dollar cap per build attempt, integer micro-dollars (v15) —
+   * approved spend, restated at the yes, enforced by the provider's own
+   * stop. NULL = no per-attempt cap was asked for. */
+  budgetMicrousd: number | null;
   proposedAt: string;
   /** Of the scope as written. Approval is bound to this exact value. */
   digest: string;
@@ -94,6 +98,8 @@ export type ScopeInput = {
   goal: string;
   outOfScope?: string | null;
   touches?: readonly string[];
+  /** Integer micro-dollars per build attempt; digest-bound when present. */
+  budgetMicrousd?: number | null;
   now: Date;
   mutation?: Mutation;
 };
@@ -105,13 +111,16 @@ export type ScopeInput = {
  * change what an operator would have said, it has to move the digest, or the
  * approval it invalidates would be an approval of something else.
  */
-export function digestOf(scope: Pick<Scope, "goal" | "outOfScope" | "touches">): string {
+export function digestOf(scope: Pick<Scope, "goal" | "outOfScope" | "touches"> & { budgetMicrousd?: number | null }): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
         goal: scope.goal.trim(),
         outOfScope: scope.outOfScope?.trim() ?? null,
         touches: [...scope.touches].sort(),
+        // Absent and null digest identically, so every pre-v15 approval
+        // stays exactly as approved.
+        ...(scope.budgetMicrousd == null ? {} : { budget: scope.budgetMicrousd }),
       }),
       "utf8",
     )
@@ -124,9 +133,9 @@ export function digestOf(scope: Pick<Scope, "goal" | "outOfScope" | "touches">):
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], now, mutation = {} } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {} } = input;
 
-  const draft = { goal, outOfScope, touches: [...touches] };
+  const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd };
   const previous = store.getScope(taskId);
 
   const scope: Scope = {
@@ -342,6 +351,9 @@ export function describeScope(scope: Scope): string[] {
     `  goal         ${scope.goal}`,
     ...(scope.outOfScope === null ? [] : [`  not this     ${scope.outOfScope}`]),
     ...(scope.touches.length === 0 ? [] : [`  touches      ${scope.touches.join(", ")}`]),
+    ...(scope.budgetMicrousd === null
+      ? []
+      : [`  budget       $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} per build attempt — the agent is stopped at this figure`]),
     `  reference    ${scope.digest}`,
     `  approved     ${describeApproval(approval)}`,
   ];

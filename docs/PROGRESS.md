@@ -1,5 +1,25 @@
 # Progress
 
+**2026-08-17 — dollar thresholds land at both layers (v15, operator
+request: "selectable when creating the task or with a global setting").**
+Per task: the scope gains an optional budget term — `task scope <id>
+--budget-usd 3.50` — that is DIGEST-BOUND (editing it strands the
+approval like any term; a scope without one digests exactly as before,
+so no existing approval moved), restated by the scope description in
+words ("$3.50 per build attempt — the agent is stopped at this figure"),
+and enforced through the same native-cap plumbing tournaments use.
+Globally: `config set budgets [--build-usd N] [--race-per-usd N]
+[--race-total-usd N] --as <you> --token <t>` (authenticated, audited)
+writes spend_defaults — new filings PRE-FILL from these (explicit flags
+always win, and the digest binds the actual numbers wherever they came
+from), tournament filings inherit per-agent/total defaults, and the
+build default doubles as an installation-wide backstop: the ordinary
+build path now caps every attempt at the SMALLER of the scope term and
+the backstop. Ruling 3's fail-closed rule holds: a provider that cannot
+hold a native dollar cap does not run capped work — the tick skips it
+typed ('budget-unenforceable') instead of pretending. Schema v15:
+task_scope.budget_microusd + the spend_defaults singleton. Suite 954.
+
 **2026-08-17 — tournament stage 4: questions, answers, custody, and the
 lineage meter.** A racing agent that parks now records CUSTODY of its
 checkout (branch, exact head, which machine, whether dirty — round-3

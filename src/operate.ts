@@ -132,7 +132,7 @@ import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, f
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
-import { auditOf, inspectionOf, isProviderId, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
+import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
 import {
   build,
   DEFAULT_BUILD_TIMEOUT_MS,
@@ -337,7 +337,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
     "command", "timeout-seconds", "stop-grace", "title", "name",
-    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd",
+    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "budget-usd", "build-usd",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -1800,6 +1800,20 @@ async function tickCommand(
       now: clock(),
     });
 
+    // The per-attempt dollar cap (v15): the scope's approved term and the
+    // installation backstop, the smaller of the two. A provider that
+    // cannot hold a cap does not run capped work (ruling 3: enforce only
+    // explicit budgets; never pretend).
+    const scopeBudget = store.getScope(id)?.budgetMicrousd ?? null;
+    const backstop = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
+    const capMicrousd =
+      scopeBudget === null ? backstop : backstop === null ? scopeBudget : Math.min(scopeBudget, backstop);
+    if (capMicrousd !== null && MONEY_CAPABILITIES[spec.provider].nativeDollarCapFlag === null) {
+      release(store, lease, clock());
+      await worktrees.release(leased.worktree.path, clock());
+      dispatched.push({ id, outcome: "skipped", reason: "budget-unenforceable" });
+      continue;
+    }
     const result = await build(store, {
       taskId: id,
       taskRef: ref.id,
@@ -1812,6 +1826,7 @@ async function tickCommand(
       now: clock(),
       clock,
       timeoutMs,
+      ...(capMicrousd === null ? {} : { maxBudgetUsd: capMicrousd / 1_000_000 }),
       provider: spec.provider,
       ...(spec.model === null ? {} : { model: spec.model }),
       ...(repairModel === undefined ? {} : { repairModel }),
@@ -3019,6 +3034,43 @@ async function configCommand(
 
   if (action !== "set" && action !== "clear") {
     return fail(write, json, "config", "usage", "`standing-orders config [show|set <phase> --provider <p> [--model <m>]|clear <phase>] [--repo <path>] --as <you> --token <t>`", EXIT.usage);
+  }
+
+  // Global dollar thresholds (v15, operator request): defaults for filings
+  // and an installation-wide backstop. Authenticated like every spend
+  // routing act; the per-task digest stays the authority.
+  if (phase === "budgets") {
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, `config ${action}`, "usage", "changing spend defaults takes `--as <you> --token <t>`", EXIT.usage);
+    }
+    const authedBudget = authenticateApprover(store, acting.name, acting.token);
+    if (!authedBudget.ok) {
+      return fail(write, json, `config ${action}`, "unauthenticated", "that is not an approver, or the token does not match", EXIT.refused);
+    }
+    if (action === "clear") {
+      store.setSpendDefaults({ buildPerRunMicrousd: null, racePerAgentMicrousd: null, raceTotalMicrousd: null }, acting.name, clock());
+      return succeed(write, json, "config clear", { budgets: null }, () => ["Spend defaults cleared — filings state their own numbers again."]);
+    }
+    const parseUsd = (flag: string): number | null | false => {
+      const given = text(flags, flag);
+      if (given === undefined) return null;
+      const value = Number(given);
+      return Number.isFinite(value) && value > 0 ? Math.round(value * 1_000_000) : false;
+    };
+    const build = parseUsd("build-usd");
+    const racePer = parseUsd("race-per-usd");
+    const raceTotal = parseUsd("race-total-usd");
+    if (build === false || racePer === false || raceTotal === false) {
+      return fail(write, json, "config set", "usage", "budgets are positive dollar amounts: `config set budgets [--build-usd N] [--race-per-usd N] [--race-total-usd N] --as <you> --token <t>`", EXIT.usage);
+    }
+    store.setSpendDefaults({ buildPerRunMicrousd: build, racePerAgentMicrousd: racePer, raceTotalMicrousd: raceTotal }, acting.name, clock());
+    return succeed(write, json, "config set", { budgets: store.getSpendDefaults() }, () => [
+      "Spend defaults set. New filings pre-fill from these; every approval still restates its own numbers:",
+      ...(build === null ? [] : [`  each ordinary build attempt: $${(build / 1_000_000).toFixed(2)} (also the installation backstop)`]),
+      ...(racePer === null ? [] : [`  each tournament agent: $${(racePer / 1_000_000).toFixed(2)}`]),
+      ...(raceTotal === null ? [] : [`  each tournament total: $${(raceTotal / 1_000_000).toFixed(2)}`]),
+    ]);
   }
 
   // Chat is its OWN configuration, deliberately not a phase (Codex v3
@@ -5501,11 +5553,25 @@ function scopeTask(
   // A tournament rides the same filing (stage 3): --race names the agents,
   // the dollar terms are REQUIRED, and everything lands unapproved — the
   // one yes later covers scope AND race terms as a single fingerprint.
+  const budgetGiven = text(flags, "budget-usd");
+  const defaults = store.getSpendDefaults();
+  const budgetUsd =
+    budgetGiven !== undefined
+      ? Number(budgetGiven)
+      : defaults?.buildPerRunMicrousd != null
+        ? defaults.buildPerRunMicrousd / 1_000_000
+        : null;
+  if (budgetGiven !== undefined && (!Number.isFinite(Number(budgetGiven)) || Number(budgetGiven) <= 0)) {
+    return fail(write, json, "task scope", "bad-budget", "--budget-usd is a positive dollar amount", EXIT.usage);
+  }
   const raceGiven = text(flags, "race");
   let plannedRace: ReturnType<typeof planTournament> | null = null;
   if (raceGiven !== undefined) {
-    const perUsd = Number(text(flags, "race-per-usd"));
-    const totalUsd = Number(text(flags, "race-total-usd"));
+    // Explicit flags win; absent ones fall back to the configured defaults
+    // (operator request) — the digest binds the ACTUAL numbers either way,
+    // and the approval restates them.
+    const perUsd = Number(text(flags, "race-per-usd") ?? (defaults?.racePerAgentMicrousd == null ? Number.NaN : defaults.racePerAgentMicrousd / 1_000_000));
+    const totalUsd = Number(text(flags, "race-total-usd") ?? (defaults?.raceTotalMicrousd == null ? Number.NaN : defaults.raceTotalMicrousd / 1_000_000));
     plannedRace = planTournament({
       agents: raceGiven.split(",").map(one => {
         const [provider = "", model = ""] = one.trim().split(":");
@@ -5524,6 +5590,7 @@ function scopeTask(
     goal,
     outOfScope: text(flags, "not") ?? null,
     touches,
+    ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
     now,
     mutation: mutationFrom(flags, now),
   });

@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -816,6 +816,19 @@ CREATE TABLE IF NOT EXISTS ceremony_nonce (
 
 CREATE INDEX IF NOT EXISTS ceremony_nonce_expiry ON ceremony_nonce (expires_at);
 
+-- Spend defaults (v15, operator request): global dollar thresholds, set by
+-- the authenticated config verb. Defaults PREFILL filings and act as an
+-- installation-wide backstop; the digest-bound scope term stays the
+-- per-task authority — a default never silently edits an approval.
+CREATE TABLE IF NOT EXISTS spend_defaults (
+  id                       INTEGER PRIMARY KEY CHECK (id = 1),
+  build_per_run_microusd   INTEGER,
+  race_per_agent_microusd  INTEGER,
+  race_total_microusd      INTEGER,
+  updated_at               TEXT NOT NULL,
+  updated_by               TEXT NOT NULL
+);
+
 -- Fleet chat (v13). Chat providers are DIRECT API adapters, deliberately a
 -- separate type from the build harnesses (Codex v3 review, change 1): a
 -- shared table would admit invalid pairs like build+anthropic-api. One
@@ -1167,6 +1180,9 @@ CREATE TABLE IF NOT EXISTS task_scope (
   touches         TEXT NOT NULL DEFAULT '[]',
   proposed_at     TEXT NOT NULL,
   digest          TEXT NOT NULL,
+  -- The dollar cap per build attempt, integer micro-dollars (v15):
+  -- approved spend, digest-bound, enforced by the provider's own stop.
+  budget_microusd INTEGER,
   approved_at     TEXT,
   approved_by     TEXT,
   approved_digest TEXT
@@ -1905,6 +1921,9 @@ function migrate(db: Database): void {
      )`,
     ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
   );
+  // v15 (budgets, operator request): the per-attempt dollar cap joins the
+  // scope, and spend_defaults arrives via the fresh SCHEMA's IF NOT EXISTS.
+  addColumn(db, "task_scope", "budget_microusd", "INTEGER");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2592,11 +2611,12 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO task_scope
-             (task_id, goal, out_of_scope, touches, proposed_at, digest, approved_at, approved_by, approved_digest)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (task_id) DO UPDATE SET
              goal = excluded.goal, out_of_scope = excluded.out_of_scope,
-             touches = excluded.touches, proposed_at = excluded.proposed_at,
+             touches = excluded.touches, budget_microusd = excluded.budget_microusd,
+             proposed_at = excluded.proposed_at,
              digest = excluded.digest, approved_at = excluded.approved_at,
              approved_by = excluded.approved_by, approved_digest = excluded.approved_digest`,
         )
@@ -2605,6 +2625,7 @@ export class Store {
           scope.goal,
           scope.outOfScope,
           JSON.stringify(scope.touches),
+          scope.budgetMicrousd ?? null,
           scope.proposedAt,
           scope.digest,
           scope.approvedAt,
@@ -3375,6 +3396,7 @@ export class Store {
         this.saveScope({
           taskId: id,
           ...draft,
+          budgetMicrousd: null,
           proposedAt: now.toISOString(),
           digest: digestOf(draft),
           approvedAt: null,
@@ -3668,6 +3690,38 @@ export class Store {
    * entry point fails closed on it (adoption review, finding 8). */
   isDemo(): boolean {
     return this.installationFact("demo") !== null;
+  }
+
+  // ---- spend defaults (v15) ----------------------------------------------
+
+  setSpendDefaults(
+    defaults: { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null },
+    by: string,
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO spend_defaults (id, build_per_run_microusd, race_per_agent_microusd, race_total_microusd, updated_at, updated_by)
+         VALUES (1, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           build_per_run_microusd = excluded.build_per_run_microusd,
+           race_per_agent_microusd = excluded.race_per_agent_microusd,
+           race_total_microusd = excluded.race_total_microusd,
+           updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      )
+      .run(defaults.buildPerRunMicrousd, defaults.racePerAgentMicrousd, defaults.raceTotalMicrousd, now.toISOString(), by);
+  }
+
+  getSpendDefaults(): { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; updatedBy: string } | null {
+    const row = this.db.prepare("SELECT * FROM spend_defaults WHERE id = 1").get();
+    if (row === undefined) return null;
+    const maybe = (key: string): number | null => (row[key] === null || row[key] === undefined ? null : Number(row[key]));
+    return {
+      buildPerRunMicrousd: maybe("build_per_run_microusd"),
+      racePerAgentMicrousd: maybe("race_per_agent_microusd"),
+      raceTotalMicrousd: maybe("race_total_microusd"),
+      updatedBy: String(row["updated_by"]),
+    };
   }
 
   // ---- tournaments (v14): persistence + the CAS primitives ---------------
@@ -7768,6 +7822,7 @@ function readScope(row: Record<string, unknown>): Scope {
     touches: readJsonArray(row["touches"]),
     proposedAt: String(row["proposed_at"]),
     digest: String(row["digest"]),
+    budgetMicrousd: row["budget_microusd"] === null || row["budget_microusd"] === undefined ? null : Number(row["budget_microusd"]),
     approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
     approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
     approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),
