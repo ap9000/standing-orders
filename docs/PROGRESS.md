@@ -1,5 +1,39 @@
 # Progress
 
+**2026-08-17 — tournament stage 3a: filing, the one yes, admission,
+children, recovery.** src/contest.ts is the orchestration: raceDigestOf
+(order-sensitive, retries pinned at zero) and tournament-approval/v1 —
+ONE approval hash over scope AND race terms (finding 31), so `task
+approve` on a tournament task refuses the scope digest alone and names
+the joint fingerprint; the interactive yes prints the agents, each
+agent's dollar cap, and the tournament total before asking. planTournament
+refuses ineligible providers in their own words (codex: turn-end-only
+usage), refuses unpriced models, and refuses a total that does not cover
+the TRUE worst case (each agent's budget plus its own overrun reserve —
+the arithmetic finding 24 demanded). admitContest is one reentrant
+transaction: open-contest check, digest re-derived from the stored terms
+(the H1 rule), approval bound to that exact digest, quota grouped by
+distinct key with doubled half-open keys refused, worker-process
+capacity in 'processes' mode, then contest + agents + slots created with
+every slot bound to its agent — a refusal persists NOTHING. Child
+finalization (findings 1/17): an agent finishing writes its own row,
+frees its slot, settles its money (or latches the FULL reservation when
+the provider went silent), and asks inside the same transaction whether
+the tournament just ended — the REGRESSION TEST proves the first
+finisher leaves the parent claim alive and the last one releases it
+exactly once, installing the contest-owned hold whose reason reads
+"tournament finished — compare the results and pick one". Recovery
+converts a dead-leased tournament to 'interrupted' by the same
+generation CAS, latching only agents that actually reached provider
+start — never-started ones stay at zero. Generic task state/requeue/
+unhold refuse 'contest-open' while a tournament runs. Found and fixed
+along the way: liveClaimByLease initially used SQL wall-clock time
+against the codebase's injected clocks — caught by the fixed-timestamp
+tests disagreeing with datetime('now') across midnight UTC. Stage 3b
+(dispatch: worktrees for all N, the ready barrier, N concurrent builds
+under the native budget cap, child wiring in the watch) is next. Suite
+949.
+
 **2026-08-17 — tournament stage 2: the v14 schema, in plain words.**
 Five new tables (the internals keep technical names; every screen will
 say "tournament", "agents", and "worker processes"): tournament_terms —

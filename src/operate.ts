@@ -128,6 +128,7 @@ import {
 } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { TEMPLATES, templateByName } from "./templates.js";
+import { planTournament, jointApprovalDigest } from "./contest.js";
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
@@ -336,7 +337,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
     "command", "timeout-seconds", "stop-grace", "title", "name",
-    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns",
+    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -2291,6 +2292,8 @@ async function requeueTask(
   if (id === undefined) {
     return fail(write, json, "task requeue", "usage", "`standing-orders task requeue <id> --as <you> --token <t>`", EXIT.usage);
   }
+  const racingGuard = refuseWhileRacing(context, "task requeue", id);
+  if (racingGuard !== null) return racingGuard;
   const acting = await askCredentials(flags, context);
   if (acting === null) {
     return fail(write, json, "task requeue", "usage", "requeueing takes `--as <you> --token <t>` — who overrode the stall is recorded, not asserted", EXIT.usage);
@@ -5081,6 +5084,28 @@ function scopeTask(
   }
 
   const touches = (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(Boolean);
+
+  // A tournament rides the same filing (stage 3): --race names the agents,
+  // the dollar terms are REQUIRED, and everything lands unapproved — the
+  // one yes later covers scope AND race terms as a single fingerprint.
+  const raceGiven = text(flags, "race");
+  let plannedRace: ReturnType<typeof planTournament> | null = null;
+  if (raceGiven !== undefined) {
+    const perUsd = Number(text(flags, "race-per-usd"));
+    const totalUsd = Number(text(flags, "race-total-usd"));
+    plannedRace = planTournament({
+      agents: raceGiven.split(",").map(one => {
+        const [provider = "", model = ""] = one.trim().split(":");
+        return { provider, model };
+      }),
+      perAgentBudgetUsd: perUsd,
+      totalBudgetUsd: totalUsd,
+    });
+    if (!plannedRace.ok) {
+      return fail(write, json, "task scope", plannedRace.reason, plannedRace.message, EXIT.refused);
+    }
+  }
+
   const scope = propose(store, {
     taskId: id,
     goal,
@@ -5089,6 +5114,35 @@ function scopeTask(
     now,
     mutation: mutationFrom(flags, now),
   });
+
+  if (plannedRace !== null && plannedRace.ok) {
+    const plan = plannedRace.plan;
+    const ref = store.refFor(BUILT_IN, id);
+    store.fileTournamentTerms(
+      {
+        taskRef: ref.id,
+        raceDigest: plan.raceDigest,
+        agents: plan.agents,
+        perAgentBudgetMicrousd: plan.perAgentBudgetMicrousd,
+        overrunReserveMicrousd: plan.overrunReserveMicrousd,
+        totalBudgetMicrousd: plan.totalBudgetMicrousd,
+        priceVersion: plan.priceVersion,
+        publicationPolicy: plan.publicationPolicy,
+      },
+      now,
+    );
+    const worst = plan.perAgentReserveMicrousd.reduce((sum, reserve) => sum + plan.perAgentBudgetMicrousd + reserve, 0);
+    return succeed(write, json, "task scope", { scope, race: plan }, () => [
+      `Scope and tournament written for ${id}. Nothing builds until somebody approves BOTH, with one yes:`,
+      ...describeScope(scope),
+      "",
+      `  tournament: ${plan.agents.map(agent => `${agent.provider} · ${agent.model}`).join("  vs  ")}`,
+      `  each agent may spend $${(plan.perAgentBudgetMicrousd / 1_000_000).toFixed(2)}, plus its stated overrun reserve;` +
+        ` worst case $${(worst / 1_000_000).toFixed(2)} total`,
+      "",
+      `  standing-orders task approve ${id} --yes`,
+    ]);
+  }
 
   return succeed(write, json, "task scope", { scope }, () => [
     `Scope written for ${id}. Nothing will build it until somebody approves it.`,
@@ -5136,6 +5190,14 @@ async function approveTask(
     write(`Approving lets a builder work on ${id}, within exactly this:`);
     write("");
     for (const line of describeScope(scope)) write(line);
+    const interactiveRace = store.activeTournamentTerms(store.refFor(BUILT_IN, id).id);
+    if (interactiveRace !== null) {
+      write("");
+      write(`  AND it starts a tournament: ${interactiveRace.n} agents build this independently —`);
+      write(`  ${interactiveRace.agents.map(agent => `${agent.provider} · ${agent.model}`).join("  vs  ")}`);
+      write(`  each may spend $${(interactiveRace.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus its overrun reserve;`);
+      write(`  the whole tournament is capped at $${(interactiveRace.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You pick the winner; only the winner publishes.`);
+    }
     write("");
     const agreed = await confirm("Approve exactly this?");
     if (!agreed) {
@@ -5162,8 +5224,18 @@ async function approveTask(
     write("");
     for (const line of describeScope(scope)) write(line);
     write("");
+    const previewRace = store.activeTournamentTerms(store.refFor(BUILT_IN, id).id);
+    if (previewRace !== null) {
+      write(`  AND the tournament: ${previewRace.agents.map(agent => `${agent.provider} · ${agent.model}`).join("  vs  ")}`);
+      write(`  each capped at $${(previewRace.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} + reserve, total $${(previewRace.totalBudgetMicrousd / 1_000_000).toFixed(2)}`);
+      write("");
+    }
     write("Nothing has been approved. Agree to this exact scope with:");
-    write(`  standing-orders task approve ${id} --yes --digest ${scope.digest} --as <you> --token <your password>`);
+    write(
+      `  standing-orders task approve ${id} --yes --digest ${
+        previewRace === null ? scope.digest : jointApprovalDigest(scope.digest, previewRace.raceDigest)
+      } --as <you> --token <your password>`,
+    );
     return EXIT.ok;
   }
   if (saw === undefined || asWho === undefined || token === undefined) {
@@ -5175,6 +5247,38 @@ async function approveTask(
   // The credential is required for a different reason: an agent that can run
   // these commands can read the digest out of `task show`, and an approval
   // nobody has to authenticate would let it agree to its own brief.
+  //
+  // A tournament task's yes covers BOTH documents (finding 31): the named
+  // digest is tournament-approval/v1 = H(scope, race), and the scope and
+  // the race terms approve together, in one transaction, or not at all.
+  const raceTerms = store.activeTournamentTerms(store.refFor(BUILT_IN, id).id);
+  if (raceTerms !== null) {
+    const joint = jointApprovalDigest(scope.digest, raceTerms.raceDigest);
+    if (saw !== joint && saw !== scope.digest) {
+      return fail(write, json, "task approve", "changed", `this task races a tournament — approve the JOINT fingerprint: ${joint}`, EXIT.refused);
+    }
+    if (saw === scope.digest && !confirmedAloud) {
+      return fail(write, json, "task approve", "changed", `this task races a tournament — the yes must name the joint fingerprint ${joint}, which covers the race terms too`, EXIT.refused);
+    }
+    const both = store.transact(() => {
+      const scopeApproved = approve(store, id, asWho as string, now, scope.digest, token as string, mutationFrom(flags, now));
+      if (!scopeApproved.ok) return scopeApproved;
+      if (!store.approveTournamentTerms(raceTerms.id, asWho as string, raceTerms.raceDigest, now)) {
+        throw new Error("the race terms changed while you were reading — nothing was approved");
+      }
+      return scopeApproved;
+    });
+    if (!both.ok) {
+      return fail(write, json, "task approve", both.reason, describeApproveFailure(both.reason, id), EXIT.refused);
+    }
+    return succeed(write, json, "task approve", { scope: both.scope, race: raceTerms }, () => [
+      `Approved — scope AND tournament, with one yes. ${raceTerms.n} agents will build ${id} independently:`,
+      ...describeScope(both.scope),
+      `  ${raceTerms.agents.map(agent => `${agent.provider} · ${agent.model}`).join("  vs  ")}`,
+      `  each may spend $${(raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus its overrun reserve; total cap $${(raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}`,
+    ]);
+  }
+
   const approved = approve(store, id, asWho, now, saw, token, mutationFrom(flags, now));
   if (!approved.ok) {
     return fail(write, json, "task approve", approved.reason, describeApproveFailure(approved.reason, id), EXIT.refused);
@@ -5344,6 +5448,8 @@ function unholdTask(
   if (store.getTask(id) === null) {
     return fail(write, json, "task unhold", "unknown-task", `no task \`${id}\``, EXIT.refused);
   }
+  const racingGuard = refuseWhileRacing(context, "task unhold", id);
+  if (racingGuard !== null) return racingGuard;
 
   const lifted = store.unhold(store.refFor(BUILT_IN, id).id, mutationFrom(flags, context.now));
   if (!lifted) return fail(write, json, "task unhold", "not-held", `${id} was not on hold`, EXIT.refused);
@@ -5385,6 +5491,21 @@ function fail(
 function text(flags: Map<string, string | true>, name: string): string | undefined {
   const value = flags.get(name);
   return typeof value === "string" ? value : undefined;
+}
+
+/** A running tournament owns its task (round-1 finding 5): the generic
+ * doors refuse until it finishes, is picked, or is abandoned. */
+function refuseWhileRacing(context: Context, command: string, taskId: string): number | null {
+  const ref = context.store.lookupRef(taskId);
+  if (ref === null || context.store.openContestFor(ref.id) === null) return null;
+  return fail(
+    context.write,
+    context.json,
+    command,
+    "contest-open",
+    "a tournament is running on this task — let it finish, then pick or abandon it",
+    EXIT.refused,
+  );
 }
 
 /**

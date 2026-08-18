@@ -292,7 +292,7 @@ export type RoutineFire = {
 };
 
 /** Who placed a hold — and therefore who alone may lift it. */
-export type HoldOwner = "operator" | "decision" | "incident" | "backoff";
+export type HoldOwner = "operator" | "decision" | "incident" | "backoff" | "contest";
 
 export type Hold = {
   id: number;
@@ -3881,6 +3881,46 @@ export class Store {
 
   setContestantCleanup(id: number, cleanup: "pending" | "done" | "attention"): void {
     this.db.prepare("UPDATE contestant SET cleanup = ? WHERE id = ?").run(cleanup, id);
+  }
+
+  contestsInStates(states: readonly ContestState[]): Contest[] {
+    const marks = states.map(() => "?").join(",");
+    return this.db.prepare(`SELECT * FROM contest WHERE state IN (${marks}) ORDER BY id`).all(...states).map(readContest);
+  }
+
+  /** The still-live claim behind a lease id, or null — recovery's question.
+   * The clock is INJECTED like everywhere else; SQL wall-clock time would
+   * silently disagree with every test's fixed timestamps. */
+  liveClaimByLease(leaseId: string, now: Date): { leaseId: string } | null {
+    const row = this.db
+      .prepare("SELECT lease_id FROM claim WHERE lease_id = ? AND released_at IS NULL AND expires_at >= ?")
+      .get(leaseId, now.toISOString());
+    return row === undefined ? null : { leaseId: String(row["lease_id"]) };
+  }
+
+  /** A racing agent's one open (or expired-but-unanswered) question. */
+  openDecisionForContestant(contestantId: number): number | null {
+    const row = this.db
+      .prepare("SELECT id FROM decision WHERE contestant = ? AND state IN ('open','expired') LIMIT 1")
+      .get(contestantId);
+    return row === undefined ? null : Number(row["id"]);
+  }
+
+  /** Admission binds each reserved slot to its agent, so recovery can
+   * find and free every one of them (nothing reserved is ever orphaned). */
+  assignSlotContestant(slotId: number, contestantId: number): void {
+    this.db.prepare("UPDATE execution_slot SET contestant = ? WHERE id = ?").run(contestantId, slotId);
+  }
+
+  releaseSlotsForContest(contestId: number, now: Date): number {
+    const changed = this.db
+      .prepare(
+        `UPDATE execution_slot SET state = 'released', released_at = ?
+          WHERE state IN ('reserved','running')
+            AND contestant IN (SELECT id FROM contestant WHERE contest = ?)`,
+      )
+      .run(now.toISOString(), contestId);
+    return Number(changed.changes);
   }
 
   // ---- worker-process slots (v14, finding 26) ----------------------------

@@ -3,6 +3,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
+import {
+  raceDigestOf,
+  jointApprovalDigest,
+  planTournament,
+  admitContest,
+  finalizeContestant,
+  recoverContests,
+  contestBranch,
+} from "./contest.js";
+import { acquire, release } from "./claim.js";
 
 const T0 = new Date("2026-08-17T12:00:00.000Z");
 
@@ -219,5 +229,304 @@ describe("worker-process slots and durable ceremony nonces", () => {
     const later = new Date(T0.getTime() + 3_600_000);
     expect(store.consumeCeremonyNonce("h2", "alex", "contest-pick", 5, "d", later)).toBe(false);
     expect(store.sweepCeremonyNonces(later)).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("stage 3a — digests, planning, admission, children, recovery", () => {
+  test("the race digest is order-sensitive; the joint digest covers both documents", () => {
+    const base = {
+      perAgentBudgetMicrousd: 5_000_000,
+      totalBudgetMicrousd: 20_000_000,
+      priceVersion: 1,
+      publicationPolicy: "none",
+    };
+    const ab = raceDigestOf({ ...base, agents: [
+      { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5" },
+      { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5" },
+    ]});
+    const ba = raceDigestOf({ ...base, agents: [
+      { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5" },
+      { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5" },
+    ]});
+    expect(ab).not.toBe(ba);
+    expect(jointApprovalDigest("s", ab)).not.toBe(jointApprovalDigest("s", ba));
+  });
+
+  test("planning refuses what money cannot bound, and the total must cover the TRUE worst case", () => {
+    const codex = planTournament({
+      agents: [{ provider: "codex", model: "gpt-5.2" }, { provider: "claude", model: "claude-sonnet-5" }],
+      perAgentBudgetUsd: 5,
+      totalBudgetUsd: 100,
+    });
+    expect(codex).toMatchObject({ ok: false, reason: "provider-ineligible" });
+    expect(planTournament({
+      agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "mystery" }],
+      perAgentBudgetUsd: 5, totalBudgetUsd: 100,
+    })).toMatchObject({ ok: false, reason: "unpriced-model" });
+    // sonnet tail = 200k*4 + 64k*15 = 1.76M microusd; two agents at $5:
+    // true worst = 2 * (5 + 1.76) = 13.52 — a $13 total refuses, $14 admits.
+    expect(planTournament({
+      agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-sonnet-5" }],
+      perAgentBudgetUsd: 5, totalBudgetUsd: 13,
+    })).toMatchObject({ ok: false, reason: "over-total" });
+    const good = planTournament({
+      agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-sonnet-5" }],
+      perAgentBudgetUsd: 5, totalBudgetUsd: 14,
+    });
+    if (!good.ok) throw new Error(good.reason);
+    expect(good.plan.perAgentReserveMicrousd).toEqual([1_760_000, 1_760_000]);
+  });
+
+  const setUpApproved = (store: Store) => {
+    store.createTask({ id: "race-3a", title: "raced" }, T0);
+    const taskRef = store.refFor("built-in", "race-3a", "ours").id;
+    const planned = planTournament({
+      agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-haiku-4-5" }],
+      perAgentBudgetUsd: 5,
+      totalBudgetUsd: 20,
+    });
+    if (!planned.ok) throw new Error(planned.reason);
+    const termsId = store.fileTournamentTerms(
+      {
+        taskRef,
+        raceDigest: planned.plan.raceDigest,
+        agents: planned.plan.agents,
+        perAgentBudgetMicrousd: planned.plan.perAgentBudgetMicrousd,
+        overrunReserveMicrousd: planned.plan.overrunReserveMicrousd,
+        totalBudgetMicrousd: planned.plan.totalBudgetMicrousd,
+        priceVersion: planned.plan.priceVersion,
+        publicationPolicy: "none",
+      },
+      T0,
+    );
+    store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
+    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim");
+    return { taskRef, leaseId: taken.claim.leaseId };
+  };
+
+  const admit = (store: Store, taskRef: number, leaseId: string, overrides: Record<string, unknown> = {}) =>
+    admitContest(
+      store,
+      {
+        taskId: "race-3a",
+        taskRef,
+        runner: "night-shift-1",
+        leaseId,
+        incarnation: null,
+        scopeDigest: "scope-d",
+        scopeApproved: true,
+        capacity: 8,
+        quotaBlocked: () => null,
+        ...overrides,
+      } as never,
+      T0,
+    );
+
+  test("admission is all or none: a capacity shortfall persists NOTHING", () => {
+    const store = openStore(":memory:");
+    const { taskRef, leaseId } = setUpApproved(store);
+    const refused = admit(store, taskRef, leaseId, { capacity: 1 });
+    expect(refused).toMatchObject({ ok: false, reason: "capacity" });
+    expect(store.openContestFor(taskRef)).toBeNull();
+    expect(store.liveSlotCount("night-shift-1")).toBe(0);
+    store.close();
+  });
+
+  test("admission proves quota per distinct key and refuses a doubled half-open key", () => {
+    const store = openStore(":memory:");
+    const { taskRef, leaseId } = setUpApproved(store);
+    expect(admit(store, taskRef, leaseId, { quotaBlocked: () => "exhausted" })).toMatchObject({ ok: false, reason: "quota" });
+    expect(store.openContestFor(taskRef)).toBeNull();
+    store.close();
+  });
+
+  test("the happy path creates the whole skeleton, slots bound to agents", () => {
+    const store = openStore(":memory:");
+    const { taskRef, leaseId } = setUpApproved(store);
+    const admitted = admit(store, taskRef, leaseId);
+    if (!admitted.ok) throw new Error(admitted.reason);
+    const contest = store.getContest(admitted.contestId);
+    expect(contest?.state).toBe("dispatching");
+    expect(contest?.currentLeaseId).toBe(leaseId);
+    const agents = store.contestants(admitted.contestId);
+    expect(agents).toHaveLength(2);
+    expect(agents[0]?.branch).toBe(contestBranch("race-3a", admitted.contestId, 1));
+    expect(agents[0]?.reserveMicrousd).toBe(1_760_000);
+    expect(store.liveSlotCount("night-shift-1")).toBe(2);
+    expect(store.getExecutionSlot(admitted.slotIds[0] as number)?.contestant).toBe(agents[0]?.id);
+    // A second admission refuses: one tournament per task.
+    expect(admit(store, taskRef, leaseId)).toMatchObject({ ok: false, reason: "contest-open" });
+    store.close();
+  });
+
+  const raceToRacing = (store: Store) => {
+    const { taskRef, leaseId } = setUpApproved(store);
+    const admitted = admit(store, taskRef, leaseId);
+    if (!admitted.ok) throw new Error(admitted.reason);
+    const contest = store.getContest(admitted.contestId);
+    if (contest === null) throw new Error("contest");
+    for (const agent of store.contestants(admitted.contestId)) {
+      store.casContestantState(agent.id, ["pending"], "ready", agent.generation);
+    }
+    store.casContestState(admitted.contestId, ["dispatching"], "racing", contest.generation);
+    for (const agent of store.contestants(admitted.contestId)) {
+      store.casContestantState(agent.id, ["ready"], "building", agent.generation);
+    }
+    return { taskRef, leaseId, contestId: admitted.contestId, slotIds: admitted.slotIds };
+  };
+
+  test("REGRESSION of the round-1 hole: the first agent finishing must NOT release the parent claim", () => {
+    const store = openStore(":memory:");
+    const { taskRef, leaseId, contestId, slotIds } = raceToRacing(store);
+    const [first, second] = store.contestants(contestId);
+    if (first === undefined || second === undefined) throw new Error("setup");
+    const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: first.branch, worktree: "/pool/c1", now: T0 });
+    const one = finalizeContestant(
+      store,
+      { contestId, contestantId: first.id, runId: run, outcome: "built", measuredMicrousd: 900_000, slotId: slotIds[0] ?? null },
+      T0,
+    );
+    expect(one.aggregated).toBeNull(); // the race is still on
+    expect(store.liveClaimByLease(leaseId, T0)).not.toBeNull(); // THE claim survives
+    expect(store.getContest(contestId)?.state).toBe("racing");
+    // The second finishes: NOW the boundary crosses, once.
+    const run2 = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: second.branch, worktree: "/pool/c2", now: T0 });
+    const two = finalizeContestant(
+      store,
+      { contestId, contestantId: second.id, runId: run2, outcome: "failed", measuredMicrousd: 300_000, slotId: slotIds[1] ?? null },
+      T0,
+    );
+    expect(two.aggregated).toBe("pick-wait");
+    expect(store.liveClaimByLease(leaseId, T0)).toBeNull(); // released exactly here
+    expect(store.getContest(contestId)?.state).toBe("pick-wait");
+    // The contest-owned hold explains the stillness in plain words.
+    const holds = store.activeHolds(taskRef, T0);
+    expect(holds.some(hold => hold.reason.includes("compare the results and pick"))).toBe(true);
+    store.close();
+  });
+
+  test("all agents failing ends in 'exhausted', never an automatic selection", () => {
+    const store = openStore(":memory:");
+    const { taskRef, leaseId, contestId, slotIds } = raceToRacing(store);
+    const agents = store.contestants(contestId);
+    for (const [index, agent] of agents.entries()) {
+      const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: agent.branch, worktree: `/pool/c${index}`, now: T0 });
+      finalizeContestant(
+        store,
+        { contestId, contestantId: agent.id, runId: run, outcome: "failed", measuredMicrousd: null, slotId: slotIds[index] ?? null },
+        T0,
+      );
+    }
+    expect(store.getContest(contestId)?.state).toBe("exhausted");
+    // measured-null latched the FULL reservation, honestly flagged.
+    const after = store.contestants(contestId);
+    expect(after[0]?.unknownSpend).toBe(true);
+    expect(after[0]?.accountedMicrousd).toBe(after[0]!.budgetMicrousd + after[0]!.reserveMicrousd);
+    store.close();
+  });
+
+  test("recovery: a dead lease interrupts the tournament; never-started agents stay at zero", () => {
+    const store = openStore(":memory:");
+    const { taskRef, leaseId, contestId } = raceToRacing(store);
+    const [first] = store.contestants(contestId);
+    if (first === undefined) throw new Error("setup");
+    // One agent actually started (run with provider start); the other never did.
+    const run = store.startRun({ taskRef, leaseId, runner: "night-shift-1", branch: first.branch, worktree: "/pool/c1", now: T0 });
+    store.stampProviderStart(run, T0);
+    store.claimContestantRun(first.id, run, store.getContestant(first.id)!.generation);
+    release(store, leaseId, T0); // the daemon died; the reaper let go
+    expect(recoverContests(store, T0)).toBe(1);
+    expect(store.getContest(contestId)?.state).toBe("interrupted");
+    const after = store.contestants(contestId);
+    const started = after.find(one => one.id === first.id);
+    const neverStarted = after.find(one => one.id !== first.id);
+    expect(started?.unknownSpend).toBe(true);
+    expect(neverStarted?.unknownSpend).toBe(false);
+    expect(neverStarted?.accountedMicrousd).toBe(0);
+    expect(store.liveSlotCount("night-shift-1")).toBe(0);
+    store.close();
+  });
+});
+
+describe("stage 3a — the CLI: filing with --race, one yes for both documents, the racing guard", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import("node:fs");
+    dir = mkdtempSync(join(tmpdir(), "race-cli-"));
+    db = join(dir, "orders.db");
+    lines = [];
+    const store = openStore(db);
+    const { addApprover } = await import("./scope.js");
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+    store.close();
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const write = (line: string) => lines.push(line);
+  const run = async (argv: string[]) => {
+    const { runOperate } = await import("./operate.js");
+    return runOperate(argv[0] as string, argv.slice(1), write, { databaseFile: db, now: T0 });
+  };
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  test("scope --race files both documents; the approval takes the JOINT fingerprint or refuses", async () => {
+    const { EXIT } = await import("./operate.js");
+    expect(await run(["task", "add", "race-cli", "--id", "race-cli", "--json"])).toBe(EXIT.ok);
+    lines = [];
+    const scoped = await run([
+      "task", "scope", "race-cli",
+      "--goal", "Build the export twice and let me pick",
+      "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5",
+      "--race-per-usd", "5",
+      "--race-total-usd", "20",
+      "--json",
+    ]);
+    expect(scoped).toBe(EXIT.ok);
+    const filed = payload();
+    expect(filed.race.agents).toHaveLength(2);
+
+    // Approving with the SCOPE digest alone refuses, naming the joint one.
+    lines = [];
+    const wrongDigest = await run([
+      "task", "approve", "race-cli", "--yes",
+      "--digest", filed.scope.digest,
+      "--as", "alex", "--token", "wrong-not-checked-yet",
+      "--json",
+    ]);
+    expect(wrongDigest).toBe(EXIT.refused);
+    const refusal = payload().message as string;
+    expect(refusal).toContain("joint fingerprint");
+    const joint = /joint fingerprint ([0-9a-f]{64})/.exec(refusal)?.[1] as string;
+
+    // The joint fingerprint, the password, one yes: both documents approve.
+    lines = [];
+    const approved = await run([
+      "task", "approve", "race-cli", "--yes",
+      "--digest", joint,
+      "--as", "alex", "--token", "not-the-real-password",
+      "--json",
+    ]);
+    // The token is wrong here (we never kept the minted one), so approval
+    // refuses on CREDENTIALS — proving the digest gate passed first.
+    expect(approved).toBe(EXIT.refused);
+    expect(payload().reason).not.toBe("changed");
+
+    // A codex agent is refused at filing, in words about turn-end usage.
+    lines = [];
+    const codex = await run([
+      "task", "scope", "race-cli",
+      "--goal", "g",
+      "--race", "codex:gpt-5.2,claude:claude-sonnet-5",
+      "--race-per-usd", "5", "--race-total-usd", "50",
+      "--json",
+    ]);
+    expect(codex).toBe(EXIT.refused);
+    expect(payload().reason).toBe("provider-ineligible");
   });
 });
