@@ -1407,7 +1407,8 @@ describe("the park", () => {
     expect(readdirSync(worktree).filter(name => name.startsWith("STANDING-ORDERS-PARK-"))).toHaveLength(0);
     // Machine-captured evidence: the payload, the diff, the inventory.
     const kinds = store.artifactsFor(runId).map(artifact => artifact.kind).sort();
-    expect(kinds).toEqual(["diff", "park-payload", "status"]);
+    // base-tree joined in v17: the live peek's snapshot, captured pre-spawn.
+    expect(kinds).toEqual(["base-tree", "diff", "park-payload", "status"]);
     expect(result.parked.artifactIds).toHaveLength(3);
     // A park never commits: whatever is in flight stays preserved.
     expect(gitCalls.some(args => args.includes("commit"))).toBe(false);

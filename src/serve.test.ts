@@ -3272,3 +3272,155 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     expect(store.runsFor(taskRef).length).toBe(2); // nothing deleted
   });
 });
+
+describe("A2 — the live peek over real HTTP: guards, fence, and the names-only fragment", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let poolRoot: string;
+  let worktree: string;
+  let approverToken: string;
+  let runId: number;
+
+  const url = (path: string) => `${base}${path}`;
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    const { gitBlobSha1, encodeBaseTreeSnapshot } = await import("./peek.js");
+    const { storeEvidence } = await import("./evidence.js");
+    const { mkdirSync } = await import("node:fs");
+    store = openStore(":memory:");
+    evidenceRoot = realpathSync(mkdtempSync(join(tmpdir(), "peek-serve-ev-")));
+    poolRoot = realpathSync(mkdtempSync(join(tmpdir(), "peek-serve-pool-")));
+    worktree = join(poolRoot, "wt-1");
+    mkdirSync(worktree);
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+    approverToken = added.token;
+
+    store.saveRunner(
+      { name: "night-shift-1", host: "here", capacity: 4, capacityMode: "tasks", repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
+      "hash",
+    );
+    store.saveRunner(
+      { name: "other-machine", host: "there", capacity: 4, capacityMode: "tasks", repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
+      "hash2",
+    );
+    store.createTask({ id: "peek-1", title: "watched work" }, T0);
+    const taskRef = store.refFor("built-in", "peek-1", "ours").id;
+    const taken = acquire(store, taskRef, "night-shift-1", { now: new Date(), ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim");
+    runId = store.startRun({
+      taskRef,
+      leaseId: taken.claim.leaseId,
+      runner: "night-shift-1",
+      branch: "standing-orders/peek-1",
+      worktree,
+      now: T0,
+    });
+    const baseSha = "b".repeat(40);
+    store.stampRun(runId, { baseRevision: baseSha });
+    store.saveWorktree({
+      path: worktree,
+      repo: "/repos/thing",
+      branch: "standing-orders/peek-1",
+      runner: "night-shift-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+      leaseEpoch: "epoch-one",
+    });
+
+    // The frozen base: one tracked file. On disk: that file edited, plus a
+    // brand-new one — the fragment must say so in names only.
+    const original = Buffer.from("export const answer = 41\n");
+    writeFileSync(join(worktree, "app.ts"), Buffer.from("export const answer = 42\n"));
+    writeFileSync(join(worktree, "notes.md"), Buffer.from("scratch\n"));
+    const snapshot = encodeBaseTreeSnapshot({
+      repo: "/repos/thing",
+      run: runId,
+      base: baseSha,
+      entries: [{ path: "app.ts", mode: "100644", sha: gitBlobSha1(original), size: original.length }],
+    });
+    storeEvidence(store, evidenceRoot, runId, "base-tree", "base-tree.json", Buffer.from(snapshot), "git ls-tree (exit 0)", T0, {
+      captureStatus: "ok",
+    });
+
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => new Date(),
+      localRunner: "night-shift-1",
+      poolRoot,
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+    rmSync(poolRoot, { recursive: true, force: true });
+  });
+
+  test("names and counts render; content never does; a session is required", async () => {
+    const bare = await fetch(url(`/r/${runId}?fragment=peek`), { redirect: "manual" });
+    expect([303, 403]).toContain(bare.status); // no session, no peek
+    const cookie = await login();
+    const peeked = await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } });
+    expect(peeked.status).toBe(200);
+    expect(peeked.headers.get("cache-control")).toBe("no-store");
+    const body = await peeked.text();
+    expect(body).toContain("best-effort look");
+    expect(body).toContain("app.ts");
+    expect(body).toContain("notes.md");
+    // Names only — never the bytes that changed.
+    expect(body).not.toContain("answer = 42");
+    // The run page itself carries the region and its poller.
+    const page = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+    expect(page).toContain("what is changing right now");
+    expect(page).toContain('id="run-peek"');
+  });
+
+  test("the fence and the guards: epoch rotation invalidates the cached look; a finished run and a foreign machine refuse", async () => {
+    const cookie = await login();
+    const first = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
+    expect(first).toContain("app.ts");
+    // A successor occupant: file changes AND the epoch rotates. The cached
+    // fragment is keyed to the dead epoch — the next look is fresh.
+    writeFileSync(join(worktree, "second.ts"), "occupant two\n");
+    const row = store.getWorktree(worktree);
+    if (row === null) throw new Error("row");
+    store.saveWorktree({ ...row, leaseEpoch: "epoch-two" });
+    const second = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
+    expect(second).toContain("second.ts");
+    // A missing epoch (adoption path) refuses rather than guessing.
+    store.saveWorktree({ ...row, leaseEpoch: null });
+    const unfenced = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
+    expect(unfenced).toContain("occupancy fence");
+    store.saveWorktree({ ...row, leaseEpoch: "epoch-three" });
+    // Another machine's build says where to look instead.
+    store.saveWorktree({ ...row, leaseEpoch: "epoch-three", runner: "other-machine" });
+    const foreign = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
+    expect(foreign).toContain("another machine");
+    store.saveWorktree({ ...row, leaseEpoch: "epoch-three", runner: "night-shift-1" });
+    // A finished run points at the record, not the tree.
+    store.finishRun(runId, { outcome: "built", committed: true, now: new Date() });
+    const done = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
+    expect(done).toContain("finished");
+  });
+});

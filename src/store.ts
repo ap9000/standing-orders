@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -446,7 +446,7 @@ export type Decision = {
 export type Artifact = {
   id: number;
   run: number;
-  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat" | "handoff" | "revision-brief";
+  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat" | "handoff" | "revision-brief" | "base-tree";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -1103,7 +1103,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -1493,6 +1493,13 @@ CREATE TABLE IF NOT EXISTS worktree (
   -- Reconstructed state is trusted only after it has been checked; see
   -- treehouse's rule about state you did not watch being created.
   verified      INTEGER NOT NULL DEFAULT 0,
+  -- Per-occupancy epoch (live-peek findings 16/28): a fresh random value
+  -- written ATOMICALLY with every lease and rotated on release, so it can
+  -- never repeat across release/forget/adopt/recreation. An observation
+  -- proved against one epoch is DISCARDED if the epoch moved before it
+  -- rendered — the fence that keeps a successor occupant's files out of a
+  -- predecessor's page.
+  lease_epoch   TEXT,
   -- The approved setup this checkout last ran to completion (M5.7):
   -- matching the live setup's digest is the cache hit; anything else runs
   -- it again before an agent may spawn here.
@@ -1945,6 +1952,32 @@ function migrate(db: Database): void {
   // and the per-instance dollar cap on standing orders.
   addColumn(db, "spend_defaults", "race_agents", "INTEGER CHECK (race_agents BETWEEN 2 AND 4)");
   addColumn(db, "routine", "budget_per_run_microusd", "INTEGER");
+  // v17 (live peek): the occupancy fence on checkouts, and artifact.kind
+  // admits 'base-tree' (the enveloped dispatch-time snapshot the peek
+  // consumes) — same recognized-exactly CHECK-widening recipe as v11's,
+  // with the FULL current column set so capture_status survives.
+  addColumn(db, "worktree", "lease_epoch", "TEXT");
+  rebuildForV4(
+    db,
+    "artifact",
+    "'diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief'",
+    "'base-tree'",
+    `CREATE TABLE artifact_next (
+       id             INTEGER PRIMARY KEY AUTOINCREMENT,
+       run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+       kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree')),
+       key            TEXT NOT NULL,
+       bytes_original INTEGER NOT NULL,
+       bytes_stored   INTEGER NOT NULL,
+       truncated      INTEGER NOT NULL DEFAULT 0,
+       sha256         TEXT NOT NULL,
+       capture        TEXT NOT NULL,
+       created_at     TEXT NOT NULL,
+       redacted       INTEGER NOT NULL DEFAULT 0,
+       capture_status TEXT CHECK (capture_status IN ('ok','failed'))
+     )`,
+    ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted", "capture_status"],
+  );
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2840,12 +2873,13 @@ export class Store {
     this.once(mutation, "saveWorktree", () => {
       this.db
         .prepare(
-          `INSERT INTO worktree (path, repo, branch, runner, task_ref, created_at, leased_at, released_at, verified)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO worktree (path, repo, branch, runner, task_ref, created_at, leased_at, released_at, verified, lease_epoch)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (path) DO UPDATE SET
              repo = excluded.repo, branch = excluded.branch, runner = excluded.runner,
              task_ref = excluded.task_ref, leased_at = excluded.leased_at,
-             released_at = excluded.released_at, verified = excluded.verified`,
+             released_at = excluded.released_at, verified = excluded.verified,
+             lease_epoch = excluded.lease_epoch`,
         )
         .run(
           worktree.path,
@@ -2857,6 +2891,7 @@ export class Store {
           worktree.leasedAt,
           worktree.releasedAt,
           worktree.verified ? 1 : 0,
+          worktree.leaseEpoch ?? null,
         );
       return null;
     });
@@ -7869,6 +7904,9 @@ export type WorktreeRow = {
   verified: boolean;
   /** The approved setup this checkout last completed — the cache key (M5.7). */
   setupDigest?: string | null;
+  /** Occupancy fence (v17): fresh random value per lease, rotated on
+   * release — never repeats, never resets. Read by the live peek. */
+  leaseEpoch?: string | null;
 };
 
 /** Permission to turn labeled GitHub issues into local unapproved proposals. */
@@ -7957,6 +7995,7 @@ function readWorktree(row: Record<string, unknown>): WorktreeRow {
     verified: Number(row["verified"]) === 1,
     setupDigest:
       row["setup_digest"] === null || row["setup_digest"] === undefined ? null : String(row["setup_digest"]),
+    leaseEpoch: row["lease_epoch"] === null || row["lease_epoch"] === undefined ? null : String(row["lease_epoch"]),
   };
 }
 

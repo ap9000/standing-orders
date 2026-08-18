@@ -33,6 +33,7 @@ import { LIMITS } from "./decision.js";
 import { PLAN_LIMITS } from "./plan.js";
 import type { Artifact, Store } from "./store.js";
 import type { ExecResult } from "./exec.js";
+import { encodeBaseTreeSnapshot, parseBaseTreeSnapshot, type BaseTreeEntry } from "./peek.js";
 
 /** The park mailbox pattern. Each run's actual name carries a nonce; see `mailboxName`. */
 export const MAILBOX_PREFIX = "STANDING-ORDERS-PARK-";
@@ -50,6 +51,8 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   plan: PLAN_LIMITS.document,
   "terminal-diff": 256 * 1024,
   "diff-stat": 32 * 1024,
+  // The enveloped base snapshot (live peek): 20k entries of path+sha+size.
+  "base-tree": 4 * 1024 * 1024,
   handoff: 32 * 1024,
   "revision-brief": 64 * 1024,
 };
@@ -597,4 +600,78 @@ export async function captureTerminalDiff(
   });
 
   return { diffId, statId };
+}
+
+/**
+ * The live peek's base snapshot (live-peek v3 §1), captured in the same
+ * pre-spawn window that computed `base` itself — one `ls-tree` against the
+ * project clone (NEVER a worktree), lazy-fetch and replace-refs disabled
+ * on argv, the child's environment reduced to an allowlist that contains
+ * no GIT_* at all. The parsed listing is round-tripped through the strict
+ * snapshot codec: any entry the codec refuses — including paths the UTF-8
+ * decode mangled into U+FFFD — refuses the WHOLE snapshot, recorded as a
+ * failed capture. Integrity class: the database's own, claimed as nothing
+ * more (round-3 finding 42).
+ */
+export async function captureBaseTree(
+  store: Store,
+  git: (file: string, args: readonly string[], options?: { cwd?: string; envAllowlist?: readonly string[] }) => Promise<ExecResult>,
+  repoRoot: string,
+  repo: string,
+  base: string,
+  root: string,
+  runId: number,
+  now: Date,
+): Promise<{ ok: boolean }> {
+  // Fail-soft throughout: a snapshot that cannot capture disables the live
+  // peek for this run and NOTHING else — the build must proceed untouched,
+  // and an invalid run refuses later at the invocation gateway, typed.
+  try {
+    return await captureBaseTreeInner(store, git, repoRoot, repo, base, root, runId, now);
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function captureBaseTreeInner(
+  store: Store,
+  git: (file: string, args: readonly string[], options?: { cwd?: string; envAllowlist?: readonly string[] }) => Promise<ExecResult>,
+  repoRoot: string,
+  repo: string,
+  base: string,
+  root: string,
+  runId: number,
+  now: Date,
+): Promise<{ ok: boolean }> {
+  const args = ["--no-lazy-fetch", "--no-replace-objects", "--no-optional-locks", "ls-tree", "-r", "-l", "-z", base];
+  const listed = await git("git", args, { cwd: repoRoot, envAllowlist: ["PATH", "HOME"] });
+  const command = `git ls-tree -r -l -z ${base} (exit ${listed.code})`;
+  const refuse = (): { ok: false } => {
+    storeEvidence(store, root, runId, "base-tree", "base-tree.json", Buffer.alloc(0), command, now, {
+      captureStatus: "failed",
+    });
+    return { ok: false };
+  };
+  if (listed.code !== 0) return refuse();
+  const entries: BaseTreeEntry[] = [];
+  for (const record of listed.stdout.split("\u0000")) {
+    if (record === "") continue;
+    // "<mode> <type> <sha> <size>\t<path>" — size is "-" for gitlinks.
+    const tab = record.indexOf("\t");
+    if (tab < 0) return refuse();
+    const head = record.slice(0, tab).trim().split(/\s+/);
+    const path = record.slice(tab + 1);
+    const [mode, , sha, sizeText] = head;
+    if (head.length !== 4 || mode === undefined || sha === undefined || sizeText === undefined) return refuse();
+    const size = sizeText === "-" ? 0 : Number(sizeText);
+    entries.push({ path, mode, sha, size });
+    if (entries.length > 20_000) return refuse();
+  }
+  const encoded = encodeBaseTreeSnapshot({ repo, run: runId, base, entries });
+  // The strict codec is the gate: what it cannot re-read, nothing stores.
+  if (parseBaseTreeSnapshot(encoded) === null) return refuse();
+  storeEvidence(store, root, runId, "base-tree", "base-tree.json", Buffer.from(encoded, "utf8"), command, now, {
+    captureStatus: "ok",
+  });
+  return { ok: true };
 }

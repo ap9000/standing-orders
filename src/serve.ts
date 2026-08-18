@@ -43,7 +43,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
@@ -91,6 +91,7 @@ import {
   type Scope,
 } from "./scope.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
+import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, jointApprovalDigest } from "./contest.js";
 import type { AgentView } from "./contest.js";
 import type { Runner } from "./runner.js";
@@ -146,6 +147,15 @@ export type ServeOptions = {
    * read from (defaults to process.env). Chat never spawns anything. */
   chatFetcher?: typeof fetch;
   chatEnv?: Record<string, string | undefined>;
+  /**
+   * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
+   * who starts serve names the runner this machine owns. This is documented
+   * as an assertion, not machine-bound credential enforcement — the product
+   * has none anywhere. Absent = the peek is off, and says so.
+   */
+  localRunner?: string;
+  /** The checkout pool root the peek confines itself to (realpath-proved). */
+  poolRoot?: string;
 };
 
 const SESSION_COOKIE = "standing-orders_session";
@@ -858,6 +868,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         // finished run says so rather than growing forms (finding 5).
         return respond(response, 200, "text/html; charset=utf-8", runFactsFragment(found, taskId));
       }
+      if (url.searchParams.get("fragment") === "peek") {
+        // The live peek: cookie sessions only (v2 §3), never stored, never
+        // cached by anything downstream.
+        if (who.via !== "cookie") return respond(response, 403, "text/plain; charset=utf-8", "the live peek is a browser session's view");
+        const peeked = await peekFragment(found.id, who.session.csrf);
+        response.setHeader("cache-control", "no-store");
+        if (peeked.retryAfter !== undefined) response.setHeader("retry-after", String(peeked.retryAfter));
+        return respond(response, peeked.status, "text/html; charset=utf-8", peeked.body);
+      }
       const liveNonce = found.outcome === null ? randomBytes(16).toString("base64") : undefined;
       const artifacts = store.artifactsFor(found.id);
       return page(
@@ -880,7 +899,14 @@ export function createDecisionServer(options: ServeOptions): Server {
           })(),
           liveNonce === undefined
             ? undefined
-            : { nonce: liveNonce, script: regionScript("run-facts", "facts", 10) + chromeScript() },
+            : {
+                nonce: liveNonce,
+                script:
+                  regionScript("run-facts", "facts", 10) +
+                  (options.localRunner === undefined ? "" : regionScript("run-peek", "peek", 15)) +
+                  chromeScript(),
+              },
+          options.localRunner !== undefined,
         ),
         liveNonce,
       );
@@ -1594,6 +1620,183 @@ export function createDecisionServer(options: ServeOptions): Server {
         now: clock(),
       }),
     );
+  }
+
+
+  // ---- the live peek (A2; three review rounds' findings are the spec) ----
+  //
+  // Names and counts only, never content; nothing durable, ever. The cache
+  // holds finished ESCAPED fragments keyed by run:base:epoch — the epoch
+  // rotates with every lease AND release, so a stale entry's key can never
+  // be asked for again; hits still re-prove the whole guard list.
+  const peekCache = new Map<string, { fragment: string; at: number }>();
+  let peekCacheBytes = 0;
+  const peekInFlight = new Map<number, Promise<string>>();
+  const peekBySession = new Map<string, number>();
+  const PEEK_CACHE_TTL_MS = 10_000;
+  const PEEK_CACHE_ENTRIES = 8;
+  const PEEK_CACHE_BYTES = 256 * 1024;
+  const PEEK_FRAGMENT_BYTES = 32 * 1024;
+  const PEEK_GLOBAL_INFLIGHT = 4;
+  const PEEK_SESSION_INFLIGHT = 2;
+
+  const peekEvict = () => {
+    for (const [key, entry] of peekCache) {
+      if (peekCache.size <= PEEK_CACHE_ENTRIES && peekCacheBytes <= PEEK_CACHE_BYTES) break;
+      peekCache.delete(key);
+      peekCacheBytes -= Buffer.byteLength(entry.fragment);
+    }
+  };
+
+  /** One typed sentence inside the region — plain words, no raw errors. */
+  const peekSay = (message: string): string => `<p class="meta">${escape(message)}</p>`;
+
+  /** The sanitize pipeline (finding 30/35): normalize → mask → escape. */
+  const peekName = (path: string): string => {
+    const normalized = path.replace(/[\u0000-\u001f\u007f]/g, "");
+    const masked = scanForSecrets(normalized).length > 0 ? "[redacted: a credential-shaped name]" : normalized;
+    return escape(masked);
+  };
+
+  type PeekAdmission = {
+    run: Run;
+    epoch: string;
+    entries: ReturnType<typeof parseBaseTreeSnapshot>;
+  };
+
+  /** The full guard list (v3 §4) — run on every request, hit or miss. */
+  function peekGuards(runId: number): { ok: true; admit: PeekAdmission & { entries: NonNullable<PeekAdmission["entries"]> } } | { ok: false; message: string } {
+    if (options.localRunner === undefined || options.poolRoot === undefined) {
+      return { ok: false, message: "live peek is off — start serve with --runner <name> naming this machine's runner" };
+    }
+    const run = store.getRun(runId);
+    if (run === null || !runVisible(run)) return { ok: false, message: "no such build" };
+    if (run.outcome !== null) return { ok: false, message: "this build has finished — the final diff below is the record" };
+    if (run.baseRevision === null) return { ok: false, message: "the build has not settled its starting point yet" };
+    if (store.liveClaimByLease(run.leaseId, clock()) === null) {
+      return { ok: false, message: "the build is not actively running right now" };
+    }
+    const row = store.getWorktree(run.worktree);
+    if (row === null || row.taskRef !== run.taskRef) return { ok: false, message: "the checkout is not where the record says" };
+    if (row.runner !== options.localRunner) {
+      return { ok: false, message: "this build runs on another machine — open the console there to watch it" };
+    }
+    // Adoption-path rows can carry no epoch (round-3 finding 37): no fence,
+    // no peek — never a guess.
+    if (row.leaseEpoch === null || row.leaseEpoch === undefined) {
+      return { ok: false, message: "this checkout predates the occupancy fence — it cannot be watched live" };
+    }
+    try {
+      const real = realpathSync(run.worktree);
+      const pool = realpathSync(options.poolRoot);
+      if (real !== run.worktree || !(real === pool || real.startsWith(`${pool}/`)) || !lstatSync(run.worktree).isDirectory()) {
+        return { ok: false, message: "the checkout is not inside this machine's pool" };
+      }
+    } catch {
+      return { ok: false, message: "the checkout could not be found on this machine" };
+    }
+    // The snapshot: exactly one successful, untruncated base-tree artifact
+    // whose envelope binds THIS run and THIS base (round-3 finding 42).
+    const artifact = store.artifactsFor(runId).find(one => one.kind === "base-tree");
+    if (artifact === undefined) return { ok: false, message: "no base snapshot was captured for this build" };
+    if (artifact.captureStatus !== "ok" || artifact.truncated) {
+      return { ok: false, message: "the base snapshot did not capture cleanly — this build cannot be watched live" };
+    }
+    const read = readVerifiedArtifact(evidenceRoot, artifact);
+    if (!read.ok) return { ok: false, message: "the base snapshot no longer verifies" };
+    const snapshot = parseBaseTreeSnapshot(read.content.toString("utf8"));
+    if (snapshot === null || snapshot.run !== runId || snapshot.base !== run.baseRevision) {
+      return { ok: false, message: "the base snapshot does not match this build" };
+    }
+    return { ok: true, admit: { run, epoch: row.leaseEpoch, entries: snapshot } };
+  }
+
+  async function peekFragment(runId: number, sessionKey: string): Promise<{ status: number; body: string; retryAfter?: number }> {
+    const guarded = peekGuards(runId);
+    if (!guarded.ok) return { status: 200, body: peekSay(guarded.message) };
+    const { run, epoch, entries } = guarded.admit;
+    const key = `${runId}:${run.baseRevision}:${epoch}`;
+    const cached = peekCache.get(key);
+    if (cached !== undefined && Date.now() - cached.at <= PEEK_CACHE_TTL_MS) {
+      return { status: 200, body: cached.fragment };
+    }
+    if (cached !== undefined) {
+      peekCache.delete(key);
+      peekCacheBytes -= Buffer.byteLength(cached.fragment);
+    }
+    // Coalesce per run; bound per session and globally (finding 10).
+    const inFlight = peekInFlight.get(runId);
+    if (inFlight !== undefined) return { status: 200, body: await inFlight };
+    if (peekInFlight.size >= PEEK_GLOBAL_INFLIGHT) return { status: 429, body: peekSay("the live view is busy — it retries by itself"), retryAfter: 10 };
+    if ((peekBySession.get(sessionKey) ?? 0) >= PEEK_SESSION_INFLIGHT) {
+      return { status: 429, body: peekSay("too many live views from this session"), retryAfter: 10 };
+    }
+    peekBySession.set(sessionKey, (peekBySession.get(sessionKey) ?? 0) + 1);
+    const work = (async (): Promise<string> => {
+      const seen = await observeWorktree(run.worktree, entries.entries, PEEK_LIMITS);
+      // The fence, proved AGAIN after the walk (findings 16/28): the same
+      // run still open, the same claim, the SAME epoch — or the whole
+      // observation is discarded, never rendered, never cached.
+      const after = peekGuards(runId);
+      if (!after.ok || after.admit.epoch !== epoch) {
+        return peekSay("the checkout changed hands mid-look — nothing is shown");
+      }
+      if (!seen.ok) return peekSay(seen.reason);
+      const stamp = clock().toISOString().slice(11, 19);
+      const parts: string[] = [
+        `<p class="meta">best-effort look at ${escape(stamp)} UTC — files can change mid-read</p>`,
+      ];
+      const changed = seen.rows.filter(one => one.kind === "changed");
+      const deleted = seen.rows.filter(one => one.kind === "deleted");
+      const unchecked = seen.rows.filter(one => one.kind === "unchecked");
+      const fresh = aggregateNewNames(seen.newPaths);
+      if (changed.length === 0 && deleted.length === 0 && fresh.total === 0) {
+        parts.push(`<p class="row">nothing has changed against the starting point yet</p>`);
+      }
+      const line = (row: { path: string; detail: string }, mark: string): string =>
+        `<p class="row mono">${mark} ${peekName(row.path)} <span class="meta">${escape(row.detail)}</span></p>`;
+      for (const row of changed) parts.push(line(row, "~"));
+      for (const row of deleted) parts.push(line(row, "−"));
+      if (fresh.total > 0) {
+        parts.push(`<p class="meta">new files · ${fresh.total}</p>`);
+        for (const row of fresh.rows) {
+          parts.push(
+            row.collapsed
+              ? `<p class="row mono">+ ${peekName(row.label)} <span class="meta">collapsed names — ${row.count} files</span></p>`
+              : `<p class="row mono">+ ${peekName(row.label)}</p>`,
+          );
+        }
+        if (fresh.renderedFiles < fresh.total) {
+          parts.push(`<p class="meta">…and ${fresh.total - fresh.renderedFiles} more (${fresh.total} new files total)</p>`);
+        }
+      }
+      if (unchecked.length > 0) {
+        parts.push(`<p class="meta">not verified this look — absence above does not mean unchanged:</p>`);
+        for (const row of unchecked) parts.push(line(row, "?"));
+      }
+      if (seen.partial !== null) parts.push(`<p class="meta">${escape(seen.partial)}</p>`);
+      let fragment = parts.join("\n");
+      if (Buffer.byteLength(fragment) > PEEK_FRAGMENT_BYTES) {
+        // The byte cap is enforced AFTER escaping (finding 32): an oversize
+        // rendering is replaced whole by its exact counts.
+        fragment =
+          `<p class="meta">best-effort look at ${escape(stamp)} UTC</p>` +
+          `<p class="row">${changed.length} changed · ${deleted.length} deleted · ${fresh.total} new · ${unchecked.length} unverified — too much to render live; the final diff will hold the detail</p>`;
+      }
+      peekCache.set(key, { fragment, at: Date.now() });
+      peekCacheBytes += Buffer.byteLength(fragment);
+      peekEvict();
+      return fragment;
+    })();
+    peekInFlight.set(runId, work);
+    try {
+      return { status: 200, body: await work };
+    } finally {
+      peekInFlight.delete(runId);
+      const left = (peekBySession.get(sessionKey) ?? 1) - 1;
+      if (left <= 0) peekBySession.delete(sessionKey);
+      else peekBySession.set(sessionKey, left);
+    }
   }
 
   /**
@@ -5053,6 +5256,14 @@ function taskBody(data: {
       `</form>`,
     ].join("");
 
+  // The live-peek door (A2, finding 10's selected-pane rule): the WATCHING
+  // happens on the run page's own polled region — this is only the way in.
+  const liveRun = data.claimed ? data.runs.find(run => run.outcome === null) : undefined;
+  const watchLink =
+    liveRun === undefined
+      ? ""
+      : `<p class="row"><a href="/r/${liveRun.id}">watch what is changing right now — build #${liveRun.id}</a></p>`;
+
   const contest = data.contest ?? null;
   const contestCard =
     contest === null
@@ -5386,6 +5597,7 @@ function taskBody(data: {
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up.
     contestCard,
+    watchLink,
     decisions,
     incidents,
     data.publication === null || data.publication === undefined
@@ -5685,8 +5897,17 @@ function runPage(
   comments: DiffComment[] = [],
   ciRepair: { pr: number } | null = null,
   live?: { nonce: string; script: string },
+  peekable = false,
 ): string {
   const rows = runFactsRows(run, taskId);
+  // The live peek region (A2): rendered only while the run is open on a
+  // serve that asserted its runner; the poller fills it within its beat.
+  const peek =
+    run.outcome !== null || !peekable
+      ? ""
+      : `<h2>what is changing right now</h2>` +
+        `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
+        `<p class="meta" id="run-peek-stamp"></p>`;
   const handoff =
     run.handoff === null
       ? ""
@@ -5769,6 +5990,7 @@ function runPage(
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     `<div id="run-facts">${rows}</div>`,
     run.outcome === null ? `<p class="meta" id="run-facts-stamp"></p>` : "",
+    peek,
     terminal === null ? "" : terminalDiffCard(terminal, run.id),
     reviewCard,
     handoff,

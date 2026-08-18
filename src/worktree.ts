@@ -23,7 +23,7 @@
  * over `.git` internals corrupts both.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
@@ -240,6 +240,10 @@ export class WorktreePool {
       releasedAt: null,
       // Freshly created, or inspected just above — either way, checked.
       verified: true,
+      // The occupancy epoch (live-peek findings 16/28): fresh randomness,
+      // written by the SAME row write that grants the lease — it can never
+      // repeat and never lag the occupancy it names.
+      leaseEpoch: randomBytes(12).toString("hex"),
     };
     // The note goes down before the lease is granted. A checkout we cannot
     // mark is one whose next holder cannot tell it is occupied — the in-use
@@ -298,6 +302,9 @@ export class WorktreePool {
       // Unknown counts as unverified. Saying "clean" about a tree we could not
       // read would hand the next runner a surprise.
       verified: dirty === false,
+      // Occupancy ended: the epoch rotates HERE too, so a peek proved
+      // against the tenancy that just ended can only discard (finding 28).
+      leaseEpoch: randomBytes(12).toString("hex"),
     };
     this.store.saveWorktree(row);
 

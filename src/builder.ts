@@ -43,6 +43,7 @@ import { OPENROUTER_ENV_KEY } from "./provider.js";
 import {
   captureParkEvidence,
   captureTerminalDiff,
+  captureBaseTree,
   evidenceRoot,
   handoffName,
   storeHandoffArtifact,
@@ -500,6 +501,12 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // the world has moved past this lease, the agent's spend is bounded by its
   // timeout either way, and nothing it produces will be committed.
   const clock = request.clock ?? (() => now);
+
+  // The live peek's base snapshot (live-peek v3 §1): captured in the same
+  // pre-spawn window that computed the base — against the project clone,
+  // never the worktree. Failure only disables the peek for this run (typed
+  // inside the artifact); the build itself proceeds untouched.
+  await captureBaseTree(store, git, leased.repo, leased.repo, baseRevision, root, request.runId, clock());
   const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
   let fencedMidBuild = false;
   let pulseTimer: ReturnType<typeof setInterval> | undefined;

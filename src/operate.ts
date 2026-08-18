@@ -2609,12 +2609,21 @@ async function serveCommand(
   const repoFlag = text(flags, "repo");
   const rootFlag = text(flags, "project-root");
 
+  // The live peek's locality assertion (live-peek v3 §3): --runner names
+  // the runner this machine owns — an ADMINISTRATOR ASSERTION, documented
+  // as such, and the peek stays off entirely without it. --pool overrides
+  // the checkout pool root the peek confines itself to.
+  const localRunner = text(flags, "runner");
+  const poolRoot = text(flags, "pool") ?? join(dirname(context.databaseFile), "worktrees");
+
   const server = createDecisionServer({
     store,
     evidenceRoot: context.evidenceRoot,
     clock: context.clock,
     telegramTokenFile: context.telegramTokenFile,
     configDir: dirname(context.databaseFile),
+    ...(localRunner === undefined ? {} : { localRunner }),
+    poolRoot,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
     ...(repoFlag === undefined ? {} : { repos: repoFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
     ...(rootFlag === undefined ? {} : { projectRoots: rootFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),

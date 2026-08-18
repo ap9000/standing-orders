@@ -1,5 +1,46 @@
 # Progress
 
+**2026-08-17 — the live worktree peek (A2, v17): three Codex rounds, then
+a native reader that executes nothing.** The attended track's blocked
+item, unblocked the hard way. Round 1 (findings 13–24) killed the naive
+design: ANY git spawned against an agent's checkout can execute
+repo-configured clean/process filters, and even object-database reads at
+poll time carry lazy-fetch/replace-refs/alternates execution surface.
+Round 2 (25–36) accepted the pivot — no subprocess at observation time —
+and rejected two overclaims. Round 3 (37–45) accepted the reclassified
+trust story in principle and handed back an implementation checklist plus
+four real walk defects, all now closed. What shipped: the base tree is
+snapshotted ONCE per run in the pre-spawn window that computes the base
+itself (`git ls-tree` against the project clone, never a worktree,
+lazy-fetch and replace-refs disabled, env allowlisted), stored as an
+enveloped `base-tree` artifact (binds repo+run+exact base OID; undecodable
+paths refuse the WHOLE snapshot; capture failure disables the peek and
+nothing else). A poll then runs pure Node: descriptor-DISCIPLINED walk
+(O_NOFOLLOW|O_NONBLOCK opens, fstat-through-descriptor, regular-file and
+same-device proofs before a byte is read, directories device-gated before
+descent, symlink TARGETS compared by readlink+in-process git-blob sha1,
+reads bounded to the accepted size with growth re-fstat'd, per-entry and
+per-chunk deadlines, unreadable corners make the look PARTIAL and
+suppress the deleted sweep), rendering NAMES AND COUNTS ONLY — changed /
+deleted / new (aggregated, never suppressed, hard row cap groups
+included) / explicitly UNCHECKED. The occupancy fence: worktree
+lease_epoch, fresh randomness written atomically with every lease and
+rotated on release — the peek proves the epoch before AND after the walk
+and discards on mismatch; the fragment cache is keyed run:base:epoch,
+LRU+byte bounded, re-guarded on every hit, byte-capped after escaping.
+Locality is an ADMINISTRATOR ASSERTION (`serve --runner <name>`, off
+without it) plus realpath containment in the pool root. Surface: the run
+page's polled region (15 s, visibility-paused) + a task-page door;
+cookie sessions only; Cache-Control: no-store; nothing durable ever.
+Residuals stated in code where they live: same-UID is the product's
+universal boundary (snapshot integrity = database integrity class), and
+pathname traversal races remain a same-volume misdirection channel in a
+names-only display until a sandboxed helper exists (named follow-up).
+Schema v17: worktree.lease_epoch + artifact.kind admits 'base-tree' by
+the recognized-exactly rebuild (doctored-db regression test; live console
+migrated and verified). Suite 986.
+
+
 **2026-08-17 — tournament stage 6 + the agent-count knob (v16, operator
 request: "configure number of competing agents").** The count, three
 ways: `task scope --race claude:claude-sonnet-5 --race-count 3`
