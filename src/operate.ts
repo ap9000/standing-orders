@@ -1224,6 +1224,10 @@ async function tickCommand(
   // agent — fresh claim, fresh slot, remaining budget only, the SAME
   // verified checkout on the SAME runner (finding 29's custody rule).
   recoverContests(store, clock());
+  // Expired ceremony nonces are litter with a bound (round-3 finding 30):
+  // the mint refuses past 50 open per approver, so the sweep keeps the
+  // ceiling meaningful rather than letting dead rows consume it.
+  store.sweepCeremonyNonces(clock());
   const resumed: TickOutcome[] = [];
   for (const waiting of store.contestsInStates(["decision-wait"])) {
     for (const racer of store.contestants(waiting.id).filter(one => one.state === "parked")) {

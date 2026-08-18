@@ -11,8 +11,17 @@ import {
   finalizeContestant,
   recoverContests,
   contestBranch,
+  buildPickView,
+  computePickPlan,
+  pickTupleDigest,
+  finalizeContestPick,
+  abandonContest,
+  nonceHashOf,
 } from "./contest.js";
+import { storeEvidence } from "./evidence.js";
+import { classify } from "./board.js";
 import { acquire, release } from "./claim.js";
+import { writeFileSync } from "node:fs";
 
 const T0 = new Date("2026-08-17T12:00:00.000Z");
 
@@ -875,5 +884,305 @@ describe("v15 — dollar thresholds: per-task terms, global defaults, real enfor
     lines = [];
     await run(["task", "scope", "explicit", "--goal", "g", "--budget-usd", "7", "--json"]);
     expect(payload().scope.budgetMicrousd).toBe(7_000_000);
+  });
+});
+
+describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremonies", () => {
+  let store: Store;
+  let root: string;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    root = mkdtempSync(join(tmpdir(), "standing-orders-pick-"));
+  });
+  afterEach(() => {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Drive a two-agent tournament to 'racing' with real terms and a claim. */
+  const toRacing = (taskId = "race-5") => {
+    store.createTask({ id: taskId, title: "raced work" }, T0);
+    const taskRef = store.refFor("built-in", taskId, "ours").id;
+    const planned = planTournament({
+      agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-haiku-4-5" }],
+      perAgentBudgetUsd: 5,
+      totalBudgetUsd: 20,
+    });
+    if (!planned.ok) throw new Error(planned.reason);
+    const termsId = store.fileTournamentTerms(
+      {
+        taskRef,
+        raceDigest: planned.plan.raceDigest,
+        agents: planned.plan.agents,
+        perAgentBudgetMicrousd: planned.plan.perAgentBudgetMicrousd,
+        overrunReserveMicrousd: planned.plan.overrunReserveMicrousd,
+        totalBudgetMicrousd: planned.plan.totalBudgetMicrousd,
+        priceVersion: planned.plan.priceVersion,
+        publicationPolicy: "none",
+      },
+      T0,
+    );
+    store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
+    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim");
+    const admitted = admitContest(
+      store,
+      {
+        taskId,
+        taskRef,
+        runner: "night-shift-1",
+        leaseId: taken.claim.leaseId,
+        incarnation: null,
+        scopeDigest: "scope-d",
+        scopeApproved: true,
+        capacity: 8,
+        quotaBlocked: () => null,
+      } as never,
+      T0,
+    );
+    if (!admitted.ok) throw new Error(admitted.reason);
+    store.stampContestDispatch(admitted.contestId, "base-sha-000", null);
+    const contest = store.getContest(admitted.contestId);
+    if (contest === null) throw new Error("contest");
+    for (const agent of store.contestants(admitted.contestId)) {
+      store.casContestantState(agent.id, ["pending"], "ready", agent.generation);
+    }
+    store.casContestState(admitted.contestId, ["dispatching"], "racing", contest.generation);
+    for (const agent of store.contestants(admitted.contestId)) {
+      store.casContestantState(agent.id, ["ready"], "building", agent.generation);
+    }
+    return { taskId, taskRef, leaseId: taken.claim.leaseId, contestId: admitted.contestId, slotIds: admitted.slotIds };
+  };
+
+  /** Finish one agent the way the builder would: run, evidence, facts, finalize. */
+  const finish = (
+    race: { taskRef: number; leaseId: string; contestId: number; slotIds: number[] },
+    contestant: { id: number; branch: string },
+    spec: {
+      outcome: "built" | "failed" | "no-change";
+      committed?: boolean;
+      head?: string;
+      handoff?: string;
+      measured?: number;
+      slot?: number | null;
+      evidence?: "ok" | "failed-capture" | "none";
+    },
+  ) => {
+    const runId = store.startRun({
+      taskRef: race.taskRef,
+      leaseId: race.leaseId,
+      runner: "night-shift-1",
+      branch: contestant.branch,
+      worktree: `/pool/${contestant.id}`,
+      contestant: contestant.id,
+      now: T0,
+    });
+    if (spec.evidence !== "none") {
+      const failed = spec.evidence === "failed-capture";
+      storeEvidence(store, root, runId, "terminal-diff", "terminal-diff.patch",
+        Buffer.from("diff --git a/x b/x\n+won\n", "utf8"), "git diff (exit 0)", T0,
+        { captureStatus: failed ? "failed" : "ok" });
+      storeEvidence(store, root, runId, "diff-stat", "terminal-diff-stat.json",
+        Buffer.from(JSON.stringify({ base: "base-sha-000", head: spec.head ?? "base-sha-000", fileCount: 1, additions: 1, deletions: 0, binaryCount: 0, filesTruncated: false, files: [] }), "utf8"),
+        "git diff --numstat (exit 0)", T0, { captureStatus: "ok" });
+    }
+    store.recordOutcomeFacts(runId, { headRevision: spec.head ?? "base-sha-000", handoff: spec.handoff ?? "done" });
+    store.finishRun(runId, {
+      outcome: spec.outcome,
+      ...(spec.committed === undefined ? {} : { committed: spec.committed }),
+      now: T0,
+    });
+    finalizeContestant(
+      store,
+      {
+        contestId: race.contestId,
+        contestantId: contestant.id,
+        runId,
+        // A verified no-change concludes the AGENT as 'built' — the run's
+        // own outcome keeps the distinction the pick predicate reads.
+        outcome: spec.outcome === "no-change" ? "built" : spec.outcome,
+        ...(spec.committed === undefined ? {} : { committed: spec.committed }),
+        measuredMicrousd: spec.measured ?? 400_000,
+        slotId: spec.slot ?? null,
+      } as never,
+      T0,
+    );
+    return runId;
+  };
+
+  test("pickability is the evidence predicate, stated in plain words when it refuses", () => {
+    const race = toRacing();
+    const [first, second] = store.contestants(race.contestId);
+    if (first === undefined || second === undefined) throw new Error("setup");
+    // First: a real committed result with verified evidence.
+    finish(race, first, { outcome: "built", committed: true, head: "head-aaa", slot: race.slotIds[0] });
+    // Second: finished but never committed — unpickable, and it says why.
+    finish(race, second, { outcome: "built", committed: false, slot: race.slotIds[1] });
+    expect(store.getContest(race.contestId)?.state).toBe("pick-wait");
+    const view = buildPickView(store, root, race.contestId);
+    if (view === null) throw new Error("view");
+    expect(view.agents[0]?.pickable).toBe(true);
+    expect(view.agents[1]?.pickable).toBe(false);
+    expect(view.agents[1]?.unpickableReason).toContain("without committing");
+    // The pick-wait boundary paged, once, with the contest address.
+    const paged = store.listNotifications("pending").find(one => one.kind === "contest-finished");
+    expect(paged?.body).toContain(`/contest/${race.contestId}`);
+  });
+
+  test("a verified no-change is pickable only while the branch really did not move", () => {
+    const race = toRacing();
+    const [first, second] = store.contestants(race.contestId);
+    if (first === undefined || second === undefined) throw new Error("setup");
+    finish(race, first, { outcome: "no-change", committed: false, head: "base-sha-000", slot: race.slotIds[0] });
+    finish(race, second, { outcome: "no-change", committed: false, head: "moved-sha", slot: race.slotIds[1] });
+    const view = buildPickView(store, root, race.contestId);
+    expect(view?.agents[0]?.pickable).toBe(true);
+    expect(view?.agents[1]?.pickable).toBe(false);
+    expect(view?.agents[1]?.unpickableReason).toContain("branch moved");
+  });
+
+  test("evidence decides: a failed capture or tampered bytes make a result unpickable", () => {
+    const race = toRacing();
+    const [first, second] = store.contestants(race.contestId);
+    if (first === undefined || second === undefined) throw new Error("setup");
+    const runId = finish(race, first, { outcome: "built", committed: true, head: "head-aaa", slot: race.slotIds[0] });
+    finish(race, second, { outcome: "built", committed: true, head: "head-bbb", slot: race.slotIds[1], evidence: "failed-capture" });
+    expect(buildPickView(store, root, race.contestId)?.agents[1]?.pickable).toBe(false);
+    // Now tamper the first agent's stored patch: bytes stop verifying.
+    writeFileSync(join(root, String(runId), "terminal-diff.patch"), "not what was hashed");
+    const after = buildPickView(store, root, race.contestId);
+    expect(after?.agents[0]?.pickable).toBe(false);
+    expect(after?.agents[0]?.unpickableReason).toContain("no longer verify");
+  });
+
+  const toPickWait = () => {
+    const race = toRacing();
+    const [first, second] = store.contestants(race.contestId);
+    if (first === undefined || second === undefined) throw new Error("setup");
+    const winnerRun = finish(race, first, { outcome: "built", committed: true, head: "head-aaa", handoff: "swapped the guard", measured: 700_000, slot: race.slotIds[0] });
+    finish(race, second, { outcome: "built", committed: false, slot: race.slotIds[1] });
+    return { ...race, first, second, winnerRun };
+  };
+
+  test("the whole pick, one transaction: nonce consumed, winner stamped, hold lifted, task done — and a replay refuses", () => {
+    const race = toPickWait();
+    const view = buildPickView(store, root, race.contestId);
+    if (view === null) throw new Error("view");
+    const plan = computePickPlan(store, view, race.first.id, null, "ours");
+    if (!plan.ok) throw new Error(plan.message);
+    const nonceValue = "nonce-value-1";
+    const minted = store.mintCeremonyNonce(
+      { hash: nonceHashOf(nonceValue), approver: "alex", subject: "contest-pick", subjectId: race.contestId, digest: plan.digest, ttlMs: 900_000 },
+      T0,
+    );
+    expect(minted.ok).toBe(true);
+    const picked = finalizeContestPick(store, {
+      contestId: race.contestId, contestantId: race.first.id, approver: "alex",
+      nonceValue, evidenceRoot: root, repo: null, taskId: race.taskId, refOrigin: "ours",
+    }, T0);
+    expect(picked).toMatchObject({ ok: true, state: "picked", publicationIntent: null });
+    const contest = store.getContest(race.contestId);
+    expect(contest?.state).toBe("picked");
+    expect(contest?.winnerContestant).toBe(race.first.id);
+    expect(contest?.pickedBy).toBe("alex");
+    expect(store.getTask(race.taskId)?.state).toBe("done");
+    expect(store.activeHolds(race.taskRef, T0)).toHaveLength(0);
+    for (const agent of store.contestants(race.contestId)) expect(agent.cleanup).toBe("pending");
+    // Replay: the nonce is gone, and so is the pick-wait state.
+    const again = finalizeContestPick(store, {
+      contestId: race.contestId, contestantId: race.first.id, approver: "alex",
+      nonceValue, evidenceRoot: root, repo: null, taskId: race.taskId, refOrigin: "ours",
+    }, T0);
+    expect(again).toMatchObject({ ok: false, reason: "not-waiting" });
+  });
+
+  test("the nonce binds the exact selection: minted for one agent, it will not pick another", () => {
+    const race = toPickWait();
+    // Make the second agent pickable too, so only the digest can refuse.
+    const view0 = buildPickView(store, root, race.contestId);
+    if (view0 === null) throw new Error("view");
+    const plan = computePickPlan(store, view0, race.first.id, null, "ours");
+    if (!plan.ok) throw new Error(plan.message);
+    store.mintCeremonyNonce(
+      { hash: nonceHashOf("nonce-x"), approver: "alex", subject: "contest-pick", subjectId: race.contestId, digest: plan.digest, ttlMs: 900_000 },
+      T0,
+    );
+    const wrong = finalizeContestPick(store, {
+      contestId: race.contestId, contestantId: race.second.id, approver: "alex",
+      nonceValue: "nonce-x", evidenceRoot: root, repo: null, taskId: race.taskId, refOrigin: "ours",
+    }, T0);
+    expect(wrong.ok).toBe(false);
+  });
+
+  test("evidence tampered between the confirmation screen and the yes: the pick refuses", () => {
+    const race = toPickWait();
+    const view = buildPickView(store, root, race.contestId);
+    if (view === null) throw new Error("view");
+    const plan = computePickPlan(store, view, race.first.id, null, "ours");
+    if (!plan.ok) throw new Error(plan.message);
+    store.mintCeremonyNonce(
+      { hash: nonceHashOf("nonce-t"), approver: "alex", subject: "contest-pick", subjectId: race.contestId, digest: plan.digest, ttlMs: 900_000 },
+      T0,
+    );
+    writeFileSync(join(root, String(race.winnerRun), "terminal-diff.patch"), "tampered after the screen");
+    const refused = finalizeContestPick(store, {
+      contestId: race.contestId, contestantId: race.first.id, approver: "alex",
+      nonceValue: "nonce-t", evidenceRoot: root, repo: null, taskId: race.taskId, refOrigin: "ours",
+    }, T0);
+    expect(refused.ok).toBe(false);
+    expect(store.getContest(race.contestId)?.state).toBe("pick-wait"); // nothing moved
+  });
+
+  test("a committed winner under a live grant creates the publication intent — the same predicate as an ordinary build", () => {
+    const race = toPickWait();
+    store.placeTask(race.taskRef, "/repos/thing");
+    store.savePublicationGrant(
+      { repo: "/repos/thing", githubRepo: "ap9000/thing", remote: "origin", headPrefix: "standing-orders/", base: "main", capabilities: ["pr"], selector: "all", draft: true, grantedBy: "alex" },
+      T0,
+    );
+    const view = buildPickView(store, root, race.contestId);
+    if (view === null) throw new Error("view");
+    const plan = computePickPlan(store, view, race.first.id, "/repos/thing", "ours");
+    if (!plan.ok) throw new Error(plan.message);
+    expect(plan.publishable).toBe(true);
+    store.mintCeremonyNonce(
+      { hash: nonceHashOf("nonce-g"), approver: "alex", subject: "contest-pick", subjectId: race.contestId, digest: plan.digest, ttlMs: 900_000 },
+      T0,
+    );
+    const picked = finalizeContestPick(store, {
+      contestId: race.contestId, contestantId: race.first.id, approver: "alex",
+      nonceValue: "nonce-g", evidenceRoot: root, repo: "/repos/thing", taskId: race.taskId, refOrigin: "ours",
+    }, T0);
+    if (!picked.ok) throw new Error(picked.message);
+    expect(picked.publicationIntent).not.toBeNull();
+  });
+
+  test("abandon: password-and-nonce like the pick — the task fails requeueably, everything is kept", () => {
+    const race = toPickWait();
+    const view = buildPickView(store, root, race.contestId);
+    if (view === null) throw new Error("view");
+    const digest = pickTupleDigest(view, { abandon: true }, { grant: null, head: null });
+    store.mintCeremonyNonce(
+      { hash: nonceHashOf("nonce-a"), approver: "alex", subject: "contest-abandon", subjectId: race.contestId, digest, ttlMs: 900_000 },
+      T0,
+    );
+    const gone = abandonContest(store, { contestId: race.contestId, approver: "alex", nonceValue: "nonce-a", evidenceRoot: root, taskId: race.taskId }, T0);
+    expect(gone.ok).toBe(true);
+    expect(store.getContest(race.contestId)?.state).toBe("abandoned");
+    expect(store.getTask(race.taskId)?.state).toBe("failed");
+    expect(store.activeHolds(race.taskRef, T0)).toHaveLength(0);
+    expect(store.runsFor(race.taskRef).length).toBeGreaterThan(0); // nothing deleted
+  });
+
+  test("the board reads a finished tournament as needs-you, addressed at the comparison screen", () => {
+    const race = toPickWait();
+    const facts = store.boardScoped(null, T0, 200, null).tasks.find(one => one.taskId === race.taskId);
+    if (facts === undefined) throw new Error("no board row");
+    expect(facts.contest).toMatchObject({ state: "pick-wait", agents: 2 });
+    const card = classify(facts, T0);
+    expect(card.lane).toBe("attention");
+    expect(card.href).toBe(`/contest/${race.contestId}`);
+    expect(card.reason).toContain("compare");
   });
 });

@@ -389,6 +389,8 @@ export type Run = {
   headRevision: string | null;
   /** The validated terminal handoff's conclusion. */
   handoff: string | null;
+  /** When racing: which tournament agent this run belongs to. */
+  contestant: number | null;
   /**
    * Where the machine is in ITS OWN state machine — stamped by the control
    * plane at boundaries it owns, never parsed from a provider stream (M5.4).
@@ -450,6 +452,8 @@ export type Artifact = {
   capture: string;
   createdAt: string;
   redacted: boolean;
+  /** Typed verdict of the capture itself (v14); null on rows from before. */
+  captureStatus: "ok" | "failed" | null;
 };
 
 /** One Telegram chat allowed to answer as one approver. Revoked, never deleted. */
@@ -3811,6 +3815,19 @@ export class Store {
   }
 
   /** The one non-finished tournament for a task, when one exists. */
+  /** The newest tournament still owed to an operator — open states plus
+   * the two that end with nothing pickable and wait for a human verdict. */
+  contestNeedingOperator(taskRef: number): Contest | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM contest WHERE task_ref = ?
+           AND state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted')
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(taskRef);
+    return row === undefined ? null : readContest(row);
+  }
+
   openContestFor(taskRef: number): Contest | null {
     const row = this.db
       .prepare(
@@ -3942,6 +3959,13 @@ export class Store {
 
   setContestantCustody(id: number, custody: string | null): void {
     this.db.prepare("UPDATE contestant SET custody = ? WHERE id = ?").run(custody, id);
+  }
+
+  /** The pick, stamped: who chose, when, and which agent won. */
+  setContestWinner(contestId: number, contestantId: number, approver: string, now: Date): void {
+    this.db
+      .prepare("UPDATE contest SET winner_contestant = ?, picked_by = ?, picked_at = ? WHERE id = ?")
+      .run(contestantId, approver, now.toISOString(), contestId);
   }
 
   setContestantCleanup(id: number, cleanup: "pending" | "done" | "attention"): void {
@@ -5570,13 +5594,15 @@ export class Store {
       capture: string;
       /** Set when the stored bytes were REDACTED before storage (audit IV-7). */
       redacted?: boolean;
+      /** Typed verdict of the capture command — a pick predicate reads THIS, never the prose in `capture`. */
+      captureStatus?: "ok" | "failed";
     },
     now: Date,
   ): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, truncated, sha256, capture, created_at, redacted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, truncated, sha256, capture, created_at, redacted, capture_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         artifact.run,
@@ -5589,6 +5615,7 @@ export class Store {
         artifact.capture,
         now.toISOString(),
         artifact.redacted === true ? 1 : 0,
+        artifact.captureStatus ?? null,
       );
     return Number(inserted.lastInsertRowid);
   }
@@ -6687,6 +6714,16 @@ export class Store {
                JOIN task_ref AS blocker_ref ON blocker_ref.backend = task_ref.backend AND blocker_ref.external_id = task_edge.blocker
                WHERE task_edge.blocked = task.id AND blocker_task.state != 'done'
                ORDER BY task_edge.blocker LIMIT 1) AS blocker_repo,
+             (SELECT contest.id FROM contest WHERE contest.task_ref = task_ref.id
+                AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted')
+               ORDER BY contest.id DESC LIMIT 1) AS contest_id,
+             (SELECT contest.state FROM contest WHERE contest.task_ref = task_ref.id
+                AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted')
+               ORDER BY contest.id DESC LIMIT 1) AS contest_state,
+             (SELECT COUNT(*) FROM contestant WHERE contestant.contest =
+               (SELECT contest.id FROM contest WHERE contest.task_ref = task_ref.id
+                  AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted')
+                ORDER BY contest.id DESC LIMIT 1)) AS contest_agents,
              (SELECT requirement.value FROM json_each(task_ref.capability_requirements) AS requirement
                WHERE task_ref.repo IS NOT NULL AND NOT EXISTS (
                  SELECT 1 FROM capability
@@ -6795,6 +6832,10 @@ export class Store {
         blockerState: text(row, "blocker_state"),
         blockerRepo: text(row, "blocker_repo"),
         missingRequirement: text(row, "missing_requirement"),
+        contest:
+          row["contest_id"] === null || row["contest_id"] === undefined
+            ? null
+            : { id: Number(row["contest_id"]), state: String(row["contest_state"]), agents: Number(row["contest_agents"]) },
         routineId:
           row["routine_id"] === null || row["routine_id"] === undefined
             ? null
@@ -7350,6 +7391,7 @@ function readRun(row: Record<string, unknown>): Run {
     provider: String(row["provider"] ?? "claude"),
     parentRun: row["parent_run"] === null || row["parent_run"] === undefined ? null : Number(row["parent_run"]),
     sessionId: row["session_id"] === null || row["session_id"] === undefined ? null : String(row["session_id"]),
+    contestant: row["contestant"] === null || row["contestant"] === undefined ? null : Number(row["contestant"]),
     baseRevision:
       row["base_revision"] === null || row["base_revision"] === undefined
         ? null
@@ -7450,6 +7492,7 @@ function readArtifact(row: Record<string, unknown>): Artifact {
     capture: String(row["capture"]),
     createdAt: String(row["created_at"]),
     redacted: Number(row["redacted"]) === 1,
+    captureStatus: row["capture_status"] === null || row["capture_status"] === undefined ? null : (String(row["capture_status"]) as "ok" | "failed"),
   };
 }
 

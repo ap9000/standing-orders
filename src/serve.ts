@@ -90,6 +90,8 @@ import {
   type Scope,
 } from "./scope.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
+import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest } from "./contest.js";
+import type { AgentView } from "./contest.js";
 import type { Runner } from "./runner.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import {
@@ -107,7 +109,7 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import type { Routine, ChatTurn, ChatProviderId } from "./store.js";
+import type { Routine, ChatTurn, ChatProviderId, Contest } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -417,7 +419,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       who.via === "cookie" && project === null && !unscopedMode &&
       url.pathname !== "/" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
-      !url.pathname.startsWith("/d/") && url.pathname !== "/projects" &&
+      !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
+      url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/workbench" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
@@ -885,6 +888,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     const runArtifact = /^\/r\/([0-9]{1,15})\/evidence\/([0-9]{1,15})$/.exec(url.pathname);
     if (runArtifact !== null) {
       return runEvidence(response, Number(runArtifact[1]), Number(runArtifact[2]));
+    }
+
+    const contestPath = /^\/contest\/([0-9]{1,15})$/.exec(url.pathname);
+    if (contestPath !== null) {
+      return contestScreen(response, who, Number(contestPath[1]), null, 200);
     }
 
     if (url.pathname === "/caps") {
@@ -1492,6 +1500,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         repo: ref?.repo ?? null,
         filedVia: store.filedViaOf(taskId),
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
+        contest: (() => {
+          if (ref === null) return null;
+          const open = store.contestNeedingOperator(ref.id);
+          return open === null ? null : { id: open.id, state: open.state, agents: store.contestants(open.id).length };
+        })(),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
         scope,
         publication: (() => {
@@ -1569,6 +1582,77 @@ export function createDecisionServer(options: ServeOptions): Server {
         nonce,
         problem,
         now: clock(),
+      }),
+    );
+  }
+
+  /**
+   * The tournament's comparison data: the pick view plus everything the
+   * page states — the task behind it, per-agent question counts, and the
+   * money totals. The ceiling is proved here, on the server-resolved repo,
+   * whatever the request named.
+   */
+  function contestData(contestId: number): {
+    view: NonNullable<ReturnType<typeof buildPickView>>;
+    taskId: string;
+    taskTitle: string;
+    repo: string | null;
+    refOrigin: string;
+    questions: Map<number, number>;
+    totalMicrousd: number;
+    anyUnknown: boolean;
+  } | null {
+    const view = buildPickView(store, evidenceRoot, contestId);
+    if (view === null) return null;
+    const ref = store.refForId(view.contest.taskRef);
+    if (ref === null || (ref.repo !== null && !visible(ref.repo))) return null;
+    const found = store.getTask(ref.externalId);
+    if (found === null) return null;
+    // Question counts follow run lineage: every run belonging to the agent,
+    // not just its final one — a parked question is part of its story.
+    const byRun = new Map<number, number>();
+    for (const one of store.runsFor(view.contest.taskRef)) {
+      if (one.contestant !== null) byRun.set(one.id, one.contestant);
+    }
+    const questions = new Map<number, number>();
+    for (const decision of store.decisionsForTask(view.contest.taskRef)) {
+      const owner = byRun.get(decision.run);
+      if (owner !== undefined) questions.set(owner, (questions.get(owner) ?? 0) + 1);
+    }
+    return {
+      view,
+      taskId: ref.externalId,
+      taskTitle: found.title,
+      repo: ref.repo,
+      refOrigin: ref.origin,
+      questions,
+      totalMicrousd: view.agents.reduce((sum, agent) => sum + agent.contestant.accountedMicrousd, 0),
+      anyUnknown: view.agents.some(agent => agent.contestant.unknownSpend),
+    };
+  }
+
+  function contestScreen(
+    response: ServerResponse,
+    who: Who,
+    contestId: number,
+    problem: string | null,
+    status: number,
+  ): void {
+    const data = contestData(contestId);
+    if (data === null) return respond(response, 404, "text/plain; charset=utf-8", "no such tournament");
+    const paneProject = who.via === "cookie" ? who.session.project : null;
+    const diffs = new Map<number, TerminalDiffView | null>();
+    for (const agent of data.view.agents) {
+      if (agent.run !== null) diffs.set(agent.contestant.id, terminalDiffView(store.artifactsFor(agent.run.id), evidenceRoot));
+    }
+    return page(
+      response,
+      status,
+      contestPage(chromeFor(paneProject, "tasks"), {
+        ...data,
+        diffs,
+        csrf: who.via === "cookie" ? who.session.csrf : "",
+        problem,
       }),
     );
   }
@@ -1794,6 +1878,84 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, status, why, `/d/${id}`);
       }
       return redirect(response, body.get("return") === "next" ? "/next" : `/d/${id}`);
+    }
+
+    const contestAct = /^\/contest\/([0-9]{1,15})\/(arm|pick|abandon)$/.exec(url.pathname);
+    if (contestAct !== null) {
+      const contestId = Number(contestAct[1]);
+      const verb = contestAct[2] as "arm" | "pick" | "abandon";
+      const data = contestData(contestId);
+      if (data === null) return respond(response, 404, "text/plain; charset=utf-8", "no such tournament");
+      const { view } = data;
+
+      if (verb === "arm") {
+        // The ceremony's nonce is minted by THIS POST, never by a GET
+        // (round-3 finding 30): a prefetched or crawled page must not mint
+        // anything. The response is the ceremony form itself, carrying the
+        // nonce value; its hash lives in a durable row bound to the exact
+        // tuple digest being restated.
+        const abandoning = body.get("act") === "abandon";
+        if (abandoning) {
+          if (!["pick-wait", "exhausted", "interrupted", "decision-wait"].includes(view.contest.state)) {
+            return contestScreen(response, who, contestId, "this tournament is not in a state an operator can abandon", 409);
+          }
+          const digest = pickTupleDigest(view, { abandon: true }, { grant: null, head: null });
+          const nonceValue = randomBytes(18).toString("base64url");
+          const minted = store.mintCeremonyNonce(
+            { hash: nonceHashOf(nonceValue), approver: who.name, subject: "contest-abandon", subjectId: contestId, digest, ttlMs: 15 * 60_000 },
+            now,
+          );
+          if (!minted.ok) return contestScreen(response, who, contestId, "too many unfinished confirmations are open — finish or let them expire", 429);
+          return page(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
+            kind: "abandon", contestId, taskId: data.taskId, taskTitle: data.taskTitle,
+            agents: view.agents.length, totalMicrousd: data.totalMicrousd, anyUnknown: data.anyUnknown,
+            nonceValue, csrf: who.via === "cookie" ? who.session.csrf : "",
+          }));
+        }
+        if (view.contest.state !== "pick-wait") {
+          return contestScreen(response, who, contestId, "this tournament is not waiting for a pick", 409);
+        }
+        const choice = Number(body.get("choice") ?? "");
+        const plan = computePickPlan(store, view, choice, data.repo, data.refOrigin);
+        if (!plan.ok) return contestScreen(response, who, contestId, plan.message, 409);
+        const nonceValue = randomBytes(18).toString("base64url");
+        const minted = store.mintCeremonyNonce(
+          { hash: nonceHashOf(nonceValue), approver: who.name, subject: "contest-pick", subjectId: contestId, digest: plan.digest, ttlMs: 15 * 60_000 },
+          now,
+        );
+        if (!minted.ok) return contestScreen(response, who, contestId, "too many unfinished confirmations are open — finish or let them expire", 429);
+        return page(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
+          kind: "pick", contestId, taskId: data.taskId, taskTitle: data.taskTitle,
+          agents: view.agents.length, totalMicrousd: data.totalMicrousd, anyUnknown: data.anyUnknown,
+          chosen: plan.chosen,
+          publication: plan.publishable && plan.grant !== null ? { githubRepo: plan.grant.githubRepo, branch: plan.chosen.run.branch, draft: plan.grant.draft } : null,
+          nonceValue, csrf: who.via === "cookie" ? who.session.csrf : "",
+        }));
+      }
+
+      // pick and abandon: the password, typed again, plus the nonce the arm
+      // POST minted. The store consumes the nonce conditionally inside the
+      // same transaction that moves the tournament — replay finds it gone.
+      const token = body.get("token") ?? "";
+      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        return contestScreen(response, who, contestId, "that decision takes your password, typed again", 403);
+      }
+      const nonceValue = body.get("nonce") ?? "";
+      if (nonceValue === "") return contestScreen(response, who, contestId, "that confirmation form was incomplete — start again", 400);
+
+      if (verb === "pick") {
+        const choice = Number(body.get("choice") ?? "");
+        const picked = finalizeContestPick(store, {
+          contestId, contestantId: choice, approver: who.name, nonceValue,
+          evidenceRoot, repo: data.repo, taskId: data.taskId, refOrigin: data.refOrigin,
+        }, now);
+        if (!picked.ok) return contestScreen(response, who, contestId, picked.message, 409);
+        return redirect(response, `/contest/${contestId}`);
+      }
+
+      const gone = abandonContest(store, { contestId, approver: who.name, nonceValue, evidenceRoot, taskId: data.taskId }, now);
+      if (!gone.ok) return contestScreen(response, who, contestId, gone.message, 409);
+      return redirect(response, `/contest/${contestId}`);
     }
 
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
@@ -4485,6 +4647,197 @@ function workbenchRail(data: {
   return parts.join("\n");
 }
 
+/** Dollars for a screen: micro-USD stated as money, unknowables in words. */
+function contestDollars(microusd: number): string {
+  return `$${(microusd / 1_000_000).toFixed(2)}`;
+}
+
+const CONTEST_STATE_WORDS: Record<string, string> = {
+  dispatching: "the agents are being set up",
+  racing: "the agents are working right now",
+  "pick-wait": "every agent has finished — compare the results and pick one",
+  "decision-wait": "an agent asked a question — answer it from the task screen and the tournament continues",
+  picked: "decided — one result was picked",
+  abandoned: "abandoned — nothing was picked; every agent's work is kept",
+  interrupted: "interrupted — the machine running it went away; decide what happens next",
+  exhausted: "finished with nothing to pick — decide what happens next",
+};
+
+/**
+ * The comparison screen: every agent's result side by side — outcome, cost,
+ * questions, conclusion, and the verified diff — with a pick button only on
+ * results the evidence supports. Plain words throughout: tournament,
+ * agents, results. The pick itself happens on a separate confirmation
+ * screen whose form this page can only reach through a POST.
+ */
+function contestPage(chrome: Chrome, data: {
+  view: { contest: Contest; agents: AgentView[] };
+  taskId: string;
+  taskTitle: string;
+  questions: Map<number, number>;
+  totalMicrousd: number;
+  anyUnknown: boolean;
+  diffs: Map<number, TerminalDiffView | null>;
+  csrf: string;
+  problem: string | null;
+}): string {
+  const { contest, agents } = data.view;
+  const picking = contest.state === "pick-wait";
+  const abandonable = ["pick-wait", "exhausted", "interrupted", "decision-wait"].includes(contest.state);
+
+  const agentCard = (agent: AgentView): string => {
+    const { contestant, run } = agent;
+    const winner = contest.winnerContestant === contestant.id;
+    const outcome =
+      run === null
+        ? "never produced a finished attempt"
+        : run.outcome === "built"
+          ? "finished with changes"
+          : run.outcome === "no-change"
+            ? "concluded no change was needed"
+            : run.outcome === "parked"
+              ? "waiting on an answer"
+              : run.outcome === null
+                ? "still working"
+                : `stopped (${run.outcome})`;
+    const minutes =
+      run === null || run.finishedAt === null
+        ? null
+        : Math.max(1, Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 60_000));
+    const asked = data.questions.get(contestant.id) ?? 0;
+    const cost = contestant.unknownSpend
+      ? `${contestDollars(contestant.accountedMicrousd)} — the exact figure was unknowable, so the full reservation was charged`
+      : contestDollars(contestant.accountedMicrousd);
+    const diff = data.diffs.get(contestant.id) ?? null;
+    const parts = [
+      `<div class="card${winner ? " approve-form" : ""}">`,
+      `<p><strong>agent ${contestant.ordinal}</strong> <span class="meta">${escape(contestant.provider)} · ${escape(contestant.model)}</span>` +
+        `${winner ? ` <span class="badge badge-done">picked</span>` : ""}</p>`,
+      `<p class="row">${escape(outcome)}` +
+        `${minutes === null ? "" : ` <span class="meta">· ${minutes} min</span>`}` +
+        `${asked > 0 ? ` <span class="meta">· asked ${asked} question${asked > 1 ? "s" : ""}</span>` : ""}` +
+        `${run === null ? "" : ` <span class="meta">· <a href="/r/${run.id}">the build</a></span>`}</p>`,
+      `<p class="row"><strong>cost</strong> ${escape(cost)}</p>`,
+      run === null || run.handoff === null ? "" : `<p><strong>its own conclusion</strong></p><p class="recap">${escape(run.handoff)}</p>`,
+      diff === null ? `<p class="meta">no diff was captured</p>` : terminalDiffCard(diff, run === null ? 0 : run.id),
+    ];
+    if (picking) {
+      if (agent.pickable) {
+        parts.push(
+          `<form method="post" action="/contest/${contest.id}/arm" class="inline">`,
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+          `<input type="hidden" name="choice" value="${contestant.id}">`,
+          `<button type="submit">pick this result…</button>`,
+          `</form>`,
+          `<p class="meta">picking continues to a confirmation screen — nothing happens yet</p>`,
+        );
+      } else {
+        parts.push(`<p class="meta">cannot be picked — ${escape(agent.unpickableReason ?? "")}</p>`);
+      }
+    }
+    parts.push(`</div>`);
+    return parts.filter(one => one !== "").join("\n");
+  };
+
+  return shell("tournament", [
+    `<h1>tournament</h1>`,
+    `<p class="meta">${agents.length} agents raced on <a href="${taskHref(data.taskId)}">${escape(data.taskTitle)}</a> — ` +
+      `only one result will be kept as the task's outcome; the rest stay archived with their evidence</p>`,
+    data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
+    `<p class="row"><strong>${escape(CONTEST_STATE_WORDS[contest.state] ?? contest.state)}</strong></p>`,
+    contest.pickedBy === null ? "" : `<p class="meta">picked by ${escape(contest.pickedBy)} at ${escape(when(contest.pickedAt ?? ""))}</p>`,
+    `<p class="row"><strong>charged so far</strong> ${escape(contestDollars(data.totalMicrousd))}` +
+      `${data.anyUnknown ? ` <span class="meta">— includes at least one agent charged its full reservation because the exact figure was unknowable</span>` : ""}</p>`,
+    ...agents.map(agentCard),
+    abandonable
+      ? [
+          `<div class="card">`,
+          `<form method="post" action="/contest/${contest.id}/arm" class="inline">`,
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+          `<input type="hidden" name="act" value="abandon">`,
+          `<button type="submit">abandon the tournament…</button>`,
+          `</form>`,
+          `<p class="meta">abandoning picks nothing: the task is marked failed (it can be re-queued), and every agent's branch and evidence is kept</p>`,
+          `</div>`,
+        ].join("\n")
+      : "",
+  ].filter(one => one !== "").join("\n"), { chrome });
+}
+
+/**
+ * The confirmation screen a POST minted: it restates, in full, exactly what
+ * the password will authorize — the identified result, the money, and the
+ * one publication consequence — over a single-use nonce bound to that
+ * restatement. If anything shifts underneath before the yes, the pick
+ * refuses rather than landing on the moved thing.
+ */
+function contestCeremonyPage(chrome: Chrome, data: {
+  kind: "pick" | "abandon";
+  contestId: number;
+  taskId: string;
+  taskTitle: string;
+  agents: number;
+  totalMicrousd: number;
+  anyUnknown: boolean;
+  chosen?: AgentView;
+  publication?: { githubRepo: string; branch: string; draft: boolean } | null;
+  nonceValue: string;
+  csrf: string;
+}): string {
+  const back = `<p class="meta"><a href="/contest/${data.contestId}">back — decide nothing</a></p>`;
+  if (data.kind === "abandon") {
+    return shell("tournament", [
+      `<h1>abandon this tournament?</h1>`,
+      `<div class="card">`,
+      `<p class="row">${data.agents} agents raced on <strong>${escape(data.taskTitle)}</strong>. Abandoning picks nothing:</p>`,
+      `<p class="row">— the task is marked <strong>failed</strong> and can be re-queued later</p>`,
+      `<p class="row">— every agent's branch and evidence is kept; nothing is deleted and nothing is published</p>`,
+      `<p class="row">— the ${escape(contestDollars(data.totalMicrousd))} already charged stays charged</p>`,
+      `</div>`,
+      `<form method="post" action="/contest/${data.contestId}/abandon" class="card approve-form">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
+      `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
+      `<button type="submit">yes — abandon the tournament</button>`,
+      `</form>`,
+      back,
+    ].join("\n"), { chrome });
+  }
+  const agent = data.chosen;
+  if (agent === undefined || agent.run === null) return shell("tournament", `<p class="meta">nothing to confirm</p>`, { chrome });
+  const run = agent.run;
+  return shell("tournament", [
+    `<h1>pick agent ${agent.contestant.ordinal}'s result?</h1>`,
+    `<div class="card">`,
+    `<p class="row"><strong>agent ${agent.contestant.ordinal}</strong> — ${escape(agent.contestant.provider)} · ${escape(agent.contestant.model)}</p>`,
+    `<p class="row">its result becomes the outcome of <strong>${escape(data.taskTitle)}</strong> — the task is marked done, keyed to <a href="/r/${run.id}">this build</a></p>`,
+    run.outcome === "no-change"
+      ? `<p class="row">the result is a verified <strong>no change</strong> — the agent concluded nothing needed doing, and its checkout still matches the starting point</p>`
+      : `<p class="row">the changes live on branch <span class="mono">${escape(run.branch)}</span>` +
+        `${run.headRevision === null ? "" : `, ending at <span class="mono">${escape(run.headRevision.slice(0, 12))}</span>`}</p>`,
+    agent.diff === null
+      ? ""
+      : `<p class="row">the diff being picked: <span class="mono">${escape(agent.diff.sha256.slice(0, 12))}</span> · ${agent.diff.bytesStored} bytes, verified</p>`,
+    data.publication === null || data.publication === undefined
+      ? `<p class="row"><strong>nothing is published</strong> — the branch stays local to this machine</p>`
+      : `<p class="row"><strong>a ${data.publication.draft ? "draft " : ""}pull request will be opened</strong> on ` +
+        `<span class="mono">${escape(data.publication.githubRepo)}</span> from <span class="mono">${escape(data.publication.branch)}</span></p>`,
+    `<p class="row">this agent was charged ${escape(contestDollars(agent.contestant.accountedMicrousd))}` +
+      `${agent.contestant.unknownSpend ? " (its full reservation — the exact figure was unknowable)" : ""}` +
+      `; the tournament charged ${escape(contestDollars(data.totalMicrousd))} in total</p>`,
+    `<p class="row">the other ${data.agents - 1} agent${data.agents - 1 === 1 ? "'s result is" : "s' results are"} not used — their branches and evidence are kept for reference</p>`,
+    `</div>`,
+    `<form method="post" action="/contest/${data.contestId}/pick" class="card approve-form">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
+    `<input type="hidden" name="choice" value="${agent.contestant.id}">`,
+    `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">yes — pick this result</button>`,
+    `</form>`,
+    back,
+  ].filter(one => one !== "").join("\n"), { chrome });
+}
+
 function projectsPage(
   chrome: Chrome,
   recent: { path: string; name: string; lastOpenedAt: string }[],
@@ -4590,6 +4943,7 @@ function taskBody(data: {
    * filed this (console, cli, intake, template:<name>) at the yes. */
   filedVia?: string | null;
   holds: Hold[];
+  contest?: { id: number; state: string; agents: number } | null;
   claimed: boolean;
   scope: Scope | null;
   runs: Run[];
@@ -4609,6 +4963,20 @@ function taskBody(data: {
       `<button type="submit">${escape(label)}</button>`,
       `</form>`,
     ].join("");
+
+  const contest = data.contest ?? null;
+  const contestCard =
+    contest === null
+      ? ""
+      : [
+          `<div class="card">`,
+          `<p><strong>tournament</strong> <span class="meta">${contest.agents} agents on this task</span></p>`,
+          `<p class="row">${escape(CONTEST_STATE_WORDS[contest.state] ?? contest.state)}</p>`,
+          `<p class="row"><a href="/contest/${contest.id}">${
+            contest.state === "pick-wait" ? "compare the results and pick one" : "see the tournament"
+          }</a></p>`,
+          `</div>`,
+        ].join("\n");
 
   const holds =
     data.holds.length === 0
@@ -4869,6 +5237,7 @@ function taskBody(data: {
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up.
+    contestCard,
     decisions,
     incidents,
     data.publication === null || data.publication === undefined

@@ -155,7 +155,7 @@ export function storeEvidence(
   content: Buffer,
   capture: string,
   now: Date,
-  options: { redacted?: boolean } = {},
+  options: { redacted?: boolean; captureStatus?: "ok" | "failed" } = {},
 ): number {
   const cap = EVIDENCE_CAPS[kind];
   const stored = content.subarray(0, cap);
@@ -171,6 +171,7 @@ export function storeEvidence(
       sha256: createHash("sha256").update(stored).digest("hex"),
       capture,
       ...(options.redacted === true ? { redacted: true } : {}),
+      ...(options.captureStatus === undefined ? {} : { captureStatus: options.captureStatus }),
     },
     now,
   );
@@ -568,6 +569,7 @@ export async function captureTerminalDiff(
   const patchContent = Buffer.from(hits.length > 0 ? redactSecretLines(rawPatch, hits) : rawPatch, "utf8");
   const diffId = storeEvidence(store, root, runId, "terminal-diff", "terminal-diff.patch", patchContent, patchCommand, now, {
     redacted: hits.length > 0,
+    captureStatus: patch.code === 0 ? "ok" : "failed",
   });
   if (hits.length > 0) {
     store.enqueueNotification(
@@ -590,7 +592,9 @@ export async function captureTerminalDiff(
     stat.code === 0
       ? budgetedStatJson(parseNumstat(stat.stdout, base, head))
       : Buffer.from(stat.stderr, "utf8");
-  const statId = storeEvidence(store, root, runId, "diff-stat", "terminal-diff-stat.json", statContent, statCommand, now);
+  const statId = storeEvidence(store, root, runId, "diff-stat", "terminal-diff-stat.json", statContent, statCommand, now, {
+    captureStatus: stat.code === 0 ? "ok" : "failed",
+  });
 
   return { diffId, statId };
 }

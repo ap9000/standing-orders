@@ -1,5 +1,38 @@
 # Progress
 
+**2026-08-17 — tournament stage 5: the comparison screen and the pick.**
+The payoff surface. `/contest/<id>` lays every agent's result side by
+side — outcome, duration, questions asked, its own conclusion, the
+verified diff, and the money in dollars (an unknowable figure said in
+words, never $0.00) — and offers a pick button ONLY where the evidence
+predicate allows: state built, a committed real change (or a verified
+no-change whose head still equals the tournament's base), typed capture
+verdicts 'ok' on both diff artifacts (the capture path now stamps
+capture_status from the git exit codes it already had), bytes verifying
+against their recorded hashes, nothing redacted, nothing truncated.
+Everything else is labeled with its reason in plain words. The ceremony
+is two POSTs: the first MINTS a durable single-use nonce (finding 30 —
+a GET can never mint) bound to the contest-pick/v1 tuple digest — every
+agent's identity/state/run/outcome/committed/head, every artifact's
+hash/bytes/capture/redaction, the selection, and the exact publication
+consequence — and answers with a confirmation screen restating all of
+it; the second takes the password, and finalizeContestPick does the
+whole thing in ONE transaction: nonce consumed against the REBUILT
+digest (evidence tampered between screens = refusal), winner's bytes
+proved again, state CAS'd by generation, winner stamped, all agents
+marked cleanup-pending, the contest hold lifted, the task done, and the
+publication intent created now-and-only-now under exactly the tick's
+own predicate (committed, non-no-change, live grant, branch under the
+grant's prefix, selector satisfied). Abandon gets the same ceremony
+shape and fails the task requeueably with everything kept. The board
+classifier reads tournaments before the generic branches (finding 6):
+racing shows "tournament — N agents racing", pick-wait/exhausted/
+interrupted are needs-you cards addressed at the comparison screen, and
+the aggregate boundary pages once through the outbox. Also fixed:
+contest.ts carried raw NUL bytes in digest separators (git saw binary);
+now \u0000 escapes, byte-identical digests. Suite 965.
+
+
 **2026-08-17 — dollar thresholds land at both layers (v15, operator
 request: "selectable when creating the task or with a global setting").**
 Per task: the scope gains an optional budget term — `task scope <id>

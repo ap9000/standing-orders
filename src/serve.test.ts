@@ -13,6 +13,8 @@ import { openStore, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 import { addApprover } from "./scope.js";
 import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
+import { planTournament, admitContest, finalizeContestant } from "./contest.js";
+import { storeEvidence } from "./evidence.js";
 import { createDecisionServer } from "./serve.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -3016,5 +3018,206 @@ describe("the workbench (attended A1) and the live substrate", () => {
     expect(closed).toContain("finished");
     expect(closed).toContain("reload for the final record");
     expect(closed).not.toContain("<form");
+  });
+});
+
+describe("stage 5 — the tournament comparison screen and the pick ceremony, over real HTTP", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+  let contestId: number;
+  let winnerId: number;
+  let taskRef: number;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-contest-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+
+    // A two-agent tournament, raced to pick-wait: one committed winner with
+    // verified evidence, one that finished without committing.
+    store.createTask({ id: "race-w", title: "raced on the web" }, T0);
+    taskRef = store.refFor("built-in", "race-w", "ours").id;
+    const planned = planTournament({
+      agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-haiku-4-5" }],
+      perAgentBudgetUsd: 5,
+      totalBudgetUsd: 20,
+    });
+    if (!planned.ok) throw new Error(planned.reason);
+    const termsId = store.fileTournamentTerms(
+      {
+        taskRef,
+        raceDigest: planned.plan.raceDigest,
+        agents: planned.plan.agents,
+        perAgentBudgetMicrousd: planned.plan.perAgentBudgetMicrousd,
+        overrunReserveMicrousd: planned.plan.overrunReserveMicrousd,
+        totalBudgetMicrousd: planned.plan.totalBudgetMicrousd,
+        priceVersion: planned.plan.priceVersion,
+        publicationPolicy: "none",
+      },
+      T0,
+    );
+    store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
+    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim");
+    const admitted = admitContest(
+      store,
+      {
+        taskId: "race-w", taskRef, runner: "night-shift-1", leaseId: taken.claim.leaseId,
+        incarnation: null, scopeDigest: "scope-d", scopeApproved: true, capacity: 8, quotaBlocked: () => null,
+      } as never,
+      T0,
+    );
+    if (!admitted.ok) throw new Error(admitted.reason);
+    contestId = admitted.contestId;
+    store.stampContestDispatch(contestId, "base-sha-000", null);
+    const contest = store.getContest(contestId);
+    if (contest === null) throw new Error("contest");
+    for (const agent of store.contestants(contestId)) store.casContestantState(agent.id, ["pending"], "ready", agent.generation);
+    store.casContestState(contestId, ["dispatching"], "racing", contest.generation);
+    for (const agent of store.contestants(contestId)) store.casContestantState(agent.id, ["ready"], "building", agent.generation);
+
+    const [first, second] = store.contestants(contestId);
+    if (first === undefined || second === undefined) throw new Error("agents");
+    winnerId = first.id;
+    const conclude = (agent: typeof first, committed: boolean, head: string, slot: number | null) => {
+      const runId = store.startRun({
+        taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-1",
+        branch: agent.branch, worktree: `/pool/${agent.id}`, contestant: agent.id, now: T0,
+      });
+      storeEvidence(store, evidenceRoot, runId, "terminal-diff", "terminal-diff.patch",
+        Buffer.from("diff --git a/x b/x\n+raced\n", "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
+      storeEvidence(store, evidenceRoot, runId, "diff-stat", "terminal-diff-stat.json",
+        Buffer.from(JSON.stringify({ base: "base-sha-000", head, fileCount: 1, additions: 1, deletions: 0, binaryCount: 0, filesTruncated: false, files: [{ path: "x", additions: 1, deletions: 0 }] }), "utf8"),
+        "git diff --numstat (exit 0)", T0, { captureStatus: "ok" });
+      store.recordOutcomeFacts(runId, { headRevision: head, handoff: "swapped the guard" });
+      store.finishRun(runId, { outcome: "built", committed, now: T0 });
+      finalizeContestant(store, { contestId, contestantId: agent.id, runId, outcome: "built", measuredMicrousd: 500_000, slotId: slot } as never, T0);
+      return runId;
+    };
+    conclude(first, true, "head-aaa", admitted.slotIds[0] ?? null);
+    conclude(second, false, "head-bbb", admitted.slotIds[1] ?? null);
+    if (store.getContest(contestId)?.state !== "pick-wait") throw new Error("not pick-wait");
+
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date() });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the whole ceremony: compare → arm (POST mints) → password → picked; a GET never mints and a replay refuses", async () => {
+    const cookie = await login();
+
+    // The comparison screen: plain words, both agents, the refusal named.
+    const compare = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
+    expect(compare).toContain("tournament");
+    expect(compare).toContain("agent 1");
+    expect(compare).toContain("agent 2");
+    expect(compare).toContain("cannot be picked — finished without committing");
+    expect(compare).toContain("pick this result");
+    // The GET minted nothing: no nonce field anywhere on it.
+    expect(compare).not.toContain('name="nonce"');
+
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(compare)?.[1];
+    if (csrf === undefined) throw new Error("no csrf on the page");
+
+    // Arm: the POST mints the nonce and answers with the confirmation form.
+    const armed = await fetch(url(`/contest/${contestId}/arm`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, choice: String(winnerId) }),
+    });
+    expect(armed.status).toBe(200);
+    const ceremony = await armed.text();
+    expect(ceremony).toContain("pick agent 1");
+    expect(ceremony).toContain("$0.50"); // the money, restated in dollars
+    expect(ceremony).toContain("nothing is published"); // no grant on this repo
+    const nonce = /name="nonce" value="([A-Za-z0-9_-]+)"/.exec(ceremony)?.[1];
+    if (nonce === undefined) throw new Error("no nonce in the ceremony form");
+
+    // A wrong password decides nothing.
+    const wrong = await fetch(url(`/contest/${contestId}/pick`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, choice: String(winnerId), nonce, token: "not-the-password" }),
+    });
+    expect(wrong.status).toBe(403);
+    expect(store.getContest(contestId)?.state).toBe("pick-wait");
+
+    // The real yes.
+    const picked = await fetch(url(`/contest/${contestId}/pick`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, choice: String(winnerId), nonce, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(picked.status).toBe(303);
+    expect(store.getContest(contestId)?.state).toBe("picked");
+    expect(store.getContest(contestId)?.winnerContestant).toBe(winnerId);
+    expect(store.getTask("race-w")?.state).toBe("done");
+    expect(store.activeHolds(taskRef, T0)).toHaveLength(0);
+
+    // Replay of the same ceremony refuses — the nonce died with the pick.
+    const replay = await fetch(url(`/contest/${contestId}/pick`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, choice: String(winnerId), nonce, token: approverToken }),
+    });
+    expect(replay.status).toBe(409);
+
+    // The screen now states the decision.
+    const after = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
+    expect(after).toContain("picked by alex");
+    expect(after).not.toContain("pick this result");
+  });
+
+  test("abandon: armed by POST, confirmed by password — the task fails requeueably and everything is kept", async () => {
+    const cookie = await login();
+    const compare = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(compare)?.[1];
+    if (csrf === undefined) throw new Error("no csrf");
+    const armed = await fetch(url(`/contest/${contestId}/arm`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, act: "abandon" }),
+    });
+    const ceremony = await armed.text();
+    expect(ceremony).toContain("abandon this tournament?");
+    expect(ceremony).toContain("marked <strong>failed</strong>");
+    const nonce = /name="nonce" value="([A-Za-z0-9_-]+)"/.exec(ceremony)?.[1];
+    if (nonce === undefined) throw new Error("no nonce");
+    const gone = await fetch(url(`/contest/${contestId}/abandon`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, nonce, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(gone.status).toBe(303);
+    expect(store.getContest(contestId)?.state).toBe("abandoned");
+    expect(store.getTask("race-w")?.state).toBe("failed");
+    expect(store.runsFor(taskRef).length).toBe(2); // nothing deleted
   });
 });

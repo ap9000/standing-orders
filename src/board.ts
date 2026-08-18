@@ -53,7 +53,10 @@ export type BoardFacts = {
     phase: string | null;
   } | null;
   /** The top-precedence live hold: operator > backoff > decision > incident. */
-  hold: { ownerKind: "operator" | "decision" | "incident" | "backoff"; until: string | null } | null;
+  hold: { ownerKind: "operator" | "decision" | "incident" | "backoff" | "contest"; until: string | null } | null;
+  /** The task's open tournament, when agents raced (v14). Optional so
+   * callers that predate tournaments stay valid; absent reads as none. */
+  contest?: { id: number; state: string; agents: number } | null;
   /** The first blocker that is not done, when one exists. */
   unmetDependency: string | null;
   /** That blocker's state — pre-redacted by the caller to null when the
@@ -106,8 +109,19 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     routineName: facts.routineName,
   };
 
+  const contest = facts.contest ?? null;
   if (facts.claim !== null) {
     const doing = facts.claim.role === "planner" ? "planning — " : "";
+    // A racing tournament wears its own chip: the operator should read
+    // "several agents on this" where a lone build would name its runner.
+    if (contest !== null && (contest.state === "dispatching" || contest.state === "racing")) {
+      return {
+        ...base,
+        lane: "building",
+        attempt: null,
+        reason: `tournament — ${contest.agents} agents racing`,
+      };
+    }
     return {
       ...base,
       lane: "building",
@@ -128,6 +142,26 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
       href: `/d/${facts.openDecisionId}`,
       stalledSince: facts.decisionCreatedAt ?? facts.updatedAt,
     };
+  }
+  // A finished tournament outranks every generic reading of the same rows
+  // (design round 2, finding 6): the claim is gone and the task still says
+  // running, which the generic branches would misread as a vanished build.
+  if (contest !== null) {
+    const link = `/contest/${contest.id}`;
+    if (contest.state === "pick-wait") {
+      return { ...base, lane: "attention", href: link, reason: `tournament finished — ${contest.agents} results to compare`, stalledSince: facts.updatedAt };
+    }
+    if (contest.state === "exhausted") {
+      return { ...base, lane: "attention", href: link, reason: "tournament ended with nothing to pick", stalledSince: facts.updatedAt };
+    }
+    if (contest.state === "interrupted") {
+      return { ...base, lane: "attention", href: link, reason: "tournament was interrupted — decide what happens next", stalledSince: facts.updatedAt };
+    }
+    if (contest.state === "decision-wait") {
+      // The open question already classified above; reaching here means it
+      // was answered and an agent resumes on the next pass.
+      return { ...base, lane: "building", reason: "tournament — an agent is resuming" };
+    }
   }
   if (facts.state === "failed" || facts.openIncidents > 0) {
     return {
