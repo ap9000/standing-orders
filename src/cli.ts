@@ -196,6 +196,7 @@ const OPERATE_COMMANDS = new Set([
   "intake",
   "providers",
   "template",
+  "contest",
   "webhook",
 ]);
 

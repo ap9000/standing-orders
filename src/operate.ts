@@ -128,7 +128,7 @@ import {
 } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant } from "./contest.js";
+import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate } from "./contest.js";
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
@@ -492,6 +492,8 @@ async function dispatch(
       return providersCommand(flags, context);
     case "template":
       return templateCommand(positional, flags, context);
+    case "contest":
+      return contestCommand(positional, flags, context);
     case "webhook":
       return webhookCommand(positional, flags, context);
     case "serve":
@@ -1217,9 +1219,155 @@ async function tickCommand(
     );
   }
 
+  // Tournament housekeeping before the ordinary pass (stage 4): interrupted
+  // races recover by CAS, and an ANSWERED question re-admits its parked
+  // agent — fresh claim, fresh slot, remaining budget only, the SAME
+  // verified checkout on the SAME runner (finding 29's custody rule).
+  recoverContests(store, clock());
+  const resumed: TickOutcome[] = [];
+  for (const waiting of store.contestsInStates(["decision-wait"])) {
+    for (const racer of store.contestants(waiting.id).filter(one => one.state === "parked")) {
+      if (store.answeredDecisionForContestant(racer.id) === null) continue;
+      const custody = racer.custody === null ? null : (JSON.parse(racer.custody) as { branch: string; head: string | null; runner: string });
+      const taskId = store.externalIdFor(waiting.taskRef);
+      if (custody === null || custody.runner !== runner || taskId === null) continue;
+      const remaining = racer.budgetMicrousd - racer.accountedMicrousd;
+      if (remaining <= 0) {
+        store.casContestantState(racer.id, ["parked"], "stopped", racer.generation);
+        contestMaybeAggregate(store, waiting.id, clock());
+        resumed.push({ id: taskId, outcome: "skipped", reason: "over-ceiling" });
+        continue;
+      }
+      const reclaimed = acquire(store, waiting.taskRef, runner, { now: clock(), ttlMs: leaseTtlMs });
+      if (!reclaimed.ok) continue;
+      const freshContest = store.getContest(waiting.id);
+      if (freshContest === null || !store.casContestState(waiting.id, ["decision-wait", "racing"], "racing", freshContest.generation)) {
+        release(store, reclaimed.claim.leaseId, clock());
+        continue;
+      }
+      store.stampContestLease(waiting.id, reclaimed.claim.leaseId, runner, text(flags, "incarnation") ?? null);
+      const leased = await worktrees.lease({ repo, branch: racer.branch, runner, taskRef: waiting.taskRef, now: clock() });
+      const headCheck = leased.ok ? await git("git", ["rev-parse", "HEAD"], { cwd: leased.worktree.path }) : null;
+      if (!leased.ok || (custody.head !== null && headCheck !== null && headCheck.stdout.trim() !== custody.head)) {
+        // The tree cannot be proved to be the one the agent left — stop the
+        // agent rather than cold-starting against a different history.
+        if (leased.ok) await worktrees.release(leased.worktree.path, clock());
+        const current = store.getContestant(racer.id);
+        if (current !== null) store.casContestantState(racer.id, ["parked"], "stopped", current.generation);
+        store.setContestantCleanup(racer.id, "attention");
+        contestMaybeAggregate(store, waiting.id, clock());
+        release(store, reclaimed.claim.leaseId, clock());
+        resumed.push({ id: taskId, outcome: "failed", reason: "contest-custody" });
+        continue;
+      }
+      const [resumeSlot] = store.reserveExecutionSlots(runner, 1, clock());
+      const parkedRun = racer.activeRun;
+      const resumeRun = store.startRun({
+        taskRef: waiting.taskRef,
+        leaseId: reclaimed.claim.leaseId,
+        runner,
+        branch: racer.branch,
+        worktree: leased.worktree.path,
+        provider: racer.provider,
+        model: racer.model,
+        contestant: racer.id,
+        ...(parkedRun === null ? {} : { parentRun: parkedRun }),
+        now: clock(),
+      });
+      if (parkedRun !== null) store.releaseContestantRun(racer.id, parkedRun);
+      const beforeBuild = store.getContestant(racer.id);
+      if (beforeBuild === null || !store.claimContestantRun(racer.id, resumeRun, beforeBuild.generation)) {
+        await worktrees.release(leased.worktree.path, clock());
+        release(store, reclaimed.claim.leaseId, clock());
+        continue;
+      }
+      const afterClaim = store.getContestant(racer.id);
+      if (afterClaim !== null) store.casContestantState(racer.id, ["parked"], "building", afterClaim.generation);
+      const resumeResult = await build(store, {
+        taskId,
+        taskRef: waiting.taskRef,
+        runner,
+        leaseId: reclaimed.claim.leaseId,
+        runId: resumeRun,
+        evidenceRoot: context.evidenceRoot,
+        worktree: leased.worktree.path,
+        branch: racer.branch,
+        now: clock(),
+        clock,
+        timeoutMs,
+        provider: racer.provider as "claude" | "codex" | "openrouter",
+        model: racer.model,
+        repairModel: racer.repairModel,
+        maxBudgetUsd: remaining / 1_000_000,
+        ...(resumeSlot === undefined
+          ? {}
+          : {
+              onProviderSpawn: (pid: number) =>
+                store.markSlotRunning(resumeSlot, { run: resumeRun, contestant: racer.id, incarnation: text(flags, "incarnation") ?? null, processGroup: pid }, clock()),
+            }),
+        ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+        ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+        ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
+      });
+      const resumedRunRow = store.getRun(resumeRun);
+      const resumeMeasured =
+        resumedRunRow === null || resumedRunRow.providerStartedAt === null
+          ? 0
+          : resumedRunRow.costUsd !== null
+            ? Math.round(resumedRunRow.costUsd * 1_000_000)
+            : null;
+      let resumedOutcome: "built" | "failed" | "parked" | "stopped" = "failed";
+      let resumedCommitted = false;
+      if (resumeResult.ok && resumeResult.parked !== undefined) {
+        resumedOutcome = "parked";
+        const asked = resumeResult.parked.decision;
+        store.saveDecision(
+          {
+            run: resumeRun,
+            contestant: racer.id,
+            urgency: asked.urgency,
+            recap: asked.recap,
+            question: asked.question,
+            options: asked.options,
+            recommendation: asked.recommendation,
+            ...(asked.assignee === null ? {} : { assignee: asked.assignee }),
+            ...(asked.deadline === null ? {} : { deadline: asked.deadline }),
+          },
+          clock(),
+        );
+      } else if (resumeResult.ok) {
+        resumedOutcome = "built";
+        resumedCommitted = resumeResult.committed;
+      } else if (resumeResult.reason === "stopped") {
+        resumedOutcome = "stopped";
+      }
+      if (resumedRunRow !== null && resumedRunRow.outcome === null) {
+        store.finishRun(resumeRun, {
+          outcome: resumedOutcome === "built" && !resumedCommitted ? "no-change" : resumedOutcome === "stopped" ? "failed" : resumedOutcome === "parked" ? "parked" : resumedOutcome,
+          committed: resumedCommitted,
+          now: clock(),
+        });
+      }
+      await worktrees.release(leased.worktree.path, clock());
+      const resumedFinal = finalizeContestant(
+        store,
+        {
+          contestId: waiting.id,
+          contestantId: racer.id,
+          runId: resumeRun,
+          outcome: resumedOutcome,
+          measuredMicrousd: resumeMeasured,
+          slotId: resumeSlot ?? null,
+        },
+        clock(),
+      );
+      resumed.push({ id: taskId, outcome: "contest", reason: resumedFinal.aggregated ?? "racing" });
+    }
+  }
+
   const ready = store.listReady(clock());
   const considered = ready.length;
-  const dispatched: TickOutcome[] = [];
+  const dispatched: TickOutcome[] = [...resumed];
   let built = 0;
   let parked = 0;
   let broke = 0;
@@ -1469,6 +1617,23 @@ async function tickCommand(
             committed,
             now: clock(),
           });
+        }
+        if (contestantOutcome === "parked") {
+          // Custody (round-3 finding 29): who owns this checkout while the
+          // question waits, and what exact state it was left in — the
+          // resume verifies all of it before trusting the tree again.
+          const headNow = await git("git", ["rev-parse", "HEAD"], { cwd: entry.worktree });
+          const dirtyNow = await git("git", ["status", "--porcelain"], { cwd: entry.worktree });
+          store.setContestantCustody(
+            entry.contestantId,
+            JSON.stringify({
+              branch: entry.branch,
+              head: headNow.code === 0 ? headNow.stdout.trim() : null,
+              runner,
+              dirty: dirtyNow.stdout.trim() !== "",
+              at: clock().toISOString(),
+            }),
+          );
         }
         await worktrees.release(entry.worktree, clock());
         const final = finalizeContestant(
@@ -3360,6 +3525,73 @@ async function intakeCommand(
     ...created.map(one => `  ${one}`),
     ...skipped.map(one => `  skipped ${one.id}: ${one.reason}`),
   ]);
+}
+
+
+/**
+ * `standing-orders contest …` — the tournament from the terminal: `show`
+ * for the machine-readable state, `exclude` to stop a racing agent whose
+ * question you will not answer (authenticated: it cancels paid-for work
+ * and un-sticks the race). The pick itself stays a console ceremony.
+ */
+function contestCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> | number {
+  const { store, write, json, clock } = context;
+  const [action, idGiven, ordinalGiven] = positional;
+  if (action === "show") {
+    const contest = store.getContest(Number(idGiven));
+    if (contest === null) return fail(write, json, "contest show", "unknown", "no tournament with that id", EXIT.refused);
+    const agents = store.contestants(contest.id);
+    if (json) {
+      write(envelopeJson({ ok: true, command: "contest show", contest, agents }));
+      return EXIT.ok;
+    }
+    write(`tournament #${contest.id} — ${contest.state}`);
+    for (const racer of agents) {
+      write(
+        `  agent ${racer.ordinal}: ${racer.provider} · ${racer.model} — ${racer.state}` +
+          ` · charged $${(racer.accountedMicrousd / 1_000_000).toFixed(2)}${racer.unknownSpend ? " (exact figure unknown — charged the reserved worst case)" : ""}`,
+      );
+    }
+    return EXIT.ok;
+  }
+  if (action === "exclude") {
+    return (async () => {
+      const contest = store.getContest(Number(idGiven));
+      const ordinal = Number(ordinalGiven);
+      if (contest === null || !Number.isInteger(ordinal)) {
+        return fail(write, json, "contest exclude", "usage", "`standing-orders contest exclude <tournament-id> <agent-number> --as <you> --token <t>`", EXIT.usage);
+      }
+      const acting = await askCredentials(flags, context);
+      if (acting === null) {
+        return fail(write, json, "contest exclude", "usage", "stopping a racing agent takes `--as <you> --token <t>`", EXIT.usage);
+      }
+      const authed = authenticateApprover(store, acting.name, acting.token);
+      if (!authed.ok) {
+        return fail(write, json, "contest exclude", "unauthenticated", "that is not an approver, or the token does not match", EXIT.refused);
+      }
+      const racer = store.contestants(contest.id).find(one => one.ordinal === ordinal);
+      if (racer === undefined || racer.state !== "parked") {
+        return fail(write, json, "contest exclude", "not-waiting", "that agent is not waiting on an answer", EXIT.refused);
+      }
+      const question = store.openDecisionForContestant(racer.id);
+      const moved = store.transact(() => {
+        if (question !== null && !store.excludeDecision(question, acting.name, clock())) return false;
+        if (!store.casContestantState(racer.id, ["parked"], "stopped", racer.generation)) return false;
+        contestMaybeAggregate(store, contest.id, clock());
+        return true;
+      });
+      if (!moved) return fail(write, json, "contest exclude", "changed", "the tournament moved while you were reading — look again", EXIT.refused);
+      const after = store.getContest(contest.id);
+      return succeed(write, json, "contest exclude", { contest: after }, () => [
+        `Agent ${ordinal} stopped; its question is closed as excluded. The tournament is now ${after?.state ?? "?"}.`,
+      ]);
+    })();
+  }
+  return fail(write, json, "contest", "usage", "`standing-orders contest show <id> | exclude <id> <agent-number>`", EXIT.usage);
 }
 
 /**

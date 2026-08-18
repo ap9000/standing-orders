@@ -1057,6 +1057,9 @@ CREATE TABLE IF NOT EXISTS decision (
   -- Which racing agent asked (v14); lets one-open-question-per-agent be a
   -- real database rule instead of a hope (finding 28). NULL = ordinary.
   contestant     INTEGER REFERENCES contestant(id),
+  -- Typed closure (v14): 'excluded' = the operator stopped the asking
+  -- agent instead of answering. Never a fake option.
+  closed_reason  TEXT CHECK (closed_reason IN ('excluded')),
   answered_via   TEXT CHECK (answered_via IN ('cli','web','telegram')),
   choice         TEXT,
   note           TEXT
@@ -1613,7 +1616,12 @@ CREATE INDEX IF NOT EXISTS task_ref_repo ON task_ref (repo, id);
 CREATE INDEX IF NOT EXISTS run_task_outcome ON run (task_ref, outcome, id DESC);
 CREATE INDEX IF NOT EXISTS task_done_recent ON task (updated_at DESC, id DESC) WHERE state = 'done';
 CREATE INDEX IF NOT EXISTS run_started ON run (started_at, id);
-CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source ON diff_comment (source_key) WHERE source_key IS NOT NULL;`);
+CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source ON diff_comment (source_key) WHERE source_key IS NOT NULL;
+-- One open question per racing agent (v14, finding 28) — lives here, after
+-- the migration, because decision.contestant arrives by addColumn on
+-- existing files (the v11c lesson).
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_decision_per_contestant
+  ON decision (contestant) WHERE contestant IS NOT NULL AND state IN ('open','expired');`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -1877,6 +1885,7 @@ function migrate(db: Database): void {
   // says so.
   addColumn(db, "run", "contestant", "INTEGER REFERENCES contestant(id)");
   addColumn(db, "decision", "contestant", "INTEGER REFERENCES contestant(id)");
+  addColumn(db, "decision", "closed_reason", "TEXT CHECK (closed_reason IN ('excluded'))");
   addColumn(db, "artifact", "capture_status", "TEXT CHECK (capture_status IN ('ok','failed'))");
   addColumn(db, "runner", "capacity_mode", "TEXT NOT NULL DEFAULT 'tasks'");
   rebuildForV4(
@@ -3848,17 +3857,19 @@ export class Store {
     this.db.prepare("UPDATE contestant SET worktree = ? WHERE id = ?").run(worktree, id);
   }
 
-  /** Money moves in one direction (finding 25): measured never decreases,
-   * accounted tracks the larger of itself and measured. */
-  recordContestantSpend(id: number, measuredMicrousd: number): void {
+  /** The lineage meter (finding 25 + round-2 finding on repairs): each
+   * finished invocation settles ONCE, and the agent's total is the SUM
+   * across its whole lineage — a park's spend and its resume's spend are
+   * both real money. Accounted tracks at least the measured total. */
+  recordContestantSpend(id: number, invocationMicrousd: number): void {
     this.db
       .prepare(
         `UPDATE contestant SET
-           measured_microusd = MAX(measured_microusd, ?),
-           accounted_microusd = MAX(accounted_microusd, MAX(measured_microusd, ?))
+           measured_microusd = measured_microusd + ?,
+           accounted_microusd = MAX(accounted_microusd, measured_microusd + ?)
          WHERE id = ?`,
       )
-      .run(measuredMicrousd, measuredMicrousd, id);
+      .run(Math.max(0, invocationMicrousd), Math.max(0, invocationMicrousd), id);
   }
 
   /** A started invocation that never reported: the ledger charges the FULL
@@ -3896,6 +3907,40 @@ export class Store {
       .prepare("SELECT lease_id FROM claim WHERE lease_id = ? AND released_at IS NULL AND expires_at >= ?")
       .get(leaseId, now.toISOString());
     return row === undefined ? null : { leaseId: String(row["lease_id"]) };
+  }
+
+
+  /**
+   * Close a racing agent's question WITHOUT answering it (the exclude
+   * ceremony, round-3 finding 28): typed closure, never a fake option.
+   * The caller owns authentication and the contestant's stop.
+   */
+  excludeDecision(id: number, by: string, now: Date): boolean {
+    const changed = this.db
+      .prepare(
+        `UPDATE decision SET state = 'answered', answered_at = ?, answered_by = ?, closed_reason = 'excluded'
+          WHERE id = ? AND state IN ('open','expired') AND contestant IS NOT NULL`,
+      )
+      .run(now.toISOString(), by, id);
+    return Number(changed.changes) === 1;
+  }
+
+  /** A racing agent's answered-but-undelivered question, for the resume pass. */
+  answeredDecisionForContestant(contestantId: number): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT decision.id AS id FROM decision
+          WHERE decision.contestant = ? AND decision.state = 'answered'
+            AND (decision.closed_reason IS NULL OR decision.closed_reason != 'excluded')
+            AND NOT EXISTS (
+              SELECT 1 FROM run_decision
+              JOIN run AS delivered ON delivered.id = run_decision.run
+              WHERE run_decision.decision = decision.id AND delivered.outcome IS NOT NULL
+            )
+          LIMIT 1`,
+      )
+      .get(contestantId);
+    return row === undefined ? null : Number(row["id"]);
   }
 
   /** A racing agent's one open (or expired-but-unanswered) question. */
@@ -5336,12 +5381,18 @@ export class Store {
    * fails and a second decision is answered in between.
    */
   attachAnswers(runId: number, taskRef: number): (Decision & { taskId: string })[] {
+    // Lineage filter (tournament round-2 finding 7): a racing agent's
+    // answers reach only ITS runs; ordinary runs see only ordinary
+    // decisions. NULL matches NULL — the two worlds never cross.
+    const receiving = this.db.prepare("SELECT contestant FROM run WHERE id = ?").get(runId);
+    const contestant = receiving === undefined || receiving["contestant"] === null ? null : Number(receiving["contestant"]);
     const rows = this.db
       .prepare(
         `SELECT decision.*, task_ref.external_id AS task_id FROM decision
          JOIN run ON run.id = decision.run
          JOIN task_ref ON task_ref.id = run.task_ref
          WHERE run.task_ref = ? AND decision.state = 'answered'
+           AND (decision.contestant IS ? OR decision.contestant = ?)
            AND NOT EXISTS (
              SELECT 1 FROM run_decision
              JOIN run AS delivered ON delivered.id = run_decision.run
@@ -5349,7 +5400,7 @@ export class Store {
            )
          ORDER BY decision.id`,
       )
-      .all(taskRef);
+      .all(taskRef, contestant, contestant);
     for (const row of rows) {
       this.db
         .prepare(

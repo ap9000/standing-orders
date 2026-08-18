@@ -1,5 +1,36 @@
 # Progress
 
+**2026-08-17 — tournament stage 4: questions, answers, custody, and the
+lineage meter.** A racing agent that parks now records CUSTODY of its
+checkout (branch, exact head, which machine, whether dirty — round-3
+finding 29) before the worktree goes back to the pool, and its question
+reaches the operator tagged with its agent; the database enforces ONE
+open question per agent by partial unique index (finding 28, living in
+the post-migration block per the v11c lesson). Answers re-admit: the
+tick's new resume pass finds decision-wait tournaments whose parked
+agents have answered questions, and — on the ORIGINAL machine only,
+after re-leasing the SAME checkout and proving its head matches custody
+— reclaims the task, reserves one worker-process slot, opens a resume
+run parented to the parked one, and builds with ONLY the remaining
+budget as the native cap. A checkout that cannot be proved to be the one
+the agent left stops that agent ('contest-custody') rather than
+cold-starting against different history. Answers are lineage-filtered:
+attachAnswers now matches the receiving run's agent, so a racing
+agent's answer can never leak into a sibling's brief or an ordinary
+build. The EXCLUDE ceremony (`contest exclude <id> <agent-number>`,
+authenticated) closes a question nobody will answer with the typed
+'excluded' reason — never a fake option — stops that agent, and
+re-aggregates; `contest show` gives the machine-readable state and both
+verbs join the envelope sweep. Interrupted-tournament recovery now
+actually runs each tick. THE CATCH: the end-to-end test (park →
+decision-wait → answer → resume → pick-wait, real tick, real git)
+exposed that the spend meter used MAX semantics — the park's $0.10
+vanished when the resume's $0.30 settled. The meter is now CUMULATIVE
+across the lineage (each invocation settles once, the agent's total is
+the sum), which is what the round-2 repair-budget finding demanded all
+along. The e2e also proves the resumed brief carried the answer's exact
+words, exactly one agent respawned, and every slot came home. Suite 952.
+
 **2026-08-17 — tournament stage 3b: the dispatch — a whole race runs.**
 The tick now recognizes an approved tournament on a claimed task and
 sends N agents instead of one builder: admission (all-or-none, quota by

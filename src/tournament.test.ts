@@ -171,20 +171,20 @@ describe("contest and contestant state moves are compare-and-swap, generation-bu
     expect(store.claimContestantRun(first, runC, 2)).toBe(true);
   });
 
-  test("money moves one way: measured is monotonic, the latch charges the FULL reservation", () => {
+  test("money accumulates across the lineage; the latch charges the FULL reservation", () => {
     const [first] = contestants;
     if (first === undefined) throw new Error("setup");
-    store.recordContestantSpend(first, 400_000);
-    store.recordContestantSpend(first, 250_000); // late, smaller — ignored
+    store.recordContestantSpend(first, 400_000); // the first invocation
+    store.recordContestantSpend(first, 250_000); // its resume — real money too
     let row = store.getContestant(first);
-    expect(row?.measuredMicrousd).toBe(400_000);
-    expect(row?.accountedMicrousd).toBe(400_000);
+    expect(row?.measuredMicrousd).toBe(650_000);
+    expect(row?.accountedMicrousd).toBe(650_000);
     expect(row?.unknownSpend).toBe(false);
     // The invocation dies without reporting: charge budget + reserve, flag it.
     store.latchContestantUnknownSpend(first);
     row = store.getContestant(first);
     expect(row?.accountedMicrousd).toBe(6_000_000);
-    expect(row?.measuredMicrousd).toBe(400_000); // the truth stays the truth
+    expect(row?.measuredMicrousd).toBe(650_000); // the truth stays the truth
     expect(row?.unknownSpend).toBe(true);
   });
 });
@@ -642,4 +642,169 @@ describe("stage 3b — a whole tournament through the real tick, against real gi
       await rm(base, { recursive: true, force: true });
     }
   }, 120_000);
+});
+
+describe("stage 4 — a racing agent parks, the answer resumes it, the tournament completes", () => {
+  test("park → decision-wait → answer → resume on the SAME checkout → pick-wait; the answer reaches only its agent", async () => {
+    const { mkdtemp, rm, mkdir, writeFile } = await import("node:fs/promises");
+    const { runOperate } = await import("./operate.js");
+    const { run: exec } = await import("./exec.js");
+    const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+
+    const base = await mkdtemp(join(tmpdir(), "standing-orders-race-park-"));
+    const repo = join(base, "repo");
+    const db = join(base, "queue.db");
+    const pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    const git = (args: string[]) => exec("git", args, { cwd: repo });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "t@example.com"]);
+    await git(["config", "user.name", "T"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+
+    let lines: string[] = [];
+    const prompts: string[] = [];
+    const DECISION = {
+      urgency: "blocking",
+      recap: "Two export formats are possible and the scope names neither.",
+      question: "CSV or JSON lines?",
+      options: [
+        { id: "csv", label: "CSV", consequence: "spreadsheet-friendly", reversible: true },
+        { id: "jsonl", label: "JSON lines", consequence: "machine-friendly", reversible: true },
+      ],
+      recommendation: "jsonl",
+    };
+    // c1 parks on its first sight of the worktree, completes after that;
+    // c2 completes immediately.
+    const parkedOnce = new Set<string>();
+    const agent = async (_file: string, args: readonly string[], options?: { cwd?: string }) => {
+      const cwd = options?.cwd ?? "";
+      const prompt = args[args.indexOf("-p") + 1] ?? "";
+      prompts.push(prompt);
+      const isFirstAgent = cwd.includes("c1");
+      if (isFirstAgent && !parkedOnce.has(cwd)) {
+        parkedOnce.add(cwd);
+        const name = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+        if (name === undefined) throw new Error("no mailbox named");
+        await writeFile(join(cwd, name), JSON.stringify(DECISION));
+        return { ...OK, stdout: JSON.stringify({ result: "parked", total_cost_usd: 0.1, usage: { input_tokens: 10, output_tokens: 5 } }) };
+      }
+      await writeFile(join(cwd, `work-${cwd.includes("c1") ? "one" : "two"}.ts`), "export const raced = true;\n");
+      const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      if (done !== undefined) {
+        await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: "completed", conclusion: "picked a lane and finished" }));
+      }
+      return { ...OK, stdout: JSON.stringify({ result: "done", total_cost_usd: 0.3, usage: { input_tokens: 30, output_tokens: 15 } }) };
+    };
+    const run = (argv: string[], now = T0) => {
+      const [command = "", ...rest] = argv;
+      lines = [];
+      return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now, agentRunner: agent as never });
+    };
+    const payload = () => JSON.parse(lines.join("\n"));
+
+    try {
+      await run(["runner", "register", "builder-1", "--json"]);
+      const runnerToken = payload().token as string;
+      await run(["approver", "add", "alex", "--json"]);
+      const approverToken = payload().token as string;
+      await run(["task", "add", "the parked race", "--id", "race-park"]);
+      await run([
+        "task", "scope", "race-park",
+        "--goal", "export the data",
+        "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5",
+        "--race-per-usd", "5", "--race-total-usd", "20", "--json",
+      ]);
+      const filed = payload();
+      const joint = jointApprovalDigest(filed.scope.digest as string, filed.race.raceDigest as string);
+      await run(["task", "approve", "race-park", "--yes", "--digest", joint, "--as", "alex", "--token", approverToken, "--json"]);
+
+      // First pass: c1 parks its question, c2 finishes → decision-wait.
+      await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"]);
+      expect(payload().dispatched[0]).toMatchObject({ id: "race-park", outcome: "contest", reason: "decision-wait" });
+
+      const store = openStore(db);
+      const ref = store.refFor("built-in", "race-park").id;
+      const contest = store.contestsInStates(["decision-wait"])[0];
+      if (contest === undefined) throw new Error("no waiting tournament");
+      const [c1] = store.contestants(contest.id);
+      expect(c1?.state).toBe("parked");
+      expect(c1?.custody).toContain("builder-1"); // custody recorded at park
+      const question = store.openDecisionForContestant(c1!.id);
+      expect(question).not.toBeNull();
+      store.close();
+
+      // The operator answers; the next pass resumes ONLY that agent.
+      await run(["decide", String(question), "--choose", "jsonl", "--as", "alex", "--token", approverToken, "--json"]);
+      const before = prompts.length;
+      await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], new Date(T0.getTime() + 60_000));
+      const resumedReport = payload();
+      expect(resumedReport.dispatched[0]).toMatchObject({ id: "race-park", outcome: "contest", reason: "pick-wait" });
+      // Exactly one new spawn (the resumed agent), and its brief carried the answer.
+      expect(prompts.length).toBe(before + 1);
+      expect(prompts[prompts.length - 1]).toContain("JSON lines");
+
+      const after = openStore(db);
+      const finished = after.contestsInStates(["pick-wait"])[0];
+      if (finished === undefined) throw new Error("not pick-wait");
+      const racers = after.contestants(finished.id);
+      expect(racers.map(one => one.state)).toEqual(["built", "built"]);
+      // c1's money spans its lineage: the park's $0.10 plus the resume's $0.30.
+      expect(racers[0]?.measuredMicrousd).toBe(400_000);
+      expect(after.liveSlotCount("builder-1")).toBe(0);
+      after.close();
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test("the exclude ceremony: a question nobody will answer stops its agent and un-sticks the race", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "race-x", title: "raced" }, T0);
+    const taskRef = store.refFor("built-in", "race-x", "ours").id;
+    const terms = store.fileTournamentTerms(
+      {
+        taskRef,
+        raceDigest: "d",
+        agents: [
+          { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5" },
+          { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5" },
+        ],
+        perAgentBudgetMicrousd: 5_000_000,
+        overrunReserveMicrousd: 1_000_000,
+        totalBudgetMicrousd: 20_000_000,
+        priceVersion: 1,
+        publicationPolicy: "none",
+      },
+      T0,
+    );
+    const contest = store.createContest({ taskRef, terms, scopeDigest: "s", raceDigest: "d" }, T0);
+    const ids = store.createContestants(contest, [
+      { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5", branch: "b1", budgetMicrousd: 5_000_000, reserveMicrousd: 1_000_000 },
+      { provider: "claude", model: "claude-haiku-4-5", repairModel: "claude-haiku-4-5", branch: "b2", budgetMicrousd: 5_000_000, reserveMicrousd: 1_000_000 },
+    ]);
+    // c2 already built; c1 parked with an open question → decision-wait.
+    const run1 = store.startRun({ taskRef, leaseId: "l1", runner: "r", branch: "b1", worktree: "/p/1", contestant: ids[0], now: T0 });
+    store.saveDecision(
+      { run: run1, contestant: ids[0], urgency: "blocking", recap: "r", question: "q?", options: [{ id: "a", label: "A", consequence: "c", reversible: true }], recommendation: "a" },
+      T0,
+    );
+    store.casContestantState(ids[0]!, ["pending"], "parked", 1);
+    store.casContestantState(ids[1]!, ["pending"], "built", 1);
+    store.casContestState(contest, ["dispatching"], "decision-wait", 1);
+
+    const question = store.openDecisionForContestant(ids[0]!);
+    expect(question).not.toBeNull();
+    expect(store.excludeDecision(question!, "alex", T0)).toBe(true);
+    const c1 = store.getContestant(ids[0]!);
+    store.casContestantState(ids[0]!, ["parked"], "stopped", c1!.generation);
+    // Aggregation now sees no waiting question and one built agent.
+    store.casContestState(contest, ["decision-wait"], "pick-wait", store.getContest(contest)!.generation);
+    expect(store.getContest(contest)?.state).toBe("pick-wait");
+    // The closure is typed, never a fake option.
+    expect(store.getDecision(question!)?.state).toBe("answered");
+    store.close();
+  });
 });
