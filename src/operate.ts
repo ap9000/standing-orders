@@ -128,7 +128,7 @@ import {
 } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { planTournament, jointApprovalDigest } from "./contest.js";
+import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant } from "./contest.js";
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
@@ -1096,7 +1096,7 @@ async function buildCommand(
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "planned" | "parked" | "skipped" | "failed";
+  outcome: "built" | "planned" | "parked" | "skipped" | "failed" | "contest";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -1307,6 +1307,187 @@ async function tickCommand(
       continue;
     }
     const lease = claimed.claim.leaseId;
+
+    // A tournament rides this claim (stage 3b): approved race terms send N
+    // agents instead of one builder. Everything after admission either
+    // reaches the ready barrier for ALL agents or interrupts the whole
+    // tournament — a partial race is never dispatched (finding 19).
+    const raceTerms = wantsPlan ? null : store.activeTournamentTerms(ref.id);
+    if (raceTerms !== null && raceTerms.approvedDigest === raceTerms.raceDigest) {
+      const scopeRow = store.getScope(id);
+      const admitted = admitContest(
+        store,
+        {
+          taskId: id,
+          taskRef: ref.id,
+          runner,
+          leaseId: lease,
+          incarnation: text(flags, "incarnation") ?? null,
+          scopeDigest: scopeRow?.digest ?? "",
+          scopeApproved: scopeRow !== null && approvalOf(scopeRow).approved,
+          // 'tasks' capacity mode keeps the claim-counted contract; the
+          // slot ledger records regardless (finding 26).
+          capacity: null,
+          quotaBlocked: (provider, model) => store.quotaState(runner, provider, model, clock())?.state ?? null,
+        },
+        clock(),
+      );
+      if (!admitted.ok) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "skipped", reason: admitted.reason });
+        continue;
+      }
+      const interrupt = async (why: string, leasedPaths: string[]): Promise<void> => {
+        const fresh = store.getContest(admitted.contestId);
+        if (fresh !== null) store.casContestState(admitted.contestId, ["dispatching", "racing"], "interrupted", fresh.generation);
+        store.releaseSlotsForContest(admitted.contestId, clock());
+        for (const path of leasedPaths) await worktrees.release(path, clock());
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "failed", reason: why });
+        broke++;
+      };
+      const baseRead = await git("git", ["rev-parse", "HEAD"], { cwd: repo });
+      if (baseRead.code !== 0) {
+        await interrupt("contest-base", []);
+        continue;
+      }
+      const baseSha = baseRead.stdout.trim();
+      store.stampContestDispatch(admitted.contestId, baseSha, store.liveWorktreeSetup(repo)?.digest ?? null);
+      const agents = store.contestants(admitted.contestId);
+      const prepared: { contestantId: number; slotId: number; runId: number; worktree: string; branch: string }[] = [];
+      let prepFailed = false;
+      for (const [index, agent] of agents.entries()) {
+        const leased = await worktrees.lease({ repo, branch: agent.branch, runner, taskRef: ref.id, now: clock(), base: baseSha });
+        if (!leased.ok) {
+          prepFailed = true;
+          break;
+        }
+        store.setContestantWorktree(agent.id, leased.worktree.path);
+        const contestantRun = store.startRun({
+          taskRef: ref.id,
+          leaseId: lease,
+          runner,
+          branch: agent.branch,
+          worktree: leased.worktree.path,
+          provider: agent.provider,
+          model: agent.model,
+          contestant: agent.id,
+          now: clock(),
+        });
+        const freshAgent = store.getContestant(agent.id);
+        if (freshAgent === null || !store.claimContestantRun(agent.id, contestantRun, freshAgent.generation)) {
+          prepFailed = true;
+          break;
+        }
+        prepared.push({
+          contestantId: agent.id,
+          slotId: admitted.slotIds[index] ?? -1,
+          runId: contestantRun,
+          worktree: leased.worktree.path,
+          branch: agent.branch,
+        });
+      }
+      const freshContest = store.getContest(admitted.contestId);
+      if (prepFailed || freshContest === null || !crossReadyBarrier(store, freshContest, admitted.contestantIds)) {
+        await interrupt("contest-admission", prepared.map(one => one.worktree));
+        continue;
+      }
+      // Every agent is READY and nothing has spawned: cross into racing and
+      // spend. The builds run concurrently; the stop fence stops them all.
+      const settled = await Promise.allSettled(
+        prepared.map(async entry => {
+          const agent = store.getContestant(entry.contestantId);
+          if (agent === null) throw new Error("contestant vanished");
+          store.casContestantState(entry.contestantId, ["ready"], "building", agent.generation);
+          return build(store, {
+            taskId: id,
+            taskRef: ref.id,
+            runner,
+            leaseId: lease,
+            runId: entry.runId,
+            evidenceRoot: context.evidenceRoot,
+            worktree: entry.worktree,
+            branch: entry.branch,
+            now: clock(),
+            clock,
+            timeoutMs,
+            provider: agent.provider as "claude" | "codex" | "openrouter",
+            model: agent.model,
+            repairModel: agent.repairModel,
+            maxBudgetUsd: agent.budgetMicrousd / 1_000_000,
+            onProviderSpawn: pid =>
+              store.markSlotRunning(entry.slotId, { run: entry.runId, contestant: entry.contestantId, incarnation: text(flags, "incarnation") ?? null, processGroup: pid }, clock()),
+            ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+            ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+            ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
+          });
+        }),
+      );
+      let lastAggregate: string | null = null;
+      for (const [index, entry] of prepared.entries()) {
+        const outcome = settled[index];
+        const run = store.getRun(entry.runId);
+        const measured =
+          run === null || run.providerStartedAt === null
+            ? 0
+            : run.costUsd !== null
+              ? Math.round(run.costUsd * 1_000_000)
+              : null;
+        let contestantOutcome: "built" | "failed" | "parked" | "stopped" = "failed";
+        let committed = false;
+        if (outcome !== undefined && outcome.status === "fulfilled") {
+          const result = outcome.value;
+          if (result.ok && result.parked !== undefined) {
+            contestantOutcome = "parked";
+            // The question still reaches the operator, tagged with its agent;
+            // decision-wait mechanics land in stage 4 — the card works today.
+            const asked = result.parked.decision;
+            store.saveDecision(
+              {
+                run: entry.runId,
+                contestant: entry.contestantId,
+                urgency: asked.urgency,
+                recap: asked.recap,
+                question: asked.question,
+                options: asked.options,
+                recommendation: asked.recommendation,
+                ...(asked.assignee === null ? {} : { assignee: asked.assignee }),
+                ...(asked.deadline === null ? {} : { deadline: asked.deadline }),
+              },
+              clock(),
+            );
+          } else if (result.ok) {
+            contestantOutcome = "built";
+            committed = result.committed;
+          } else if (result.reason === "stopped") {
+            contestantOutcome = "stopped";
+          }
+        }
+        if (run !== null && run.outcome === null) {
+          store.finishRun(entry.runId, {
+            outcome: contestantOutcome === "built" && !committed ? "no-change" : contestantOutcome === "stopped" ? "failed" : contestantOutcome === "parked" ? "parked" : contestantOutcome,
+            committed,
+            now: clock(),
+          });
+        }
+        await worktrees.release(entry.worktree, clock());
+        const final = finalizeContestant(
+          store,
+          {
+            contestId: admitted.contestId,
+            contestantId: entry.contestantId,
+            runId: entry.runId,
+            outcome: contestantOutcome,
+            measuredMicrousd: measured,
+            slotId: entry.slotId >= 0 ? entry.slotId : null,
+          },
+          clock(),
+        );
+        if (final.aggregated !== null) lastAggregate = final.aggregated;
+      }
+      dispatched.push({ id, outcome: "contest", reason: lastAggregate ?? "racing" });
+      continue;
+    }
 
     if (wantsPlan) {
       // The planner's workspace is disposable and its branch namespace is

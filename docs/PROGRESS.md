@@ -1,5 +1,33 @@
 # Progress
 
+**2026-08-17 — tournament stage 3b: the dispatch — a whole race runs.**
+The tick now recognizes an approved tournament on a claimed task and
+sends N agents instead of one builder: admission (all-or-none, quota by
+distinct key, slots bound to agents), the base commit frozen by SHA and
+stamped with the live setup identity, a worktree leased per agent on its
+own contest-unique branch, a run opened per agent CARRYING its agent
+identity, the ready barrier crossed only when every agent is prepared —
+and only then the concurrent builds, each under claude's NATIVE dollar
+cap (`--max-budget-usd`, plumbed Invocation→adapter argv) with the
+worker-process ledger recording each spawn's process-group id via the
+new onSpawn callback (exec→builder→slot). Failures anywhere before the
+barrier interrupt the WHOLE tournament — worktrees, slots, and the
+claim all come home, nothing spawns. Completions route through the
+child finalizers: run finished honestly (built/no-change/parked/
+failed), evidence captured by the builder as for any run, money settled
+from the provider's reported figure (or latched at the full reservation
+if it went silent after starting), and the aggregate boundary crossed
+exactly once. A parked agent's question reaches the operator tagged
+with its agent (decision.contestant) — full decision-wait mechanics are
+stage 4. THE PROOF: an end-to-end test drives a real tick against real
+git — two claude agents race, both finish, the contest lands in
+pick-wait with the "compare the results and pick one" hold, both
+contest branches exist in the repository, both spawns carried
+--max-budget-usd 5, terminal diffs exist per agent, measured spend
+equals the provider's reported figure in micro-dollars, the parent
+claim released exactly once, and every worker-process slot came home.
+Suite 950.
+
 **2026-08-17 — tournament stage 3a: filing, the one yes, admission,
 children, recovery.** src/contest.ts is the orchestration: raceDigestOf
 (order-sensitive, retries pinned at zero) and tournament-approval/v1 —

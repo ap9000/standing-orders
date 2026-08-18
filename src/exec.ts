@@ -58,6 +58,9 @@ export type RunOptions = {
    * currently only the streaming transport can deliver this early).
    */
   onSessionId?: (id: string) => void;
+  /** Fires once the child exists, with its pid (the process-group id when
+   * processGroup is set) — the slot ledger records it (v14 finding 26). */
+  onSpawn?: (pid: number) => void;
 };
 
 /** Live provider children, for the deterministic stop. Registered only when `processGroup` was set. */
@@ -172,6 +175,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
       maxBuffer,
       ...(cwd === undefined ? {} : { cwd }),
       ...(childEnv === undefined ? {} : { childEnv }),
+      ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
     });
   }
 
@@ -208,7 +212,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined> },
+  bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void },
 ): Promise<ExecResult> {
   return new Promise(resolve => {
     let child: ReturnType<typeof spawn>;
@@ -221,6 +225,7 @@ function runBufferedGroup(
         stdio: ["ignore", "pipe", "pipe"],
         ...(bag.childEnv === undefined ? {} : { env: bag.childEnv }),
       });
+      if (child.pid !== undefined) bag.onSpawn?.(child.pid);
     } catch (error) {
       resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
       return;
@@ -344,6 +349,7 @@ export function runStreamJsonl(
         stdio: ["ignore", "pipe", "pipe"],
         ...(childEnv === undefined ? {} : { env: childEnv }),
       });
+      if (child.pid !== undefined) options.onSpawn?.(child.pid);
     } catch (error) {
       resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
       return;

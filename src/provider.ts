@@ -57,6 +57,9 @@ export type Invocation = {
   skipPermissions: boolean;
   /** Resume this session (repair). Meaningless across providers. */
   resumeSession: string | null;
+  /** Claude's native dollar cap (tournament stage 3b) — the harness stops
+   * itself when spend reaches this. Ignored by providers without one. */
+  maxBudgetUsd?: number;
 };
 
 export type ProviderRunner = (
@@ -124,6 +127,7 @@ const claudeArgv = (invocation: Invocation): string[] => [
     ? ["--dangerously-skip-permissions"]
     : ["--permission-mode", invocation.permissionMode]),
   ...(invocation.model === null ? [] : ["--model", invocation.model]),
+  ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
 ];
 
 function claudeParse(stdout: string): ParsedEnvelope {

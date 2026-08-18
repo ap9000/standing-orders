@@ -4860,12 +4860,14 @@ export class Store {
     provider?: string;
     parentRun?: number;
     sessionId?: string;
+    /** Which racing agent this run belongs to (v14); absent = ordinary. */
+    contestant?: number;
     now: Date;
   }): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.taskRef,
@@ -4878,6 +4880,7 @@ export class Store {
         run.provider ?? "claude",
         run.parentRun ?? null,
         run.sessionId ?? null,
+        run.contestant ?? null,
         run.now.toISOString(),
       );
     return Number(inserted.lastInsertRowid);
@@ -5158,13 +5161,15 @@ export class Store {
       recommendation: string;
       assignee?: string;
       deadline?: string;
+      /** Which racing agent asked (v14); absent = ordinary. */
+      contestant?: number;
     },
     now: Date,
   ): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO decision (run, urgency, recap, question, options, recommendation, assignee, deadline, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO decision (run, urgency, recap, question, options, recommendation, assignee, deadline, contestant, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         decision.run,
@@ -5175,6 +5180,7 @@ export class Store {
         decision.recommendation,
         decision.assignee ?? null,
         decision.deadline ?? null,
+        decision.contestant ?? null,
         now.toISOString(),
       );
     return Number(inserted.lastInsertRowid);

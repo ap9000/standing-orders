@@ -530,3 +530,116 @@ describe("stage 3a — the CLI: filing with --race, one yes for both documents, 
     expect(payload().reason).toBe("provider-ineligible");
   });
 });
+
+describe("stage 3b — a whole tournament through the real tick, against real git", () => {
+  test("two agents race, both finish, the pick-wait hold takes over, the money flags were real", async () => {
+    const { mkdtemp, rm, mkdir, writeFile } = await import("node:fs/promises");
+    const { runOperate } = await import("./operate.js");
+    const { run: exec } = await import("./exec.js");
+    const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+
+    const base = await mkdtemp(join(tmpdir(), "standing-orders-race-e2e-"));
+    const repo = join(base, "repo");
+    const db = join(base, "queue.db");
+    const pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    const git = (args: string[]) => exec("git", args, { cwd: repo });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "t@example.com"]);
+    await git(["config", "user.name", "T"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+
+    let lines: string[] = [];
+    const seenArgv: string[][] = [];
+    const agent = async (_file: string, args: readonly string[], options?: { cwd?: string }) => {
+      seenArgv.push([...args]);
+      const cwd = options?.cwd ?? "";
+      await writeFile(join(cwd, `work-${seenArgv.length}.ts`), "export const raced = true;\n");
+      const prompt = args[args.indexOf("-p") + 1] ?? "";
+      const name = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      if (name !== undefined && cwd !== "") {
+        await writeFile(join(cwd, name), JSON.stringify({ version: 1, status: "completed", conclusion: "did the thing" }));
+      }
+      return { ...OK, stdout: JSON.stringify({ result: "done", total_cost_usd: 0.42, usage: { input_tokens: 100, output_tokens: 50 } }) };
+    };
+    const run = (argv: string[], now = T0) => {
+      const [command = "", ...rest] = argv;
+      lines = [];
+      return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now, agentRunner: agent as never });
+    };
+    const payload = () => JSON.parse(lines.join("\n"));
+
+    try {
+      await run(["runner", "register", "builder-1", "--json"]);
+      const runnerToken = payload().token as string;
+      await run(["approver", "add", "alex", "--json"]);
+      const approverToken = payload().token as string;
+
+      await run(["task", "add", "the raced work", "--id", "race-e2e"]);
+      await run([
+        "task", "scope", "race-e2e",
+        "--goal", "add the guard twice and let me pick",
+        "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5",
+        "--race-per-usd", "5", "--race-total-usd", "20",
+        "--json",
+      ]);
+      const filed = payload();
+      const joint = jointApprovalDigest(filed.scope.digest as string, filed.race.raceDigest as string);
+      await run([
+        "task", "approve", "race-e2e", "--yes",
+        "--digest", joint, "--as", "alex", "--token", approverToken, "--json",
+      ]);
+      expect(payload().race.n).toBe(2);
+
+      await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"]);
+      const ticked = payload();
+      expect(ticked.dispatched[0]).toMatchObject({ id: "race-e2e", outcome: "contest", reason: "pick-wait" });
+
+      const store = openStore(db);
+      const ref = store.refFor("built-in", "race-e2e").id;
+      const contest = store.openContestFor(ref) ?? store.contestsInStates(["pick-wait"])[0];
+      if (contest === undefined || contest === null) throw new Error("no contest");
+      expect(contest.state).toBe("pick-wait");
+      expect(contest.baseSha).toMatch(/^[0-9a-f]{40}$/);
+
+      const agents = store.contestants(contest.id);
+      expect(agents.map(one => one.state)).toEqual(["built", "built"]);
+      // The provider reported $0.42 each; measured is the truth, in micro-dollars.
+      expect(agents.map(one => one.measuredMicrousd)).toEqual([420_000, 420_000]);
+      expect(agents.every(one => !one.unknownSpend)).toBe(true);
+
+      // The parent claim is gone, the contest-owned hold explains the wait.
+      expect(store.liveClaimByLease(contest.currentLeaseId as string, T0)).toBeNull();
+      const holds = store.activeHolds(ref, T0);
+      expect(holds.some(hold => hold.reason.includes("compare the results"))).toBe(true);
+
+      // Each agent's run carries its identity and evidence.
+      for (const racer of agents) {
+        const runs = store.runsFor(ref).filter(one => one.branch === racer.branch);
+        expect(runs).toHaveLength(1);
+        const artifacts = store.artifactsFor(runs[0]!.id);
+        expect(artifacts.some(one => one.kind === "terminal-diff")).toBe(true);
+      }
+
+      // Both branches exist in the real repository, distinctly named.
+      const branches = await git(["branch", "--list"]);
+      expect(branches.stdout).toContain(`contest-${contest.id}/c1`);
+      expect(branches.stdout).toContain(`contest-${contest.id}/c2`);
+
+      // The native dollar cap rode BOTH spawns.
+      expect(seenArgv).toHaveLength(2);
+      for (const argv of seenArgv) {
+        const at = argv.indexOf("--max-budget-usd");
+        expect(at).toBeGreaterThan(-1);
+        expect(argv[at + 1]).toBe("5");
+      }
+      // Worker-process slots all came home.
+      expect(store.liveSlotCount("builder-1")).toBe(0);
+      store.close();
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }, 120_000);
+});

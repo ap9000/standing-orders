@@ -88,6 +88,12 @@ export type BuildRequest = {
    * gateway refuses a paid call whose run is missing or already finished.
    */
   runId: number;
+  /** Claude's native dollar cap for this attempt (tournaments): the
+   * harness stops itself at this figure. Absent = uncapped, as today. */
+  maxBudgetUsd?: number;
+  /** Fires with the provider's process-group id the moment it exists —
+   * the worker-process ledger records it (v14). */
+  onProviderSpawn?: (pid: number) => void;
   /** Where evidence files live. Defaults to ~/.standing-orders/evidence. */
   evidenceRoot?: string;
   /** Defaults to the safe one; see the note on permissions above. */
@@ -611,8 +617,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         permissionMode,
         skipPermissions,
         resumeSession,
+        ...(request.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: request.maxBudgetUsd }),
       },
-      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
+      {
+        cwd: worktree,
+        timeoutMs,
+        omitEnv: AGENT_ENV_DENYLIST,
+        ...(agent === undefined ? {} : { runner: agent }),
+        ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
+        clock,
+      },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
