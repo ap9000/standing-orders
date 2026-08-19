@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
-import { acquire } from "./claim.js";
+import { acquire, release } from "./claim.js";
 import { addApprover } from "./scope.js";
 import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
@@ -3029,7 +3029,8 @@ describe("the workbench (attended A1) and the live substrate", () => {
     expect(html).toContain("Needs a scope written");
     expect(html).toContain("building");
     expect(html).toContain("Being built right now");
-    expect(html).toContain("agent-running");
+    expect(html).toContain("agent working");
+    expect(html).not.toContain("agent-running");
     expect(html).toContain("data-elapsed-since=");
     expect(html).toContain('id="palette-index"');
     expect(html).toContain('id="wb-rail"');
@@ -3062,13 +3063,230 @@ describe("the workbench (attended A1) and the live substrate", () => {
   test("an open run's facts fragment answers live; a finished run's says to reload", async () => {
     const cookie = await login();
     const open = await (await fetch(url("/r/1?fragment=facts"), { headers: { cookie } })).text();
-    expect(open).toContain("agent-running");
+    expect(open).toContain("agent working");
+    expect(open).not.toContain("agent-running");
     expect(open).toContain("data-elapsed-since=");
     store.finishRun(1, { outcome: "built", committed: true, now: new Date() });
     const closed = await (await fetch(url("/r/1?fragment=facts"), { headers: { cookie } })).text();
     expect(closed).toContain("finished");
     expect(closed).toContain("reload for the final record");
     expect(closed).not.toContain("<form");
+  });
+});
+
+describe("round 4 — liveness is proved from the current lease, never guessed from a null outcome", () => {
+  let store: Store;
+  let server: Server | null = null;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+  let liveRun: number;
+  let orphanRun: number;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const boot = async (options: Record<string, unknown> = {}): Promise<void> => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), ...options });
+    await new Promise<void>(resolve => (server as Server).listen(0, "127.0.0.1", resolve));
+    const address = (server as Server).address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-live-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+
+    // One genuinely live build: the claim's lease is current and unexpired.
+    store.createTask({ id: "alive", title: "being built right now" }, T0);
+    const aliveRef = store.refFor("built-in", "alive", "ours").id;
+    const aliveTaken = acquire(store, aliveRef, "night-shift-1", { now: new Date(), ttlMs: 3_600_000 });
+    if (!aliveTaken.ok) throw new Error("claim failed");
+    liveRun = store.startRun({
+      taskRef: aliveRef, leaseId: aliveTaken.claim.leaseId, runner: "night-shift-1",
+      branch: "standing-orders/alive", worktree: "/pool/alive", now: new Date(),
+    });
+    store.setRunPhase(liveRun, "agent-running");
+    store.setTaskState("alive", "running", T0);
+
+    // One orphan: the claim expired an hour ago; its run never finished.
+    // Every "running" label must refuse this one.
+    store.createTask({ id: "orphan", title: "left behind by a dead worker" }, T0);
+    const orphanRef = store.refFor("built-in", "orphan", "ours").id;
+    const orphanTaken = acquire(store, orphanRef, "night-shift-2", {
+      now: new Date(Date.now() - 7_200_000), ttlMs: 3_600_000,
+    });
+    if (!orphanTaken.ok) throw new Error("orphan claim failed");
+    orphanRun = store.startRun({
+      taskRef: orphanRef, leaseId: orphanTaken.claim.leaseId, runner: "night-shift-2",
+      branch: "standing-orders/orphan", worktree: "/pool/orphan", now: new Date(Date.now() - 7_200_000),
+    });
+    store.setTaskState("orphan", "running", T0);
+
+    await boot();
+  });
+
+  afterEach(async () => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = null;
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("a live run says running in plain words; an orphaned run stays never finished and gets no poller", async () => {
+    const cookie = await login();
+    const alive = await (await fetch(url(`/r/${liveRun}`), { headers: { cookie } })).text();
+    expect(alive).toContain("badge-running");
+    expect(alive).toContain(">running<");
+    expect(alive).toContain("agent working");
+    expect(alive).toContain('id="run-facts-stamp"');
+
+    // The orphan's own facts say "never finished" and earn no ticker or
+    // poller stamp. (The page's side list still shows OTHER runs' badges,
+    // so the fragment is the honest place to assert absence.)
+    const orphan = await (await fetch(url(`/r/${orphanRun}`), { headers: { cookie } })).text();
+    expect(orphan).toContain("never finished");
+    expect(orphan).not.toContain("data-elapsed-since");
+    expect(orphan).not.toContain('id="run-facts-stamp"');
+    const orphanFacts = await (await fetch(url(`/r/${orphanRun}?fragment=facts`), { headers: { cookie } })).text();
+    expect(orphanFacts).not.toContain("badge-running");
+  });
+
+  test("the facts fragment stops the poller for finished AND orphaned runs, and answers live otherwise", async () => {
+    const cookie = await login();
+    const alive = await (await fetch(url(`/r/${liveRun}?fragment=facts`), { headers: { cookie } })).text();
+    expect(alive).toContain(">running<");
+    expect(alive).not.toContain("data-region-stop");
+
+    const orphan = await (await fetch(url(`/r/${orphanRun}?fragment=facts`), { headers: { cookie } })).text();
+    expect(orphan).toContain("stopped without finishing");
+    expect(orphan).toContain("data-region-stop");
+
+    store.finishRun(liveRun, { outcome: "built", committed: true, now: new Date() });
+    const finished = await (await fetch(url(`/r/${liveRun}?fragment=facts`), { headers: { cookie } })).text();
+    expect(finished).toContain("reload for the final record");
+    expect(finished).toContain("data-region-stop");
+  });
+
+  test("the task page offers the live build honestly: a plain door without --runner, the watch promise with it", async () => {
+    const cookie = await login();
+    const plain = await (await fetch(url("/t/alive"), { headers: { cookie } })).text();
+    expect(plain).toContain(`open the running build — build #${liveRun}`);
+    expect(plain).not.toContain("watch what is changing right now");
+
+    // The run page still shows the section, saying why it is empty — the
+    // click must never land on silence.
+    const runPlain = await (await fetch(url(`/r/${liveRun}`), { headers: { cookie } })).text();
+    expect(runPlain).toContain("what is changing right now");
+    expect(runPlain).toContain("the live file view is off");
+
+    await boot({ localRunner: "night-shift-1" });
+    const cookieOn = await login();
+    const watching = await (await fetch(url("/t/alive"), { headers: { cookie: cookieOn } })).text();
+    expect(watching).toContain(`watch what is changing right now — build #${liveRun}`);
+    const runOn = await (await fetch(url(`/r/${liveRun}`), { headers: { cookie: cookieOn } })).text();
+    expect(runOn).toContain("watching…");
+    expect(runOn).not.toContain("the live file view is off");
+
+    // The orphan's task page offers no door at all — there is nothing live.
+    const orphanTask = await (await fetch(url("/t/orphan"), { headers: { cookie: cookieOn } })).text();
+    expect(orphanTask).not.toContain("open the running build");
+    expect(orphanTask).not.toContain("watch what is changing");
+  });
+
+  test("a building card lands on the build itself; a vanished build stays a repair card on the task", async () => {
+    const cookie = await login();
+    const board = await (await fetch(url("/board?fragment=1"), { headers: { cookie } })).text();
+    expect(board).toContain(`href="/r/${liveRun}"`);
+    // The orphan's dead lease earns no run link anywhere on the board — its
+    // card stays on the task screen, in the attention lane.
+    expect(board).not.toContain(`href="/r/${orphanRun}"`);
+    expect(board).toContain(`href="/t/orphan"`);
+  });
+
+  test("unknown task and tournament pages refuse on the console's own page, not bare text", async () => {
+    const cookie = await login();
+    const task = await fetch(url("/t/definitely-not-here"), { headers: { cookie } });
+    expect(task.status).toBe(404);
+    expect(task.headers.get("content-type") ?? "").toContain("text/html");
+    expect(await task.text()).toContain("no such task");
+
+    const contest = await fetch(url("/contest/424242"), { headers: { cookie } });
+    expect(contest.status).toBe(404);
+    expect(contest.headers.get("content-type") ?? "").toContain("text/html");
+    expect(await contest.text()).toContain("no such tournament");
+  });
+
+  test("an interrupted tournament's agents read as stopped, never as still working", async () => {
+    // Recovery marks the contest interrupted but leaves the agents' run
+    // records unfinished (round-4 finding 16) — the comparison screen must
+    // prove liveness rather than map a null outcome to "still working".
+    store.createTask({ id: "race-int", title: "raced then interrupted" }, T0);
+    const taskRef = store.refFor("built-in", "race-int", "ours").id;
+    const planned = planTournament({
+      agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-haiku-4-5" }],
+      perAgentBudgetUsd: 5,
+      totalBudgetUsd: 20,
+    });
+    if (!planned.ok) throw new Error(planned.reason);
+    const termsId = store.fileTournamentTerms(
+      {
+        taskRef, raceDigest: planned.plan.raceDigest, agents: planned.plan.agents,
+        perAgentBudgetMicrousd: planned.plan.perAgentBudgetMicrousd,
+        overrunReserveMicrousd: planned.plan.overrunReserveMicrousd,
+        totalBudgetMicrousd: planned.plan.totalBudgetMicrousd,
+        priceVersion: planned.plan.priceVersion, publicationPolicy: "none",
+      },
+      T0,
+    );
+    store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
+    // The lease died with the machine: acquired two hours ago, one-hour TTL.
+    const taken = acquire(store, taskRef, "night-shift-3", { now: new Date(Date.now() - 7_200_000), ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim");
+    const admitted = admitContest(
+      store,
+      {
+        taskId: "race-int", taskRef, runner: "night-shift-3", leaseId: taken.claim.leaseId,
+        incarnation: null, scopeDigest: "scope-d", scopeApproved: true, capacity: 8, quotaBlocked: () => null,
+      } as never,
+      T0,
+    );
+    if (!admitted.ok) throw new Error(admitted.reason);
+    store.stampContestDispatch(admitted.contestId, "base-sha-000", null);
+    const contest = store.getContest(admitted.contestId);
+    if (contest === null) throw new Error("contest");
+    for (const agent of store.contestants(admitted.contestId)) store.casContestantState(agent.id, ["pending"], "ready", agent.generation);
+    store.casContestState(admitted.contestId, ["dispatching"], "racing", contest.generation);
+    for (const agent of store.contestants(admitted.contestId)) {
+      store.casContestantState(agent.id, ["ready"], "building", agent.generation);
+      store.startRun({
+        taskRef, leaseId: taken.claim.leaseId, runner: "night-shift-3",
+        branch: agent.branch, worktree: `/pool/int-${agent.id}`, contestant: agent.id, now: new Date(Date.now() - 7_200_000),
+      });
+    }
+    const racing = store.getContest(admitted.contestId);
+    if (racing === null) throw new Error("contest");
+    store.casContestState(admitted.contestId, ["racing"], "interrupted", racing.generation);
+
+    const cookie = await login();
+    const html = await (await fetch(url(`/contest/${admitted.contestId}`), { headers: { cookie } })).text();
+    expect(html).toContain("interrupted");
+    expect(html).toContain("stopped without finishing");
+    expect(html).not.toContain("still working");
   });
 });
 
@@ -3411,7 +3629,7 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     // A missing epoch (adoption path) refuses rather than guessing.
     store.saveWorktree({ ...row, leaseEpoch: null });
     const unfenced = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
-    expect(unfenced).toContain("occupancy fence");
+    expect(unfenced).toContain("before live watching existed");
     store.saveWorktree({ ...row, leaseEpoch: "epoch-three" });
     // Another machine's build says where to look instead.
     store.saveWorktree({ ...row, leaseEpoch: "epoch-three", runner: "other-machine" });
@@ -3422,5 +3640,24 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     store.finishRun(runId, { outcome: "built", committed: true, now: new Date() });
     const done = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
     expect(done).toContain("finished");
+    expect(done).toContain("data-region-stop");
+  });
+
+  test("a released lease is superseded forever: the peek refuses finally, and the region poller stops", async () => {
+    // liveClaimByLease alone would still admit a superseded lease
+    // (round-4 finding 15) — the guard must prove the run's lease IS the
+    // task's current live claim, and say so with the stop marker, because
+    // superseded never heals.
+    const cookie = await login();
+    const running = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
+    expect(running).toContain("app.ts");
+
+    const leaseId = store.getRun(runId)?.leaseId;
+    if (leaseId === undefined) throw new Error("run");
+    release(store, leaseId, new Date());
+
+    const gone = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
+    expect(gone).toContain("not actively running");
+    expect(gone).toContain("data-region-stop");
   });
 });

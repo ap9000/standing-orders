@@ -113,6 +113,54 @@ describe("missing paths", () => {
     expect(payload.missingRoots).toEqual([resolve(absent)]);
     expect(payload.repos).toEqual([]);
   });
+
+  test("an all-missing scan's envelope says no, not yes", async () => {
+    // ok:true with exit 2 was a lie in the envelope: an agent that typo'd a
+    // COMMAND read a green scan and moved on (round-4 findings 6/19). The
+    // scan fields stay, so existing consumers keep their shape.
+    const lines: string[] = [];
+    const absent = join(tmpdir(), "standing-orders-nobody", "Documentd");
+
+    const code = await main(["--json", absent], line => lines.push(line));
+
+    expect(code).toBe(2);
+    const payload = JSON.parse(lines.join("\n"));
+    expect(payload.ok).toBe(false);
+    expect(payload.reason).toBe("no-repositories");
+    expect(payload.command).toBe("scan");
+    expect(typeof payload.scannedAt).toBe("string");
+  });
+
+  test("a missing bare word names both readings — command or folder", async () => {
+    // After resolve() a typo'd verb and a missing relative folder are the
+    // same string; the message must not guess which one it was (finding 18).
+    const lines: string[] = [];
+
+    const code = await main(["frobnicate"], line => lines.push(line));
+
+    expect(code).toBe(2);
+    expect(lines.join("\n")).toContain("if you meant a command");
+    expect(lines.join("\n")).toContain("--help");
+  });
+
+  test("a missing path-shaped root keeps the plain missing-path message", async () => {
+    const lines: string[] = [];
+
+    const code = await main(["/Users/nobody/Documentd"], line => lines.push(line));
+
+    expect(code).toBe(2);
+    expect(lines.join("\n")).toContain("does not exist — check the path.");
+    expect(lines.join("\n")).not.toContain("if you meant a command");
+  });
+
+  test("`standing-orders help` prints help instead of scanning a folder named help", async () => {
+    const lines: string[] = [];
+
+    const code = await main(["help"], line => lines.push(line));
+
+    expect(code).toBe(0);
+    expect(lines.join("\n")).toContain("a control plane for unattended coding agents");
+  });
 });
 
 describe("isDirectInvocation", () => {

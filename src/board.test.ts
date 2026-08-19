@@ -143,6 +143,40 @@ describe("the lane classifier", () => {
     expect(secondTry.attempt).toBe(2);
   });
 
+  test("a building card lands on the live build when one exists, and on the task before it starts", () => {
+    // The pop-in glance reaches the build in one click (round-4, A3). The
+    // liveRunId is the data layer's proof — classify never guesses it.
+    const claim = { runner: "r", claimedAt: T0.toISOString(), model: "m", branch: "b", worktree: "/pool/x", role: null };
+    const started = classify(facts({ state: "running", claim, liveRunId: 41 }), T0);
+    expect(started.lane).toBe("building");
+    expect(started.href).toBe("/r/41");
+
+    const preparing = classify(facts({ state: "running", claim, liveRunId: null }), T0);
+    expect(preparing.href).toBe("/t/t-1");
+
+    // A tournament has no single run — its card keeps the task screen.
+    const racing = classify(
+      facts({ state: "running", claim, liveRunId: 41, contest: { id: 7, state: "racing", agents: 3 } }),
+      T0,
+    );
+    expect(racing.href).toBe("/t/t-1");
+
+    // No claim at all: liveRunId is stale data, never a building card.
+    const vanished = classify(facts({ state: "running", claim: null, liveRunId: 41 }), T0);
+    expect(vanished.lane).toBe("attention");
+    expect(vanished.href).toBe("/t/t-1");
+  });
+
+  test("an orphaned hold names its owner in plain words, never the internal token", () => {
+    const held = classify(facts({ hold: { ownerKind: "contest", until: null } }), T0);
+    expect(held.lane).toBe("waiting");
+    expect(held.reason).toBe("held by a tournament");
+    expect(held.reason).not.toContain("contest");
+
+    const question = classify(facts({ hold: { ownerKind: "decision", until: null } }), T0);
+    expect(question.reason).toBe("waiting on a question");
+  });
+
   test("total: every combination lands in exactly one lane", () => {
     const holds: BoardFacts["hold"][] = [null, { ownerKind: "operator", until: null }];
     const claims: BoardFacts["claim"][] = [

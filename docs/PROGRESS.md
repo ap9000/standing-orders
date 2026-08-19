@@ -1,5 +1,47 @@
 # Progress
 
+**2026-08-19 — the UX fix batch: liveness is proved, help is safe, and
+the last raw tokens leave the pages.** A full assessment of the console
+(walked live via the demo sandbox) and the CLI (probed live) became a
+spec, Codex-reviewed twice (round 1 REDESIGN, findings 1–13; round 2
+APPROVE WITH CHANGES, findings 14–20), then implemented to the letter.
+The spine of the batch is ONE liveness fact: a run is live iff its lease
+is the task's CURRENT claim — maximum generation, unreleased, strictly
+unexpired (`store.currentLiveLease`) — and every surface now derives
+from it instead of guessing from a null outcome. A live build's page
+says "running" with plain-word phases; an orphaned run stays "never
+finished", loses its pollers (fragments carry a stop marker the region
+script obeys), and can no longer be called "still working" on an
+interrupted tournament's comparison screen. The board's building card
+lands on the live build itself (`live_run_id` projected inside
+`boardScoped`'s own claim join — outcome predicate inside the subquery),
+and the task page's live-peek door stops promising what a serve without
+`--runner` cannot show: the link reads "open the running build", and the
+run page's watch section says in place how to turn the live view on. The
+peek guard's lease check was also STRENGTHENED: `liveClaimByLease` would
+admit a superseded lease; the current-lease proof refuses it finally.
+No-jargon sweep: hold owners ("held by a tournament", never
+`held (contest)`), incident kinds, evidence-link labels, run failure
+reasons, contestant states — every map with a generic plain fallback so
+an unknown future token can never leak; "occupancy fence" copy replaced;
+digests display truncated; bare-text 404s now refuse on the console's
+own page. CLI: `--help` on any queue verb answers BEFORE the database
+opens (`serve --help` once started the server; asking for help minted
+orders.db) and answers as an envelope under --json; unknown flags are
+refused by name instead of silently becoming booleans (`--follow` and
+friends allowlisted); a mistyped verb's scan now says "if you meant a
+command" and its JSON envelope finally says ok:false (reason
+no-repositories — it said ok:true with exit 2); missing race budgets
+name the missing flag and the config command that defaults it; `config
+set budgets` names the offending flag; serve validates --port; the four
+unconfirmed previews (enroll, task approve, routine approve, publish
+grant) now exit 3 in BOTH modes — a deliberate, documented compatibility
+change for scripts that read the human-mode 0; watch --json's one stray
+stdout line (the bridge cycle) moved to stderr, with an exact-stdout
+regression test. Help finally admits `approver` exists, `task`'s
+unknown-subverb error lists all twelve subverbs, and `task scope`'s
+usage names the whole tournament flag surface. Suite 1007.
+
 **2026-08-17 — the live worktree peek (A2, v17): three Codex rounds, then
 a native reader that executes nothing.** The attended track's blocked
 item, unblocked the hard way. Round 1 (findings 13–24) killed the naive

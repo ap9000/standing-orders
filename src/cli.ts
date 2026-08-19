@@ -44,6 +44,10 @@ import {
 
 export type CliOptions = {
   roots: string[];
+  /** The positional tokens exactly as typed, index-aligned with `roots` —
+   * kept because a resolved absolute path can no longer say whether the
+   * operator typed a bare word that might have been a command. */
+  rawRoots: string[];
   /** Whether roots came from the command line, as opposed to the default. */
   rootsGiven: boolean;
   maxDepth: number;
@@ -78,13 +82,22 @@ Usage
   standing-orders skills install   teach a repo's agents this queue exists (preview first)
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
 
-Operating the queue — see \`standing-orders task\` for the whole surface
+Operating the queue — \`standing-orders task\` prints the whole surface,
+and any queue command + --help prints it too
+  standing-orders approver add <name>
+                               mint the credential that lets a person say yes
   standing-orders ready            what could be dispatched right now
   standing-orders task add <title> queue work
+  standing-orders task scope <id> --goal <text>
+                               state what success is; approval binds to it
+  standing-orders task approve <id>
+                               the yes — nothing builds without one
   standing-orders claim <id> --runner <name>
   standing-orders heartbeat <lease> / release <lease> / reap
   standing-orders tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
+  standing-orders serve --repo <path>  the console; watch, decide, approve
+  standing-orders watch / daemon install   the unattended loop, kept running
   standing-orders reconcile        recover what the last stretch left behind
 
 With nothing connected it reports everything it can find below the working
@@ -114,8 +127,10 @@ home directory, and never touches a file it did not create.`;
 
 export function parseArgs(argv: readonly string[]): ParseResult {
   const roots: string[] = [];
+  const rawRoots: string[] = [];
   const options: CliOptions = {
     roots: [],
+    rawRoots: [],
     rootsGiven: false,
     maxDepth: DEFAULT_MAX_DEPTH,
     json: false,
@@ -151,6 +166,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       return { error: `unknown option ${argument} — try \`standing-orders --help\`` };
     } else {
       roots.push(resolve(argument));
+      rawRoots.push(argument);
     }
   }
 
@@ -158,6 +174,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
     options: {
       ...options,
       roots: roots.length > 0 ? roots : [process.cwd()],
+      rawRoots,
       rootsGiven: roots.length > 0,
     },
   };
@@ -281,6 +298,12 @@ async function dispatch(
   mainOptions: MainOptions,
 ): Promise<number> {
   const [first, ...rest] = argv;
+  if (first === "help") {
+    // The bare word, because somebody will type it — never scanned as a
+    // path named "help".
+    write(HELP);
+    return 0;
+  }
   if (first === "link" || first === "unlink") {
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
@@ -324,13 +347,20 @@ async function dispatch(
 
   // A path that does not exist is a typo, not an empty search, and saying
   // "no repositories found" about it would be answering a question we never
-  // asked. Warnings go inside the envelope in JSON mode so it stays parseable.
+  // asked. Warnings go inside the envelope in JSON mode so it stays
+  // parseable — and when NOTHING was scannable the envelope says ok:false
+  // (aligned with `pulls`), because an all-missing scan that reported
+  // ok:true let a typo'd command read as success.
   if (present.length === 0) {
-    write(options.json ? renderJson([], options.roots, missing, now) : describeMissing(missing));
+    write(
+      options.json
+        ? renderMissingJson(options.roots, missing, now)
+        : describeMissing(missing, options.rawRoots, options.roots),
+    );
     return USAGE_EXIT;
   }
   if (missing.length > 0 && !options.json) {
-    write(describeMissing(missing));
+    write(describeMissing(missing, options.rawRoots, options.roots));
     write("");
   }
 
@@ -413,8 +443,43 @@ export function partitionRoots(
   };
 }
 
-function describeMissing(missing: readonly string[]): string {
-  return missing.map(root => `${root} does not exist — check the path.`).join("\n");
+/**
+ * A missing root that was typed as a bare word — no separator, no leading
+ * dot, no home shorthand — is as likely a mistyped COMMAND as a missing
+ * folder, and after `resolve()` the two are indistinguishable. The message
+ * names both readings instead of guessing (Codex round-4 finding 18);
+ * path-shaped roots keep the plain missing-path sentence.
+ */
+function describeMissing(missing: readonly string[], rawRoots: readonly string[] = [], roots: readonly string[] = []): string {
+  const rawOf = new Map<string, string>();
+  roots.forEach((resolved, index) => {
+    const raw = rawRoots[index];
+    if (raw !== undefined) rawOf.set(resolved, raw);
+  });
+  const bareWord = (raw: string | undefined): boolean =>
+    raw !== undefined && !/[/\\~]/.test(raw) && !raw.startsWith(".");
+  return missing
+    .map(root =>
+      bareWord(rawOf.get(root))
+        ? `${root} does not exist — if you meant a command, \`standing-orders --help\` lists them; to scan a folder, give a path that exists.`
+        : `${root} does not exist — check the path.`,
+    )
+    .join("\n");
+}
+
+/** The all-missing scan envelope: honest ok:false with the scan fields kept. */
+function renderMissingJson(roots: readonly string[], missingRoots: readonly string[], now: Date): string {
+  return envelopeJson({
+    ok: false,
+    command: "scan",
+    reason: "no-repositories",
+    message: "none of the given paths exist — nothing was scanned",
+    scannedAt: now.toISOString(),
+    roots,
+    missingRoots,
+    remoteRead: false,
+    repos: [],
+  });
 }
 
 /**

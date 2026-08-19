@@ -106,7 +106,7 @@ import {
   rowVisible,
 } from "./project.js";
 import { tally, spendLine } from "./summary.js";
-import { classify } from "./board.js";
+import { classify, holdOwnerWords } from "./board.js";
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
@@ -853,7 +853,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         before = Number(raw);
       }
       const rows = store.listRunsBefore(before, RUNS_PAGE, project);
-      return page(response, 200, runsPage(chromeFor(project, "runs"), rows, rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
+      return page(response, 200, runsPage(chromeFor(project, "runs"), rows, liveRunIds(rows), rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
     }
 
     const run = /^\/r\/([0-9]{1,15})$/.exec(url.pathname);
@@ -863,10 +863,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such run", "/runs");
       }
       const taskId = store.externalIdFor(found.taskRef) ?? "?";
+      const running = runIsLive(found);
       if (url.searchParams.get("fragment") === "facts") {
         // The facts region alone — same auth and ceiling as the page; a
-        // finished run says so rather than growing forms (finding 5).
-        return respond(response, 200, "text/html; charset=utf-8", runFactsFragment(found, taskId));
+        // finished or no-longer-live run says so rather than growing forms
+        // (finding 5; round-4 finding 15).
+        return respond(response, 200, "text/html; charset=utf-8", runFactsFragment(found, taskId, running));
       }
       if (url.searchParams.get("fragment") === "peek") {
         // The live peek: cookie sessions only (v2 §3), never stored, never
@@ -877,7 +879,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (peeked.retryAfter !== undefined) response.setHeader("retry-after", String(peeked.retryAfter));
         return respond(response, peeked.status, "text/html; charset=utf-8", peeked.body);
       }
-      const liveNonce = found.outcome === null ? randomBytes(16).toString("base64") : undefined;
+      // Pollers and their nonce exist only for a LIVE run — an orphaned
+      // null-outcome run would otherwise be refetched forever (finding 15).
+      const liveNonce = running ? randomBytes(16).toString("base64") : undefined;
       const artifacts = store.artifactsFor(found.id);
       return page(
         response,
@@ -907,6 +911,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                   chromeScript(),
               },
           options.localRunner !== undefined,
+          running,
         ),
         liveNonce,
       );
@@ -1093,7 +1098,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         detail:
           setupDone > 0
             ? `setup command set${counted(setupDone)}`
-            : `agents build in throwaway worktrees; give them the preparation step: <code>standing-orders setup set --repo &lt;path&gt; --command "npm ci"</code>`,
+            : `agents build in throwaway workspaces; give them the preparation step: <code>standing-orders setup set --repo &lt;path&gt; --command "npm ci"</code>`,
       },
       {
         done: repos.length > 0 && skillDone === repos.length,
@@ -1421,15 +1426,34 @@ export function createDecisionServer(options: ServeOptions): Server {
     return `<h2>tasks</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
   }
 
+  /**
+   * The one liveness fact (round-4 findings 14/15): a run is being built
+   * right now iff its outcome is null AND its lease is the task's current
+   * live claim \u2014 maximum generation, unreleased, strictly unexpired. Every
+   * "running" label, poller, and watch link derives from this; nothing
+   * ever infers liveness from a null outcome alone.
+   */
+  function runIsLive(run: Pick<Run, "outcome" | "leaseId" | "taskRef">): boolean {
+    return run.outcome === null && store.currentLiveLease(run.taskRef, clock()) === run.leaseId;
+  }
+
+  /** The live subset of a bounded run page \u2014 one indexed lookup per row. */
+  function liveRunIds(rows: readonly (Pick<Run, "id" | "outcome" | "leaseId" | "taskRef">)[]): Set<number> {
+    const live = new Set<number>();
+    for (const run of rows) if (runIsLive(run)) live.add(run.id);
+    return live;
+  }
+
   /** The compact recent-runs list for the master pane. */
   function runListPane(project: string | null, currentId: number | null): string {
     const rows = store.listRunsBefore(null, 50, project);
+    const live = liveRunIds(rows);
     const items = rows
       .map(
         run =>
           `<a class="item${run.id === currentId ? " current" : ""}" href="/r/${run.id}">` +
           `<span class="t">#${run.id} \u00b7 ${escape(run.taskId)}</span>` +
-          `<span class="m"><span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
+          `<span class="m">${runOutcomeBadge(run, live.has(run.id))}` +
           `<span class="mono">${escape(when(run.startedAt))}</span></span></a>`,
       )
       .join("\n");
@@ -1475,7 +1499,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   function revisionViewOf(ref: ReturnType<Store["lookupRef"]>): RevisionView | null {
     if (ref === null || ref.revisionBriefArtifact === null) return null;
     const artifact = store.getArtifact(ref.revisionBriefArtifact);
-    if (artifact === null) return { problem: "the revision brief artifact is missing" };
+    if (artifact === null) return { problem: "the revision brief is missing from this build's records" };
     const read = readVerifiedArtifact(evidenceRoot, artifact);
     if (!read.ok) return { problem: `the revision brief no longer verifies — ${read.problem}` };
     try {
@@ -1539,6 +1563,15 @@ export function createDecisionServer(options: ServeOptions): Server {
           return open === null ? null : { id: open.id, state: open.state, agents: store.contestants(open.id).length };
         })(),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
+        // The one liveness fact, computed here where the store is: the run
+        // whose lease is the task's CURRENT claim — not merely the first
+        // unfinished run (round-4 finding, A1).
+        liveRunId: (() => {
+          if (ref === null) return null;
+          const found = store.runsFor(ref.id).find(one => runIsLive(one));
+          return found === undefined ? null : found.id;
+        })(),
+        peekable: options.localRunner !== undefined,
         scope,
         raceTerms,
         approvalDigest,
@@ -1572,7 +1605,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     status: number,
   ): void {
     const data = taskViewData(taskId, who, problem);
-    if (data === null) return respond(response, 404, "text/plain; charset=utf-8", "no such task");
+    if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
     const paneProject = who.via === "cookie" ? who.session.project : null;
     return page(
       response,
@@ -1648,8 +1681,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   };
 
-  /** One typed sentence inside the region — plain words, no raw errors. */
-  const peekSay = (message: string): string => `<p class="meta">${escape(message)}</p>`;
+  /** One typed sentence inside the region — plain words, no raw errors.
+   * `final` marks conditions that cannot heal for this run (finished,
+   * superseded, wrong machine): the region poller reads the marker and
+   * stops, instead of refetching a dead build every beat forever. */
+  const peekSay = (message: string, final = false): string =>
+    `<p class="meta"${final ? " data-region-stop" : ""}>${escape(message)}</p>`;
 
   /** The sanitize pipeline (finding 30/35): normalize → mask → escape. */
   const peekName = (path: string): string => {
@@ -1665,26 +1702,30 @@ export function createDecisionServer(options: ServeOptions): Server {
   };
 
   /** The full guard list (v3 §4) — run on every request, hit or miss. */
-  function peekGuards(runId: number): { ok: true; admit: PeekAdmission & { entries: NonNullable<PeekAdmission["entries"]> } } | { ok: false; message: string } {
+  function peekGuards(runId: number): { ok: true; admit: PeekAdmission & { entries: NonNullable<PeekAdmission["entries"]> } } | { ok: false; message: string; final?: boolean } {
     if (options.localRunner === undefined || options.poolRoot === undefined) {
-      return { ok: false, message: "live peek is off — start serve with --runner <name> naming this machine's runner" };
+      return { ok: false, message: "live peek is off — start serve with --runner <name> naming this machine's runner", final: true };
     }
     const run = store.getRun(runId);
-    if (run === null || !runVisible(run)) return { ok: false, message: "no such build" };
-    if (run.outcome !== null) return { ok: false, message: "this build has finished — the final diff below is the record" };
+    if (run === null || !runVisible(run)) return { ok: false, message: "no such build", final: true };
+    if (run.outcome !== null) return { ok: false, message: "this build has finished — the final diff below is the record", final: true };
     if (run.baseRevision === null) return { ok: false, message: "the build has not settled its starting point yet" };
-    if (store.liveClaimByLease(run.leaseId, clock()) === null) {
-      return { ok: false, message: "the build is not actively running right now" };
+    // The run's lease must be the task's CURRENT live lease — max generation,
+    // unreleased, strictly unexpired. liveClaimByLease proves only that the
+    // lease exists; a superseded lease would still pass it (round-4
+    // finding 15), and superseded is forever, so the poller may stop.
+    if (store.currentLiveLease(run.taskRef, clock()) !== run.leaseId) {
+      return { ok: false, message: "the build is not actively running right now", final: true };
     }
     const row = store.getWorktree(run.worktree);
     if (row === null || row.taskRef !== run.taskRef) return { ok: false, message: "the checkout is not where the record says" };
     if (row.runner !== options.localRunner) {
-      return { ok: false, message: "this build runs on another machine — open the console there to watch it" };
+      return { ok: false, message: "this build runs on another machine — open the console there to watch it", final: true };
     }
     // Adoption-path rows can carry no epoch (round-3 finding 37): no fence,
     // no peek — never a guess.
     if (row.leaseEpoch === null || row.leaseEpoch === undefined) {
-      return { ok: false, message: "this checkout predates the occupancy fence — it cannot be watched live" };
+      return { ok: false, message: "this checkout was set up before live watching existed — the next fresh build can be watched", final: true };
     }
     try {
       const real = realpathSync(run.worktree);
@@ -1713,7 +1754,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   async function peekFragment(runId: number, sessionKey: string): Promise<{ status: number; body: string; retryAfter?: number }> {
     const guarded = peekGuards(runId);
-    if (!guarded.ok) return { status: 200, body: peekSay(guarded.message) };
+    if (!guarded.ok) return { status: 200, body: peekSay(guarded.message, guarded.final === true) };
     const { run, epoch, entries } = guarded.admit;
     const key = `${runId}:${run.baseRevision}:${epoch}`;
     const cached = peekCache.get(key);
@@ -1812,6 +1853,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     repo: string | null;
     refOrigin: string;
     questions: Map<number, number>;
+    liveRuns: Set<number>;
     totalMicrousd: number;
     anyUnknown: boolean;
   } | null {
@@ -1839,6 +1881,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       repo: ref.repo,
       refOrigin: ref.origin,
       questions,
+      // An interrupted tournament's agents are STOPPED, not "still
+      // working" — their run records stay unfinished, so the card must
+      // prove liveness the same way every other surface does (round-4
+      // finding 16).
+      liveRuns: liveRunIds(view.agents.flatMap(agent => (agent.run === null ? [] : [agent.run]))),
       totalMicrousd: view.agents.reduce((sum, agent) => sum + agent.contestant.accountedMicrousd, 0),
       anyUnknown: view.agents.some(agent => agent.contestant.unknownSpend),
     };
@@ -1852,7 +1899,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     status: number,
   ): void {
     const data = contestData(contestId);
-    if (data === null) return respond(response, 404, "text/plain; charset=utf-8", "no such tournament");
+    if (data === null) return refuse(response, who, 404, "no such tournament", "/board");
     const paneProject = who.via === "cookie" ? who.session.project : null;
     const diffs = new Map<number, TerminalDiffView | null>();
     for (const agent of data.view.agents) {
@@ -2098,7 +2145,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const contestId = Number(contestAct[1]);
       const verb = contestAct[2] as "arm" | "pick" | "abandon";
       const data = contestData(contestId);
-      if (data === null) return respond(response, 404, "text/plain; charset=utf-8", "no such tournament");
+      if (data === null) return refuse(response, who, 404, "no such tournament", "/board");
       const { view } = data;
 
       if (verb === "arm") {
@@ -3571,7 +3618,9 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     `return r.ok?r.text():null;})` +
     `.then(function(t){if(t){region.innerHTML=t;last=Date.now();wait=${ms};}else{wait=Math.min(wait*2,${ms}*8);}})` +
     `.catch(function(){wait=Math.min(wait*2,${ms}*8);})` +
-    `.then(function(){busy=false;tell();setTimeout(cycle,wait);});}` +
+    // A fragment that marks itself final stops the poller: a finished or
+    // abandoned build must not be fetched every beat forever.
+    `.then(function(){busy=false;tell();if(region.querySelector("[data-region-stop]")){if(stamp)stamp.textContent="";return;}setTimeout(cycle,wait);});}` +
     `setTimeout(cycle,wait);})();`
   );
 }
@@ -4071,22 +4120,13 @@ function boardBody(
       card.stalledSince === null ? "" : ` \u00b7 waiting ${age(card.stalledSince)}`
     }</span></a>`;
 
-  // The machine phase's chip copy \u2014 plain words for the machine's own
-  // boundaries. Unknown values (a newer daemon's vocabulary) show nothing
-  // rather than raw tokens.
-  const PHASE_LABEL: Record<string, string> = {
-    "agent-running": "agent working",
-    "validating-handoff": "checking the handoff",
-    "capturing-evidence": "capturing evidence",
-    committing: "committing",
-  };
-
   const building = (card: BoardCard): string => {
     const claim = card.claim;
     if (claim === null) return plain(card);
     const minutes = Math.max(1, Math.round((data.now.getTime() - new Date(claim.claimedAt).getTime()) / 60_000));
     const workspace = claim.worktree === null ? null : (claim.worktree.split("/").pop() ?? claim.worktree);
-    const phase = claim.phase === null ? undefined : PHASE_LABEL[claim.phase];
+    // Chip copy: unknown phases show nothing rather than raw tokens.
+    const phase = claim.phase === null ? undefined : PHASE_WORDS[claim.phase];
     return (
       `<a class="lane-card building" href="${card.href}">` +
       `<span class="t"><span class="dot dot-ok pulse"></span>${escape(card.title)}</span>` +
@@ -4660,7 +4700,7 @@ function homePage(chrome: Chrome, data: {
         data.incidents
           .map(
             one =>
-              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> — ${escape(one.kind)}` +
+              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> — ${escape(incidentWords(one.kind))}` +
               `<span class="right"><form method="post" action="/i/${one.id}/resolve" class="inline">` +
               `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
               `<button type="submit">resolve</button></form></span></p>`,
@@ -4910,7 +4950,7 @@ function workbenchRail(data: {
           .map(card =>
             row(
               card,
-              `<span class="meta">${escape(card.claim?.phase ?? "working")}` +
+              `<span class="meta">${escape(card.claim?.phase == null ? "working" : phaseWords(card.claim.phase))}` +
                 `${card.claim?.provider ? ` · ${escape(card.claim.provider)}` : ""}` +
                 `${card.claim?.claimedAt ? ` · <time data-elapsed-since="${escape(card.claim.claimedAt)}"></time>` : ""}</span>`,
             ),
@@ -4965,6 +5005,10 @@ function contestPage(chrome: Chrome, data: {
   totalMicrousd: number;
   anyUnknown: boolean;
   diffs: Map<number, TerminalDiffView | null>;
+  /** Runs whose lease is still the task's current live claim — "still
+   * working" is said only of these; an interrupted agent's unfinished run
+   * reads as stopped (round-4 finding 16). */
+  liveRuns?: ReadonlySet<number>;
   csrf: string;
   problem: string | null;
 }): string {
@@ -4985,8 +5029,12 @@ function contestPage(chrome: Chrome, data: {
             : run.outcome === "parked"
               ? "waiting on an answer"
               : run.outcome === null
-                ? "still working"
-                : `stopped (${run.outcome})`;
+                ? (data.liveRuns?.has(run.id) === true ? "still working" : "stopped without finishing")
+                : run.outcome === "failed"
+                  ? "failed"
+                  : run.outcome === "refused"
+                    ? "refused — a gate said no"
+                    : "stopped";
     const minutes =
       run === null || run.finishedAt === null
         ? null
@@ -5031,7 +5079,7 @@ function contestPage(chrome: Chrome, data: {
     `<p class="meta">${agents.length} agents raced on <a href="${taskHref(data.taskId)}">${escape(data.taskTitle)}</a> — ` +
       `only one result will be kept as the task's outcome; the rest stay archived with their evidence</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
-    `<p class="row"><strong>${escape(CONTEST_STATE_WORDS[contest.state] ?? contest.state)}</strong></p>`,
+    `<p class="row"><strong>${escape(CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail")}</strong></p>`,
     contest.pickedBy === null ? "" : `<p class="meta">picked by ${escape(contest.pickedBy)} at ${escape(when(contest.pickedAt ?? ""))}</p>`,
     `<p class="row"><strong>charged so far</strong> ${escape(contestDollars(data.totalMicrousd))}` +
       `${data.anyUnknown ? ` <span class="meta">— includes at least one agent charged its full reservation because the exact figure was unknowable</span>` : ""}</p>`,
@@ -5232,6 +5280,11 @@ function taskBody(data: {
   holds: Hold[];
   contest?: { id: number; state: string; agents: number } | null;
   claimed: boolean;
+  /** The run whose lease is the CURRENT live claim — computed by the data
+   * layer; the renderer never guesses liveness from a null outcome. */
+  liveRunId?: number | null;
+  /** Whether this serve asserted its runner — the live file view exists. */
+  peekable?: boolean;
   scope: Scope | null;
   /** Filed race terms (v14) — the approval restates them; one yes covers both. */
   raceTerms?: TournamentTerms | null;
@@ -5258,11 +5311,16 @@ function taskBody(data: {
 
   // The live-peek door (A2, finding 10's selected-pane rule): the WATCHING
   // happens on the run page's own polled region — this is only the way in.
-  const liveRun = data.claimed ? data.runs.find(run => run.outcome === null) : undefined;
+  // The link promises a live file view only where one exists; a serve that
+  // never asserted its runner offers the running build without the promise
+  // (round-4, A1).
+  const liveRunId = data.liveRunId ?? null;
   const watchLink =
-    liveRun === undefined
+    liveRunId === null
       ? ""
-      : `<p class="row"><a href="/r/${liveRun.id}">watch what is changing right now — build #${liveRun.id}</a></p>`;
+      : data.peekable === true
+        ? `<p class="row"><a href="/r/${liveRunId}">watch what is changing right now — build #${liveRunId}</a></p>`
+        : `<p class="row"><a href="/r/${liveRunId}">open the running build — build #${liveRunId}</a></p>`;
 
   const contest = data.contest ?? null;
   const contestCard =
@@ -5271,7 +5329,7 @@ function taskBody(data: {
       : [
           `<div class="card">`,
           `<p><strong>tournament</strong> <span class="meta">${contest.agents} agents on this task</span></p>`,
-          `<p class="row">${escape(CONTEST_STATE_WORDS[contest.state] ?? contest.state)}</p>`,
+          `<p class="row">${escape(CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail")}</p>`,
           `<p class="row"><a href="/contest/${contest.id}">${
             contest.state === "pick-wait" ? "compare the results and pick one" : "see the tournament"
           }</a></p>`,
@@ -5285,7 +5343,7 @@ function taskBody(data: {
         data.holds
           .map(
             hold =>
-              `<p class="row">${escape(hold.ownerKind)} — ${escape(hold.reason)}` +
+              `<p class="row">${escape(holdOwnerWords(hold.ownerKind))} — ${escape(hold.reason)}` +
               `${hold.until === null ? "" : ` <span class="meta">until ${escape(when(hold.until))}</span>`}</p>`,
           )
           .join("\n") +
@@ -5300,7 +5358,7 @@ function taskBody(data: {
           `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
           scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
           scope.touches.length === 0 ? "" : `<p><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
-          `<p class="meta">terms fingerprint <span class="mono">${escape(scope.digest)}</span> — approval binds to this exact wording</p>`,
+          `<p class="meta">terms fingerprint <span class="mono">${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>`,
           approval.approved
             ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
             : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
@@ -5472,8 +5530,8 @@ function taskBody(data: {
             ].filter((bit): bit is string => bit !== null);
             return (
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
-              `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
-              `${run.reason === null ? "" : ` <span class="meta">${escape(run.reason)}</span>`}` +
+              runOutcomeBadge(run, run.id === liveRunId) +
+              `${run.reason === null ? "" : ` <span class="meta">${escape(reasonWords(run.reason))}</span>`}` +
               ` <span class="meta mono">${escape(bits.join(" · "))}</span>` +
               `<span class="right meta mono">${escape(when(run.startedAt))}</span></p>`
             );
@@ -5530,11 +5588,11 @@ function taskBody(data: {
         data.incidents
           .map(one =>
             one.resolvedAt === null
-              ? `<p class="row">${escape(one.kind)} ` +
+              ? `<p class="row">${escape(incidentWords(one.kind))} ` +
                 `<form method="post" action="/i/${one.id}/resolve" class="inline">` +
                 `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
                 `<button type="submit">resolve</button></form></p>`
-              : `<p class="row meta">${escape(one.kind)} — resolved by ${escape(one.resolvedBy ?? "?")}</p>`,
+              : `<p class="row meta">${escape(incidentWords(one.kind))} — resolved by ${escape(one.resolvedBy ?? "?")}</p>`,
           )
           .join("\n");
 
@@ -5691,7 +5749,100 @@ function reviewPage(
   ].join("\n"), { chrome });
 }
 
-function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor: number | null): string {
+/**
+ * Plain words for the machine's own vocabulary — no internal token ever
+ * reaches a page. Every map here has a generic fallback: a kind a newer
+ * daemon invents degrades to honest generic prose, never to its raw name.
+ */
+const PHASE_WORDS: Record<string, string> = {
+  "agent-running": "agent working",
+  "validating-handoff": "checking the handoff",
+  "capturing-evidence": "capturing evidence",
+  committing: "committing",
+};
+
+function phaseWords(phase: string): string {
+  return PHASE_WORDS[phase] ?? "the agent is working";
+}
+
+const REASON_WORDS: Record<string, string> = {
+  agent: "the agent failed",
+  "agent-reported": "the agent reported it could not finish",
+  "no-op": "nothing changed when something should have",
+  "moved-head": "the branch moved underneath the build",
+  "moved-branch": "the branch moved underneath the build",
+  timeout: "ran out of time",
+  git: "a git step failed",
+  "malformed-decision": "the agent's question was malformed",
+  "malformed-plan": "the plan was malformed",
+  fenced: "another worker took the task over",
+  unapproved: "the scope was not approved",
+  "scope-changed": "the scope changed after approval",
+  capability: "a requirement was missing",
+  setup: "the workspace preparation step failed",
+  "provider-init": "the agent could not start",
+  "commit-failure": "the commit failed",
+  "protected-branch": "refused to touch a protected branch",
+  "wrong-branch": "the checkout was on the wrong branch",
+  "not-leased": "the lease was not valid",
+  "no-claim": "the lease was not valid",
+  "not-yours": "the lease was not valid",
+  "no-run-record": "the run record was missing",
+  "missing-mailbox": "the resume mailbox could not be read",
+  "unreadable-mailbox": "the resume mailbox could not be read",
+  "revision-brief": "the revision brief could not be read",
+  "repaired-park": "resumed from a parked question",
+  stopped: "stopped by the operator",
+};
+
+function reasonWords(reason: string): string {
+  return REASON_WORDS[reason] ?? "stopped — the build records have the detail";
+}
+
+const INCIDENT_WORDS: Record<string, string> = {
+  "malformed-decision": "the agent's question was malformed",
+  "attempts-exhausted": "failed too many times in a row",
+  "commit-failure": "the commit failed",
+  "malformed-plan": "the plan was malformed",
+  "plan-attempts-exhausted": "planning failed too many times",
+};
+
+function incidentWords(kind: string): string {
+  return INCIDENT_WORDS[kind] ?? "something went wrong — the run records have the detail";
+}
+
+const EVIDENCE_WORDS: Record<string, string> = {
+  diff: "the diff",
+  status: "the build status",
+  "park-payload": "the parked question's record",
+  plan: "the plan",
+  "terminal-diff": "the final diff",
+  "diff-stat": "the change summary",
+  "base-tree": "the starting-point file list",
+  handoff: "the agent's conclusion",
+  "revision-brief": "the revision brief",
+};
+
+function evidenceWords(kind: string): string {
+  return EVIDENCE_WORDS[kind] ?? "a stored record";
+}
+
+/** A shortened fingerprint for display — enough to compare by eye; the
+ * full value rides in the title attribute and in every form field. */
+function shortDigest(digest: string): string {
+  return digest.length <= 12 ? escape(digest) : `<span title="${escape(digest)}">${escape(digest.slice(0, 12))}…</span>`;
+}
+
+/** The badge for a run's outcome. A null outcome reads "running" ONLY when
+ * the caller proved the run's lease is the task's current live claim — an
+ * orphaned run keeps saying what actually became of it. */
+function runOutcomeBadge(run: Run, live: boolean): string {
+  return live
+    ? `<span class="badge badge-running">running</span>`
+    : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>`;
+}
+
+function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: ReadonlySet<number>, nextCursor: number | null): string {
   const list =
     rows.length === 0
       ? `<p class="meta">No runs yet \u2014 a run is one unattended build attempt; they appear once the watch dispatches an approved task.</p>`
@@ -5700,7 +5851,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], nextCursor
             run =>
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
-              `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>` +
+              runOutcomeBadge(run, liveIds.has(run.id)) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
               `<span class="right meta mono">${escape(when(run.startedAt))}` +
               `${
@@ -5829,9 +5980,9 @@ function terminalDiffCard(view: TerminalDiffView, runId: number): string {
     parts.push(`<p class="meta">empty diff — captured successfully, nothing changed</p>`);
   } else {
     parts.push(
-      `<details><summary>the patch${view.patch.truncated ? " (TRUNCATED — the raw artifact says how much was cut)" : ""}</summary>` +
+      `<details><summary>the patch${view.patch.truncated ? " (TRUNCATED — the raw record says how much was cut)" : ""}</summary>` +
         `<pre class="mono" style="overflow-x:auto">${escape(view.patch.text)}</pre></details>` +
-        `<p class="meta"><a href="/r/${runId}/evidence/${view.patch.artifactId}">raw patch artifact</a></p>`,
+        `<p class="meta"><a href="/r/${runId}/evidence/${view.patch.artifactId}">the raw patch record</a></p>`,
     );
   }
 
@@ -5841,18 +5992,18 @@ function terminalDiffCard(view: TerminalDiffView, runId: number): string {
 
 /** The run's facts as rows — one renderer for the page and its live
  * fragment (A4). Elapsed ticks client-side while the run is open. */
-function runFactsRows(run: Run, taskId: string): string {
+function runFactsRows(run: Run, taskId: string, live: boolean): string {
   const facts: [string, string | null, boolean?][] = [
     ["task", taskId, true],
     ["role", run.role],
-    ["outcome", run.outcome ?? "never finished"],
-    ["phase", run.outcome === null ? run.phase : null],
-    ["reason", run.reason],
+    ["outcome", live ? "running" : (run.outcome ?? "never finished")],
+    ["phase", live && run.phase !== null ? phaseWords(run.phase) : null],
+    ["reason", run.reason === null ? null : reasonWords(run.reason)],
     ["runner", run.runner, true],
     ["branch", run.branch, true],
     ["model", run.model, true],
-    ["base", run.baseRevision, true],
-    ["head", run.headRevision, true],
+    ["starting point", run.baseRevision === null ? null : `${run.baseRevision.slice(0, 12)}…`, true],
+    ["ended at", run.headRevision === null ? null : `${run.headRevision.slice(0, 12)}…`, true],
     ["started", when(run.startedAt), true],
     ["finished", when(run.finishedAt), true],
     ["provider started", when(run.providerStartedAt), true],
@@ -5871,7 +6022,7 @@ function runFactsRows(run: Run, taskId: string): string {
     ],
   ];
   const elapsed =
-    run.outcome === null && run.startedAt !== null
+    live && run.startedAt !== null
       ? `<p class="row"><span class="meta" style="min-width:8.5rem">elapsed</span> <time class="mono" data-elapsed-since="${escape(run.startedAt)}"></time></p>`
       : "";
   return (
@@ -5898,16 +6049,22 @@ function runPage(
   ciRepair: { pr: number } | null = null,
   live?: { nonce: string; script: string },
   peekable = false,
+  running = false,
 ): string {
-  const rows = runFactsRows(run, taskId);
-  // The live peek region (A2): rendered only while the run is open on a
-  // serve that asserted its runner; the poller fills it within its beat.
-  const peek =
-    run.outcome !== null || !peekable
-      ? ""
-      : `<h2>what is changing right now</h2>` +
+  const rows = runFactsRows(run, taskId, running);
+  // The live peek region (A2): the poller fills it only on a serve that
+  // asserted its runner. Without the assertion the section still appears
+  // for a running build and says honestly why it is empty \u2014 a page that
+  // silently lacked the region while the task screen promised a live view
+  // read as broken (round-4, A1).
+  const peek = !running
+    ? ""
+    : peekable
+      ? `<h2>what is changing right now</h2>` +
         `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
-        `<p class="meta" id="run-peek-stamp"></p>`;
+        `<p class="meta" id="run-peek-stamp"></p>`
+      : `<h2>what is changing right now</h2>` +
+        `<p class="meta">the live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
   const handoff =
     run.handoff === null
       ? ""
@@ -5919,7 +6076,7 @@ function runPage(
         artifacts
           .map(
             artifact =>
-              `<a href="/r/${run.id}/evidence/${artifact.id}">${escape(artifact.kind)}` +
+              `<a href="/r/${run.id}/evidence/${artifact.id}">${escape(evidenceWords(artifact.kind))}` +
               `${artifact.truncated ? " (truncated)" : ""} · ${artifact.bytesStored} bytes</a>`,
           )
           .join("\n") +
@@ -5989,7 +6146,7 @@ function runPage(
   return shell(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     `<div id="run-facts">${rows}</div>`,
-    run.outcome === null ? `<p class="meta" id="run-facts-stamp"></p>` : "",
+    running ? `<p class="meta" id="run-facts-stamp"></p>` : "",
     peek,
     terminal === null ? "" : terminalDiffCard(terminal, run.id),
     reviewCard,
@@ -6000,12 +6157,18 @@ function runPage(
 }
 
 /** The facts region alone, for the open-run poll (A4). A finished run's
- * fragment says so instead of quietly growing forms (finding 5). */
-export function runFactsFragment(run: Run, taskId: string): string {
+ * fragment says so instead of quietly growing forms (finding 5), and a run
+ * that stopped being the task's live claim says so too — both carry the
+ * stop marker, so an open tab quits refetching a dead build (round-4
+ * finding 15). */
+export function runFactsFragment(run: Run, taskId: string, live: boolean): string {
   if (run.outcome !== null) {
-    return `<p class="meta">finished — <a href="/r/${run.id}">reload for the final record</a></p>`;
+    return `<p class="meta" data-region-stop>finished — <a href="/r/${run.id}">reload for the final record</a></p>`;
   }
-  return runFactsRows(run, taskId);
+  if (!live) {
+    return `<p class="meta" data-region-stop>this build stopped without finishing — <a href="/r/${run.id}">reload for the record</a></p>`;
+  }
+  return runFactsRows(run, taskId, live);
 }
 
 function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): string {
@@ -6252,7 +6415,7 @@ function decisionPage(
         artifacts
           .map(
             artifact =>
-              `<a href="/d/${decision.id}/evidence/${artifact.id}">${escape(artifact.kind)}` +
+              `<a href="/d/${decision.id}/evidence/${artifact.id}">${escape(evidenceWords(artifact.kind))}` +
               `${artifact.truncated ? " (truncated)" : ""} · ${artifact.bytesStored} bytes</a>`,
           )
           .join("\n") +

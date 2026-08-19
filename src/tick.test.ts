@@ -198,8 +198,12 @@ describe("tick, against real git", () => {
     await queueApproved("t-1", approverToken);
 
     // Terms first: without --yes nothing is granted, and status says so.
-    await run(["publish", "grant", "--github", "alex/thing", "--repo", repo, "--json"]);
-    expect(payload().granted).toBe(false);
+    // Unconfirmed answers like every other grant preview — ok:false,
+    // reason "unconfirmed", exit 3 (round-4 preview normalization; this
+    // one alone used to say ok:true).
+    const preview = await run(["publish", "grant", "--github", "alex/thing", "--repo", repo, "--json"]);
+    expect(preview).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "unconfirmed", granted: false });
     await run(["publish", "status", "--repo", repo, "--json"]);
     expect(payload().grant).toBeNull();
 
@@ -1643,6 +1647,11 @@ describe("watch — the loop, zero tokens idle", () => {
     ]);
 
     expect(code).toBe(EXIT.ok);
+    // Under --json, stdout is EXACTLY one envelope — progress narration
+    // belongs to stderr, and one stray write() line beside the envelope is
+    // the regression this guards (round-4 finding 12). The backward-scan in
+    // payload() would mask it, so parse the whole capture strictly.
+    expect(() => JSON.parse(lines.join("\n"))).not.toThrow();
     await run(["task", "show", "t-1", "--json"]);
     expect(payload().task.state).toBe("done");
     await run(["task", "show", "t-2", "--json"]);

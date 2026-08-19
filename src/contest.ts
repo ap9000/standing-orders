@@ -469,13 +469,29 @@ export function buildPickView(store: Store, evidenceRoot: string, contestId: num
     const artifacts = run === null ? [] : store.artifactsFor(run.id);
     const diff = artifacts.find(one => one.kind === "terminal-diff") ?? null;
     const stat = artifacts.find(one => one.kind === "diff-stat") ?? null;
+    // Plain words only — the internal state/outcome tokens never reach the
+    // comparison screen (round-4 finding 17). The tuple digest binds the
+    // raw facts separately; these strings are display, not authority.
+    const stateWords: Record<string, string> = {
+      pending: "was never started",
+      ready: "was set up but never ran",
+      building: "is still building",
+      parked: "stopped at a question",
+      failed: "failed",
+      stopped: "was stopped",
+    };
+    const outcomeWords: Record<string, string> = {
+      failed: "the attempt failed",
+      refused: "a gate refused the attempt",
+      parked: "the attempt stopped at a question",
+    };
     let reason: string | null = null;
-    if (contestant.state !== "built") reason = `did not finish (${contestant.state})`;
+    if (contestant.state !== "built") reason = `did not finish — ${stateWords[contestant.state] ?? "the records have the detail"}`;
     else if (run === null || run.outcome === null) reason = "no finished attempt";
     else if (run.outcome === "built" && run.committed !== true) reason = "finished without committing";
     else if (run.outcome === "no-change" && run.headRevision !== null && contest.baseSha !== null && run.headRevision !== contest.baseSha)
       reason = "claims no change but the branch moved";
-    else if (run.outcome !== "built" && run.outcome !== "no-change") reason = `outcome ${run.outcome}`;
+    else if (run.outcome !== "built" && run.outcome !== "no-change") reason = outcomeWords[run.outcome] ?? "the attempt did not finish cleanly";
     else if (diff === null || stat === null) reason = "evidence was not captured";
     else if (diff.captureStatus !== "ok" || stat.captureStatus !== "ok") reason = "evidence capture did not verify";
     else if (diff.redacted) reason = "the diff was redacted (something credential-shaped) — unpickable, like unpublishable";

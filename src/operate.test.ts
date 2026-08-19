@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
@@ -103,6 +104,56 @@ describe("operating the queue from the command line", () => {
       expect(code).toBe(EXIT.refused);
       expect(payload()).toMatchObject({ ok: false, reason: "fenced" });
       expect(payload().message).toContain("stop rather than retry");
+    });
+
+    test("--help answers on any queue command without creating the database", async () => {
+      // `serve --help` once STARTED THE SERVER, and asking for help minted
+      // ~/.config/standing-orders/orders.db as a side effect (round-4
+      // findings 2/7). Help now answers before the store ever opens.
+      const code = await run(["serve", "--help"]);
+
+      expect(code).toBe(EXIT.ok);
+      expect(out()).toContain("operating the queue");
+      expect(existsSync(db)).toBe(false);
+    });
+
+    test("--help --json answers as one envelope, honoring the contract", async () => {
+      const code = await run(["tick", "--help", "--json"]);
+
+      expect(code).toBe(EXIT.ok);
+      expect(payload()).toMatchObject({ ok: true, command: "help" });
+      expect(payload().help).toContain("operating the queue");
+      expect(existsSync(db)).toBe(false);
+    });
+
+    test("an unknown flag is refused by name, never silently accepted", async () => {
+      // --runer used to become boolean true and "alice" a positional; the
+      // real error then surfaced two steps later as something else.
+      const code = await run(["task", "list", "--runer", "alice"]);
+
+      expect(code).toBe(EXIT.usage);
+      expect(out()).toContain("--runer");
+    });
+
+    test("a parse refusal still answers in an envelope under --json", async () => {
+      const code = await run(["task", "list", "--runer", "alice", "--json"]);
+
+      expect(code).toBe(EXIT.usage);
+      expect(payload()).toMatchObject({ ok: false, reason: "usage" });
+    });
+
+    test("a value flag followed by another flag is a missing value, not a swallowed flag", async () => {
+      const code = await run(["task", "hold", "t-1", "--reason", "--json"]);
+
+      expect(code).toBe(EXIT.usage);
+      expect(payload().message).toContain("--reason needs a value");
+    });
+
+    test("serve validates --port as a number, like demo does", async () => {
+      const code = await run(["serve", "--port", "abc", "--json"]);
+
+      expect(code).toBe(EXIT.usage);
+      expect(payload().message).toContain("--port");
     });
   });
 
@@ -350,7 +401,9 @@ describe("write access", () => {
     // Printing the terms after the fact would be a receipt, not consent.
     const code = await run(["enroll", dir, "--backend", "beads", "--paths", ".beads"]);
 
-    expect(code).toBe(EXIT.ok);
+    // Unconfirmed is "no, not yet" — exit 3 in human mode too, matching the
+    // JSON path (the round-4 preview normalization).
+    expect(code).toBe(EXIT.refused);
     expect(out()).toContain("Nothing has been granted");
     expect(out()).toContain("may do");
     expect(out()).toContain("only those Standing Orders created or was given");
@@ -609,7 +662,7 @@ describe("agreeing to a scope from the command line", () => {
 
     const code = await run(["task", "approve", "pay"]);
 
-    expect(code).toBe(EXIT.ok);
+    expect(code).toBe(EXIT.refused);
     expect(out()).toContain("Nothing has been approved");
     await run(["task", "show", "pay", "--json"]);
     expect(payload().approval.approved).toBe(false);
@@ -622,7 +675,7 @@ describe("agreeing to a scope from the command line", () => {
 
     const code = await run(["task", "approve", "pay", "--yes"]);
 
-    expect(code).toBe(EXIT.ok);
+    expect(code).toBe(EXIT.refused);
     expect(out()).toContain("--digest");
     await run(["task", "show", "pay", "--json"]);
     expect(payload().approval.approved).toBe(false);

@@ -1262,6 +1262,69 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
         "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--json",
       ])).toBe(EXIT.ok);
       expect(JSON.parse(lines.join("\n")).race.agents).toHaveLength(2);
+
+      // config clear budgets resets the agent count too — the store nulls
+      // every omitted key (round-4 finding 11 recast as this regression):
+      // after the clear, one named agent no longer replicates to three, so
+      // the filing refuses for being a one-agent tournament.
+      lines.length = 0;
+      expect(await run(["config", "clear", "budgets", "--as", "alex", "--token", added.token, "--json"])).toBe(EXIT.ok);
+      lines.length = 0;
+      expect(await run([
+        "task", "scope", "default-cli", "--goal", "g",
+        "--race", "claude:claude-sonnet-5", "--race-per-usd", "5", "--race-total-usd", "30", "--json",
+      ])).toBe(EXIT.refused);
+      expect(JSON.parse(lines.join("\n")).message).toContain("2 to 4");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing race budget names the missing flag and the way to default it; a bad budgets value names its flag", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const dir = mkdtempSync(join(tmpdir(), "race-budget-msg-"));
+    const db = join(dir, "orders.db");
+    const lines: string[] = [];
+    const write = (line: string) => lines.push(line);
+    const { runOperate, EXIT } = await import("./operate.js");
+    const run = (argv: string[]) => runOperate(argv[0] as string, argv.slice(1), write, { databaseFile: db, now: T0 });
+    try {
+      const bootstrap = openStore(db);
+      const { addApprover } = await import("./scope.js");
+      const added = addApprover(bootstrap, "alex", T0);
+      if (!added.ok) throw new Error("bootstrap");
+      bootstrap.close();
+      expect(await run(["task", "add", "msg-cli", "--id", "msg-cli", "--json"])).toBe(EXIT.ok);
+
+      // No --race-per-usd and no default: the refusal names the flag and
+      // the config command that would fill it — not the generic
+      // "positive dollar budget" riddle (round-4 finding 11).
+      lines.length = 0;
+      expect(await run([
+        "task", "scope", "msg-cli", "--goal", "g",
+        "--race", "claude:claude-sonnet-5,claude:claude-opus-5", "--json",
+      ])).toBe(EXIT.usage);
+      let refusal = JSON.parse(lines.join("\n"));
+      expect(refusal.reason).toBe("bad-budget");
+      expect(refusal.message).toContain("--race-per-usd is missing");
+      expect(refusal.message).toContain("config set budgets");
+
+      // Per-agent present, total absent: the OTHER flag is named.
+      lines.length = 0;
+      expect(await run([
+        "task", "scope", "msg-cli", "--goal", "g",
+        "--race", "claude:claude-sonnet-5,claude:claude-opus-5", "--race-per-usd", "5", "--json",
+      ])).toBe(EXIT.usage);
+      refusal = JSON.parse(lines.join("\n"));
+      expect(refusal.message).toContain("--race-total-usd is missing");
+
+      // A bad value on config set budgets names the offending flag.
+      lines.length = 0;
+      expect(await run([
+        "config", "set", "budgets", "--race-per-usd", "-1",
+        "--as", "alex", "--token", added.token, "--json",
+      ])).toBe(EXIT.usage);
+      expect(JSON.parse(lines.join("\n")).message).toContain("--race-per-usd is a positive dollar amount");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

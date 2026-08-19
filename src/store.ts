@@ -3291,9 +3291,21 @@ export class Store {
    * runner's completion minutes later.
    */
   hasLiveClaim(taskRef: number, now: Date): boolean {
+    return this.currentLiveLease(taskRef, now) !== null;
+  }
+
+  /**
+   * The lease currently holding this task — the MAXIMUM claim generation,
+   * still unreleased, strictly unexpired — or null. This is the one fact
+   * "is this run live" derives from: a run is being built right now iff its
+   * outcome is null AND its lease is this lease. `liveClaimByLease` proves
+   * only that a lease exists; it cannot prove the lease is current, so it
+   * must never stand in for this.
+   */
+  currentLiveLease(taskRef: number, now: Date): string | null {
     const live = this.db
       .prepare(
-        `SELECT 1 AS hit FROM claim
+        `SELECT lease_id FROM claim
           WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?
             AND lease_generation = (
               SELECT MAX(newest.lease_generation) FROM claim AS newest
@@ -3301,7 +3313,7 @@ export class Store {
             )`,
       )
       .get(taskRef, now.toISOString());
-    return live !== undefined;
+    return live === undefined ? null : String(live["lease_id"]);
   }
 
   requeueTask(
@@ -6782,6 +6794,8 @@ export class Store {
              live.runner AS claim_runner, live.acquired_at AS claim_at, live.lease_id AS claim_lease,
              claim_run.model AS claim_model, claim_run.branch AS claim_branch, claim_run.worktree AS claim_worktree,
              claim_run.role AS claim_role, claim_run.provider AS claim_provider, claim_run.phase AS claim_phase,
+             (SELECT MAX(unfinished.id) FROM run AS unfinished
+               WHERE unfinished.lease_id = live.lease_id AND unfinished.outcome IS NULL) AS live_run_id,
              (SELECT hold.owner_kind FROM hold
                WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
                ORDER BY CASE hold.owner_kind WHEN 'operator' THEN 0 WHEN 'backoff' THEN 1 WHEN 'decision' THEN 2 ELSE 3 END, hold.id
@@ -6910,6 +6924,10 @@ export class Store {
                 provider: text(row, "claim_provider"),
                 phase: text(row, "claim_phase"),
               },
+        liveRunId:
+          row["live_run_id"] === null || row["live_run_id"] === undefined
+            ? null
+            : Number(row["live_run_id"]),
         hold:
           row["hold_kind"] === null || row["hold_kind"] === undefined
             ? null

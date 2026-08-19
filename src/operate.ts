@@ -187,6 +187,28 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task hold <id> --reason <why> [--until <iso>]
   standing-orders task unhold <id>
 
+  standing-orders approver add <name> [--password <p>]
+                                        mint the credential that lets a
+                                        person say yes; the bootstrap for
+                                        every approving act
+  standing-orders approver list
+  standing-orders task scope <id> --goal <what success is>
+      [--not <text>] [--touches a,b] [--budget-usd <n>]
+      [--race provider:model[,provider:model…]] [--race-count 2..4]
+      [--race-per-usd <n>] [--race-total-usd <n>]
+                                        a tournament races 2-4 agents on the
+                                        task; you compare and pick one
+  standing-orders task approve <id>         the yes — interactive, or
+      --yes --digest <d> --as <you> --token <t> for scripts; a tournament
+      approves both documents with one yes, on the joint fingerprint
+  standing-orders task requeue <id> --as <you> --token <t>
+                                        exit a stall: incidents resolved,
+                                        strikes cleared, queued again
+  standing-orders config set budgets [--build-usd <n>] [--race-per-usd <n>]
+      [--race-total-usd <n>] [--race-agents 2..4] --as <you> --token <t>
+                                        spend defaults new filings pre-fill
+                                        from; config clear budgets resets
+
   standing-orders claim <id> --runner <name> [--ttl <seconds>]
   standing-orders heartbeat <lease>         still working; extends the lease
   standing-orders release <lease>           done with it; fenced if superseded
@@ -231,6 +253,7 @@ Routines — standing orders that fire on a schedule, each instance isolated
   standing-orders routine add <name> --repo <path> --goal <text>
       --schedule every:<min>|daily:<HH:MM>   (UTC)
       [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]
+      [--budget-usd <n>]                    what each firing may spend
   standing-orders routine approve <name>    the step-up: approving means each
                                         firing builds WITHOUT asking, inside
                                         exactly the stated terms; editing any
@@ -308,6 +331,7 @@ Write access — discovery stays read-only until you grant it
   --credentials <name>  which credential scope it may use
 
 Options
+  --help            this, from any queue command — nothing runs, nothing is created
   --json            one envelope per command: { ok, command, ... }
   --key <key>       idempotency key; a retry returns the first answer
   --db <path>       use a different queue
@@ -340,19 +364,39 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd",
   ]);
 
+  // Every boolean flag any verb reads. A --flag in neither set is a typo,
+  // and a typo silently becoming `true` (with its intended value demoted to
+  // a positional) surfaces later as a different, wronger error — refuse it
+  // here by name instead (Codex round-4 findings 3/8).
+  const booleans = new Set([
+    "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
+    "clear", "follow", "ready", "all-tasks", "inbound-only", "help",
+  ]);
+
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index] as string;
     if (!argument.startsWith("--")) {
+      // `-h` is the one short flag people type from habit; only `--` forms
+      // are flags here, so normalize it rather than scanning it as data.
+      if (argument === "-h") {
+        flags.set("help", true);
+        continue;
+      }
       positional.push(argument);
       continue;
     }
     const name = argument.slice(2);
-    if (!wantsValue.has(name)) {
+    if (booleans.has(name)) {
       flags.set(name, true);
       continue;
     }
+    if (!wantsValue.has(name)) {
+      return { error: `unknown option --${name} — add --help to any queue command for the whole surface` };
+    }
     const value = argv[++index];
-    if (value === undefined) return { error: `--${name} needs a value` };
+    // A following --flag is not a value — consuming it would swallow a real
+    // flag and leave this one holding a name-shaped lie.
+    if (value === undefined || value.startsWith("--")) return { error: `--${name} needs a value` };
     flags.set(name, value);
   }
 
@@ -367,10 +411,26 @@ export async function runOperate(
   options: OperateOptions = {},
 ): Promise<number> {
   const parsed = parseOperateArgs(argv);
-  if ("error" in parsed) return fail(write, false, command, "usage", parsed.error, EXIT.usage);
+  // A parse error precedes the flags map, so JSON mode is read from the raw
+  // argv — the envelope contract holds even for the earliest refusal.
+  if ("error" in parsed) return fail(write, argv.includes("--json"), command, "usage", parsed.error, EXIT.usage);
 
   const { positional, flags } = parsed;
   const json = flags.has("json");
+
+  // Help answers BEFORE the database opens: asking what the commands are
+  // must not create ~/.config/standing-orders/orders.db as a side effect,
+  // and `serve --help` must print help, never start a server (round-4
+  // findings 2/7).
+  if (flags.has("help")) {
+    if (json) {
+      write(envelopeJson({ ok: true, command: "help", help: OPERATE_HELP }));
+    } else {
+      write(OPERATE_HELP);
+    }
+    return EXIT.ok;
+  }
+
   const file = text(flags, "db") ?? options.databaseFile ?? databasePath(process.env, homedir());
   const now = options.now ?? new Date();
 
@@ -2600,7 +2660,13 @@ async function serveCommand(
   context: Context,
 ): Promise<number> {
   const { store, write, json } = context;
-  const port = Number(text(flags, "port") ?? 4180);
+  const portGiven = text(flags, "port");
+  const port = Number(portGiven ?? 4180);
+  // Validated like demo's --port — a NaN handed to listen() surfaced as a
+  // baffling bind failure instead of a usage answer (round-4 finding 11).
+  if (portGiven !== undefined && (!Number.isInteger(port) || port < 1 || port >= 65536)) {
+    return fail(write, json, "serve", "usage", "--port is a whole number under 65536", EXIT.usage);
+  }
   const host = text(flags, "host") ?? "127.0.0.1";
   const allow = text(flags, "allow-host");
   // The authorization ceiling: --repo (comma-separable) names repos this
@@ -3079,8 +3145,11 @@ async function configCommand(
     const build = parseUsd("build-usd");
     const racePer = parseUsd("race-per-usd");
     const raceTotal = parseUsd("race-total-usd");
-    if (build === false || racePer === false || raceTotal === false) {
-      return fail(write, json, "config set", "usage", "budgets are positive dollar amounts: `config set budgets [--build-usd N] [--race-per-usd N] [--race-total-usd N] [--race-agents N] --as <you> --token <t>`", EXIT.usage);
+    // Name the flag that was bad — "budgets are positive dollar amounts"
+    // over four candidates left the caller diffing their own command line.
+    const badFlag = build === false ? "--build-usd" : racePer === false ? "--race-per-usd" : raceTotal === false ? "--race-total-usd" : null;
+    if (badFlag !== null || build === false || racePer === false || raceTotal === false) {
+      return fail(write, json, "config set", "usage", `${badFlag ?? "--build-usd"} is a positive dollar amount`, EXIT.usage);
     }
     // The default competing-agent count (operator request): applied only
     // where a filing names one agent and no explicit count; a race digest
@@ -3929,7 +3998,7 @@ async function routineCommand(
     const goal = text(flags, "goal");
     const schedule = text(flags, "schedule");
     if (repoGiven === undefined || goal === undefined || schedule === undefined) {
-      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]`", EXIT.usage);
+      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>] [--budget-usd <n>]`", EXIT.usage);
     }
     const ceilingGiven = text(flags, "ceiling");
     // --budget-usd on a routine caps EACH instance (v16): it becomes the
@@ -4036,7 +4105,9 @@ async function routineCommand(
         write("");
         write("Nothing has been approved. Agree to exactly this with:");
         write(`  standing-orders routine approve ${name} --yes --digest ${routine.digest} --as <you> --token <your password>`);
-        return EXIT.ok;
+        // A preview reached by omitting --yes is the answer "no, not yet" —
+        // exit 3 in both modes, matching the JSON path (round-4 finding 10).
+        return EXIT.refused;
       }
       const approved = approveRoutine(store, routine.id, asWho as string, clock(), saw as string, token as string);
       if (!approved.ok) {
@@ -4370,7 +4441,10 @@ async function watchCommand(
       transport,
       signal: followController.signal,
       onCycle: cycle => {
-        write(
+        // progress(), not write(): under --json this line went to stdout
+        // BESIDE the final envelope — the one stdout contamination in the
+        // watch (round-4 finding 12).
+        progress(
           `watch: bridge sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
             (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
         );
@@ -4782,12 +4856,18 @@ async function publishCommand(
     };
 
     if (!flags.has("yes")) {
-      return succeed(write, json, "publish grant", { proposed: spec, granted: false }, () => [
-        "This grant would allow, unattended:",
-        ...describePublicationGrant(spec),
-        "",
-        "Nothing is granted yet. Repeat with --yes --as <you> --token <approver-token> to agree to exactly this.",
-      ]);
+      // Unconfirmed, like every other grant preview: ok:false, reason
+      // "unconfirmed", exit 3 — this one alone said ok:true (round-4
+      // finding 10 / round-3 finding B5).
+      if (json) {
+        write(envelopeJson({ ok: false, command: "publish grant", reason: "unconfirmed", proposed: spec, granted: false }));
+        return EXIT.refused;
+      }
+      write("This grant would allow, unattended:");
+      for (const line of describePublicationGrant(spec)) write(line);
+      write("");
+      write("Nothing is granted yet. Repeat with --yes --as <you> --token <approver-token> to agree to exactly this.");
+      return EXIT.refused;
     }
 
     const acting = await askCredentials(flags, context);
@@ -5029,7 +5109,8 @@ async function enrollCommand(
     for (const line of describeWithheld(grant)) write(line);
     write("");
     write("Nothing has been granted. Re-run with --yes to agree to this.");
-    return EXIT.ok;
+    // Unconfirmed is "no, not yet" — exit 3 in both modes (round-4 finding 10).
+    return EXIT.refused;
   }
 
   store.saveGrant(grant, mutationFrom(flags, now));
@@ -5153,7 +5234,7 @@ function taskCommand(
         context.json,
         "task",
         "usage",
-        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, hold, unhold`,
+        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, scope, approve, hold, unhold, require, requeue, plan`,
         EXIT.usage,
       );
   }
@@ -5577,7 +5658,7 @@ function scopeTask(
   const id = positional[0];
   const goal = text(flags, "goal");
   if (id === undefined || goal === undefined) {
-    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is>`", EXIT.usage);
+    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is> [--not <text>] [--touches a,b] [--budget-usd <n>] [--race provider:model[,provider:model…]] [--race-count 2..4] [--race-per-usd <n>] [--race-total-usd <n>]`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task scope", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -5608,7 +5689,15 @@ function scopeTask(
   if (raceGiven !== undefined) {
     // Explicit flags win; absent ones fall back to the configured defaults
     // (operator request) — the digest binds the ACTUAL numbers either way,
-    // and the approval restates them.
+    // and the approval restates them. A budget that is simply MISSING is
+    // named as the missing flag here, before planTournament's generic
+    // positive-amount backstop turns it into a riddle (round-4 finding 11).
+    if (text(flags, "race-per-usd") === undefined && defaults?.racePerAgentMicrousd == null) {
+      return fail(write, json, "task scope", "bad-budget", "--race-per-usd is missing and no default is set — pass it, or set one with `standing-orders config set budgets --race-per-usd <n>`", EXIT.usage);
+    }
+    if (text(flags, "race-total-usd") === undefined && defaults?.raceTotalMicrousd == null) {
+      return fail(write, json, "task scope", "bad-budget", "--race-total-usd is missing and no default is set — pass it, or set one with `standing-orders config set budgets --race-total-usd <n>`", EXIT.usage);
+    }
     const perUsd = Number(text(flags, "race-per-usd") ?? (defaults?.racePerAgentMicrousd == null ? Number.NaN : defaults.racePerAgentMicrousd / 1_000_000));
     const totalUsd = Number(text(flags, "race-total-usd") ?? (defaults?.raceTotalMicrousd == null ? Number.NaN : defaults.raceTotalMicrousd / 1_000_000));
     let agents = raceGiven.split(",").map(one => {
@@ -5774,7 +5863,8 @@ async function approveTask(
         previewRace === null ? scope.digest : jointApprovalDigest(scope.digest, previewRace.raceDigest)
       } --as <you> --token <your password>`,
     );
-    return EXIT.ok;
+    // Unconfirmed is "no, not yet" — exit 3 in both modes (round-4 finding 10).
+    return EXIT.refused;
   }
   if (saw === undefined || asWho === undefined || token === undefined) {
     return fail(write, json, "task approve", "usage", "approving non-interactively takes --yes --digest <d> --as <you> --token <t>", EXIT.usage);
@@ -6041,7 +6131,7 @@ function refuseWhileRacing(context: Context, command: string, taskId: string): n
     context.json,
     command,
     "contest-open",
-    "a tournament is running on this task — let it finish, then pick or abandon it",
+    "a tournament is running on this task — let it finish, then pick or abandon it from the tournament screen in the console (the task's page links to it)",
     EXIT.refused,
   );
 }

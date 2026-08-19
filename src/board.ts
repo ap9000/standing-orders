@@ -52,6 +52,10 @@ export type BoardFacts = {
      * never parsed from a provider stream. Null before the first boundary. */
     phase: string | null;
   } | null;
+  /** The newest unfinished run under the live claim — where a building card
+   * links, so a glance lands on the build itself. Null before the run
+   * starts (the card falls back to the task screen). */
+  liveRunId?: number | null;
   /** The top-precedence live hold: operator > backoff > decision > incident. */
   hold: { ownerKind: "operator" | "decision" | "incident" | "backoff" | "contest"; until: string | null } | null;
   /** The task's open tournament, when agents raced (v14). Optional so
@@ -96,6 +100,24 @@ function clockOf(iso: string): string {
   return iso.slice(11, 16);
 }
 
+/**
+ * Plain words for every hold owner — shared with the task page so "who is
+ * holding this" reads the same everywhere. The internal owner tokens
+ * ("contest") never reach a page; an unknown future owner degrades to the
+ * generic word, never to its raw name.
+ */
+export const HOLD_OWNER_WORDS: Record<string, string> = {
+  operator: "held by you",
+  decision: "waiting on a question",
+  incident: "stopped by an incident",
+  backoff: "backing off after a failure",
+  contest: "held by a tournament",
+};
+
+export function holdOwnerWords(ownerKind: string): string {
+  return HOLD_OWNER_WORDS[ownerKind] ?? "held";
+}
+
 export function classify(facts: BoardFacts, now: Date): BoardCard {
   const base = {
     taskId: facts.taskId,
@@ -122,9 +144,15 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
         reason: `tournament — ${contest.agents} agents racing`,
       };
     }
+    // A building card lands on the build itself when one exists — the
+    // pop-in glance should reach the live page in one click. Before the
+    // run starts (or for a tournament, which has no single run) the task
+    // screen remains the destination.
+    const liveRunId = facts.liveRunId ?? null;
     return {
       ...base,
       lane: "building",
+      href: liveRunId === null ? base.href : `/r/${liveRunId}`,
       attempt: facts.strikes > 0 ? facts.strikes + 1 : null,
       reason:
         facts.claim.model === null && facts.claim.branch === null
@@ -203,9 +231,10 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
             : until <= now.toISOString()
               ? "retrying now"
               : `retrying ${clockOf(until)}`
-          : // A decision or incident hold with no open decision or incident
-            // above it is an orphan — name the owner rather than guess.
-            `held (${facts.hold.ownerKind})`;
+          : // A decision, incident, or tournament hold with no open item
+            // above it is an orphan — say who holds it in plain words,
+            // never the internal owner token.
+            holdOwnerWords(facts.hold.ownerKind);
     return { ...base, lane: "waiting", reason };
   }
   if (facts.unmetDependency !== null) {
