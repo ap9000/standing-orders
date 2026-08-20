@@ -37,7 +37,8 @@ import {
   type Store,
   type TaskState,
 } from "./store.js";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { readFileSync } from "node:fs";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
@@ -97,6 +98,7 @@ import {
   reap,
   currentClaim,
   DEFAULT_LEASE_MS,
+  SYNC_MAX_AGE_MS,
 } from "./claim.js";
 import {
   proposeGrant,
@@ -172,6 +174,8 @@ export type OperateOptions = {
   publishExec?: PublishExec;
   /** Injected by tests: the stop fence a watch would set. */
   shouldStop?: () => boolean;
+  /** Injected by tests: the external-dispatch gh surface. */
+  dispatchAdapter?: DispatchAdapter;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
@@ -193,6 +197,23 @@ export const OPERATE_HELP = `standing-orders — operating the queue
                                         reserve it for one worker (it joins
                                         the back of that worker's queue) or
                                         return it to the shared queue
+  standing-orders task reopen <id> --as <you> --token <t>
+                                        resume external work its tracker
+                                        closed and has been SEEN open again
+
+External trackers — build what a tracker nominates, under local approvals
+  standing-orders enroll <repo> --backend github-issues --github <owner/name>
+      --allow-dispatch [--selector ours|all] --yes
+                                        the dispatch grant: its own explicit
+                                        yes, never in any default; writes a
+                                        plane marker label to the repository
+  standing-orders sync [--repo <path>]      pull nominated work in as ordinary
+                                        local tasks (titles only, validated;
+                                        bodies never), refresh every mirror
+                                        INDIVIDUALLY, verify the marker, and
+                                        deliver write-backs — zero tokens,
+                                        fail closed; runs with reconcile and
+                                        under watch automatically
   standing-orders task hold <id> --reason <why> [--until <iso>]
   standing-orders task unhold <id>
 
@@ -370,7 +391,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
     "command", "timeout-seconds", "stop-grace", "title", "name",
-    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd",
+    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age",
   ]);
 
   // Every boolean flag any verb reads. A --flag in neither set is a typo,
@@ -379,7 +400,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   // here by name instead (Codex round-4 findings 3/8).
   const booleans = new Set([
     "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
-    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone",
+    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -475,6 +496,7 @@ export async function runOperate(
       ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
       ...(options.telegramTransport === undefined ? {} : { telegramTransport: options.telegramTransport }),
       ...(options.publishExec === undefined ? {} : { publishExec: options.publishExec }),
+      ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
     });
   } catch (error) {
@@ -499,6 +521,8 @@ type Context = {
   telegramTransport?: TelegramTransport;
   /** Injected by tests: what `publish` runs for git and gh. */
   publishExec?: PublishExec;
+  /** Injected by tests: the external-dispatch gh surface. */
+  dispatchAdapter?: DispatchAdapter;
   /**
    * The stop fence (Codex M5-M8 audit, IV-1): set by the watch when a
    * signal lands. A pass that sees true admits NOTHING more — no routine
@@ -565,6 +589,8 @@ async function dispatch(
       return contestCommand(positional, flags, context);
     case "webhook":
       return webhookCommand(positional, flags, context);
+    case "sync":
+      return syncCommand(flags, context);
     case "serve":
       return serveCommand(flags, context);
     case "watch":
@@ -776,6 +802,17 @@ function claimCommand(
         { reservedFor: result.reservedFor },
       );
     }
+    if (result.reason === "external") {
+      const said: Record<string, string> = {
+        "stale-mirror": "this tracker item has not been seen recently — run `standing-orders sync` first",
+        "external-closed": "the tracker closed this — reopen it first, or leave it be",
+        "dispatch-revoked": "this tracker's building permission was revoked or narrowed",
+        "plane-blocked": "this tracker's plane marker could not be verified — building is paused",
+      };
+      return fail(write, json, "claim", "external", said[result.detail] ?? "external work is not dispatchable right now", EXIT.refused, {
+        detail: result.detail,
+      });
+    }
     return fail(
       write,
       json,
@@ -789,7 +826,18 @@ function claimCommand(
 
   // Taking a task is what makes it running; leaving that to the caller would
   // let a claimed task keep showing up as queued to anything reading state.
-  store.setTaskState(id, "running", now);
+  // On an idempotent REPLAY the transition runs only as the ONE narrow
+  // repair (external dispatch, finding 36): the stored claim is still the
+  // live lease and the task never left queued — anything else (cancelled,
+  // done, reopened elsewhere) mutates nothing.
+  if (result.replayed === true) {
+    const task = store.getTask(id);
+    const ref = store.lookupRef(id);
+    const stillMine = ref !== null && store.currentLiveLease(ref.id, now) === result.claim.leaseId;
+    if (task !== null && task.state === "queued" && stillMine) store.setTaskState(id, "running", now);
+  } else {
+    store.setTaskState(id, "running", now);
+  }
 
   return succeed(write, json, "claim", { lease: result.claim, reclaimed: result.reclaimed }, () => [
     `Claimed ${id} as ${runner}.`,
@@ -1014,6 +1062,11 @@ async function buildCommand(
   const demoFence = refuseDemo(context, "build");
   if (demoFence !== null) return demoFence;
   const id = positional[0];
+  if (id !== undefined && store.mirrorByTask(id) !== null) {
+    // D2 (external dispatch): the debug verb keeps zero mirror surface —
+    // tick/watch is the product path, where the completion gate lives.
+    return fail(write, json, "build", "external-task", "external work dispatches through tick/watch — the completion gate lives there", EXIT.refused);
+  }
   const runner = text(flags, "runner");
   const token = text(flags, "token");
   const branch = text(flags, "branch");
@@ -1240,6 +1293,11 @@ async function tickCommand(
   if (!Number.isInteger(max) || max <= 0) {
     return fail(write, json, "tick", "usage", "--max takes a whole number of tasks", EXIT.usage);
   }
+  const syncAgeGiven = text(flags, "sync-max-age");
+  const syncMaxAgeMs = syncAgeGiven === undefined ? SYNC_MAX_AGE_MS : Number(syncAgeGiven) * 1000;
+  if (!Number.isInteger(syncMaxAgeMs) || syncMaxAgeMs <= 0) {
+    return fail(write, json, "tick", "usage", "--sync-max-age takes whole seconds", EXIT.usage);
+  }
 
   const repo = repoFrom(flags);
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
@@ -1318,6 +1376,14 @@ async function tickCommand(
   escalateOverdueContests(store, clock());
   const resumed: TickOutcome[] = [];
   for (const waiting of store.contestsInStates(["decision-wait"])) {
+    // D1 belt-and-braces (external dispatch, finding 41): a mirror and a
+    // contest should never coexist; if one ever does, its race resumes
+    // NOTHING — no claim, no run, no worktree, no spend.
+    const waitingTaskId = store.externalIdFor(waiting.taskRef);
+    if (waitingTaskId !== null && store.mirrorByTask(waitingTaskId) !== null) {
+      resumed.push({ id: waitingTaskId, outcome: "skipped", reason: "external-race" });
+      continue;
+    }
     for (const racer of store.contestants(waiting.id).filter(one => one.state === "parked")) {
       if (store.answeredDecisionForContestant(racer.id) === null) continue;
       const custody = racer.custody === null ? null : (JSON.parse(racer.custody) as { branch: string; head: string | null; runner: string });
@@ -1463,6 +1529,28 @@ async function tickCommand(
   const ready = store.listReady(clock(), runner);
   const considered = ready.length;
   const dispatched: TickOutcome[] = [...resumed];
+  // The stale-scan (dispatch v3, finding 20): mirrors the courtesy filter
+  // kept out of ready are REPORTED here, typed, with a paged episode —
+  // an undispatakable tracker item is a 9am fact, not a silent absence.
+  const MIRROR_WORDS: Record<string, string> = {
+    "stale-mirror": "its tracker has not been synced recently — `standing-orders sync` restores freshness",
+    "external-closed": "the tracker closed it — reopen it there, then `standing-orders task reopen`",
+    "dispatch-revoked": "the tracker's building permission was revoked or narrowed",
+    "plane-blocked": "the tracker's plane marker could not be verified — building is paused",
+  };
+  for (const skippedMirror of store.ineligibleMirrors(repo, clock(), syncMaxAgeMs)) {
+    dispatched.push({ id: skippedMirror.taskId, outcome: "skipped", reason: skippedMirror.why });
+    store.enqueueNotification(
+      {
+        dedupeKey: `mirror:${skippedMirror.taskId}:${skippedMirror.why}`,
+        kind: "external-skipped",
+        subject: `${skippedMirror.taskId} cannot dispatch`,
+        body: MIRROR_WORDS[skippedMirror.why] ?? "the tracker item is not dispatchable right now",
+      },
+      clock(),
+    );
+  }
+
   let built = 0;
   let parked = 0;
   let broke = 0;
@@ -1510,6 +1598,7 @@ async function tickCommand(
       ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
       now: clock(),
       ttlMs: leaseTtlMs,
+      syncMaxAgeMs,
       repo,
       provider: spec.provider,
       ...(spec.model === null ? {} : { model: spec.model }),
@@ -1975,6 +2064,24 @@ async function tickCommand(
       const sealed = store.transact(() => {
         const fence = completeFenced(store, lease, "done", clock());
         if (!fence.ok) return fence;
+        // The disowned arm (external dispatch, v4 §24): the tracker closed
+        // this mirror while it was being built. The task is already
+        // cancelled inside completeFenced; the run says what happened, the
+        // branch stays as evidence, and NO publication intent exists
+        // because this arm never reaches the intent block.
+        if (fence.arm === "disowned") {
+          store.finishRun(runId, { outcome: "failed", reason: "external-closed", committed: result.committed, now: clock() });
+          store.enqueueNotification(
+            {
+              dedupeKey: `run:${runId}:external-closed`,
+              kind: "external-closed",
+              subject: `${id}: the tracker closed this while it was being built`,
+              body: `The branch ${branch} is kept as evidence; nothing is published. Reopen the tracker item and \`standing-orders task reopen ${id}\` if the work should continue.`,
+            },
+            clock(),
+          );
+          return fence;
+        }
         store.finishRun(runId, {
           outcome: result.noChange === true ? "no-change" : "built",
           ...(result.noChange === true ? { reason: "handoff" } : {}),
@@ -2018,6 +2125,11 @@ async function tickCommand(
         }
         return fence;
       });
+      if (sealed.ok && sealed.arm === "disowned") {
+        dispatched.push({ id, outcome: "failed", reason: "external-closed", branch, worktree: leased.worktree.path });
+        broke++;
+        continue;
+      }
       if (sealed.ok) {
         // A concluded success ends the failure streak and its backoff —
         // and proves the credential, clearing any quota stamp it was
@@ -2244,6 +2356,25 @@ async function reconcileCommand(
   if (demoFence !== null) return demoFence;
   const repo = repoFrom(flags);
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
+
+  // External trackers sync at reconcile cadence — the daemon inherits it
+  // (watch runs reconcile periodically), and a FAILED pass is reported,
+  // never swallowed: stale mirrors refuse dispatch on their own clock.
+  const syncReports = [];
+  for (const dispatchGrant of store.listGrants().filter(one => one.dispatch === true && one.remoteRepo != null && one.repo === repo)) {
+    syncReports.push(await syncPass(store, dispatchGrant, context.dispatchAdapter ?? ghDispatchAdapter(), clock));
+  }
+  for (const report of syncReports.filter(one => one.outcome === "failed" || one.outcome === "blocked")) {
+    store.enqueueNotification(
+      {
+        dedupeKey: `sync:${report.remoteRepo}:${report.outcome}`,
+        kind: "sync-failed",
+        subject: `syncing ${report.remoteRepo} ${report.outcome === "blocked" ? "is blocked" : "failed"}`,
+        body: `${report.detail ?? "the pass did not finish"} — external work keeps its last verified state and stops dispatching past its freshness window.`,
+      },
+      clock(),
+    );
+  }
 
   const recovered = recoverDead(store, clock());
   for (const one of recovered) {
@@ -3680,17 +3811,38 @@ async function intakeCommand(
       skipped.push({ id: one.id, reason: "title-refused" });
       continue;
     }
-    const made = fileTaskProposal(
-      store,
-      {
-        id: one.id,
-        title: `GH#${one.number}: ${one.title}`,
-        repo,
-        goal: `Imported from GitHub issue #${one.number} in ${grant.github} (label "${grant.label}"). Only the title was imported — read the issue at https://github.com/${grant.github}/issues/${one.number} for full context, then edit and approve this scope before anything builds.`,
-        filedVia: "intake",
-      },
-      clock(),
-    );
+    const made = store.transact(() => {
+      const filed = fileTaskProposal(
+        store,
+        {
+          id: one.id,
+          title: `GH#${one.number}: ${one.title}`,
+          repo,
+          goal: `Imported from GitHub issue #${one.number} in ${grant.github} (label "${grant.label}"). Only the title was imported — read the issue at https://github.com/${grant.github}/issues/${one.number} for full context, then edit and approve this scope before anything builds.`,
+          filedVia: "intake",
+        },
+        clock(),
+      );
+      if (!filed.ok) return filed;
+      // The mirror row rides the SAME transaction (v3 §4): provenance is
+      // this intake grant, immutably — never inferred later from a label.
+      const established = store.establishMirror(
+        {
+          localTaskId: filed.id,
+          backend: "github-issues",
+          remoteRepo: grant.github,
+          remoteId: String(one.number),
+          provenance: "intake",
+          intakeGrant: grant.id,
+          establishedBy: "intake",
+        },
+        clock(),
+      );
+      if (!established.ok && established.reason !== "duplicate") {
+        throw new Error(`mirror not established: ${established.reason}`);
+      }
+      return filed;
+    });
     if (made.ok) created.push(made.id);
     else skipped.push({ id: one.id, reason: made.reason });
   }
@@ -5114,6 +5266,18 @@ async function enrollCommand(
     );
   }
 
+  // External dispatch (v20): its own explicit yes, never in any default.
+  // A dispatch grant binds EXACTLY ONE remote repository and mints this
+  // plane's marker identity.
+  const wantsDispatch = flags.has("allow-dispatch");
+  const dispatchRepo = text(flags, "github");
+  if (wantsDispatch && backend !== "github-issues") {
+    return fail(write, json, "enroll", "usage", "--allow-dispatch is a github-issues authority in this release", EXIT.usage);
+  }
+  if (wantsDispatch && (dispatchRepo === undefined || !GITHUB_REPO_SHAPE.test(dispatchRepo))) {
+    return fail(write, json, "enroll", "usage", "--allow-dispatch binds exactly one tracker: name it with `--github <owner/name>`", EXIT.usage);
+  }
+
   const grant = await proposeGrant({
     repo,
     backend,
@@ -5123,6 +5287,15 @@ async function enrollCommand(
     credentialScope: text(flags, "credentials") ?? null,
     now,
   });
+  if (wantsDispatch) {
+    const previous = store.grantFor(repo, backend);
+    grant.dispatch = true;
+    grant.remoteRepo = dispatchRepo as string;
+    // Re-enrolling keeps the plane identity — that is exactly how a
+    // marker is repaired after a semantic block.
+    grant.planeId = previous?.planeId ?? randomBytes(8).toString("hex");
+    grant.dispatchBlocked = "pending-marker";
+  }
 
   if (!flags.has("yes")) {
     if (json) {
@@ -5133,6 +5306,13 @@ async function enrollCommand(
     write("");
     for (const line of describeGrant(grant)) write(line);
     for (const line of describeWithheld(grant)) write(line);
+    if (wantsDispatch) {
+      write("");
+      write(`AND external dispatch: this plane will BUILD what ${dispatchRepo} nominates,`);
+      write("under scopes approved here, and spend accordingly. Write-back stays limited");
+      write("to the classes above. Enrolling writes a plane marker label to the repository");
+      write("(needs push permission there); a second plane's marker pauses building here.");
+    }
     write("");
     write("Nothing has been granted. Re-run with --yes to agree to this.");
     // Unconfirmed is "no, not yet" — exit 3 in both modes (round-4 finding 10).
@@ -5141,10 +5321,29 @@ async function enrollCommand(
 
   store.saveGrant(grant, mutationFrom(flags, now));
 
+  // The marker, AFTER the grant row (v3 §5): a partial failure leaves the
+  // grant honestly blocked 'pending-marker'; re-running enroll repairs it.
+  if (wantsDispatch) {
+    const adapter = ghDispatchAdapter();
+    const wrote = await adapter.writeMarker(dispatchRepo as string, grant.planeId as string);
+    if (wrote.ok) {
+      store.setDispatchBlocked(repo, backend, null, now);
+    } else {
+      store.setDispatchBlocked(repo, backend, "pending-marker", now, wrote.message);
+    }
+    if (!wrote.ok) {
+      return succeed(write, json, "enroll", { grant, marker: "pending" }, () => [
+        `Granted, but the plane marker could not be written (${wrote.message}).`,
+        "Building stays paused until it is — re-run this enroll to retry.",
+      ]);
+    }
+  }
+
   return succeed(write, json, "enroll", { grant }, () => [
     `Granted. Standing Orders may now write to ${backend} in ${repo}.`,
     ...describeGrant(grant),
     ...describeWithheld(grant),
+    ...(wantsDispatch ? ["", `External dispatch is ON for ${dispatchRepo} — \`standing-orders sync\` pulls its nominated work.`] : []),
     "",
     "Take it back with `standing-orders revoke`.",
   ]);
@@ -5182,7 +5381,13 @@ function revokeCommand(
 
   // No --yes here on purpose: taking permission away is the safe direction,
   // and a confirmation prompt on the brakes is how people stop using them.
+  const outgoing = store.grantFor(repo, backend);
   const revoked = store.revokeGrant(repo, backend, mutationFrom(flags, now));
+  // Best-effort marker cleanup: a failure leaves a stale label another
+  // plane will read as foreign — stated, and repairable there by enroll.
+  if (revoked && outgoing?.dispatch === true && outgoing.remoteRepo != null) {
+    void ghDispatchAdapter().deleteMarker(outgoing.remoteRepo);
+  }
   if (!revoked) {
     return fail(write, json, "revoke", "no-grant", `${repo} was not enrolled for ${backend}`, EXIT.refused);
   }
@@ -5246,6 +5451,8 @@ function taskCommand(
       return nextTask(rest, flags, context);
     case "assign":
       return assignTask(rest, flags, context);
+    case "reopen":
+      return reopenTask(rest, flags, context);
     case "scope":
       return scopeTask(rest, flags, context);
     case "approve":
@@ -5266,7 +5473,7 @@ function taskCommand(
         context.json,
         "task",
         "usage",
-        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, unblock, next, assign, scope, approve, hold, unhold, require, requeue, plan`,
+        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, unblock, next, assign, reopen, scope, approve, hold, unhold, require, requeue, plan`,
         EXIT.usage,
       );
   }
@@ -5305,8 +5512,35 @@ async function addTask(
     // Created through Standing Orders, so it is ours — recorded here rather than
     // asserted later, which is what the grant's default selector rests on.
     store.refFor(backendName, created.value, "ours");
-    return succeed(write, json, "task add", { id: created.value, backend: backendName }, () => [
+    // With a dispatch grant standing, the created item ALSO becomes a local
+    // mirror (provenance local-create) — established at creation, the only
+    // moment "we made this" is a fact rather than a claim (v3 §4).
+    const dispatchGrant = store.grantFor(repoFrom(flags), backendName);
+    let mirrored: string | null = null;
+    if (backendName === "github-issues" && dispatchGrant?.dispatch === true && dispatchGrant.remoteRepo != null) {
+      const localId = mirrorTaskId(dispatchGrant.remoteRepo, created.value);
+      const made = store.transact(() => {
+        const filed = fileTaskProposal(store, { id: localId, title, repo: dispatchGrant.repo, filedVia: "cli" }, now);
+        if (!filed.ok) return filed;
+        const established = store.establishMirror(
+          {
+            localTaskId: filed.id,
+            backend: backendName,
+            remoteRepo: dispatchGrant.remoteRepo as string,
+            remoteId: created.value,
+            provenance: "local-create",
+            establishedBy: "cli",
+          },
+          now,
+        );
+        if (!established.ok) throw new Error(`mirror not established: ${established.reason}`);
+        return filed;
+      });
+      if (made.ok) mirrored = made.id;
+    }
+    return succeed(write, json, "task add", { id: created.value, backend: backendName, ...(mirrored === null ? {} : { mirror: mirrored }) }, () => [
       `Filed ${created.value} in ${backendName}.`,
+      ...(mirrored === null ? [] : [`Mirrored locally as ${mirrored} — scope and approve it, and this plane builds it.`]),
     ]);
   }
 
@@ -5649,7 +5883,11 @@ async function stateTask(
   }
 
   const moved = store.setTaskState(id, state as TaskState, now, mutationFrom(flags, now));
-  if (!moved) return fail(write, json, "task state", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  if (!moved.ok) {
+    return moved.reason === "external-closed"
+      ? fail(write, json, "task state", "external-closed", "the tracker closed this — reopen it first, or leave it cancelled", EXIT.refused)
+      : fail(write, json, "task state", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  }
 
   return succeed(write, json, "task state", { id, state }, () => [`${id} is now ${state}.`]);
 }
@@ -5796,6 +6034,85 @@ function assignTask(
 }
 
 /**
+ * Reopen an externally-closed mirror: an authenticated act that needs the
+ * tracker SEEN open again after the close, and the task clean — the
+ * refusals point at the existing acts that clear each blocker.
+ */
+async function reopenTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const id = positional[0];
+  if (id === undefined) {
+    return fail(write, json, "task reopen", "usage", "`standing-orders task reopen <id> --as <you> --token <t>`", EXIT.usage);
+  }
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task reopen", "usage", "reopening takes `--as <you> --token <t>` — who resumed external work is recorded, not asserted", EXIT.usage);
+  }
+  const reopened = store.reopenMirror(id, acting.name, context.clock());
+  if (!reopened.ok) {
+    const said: Record<string, string> = {
+      "unknown-task": `no external task \`${id}\``,
+      "not-latched": `${id} was never closed on its tracker — there is nothing to reopen`,
+      "not-seen-open": "the tracker has not been SEEN open again since the close — reopen it there, then `standing-orders sync`",
+      claimed: `${id} is being built right now`,
+      "contest-open": "a tournament is open on this task — decide it first",
+      held: "a hold stands — lift it first (`task unhold`, or wait out the timer)",
+      "question-open": "an unanswered question stands — answer or close it first (it is on the task page)",
+      "incident-open": "an unresolved incident stands — resolve it first",
+      "bad-state": `${id} is not in a state reopen can take (it may already be done)`,
+    };
+    return fail(write, json, "task reopen", reopened.reason, said[reopened.reason] ?? "the mirror could not be reopened", EXIT.refused);
+  }
+  return succeed(write, json, "task reopen", { task: id, by: acting.name }, () => [
+    `${id} is queued again — the tracker was seen open, the approved scope stands, and the next pass may take it.`,
+  ]);
+}
+
+/**
+ * The sync pass, by hand: every dispatch-granted tracker (or one repo's),
+ * through the same engine the daemon runs. Zero tokens; fail closed.
+ */
+async function syncCommand(flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json } = context;
+  const demoFence = refuseDemo(context, "sync");
+  if (demoFence !== null) return demoFence;
+  const only = text(flags, "repo");
+  const grants = store
+    .listGrants()
+    .filter(grant => grant.dispatch === true && grant.remoteRepo != null)
+    .filter(grant => only === undefined || grant.repo === resolve(only));
+  if (grants.length === 0) {
+    return fail(write, json, "sync", "no-grant", "no tracker has a dispatch grant — `standing-orders enroll <repo> --backend github-issues --github <owner/name> --allow-dispatch` states the terms", EXIT.refused);
+  }
+  const adapter = ghDispatchAdapter();
+  const reports = [];
+  for (const grant of grants) {
+    reports.push(await syncPass(store, grant, adapter, context.clock));
+  }
+  const failed = reports.filter(one => one.outcome === "failed" || one.outcome === "blocked");
+  if (json) {
+    write(envelopeJson({ ok: failed.length === 0, command: "sync", ...(failed.length === 0 ? {} : { reason: "sync-failed", message: failed[0]?.detail ?? "a pass failed" }), reports }));
+    return failed.length === 0 ? EXIT.ok : EXIT.failed;
+  }
+  for (const report of reports) {
+    write(
+      `${report.remoteRepo}  ${report.outcome}` +
+        `${report.outcome === "complete" || report.outcome === "capped" ? ` — ${report.candidates} open, ${report.mirrored} newly mirrored, ${report.latched} closed there, ${report.delivered} write-back(s) delivered` : ""}` +
+        `${report.detail === null ? "" : `  (${report.detail})`}`,
+    );
+  }
+  if (failed.length > 0) {
+    write("A failed or blocked pass advances nothing — external work keeps its last verified state and will not dispatch past its freshness window.");
+    return EXIT.failed;
+  }
+  return EXIT.ok;
+}
+
+/**
  * Write down what a task is allowed to become.
  *
  * Proposing never approves. The two are separate commands because they are
@@ -5853,6 +6170,9 @@ function scopeTask(
     }
     const perUsd = Number(text(flags, "race-per-usd") ?? (defaults?.racePerAgentMicrousd == null ? Number.NaN : defaults.racePerAgentMicrousd / 1_000_000));
     const totalUsd = Number(text(flags, "race-total-usd") ?? (defaults?.raceTotalMicrousd == null ? Number.NaN : defaults.raceTotalMicrousd / 1_000_000));
+    if (store.mirrorByTask(id) !== null) {
+      return fail(write, json, "task scope", "external-race", "external work races in a follow-up release — file the tournament on a local task", EXIT.refused);
+    }
     let agents = raceGiven.split(",").map(one => {
       const [provider = "", model = ""] = one.trim().split(":");
       return { provider, model };

@@ -54,14 +54,30 @@ export type Claim = {
 };
 
 export type AcquireResult =
-  | { ok: true; claim: Claim; reclaimed: boolean }
+  | { ok: true; claim: Claim; reclaimed: boolean; replayed?: boolean }
   | { ok: false; reason: "held"; by: string; until: string }
-  | { ok: false; reason: "reserved"; reservedFor: string };
+  | { ok: false; reason: "reserved"; reservedFor: string }
+  | { ok: false; reason: "external"; detail: "stale-mirror" | "external-closed" | "dispatch-revoked" | "plane-blocked" };
 
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
 export type FenceResult =
   | { ok: true; claim: Claim; duplicate?: boolean }
   | { ok: false; reason: "fenced" | "unknown" };
+
+/**
+ * Completion's OWN result (external dispatch, finding 33): `completed` is
+ * today's world — the task is done/failed as asked; `disowned` means the
+ * tracker closed this mirror while it was being built — the task is
+ * cancelled, the branch is kept as evidence, and the caller must never
+ * publish. The arm is DURABLE (claim.released_by), so a retried completion
+ * returns its original answer forever.
+ */
+export type CompleteResult =
+  | { ok: true; arm: "completed" | "disowned"; claim: Claim; duplicate?: boolean }
+  | { ok: false; reason: "fenced" | "unknown" };
+
+/** How stale a mirror's last complete sync may be before admission refuses. */
+export const SYNC_MAX_AGE_MS = 15 * 60_000;
 
 export type AcquireOptions = {
   now: Date;
@@ -71,6 +87,8 @@ export type AcquireOptions = {
   /** The watch incarnation dispatching this claim, for crash recovery keyed to it. */
   incarnation?: string;
   mutation?: Mutation;
+  /** External-mirror freshness bound; defaults to SYNC_MAX_AGE_MS. */
+  syncMaxAgeMs?: number;
 };
 
 /**
@@ -93,7 +111,13 @@ export function acquire(
   runner: string,
   options: AcquireOptions,
 ): AcquireResult {
-  return inTransaction(store, () => acquireLocked(store, taskRef, runner, options));
+  // Replay detection is ACQUIRE-SPECIFIC (external dispatch, finding 36):
+  // the stored payload is untouched — the flag rides only the returned
+  // copy, so a second replay cannot double-stamp, and Store.replay's T→T
+  // contract holds for every other user.
+  const replayed = store.hasMutationRecord(options.mutation ?? {});
+  const result = inTransaction(store, () => acquireLocked(store, taskRef, runner, options));
+  return replayed && result.ok ? { ...result, replayed: true } : result;
 }
 
 /**
@@ -124,6 +148,14 @@ function acquireLocked(
       const reservedFor = store.assignedRunnerOf(taskRef);
       if (reservedFor !== null && reservedFor !== runner) {
         return { ok: false as const, reason: "reserved" as const, reservedFor };
+      }
+      // The external-mirror gate (dispatch v3 §2): every acquisition path
+      // shares this line, so a stale, closed, revoked, or plane-blocked
+      // mirror never starts a build — whatever the caller's snapshot said.
+      // An ordinary task costs one indexed lookup.
+      const mirrorWhy = store.mirrorAdmissionRefusal(taskRef, now, options.syncMaxAgeMs ?? SYNC_MAX_AGE_MS);
+      if (mirrorWhy !== null && mirrorWhy !== "not-a-mirror") {
+        return { ok: false as const, reason: "external" as const, detail: mirrorWhy };
       }
       const existing = latest(db, taskRef);
 
@@ -570,7 +602,7 @@ export function completeFenced(
   state: Extract<TaskState, "done" | "failed">,
   now: Date,
   mutation: Mutation = {},
-): FenceResult {
+): CompleteResult {
   const db = store.handle;
 
   return inTransaction(store, () => {
@@ -583,11 +615,27 @@ export function completeFenced(
 
     if (Number(changes) === 0) {
       // Only a completion this same lease already made reads as a duplicate.
-      // A lease the reaper or recovery released was never *accepted* — its
-      // machine went quiet and the system took the task back — and a late
-      // completion arriving afterwards is exactly the stale commit the fence
-      // exists to keep out.
-      return duplicateOrRefusal(db, leaseId, ["completed"]);
+      // The DURABLE disposition (released_by) reproduces the original arm —
+      // whatever the task or the tracker did since (finding 33). A lease
+      // the reaper or recovery released was never *accepted*; a late
+      // completion after that is exactly the stale commit the fence keeps
+      // out.
+      const released = db
+        .prepare("SELECT * FROM claim WHERE lease_id = ? AND released_at IS NOT NULL")
+        .get(leaseId);
+      if (released !== undefined) {
+        const by = String(released["released_by"] ?? "");
+        if (by === "completed" || by === "disowned") {
+          return {
+            ok: true as const,
+            arm: by === "disowned" ? ("disowned" as const) : ("completed" as const),
+            claim: readClaim(released),
+            duplicate: true,
+          };
+        }
+        return { ok: false as const, reason: "fenced" as const };
+      }
+      return refusal(db, leaseId) as CompleteResult;
     }
 
     const row = db.prepare("SELECT * FROM claim WHERE lease_id = ?").get(leaseId);
@@ -596,10 +644,21 @@ export function completeFenced(
     const taskId = db
       .prepare("SELECT external_id FROM task_ref WHERE id = ? AND backend = ?")
       .get(claim.taskRef, BUILT_IN);
+
+    // The completion gate (external dispatch, v4 §24): the latch is read
+    // INSIDE this transaction, on a FRESH win only. A latched mirror's
+    // completion is DISOWNED — the task is cancelled, the disposition is
+    // written durably, and the caller never sees the completed arm, so
+    // publication is impossible by construction.
+    const disowned = taskId !== undefined && !store.mirrorAllowsCompletion(String(taskId["external_id"]));
+    if (disowned) {
+      db.prepare("UPDATE claim SET released_by = 'disowned' WHERE lease_id = ?").run(leaseId);
+    }
+
     if (taskId !== undefined) {
       store.replay(mutation, "completeFenced", () => {
         db.prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?").run(
-          state,
+          disowned ? "cancelled" : state,
           now.toISOString(),
           String(taskId["external_id"]),
         );
@@ -608,7 +667,7 @@ export function completeFenced(
     }
 
     store.bumpWake();
-    return { ok: true as const, claim };
+    return { ok: true as const, arm: disowned ? ("disowned" as const) : ("completed" as const), claim };
   });
 }
 

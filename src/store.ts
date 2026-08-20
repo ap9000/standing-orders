@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -1202,7 +1202,81 @@ CREATE TABLE IF NOT EXISTS backend_grant (
   observed_by_git  INTEGER NOT NULL,
   granted_at       TEXT NOT NULL,
   granted_by       TEXT NOT NULL,
+  -- External dispatch (v20): a SEPARATE authority from tracker writes —
+  -- "this plane will BUILD what this tracker nominates". Never granted
+  -- by default; dispatch=1 requires remote_repo and plane_id (enforced
+  -- in saveGrant — ALTER ADD COLUMN cannot carry cross-column CHECKs).
+  dispatch                INTEGER NOT NULL DEFAULT 0 CHECK (dispatch IN (0, 1)),
+  remote_repo             TEXT,
+  plane_id                TEXT,
+  dispatch_blocked        TEXT CHECK (dispatch_blocked IN ('pending-marker','unreachable','foreign','missing','multiple-or-malformed')),
+  dispatch_blocked_at     TEXT,
+  dispatch_blocked_detail TEXT,
   PRIMARY KEY (repo, backend)
+);
+
+-- The external mirror (v20): a synced tracker item, dispatchable as an
+-- ORDINARY local task. Identity and provenance are immutable — labels
+-- and titles may nominate work; only this row establishes whose it is.
+CREATE TABLE IF NOT EXISTS external_mirror (
+  local_task_id   TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  backend         TEXT NOT NULL,
+  remote_repo     TEXT NOT NULL,
+  remote_id       TEXT NOT NULL,
+  provenance      TEXT NOT NULL CHECK (provenance IN ('local-create','intake','granted-all')),
+  intake_grant    INTEGER,
+  established_by  TEXT NOT NULL,
+  established_at  TEXT NOT NULL,
+  remote_state    TEXT NOT NULL CHECK (remote_state IN ('open','closed','missing')),
+  close_generation INTEGER,
+  sync_generation INTEGER NOT NULL DEFAULT 0,
+  dispatch_ok     INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_ok IN (0, 1)),
+  reopened_by     TEXT,
+  reopened_at     TEXT,
+  CHECK ((provenance = 'intake') = (intake_grant IS NOT NULL)),
+  UNIQUE (backend, remote_repo, remote_id)
+);
+
+-- Immutability guard: identity/provenance columns refuse CHANGES; an
+-- upsert rewriting identical values passes.
+CREATE TRIGGER IF NOT EXISTS external_mirror_immutable
+BEFORE UPDATE ON external_mirror
+WHEN OLD.backend IS NOT NEW.backend OR OLD.remote_repo IS NOT NEW.remote_repo
+  OR OLD.remote_id IS NOT NEW.remote_id OR OLD.provenance IS NOT NEW.provenance
+  OR OLD.intake_grant IS NOT NEW.intake_grant
+  OR OLD.established_by IS NOT NEW.established_by OR OLD.established_at IS NOT NEW.established_at
+BEGIN
+  SELECT RAISE(ABORT, 'external mirror identity is immutable');
+END;
+
+-- One row per sync pass; only a COMPLETE pass advances mirror
+-- generations (a capped or failed scan proves nothing about absence).
+CREATE TABLE IF NOT EXISTS sync_ledger (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  backend     TEXT NOT NULL,
+  remote_repo TEXT NOT NULL,
+  generation  INTEGER NOT NULL,
+  started_at  TEXT NOT NULL,
+  finished_at TEXT,
+  outcome     TEXT CHECK (outcome IN ('complete','capped','failed')),
+  candidates  INTEGER NOT NULL DEFAULT 0,
+  mirrored    INTEGER NOT NULL DEFAULT 0,
+  detail      TEXT,
+  UNIQUE (backend, remote_repo, generation)
+);
+
+-- Durable write-back intents: delivery has its own ledger; a run's
+-- outcome is never rewritten by a tracker write failing.
+CREATE TABLE IF NOT EXISTS external_intent (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  mirror       TEXT NOT NULL REFERENCES external_mirror(local_task_id),
+  kind         TEXT NOT NULL CHECK (kind IN ('comment','transition','close')),
+  body         TEXT,
+  state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','delivered','refused')),
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT,
+  created_at   TEXT NOT NULL,
+  delivered_at TEXT
 );
 
 -- What a task is allowed to become, and whether a person agreed to it.
@@ -2012,6 +2086,68 @@ function migrate(db: Database): void {
     revision INTEGER NOT NULL DEFAULT 0
   )`);
   db.exec("INSERT OR IGNORE INTO queue_state (id, revision) VALUES (1, 0)");
+  // v20 (external dispatch): dispatch authority + blocked state on the
+  // grant (cross-column rule dispatch=1 → remote_repo/plane_id lives in
+  // saveGrant — ALTER ADD COLUMN cannot carry cross-column CHECKs), and
+  // the mirror/ledger/intent tables. The trigger and every table are
+  // shared with the fresh SCHEMA via CREATE IF NOT EXISTS.
+  addColumn(db, "backend_grant", "dispatch", "INTEGER NOT NULL DEFAULT 0 CHECK (dispatch IN (0, 1))");
+  addColumn(db, "backend_grant", "remote_repo", "TEXT");
+  addColumn(db, "backend_grant", "plane_id", "TEXT");
+  addColumn(db, "backend_grant", "dispatch_blocked", "TEXT CHECK (dispatch_blocked IN ('pending-marker','unreachable','foreign','missing','multiple-or-malformed'))");
+  addColumn(db, "backend_grant", "dispatch_blocked_at", "TEXT");
+  addColumn(db, "backend_grant", "dispatch_blocked_detail", "TEXT");
+  db.exec(`CREATE TABLE IF NOT EXISTS external_mirror (
+    local_task_id   TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+    backend         TEXT NOT NULL,
+    remote_repo     TEXT NOT NULL,
+    remote_id       TEXT NOT NULL,
+    provenance      TEXT NOT NULL CHECK (provenance IN ('local-create','intake','granted-all')),
+    intake_grant    INTEGER,
+    established_by  TEXT NOT NULL,
+    established_at  TEXT NOT NULL,
+    remote_state    TEXT NOT NULL CHECK (remote_state IN ('open','closed','missing')),
+    close_generation INTEGER,
+    sync_generation INTEGER NOT NULL DEFAULT 0,
+    dispatch_ok     INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_ok IN (0, 1)),
+    reopened_by     TEXT,
+    reopened_at     TEXT,
+    CHECK ((provenance = 'intake') = (intake_grant IS NOT NULL)),
+    UNIQUE (backend, remote_repo, remote_id)
+  )`);
+  db.exec(`CREATE TRIGGER IF NOT EXISTS external_mirror_immutable
+    BEFORE UPDATE ON external_mirror
+    WHEN OLD.backend IS NOT NEW.backend OR OLD.remote_repo IS NOT NEW.remote_repo
+      OR OLD.remote_id IS NOT NEW.remote_id OR OLD.provenance IS NOT NEW.provenance
+      OR OLD.intake_grant IS NOT NEW.intake_grant
+      OR OLD.established_by IS NOT NEW.established_by OR OLD.established_at IS NOT NEW.established_at
+    BEGIN
+      SELECT RAISE(ABORT, 'external mirror identity is immutable');
+    END`);
+  db.exec(`CREATE TABLE IF NOT EXISTS sync_ledger (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    backend     TEXT NOT NULL,
+    remote_repo TEXT NOT NULL,
+    generation  INTEGER NOT NULL,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    outcome     TEXT CHECK (outcome IN ('complete','capped','failed')),
+    candidates  INTEGER NOT NULL DEFAULT 0,
+    mirrored    INTEGER NOT NULL DEFAULT 0,
+    detail      TEXT,
+    UNIQUE (backend, remote_repo, generation)
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS external_intent (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    mirror       TEXT NOT NULL REFERENCES external_mirror(local_task_id),
+    kind         TEXT NOT NULL CHECK (kind IN ('comment','transition','close')),
+    body         TEXT,
+    state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','delivered','refused')),
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    created_at   TEXT NOT NULL,
+    delivered_at TEXT
+  )`);
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2359,21 +2495,38 @@ export class Store {
     return row === undefined ? null : readTaskRef(row);
   }
 
-  setTaskState(id: string, state: TaskState, now: Date, mutation: Mutation = {}): boolean {
+  setTaskState(
+    id: string,
+    state: TaskState,
+    now: Date,
+    mutation: Mutation = {},
+  ): { ok: true } | { ok: false; reason: "unknown-task" | "external-closed" } {
     return this.once(
       mutation,
       "setTaskState",
       () => {
+        // The terminal guard lives IN the primitive so every present and
+        // future caller is covered (external dispatch, finding 23): a
+        // mirror the tracker closed cannot be marked done — reopen it
+        // first, or leave it cancelled. cancelled/failed stay allowed;
+        // they are the latch's own vocabulary.
+        if (state === "done") {
+          const latched = this.db
+            .prepare("SELECT 1 AS hit FROM external_mirror WHERE local_task_id = ? AND remote_state <> 'open'")
+            .get(id);
+          if (latched !== undefined) return { ok: false as const, reason: "external-closed" as const };
+        }
         const { changes } = this.db
           .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
           .run(state, now.toISOString(), id);
-        if (Number(changes) > 0) this.bumpWake();
-        return Number(changes) > 0;
+        if (Number(changes) === 0) return { ok: false as const, reason: "unknown-task" as const };
+        this.bumpWake();
+        return { ok: true as const };
       },
-      // A state change that matched no task mutated nothing, so there is
-      // nothing to replay — and recording it would answer "no such task"
-      // forever, including after somebody creates it.
-      moved => moved,
+      // A refusal mutated nothing, so there is nothing to replay — and
+      // recording it would answer "no" forever, including after somebody
+      // creates the task or reopens the mirror (finding 42).
+      result => result.ok,
     );
   }
 
@@ -2798,6 +2951,14 @@ export class Store {
              JOIN task AS blocker ON blocker.id = task_edge.blocker
              WHERE task_edge.blocked = task.id AND blocker.state <> 'done'
            )
+           -- External mirrors ride only while cheap eligibility holds; the
+           -- admission transaction is the law, this is the courtesy filter
+           -- (dispatch v3, finding 20 — the stale-scan reports the rest).
+           AND NOT EXISTS (
+             SELECT 1 FROM external_mirror
+             WHERE external_mirror.local_task_id = task.id
+               AND (external_mirror.remote_state <> 'open' OR external_mirror.dispatch_ok = 0)
+           )
          ${order}`,
       )
       .all(...(forRunner === undefined ? [BUILT_IN, stamp, stamp] : [BUILT_IN, forRunner, stamp, stamp]));
@@ -2951,17 +3112,28 @@ export class Store {
    * not a permission anyone can reason about.
    */
   saveGrant(grant: BackendGrant, mutation: Mutation = {}): void {
+    // The cross-column dispatch rule lives HERE because ALTER ADD COLUMN
+    // cannot carry cross-column CHECKs: dispatch demands its exact remote
+    // repository and a plane identity, or it is not a dispatch grant.
+    if (grant.dispatch === true && (grant.remoteRepo == null || grant.planeId == null)) {
+      throw new Error("a dispatch grant names exactly one remote repository and carries a plane id");
+    }
     this.once(mutation, "saveGrant", () => {
       this.db
         .prepare(
           `INSERT INTO backend_grant
-             (repo, backend, paths, mutations, selector, credential_scope, observed_by_git, granted_at, granted_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (repo, backend, paths, mutations, selector, credential_scope, observed_by_git, granted_at, granted_by,
+              dispatch, remote_repo, plane_id, dispatch_blocked, dispatch_blocked_at, dispatch_blocked_detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (repo, backend) DO UPDATE SET
              paths = excluded.paths, mutations = excluded.mutations,
              selector = excluded.selector, credential_scope = excluded.credential_scope,
              observed_by_git = excluded.observed_by_git,
-             granted_at = excluded.granted_at, granted_by = excluded.granted_by`,
+             granted_at = excluded.granted_at, granted_by = excluded.granted_by,
+             dispatch = excluded.dispatch, remote_repo = excluded.remote_repo,
+             plane_id = excluded.plane_id, dispatch_blocked = excluded.dispatch_blocked,
+             dispatch_blocked_at = excluded.dispatch_blocked_at,
+             dispatch_blocked_detail = excluded.dispatch_blocked_detail`,
         )
         .run(
           grant.repo,
@@ -2973,9 +3145,404 @@ export class Store {
           grant.observedByGit ? 1 : 0,
           grant.grantedAt,
           grant.grantedBy,
+          grant.dispatch === true ? 1 : 0,
+          grant.remoteRepo ?? null,
+          grant.planeId ?? null,
+          grant.dispatchBlocked ?? null,
+          grant.dispatchBlockedAt ?? null,
+          grant.dispatchBlockedDetail ?? null,
         );
       return null;
     });
+  }
+
+  // ---- external mirrors (v20) ---------------------------------------------
+
+  /**
+   * Establish a mirror: the ONE act that makes a local task stand for a
+   * tracker item. Identity and provenance are immutable after this row
+   * (trigger-enforced); labels and titles may nominate work, only this
+   * establishes whose it is. Refuses tasks carrying race terms or an open
+   * tournament (D1 — external work does not race in this release).
+   */
+  establishMirror(
+    mirror: {
+      localTaskId: string;
+      backend: string;
+      remoteRepo: string;
+      remoteId: string;
+      provenance: "local-create" | "intake" | "granted-all";
+      intakeGrant?: number | null;
+      establishedBy: string;
+      syncGeneration?: number;
+    },
+    now: Date,
+  ): { ok: true } | { ok: false; reason: "unknown-task" | "duplicate" | "racing" } {
+    return this.transact(() => {
+      const ref = this.db
+        .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+        .get(BUILT_IN, mirror.localTaskId);
+      if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
+      const racing = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM contest WHERE task_ref = ?
+            AND state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted') LIMIT 1`,
+        )
+        .get(Number(ref["id"]));
+      const terms = this.db
+        .prepare("SELECT 1 AS hit FROM tournament_terms WHERE task_ref = ? AND active = 1 LIMIT 1")
+        .get(Number(ref["id"]));
+      if (racing !== undefined || terms !== undefined) return { ok: false as const, reason: "racing" as const };
+      const inserted = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO external_mirror
+             (local_task_id, backend, remote_repo, remote_id, provenance, intake_grant,
+              established_by, established_at, remote_state, sync_generation, dispatch_ok)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 1)`,
+        )
+        .run(
+          mirror.localTaskId,
+          mirror.backend,
+          mirror.remoteRepo,
+          mirror.remoteId,
+          mirror.provenance,
+          mirror.provenance === "intake" ? (mirror.intakeGrant ?? null) : null,
+          mirror.establishedBy,
+          now.toISOString(),
+          mirror.syncGeneration ?? 0,
+        );
+      if (Number(inserted.changes) === 0) return { ok: false as const, reason: "duplicate" as const };
+      return { ok: true as const };
+    });
+  }
+
+  mirrorByTask(taskId: string): ExternalMirror | null {
+    const row = this.db.prepare("SELECT * FROM external_mirror WHERE local_task_id = ?").get(taskId);
+    return row === undefined ? null : readMirror(row);
+  }
+
+  mirrorByRemote(backend: string, remoteRepo: string, remoteId: string): ExternalMirror | null {
+    const row = this.db
+      .prepare("SELECT * FROM external_mirror WHERE backend = ? AND remote_repo = ? AND remote_id = ?")
+      .get(backend, remoteRepo, remoteId);
+    return row === undefined ? null : readMirror(row);
+  }
+
+  externalMirrors(backend: string, remoteRepo: string): ExternalMirror[] {
+    return this.db
+      .prepare("SELECT * FROM external_mirror WHERE backend = ? AND remote_repo = ? ORDER BY local_task_id")
+      .all(backend, remoteRepo)
+      .map(readMirror);
+  }
+
+  /**
+   * The latch (v3 §1): an authoritative closed/missing observation. ONE
+   * transaction, and it never touches claims or runs — an idle mirror's
+   * task is cancelled here (cancelTask's own matrix: queued/failed/
+   * running, never done — done stays done, dependency satisfaction never
+   * regresses); an in-flight one is left for the completion gate.
+   */
+  latchMirror(
+    localTaskId: string,
+    observed: "closed" | "missing",
+    generation: number,
+    now: Date,
+  ): void {
+    this.transact(() => {
+      this.db
+        .prepare(
+          `UPDATE external_mirror
+             SET remote_state = ?, dispatch_ok = 0,
+                 close_generation = COALESCE(close_generation, ?), sync_generation = ?
+           WHERE local_task_id = ?`,
+        )
+        .run(observed, generation, generation, localTaskId);
+      const ref = this.db
+        .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+        .get(BUILT_IN, localTaskId);
+      if (ref === undefined) return;
+      const live = this.currentLiveLease(Number(ref["id"]), now) !== null;
+      const contested = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM contest WHERE task_ref = ?
+            AND state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted') LIMIT 1`,
+        )
+        .get(Number(ref["id"]));
+      if (!live && contested === undefined) {
+        this.db
+          .prepare(
+            "UPDATE task SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','failed','running')",
+          )
+          .run(now.toISOString(), localTaskId);
+      }
+      this.bumpWake();
+    });
+  }
+
+  /** A fresh authoritative OPEN observation — recorded as reality; the
+   * latch (dispatch_ok) clears only through the reopen act. */
+  observeMirrorOpen(localTaskId: string, generation: number): void {
+    this.db
+      .prepare("UPDATE external_mirror SET remote_state = 'open', sync_generation = ? WHERE local_task_id = ?")
+      .run(generation, localTaskId);
+  }
+
+  /**
+   * The reopen act (v3 §7 + findings 18/30): an authenticated CAS that
+   * requires the tracker to have been SEEN open again after the close,
+   * and the task to be clean — no live claim, no open tournament, no
+   * active hold, no open question, no unresolved incident. It reconciles
+   * task state from any admitted state back to queued; the approved
+   * scope is preserved (its digest never changed) — this act is the
+   * operator's decision to resume.
+   */
+  reopenMirror(
+    localTaskId: string,
+    by: string,
+    now: Date,
+  ): { ok: true } | { ok: false; reason: "unknown-task" | "not-latched" | "not-seen-open" | "claimed" | "contest-open" | "held" | "question-open" | "incident-open" | "bad-state" } {
+    return this.transact(() => {
+      const mirror = this.mirrorByTask(localTaskId);
+      if (mirror === null) return { ok: false as const, reason: "unknown-task" as const };
+      if (mirror.dispatchOk && mirror.closeGeneration === null) return { ok: false as const, reason: "not-latched" as const };
+      if (mirror.remoteState !== "open" || mirror.closeGeneration === null || mirror.syncGeneration <= mirror.closeGeneration) {
+        return { ok: false as const, reason: "not-seen-open" as const };
+      }
+      const ref = this.db
+        .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+        .get(BUILT_IN, localTaskId);
+      if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
+      const taskRef = Number(ref["id"]);
+      if (this.currentLiveLease(taskRef, now) !== null) return { ok: false as const, reason: "claimed" as const };
+      const contested = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM contest WHERE task_ref = ?
+            AND state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted') LIMIT 1`,
+        )
+        .get(taskRef);
+      if (contested !== undefined) return { ok: false as const, reason: "contest-open" as const };
+      if (this.activeHolds(taskRef, now).length > 0) return { ok: false as const, reason: "held" as const };
+      const question = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM decision JOIN run ON run.id = decision.run
+            WHERE run.task_ref = ? AND decision.answered_at IS NULL LIMIT 1`,
+        )
+        .get(taskRef);
+      if (question !== undefined) return { ok: false as const, reason: "question-open" as const };
+      const incident = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM incident JOIN run ON run.id = incident.run
+            WHERE run.task_ref = ? AND incident.resolved_at IS NULL LIMIT 1`,
+        )
+        .get(taskRef);
+      if (incident !== undefined) return { ok: false as const, reason: "incident-open" as const };
+      const task = this.db.prepare("SELECT state FROM task WHERE id = ?").get(localTaskId);
+      if (task === undefined || !["cancelled", "failed", "queued"].includes(String(task["state"]))) {
+        return { ok: false as const, reason: "bad-state" as const };
+      }
+      this.db
+        .prepare(
+          `UPDATE external_mirror SET dispatch_ok = 1, close_generation = NULL, reopened_by = ?, reopened_at = ?
+            WHERE local_task_id = ?`,
+        )
+        .run(by, now.toISOString(), localTaskId);
+      this.db
+        .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ?")
+        .run(now.toISOString(), localTaskId);
+      this.bumpWake();
+      return { ok: true as const };
+    });
+  }
+
+  /** The last COMPLETE sync pass for a tracker, or null — freshness's anchor. */
+  lastCompleteSync(backend: string, remoteRepo: string): { generation: number; finishedAt: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT generation, finished_at FROM sync_ledger
+          WHERE backend = ? AND remote_repo = ? AND outcome = 'complete'
+          ORDER BY generation DESC LIMIT 1`,
+      )
+      .get(backend, remoteRepo);
+    return row === undefined || row["finished_at"] === null
+      ? null
+      : { generation: Number(row["generation"]), finishedAt: String(row["finished_at"]) };
+  }
+
+  openSyncPass(backend: string, remoteRepo: string, now: Date): { id: number; generation: number } {
+    return this.transact(() => {
+      const last = this.db
+        .prepare("SELECT MAX(generation) AS top FROM sync_ledger WHERE backend = ? AND remote_repo = ?")
+        .get(backend, remoteRepo);
+      const generation = (last === undefined || last["top"] === null ? 0 : Number(last["top"])) + 1;
+      this.db
+        .prepare(
+          "INSERT INTO sync_ledger (backend, remote_repo, generation, started_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(backend, remoteRepo, generation, now.toISOString());
+      const row = this.db.prepare("SELECT last_insert_rowid() AS id").get();
+      return { id: Number(row?.["id"]), generation };
+    });
+  }
+
+  /**
+   * Close a pass. ONLY `complete` advances the surviving mirrors'
+   * generations — atomically with the ledger transition, so freshness can
+   * never outrun the observation that earned it (v3 §6). A capped or
+   * failed pass proves nothing about absence and advances nothing.
+   */
+  closeSyncPass(
+    id: number,
+    outcome: "complete" | "capped" | "failed",
+    counts: { candidates: number; mirrored: number },
+    now: Date,
+    detail: string | null = null,
+  ): void {
+    this.transact(() => {
+      this.db
+        .prepare(
+          "UPDATE sync_ledger SET finished_at = ?, outcome = ?, candidates = ?, mirrored = ?, detail = ? WHERE id = ?",
+        )
+        .run(now.toISOString(), outcome, counts.candidates, counts.mirrored, detail, id);
+      if (outcome === "complete") {
+        const pass = this.db.prepare("SELECT backend, remote_repo, generation FROM sync_ledger WHERE id = ?").get(id);
+        if (pass !== undefined) {
+          this.db
+            .prepare(
+              "UPDATE external_mirror SET sync_generation = ? WHERE backend = ? AND remote_repo = ? AND sync_generation < ?",
+            )
+            .run(Number(pass["generation"]), String(pass["backend"]), String(pass["remote_repo"]), Number(pass["generation"]));
+        }
+      }
+    });
+  }
+
+  /**
+   * The admission gate's fact (v3 §2 / v4 §26): why this mirror may not
+   * dispatch right now, or null for "go" — and "not-a-mirror" costs one
+   * indexed lookup for every ordinary task. The FULL live grant tuple is
+   * re-proved here: revocation, narrowing, and marker blocks take effect
+   * at the very next admission.
+   */
+  mirrorAdmissionRefusal(
+    taskRef: number,
+    now: Date,
+    maxAgeMs: number,
+  ): "stale-mirror" | "external-closed" | "dispatch-revoked" | "plane-blocked" | null | "not-a-mirror" {
+    const ref = this.db.prepare("SELECT external_id, repo FROM task_ref WHERE id = ?").get(taskRef);
+    if (ref === undefined) return "not-a-mirror";
+    const mirror = this.mirrorByTask(String(ref["external_id"]));
+    if (mirror === null) return "not-a-mirror";
+    if (mirror.remoteState !== "open" || !mirror.dispatchOk) return "external-closed";
+    const repo = ref["repo"] === null ? null : String(ref["repo"]);
+    const grant = repo === null ? null : this.grantFor(repo, mirror.backend);
+    if (grant === null || grant.dispatch !== true || grant.remoteRepo !== mirror.remoteRepo) return "dispatch-revoked";
+    if (grant.selector === "ours" && mirror.provenance === "granted-all") return "dispatch-revoked";
+    if (grant.dispatchBlocked != null) return "plane-blocked";
+    const anchor = this.lastCompleteSync(mirror.backend, mirror.remoteRepo);
+    if (
+      anchor === null ||
+      mirror.syncGeneration < anchor.generation ||
+      now.getTime() - new Date(anchor.finishedAt).getTime() > maxAgeMs
+    ) {
+      return "stale-mirror";
+    }
+    return null;
+  }
+
+  /**
+   * The stale-scan's rows (dispatch v3, finding 20): every mirror in this
+   * repo that admission would refuse right now, with its typed reason —
+   * so a skipped mirror is REPORTED, never silently absent from ready.
+   */
+  ineligibleMirrors(
+    repo: string | null,
+    now: Date,
+    maxAgeMs: number,
+  ): { taskId: string; why: "stale-mirror" | "external-closed" | "dispatch-revoked" | "plane-blocked" }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT external_mirror.local_task_id AS id, task_ref.id AS ref FROM external_mirror
+           JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = external_mirror.local_task_id
+           JOIN task ON task.id = external_mirror.local_task_id
+          WHERE task.state = 'queued' AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+          LIMIT 100`,
+      )
+      .all(BUILT_IN, repo, repo);
+    const skipped: { taskId: string; why: "stale-mirror" | "external-closed" | "dispatch-revoked" | "plane-blocked" }[] = [];
+    for (const row of rows) {
+      const why = this.mirrorAdmissionRefusal(Number(row["ref"]), now, maxAgeMs);
+      if (why !== null && why !== "not-a-mirror") skipped.push({ taskId: String(row["id"]), why });
+    }
+    return skipped;
+  }
+
+  /** Whether a fresh completion may stand as done (v4 §24) — read INSIDE
+   * completeFenced's transaction. Non-mirrors always complete. */
+  mirrorAllowsCompletion(taskId: string): boolean {
+    const row = this.db
+      .prepare("SELECT remote_state, dispatch_ok FROM external_mirror WHERE local_task_id = ?")
+      .get(taskId);
+    if (row === undefined) return true;
+    return String(row["remote_state"]) === "open" && Number(row["dispatch_ok"]) === 1;
+  }
+
+  /** Whether a stored acquire mutation exists — the replay marker's fact. */
+  hasMutationRecord(mutation: Mutation): boolean {
+    if (mutation.idempotencyKey === undefined) return false;
+    const row = this.db
+      .prepare("SELECT 1 AS hit FROM mutation WHERE idempotency_key = ? LIMIT 1")
+      .get(mutation.idempotencyKey);
+    return row !== undefined;
+  }
+
+  enqueueExternalIntent(
+    mirror: string,
+    kind: "comment" | "transition" | "close",
+    body: string | null,
+    now: Date,
+  ): void {
+    this.db
+      .prepare("INSERT INTO external_intent (mirror, kind, body, created_at) VALUES (?, ?, ?, ?)")
+      .run(mirror, kind, body, now.toISOString());
+  }
+
+  pendingExternalIntents(limit = 50): { id: number; mirror: string; kind: "comment" | "transition" | "close"; body: string | null; attempts: number }[] {
+    return this.db
+      .prepare("SELECT id, mirror, kind, body, attempts FROM external_intent WHERE state = 'pending' ORDER BY id LIMIT ?")
+      .all(Math.max(1, Math.min(limit, 200)))
+      .map(row => ({
+        id: Number(row["id"]),
+        mirror: String(row["mirror"]),
+        kind: String(row["kind"]) as "comment" | "transition" | "close",
+        body: row["body"] === null ? null : String(row["body"]),
+        attempts: Number(row["attempts"]),
+      }));
+  }
+
+  settleExternalIntent(id: number, state: "delivered" | "refused", now: Date, error: string | null = null): void {
+    this.db
+      .prepare(
+        `UPDATE external_intent SET state = ?, attempts = attempts + 1, last_error = ?,
+           delivered_at = CASE WHEN ? = 'delivered' THEN ? ELSE delivered_at END
+         WHERE id = ?`,
+      )
+      .run(state, error, state, now.toISOString(), id);
+  }
+
+  /** Marker verification writes its verdict here — fail closed, typed. */
+  setDispatchBlocked(
+    repo: string,
+    backend: string,
+    blocked: "pending-marker" | "unreachable" | "foreign" | "missing" | "multiple-or-malformed" | null,
+    now: Date,
+    detail: string | null = null,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE backend_grant SET dispatch_blocked = ?, dispatch_blocked_at = ?, dispatch_blocked_detail = ?
+          WHERE repo = ? AND backend = ?`,
+      )
+      .run(blocked, blocked === null ? null : now.toISOString(), detail, repo, backend);
   }
 
   /** null is denial, and is the answer for anything never enrolled. */
@@ -4176,6 +4743,19 @@ export class Store {
     now: Date,
   ): number {
     return this.transact(() => {
+      // D1 (external dispatch, finding 40): external work does not race in
+      // this release — the STORE refuses, so no forged POST and no future
+      // caller can file race terms on a mirror. UI hiding is convenience.
+      const external = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM external_mirror
+            JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = external_mirror.local_task_id
+           WHERE task_ref.id = ? LIMIT 1`,
+        )
+        .get(BUILT_IN, spec.taskRef);
+      if (external !== undefined) {
+        throw new Error("external work races in a follow-up release — file the tournament on a local task");
+      }
       const previous = this.db
         .prepare("SELECT id, generation FROM tournament_terms WHERE task_ref = ? AND active = 1")
         .get(spec.taskRef);
@@ -4444,13 +5024,22 @@ export class Store {
    * The caller owns authentication and the contestant's stop.
    */
   excludeDecision(id: number, by: string, now: Date): boolean {
-    const changed = this.db
-      .prepare(
-        `UPDATE decision SET state = 'answered', answered_at = ?, answered_by = ?, closed_reason = 'excluded'
-          WHERE id = ? AND state IN ('open','expired') AND contestant IS NOT NULL`,
-      )
-      .run(now.toISOString(), by, id);
-    return Number(changed.changes) === 1;
+    return this.transact(() => {
+      const changed = this.db
+        .prepare(
+          `UPDATE decision SET state = 'answered', answered_at = ?, answered_by = ?, closed_reason = 'excluded'
+            WHERE id = ? AND state IN ('open','expired') AND contestant IS NOT NULL`,
+        )
+        .run(now.toISOString(), by, id);
+      if (Number(changed.changes) !== 1) return false;
+      // Closure clears what an answer would have cleared (external
+      // dispatch review, finding 43): the decision-owned hold and the
+      // page episode — an excluded question must not hold work forever.
+      this.releaseOwnedHold("decision", String(id));
+      this.resolveEpisode(`decision:${id}`, now);
+      this.bumpWake();
+      return true;
+    });
   }
 
   /** A racing agent's answered-but-undelivered question, for the resume pass. */
@@ -6195,11 +6784,36 @@ export class Store {
 
   /** The body, for callers already holding the transaction (requeueTask). */
   private resolveIncidentLocked(id: number, by: string, now: Date): boolean {
+    const incident = this.db
+      .prepare("SELECT kind, run FROM incident WHERE id = ?")
+      .get(id);
     const { changes } = this.db
       .prepare("UPDATE incident SET resolved_at = ?, resolved_by = ? WHERE id = ? AND resolved_at IS NULL")
       .run(now.toISOString(), by, id);
     if (Number(changes) === 0) return false;
     this.releaseOwnedHold("incident", String(id));
+    // The incident's PAGE episode resolves with it (external dispatch
+    // review, finding 43) — a stale page delivered after resolution told
+    // the operator about a problem that no longer stands. Keys follow the
+    // enqueue sites' own vocabulary, per kind.
+    if (incident !== undefined) {
+      const run = Number(incident["run"]);
+      const kind = String(incident["kind"]);
+      const taskRef = this.db.prepare("SELECT task_ref FROM run WHERE id = ?").get(run);
+      const keys: Record<string, string> = {
+        "malformed-decision": `malformed:${run}`,
+        "commit-failure": `commit-failure:${run}`,
+        "malformed-plan": `malformed-plan:${run}`,
+        ...(taskRef === undefined
+          ? {}
+          : {
+              "attempts-exhausted": `stalled:${Number(taskRef["task_ref"])}`,
+              "plan-attempts-exhausted": `plan-stalled:${Number(taskRef["task_ref"])}`,
+            }),
+      };
+      const key = keys[kind];
+      if (key !== undefined) this.resolveEpisode(key, now);
+    }
     this.bumpWake();
     return true;
   }
@@ -8441,6 +9055,42 @@ function readWorktreeSetup(row: Record<string, unknown>): WorktreeSetup {
   };
 }
 
+export type ExternalMirror = {
+  localTaskId: string;
+  backend: string;
+  remoteRepo: string;
+  remoteId: string;
+  provenance: "local-create" | "intake" | "granted-all";
+  intakeGrant: number | null;
+  establishedBy: string;
+  establishedAt: string;
+  remoteState: "open" | "closed" | "missing";
+  closeGeneration: number | null;
+  syncGeneration: number;
+  dispatchOk: boolean;
+  reopenedBy: string | null;
+  reopenedAt: string | null;
+};
+
+function readMirror(row: Record<string, unknown>): ExternalMirror {
+  return {
+    localTaskId: String(row["local_task_id"]),
+    backend: String(row["backend"]),
+    remoteRepo: String(row["remote_repo"]),
+    remoteId: String(row["remote_id"]),
+    provenance: String(row["provenance"]) as ExternalMirror["provenance"],
+    intakeGrant: row["intake_grant"] === null ? null : Number(row["intake_grant"]),
+    establishedBy: String(row["established_by"]),
+    establishedAt: String(row["established_at"]),
+    remoteState: String(row["remote_state"]) as ExternalMirror["remoteState"],
+    closeGeneration: row["close_generation"] === null ? null : Number(row["close_generation"]),
+    syncGeneration: Number(row["sync_generation"]),
+    dispatchOk: Number(row["dispatch_ok"]) === 1,
+    reopenedBy: row["reopened_by"] === null ? null : String(row["reopened_by"]),
+    reopenedAt: row["reopened_at"] === null ? null : String(row["reopened_at"]),
+  };
+}
+
 function readGrant(row: Record<string, unknown>): BackendGrant {
   return {
     repo: String(row["repo"]),
@@ -8452,6 +9102,16 @@ function readGrant(row: Record<string, unknown>): BackendGrant {
     observedByGit: Number(row["observed_by_git"]) === 1,
     grantedAt: String(row["granted_at"]),
     grantedBy: String(row["granted_by"]),
+    dispatch: Number(row["dispatch"] ?? 0) === 1,
+    remoteRepo: row["remote_repo"] === null || row["remote_repo"] === undefined ? null : String(row["remote_repo"]),
+    planeId: row["plane_id"] === null || row["plane_id"] === undefined ? null : String(row["plane_id"]),
+    dispatchBlocked:
+      row["dispatch_blocked"] === null || row["dispatch_blocked"] === undefined
+        ? null
+        : (String(row["dispatch_blocked"]) as "pending-marker" | "unreachable" | "foreign" | "missing" | "multiple-or-malformed"),
+    dispatchBlockedAt: row["dispatch_blocked_at"] === null || row["dispatch_blocked_at"] === undefined ? null : String(row["dispatch_blocked_at"]),
+    dispatchBlockedDetail:
+      row["dispatch_blocked_detail"] === null || row["dispatch_blocked_detail"] === undefined ? null : String(row["dispatch_blocked_detail"]),
   };
 }
 

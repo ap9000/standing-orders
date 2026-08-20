@@ -144,9 +144,14 @@ export function builtIn(store: Store, now: () => Date = () => new Date()): Graph
     },
 
     async setState(id, state) {
-      return store.setTaskState(id, state, now())
-        ? ok(undefined)
-        : no("rejected", `no task \`${id}\``);
+      const moved = store.setTaskState(id, state, now());
+      if (moved.ok) return ok(undefined);
+      return no(
+        "rejected",
+        moved.reason === "external-closed"
+          ? `the tracker closed \`${id}\` — reopen it first`
+          : `no task \`${id}\``,
+      );
     },
 
     async addEdge(blocked, blocker) {

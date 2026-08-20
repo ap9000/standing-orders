@@ -233,7 +233,7 @@ describe("describeGrant", () => {
   });
 
   test("says nothing about withholding when nothing is withheld", () => {
-    const everything = grant({ mutations: ["create", "transition", "edge", "hold", "close"] });
+    const everything = grant({ mutations: ["create", "transition", "edge", "hold", "close", "comment"] });
 
     expect(describeWithheld(everything)).toEqual([]);
   });

@@ -196,6 +196,14 @@ export function admitContest(
   now: Date,
 ): { ok: true; contestId: number; contestantIds: number[]; slotIds: number[] } | AdmissionRefusal {
   return store.transact(() => {
+    // D1 (external dispatch): external work does not race in this release.
+    if (store.mirrorByTask(args.taskId) !== null) {
+      return {
+        ok: false as const,
+        reason: "contest-open" as const,
+        message: "external work races in a follow-up release — file the tournament on a local task",
+      };
+    }
     if (store.openContestFor(args.taskRef) !== null) {
       return { ok: false as const, reason: "contest-open" as const, message: "a tournament is already running on this task" };
     }
@@ -646,7 +654,10 @@ export function finalizeContestPick(
     store.setContestWinner(args.contestId, args.contestantId, args.approver, now);
     for (const agent of view.agents) store.setContestantCleanup(agent.contestant.id, "pending");
     store.releaseOwnedHold("contest", String(args.contestId));
-    store.setTaskState(args.taskId, "done", now);
+    const done = store.setTaskState(args.taskId, "done", now);
+    // With mirrors barred from tournaments (D1), a refusal here is a bug
+    // by construction — surface it, never publish over it.
+    if (!done.ok) throw new Error(`the picked task could not be marked done (${done.reason})`);
     let intent: number | null = null;
     if (publishable && grant !== null && chosen.run.headRevision !== null) {
       intent = store.createPublicationIntent(

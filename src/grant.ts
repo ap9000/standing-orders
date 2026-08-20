@@ -39,7 +39,7 @@ import { run, type ExecResult, type RunOptions } from "./exec.js";
  * as done" and "close the issue somebody filed in March" are the same verb to
  * a database and completely different acts to a person.
  */
-export type MutationClass = "create" | "transition" | "edge" | "hold" | "close";
+export type MutationClass = "create" | "transition" | "edge" | "hold" | "close" | "comment";
 
 export const MUTATION_CLASSES: readonly MutationClass[] = [
   "create",
@@ -47,6 +47,7 @@ export const MUTATION_CLASSES: readonly MutationClass[] = [
   "edge",
   "hold",
   "close",
+  "comment",
 ];
 
 /** Granted unless asked otherwise; `close` is the deliberate omission. */
@@ -72,6 +73,21 @@ export type BackendGrant = {
   observedByGit: boolean;
   grantedAt: string;
   grantedBy: string;
+  /** External dispatch (v20): a SEPARATE authority from tracker writes —
+   * "this plane will BUILD what this tracker nominates, under scopes
+   * approved here". Never in any default; its own explicit yes. */
+  dispatch?: boolean;
+  /** The one exact owner/name this dispatch grant binds. Required when
+   * dispatch is true (enforced in saveGrant). */
+  remoteRepo?: string | null;
+  /** This plane's identity for the tracker-side marker — detection of a
+   * second plane, never a distributed lease. Minted at grant creation. */
+  planeId?: string | null;
+  /** Fail-closed dispatch block: set by marker verification and sync
+   * failures; null = clear. Admission refuses while set. */
+  dispatchBlocked?: "pending-marker" | "unreachable" | "foreign" | "missing" | "multiple-or-malformed" | null;
+  dispatchBlockedAt?: string | null;
+  dispatchBlockedDetail?: string | null;
 };
 
 /** Where a task came from, which is what `selector` discriminates on. */

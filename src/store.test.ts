@@ -33,13 +33,13 @@ describe("the built-in task store", () => {
   test("moves a task between states", () => {
     store.createTask({ id: "t-1", title: "a" }, T0);
 
-    expect(store.setTaskState("t-1", "running", later(1_000))).toBe(true);
+    expect(store.setTaskState("t-1", "running", later(1_000))).toMatchObject({ ok: true });
     expect(store.getTask("t-1")?.state).toBe("running");
     expect(store.getTask("t-1")?.updatedAt).toBe(later(1_000).toISOString());
   });
 
   test("says so when there was nothing to move", () => {
-    expect(store.setTaskState("ghost", "done", T0)).toBe(false);
+    expect(store.setTaskState("ghost", "done", T0)).toMatchObject({ ok: false, reason: "unknown-task" });
   });
 
   describe("the ready set", () => {
@@ -219,8 +219,8 @@ describe("the built-in task store", () => {
       store.createTask({ id: "ghost", title: "now it exists" }, T0);
       const afterwards = store.setTaskState("ghost", "done", T0, { idempotencyKey: "k-2", at: T0 });
 
-      expect(first).toBe(false);
-      expect(afterwards).toBe(true);
+      expect(first).toMatchObject({ ok: false, reason: "unknown-task" });
+      expect(afterwards).toMatchObject({ ok: true });
       expect(store.getTask("ghost")?.state).toBe("done");
     });
 
@@ -232,7 +232,7 @@ describe("the built-in task store", () => {
       store.setTaskState("t-1", "running", later(1_000));
       const replayed = store.setTaskState("t-1", "done", T0, { idempotencyKey: "k-4", at: T0 });
 
-      expect(replayed).toBe(true);
+      expect(replayed).toMatchObject({ ok: true });
       expect(store.getTask("t-1")?.state).toBe("running");
     });
 

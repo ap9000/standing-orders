@@ -286,7 +286,10 @@ describe("claim", () => {
       mutation: { idempotencyKey: "dispatch-1", at: T0 },
     });
 
-    expect(retry).toEqual(first);
+    // Same lease, same generation — plus the honest replay marker, so a
+    // caller never re-runs first-time side effects on a stored answer
+    // (external dispatch, finding 36).
+    expect(retry).toEqual({ ...first, replayed: true });
     if (retry.ok) expect(retry.claim.generation).toBe(1);
   });
 

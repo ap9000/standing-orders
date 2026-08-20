@@ -72,6 +72,7 @@ import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import {
   type Artifact,
   type DiffComment,
+  type ExternalMirror,
   type Publication,
   type Capability,
   type Decision,
@@ -1625,6 +1626,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         })(),
         peekable: options.localRunner !== undefined,
         position: store.queuePosition(taskId),
+        mirror: store.mirrorByTask(taskId),
         scope,
         raceTerms,
         approvalDigest,
@@ -2344,7 +2346,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/contest/${contestId}`);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -2959,6 +2961,31 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return redirect(response, taskHref(taskId));
       }
+      case "reopen": {
+        // Authenticated like every approving act: the session alone may
+        // read; resuming external work takes the password, typed again.
+        const token = (body.get("token") ?? "").trim();
+        const authenticated = token !== "" ? authenticateApprover(store, who.name, token) : null;
+        if (authenticated === null || !authenticated.ok) {
+          return taskScreen(response, who, taskId, "reopening takes your password, typed again", 403);
+        }
+        const reopened = store.reopenMirror(taskId, who.name, now);
+        if (!reopened.ok) {
+          const said: Record<string, string> = {
+            "unknown-task": "this task is not external work",
+            "not-latched": "the tracker never closed this — there is nothing to reopen",
+            "not-seen-open": "the tracker has not been seen open again since the close — reopen it there first; the next sync notices",
+            claimed: "this task is being built right now",
+            "contest-open": "a tournament is open on this task — decide it first",
+            held: "a hold stands — lift it first",
+            "question-open": "an unanswered question stands — answer or close it first",
+            "incident-open": "an unresolved incident stands — resolve it first",
+            "bad-state": "this task is not in a state reopen can take",
+          };
+          return taskScreen(response, who, taskId, said[reopened.reason] ?? "the task could not be reopened", 409);
+        }
+        return redirect(response, taskHref(taskId));
+      }
       case "unhold": {
         store.unhold(ref.id);
         return redirect(response, taskHref(taskId));
@@ -3038,6 +3065,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           // deactivated row survives as history, and the approval card
           // returns to the scope alone.
           store.retractTournamentTerms(ref.id);
+        }
+        if (plannedRace !== null && store.mirrorByTask(taskId) !== null) {
+          return taskScreen(response, who, taskId, "external work races in a follow-up release — file the tournament on a local task", 409);
         }
         if (plannedRace !== null) {
           store.fileTournamentTerms(
@@ -5655,6 +5685,8 @@ function taskBody(data: {
   peekable?: boolean;
   /** Where the task stands in its own column, from the data layer. */
   position?: { position: number; total: number; column: string | null } | null;
+  /** The tracker item this task stands for, when it is external work. */
+  mirror?: ExternalMirror | null;
   scope: Scope | null;
   /** Filed race terms (v14) — the approval restates them; one yes covers both. */
   raceTerms?: TournamentTerms | null;
@@ -6049,6 +6081,41 @@ function taskBody(data: {
     data.position !== null && data.position !== undefined && task.state === "queued"
       ? `<p class="meta">queue position ${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} — <a href="/queue">the queue screen</a> reorders</p>`
       : "",
+    // External work wears its tracker on the page: the link, the last
+    // observed state, and — when the tracker closed it and has been seen
+    // open again — the authenticated reopen act. Done + closed is display
+    // only: completed here stays completed.
+    (() => {
+      const mirror = data.mirror ?? null;
+      if (mirror === null) return "";
+      const link =
+        mirror.backend === "github-issues"
+          ? `<a href="https://github.com/${escape(mirror.remoteRepo)}/issues/${escape(mirror.remoteId)}">${escape(mirror.remoteRepo)}#${escape(mirror.remoteId)}</a>`
+          : `<span class="mono">${escape(mirror.remoteRepo)}#${escape(mirror.remoteId)}</span>`;
+      const state =
+        task.state === "done" && mirror.remoteState !== "open"
+          ? "completed here; closed on the tracker"
+          : mirror.remoteState === "open"
+            ? mirror.dispatchOk
+              ? "open on the tracker"
+              : "seen open again — reopen below to resume"
+            : mirror.remoteState === "closed"
+              ? "closed on the tracker"
+              : "gone from the tracker";
+      const reopenable =
+        mirror.remoteState === "open" && !mirror.dispatchOk && mirror.closeGeneration !== null &&
+        mirror.syncGeneration > mirror.closeGeneration && ["cancelled", "failed", "queued"].includes(task.state) && data.csrf !== "";
+      return (
+        `<div class="card"><p><strong>external work</strong> <span class="meta">${link} · ${escape(state)}</span></p>` +
+        (reopenable
+          ? `<form method="post" action="${taskHref(task.id)}/reopen" class="row">` +
+            `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+            `<input type="password" name="token" placeholder="your password" aria-label="your password" autocomplete="current-password">` +
+            `<button type="submit">reopen — the approved scope stands, the next pass may take it</button></form>`
+          : "") +
+        `</div>`
+      );
+    })(),
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     // The board sent them here saying "needs you" — the page must open by
     // saying WHY and pointing at the act, not read as a fact sheet

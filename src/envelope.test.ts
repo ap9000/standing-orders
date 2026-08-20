@@ -123,6 +123,7 @@ describe("the machine envelope", () => {
     // are deliberate: the contract must hold on the road an agent actually
     // hits first, not only on the happy one.
     const operateTable: Record<string, string[]> = {
+      sync: ["--json"],
       ready: ["--json"],
       task: ["list", "--json"],
       claim: ["--json"],

@@ -1,5 +1,55 @@
 # Progress
 
+**2026-08-20 — external dispatch (v20): the loop reaches the tracker.**
+The M0-promised arc, and the hardest review of the project: FIVE Codex
+rounds (REDESIGN ×4, then APPROVE WITH CHANGES with findings 40–43),
+because this is the boundary where local authority meets a tracker other
+people can write to. What shipped: a GitHub issue becomes an ORDINARY
+local task — scope, approval, queue columns, chains, budgets all apply
+untouched — plus one immutable `external_mirror` row carrying its full
+remote identity (owner/name#number, collision-hashed local ids) and its
+PROVENANCE (local-create | intake | granted-all; recorded at creation or
+by the authorizing intake grant, trigger-enforced immutable — titles and
+labels may nominate work, never establish whose it is). The `sync` pass
+(daemon cadence via reconcile/watch, zero tokens, demo-fenced): an
+authenticated access proof first (GitHub 404s what you cannot see, so a
+label 404 is "missing" only after the proof — everything operational
+blocks dispatch IMMEDIATELY, no grace), the plane-marker verdict (one
+fixed label, plane id in its description, overwrite-repaired by
+re-enroll; detection of a second plane, honestly never a lease), a
+paginated forward scan (titles through the canonical validator, bodies
+NEVER fetched), then every known mirror fetched INDIVIDUALLY — absence
+from a capped listing proves nothing, and only a COMPLETE pass advances
+freshness, atomically with its ledger row. Enforcement lives at the two
+atomic points, never mid-build: ADMISSION (a typed gate inside
+acquireLocked itself — raw claims and tournament resume included — plus
+a pre-spawn re-proof; stale/closed/revoked/plane-blocked mirrors never
+start, and the tick stale-scan pages each one rather than hiding it)
+and COMPLETION (`completeFenced` now returns completed|disowned decided
+inside its own transaction with the disposition durable on the claim
+row: a mirror the tracker closed mid-build finalizes failed/
+external-closed, task cancelled, branch kept as disowned evidence,
+publication impossible by construction — one build's compute honestly
+wasted instead of a fence that usually works). `setTaskState` itself
+refuses `done` on a latched mirror (typed union, every caller
+migrated); DONE STAYS DONE — remote closure never regresses a
+completed dependency. Reopen is an authenticated CAS needing the
+tracker SEEN open again on a later generation and a clean task — the
+refusals name the existing act that clears each blocker, and exclusion/
+incident-resolve now clear their holds and page episodes (finding 43).
+Write-back rides `external_intent` rows under the grant's classes
+exactly (`comment` is a NEW explicit class, close still withheld) — a
+denial is a typed intent refusal, never a run rewrite. `dispatch` is a
+grant FIELD with its own enroll terms ("this plane will BUILD what this
+tracker nominates"), binding exactly one remote repository, never in
+any default. Descoped by name after round 4: tournaments on mirrors and
+the standalone `build` verb on mirrors (both refuse, typed — the two
+interactions generating most review complexity); also out: beads
+dispatch, external edges, body ingestion, a distributed lease,
+retroactive v19 intake mirrors. The idempotent-acquire replay now
+carries a `replayed` flag (acquire-specific) and performs exactly one
+narrow repair. Suite 1031.
+
 **2026-08-19 (evening) — the queue screen (v19): Spotify's up-next, as
 per-worker columns.** Operator directive: drag-and-reorder "for
 different agents", columns "with a note at the top for each so we know

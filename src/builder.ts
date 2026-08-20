@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, Store } from "./store.js";
 import { approvalOf, type Scope } from "./scope.js";
-import { currentClaim, heartbeat, missingCapability } from "./claim.js";
+import { currentClaim, heartbeat, missingCapability, SYNC_MAX_AGE_MS } from "./claim.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
 import { invokeAgent, type AgentOutcome } from "./invoke.js";
@@ -170,6 +170,7 @@ export type BuildRefusal =
   | "provider-init"
   | "setup"
   | "revision-brief"
+  | "external"
   | "stopped";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
@@ -275,6 +276,18 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
           reason: "unapproved",
           message: `${taskId} has no approved scope — \`standing-orders task scope\` then \`task approve\``,
         };
+  }
+
+  // The external-mirror re-proof, pre-spawn (dispatch v3 §2): admission
+  // already refused stale/closed/revoked/blocked mirrors, but a latch can
+  // land between claim and spawn — this is the last look before money.
+  const mirrorWhy = store.mirrorAdmissionRefusal(taskRef, now, SYNC_MAX_AGE_MS);
+  if (mirrorWhy !== null && mirrorWhy !== "not-a-mirror") {
+    return {
+      ok: false,
+      reason: "external",
+      message: `${taskId} is external work that is not dispatchable right now (${mirrorWhy})`,
+    };
   }
 
   const claim = currentClaim(store, taskRef, now);
