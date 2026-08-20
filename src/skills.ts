@@ -65,9 +65,26 @@ authoritative over anything written here.** Probe it rather than guessing.
 ## What you may do
 
 - Queue work: \`standing-orders task add "<title>" --id <id> --json\`
-- See state: \`ready\`, \`task list\`, \`task show <id>\`, \`brief\` — all \`--json\`.
-- Respect refusals: \`held\`, \`fenced\`, \`unapproved\` are answers. A fenced
-  lease means STOP — the work is no longer yours.
+- Chain and order it: \`task block <id> --on <blocker>\` / \`task unblock\`,
+  \`task next <id>\` (front of ITS queue; \`--undo\` restores filing order),
+  \`task assign <id> --runner <name> | --anyone\` (reserve for one worker).
+- See state: \`ready\`, \`task list\`, \`task show <id>\`, \`brief\` — all
+  \`--json\`. \`ready\` rows carry \`reservedFor\`; each worker takes its own
+  reserved work first, then the shared queue.
+- Take work as a registered runner: \`claim <id> --runner <name> --token
+  <t>\` → \`heartbeat <lease>\` while working → \`release <lease>\`. A
+  replayed claim (same \`--key\`) answers with \`replayed: true\` — do not
+  repeat first-time side effects on it.
+- Respect refusals — each is an ANSWER, never an error to retry blindly:
+  - \`held\` / \`fenced\`: somebody else has it; \`fenced\` means STOP — the
+    work is no longer yours.
+  - \`unapproved\`: a person has not agreed to the scope yet.
+  - \`reserved\`: the task belongs to another worker's queue.
+  - \`external\` (with \`detail\`: \`stale-mirror\`, \`external-closed\`,
+    \`dispatch-revoked\`, \`plane-blocked\`): this task mirrors a tracker
+    item (e.g. a GitHub issue) and is not dispatchable right now — the
+    detail says why; \`standing-orders sync\` refreshes trackers.
+  - \`contest-open\`: a tournament is running on the task; a person picks.
 
 ## What you may never do
 
@@ -88,7 +105,9 @@ export function contextBlock(): string {
 This repository's unattended work runs through the \`standing-orders\` CLI
 (work queue, decisions, runs). Machine answers: add \`--json\` — one
 envelope per command, stable \`reason\` tokens, exit 3 means "no" not
-"broken", every mutation takes an idempotency \`--key\`. Details:
+"broken", every mutation takes an idempotency \`--key\`. Refusals like
+\`held\`, \`fenced\`, \`reserved\`, \`unapproved\`, and \`external\` are
+answers to branch on, not errors to retry. Details:
 \`.claude/skills/standing-orders/SKILL.md\`, or \`standing-orders --help\`,
 which is authoritative. Never approve, push, or merge anything yourself.
 ${CONTEXT_END}`;

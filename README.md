@@ -134,7 +134,7 @@ Four properties make that loop safe to run unattended.
 standing-orders tick --runner builder-1 --token <t> --repo ~/code/thing --max 1
 ```
 
-One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `standing-orders/<task-id>`, and commit. **It never pushes**, and it cannot touch the default branch; a pull request is always the terminus, and opening one stays a person's decision at this milestone.
+One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `standing-orders/<task-id>`, and commit. **Tick itself never pushes** and cannot touch the default branch; pushing and opening the pull request happen only under a publication grant whose exact repository, branch prefix, and base you approved — and merging stays yours, on GitHub.
 
 It is deliberately a pass and not a daemon: point cron at it and the fences make repetition safe — a second pass finds the first's work done and converges to `empty` (exit 3) instead of building anything twice. A broken build marks its task `failed` and the pass exits 1 even if other tasks succeeded, because exit 0 has to mean "nothing needs you". Refusals that are really a person's pending decision — a scope nobody approved, or one that changed after approval — leave the task queued and untouched.
 
@@ -236,9 +236,40 @@ approval digest binds — and requires your approver token typed again. A
 logged-in session alone can read everything and approve nothing.
 
 Plain HTTP, so keep it on localhost or a tailnet and put TLS in front for
-anything else. External-backend tasks (GitHub Issues and friends) appear
-here when external dispatch ships; today this is the built-in queue's
-console, and says so.
+anything else.
+
+## Steering a fleet, not just a task
+
+Everything below ships on `main` today (npm 0.3.0 pending):
+
+- **The queue screen** — every worker's up-next list as columns, like a
+  music queue: drag to reorder, drag into a worker's column to reserve a
+  task for it (each column wears an editable theme note), top is taken
+  first. A worker drains its own column, then the shared queue. The
+  reservation is enforced in the claim primitive itself — the wrong
+  worker's claim gets a typed `reserved` refusal, however it asks.
+- **Chains and "this one first"** — `task block/unblock` wires
+  dependencies (cycles refused), "starts after" on the filing form,
+  `task next` moves work to the front of its own queue. Scheduling,
+  never authority: approvals are untouched by any of it.
+- **Tournaments** — race 2–4 agents on one task under native dollar
+  caps, compare their verified diffs side by side, and pick one through
+  a password ceremony; the losers' branches and evidence are kept.
+- **The live peek** — a running build's page shows what is changing in
+  its checkout right now (names and counts, never contents), through a
+  native reader that executes nothing — no git command ever runs
+  against an agent-controlled worktree.
+- **External dispatch** — enroll a GitHub repository with an explicit
+  dispatch grant and its labeled issues become ordinary local tasks:
+  scoped and approved HERE (issue bodies are never imported — a tracker
+  anyone can write to is a prompt-injection surface), built unattended,
+  answered back with a PR-link comment under exactly the write classes
+  you granted. An issue closed mid-build can never publish: the
+  completion transaction disowns it, keeps the branch as evidence, and
+  says so. Done stays done — remote closure never regresses a completed
+  dependency. Revisions ride review comments: mark up the finished
+  diff (or let granted reviewers do it from the PR) and seal the batch
+  into one new approval-bound task.
 
 ## Writing to a tracker you already have
 
@@ -262,7 +293,7 @@ Every backend goes through the same contract, and the authorization wraps it rat
 
 The beads adapter is built to beads' own documentation and exercised against a stubbed runner; it has never run against a real installation, because `bd` was not present on the machine it was written on. Commands whose flags could not be established — a general status update, in particular — refuse rather than guess.
 
-**Next in M0:** issues in the default report, and a materialised snapshot so a scheduler can read an external backend without a network call in its hot path.
+The materialised snapshot M0 promised shipped as **external dispatch**: a `sync` pass mirrors a tracker's nominated issues into the queue as ordinary local tasks (titles only, validated; bodies never), so the scheduler's hot path never touches the network — see below.
 
 **It survives the night, cheaply.** Work dispatches itself from a dependency graph, fails safely, and parks a *typed* decision — recap, options with reversibility, a recommendation, evidence — instead of guessing. Parking never stalls the loop; the blocked task steps aside and eleven others keep going.
 
@@ -278,6 +309,12 @@ And it costs nothing while idle. **An LLM never polls.** The daemon handles ever
 | You wake to five transcripts | one briefing: what ran, what is blocked, what needs deciding |
 
 ## Status
+
+**Shipped on `main` through schema v20, suite 1031** — the M4 loop plus
+tournaments, the live peek, chains and queue ordering, per-worker queue
+columns, and external dispatch (each behind five adversarial Codex
+review rounds at its hardest; the ledger records every finding). The
+npm release is 0.2.0; everything above awaits 0.3.0.
 
 **M4 built.** The whole loop runs: `standing-orders watch` (or `daemon
 install` — no crontab) dispatches approved work, spends nothing while idle,

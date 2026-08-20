@@ -2,7 +2,25 @@
 
 **Standing orders for your agents. Wake me only for these.**
 
-Status: design, pre-M0.
+Status: the pre-M0 design, kept as written — the sections below are the
+original bet, and [PROGRESS.md](PROGRESS.md) is the ledger of what each
+milestone actually shipped and what its adversarial reviews changed.
+
+**Built since this document** (each behind its own Codex review rounds;
+the ledger has every finding): the M1–M4 loop as designed; typed
+decisions answered from terminal, console, or Telegram; publication
+grants (push + PR under exact approved terms; merge stays human);
+capability probes and worktree setup commands; the fleet console (board,
+workbench, inbox, triage, activity, review queue); tournaments (2–4
+agents race under native dollar caps, verified-evidence pick ceremony);
+the live worktree peek (a native no-execution reader — names and counts,
+never contents); dependency chains and queue ordering (`task
+block/unblock/next`); per-worker queue columns with drag reservation
+enforced in the claim primitive; and external dispatch (GitHub issues
+mirrored as ordinary local tasks under an explicit dispatch grant —
+titles validated, bodies never imported, closure latched with
+completion-time disowning, done never regressed). Schema v20.
+
 v0.4 makes the work graph a pluggable backend chosen during onboarding, and adds the supervision rule that makes overnight runs affordable.
 
 ---
