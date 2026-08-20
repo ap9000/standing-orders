@@ -74,6 +74,9 @@ export type BoardFacts = {
    * only when they need a person, wearing the routine's name. */
   routineId: number | null;
   routineName: string | null;
+  /** Queue rank — 0 is filing order. Scheduling only; the queued lane
+   * sorts by it and badges the actual front of the queue. */
+  priority?: number;
 };
 
 export type BoardCard = {
@@ -93,6 +96,8 @@ export type BoardCard = {
   overdue: boolean;
   /** The routine this card is an instance of — the chip it wears in lanes. */
   routineName: string | null;
+  /** The task's queue rank, carried for the queued lane's sort and badge. */
+  priority: number;
 };
 
 /** ISO to the minute for chip text — "retrying 14:32". */
@@ -129,6 +134,7 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     attempt: null as number | null,
     overdue: false,
     routineName: facts.routineName,
+    priority: facts.priority ?? 0,
   };
 
   const contest = facts.contest ?? null;

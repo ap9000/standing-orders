@@ -184,6 +184,11 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task show <id>
   standing-orders task state <id> <state>   queued|running|done|failed|cancelled
   standing-orders task block <id> --on <id> <id> waits for <on>
+  standing-orders task unblock <id> --on <id>  stop waiting for <on>
+  standing-orders task next <id> [--undo]   move it to the front of the
+                                        queue (scheduling only — approval
+                                        is still required); --undo puts it
+                                        back in filing order
   standing-orders task hold <id> --reason <why> [--until <iso>]
   standing-orders task unhold <id>
 
@@ -370,7 +375,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   // here by name instead (Codex round-4 findings 3/8).
   const booleans = new Set([
     "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
-    "clear", "follow", "ready", "all-tasks", "inbound-only", "help",
+    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -5214,6 +5219,10 @@ function taskCommand(
       return stateTask(rest, flags, context);
     case "block":
       return blockTask(rest, flags, context);
+    case "unblock":
+      return unblockTask(rest, flags, context);
+    case "next":
+      return nextTask(rest, flags, context);
     case "scope":
       return scopeTask(rest, flags, context);
     case "approve":
@@ -5234,7 +5243,7 @@ function taskCommand(
         context.json,
         "task",
         "usage",
-        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, scope, approve, hold, unhold, require, requeue, plan`,
+        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, unblock, next, scope, approve, hold, unhold, require, requeue, plan`,
         EXIT.usage,
       );
   }
@@ -5571,6 +5580,7 @@ function showTask(positional: readonly string[], context: Context): number {
     `${task.id}  ${task.state}`,
     `  ${task.title}`,
     ...(detail.blockedBy.length > 0 ? [`  waits for ${detail.blockedBy.join(", ")}`] : []),
+    ...(detail.task.priority > 0 ? [`  position  moved up (rank ${detail.task.priority}) — picked before filing order`] : []),
     ...(detail.hold === null ? [] : [`  held: ${detail.hold.reason}`]),
     ...(detail.claim === null ? [] : [`  claimed by ${detail.claim.runner} until ${detail.claim.expiresAt}`]),
     ...(scope === null
@@ -5633,12 +5643,82 @@ function blockTask(
       return fail(write, json, "task block", "unknown-task", `no task \`${each}\``, EXIT.refused);
     }
   }
+  const racingGuard = refuseWhileRacing(context, "task block", id);
+  if (racingGuard !== null) return racingGuard;
 
   const result = store.addEdge(id, on, mutationFrom(flags, context.now));
   if (!result.ok) return fail(write, json, "task block", "rejected", result.reason, EXIT.refused);
 
   return succeed(write, json, "task block", { blocked: id, blocker: on }, () => [
     `${id} now waits for ${on}.`,
+  ]);
+}
+
+/** The mirror of block: stop waiting. Removal cannot create a cycle. */
+function unblockTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json } = context;
+  const id = positional[0];
+  const on = text(flags, "on");
+  if (id === undefined || on === undefined) {
+    return fail(write, json, "task unblock", "usage", "`standing-orders task unblock <id> --on <id>`", EXIT.usage);
+  }
+  if (store.getTask(id) === null) {
+    return fail(write, json, "task unblock", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  }
+  const racingGuard = refuseWhileRacing(context, "task unblock", id);
+  if (racingGuard !== null) return racingGuard;
+
+  const result = store.removeEdge(id, on, mutationFrom(flags, context.now));
+  if (!result.ok) {
+    return fail(write, json, "task unblock", "not-waiting", `${id} was not waiting on ${on}`, EXIT.refused);
+  }
+  return succeed(write, json, "task unblock", { blocked: id, blocker: on }, () => [
+    `${id} no longer waits for ${on}.`,
+  ]);
+}
+
+/**
+ * Move a task to the front of the queue — or put it back with --undo.
+ * Scheduling only: the rank changes when the next free worker looks,
+ * and approval is still required for anything to build.
+ */
+function nextTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json } = context;
+  const id = positional[0];
+  if (id === undefined) {
+    return fail(write, json, "task next", "usage", "`standing-orders task next <id> [--undo]`", EXIT.usage);
+  }
+  if (flags.has("undo")) {
+    const cleared = store.clearTaskPriority(id, mutationFrom(flags, context.now));
+    if (!cleared.ok) return fail(write, json, "task next", "unknown-task", `no task \`${id}\``, EXIT.refused);
+    return succeed(write, json, "task next", { task: id, priority: 0 }, () => [
+      `${id} is back in filing order.`,
+    ]);
+  }
+  const moved = store.moveTaskNext(id, context.clock(), mutationFrom(flags, context.now));
+  if (!moved.ok) {
+    const message =
+      moved.reason === "unknown-task"
+        ? `no task \`${id}\``
+        : moved.reason === "not-queued"
+          ? `${id} is not queued — only queued work can move up`
+          : moved.reason === "claimed"
+            ? `${id} is being built right now — it needs no place in line`
+            : moved.reason === "contest-open"
+              ? "a tournament is running on this task — let it finish, then pick or abandon it from the tournament screen in the console (the task's page links to it)"
+              : "the queue rank could not be raised any further";
+    return fail(write, json, "task next", moved.reason, message, EXIT.refused);
+  }
+  return succeed(write, json, "task next", { task: id, priority: moved.priority }, () => [
+    `${id} moved to the front — it is picked first at the next selection (approval still required).`,
   ]);
 }
 

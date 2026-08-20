@@ -1486,5 +1486,49 @@ describe("the same-day upgrade shape (audit TG-8)", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("a v17 database whose task table predates priority opens, gains the column, and old rows read as filing order", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { createRequire } = await import("node:module");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "standing-orders-v18-"));
+    const file = join(dir, "orders.db");
+    try {
+      const require = createRequire(import.meta.url);
+      const { DatabaseSync } = require("node:sqlite");
+      const old = new DatabaseSync(file);
+      old.exec(`
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (17);
+        CREATE TABLE task (
+          id         TEXT PRIMARY KEY,
+          title      TEXT NOT NULL,
+          state      TEXT NOT NULL CHECK (state IN ('queued','running','done','failed','cancelled')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO task VALUES ('old-row', 'work filed before v18', 'queued', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z');
+      `);
+      old.close();
+
+      const store = openStore(file);
+      try {
+        const columns = store.handle
+          .prepare("PRAGMA table_info(task)")
+          .all()
+          .map((row: Record<string, unknown>) => String(row["name"]));
+        expect(columns).toContain("priority");
+        const task = store.getTask("old-row");
+        expect(task?.priority).toBe(0);
+        const moved = store.moveTaskNext("old-row", new Date("2026-08-19T00:00:00.000Z"));
+        expect(moved).toMatchObject({ ok: true, priority: 1 });
+      } finally {
+        store.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 

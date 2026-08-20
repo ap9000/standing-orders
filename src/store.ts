@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -65,6 +65,9 @@ export type Task = {
   state: TaskState;
   createdAt: string;
   updatedAt: string;
+  /** Queue rank — 0 is filing order; higher is picked sooner. Scheduling
+   * only, never authority: approval gates are untouched by it. */
+  priority: number;
 };
 
 export type TaskRef = {
@@ -572,7 +575,8 @@ CREATE TABLE IF NOT EXISTS task (
   title      TEXT NOT NULL,
   state      TEXT NOT NULL CHECK (state IN ('queued','running','done','failed','cancelled')),
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  priority   INTEGER NOT NULL DEFAULT 0
 );
 
 -- Dependency edges, owned natively because this backend is ours. Edges are
@@ -1978,6 +1982,9 @@ function migrate(db: Database): void {
      )`,
     ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted", "capture_status"],
   );
+  // v18 (chains and next): the queue rank. Scheduling, never authority —
+  // no digest binds it and no approval is voided by it.
+  addColumn(db, "task", "priority", "INTEGER NOT NULL DEFAULT 0");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2285,6 +2292,7 @@ export class Store {
         state: "queued" as TaskState,
         createdAt: stamp,
         updatedAt: stamp,
+        priority: 0,
       };
       }),
     );
@@ -2362,6 +2370,87 @@ export class Store {
         this.db
           .prepare("INSERT OR IGNORE INTO task_edge (blocked, blocker) VALUES (?, ?)")
           .run(blocked, blocker);
+        return { ok: true as const };
+      }),
+      result => result.ok,
+    );
+  }
+
+  /**
+   * Remove one dependency edge. Removal cannot create a cycle, so no
+   * closure check — but delete-and-wake stay one transaction so it
+   * serializes cleanly against claim admission: whichever commits first,
+   * the claim's own re-proof sees a consistent world. Removing an edge
+   * makes a task DISPATCHABLE sooner, never buildable without approval.
+   */
+  removeEdge(blocked: string, blocker: string, mutation: Mutation = {}): { ok: true } | { ok: false; reason: string } {
+    return this.once(mutation, "removeEdge", () =>
+      this.transact(() => {
+        const changes = this.db
+          .prepare("DELETE FROM task_edge WHERE blocked = ? AND blocker = ?")
+          .run(blocked, blocker).changes;
+        if (Number(changes) === 0) return { ok: false as const, reason: "not-waiting" };
+        // A tick that snapshotted its ready list before this commit waits
+        // for the next pass — the wake is what makes "next pass" now.
+        this.bumpWake();
+        return { ok: true as const };
+      }),
+      result => result.ok,
+    );
+  }
+
+  /**
+   * Move a task to the front of the queue: rank = one past the highest
+   * rank any still-dispatchable task holds, computed and written in ONE
+   * transaction (two racing "next" calls get distinct ranks; the later
+   * ask wins). Scheduling only: it refuses anything not plainly queued —
+   * building, finished, failed, cancelled, or racing a tournament — and
+   * never touches updated_at, which the board reads as the stall clock.
+   */
+  moveTaskNext(taskId: string, now: Date, mutation: Mutation = {}): { ok: true; priority: number } | { ok: false; reason: string } {
+    return this.once(mutation, "moveTaskNext", () =>
+      this.transact(() => {
+        const task = this.db.prepare("SELECT state FROM task WHERE id = ?").get(taskId);
+        if (task === undefined) return { ok: false as const, reason: "unknown-task" };
+        const ref = this.db
+          .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+          .get(BUILT_IN, taskId);
+        if (ref !== undefined) {
+          // The live claim is checked BEFORE the state: taking a task sets
+          // it running, so "claimed" would otherwise be unreachable and the
+          // operator would read the less honest "not queued".
+          if (this.currentLiveLease(Number(ref["id"]), now) !== null) return { ok: false as const, reason: "claimed" };
+          const racing = this.db
+            .prepare(
+              `SELECT 1 AS hit FROM contest WHERE task_ref = ?
+                AND state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted') LIMIT 1`,
+            )
+            .get(Number(ref["id"]));
+          if (racing !== undefined) return { ok: false as const, reason: "contest-open" };
+        }
+        if (String(task["state"]) !== "queued") return { ok: false as const, reason: "not-queued" };
+        const top = this.db
+          .prepare("SELECT MAX(priority) AS top FROM task WHERE state IN ('queued','running')")
+          .get();
+        const highest = top === undefined || top["top"] === null ? 0 : Number(top["top"]);
+        if (highest >= Number.MAX_SAFE_INTEGER - 1) return { ok: false as const, reason: "rank-overflow" };
+        const priority = highest + 1;
+        this.db.prepare("UPDATE task SET priority = ? WHERE id = ?").run(priority, taskId);
+        this.bumpWake();
+        return { ok: true as const, priority };
+      }),
+      result => result.ok,
+    );
+  }
+
+  /** Undo a promotion: back to filing order. Refuses nothing but absence —
+   * demoting finished work is harmless. */
+  clearTaskPriority(taskId: string, mutation: Mutation = {}): { ok: true } | { ok: false; reason: string } {
+    return this.once(mutation, "clearTaskPriority", () =>
+      this.transact(() => {
+        const changes = this.db.prepare("UPDATE task SET priority = 0 WHERE id = ?").run(taskId).changes;
+        if (Number(changes) === 0) return { ok: false as const, reason: "unknown-task" };
+        this.bumpWake();
         return { ok: true as const };
       }),
       result => result.ok,
@@ -2449,7 +2538,7 @@ export class Store {
              JOIN task AS blocker ON blocker.id = task_edge.blocker
              WHERE task_edge.blocked = task.id AND blocker.state <> 'done'
            )
-         ORDER BY task.created_at`,
+         ORDER BY task.priority DESC, task.created_at, task_ref.id`,
       )
       .all(BUILT_IN, stamp, stamp);
 
@@ -5330,6 +5419,7 @@ export class Store {
       state: String(row["state"]) as TaskState,
       createdAt: String(row["created_at"]),
       updatedAt: String(row["updated_at"]),
+      priority: row["priority"] === null || row["priority"] === undefined ? 0 : Number(row["priority"]),
       repo: row["task_repo"] === null ? null : String(row["task_repo"]),
     }));
   }
@@ -6654,6 +6744,7 @@ export class Store {
         state: String(row["state"]) as TaskState,
         createdAt: String(row["created_at"]),
         updatedAt: String(row["updated_at"]),
+        priority: row["priority"] === null || row["priority"] === undefined ? 0 : Number(row["priority"]),
         repo: row["task_repo"] === null ? null : String(row["task_repo"]),
         approved: Number(row["approved"]) === 1,
         held: Number(row["held"]) === 1,
@@ -6767,7 +6858,7 @@ export class Store {
     const admissionParams = admitted === null ? [repo, repo] : admitted;
 
     const columns = `
-        SELECT task.id, task.title, task.state, task.updated_at, task_ref.strikes, task_ref.repo AS task_repo,
+        SELECT task.id, task.title, task.state, task.updated_at, task.priority, task_ref.strikes, task_ref.repo AS task_repo,
              EXISTS (SELECT 1 FROM task_scope WHERE task_scope.task_id = task.id) AS has_scope,
              EXISTS (
                SELECT 1 FROM task_scope
@@ -6878,8 +6969,18 @@ export class Store {
            LIMIT ?`)
         .all(...shared, attentionPage);
 
+      // Promoted work is pinned onto the page (chains-and-next review,
+      // finding 7): an old task moved to the front must not vanish from
+      // the board just because 200 newer things moved since.
+      const promoted = this.db
+        .prepare(`${columns}
+             AND task.priority > 0 AND task.state IN ('queued','running')
+           ORDER BY task.priority DESC, task.id
+           LIMIT ?`)
+        .all(...shared, Math.min(page, 50));
+
       const seen = new Set<string>();
-      const rows = [...newest, ...stalled].filter(row => {
+      const rows = [...newest, ...stalled, ...promoted].filter(row => {
         const id = String(row["id"]);
         if (seen.has(id)) return false;
         seen.add(id);
@@ -6928,6 +7029,7 @@ export class Store {
           row["live_run_id"] === null || row["live_run_id"] === undefined
             ? null
             : Number(row["live_run_id"]),
+        priority: row["priority"] === null || row["priority"] === undefined ? 0 : Number(row["priority"]),
         hold:
           row["hold_kind"] === null || row["hold_kind"] === undefined
             ? null
@@ -7714,6 +7816,7 @@ function readTask(row: Record<string, unknown>): Task {
     state: String(row["state"]) as TaskState,
     createdAt: String(row["created_at"]),
     updatedAt: String(row["updated_at"]),
+    priority: row["priority"] === null || row["priority"] === undefined ? 0 : Number(row["priority"]),
   };
 }
 

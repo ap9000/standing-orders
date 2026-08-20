@@ -835,7 +835,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/tasks/new") {
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const revision = who.via === "cookie" ? who.session.projectRevision : 0;
-      return page(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null));
+      const chainable = store
+        .listTasksScoped(project, undefined, 100, null)
+        .filter(one => one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
+        .map(one => ({ id: one.id, title: one.title }));
+      return page(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable));
     }
 
     const task = matchTaskPath(url.pathname, "");
@@ -1563,6 +1567,25 @@ export function createDecisionServer(options: ServeOptions): Server {
           return open === null ? null : { id: open.id, state: open.state, agents: store.contestants(open.id).length };
         })(),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
+        // The chain, both directions of trust: blockers outside the ceiling
+        // are named but wear no state and no link (same redaction the board
+        // applies to blockerState).
+        waitsFor: store.blockers(taskId).map(blockerId => {
+          const blockerRef = store.lookupRef(blockerId);
+          const admitted = blockerRef !== null && visible(blockerRef.repo);
+          const blocker = admitted ? store.getTask(blockerId) : null;
+          return { id: blockerId, state: blocker === null ? null : blocker.state, admitted };
+        }),
+        // Candidates a "wait for" select may offer: the OPEN project's own
+        // open work, never itself. A projectless roll-up session gets no
+        // select at all — the roll-up never lists across projects.
+        waitCandidates:
+          who.via !== "cookie" || (who.session.project === null && !unscopedMode)
+            ? []
+            : store
+                .listTasksScoped(who.session.project, undefined, 100, null)
+                .filter(one => one.id !== taskId && one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
+                .map(one => ({ id: one.id, title: one.title })),
         // The one liveness fact, computed here where the store is: the run
         // whose lease is the task's CURRENT claim — not merely the first
         // unfinished run (round-4 finding, A1).
@@ -2101,6 +2124,20 @@ export function createDecisionServer(options: ServeOptions): Server {
           tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project),
         );
       }
+      // "starts after": a chain filed with the work. The task ALREADY
+      // exists at this point, so a bad chain must not lose it — the new
+      // task's page renders with the un-made wait named instead.
+      const after = (body.get("after") ?? "").trim();
+      if (after !== "") {
+        const afterRef = store.lookupRef(after);
+        const chained =
+          store.getTask(after) !== null && afterRef !== null && visible(afterRef.repo)
+            ? store.addEdge(made.id, after)
+            : { ok: false as const, reason: "that task does not exist here" };
+        if (!chained.ok) {
+          return taskScreen(response, who, made.id, `the task was created, but could not be made to wait for ${after} — ${chained.reason}`, 200);
+        }
+      }
       return redirect(response, taskHref(made.id));
     }
 
@@ -2218,7 +2255,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/contest/${contestId}`);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -2779,6 +2816,58 @@ export function createDecisionServer(options: ServeOptions): Server {
         // owner. Decision, incident, and backoff holds are not reachable
         // from here, whatever a request claims.
         store.hold(ref.id, reason, null, now);
+        return redirect(response, taskHref(taskId));
+      }
+      case "block": {
+        // Chains are scheduling, not authority (chains-and-next review,
+        // finding 2): the edge decides WHEN the ready set admits the task;
+        // approval still decides WHAT may build. Both ends are re-proved
+        // here — existence, ceiling, and the tournament guard — and the
+        // cycle refusal comes from the store's own closure check.
+        const on = (body.get("on") ?? "").trim();
+        const blocker = on === "" ? null : store.getTask(on);
+        const blockerRef = on === "" ? null : store.lookupRef(on);
+        if (blocker === null || blockerRef === null || !visible(blockerRef.repo)) {
+          return taskScreen(response, who, taskId, "that task to wait for does not exist here", 404);
+        }
+        if (store.openContestFor(ref.id) !== null) {
+          return taskScreen(response, who, taskId, "a tournament is running on this task — let it finish, then pick or abandon it", 409);
+        }
+        const added = store.addEdge(taskId, on);
+        if (!added.ok) {
+          return taskScreen(response, who, taskId, `could not make ${taskId} wait for ${on} — ${added.reason}`, 409);
+        }
+        return redirect(response, taskHref(taskId));
+      }
+      case "unblock": {
+        const on = (body.get("on") ?? "").trim();
+        if (store.openContestFor(ref.id) !== null) {
+          return taskScreen(response, who, taskId, "a tournament is running on this task — let it finish, then pick or abandon it", 409);
+        }
+        const removed = store.removeEdge(taskId, on);
+        if (!removed.ok) {
+          return taskScreen(response, who, taskId, `${taskId} was not waiting on ${on}`, 409);
+        }
+        return redirect(response, taskHref(taskId));
+      }
+      case "next": {
+        if (body.get("undo") !== null) {
+          const cleared = store.clearTaskPriority(taskId);
+          if (!cleared.ok) return taskScreen(response, who, taskId, "this task could not be put back in filing order", 409);
+          return redirect(response, taskHref(taskId));
+        }
+        const moved = store.moveTaskNext(taskId, now);
+        if (!moved.ok) {
+          const said =
+            moved.reason === "not-queued"
+              ? "only queued work can move up — this task is not waiting in the queue"
+              : moved.reason === "claimed"
+                ? "this task is being built right now — it needs no place in line"
+                : moved.reason === "contest-open"
+                  ? "a tournament is running on this task — let it finish, then pick or abandon it"
+                  : "the queue rank could not be raised";
+          return taskScreen(response, who, taskId, said, 409);
+        }
         return redirect(response, taskHref(taskId));
       }
       case "unhold": {
@@ -4088,15 +4177,20 @@ function boardBody(
     key: "attention" | "queued" | "waiting" | "building",
     title: string,
     hint: string,
-    renderOne: (card: BoardCard) => string,
+    renderOne: (card: BoardCard, index: number) => string,
   ): string => {
     const cards = data.cards.filter(card => card.lane === key);
     // The longest-stalled card leads the board: attention sorts by how
-    // long it has waited, everything else stays newest-first.
+    // long it has waited, everything else stays newest-first — except the
+    // queued lane, which reads in DISPATCH order: moved-up work first,
+    // exactly as the next free worker will pick it.
     if (key === "attention") {
       cards.sort((a, b) =>
         (a.stalledSince ?? "9999").localeCompare(b.stalledSince ?? "9999"),
       );
+    }
+    if (key === "queued") {
+      cards.sort((a, b) => b.priority - a.priority);
     }
     const shown = cards.slice(0, CAP);
     const more = cards.length - shown.length;
@@ -4104,7 +4198,7 @@ function boardBody(
       `<section class="lane lane-${key}"><h2>${title} <span class="lane-count">${cards.length}${
         data.saturated ? "+" : ""
       }</span></h2><p class="hint">${hint}</p>` +
-      (shown.length === 0 ? `<p class="meta lane-empty">nothing here</p>` : shown.map(renderOne).join("")) +
+      (shown.length === 0 ? `<p class="meta lane-empty">nothing here</p>` : shown.map((card, index) => renderOne(card, index)).join("")) +
       (more > 0 ? `<a class="lane-more" href="/tasks">+${more} more in the task list</a>` : "") +
       `</section>`
     );
@@ -4119,6 +4213,19 @@ function boardBody(
     `<span class="mono meta">${escape(card.taskId)}${
       card.stalledSince === null ? "" : ` \u00b7 waiting ${age(card.stalledSince)}`
     }</span></a>`;
+
+  // The queued lane in dispatch order: only the card a free worker would
+  // actually take first says "next up"; anything else moved up says so
+  // without claiming first place (chains-and-next review, findings 7/12).
+  const queuedCard = (card: BoardCard, index: number): string =>
+    `<a class="lane-card" href="${card.href}">` +
+    `<span class="t">${escape(card.title)}</span>` +
+    `<span class="meta">${escape(card.reason)}${
+      card.priority > 0 ? ` <span class="badge">${index === 0 ? "next up" : "moved up"}</span>` : ""
+    }${
+      card.routineName === null ? "" : ` <span class="badge">${escape(card.routineName)}</span>`
+    }${chip(card.repo)}</span>` +
+    `<span class="mono meta">${escape(card.taskId)}</span></a>`;
 
   const building = (card: BoardCard): string => {
     const claim = card.claim;
@@ -4209,7 +4316,7 @@ function boardBody(
     toggle,
     `<div class="board">`,
     lane("attention", "needs you", "answer, approve, or repair \u2014 these wait for a person", plain),
-    lane("queued", "queued", "ready \u2014 starts when a worker has a free slot", plain),
+    lane("queued", "queued", "ready \u2014 starts when a worker has a free slot", queuedCard),
     lane("waiting", "waiting", "paused on a timer, a dependency, or a missing requirement", plain),
     lane("building", "building", "live \u2014 each card is one agent in its own workspace", building),
     `<section class="lane lane-done"><h2><a href="/done">done recently</a></h2><p class="hint">the last few finished \u2014 the full ledger is under done</p>${doneCards}</section>`,
@@ -4543,9 +4650,7 @@ function routinesPage(
         ].join("\n");
   const list =
     tracks.length === 0
-      ? `<p class="meta">No standing orders${chrome.project === null ? "" : " in this project"}. File one from the terminal:</p>` +
-        `<pre class="recap">standing-orders routine add nightly-deps --repo &lt;path&gt; \\\n  --goal "Refresh the lockfile and note anything major" \\\n  --schedule daily:03:30</pre>` +
-        `<p class="meta">then approve it here — approving a routine is what lets each firing build without asking.</p>`
+      ? `<p class="meta">No standing orders${chrome.project === null ? " — open a project to file one" : " in this project yet — file one below; nothing fires until you approve it"}.</p>`
       : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
   return shell("routines", [
     `<h1>routines</h1>`,
@@ -5242,6 +5347,7 @@ function newTaskPage(
   csrf: string,
   projectRevision: number,
   problem: string | null,
+  candidates: { id: string; title: string }[] = [],
 ): string {
   return shell("new task", [
     `<h1>new task</h1>`,
@@ -5256,6 +5362,12 @@ function newTaskPage(
     `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
       `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
     `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
+    candidates.length === 0
+      ? ""
+      : `<label>starts after <span class="meta">(optional — waits for that task to finish before a worker takes this one)</span>` +
+        `<select name="after"><option value="">right away</option>` +
+        candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
+        `</select></label>`,
     `<button type="submit">create task</button>`,
     `</form>`,
   ].join("\n"), { chrome });
@@ -5280,6 +5392,11 @@ function taskBody(data: {
   holds: Hold[];
   contest?: { id: number; state: string; agents: number } | null;
   claimed: boolean;
+  /** What this task waits for — blockers outside this console's ceiling
+   * are named but carry no state and no link. */
+  waitsFor?: { id: string; state: string | null; admitted: boolean }[];
+  /** Open tasks a "wait for" select may offer (this console's view only). */
+  waitCandidates?: { id: string; title: string }[];
   /** The run whose lease is the CURRENT live claim — computed by the data
    * layer; the renderer never guesses liveness from a null outcome. */
   liveRunId?: number | null;
@@ -5599,6 +5716,39 @@ function taskBody(data: {
   const stalled =
     task.state === "failed" || data.incidents.some(one => one.resolvedAt === null);
 
+  // The chain: what this task waits for, editable in place. Blockers
+  // outside this console's view are named without state or link — the same
+  // redaction the board applies. Adding and removing are ordinary
+  // re-proved POSTs; the loop refusal comes back as the problem banner.
+  const waitsFor = data.waitsFor ?? [];
+  const candidates = (data.waitCandidates ?? []).filter(one => !waitsFor.some(existing => existing.id === one.id));
+  const waitRows = waitsFor
+    .map(
+      one =>
+        `<p class="row">${
+          one.admitted ? `<a href="${taskHref(one.id)}" class="mono">${escape(one.id)}</a>` : `<span class="mono">${escape(one.id)}</span>`
+        }${one.state === null ? "" : ` <span class="badge badge-${escape(one.state)}">${escape(one.state)}</span>`}` +
+        `<form method="post" action="${taskHref(task.id)}/unblock" class="inline">` +
+        `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+        `<input type="hidden" name="on" value="${escape(one.id)}">` +
+        `<button type="submit">stop waiting</button></form></p>`,
+    )
+    .join("\n");
+  const waitAdd =
+    data.csrf === "" || candidates.length === 0
+      ? ""
+      : `<form method="post" action="${taskHref(task.id)}/block" class="row">` +
+        `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+        `<select name="on" aria-label="task to wait for">` +
+        candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
+        `</select>` +
+        `<button type="submit">wait for this</button>` +
+        `<span class="meta"> — this task starts only after it finishes</span></form>`;
+  const waitsForCard =
+    waitRows === "" && waitAdd === ""
+      ? ""
+      : `<h2>waits for</h2>${waitRows === "" ? `<p class="meta">nothing — it starts when a worker is free</p>` : waitRows}${waitAdd}`;
+
   const acts = [
     `<h2>acts</h2>`,
     data.claimed
@@ -5610,6 +5760,12 @@ function taskBody(data: {
       : "",
     data.plan === null && !approval.approved && !data.claimed && task.state === "queued"
       ? `<p class="meta">plan first sends an agent to read the repository, ask you questions, and propose a scope \u2014 nothing builds until you approve it</p>`
+      : "",
+    // Queue rank is scheduling, never authority: moving up changes when
+    // the next free worker looks, and approval is still required.
+    task.state === "queued" && !data.claimed && task.priority === 0 ? act("next", "build this next") : "",
+    task.state === "queued" && task.priority > 0
+      ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
     act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" aria-label="hold reason" style="width:12rem">`),
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
@@ -5637,6 +5793,9 @@ function taskBody(data: {
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
       `${data.filedVia === null || data.filedVia === undefined ? "" : ` · filed via ${escape(data.filedVia)}`}</span></h1>`,
     `<p>${escape(task.title)}</p>`,
+    task.priority > 0 && task.state === "queued"
+      ? `<p class="meta">moved up — picked before filing order when a worker is free (approval still required)</p>`
+      : "",
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     // The board sent them here saying "needs you" — the page must open by
     // saying WHY and pointing at the act, not read as a fact sheet
@@ -5677,6 +5836,7 @@ function taskBody(data: {
     revisionCard,
     approveForm,
     scopeForm,
+    waitsForCard,
     holds,
     acts,
   ].join("\n");

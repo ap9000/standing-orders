@@ -321,6 +321,74 @@ describe("operating the queue from the command line", () => {
       expect(payload().claim.runner).toBe("r");
     });
 
+    test("unblock is the mirror of block: the wait ends, and a wait that never was refuses", async () => {
+      await run(["task", "add", "a", "--id", "a"]);
+      await run(["task", "add", "b", "--id", "b"]);
+      await run(["task", "block", "b", "--on", "a"]);
+
+      const code = await run(["task", "unblock", "b", "--on", "a", "--json"]);
+      expect(code).toBe(EXIT.ok);
+      await run(["task", "show", "b", "--json"]);
+      expect(payload().blockedBy).toEqual([]);
+
+      // b no longer waits — the ready set proves it, not just the record.
+      await run(["ready", "--json"]);
+      expect(payload().tasks.map((one: { id: string }) => one.id)).toContain("b");
+
+      const again = await run(["task", "unblock", "b", "--on", "a", "--json"]);
+      expect(again).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ ok: false, reason: "not-waiting" });
+
+      expect(await run(["task", "unblock", "ghost", "--on", "a"])).toBe(EXIT.refused);
+      expect(await run(["task", "unblock", "b"])).toBe(EXIT.usage);
+    });
+
+    test("next moves a task to the front of the selection — the LAST ask wins, undo restores filing order", async () => {
+      await run(["task", "add", "first", "--id", "first"]);
+      await run(["task", "add", "second", "--id", "second"]);
+      await run(["task", "add", "third", "--id", "third"]);
+
+      // Filing order to start.
+      await run(["ready", "--json"]);
+      expect(payload().tasks.map((one: { id: string }) => one.id)).toEqual(["first", "second", "third"]);
+
+      // Promote third, then second: the most recent ask is picked first,
+      // the earlier ask still outranks the unasked.
+      expect(await run(["task", "next", "third", "--json"])).toBe(EXIT.ok);
+      expect(await run(["task", "next", "second", "--json"])).toBe(EXIT.ok);
+      await run(["ready", "--json"]);
+      expect(payload().tasks.map((one: { id: string }) => one.id)).toEqual(["second", "third", "first"]);
+
+      // A mistaken promotion is not sticky.
+      expect(await run(["task", "next", "second", "--undo", "--json"])).toBe(EXIT.ok);
+      await run(["ready", "--json"]);
+      expect(payload().tasks.map((one: { id: string }) => one.id)).toEqual(["third", "first", "second"]);
+
+      // show says where it stands, in words.
+      await run(["task", "next", "third", "--undo"]);
+      await run(["task", "next", "first"]);
+      await run(["task", "show", "first"]);
+      expect(out()).toContain("position");
+      expect(out()).toContain("moved up");
+    });
+
+    test("next refuses what is not plainly queued", async () => {
+      expect(await run(["task", "next", "ghost", "--json"])).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ reason: "unknown-task" });
+
+      await run(["task", "add", "busy", "--id", "busy"]);
+      await claim(["claim", "busy", "--runner", "r"]);
+      const claimed = await run(["task", "next", "busy", "--json"], later(1_000));
+      expect(claimed).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ reason: "claimed" });
+
+      await run(["task", "add", "finished", "--id", "finished"]);
+      await run(["task", "state", "finished", "done"]);
+      const done = await run(["task", "next", "finished", "--json"]);
+      expect(done).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ reason: "not-queued" });
+    });
+
     test("lists nothing without inventing an error", async () => {
       expect(await run(["task", "list"])).toBe(EXIT.ok);
       expect(out()).toContain("empty");

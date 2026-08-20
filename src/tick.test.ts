@@ -124,6 +124,21 @@ describe("tick, against real git", () => {
       runner,
     );
 
+  test("`task next` changes what the pass actually takes — the dispatch-order proof", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-first", approverToken);
+    await queueApproved("t-second", approverToken);
+
+    await run(["task", "next", "t-second"]);
+    const code = await tick(runnerToken, ["--max", "1"]);
+
+    expect(code).toBe(EXIT.ok);
+    expect(payload().dispatched[0]).toMatchObject({ id: "t-second", outcome: "built" });
+    // The promoted task was built; the earlier filing waits its turn.
+    await run(["task", "show", "t-first", "--json"]);
+    expect(payload().task.state).toBe("queued");
+  });
+
   test("one task goes queued → branch → commit, unattended", async () => {
     const { runnerToken, approverToken } = await credentials();
     await queueApproved("t-1", approverToken);

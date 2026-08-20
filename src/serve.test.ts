@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire, release } from "./claim.js";
-import { addApprover } from "./scope.js";
+import { addApprover, approve, propose } from "./scope.js";
 import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
@@ -1951,7 +1951,10 @@ describe("routines — standing orders on the console", () => {
     const cookie = await login();
     const empty = await (await fetch(url("/routines"), { headers: { cookie } })).text();
     expect(empty).toContain("No standing orders");
-    expect(empty).toContain("routine add");
+    // The empty state points at the filing form on this very page — not at
+    // the terminal (round-5 copy fix).
+    expect(empty).toContain("file one");
+    expect(empty).not.toContain("from the terminal");
 
     const id = file("weekly");
     approveRoutine(store, id, "alex", T0, store.getRoutine(id)?.digest ?? "", approverToken);
@@ -3229,6 +3232,125 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     expect(contest.status).toBe(404);
     expect(contest.headers.get("content-type") ?? "").toContain("text/html");
     expect(await contest.text()).toContain("no such tournament");
+  });
+
+  test("chains from the console: wait for, stop waiting, and a loop refused in plain words", async () => {
+    store.createTask({ id: "t-schema", title: "migrate the schema" }, T0);
+    store.refFor("built-in", "t-schema", "ours");
+    store.createTask({ id: "t-api", title: "wire the api" }, T0);
+    store.refFor("built-in", "t-api", "ours");
+    const cookie = await login();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(
+      await (await fetch(url("/t/t-api"), { headers: { cookie } })).text(),
+    )?.[1] as string;
+
+    const post = (path: string, fields: Record<string, string>) =>
+      fetch(url(path), {
+        method: "POST",
+        headers: { cookie },
+        body: new URLSearchParams({ csrf, ...fields }),
+        redirect: "manual",
+      });
+
+    // api waits for schema — created, visible, removable.
+    expect((await post("/t/t-api/block", { on: "t-schema" })).status).toBe(303);
+    const page = await (await fetch(url("/t/t-api"), { headers: { cookie } })).text();
+    expect(page).toContain("waits for");
+    expect(page).toContain("t-schema");
+    expect(page).toContain("stop waiting");
+
+    // The loop refuses with the store's own sentence, on the page.
+    const loop = await post("/t/t-schema/block", { on: "t-api" });
+    expect(loop.status).toBe(409);
+    expect(await loop.text()).toContain("cycle");
+
+    // Stop waiting; a wait that never was refuses.
+    expect((await post("/t/t-api/unblock", { on: "t-schema" })).status).toBe(303);
+    expect((await post("/t/t-api/unblock", { on: "t-schema" })).status).toBe(409);
+
+    // A blocker that does not exist here refuses before anything writes.
+    expect((await post("/t/t-api/block", { on: "ghost" })).status).toBe(404);
+  });
+
+  test("build this next from the console: the act, the words, and the board's honest badges", async () => {
+    // Approved scopes, so both cards sit in the QUEUED lane — the lane the
+    // rank sorts and badges. Unapproved work is attention, not a queue.
+    for (const [id, title] of [["q-one", "first filed"], ["q-two", "second filed"]] as const) {
+      store.createTask({ id, title }, T0);
+      store.refFor("built-in", id, "ours");
+      const scoped = propose(store, { taskId: id, goal: `do ${title}`, now: T0 });
+      const agreed = approve(store, id, "alex", T0, scoped.digest, approverToken);
+      if (!agreed.ok) throw new Error("approve failed in setup");
+    }
+    const cookie = await login();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(
+      await (await fetch(url("/t/q-two"), { headers: { cookie } })).text(),
+    )?.[1] as string;
+    const post = (path: string, fields: Record<string, string> = {}) =>
+      fetch(url(path), {
+        method: "POST",
+        headers: { cookie },
+        body: new URLSearchParams({ csrf, ...fields }),
+        redirect: "manual",
+      });
+
+    expect((await post("/t/q-two/next")).status).toBe(303);
+    const page = await (await fetch(url("/t/q-two"), { headers: { cookie } })).text();
+    expect(page).toContain("moved up — picked before filing order");
+    expect(page).toContain("back to filing order");
+
+    // Only the actual front of the queue says "next up".
+    expect((await post("/t/q-one/next")).status).toBe(303);
+    const board = await (await fetch(url("/board?fragment=1"), { headers: { cookie } })).text();
+    const front = board.indexOf("first filed");
+    const second = board.indexOf("second filed");
+    expect(front).toBeGreaterThan(-1);
+    expect(front).toBeLessThan(second);
+    expect(board).toContain("next up");
+    expect(board).toContain("moved up");
+
+    // Undo restores filing order and the badge goes with it.
+    expect((await post("/t/q-one/next", { undo: "1" })).status).toBe(303);
+    expect((await post("/t/q-two/next", { undo: "1" })).status).toBe(303);
+    const calm = await (await fetch(url("/board?fragment=1"), { headers: { cookie } })).text();
+    expect(calm).not.toContain("next up");
+
+    // The orphaned run's task (state running) cannot move up.
+    const refused = await post("/t/orphan/next");
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain("only queued work can move up");
+  });
+
+  test("a task can be filed to start after another, and a bad chain never loses the task", async () => {
+    store.createTask({ id: "t-before", title: "goes first" }, T0);
+    store.refFor("built-in", "t-before", "ours");
+    const cookie = await login();
+    const form = await (await fetch(url("/tasks/new"), { headers: { cookie } })).text();
+    expect(form).toContain("starts after");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(form)?.[1] as string;
+
+    const created = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf, title: "goes second", id: "t-after", after: "t-before" }),
+      redirect: "manual",
+    });
+    expect(created.status).toBe(303);
+    const page = await (await fetch(url("/t/t-after"), { headers: { cookie } })).text();
+    expect(page).toContain("waits for");
+    expect(page).toContain("t-before");
+
+    // A vanished "after" still files the task — the page says what failed.
+    const kept = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf, title: "kept anyway", id: "t-kept", after: "nope-gone" }),
+      redirect: "manual",
+    });
+    expect(kept.status).toBe(200);
+    const keptPage = await kept.text();
+    expect(keptPage).toContain("the task was created, but could not be made to wait for nope-gone");
+    expect(await (await fetch(url("/t/t-kept"), { headers: { cookie } })).text()).toContain("kept anyway");
   });
 
   test("an interrupted tournament's agents read as stopped, never as still working", async () => {

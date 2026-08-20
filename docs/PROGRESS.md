@@ -1,5 +1,43 @@
 # Progress
 
+**2026-08-19 (later) — chains and next (v18): dependencies become a whole
+feature, and the queue learns "this one first".** The operator asked for
+the next orchestration and workflow-creation improvements; the assessment
+found dependencies were HALF a feature (edges existed with cycle refusal,
+but nothing anywhere could remove one, the console could neither create
+nor see them, and the task page never said what a task waits for) and
+dispatch was pure filing-order FIFO. Spec Codex-reviewed (APPROVE WITH
+CHANGES, findings 1–12), implemented to all twelve. The authority line,
+held throughout: chains and rank are SCHEDULING, never authority — no
+digest binds them, no approval is voided by them, and the claim
+transaction re-proves everything it always did. Shipped: schema v18
+(`task.priority`, addColumn + doctored-v17 regression test);
+`store.removeEdge` (one transaction, wake-bumped — removal cannot create
+a cycle) and `store.moveTaskNext` (rank = MAX+1 over live work, computed
+and written in ONE transaction so racing asks get distinct ranks — the
+LAST ask wins; refuses claimed work BEFORE the state check so the honest
+word is "being built", plus unknown/not-queued/tournament/overflow, all
+typed) with `clearTaskPriority` because a mistaken promotion must not be
+sticky; `listReady` orders `priority DESC, created_at, ref id` (the tie
+now deterministic where it was timestamp-luck); CLI `task unblock` and
+`task next [--undo]` (block/unblock/next all wear the tournament guard),
+`task show` says "position moved up (rank N)", help updated everywhere;
+console: a "waits for" card on the task page (blockers with states,
+stop-waiting buttons, an add select scoped to the OPEN project and the
+ceiling — a projectless roll-up gets no cross-project select), "starts
+after" on the new-task form (a bad chain never loses the created task —
+its page says exactly what failed), "build this next" / "back to filing
+order" acts, the queued lane sorted in true dispatch order with only the
+actual front card badged "next up" (the rest "moved up"), a third
+bounded board query so an old promoted task cannot fall off the newest
+page, and the routines empty state finally pointing at the filing form
+on its own page instead of the terminal. Dispatch-order proof is a test:
+two approved tasks, `task next` the second, a --max 1 tick builds it.
+Deliberately out, named: per-task model override (authority-bearing —
+its own round), a chain-composer form, external-backend ordering,
+contest-resumption ordering (they precede the ready snapshot by design).
+Suite 1015.
+
 **2026-08-19 — the UX fix batch: liveness is proved, help is safe, and
 the last raw tokens leave the pages.** A full assessment of the console
 (walked live via the demo sandbox) and the CLI (probed live) became a
