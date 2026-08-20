@@ -185,10 +185,14 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task state <id> <state>   queued|running|done|failed|cancelled
   standing-orders task block <id> --on <id> <id> waits for <on>
   standing-orders task unblock <id> --on <id>  stop waiting for <on>
-  standing-orders task next <id> [--undo]   move it to the front of the
+  standing-orders task next <id> [--undo]   move it to the front of ITS
                                         queue (scheduling only — approval
                                         is still required); --undo puts it
                                         back in filing order
+  standing-orders task assign <id> --runner <name> | --anyone
+                                        reserve it for one worker (it joins
+                                        the back of that worker's queue) or
+                                        return it to the shared queue
   standing-orders task hold <id> --reason <why> [--until <iso>]
   standing-orders task unhold <id>
 
@@ -375,7 +379,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   // here by name instead (Codex round-4 findings 3/8).
   const booleans = new Set([
     "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
-    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo",
+    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -666,15 +670,15 @@ async function readyCommand(
     return EXIT.refused;
   }
 
-  write(`${ready.length} ready:`);
+  write(`${ready.length} ready (each worker takes its own reserved work first — this is the shared view):`);
   for (const ref of ready) {
     const task = store.getTask(ref.externalId);
-    write(`  ${ref.externalId}  ${task === null ? "" : task.title}`);
+    write(`  ${ref.externalId}  ${task === null ? "" : task.title}${ref.assignedRunner === null ? "" : `  (reserved for ${ref.assignedRunner})`}`);
   }
   return EXIT.ok;
 }
 
-function describeRef(store: Store, ref: { externalId: string; backend: string; id: number }, now: Date) {
+function describeRef(store: Store, ref: { externalId: string; backend: string; id: number; assignedRunner?: string | null }, now: Date) {
   const task = store.getTask(ref.externalId);
   return {
     id: ref.externalId,
@@ -682,6 +686,7 @@ function describeRef(store: Store, ref: { externalId: string; backend: string; i
     backend: ref.backend,
     title: task?.title ?? null,
     state: task?.state ?? null,
+    reservedFor: ref.assignedRunner ?? null,
     claim: currentClaim(store, ref.id, now),
   };
 }
@@ -758,6 +763,19 @@ function claimCommand(
   });
 
   if (!result.ok) {
+    // Two distinct refusals: somebody HOLDS it right now, or it is
+    // RESERVED for a specific worker whoever asks (queue columns, v19).
+    if (result.reason === "reserved") {
+      return fail(
+        write,
+        json,
+        "claim",
+        "reserved",
+        `${id} is reserved for ${result.reservedFor} — only that worker takes it`,
+        EXIT.refused,
+        { reservedFor: result.reservedFor },
+      );
+    }
     return fail(
       write,
       json,
@@ -1439,7 +1457,10 @@ async function tickCommand(
     }
   }
 
-  const ready = store.listReady(clock());
+  // The DISPATCH view of the queue (queue columns, v19): this runner's own
+  // reserved work first, then the shared queue; work reserved for other
+  // workers is absent. The claim primitive re-proves the reservation.
+  const ready = store.listReady(clock(), runner);
   const considered = ready.length;
   const dispatched: TickOutcome[] = [...resumed];
   let built = 0;
@@ -5223,6 +5244,8 @@ function taskCommand(
       return unblockTask(rest, flags, context);
     case "next":
       return nextTask(rest, flags, context);
+    case "assign":
+      return assignTask(rest, flags, context);
     case "scope":
       return scopeTask(rest, flags, context);
     case "approve":
@@ -5243,7 +5266,7 @@ function taskCommand(
         context.json,
         "task",
         "usage",
-        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, unblock, next, scope, approve, hold, unhold, require, requeue, plan`,
+        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, unblock, next, assign, scope, approve, hold, unhold, require, requeue, plan`,
         EXIT.usage,
       );
   }
@@ -5569,6 +5592,8 @@ function showTask(positional: readonly string[], context: Context): number {
     task,
     ref: ref.id,
     blockedBy: store.blockers(id),
+    position: store.queuePosition(id),
+    reservedFor: ref.assignedRunner,
     hold: store.activeHold(ref.id, now),
     claim: currentClaim(store, ref.id, now),
     scope,
@@ -5580,7 +5605,9 @@ function showTask(positional: readonly string[], context: Context): number {
     `${task.id}  ${task.state}`,
     `  ${task.title}`,
     ...(detail.blockedBy.length > 0 ? [`  waits for ${detail.blockedBy.join(", ")}`] : []),
-    ...(detail.task.priority > 0 ? [`  position  moved up (rank ${detail.task.priority}) — picked before filing order`] : []),
+    ...(detail.position === null
+      ? []
+      : [`  position  ${detail.position.position} of ${detail.position.total}${detail.position.column === null ? " in the shared queue" : ` in ${detail.position.column}'s queue`}`]),
     ...(detail.hold === null ? [] : [`  held: ${detail.hold.reason}`]),
     ...(detail.claim === null ? [] : [`  claimed by ${detail.claim.runner} until ${detail.claim.expiresAt}`]),
     ...(scope === null
@@ -5718,7 +5745,53 @@ function nextTask(
     return fail(write, json, "task next", moved.reason, message, EXIT.refused);
   }
   return succeed(write, json, "task next", { task: id, priority: moved.priority }, () => [
-    `${id} moved to the front — it is picked first at the next selection (approval still required).`,
+    `${id} moved to the front of its queue — a worker takes its own reserved work first, then the shared queue (approval still required).`,
+  ]);
+}
+
+/**
+ * Reserve a task for one worker, or return it to the shared queue.
+ * Scheduling, never authority — the claim primitive enforces it, and
+ * approval still decides what may build.
+ */
+function assignTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json } = context;
+  const id = positional[0];
+  const runner = text(flags, "runner");
+  const anyone = flags.has("anyone");
+  if (id === undefined || (runner === undefined && !anyone) || (runner !== undefined && anyone)) {
+    return fail(write, json, "task assign", "usage", "`standing-orders task assign <id> --runner <name> | --anyone`", EXIT.usage);
+  }
+  const moved = store.moveTask(
+    { taskId: id, toRunner: runner ?? null, beforeTaskId: null },
+    context.clock(),
+    mutationFrom(flags, context.now),
+  );
+  if (!moved.ok) {
+    const message =
+      moved.reason === "unknown-task"
+        ? `no task \`${id}\``
+        : moved.reason === "not-queued"
+          ? `${id} is not queued — only queued work can be reserved`
+          : moved.reason === "claimed"
+            ? `${id} is being built right now — it needs no reservation`
+            : moved.reason === "contest-open"
+              ? "a tournament is running on this task — let it finish, then pick or abandon it from the tournament screen in the console (the task's page links to it)"
+              : moved.reason === "no-such-worker"
+                ? `no worker named \`${runner}\` — \`standing-orders runner list\` names them`
+                : moved.reason === "worker-retired"
+                  ? `${runner} is retired — register the name again, or reserve for another worker`
+                  : "the queue did not accept the move";
+    return fail(write, json, "task assign", moved.reason, message, EXIT.refused);
+  }
+  return succeed(write, json, "task assign", { task: id, reservedFor: runner ?? null }, () => [
+    runner === undefined
+      ? `${id} is back in the shared queue — any free worker takes it.`
+      : `${id} is reserved for ${runner}, at the back of that worker's queue — only that worker takes it.`,
   ]);
 }
 

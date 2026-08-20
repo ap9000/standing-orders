@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -76,6 +76,9 @@ export type TaskRef = {
   externalId: string;
   /** Where the work lives, when known. null dispatches anywhere; no gap claims it. */
   repo: string | null;
+  /** The worker this task is reserved for; null = any free worker.
+   * Scheduling only — enforced in the claim primitive, never authority. */
+  assignedRunner: string | null;
   zones: string[];
   capabilityRequirements: string[];
   parkRate: number;
@@ -581,6 +584,16 @@ CREATE TABLE IF NOT EXISTS task (
 
 -- Dependency edges, owned natively because this backend is ours. Edges are
 -- never emulated on top of a backend that lacks them; see §4.
+-- The queue revision (v19): bumped by every EXPLICIT queue edit (drag,
+-- assign, next, undo) and CAS-checked by the console's moves, so a second
+-- tab's stale drag refuses whole. Scheduler claims deliberately do not
+-- bump it — the revision detects competing operators, not dispatch.
+CREATE TABLE IF NOT EXISTS queue_state (
+  id       INTEGER PRIMARY KEY CHECK (id = 1),
+  revision INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO queue_state (id, revision) VALUES (1, 0);
+
 CREATE TABLE IF NOT EXISTS task_edge (
   blocked TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
   blocker TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
@@ -604,6 +617,8 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- say where they live. NULL is honest for a task nobody has placed yet —
   -- it dispatches anywhere, and no gap claims it.
   repo                    TEXT,
+  -- The worker this task is reserved for (v19); NULL = any free worker.
+  assigned_runner         TEXT,
   zones                   TEXT NOT NULL DEFAULT '[]',
   capability_requirements TEXT NOT NULL DEFAULT '[]',
   park_rate               REAL NOT NULL DEFAULT 0,
@@ -1477,7 +1492,9 @@ CREATE TABLE IF NOT EXISTS runner (
   agents          TEXT NOT NULL DEFAULT '[]',
   registered_at   TEXT NOT NULL,
   heartbeat_at    TEXT NOT NULL,
-  retired_at      TEXT
+  retired_at      TEXT,
+  -- The queue column's theme note (v19) — operator prose, display only.
+  queue_note      TEXT
 );
 
 -- A checked-out working copy, leased to one runner at a time.
@@ -1985,6 +2002,16 @@ function migrate(db: Database): void {
   // v18 (chains and next): the queue rank. Scheduling, never authority —
   // no digest binds it and no approval is voided by it.
   addColumn(db, "task", "priority", "INTEGER NOT NULL DEFAULT 0");
+  // v19 (queue columns): reservations, the column note, and the queue
+  // revision the console's drag CAS-checks. All additive; no index in
+  // the fresh SCHEMA (the recorded partial-index trap).
+  addColumn(db, "task_ref", "assigned_runner", "TEXT");
+  addColumn(db, "runner", "queue_note", "TEXT");
+  db.exec(`CREATE TABLE IF NOT EXISTS queue_state (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL DEFAULT 0
+  )`);
+  db.exec("INSERT OR IGNORE INTO queue_state (id, revision) VALUES (1, 0)");
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2429,13 +2456,25 @@ export class Store {
           if (racing !== undefined) return { ok: false as const, reason: "contest-open" };
         }
         if (String(task["state"]) !== "queued") return { ok: false as const, reason: "not-queued" };
+        // Rank is per COLUMN (assigned worker + repo partition) — "next"
+        // means the front of THIS task's own queue, not a global race. A
+        // legacy row with no reference lives in the (null, null) partition.
+        const partition = this.db
+          .prepare("SELECT repo, assigned_runner FROM task_ref WHERE backend = ? AND external_id = ?")
+          .get(BUILT_IN, taskId);
         const top = this.db
-          .prepare("SELECT MAX(priority) AS top FROM task WHERE state IN ('queued','running')")
-          .get();
+          .prepare(
+            `SELECT MAX(task.priority) AS top FROM task
+               LEFT JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+              WHERE task.state IN ('queued','running')
+                AND (task_ref.assigned_runner IS ?) AND (task_ref.repo IS ?)`,
+          )
+          .get(BUILT_IN, partition?.["assigned_runner"] ?? null, partition?.["repo"] ?? null);
         const highest = top === undefined || top["top"] === null ? 0 : Number(top["top"]);
         if (highest >= Number.MAX_SAFE_INTEGER - 1) return { ok: false as const, reason: "rank-overflow" };
         const priority = highest + 1;
         this.db.prepare("UPDATE task SET priority = ? WHERE id = ?").run(priority, taskId);
+        this.bumpQueueRevision();
         this.bumpWake();
         return { ok: true as const, priority };
       }),
@@ -2450,11 +2489,220 @@ export class Store {
       this.transact(() => {
         const changes = this.db.prepare("UPDATE task SET priority = 0 WHERE id = ?").run(taskId).changes;
         if (Number(changes) === 0) return { ok: false as const, reason: "unknown-task" };
+        this.bumpQueueRevision();
         this.bumpWake();
         return { ok: true as const };
       }),
       result => result.ok,
     );
+  }
+
+  // ---- queue columns (v19) -------------------------------------------------
+
+  /** The worker a task is reserved for, or null — the claim gate's read. */
+  assignedRunnerOf(taskRef: number): string | null {
+    const row = this.db.prepare("SELECT assigned_runner FROM task_ref WHERE id = ?").get(taskRef);
+    return row === undefined || row["assigned_runner"] === null ? null : String(row["assigned_runner"]);
+  }
+
+  queueRevision(): number {
+    const row = this.db.prepare("SELECT revision FROM queue_state WHERE id = 1").get();
+    return row === undefined ? 0 : Number(row["revision"]);
+  }
+
+  private bumpQueueRevision(): void {
+    this.db.exec("UPDATE queue_state SET revision = revision + 1 WHERE id = 1");
+  }
+
+  /** The column note — operator prose, display only. */
+  setRunnerQueueNote(name: string, note: string | null): { ok: true } | { ok: false; reason: string } {
+    const changes = this.db.prepare("UPDATE runner SET queue_note = ? WHERE name = ?").run(note, name).changes;
+    return Number(changes) === 1 ? { ok: true } : { ok: false, reason: "no-such-worker" };
+  }
+
+  /**
+   * One atomic queue move (queue-columns review, findings 3/9/13): the
+   * revision CAS, every refusal, the assignment write, and the rerank of
+   * BOTH affected columns are one transaction. The rerank member set is
+   * the FREE members only — anything live-claimed or racing a tournament
+   * keeps its rank untouched, so a drag can never rewrite work being
+   * taken (a setup-failure release rejoins with the rank the operator
+   * last gave it — intent, not a bug). Scheduling, never authority.
+   */
+  moveTask(
+    args: { taskId: string; toRunner: string | null; beforeTaskId: string | null; queueRevision?: number },
+    now: Date,
+    mutation: Mutation = {},
+  ): { ok: true } | { ok: false; reason: string } {
+    return this.once(mutation, "moveTask", () =>
+      this.transact(() => {
+        if (args.queueRevision !== undefined && args.queueRevision !== this.queueRevision()) {
+          return { ok: false as const, reason: "stale" };
+        }
+        const task = this.db.prepare("SELECT state FROM task WHERE id = ?").get(args.taskId);
+        if (task === undefined) return { ok: false as const, reason: "unknown-task" };
+        const ref = this.db
+          .prepare("SELECT id, repo, assigned_runner FROM task_ref WHERE backend = ? AND external_id = ?")
+          .get(BUILT_IN, args.taskId);
+        if (ref === undefined) return { ok: false as const, reason: "unknown-task" };
+        // Claimed before not-queued: taking a task sets it running, so the
+        // honest word for mid-build work is "claimed" (same rule as next).
+        if (this.currentLiveLease(Number(ref["id"]), now) !== null) return { ok: false as const, reason: "claimed" };
+        if (String(task["state"]) !== "queued") return { ok: false as const, reason: "not-queued" };
+        const racing = this.db
+          .prepare(
+            `SELECT 1 AS hit FROM contest WHERE task_ref = ?
+              AND state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted') LIMIT 1`,
+          )
+          .get(Number(ref["id"]));
+        if (racing !== undefined) return { ok: false as const, reason: "contest-open" };
+        if (args.toRunner !== null) {
+          const worker = this.db.prepare("SELECT retired_at FROM runner WHERE name = ?").get(args.toRunner);
+          if (worker === undefined) return { ok: false as const, reason: "no-such-worker" };
+          const alreadyOwns = ref["assigned_runner"] !== null && String(ref["assigned_runner"]) === args.toRunner;
+          if (worker["retired_at"] !== null && !alreadyOwns) return { ok: false as const, reason: "worker-retired" };
+        }
+        const repo = ref["repo"] === null ? null : String(ref["repo"]);
+        const fromRunner = ref["assigned_runner"] === null ? null : String(ref["assigned_runner"]);
+
+        // The FREE members of a partition, in current queue order.
+        const freeMembers = (runner: string | null): string[] =>
+          this.db
+            .prepare(
+              `SELECT task.id AS id FROM task
+                 JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+                WHERE task.state = 'queued'
+                  AND (task_ref.assigned_runner IS ? )
+                  AND (task_ref.repo IS ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM claim WHERE claim.task_ref = task_ref.id
+                      AND claim.released_at IS NULL AND claim.expires_at > ?
+                      AND claim.lease_generation = (
+                        SELECT MAX(newest.lease_generation) FROM claim AS newest
+                        WHERE newest.task_ref = task_ref.id))
+                  AND NOT EXISTS (
+                    SELECT 1 FROM contest WHERE contest.task_ref = task_ref.id
+                      AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted'))
+                ORDER BY task.priority DESC, task.created_at, task_ref.id`,
+            )
+            .all(BUILT_IN, runner, repo, now.toISOString())
+            .map(row => String(row["id"]));
+
+        const target = freeMembers(args.toRunner).filter(id => id !== args.taskId);
+        if (args.beforeTaskId !== null) {
+          if (args.beforeTaskId === args.taskId) return { ok: false as const, reason: "stale" };
+          const at = target.indexOf(args.beforeTaskId);
+          if (at === -1) return { ok: false as const, reason: "stale" };
+          target.splice(at, 0, args.taskId);
+        } else {
+          target.push(args.taskId);
+        }
+
+        this.db
+          .prepare("UPDATE task_ref SET assigned_runner = ? WHERE backend = ? AND external_id = ?")
+          .run(args.toRunner, BUILT_IN, args.taskId);
+        const rank = this.db.prepare("UPDATE task SET priority = ? WHERE id = ?");
+        target.forEach((id, index) => rank.run(target.length - index, id));
+        if (fromRunner !== args.toRunner) {
+          const source = freeMembers(fromRunner).filter(id => id !== args.taskId);
+          source.forEach((id, index) => rank.run(source.length - index, id));
+        }
+        this.bumpQueueRevision();
+        this.bumpWake();
+        return { ok: true as const };
+      }),
+      result => result.ok,
+    );
+  }
+
+  /**
+   * The queue screen's snapshot: every queued task in the project, in
+   * column order, each saying whether the scheduler already has its hands
+   * on it (those cards render pinned, not draggable — finding 13).
+   */
+  queueScoped(
+    repo: string | null,
+    now: Date,
+  ): {
+    id: string;
+    title: string;
+    repo: string | null;
+    assignedRunner: string | null;
+    approved: boolean;
+    blockers: number;
+    taken: boolean;
+    createdAt: string;
+  }[] {
+    const stamp = now.toISOString();
+    return this.db
+      .prepare(
+        `SELECT task.id AS id, task.title AS title, task_ref.repo AS repo,
+                task_ref.assigned_runner AS assigned, task.created_at AS created_at,
+                EXISTS (SELECT 1 FROM task_scope WHERE task_scope.task_id = task.id
+                  AND task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL) AS approved,
+                (SELECT COUNT(*) FROM task_edge JOIN task AS blocker ON blocker.id = task_edge.blocker
+                  WHERE task_edge.blocked = task.id AND blocker.state <> 'done') AS blockers,
+                (EXISTS (SELECT 1 FROM claim WHERE claim.task_ref = task_ref.id
+                    AND claim.released_at IS NULL AND claim.expires_at > ?
+                    AND claim.lease_generation = (SELECT MAX(newest.lease_generation) FROM claim AS newest
+                      WHERE newest.task_ref = task_ref.id))
+                 OR EXISTS (SELECT 1 FROM contest WHERE contest.task_ref = task_ref.id
+                    AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted'))) AS taken
+           FROM task JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+          WHERE task.state = 'queued'
+            AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+          ORDER BY task.priority DESC, task.created_at, task_ref.id
+          LIMIT 200`,
+      )
+      .all(stamp, BUILT_IN, repo, repo)
+      .map(row => ({
+        id: String(row["id"]),
+        title: String(row["title"]),
+        repo: row["repo"] === null ? null : String(row["repo"]),
+        assignedRunner: row["assigned"] === null ? null : String(row["assigned"]),
+        approved: Number(row["approved"]) === 1,
+        blockers: Number(row["blockers"]),
+        taken: Number(row["taken"]) === 1,
+        createdAt: String(row["created_at"]),
+      }));
+  }
+
+  /**
+   * Where a queued task stands, using the COMPLETE order — rank, then
+   * filing time, then reference id (finding 15: rank alone calls every
+   * unranked task "first"). Position is within the task's own column.
+   */
+  queuePosition(taskId: string): { position: number; total: number; column: string | null } | null {
+    const me = this.db
+      .prepare(
+        `SELECT task.priority AS priority, task.created_at AS created_at, task_ref.id AS ref,
+                task_ref.repo AS repo, task_ref.assigned_runner AS assigned
+           FROM task JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+          WHERE task.id = ? AND task.state = 'queued'`,
+      )
+      .get(BUILT_IN, taskId);
+    if (me === undefined) return null;
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN task.priority > ?
+                 OR (task.priority = ? AND task.created_at < ?)
+                 OR (task.priority = ? AND task.created_at = ? AND task_ref.id < ?)
+               THEN 1 ELSE 0 END) AS ahead
+           FROM task JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+          WHERE task.state = 'queued' AND (task_ref.assigned_runner IS ?) AND (task_ref.repo IS ?)`,
+      )
+      .get(
+        Number(me["priority"]), Number(me["priority"]), String(me["created_at"]),
+        Number(me["priority"]), String(me["created_at"]), Number(me["ref"]),
+        BUILT_IN, me["assigned"], me["repo"],
+      );
+    return {
+      position: Number(row?.["ahead"] ?? 0) + 1,
+      total: Number(row?.["total"] ?? 1),
+      column: me["assigned"] === null ? null : String(me["assigned"]),
+    };
   }
 
   /** Whether this connection is already inside transact(); see below. */
@@ -2508,13 +2756,25 @@ export class Store {
    * A hold whose `until` has passed is not a hold. Reading it as one would
    * strand work at exactly the moment it was supposed to resume.
    */
-  listReady(now: Date): TaskRef[] {
+  listReady(now: Date, forRunner?: string): TaskRef[] {
     const stamp = now.toISOString();
+    // With a runner named, this is the DISPATCH view (queue-columns v2):
+    // tasks reserved for others are absent, and the runner's own reserved
+    // work comes before the shared queue. Without one it is the report.
+    const reservation =
+      forRunner === undefined
+        ? ""
+        : " AND (task_ref.assigned_runner IS NULL OR task_ref.assigned_runner = ?) ";
+    const order =
+      forRunner === undefined
+        ? "ORDER BY task.priority DESC, task.created_at, task_ref.id"
+        : "ORDER BY (task_ref.assigned_runner IS NULL) ASC, task.priority DESC, task.created_at, task_ref.id";
     const rows = this.db
       .prepare(
         `SELECT task_ref.* FROM task
          JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
          WHERE task.state = 'queued'
+           ${reservation}
            AND NOT EXISTS (
              SELECT 1 FROM hold
              WHERE hold.task_ref = task_ref.id
@@ -2538,9 +2798,9 @@ export class Store {
              JOIN task AS blocker ON blocker.id = task_edge.blocker
              WHERE task_edge.blocked = task.id AND blocker.state <> 'done'
            )
-         ORDER BY task.priority DESC, task.created_at, task_ref.id`,
+         ${order}`,
       )
-      .all(BUILT_IN, stamp, stamp);
+      .all(...(forRunner === undefined ? [BUILT_IN, stamp, stamp] : [BUILT_IN, forRunner, stamp, stamp]));
 
     return rows.map(readTaskRef);
   }
@@ -6887,6 +7147,7 @@ export class Store {
              claim_run.role AS claim_role, claim_run.provider AS claim_provider, claim_run.phase AS claim_phase,
              (SELECT MAX(unfinished.id) FROM run AS unfinished
                WHERE unfinished.lease_id = live.lease_id AND unfinished.outcome IS NULL) AS live_run_id,
+             task_ref.assigned_runner AS assigned_runner,
              (SELECT hold.owner_kind FROM hold
                WHERE hold.task_ref = task_ref.id AND (hold.until IS NULL OR hold.until > ?)
                ORDER BY CASE hold.owner_kind WHEN 'operator' THEN 0 WHEN 'backoff' THEN 1 WHEN 'decision' THEN 2 ELSE 3 END, hold.id
@@ -6969,13 +7230,18 @@ export class Store {
            LIMIT ?`)
         .all(...shared, attentionPage);
 
-      // Promoted work is pinned onto the page (chains-and-next review,
-      // finding 7): an old task moved to the front must not vanish from
-      // the board just because 200 newer things moved since.
+      // Every column's HEAD is pinned onto the page (queue-columns review,
+      // finding 14): after a drag, whole columns carry positive ranks, so
+      // "priority > 0" would let long columns crowd out a short column's
+      // front card. One head per (worker, repo) partition instead.
       const promoted = this.db
-        .prepare(`${columns}
-             AND task.priority > 0 AND task.state IN ('queued','running')
-           ORDER BY task.priority DESC, task.id
+        .prepare(`SELECT * FROM (
+             SELECT ranked.*, ROW_NUMBER() OVER (
+               PARTITION BY ranked.assigned_runner, ranked.task_repo
+               ORDER BY ranked.priority DESC, ranked.updated_at, ranked.id
+             ) AS in_column
+             FROM (${columns} AND task.state = 'queued') AS ranked
+           ) WHERE in_column = 1
            LIMIT ?`)
         .all(...shared, Math.min(page, 50));
 
@@ -7030,6 +7296,8 @@ export class Store {
             ? null
             : Number(row["live_run_id"]),
         priority: row["priority"] === null || row["priority"] === undefined ? 0 : Number(row["priority"]),
+        assignedRunner:
+          row["assigned_runner"] === null || row["assigned_runner"] === undefined ? null : String(row["assigned_runner"]),
         hold:
           row["hold_kind"] === null || row["hold_kind"] === undefined
             ? null
@@ -7826,6 +8094,8 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     backend: String(row["backend"]),
     externalId: String(row["external_id"]),
     repo: row["repo"] === null || row["repo"] === undefined ? null : String(row["repo"]),
+    assignedRunner:
+      row["assigned_runner"] === null || row["assigned_runner"] === undefined ? null : String(row["assigned_runner"]),
     zones: readJsonArray(row["zones"]),
     capabilityRequirements: readJsonArray(row["capability_requirements"]),
     parkRate: Number(row["park_rate"]),
@@ -8100,6 +8370,7 @@ function readRunner(row: Record<string, unknown>): Runner {
     registeredAt: String(row["registered_at"]),
     heartbeatAt: String(row["heartbeat_at"]),
     retiredAt: row["retired_at"] === null ? null : String(row["retired_at"]),
+    queueNote: row["queue_note"] === null || row["queue_note"] === undefined ? null : String(row["queue_note"]),
   };
 }
 

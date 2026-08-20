@@ -1,5 +1,46 @@
 # Progress
 
+**2026-08-19 (evening) — the queue screen (v19): Spotify's up-next, as
+per-worker columns.** Operator directive: drag-and-reorder "for
+different agents", columns "with a note at the top for each so we know
+theme/project". TWO Codex rounds (v1 REDESIGN findings 1–12, v2 APPROVE
+WITH CHANGES 13–20), implemented to all twenty. The law lives in the ONE
+claim primitive every acquisition path shares (`acquireLocked` — round-1
+finding 1 caught raw CLI claim and tournament resume bypassing the
+higher gate): a task reserved for one worker refuses every other with
+the new stable reason `reserved`. The Spotify rule: a worker drains ITS
+OWN column top-to-bottom, then the shared queue (`listReady(forRunner)`
+is the dispatch view; tick passes its runner). Rank is REINTERPRETED as
+position within a (worker, repo) column — `moveTaskNext` computes its
+MAX per partition, `queuePosition` uses the complete tie-break order
+(rank, filing time, ref id — finding 15), the task page keys its acts on
+POSITION not sign (finding 16), the board badges only true column heads
+("next up" for the shared queue, "next for <worker>" per column —
+finding 14) and pins one head per partition onto the bounded page with a
+window function. One atomic `moveTask` does assignment + both columns'
+rerank in a single transaction, CAS-guarded by a `queue_state` revision
+(explicit edits only — the scheduler's claims never bump it) and
+touching only FREE members: anything live-claimed or racing keeps its
+rank (finding 13; a setup-failure release rejoins with the rank the
+operator gave it, stated in code). /queue: shared column first, then
+each worker — editable theme note (validated like hold reasons), auto
+project chips, retired columns kept greyed while they still own tasks,
+approve-its-scope and waits-for chips, "being taken — keeps its claim"
+pinned cards, the starvation truth on the shared head when every column
+is busy. Drag = delegated pointer events surviving every fragment swap;
+the poller re-checks focus/dirty/drag AT SWAP TIME and says "paused
+while you edit" (findings 17/18); every drag has button/select
+equivalents. CLI: `task assign <id> --runner <name> | --anyone` (back of
+the destination column, defined), `ready` says reservedFor and that each
+worker takes its own reserved work first, `claim` renders the reserved
+refusal distinctly. Schema v19: task_ref.assigned_runner,
+runner.queue_note, singleton queue_state — all additive. Honesty kept:
+reservations are SCHEDULING, never authority (approval gates untouched);
+per-worker capability warnings were dropped as unsupportable (finding
+5); private-first starvation is stated on the page and here: a worker
+with reserved work does not touch the shared queue until its column
+empties. Suite 1017.
+
 **2026-08-19 (later) — chains and next (v18): dependencies become a whole
 feature, and the queue learns "this one first".** The operator asked for
 the next orchestration and workflow-creation improvements; the assessment

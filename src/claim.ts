@@ -55,7 +55,8 @@ export type Claim = {
 
 export type AcquireResult =
   | { ok: true; claim: Claim; reclaimed: boolean }
-  | { ok: false; reason: "held"; by: string; until: string };
+  | { ok: false; reason: "held"; by: string; until: string }
+  | { ok: false; reason: "reserved"; reservedFor: string };
 
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
 export type FenceResult =
@@ -114,6 +115,16 @@ function acquireLocked(
   return (
     store.replay(mutation, "acquire", () => {
       const stamp = now.toISOString();
+      // The reservation gate lives HERE, in the one primitive every
+      // acquisition path shares (queue-columns review, finding 1): tick's
+      // acquireIfReady, the raw CLI claim, and the tournament resume all
+      // pass through this line, so a task reserved for one worker can
+      // never be taken by another, whatever the caller's snapshot said.
+      // Scheduling, not authority: nothing about WHAT may build changes.
+      const reservedFor = store.assignedRunnerOf(taskRef);
+      if (reservedFor !== null && reservedFor !== runner) {
+        return { ok: false as const, reason: "reserved" as const, reservedFor };
+      }
       const existing = latest(db, taskRef);
 
       if (existing !== undefined && isLive(existing, stamp)) {

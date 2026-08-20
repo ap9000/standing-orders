@@ -139,6 +139,27 @@ describe("tick, against real git", () => {
     expect(payload().task.state).toBe("queued");
   });
 
+  test("a reserved task is built only by its worker; the shared queue waits behind a private column", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await run(["runner", "register", "builder-2", "--json"]);
+    const otherToken = JSON.parse(lines.join("\n")).token as string;
+    await queueApproved("t-shared", approverToken);
+    await queueApproved("t-private", approverToken);
+    await run(["task", "assign", "t-private", "--runner", "builder-1"]);
+
+    // builder-2 sees only the shared queue — the reservation is absent.
+    const other = await run([
+      "tick", "--runner", "builder-2", "--token", otherToken, "--repo", repo, "--pool", pool, "--max", "2", "--json",
+    ]);
+    expect(other).toBe(EXIT.ok);
+    expect(payload().dispatched.map((one: { id: string }) => one.id)).toEqual(["t-shared"]);
+
+    // builder-1 drains its own column.
+    const mine = await tick(runnerToken, ["--max", "2"]);
+    expect(mine).toBe(EXIT.ok);
+    expect(payload().dispatched.map((one: { id: string }) => one.id)).toEqual(["t-private"]);
+  });
+
   test("one task goes queued → branch → commit, unattended", async () => {
     const { runnerToken, approverToken } = await credentials();
     await queueApproved("t-1", approverToken);

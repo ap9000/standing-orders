@@ -33,6 +33,8 @@ export type Runner = {
   registeredAt: string;
   heartbeatAt: string;
   retiredAt: string | null;
+  /** The queue column's theme note (v19) — operator prose, display only. */
+  queueNote?: string | null;
 };
 
 export type Registration = {

@@ -3296,10 +3296,10 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
 
     expect((await post("/t/q-two/next")).status).toBe(303);
     const page = await (await fetch(url("/t/q-two"), { headers: { cookie } })).text();
-    expect(page).toContain("moved up — picked before filing order");
+    expect(page).toContain("queue position 1 of 2 in the shared queue");
     expect(page).toContain("back to filing order");
 
-    // Only the actual front of the queue says "next up".
+    // Only the actual front of the shared queue says "next up".
     expect((await post("/t/q-one/next")).status).toBe(303);
     const board = await (await fetch(url("/board?fragment=1"), { headers: { cookie } })).text();
     const front = board.indexOf("first filed");
@@ -3307,13 +3307,13 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     expect(front).toBeGreaterThan(-1);
     expect(front).toBeLessThan(second);
     expect(board).toContain("next up");
-    expect(board).toContain("moved up");
+    expect(board.match(/next up/g)?.length).toBe(1);
 
-    // Undo restores filing order and the badge goes with it.
+    // Undo puts it behind the still-promoted card; the badge follows rank.
     expect((await post("/t/q-one/next", { undo: "1" })).status).toBe(303);
     expect((await post("/t/q-two/next", { undo: "1" })).status).toBe(303);
     const calm = await (await fetch(url("/board?fragment=1"), { headers: { cookie } })).text();
-    expect(calm).not.toContain("next up");
+    expect(calm.match(/next up/g)?.length).toBe(1);
 
     // The orphaned run's task (state running) cannot move up.
     const refused = await post("/t/orphan/next");

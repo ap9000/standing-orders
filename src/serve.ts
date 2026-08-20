@@ -832,6 +832,34 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/queue") {
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const revision = who.via === "cookie" ? who.session.projectRevision : 0;
+      const tasks = store.queueScoped(project, clock());
+      const owned = new Set(tasks.map(one => one.assignedRunner).filter((one): one is string => one !== null));
+      // Columns: active workers, plus retired workers that still own tasks.
+      const workers = store
+        .listRunners()
+        .filter(one => one.retiredAt === null || owned.has(one.name))
+        .map(one => ({ name: one.name, retired: one.retiredAt !== null, note: one.queueNote ?? null }));
+      const body = queueBody(tasks, workers, csrf, revision, store.queueRevision());
+      if (url.searchParams.get("fragment") === "1") {
+        return respond(response, 200, "text/html; charset=utf-8", body);
+      }
+      const nonce = randomBytes(16).toString("base64");
+      return page(
+        response,
+        200,
+        shell("queue", [
+          `<h1>queue</h1>`,
+          `<p class="hint">every worker's up-next list — drag a card to reorder or to reserve it for a worker; top is taken first. The order applies at the next selection; work already being taken keeps its claim.</p>`,
+          `<div id="queue-region">${body}</div>`,
+          `<p class="meta" id="queue-region-stamp"></p>`,
+        ].join("\n"), { chrome: chromeFor(project, "queue"), live: { nonce, script: queueScript() + chromeScript() } }),
+        nonce,
+      );
+    }
+
     if (url.pathname === "/tasks/new") {
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const revision = who.via === "cookie" ? who.session.projectRevision : 0;
@@ -1369,6 +1397,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const entries: { label: string; href: string }[] = [
       { label: "inbox", href: "/" },
       { label: "board", href: "/board?scope=all" },
+      { label: "queue", href: "/queue" },
       { label: "workbench", href: "/workbench" },
       { label: "routines", href: "/routines" },
       { label: "done", href: "/done" },
@@ -1595,6 +1624,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return found === undefined ? null : found.id;
         })(),
         peekable: options.localRunner !== undefined,
+        position: store.queuePosition(taskId),
         scope,
         raceTerms,
         approvalDigest,
@@ -2139,6 +2169,65 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
       }
       return redirect(response, taskHref(made.id));
+    }
+
+    if (url.pathname === "/queue/move" || url.pathname === "/queue/note") {
+      const project = projectOf(who, request);
+      if (project === undefined) {
+        return refuse(response, who, 403, "that project is outside what this server was configured to show");
+      }
+      if (who.via === "cookie") {
+        const seen = body.get("projectRevision");
+        if (seen !== null && seen !== String(who.session.projectRevision)) {
+          return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", "/queue");
+        }
+      }
+      if (url.pathname === "/queue/note") {
+        const worker = (body.get("runner") ?? "").trim();
+        const note = (body.get("note") ?? "").trim();
+        if (note.length > 200 || hasForbiddenControls(note)) {
+          return refuse(response, who, 400, "that note will not render, so it will not store", "/queue");
+        }
+        const set = store.setRunnerQueueNote(worker, note === "" ? null : note);
+        if (!set.ok) return refuse(response, who, 404, "no such worker", "/queue");
+        return redirect(response, "/queue");
+      }
+      const taskId = (body.get("task") ?? "").trim();
+      const columnGiven = (body.get("column") ?? "").trim();
+      const toRunner = columnGiven === "" || columnGiven === "anyone" ? null : columnGiven;
+      const beforeGiven = (body.get("before") ?? "").trim();
+      const revisionGiven = Number(body.get("queueRevision") ?? "");
+      // Both ends must belong to this console's view of the open project.
+      const belongs = (id: string): boolean => {
+        const ref = store.lookupRef(id);
+        return ref !== null && visible(ref.repo) && (project === null || ref.repo === null || ref.repo === project);
+      };
+      if (!belongs(taskId) || (beforeGiven !== "" && !belongs(beforeGiven))) {
+        return refuse(response, who, 404, "that task is not in this queue", "/queue");
+      }
+      const moved = store.moveTask(
+        {
+          taskId,
+          toRunner,
+          beforeTaskId: beforeGiven === "" ? null : beforeGiven,
+          ...(Number.isSafeInteger(revisionGiven) ? { queueRevision: revisionGiven } : {}),
+        },
+        clock(),
+      );
+      if (!moved.ok) {
+        const said =
+          moved.reason === "stale"
+            ? "the queue moved underneath you — it just reloaded"
+            : moved.reason === "claimed" || moved.reason === "contest-open"
+              ? "that task is being taken right now — it keeps its claim"
+              : moved.reason === "worker-retired"
+                ? "that worker is retired — drag its work elsewhere, or register the name again"
+                : moved.reason === "no-such-worker"
+                  ? "no such worker"
+                  : "that task is not in this queue any more";
+        return refuse(response, who, 409, said, "/queue");
+      }
+      return redirect(response, "/queue");
     }
 
     const answer = /^\/d\/([0-9]{1,15})\/answer$/.exec(url.pathname);
@@ -3661,7 +3750,7 @@ const STYLE = `
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
+  active: "inbox" | "board" | "queue" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -3830,6 +3919,7 @@ function shell(
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
     item("board", "/board", "board"),
+    item("queue", "/queue", "queue"),
     item("workbench", "/workbench", "workbench"),
     item("routines", "/routines", "routines"),
     item("done", "/done", "done"),
@@ -4190,7 +4280,14 @@ function boardBody(
       );
     }
     if (key === "queued") {
-      cards.sort((a, b) => b.priority - a.priority);
+      // Group: the shared queue first, then reserved columns by worker;
+      // dispatch order (rank) within each — never a cross-column rank race.
+      cards.sort((a, b) => {
+        const ka = a.assignedRunner ?? "";
+        const kb = b.assignedRunner ?? "";
+        if (ka !== kb) return ka.localeCompare(kb);
+        return b.priority - a.priority;
+      });
     }
     const shown = cards.slice(0, CAP);
     const more = cards.length - shown.length;
@@ -4214,14 +4311,27 @@ function boardBody(
       card.stalledSince === null ? "" : ` \u00b7 waiting ${age(card.stalledSince)}`
     }</span></a>`;
 
-  // The queued lane in dispatch order: only the card a free worker would
-  // actually take first says "next up"; anything else moved up says so
-  // without claiming first place (chains-and-next review, findings 7/12).
-  const queuedCard = (card: BoardCard, index: number): string =>
+  // The queued lane: ranks compare only within a COLUMN (queue-columns
+  // review, finding 14), so the badge is per column head — the shared
+  // queue's front card says "next up"; a reserved column's front card
+  // says whose turn it is. No cross-column comparison is claimed.
+  const queuedHeads = (() => {
+    const heads = new Map<string, string>();
+    for (const card of data.cards.filter(one => one.lane === "queued")) {
+      const key = `${card.assignedRunner ?? ""}|${card.repo ?? ""}`;
+      if (!heads.has(key)) heads.set(key, card.taskId);
+    }
+    return heads;
+  })();
+  const queuedCard = (card: BoardCard): string =>
     `<a class="lane-card" href="${card.href}">` +
     `<span class="t">${escape(card.title)}</span>` +
     `<span class="meta">${escape(card.reason)}${
-      card.priority > 0 ? ` <span class="badge">${index === 0 ? "next up" : "moved up"}</span>` : ""
+      queuedHeads.get(`${card.assignedRunner ?? ""}|${card.repo ?? ""}`) === card.taskId
+        ? ` <span class="badge">${card.assignedRunner === null ? "next up" : `next for ${escape(card.assignedRunner)}`}</span>`
+        : ""
+    }${
+      card.assignedRunner === null ? "" : ` <span class="badge">reserved for ${escape(card.assignedRunner)}</span>`
     }${
       card.routineName === null ? "" : ` <span class="badge">${escape(card.routineName)}</span>`
     }${chip(card.repo)}</span>` +
@@ -5341,6 +5451,147 @@ function projectsPage(
  * a title, the goal that becomes the scope draft, and the project it lands
  * in — then straight to the approve card, which is the aha the flow serves.
  */
+/** One queue card. Taken work renders pinned — visible, never draggable. */
+function queueCard(one: { id: string; title: string; approved: boolean; blockers: number; taken: boolean }, csrf: string, revision: number, queueRevision: number, workers: { name: string; retired: boolean }[], column: string): string {
+  const chips =
+    `${one.approved ? "" : ` <a class="badge" href="${taskHref(one.id)}">approve its scope</a>`}` +
+    `${one.blockers > 0 ? ` <span class="badge">waits for ${one.blockers} task${one.blockers > 1 ? "s" : ""}</span>` : ""}` +
+    `${one.taken ? ` <span class="badge">being taken — keeps its claim</span>` : ""}`;
+  const hidden =
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    `<input type="hidden" name="projectRevision" value="${revision}">` +
+    `<input type="hidden" name="queueRevision" value="${queueRevision}">` +
+    `<input type="hidden" name="task" value="${escape(one.id)}">`;
+  const controls = one.taken
+    ? ""
+    : `<form method="post" action="/queue/move" class="inline">${hidden}` +
+      `<input type="hidden" name="column" value="${escape(column)}">` +
+      `<input type="hidden" name="before" value="__TOP__">` +
+      `<button type="submit" aria-label="move to the front">▲</button></form>` +
+      `<form method="post" action="/queue/move" class="inline">${hidden}` +
+      `<select name="column" aria-label="reserve for">` +
+      `<option value="anyone"${column === "anyone" ? " selected" : ""}>anyone</option>` +
+      workers.filter(worker => !worker.retired).map(worker => `<option value="${escape(worker.name)}"${column === worker.name ? " selected" : ""}>${escape(worker.name)}</option>`).join("") +
+      `</select><button type="submit">move</button></form>`;
+  return (
+    `<div class="card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}">` +
+    `<p class="row">${one.taken ? "" : `<span class="queue-handle" style="cursor:grab;user-select:none" aria-hidden="true">≡ </span>`}` +
+    `<a href="${taskHref(one.id)}">${escape(one.title)}</a>${chips}</p>` +
+    `<p class="row meta"><span class="mono">${escape(one.id)}</span> ${controls}</p>` +
+    `</div>`
+  );
+}
+
+/** The queue columns fragment — shared queue first, then each worker. */
+function queueBody(
+  tasks: ReturnType<Store["queueScoped"]>,
+  workers: { name: string; retired: boolean; note: string | null }[],
+  csrf: string,
+  revision: number,
+  queueRevision: number,
+): string {
+  const columnOf = (runner: string | null) => tasks.filter(one => one.assignedRunner === runner);
+  const projectChips = (rows: typeof tasks) => {
+    const repos = [...new Set(rows.map(one => one.repo).filter((one): one is string => one !== null))];
+    return repos.map(repo => `<span class="badge">${escape(repo.split("/").pop() ?? repo)}</span>`).join(" ");
+  };
+  const shared = columnOf(null);
+  const allWorkersBusy = workers.filter(one => !one.retired).length > 0 && workers.filter(one => !one.retired).every(one => columnOf(one.name).length > 0);
+  const column = (title: string, key: string, head: string, rows: typeof tasks, empty: string): string =>
+    `<section class="lane queue-column" data-column="${escape(key)}"><h2>${escape(title)}</h2>${head}` +
+    `<p class="meta">${projectChips(rows)}</p>` +
+    (rows.length === 0
+      ? `<p class="meta lane-empty">${escape(empty)}</p>`
+      : rows
+          .map((one, index) =>
+            index === 0 && key === "anyone" && allWorkersBusy && !one.taken
+              ? queueCard(one, csrf, revision, queueRevision, workers, key).replace(
+                  '</p>\n',
+                  "</p>",
+                ).replace(
+                  `<p class="row meta">`,
+                  `<p class="meta">every worker has reserved work — this waits until a column empties</p><p class="row meta">`,
+                )
+              : queueCard(one, csrf, revision, queueRevision, workers, key),
+          )
+          .join("\n")) +
+    `</section>`;
+  const noteForm = (worker: { name: string; retired: boolean; note: string | null }): string =>
+    worker.retired
+      ? `<p class="meta">this worker is retired — drag these elsewhere, or register the name again</p>`
+      : `<form method="post" action="/queue/note" class="row">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="hidden" name="projectRevision" value="${revision}">` +
+        `<input type="hidden" name="runner" value="${escape(worker.name)}">` +
+        `<input type="text" name="note" value="${worker.note === null ? "" : escape(worker.note)}" data-initial="${worker.note === null ? "" : escape(worker.note)}" placeholder="what this worker is working through" aria-label="column note" maxlength="200">` +
+        `<button type="submit">save</button></form>` +
+        `<p class="meta">takes from the shared queue when its own is empty</p>`;
+  return (
+    `<div class="board" data-queue-revision="${queueRevision}">` +
+    column("shared queue", "anyone", `<p class="meta">any free worker takes from here, top first</p>`, shared, "nothing waiting — every task is reserved or running") +
+    workers
+      .map(worker => column(worker.name + (worker.retired ? " (retired)" : ""), worker.name, noteForm(worker), columnOf(worker.name), "nothing queued — this worker will take from the shared queue"))
+      .join("\n") +
+    `</div>`
+  );
+}
+
+/**
+ * The queue page's one nonce'd script: delegated pointer-event drag (it
+ * survives every fragment swap — finding 17) plus a poller that re-checks
+ * focus, dirty inputs, and an in-flight drag AT SWAP TIME, never only
+ * before the fetch. Select dirtiness compares against data-initial
+ * (finding 18); missing that, a select counts clean.
+ */
+function queueScript(): string {
+  return (
+    `(function(){var region=document.getElementById("queue-region");if(!region)return;` +
+    `var stamp=document.getElementById("queue-region-stamp");var dragging=null;var ghost=null;` +
+    `function dirty(){if(region.contains(document.activeElement)&&document.activeElement!==document.body)return true;` +
+    `var inputs=region.querySelectorAll("input[type=text]");for(var i=0;i<inputs.length;i++){` +
+    `if(inputs[i].value!==(inputs[i].getAttribute("data-initial")||""))return true;}` +
+    `var selects=region.querySelectorAll("select");for(var j=0;j<selects.length;j++){` +
+    `var base=selects[j].getAttribute("data-initial");if(base!==null&&selects[j].value!==base)return true;}` +
+    `return false;}` +
+    `function paused(){return dragging!==null||dirty();}` +
+    // the poller: pause is re-checked at SWAP time
+    `var wait=15000;var last=Date.now();var busy=false;` +
+    `function tell(){if(!stamp)return;if(paused()){stamp.textContent="paused while you edit";return;}` +
+    `stamp.textContent="updated "+Math.round((Date.now()-last)/1000)+"s ago";}setInterval(tell,1000);` +
+    `function cycle(){if(document.hidden||busy||paused()){setTimeout(cycle,wait);return;}busy=true;` +
+    `fetch("/queue?fragment=1",{redirect:"manual",cache:"no-store"})` +
+    `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return null;}` +
+    `return r.ok?r.text():null;})` +
+    `.then(function(t){if(t&&!paused()){region.innerHTML=t;last=Date.now();}})` +
+    `.catch(function(){})` +
+    `.then(function(){busy=false;tell();setTimeout(cycle,wait);});}setTimeout(cycle,wait);` +
+    // the drag: delegated from the stable region element
+    `region.addEventListener("pointerdown",function(e){var handle=e.target.closest(".queue-handle");if(!handle)return;` +
+    `var card=handle.closest(".queue-card");if(!card||card.getAttribute("data-taken")==="1")return;` +
+    `e.preventDefault();dragging={task:card.getAttribute("data-task"),card:card};card.style.opacity="0.5";});` +
+    `region.addEventListener("pointermove",function(e){if(!dragging)return;e.preventDefault();` +
+    `var over=document.elementFromPoint(e.clientX,e.clientY);if(!over)return;` +
+    `var target=over.closest(".queue-card");var lane=over.closest(".queue-column");` +
+    `region.querySelectorAll(".queue-card,.queue-column").forEach(function(n){n.style.outline="";});` +
+    `if(target&&target!==dragging.card){target.style.outline="2px solid currentColor";}` +
+    `else if(lane){lane.style.outline="2px dashed currentColor";}});` +
+    `region.addEventListener("pointerup",function(e){if(!dragging)return;var drag=dragging;dragging=null;` +
+    `drag.card.style.opacity="";region.querySelectorAll(".queue-card,.queue-column").forEach(function(n){n.style.outline="";});` +
+    `var over=document.elementFromPoint(e.clientX,e.clientY);if(!over){tell();return;}` +
+    `var target=over.closest(".queue-card");var lane=over.closest(".queue-column");if(!lane){tell();return;}` +
+    `var column=lane.getAttribute("data-column");var before=target&&target!==drag.card?target.getAttribute("data-task"):"";` +
+    `if(target&&target.getAttribute("data-taken")==="1"){before="";}` +
+    `var wrap=region.querySelector("[data-queue-revision]");` +
+    `var form=document.createElement("form");form.method="post";form.action="/queue/move";` +
+    `var csrfField=region.querySelector("input[name=csrf]");if(!csrfField)return;` +
+    `var fields={csrf:csrfField.value,projectRevision:(region.querySelector("input[name=projectRevision]")||{value:"0"}).value,` +
+    `queueRevision:wrap?wrap.getAttribute("data-queue-revision"):"",task:drag.task,column:column,before:before};` +
+    `Object.keys(fields).forEach(function(k){var f=document.createElement("input");f.type="hidden";f.name=k;f.value=fields[k];form.appendChild(f);});` +
+    `document.body.appendChild(form);form.submit();});` +
+    `})();`
+  );
+}
+
 function newTaskPage(
   chrome: Chrome,
   project: string | null,
@@ -5402,6 +5653,8 @@ function taskBody(data: {
   liveRunId?: number | null;
   /** Whether this serve asserted its runner — the live file view exists. */
   peekable?: boolean;
+  /** Where the task stands in its own column, from the data layer. */
+  position?: { position: number; total: number; column: string | null } | null;
   scope: Scope | null;
   /** Filed race terms (v14) — the approval restates them; one yes covers both. */
   raceTerms?: TournamentTerms | null;
@@ -5763,8 +6016,8 @@ function taskBody(data: {
       : "",
     // Queue rank is scheduling, never authority: moving up changes when
     // the next free worker looks, and approval is still required.
-    task.state === "queued" && !data.claimed && task.priority === 0 ? act("next", "build this next") : "",
-    task.state === "queued" && task.priority > 0
+    task.state === "queued" && !data.claimed && (data.position?.position ?? 1) > 1 ? act("next", "build this next") : "",
+    task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0
       ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
     act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" aria-label="hold reason" style="width:12rem">`),
@@ -5793,8 +6046,8 @@ function taskBody(data: {
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
       `${data.filedVia === null || data.filedVia === undefined ? "" : ` · filed via ${escape(data.filedVia)}`}</span></h1>`,
     `<p>${escape(task.title)}</p>`,
-    task.priority > 0 && task.state === "queued"
-      ? `<p class="meta">moved up — picked before filing order when a worker is free (approval still required)</p>`
+    data.position !== null && data.position !== undefined && task.state === "queued"
+      ? `<p class="meta">queue position ${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} — <a href="/queue">the queue screen</a> reorders</p>`
       : "",
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     // The board sent them here saying "needs you" — the page must open by

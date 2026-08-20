@@ -368,8 +368,40 @@ describe("operating the queue from the command line", () => {
       await run(["task", "next", "third", "--undo"]);
       await run(["task", "next", "first"]);
       await run(["task", "show", "first"]);
-      expect(out()).toContain("position");
-      expect(out()).toContain("moved up");
+      expect(out()).toContain("position  1 of 3 in the shared queue");
+    });
+
+    test("a reserved task is taken only by its worker — the claim primitive is the gate", async () => {
+      await run(["task", "add", "pinned", "--id", "pinned"]);
+      await tokenFor("mine");
+      await tokenFor("other");
+      expect(await run(["task", "assign", "pinned", "--runner", "mine", "--json"])).toBe(EXIT.ok);
+
+      // The finding-1 regression: an explicit raw claim by the WRONG
+      // worker refuses with the stable reason, not a held/until shape.
+      const wrong = await claim(["claim", "pinned", "--runner", "other", "--json"]);
+      expect(wrong).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ ok: false, reason: "reserved", reservedFor: "mine" });
+
+      const right = await claim(["claim", "pinned", "--runner", "mine", "--json"]);
+      expect(right).toBe(EXIT.ok);
+
+      // Back to the shared queue needs the claim gone first.
+      const busy = await run(["task", "assign", "pinned", "--anyone", "--json"], later(1_000));
+      expect(busy).toBe(EXIT.refused);
+      expect(payload()).toMatchObject({ reason: "claimed" });
+    });
+
+    test("ready is the dispatch view: reservations shown, and a worker's own column first", async () => {
+      await run(["task", "add", "shared-1", "--id", "shared-1"]);
+      await run(["task", "add", "mine-1", "--id", "mine-1"]);
+      await tokenFor("mine");
+      await run(["task", "assign", "mine-1", "--runner", "mine"]);
+
+      await run(["ready", "--json"]);
+      const rows = payload().tasks as { id: string; reservedFor: string | null }[];
+      expect(rows.find(one => one.id === "mine-1")?.reservedFor).toBe("mine");
+      expect(rows.find(one => one.id === "shared-1")?.reservedFor).toBeNull();
     });
 
     test("next refuses what is not plainly queued", async () => {
