@@ -1,5 +1,12 @@
 # Progress
 
+**2026-08-21 — 0.3.0 published.** Alex ran the publish (fresh npm login
+after a token expiry masquerading as E404); tag v0.3.0 pushed;
+`npx standing-orders@0.3.0 --help` verified cold from the registry. The
+release carries everything since 0.2.0: tournaments (v14–v16), the live
+peek (v17), chains and next (v18), queue columns (v19), external
+dispatch (v20), the UX fix batch, and the docs pass. Suite 1031.
+
 **2026-08-20 — external dispatch (v20): the loop reaches the tracker.**
 The M0-promised arc, and the hardest review of the project: FIVE Codex
 rounds (REDESIGN ×4, then APPROVE WITH CHANGES with findings 40–43),
