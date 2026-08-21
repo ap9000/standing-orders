@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 20;
+export const SCHEMA_VERSION = 21;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -525,6 +525,10 @@ export type PublicationGrant = {
   grantedAt: string;
   revokedBy: string | null;
   revokedAt: string | null;
+  /** Merge authority (v21): explicit, default off — its own yes. */
+  merge?: boolean;
+  mergeMethod?: "squash" | "merge" | "rebase" | null;
+  mergeDeleteBranch?: boolean;
 };
 
 /** One run's road to a PR, durable at every phase. */
@@ -1277,6 +1281,51 @@ CREATE TABLE IF NOT EXISTS external_intent (
   last_error   TEXT,
   created_at   TEXT NOT NULL,
   delivered_at TEXT
+);
+
+-- The merge grant's evidence (v21): the LATEST CI observation per PR,
+-- generation-ordered so a stalled older response can never overwrite —
+-- or authorize past — a newer one. Only a WINNING settle has effects.
+CREATE TABLE IF NOT EXISTS ci_observation (
+  github_repo TEXT NOT NULL,
+  pr_number   INTEGER NOT NULL,
+  head_sha    TEXT NOT NULL,
+  state       TEXT NOT NULL CHECK (state IN ('passing','failing','running','none')),
+  generation  INTEGER NOT NULL,
+  observed_at TEXT NOT NULL,
+  PRIMARY KEY (github_repo, pr_number)
+);
+
+-- Durable merge intents (v21): one per publication, claim-leased with a
+-- generation fence so overlapping passes cannot double-fire and a crash
+-- can never strand a claim or leave "did it merge?" ambiguous.
+CREATE TABLE IF NOT EXISTS merge_intent (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  publication   INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+  grant_terms_hash TEXT NOT NULL,
+  head_sha      TEXT NOT NULL,
+  method        TEXT NOT NULL CHECK (method IN ('squash','merge','rebase')),
+  delete_branch INTEGER NOT NULL DEFAULT 0 CHECK (delete_branch IN (0, 1)),
+  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','claimed','merged','refused','superseded')),
+  claimed_by    TEXT,
+  claimed_until TEXT,
+  generation    INTEGER NOT NULL DEFAULT 0,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT,
+  receipt       TEXT,
+  created_at    TEXT NOT NULL,
+  settled_at    TEXT,
+  CHECK (state <> 'claimed' OR (claimed_by IS NOT NULL AND claimed_until IS NOT NULL))
+);
+
+-- A CI repair in flight durably blocks its source PR's merge (v21).
+-- STICKY by design: no task-lifecycle path touches it — it lifts only
+-- by the authenticated unblock act or the PR itself closing remotely.
+CREATE TABLE IF NOT EXISTS merge_blocker (
+  publication INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+  reason      TEXT NOT NULL CHECK (reason IN ('repair-open')),
+  task_id     TEXT,
+  created_at  TEXT NOT NULL
 );
 
 -- What a task is allowed to become, and whether a person agreed to it.
@@ -2147,6 +2196,46 @@ function migrate(db: Database): void {
     last_error   TEXT,
     created_at   TEXT NOT NULL,
     delivered_at TEXT
+  )`);
+  // v21 (merge grant): merge authority as explicit fields on the
+  // publication grant (cross-column rule merge=1 → merge_method lives in
+  // savePublicationGrant + a trigger — additive ALTER cannot carry it),
+  // plus the observation/intent/blocker tables shared with fresh SCHEMA.
+  addColumn(db, "publication_grant", "merge", "INTEGER NOT NULL DEFAULT 0 CHECK (merge IN (0, 1))");
+  addColumn(db, "publication_grant", "merge_method", "TEXT CHECK (merge_method IN ('squash','merge','rebase'))");
+  addColumn(db, "publication_grant", "merge_delete_branch", "INTEGER NOT NULL DEFAULT 0 CHECK (merge_delete_branch IN (0, 1))");
+  db.exec(`CREATE TABLE IF NOT EXISTS ci_observation (
+    github_repo TEXT NOT NULL,
+    pr_number   INTEGER NOT NULL,
+    head_sha    TEXT NOT NULL,
+    state       TEXT NOT NULL CHECK (state IN ('passing','failing','running','none')),
+    generation  INTEGER NOT NULL,
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY (github_repo, pr_number)
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS merge_intent (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    publication   INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+    grant_terms_hash TEXT NOT NULL,
+    head_sha      TEXT NOT NULL,
+    method        TEXT NOT NULL CHECK (method IN ('squash','merge','rebase')),
+    delete_branch INTEGER NOT NULL DEFAULT 0 CHECK (delete_branch IN (0, 1)),
+    state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','claimed','merged','refused','superseded')),
+    claimed_by    TEXT,
+    claimed_until TEXT,
+    generation    INTEGER NOT NULL DEFAULT 0,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    receipt       TEXT,
+    created_at    TEXT NOT NULL,
+    settled_at    TEXT,
+    CHECK (state <> 'claimed' OR (claimed_by IS NOT NULL AND claimed_until IS NOT NULL))
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS merge_blocker (
+    publication INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+    reason      TEXT NOT NULL CHECK (reason IN ('repair-open')),
+    task_id     TEXT,
+    created_at  TEXT NOT NULL
   )`);
 }
 
@@ -7193,9 +7282,17 @@ export class Store {
       selector: "ours" | "all";
       draft: boolean;
       grantedBy: string;
+      merge?: boolean;
+      mergeMethod?: "squash" | "merge" | "rebase" | null;
+      mergeDeleteBranch?: boolean;
     },
     now: Date,
   ): void {
+    // Cross-column rule (v21): merge authority names its method, always —
+    // additive ALTER cannot carry a table CHECK for this.
+    if (grant.merge === true && grant.mergeMethod == null) {
+      throw new Error("a merge grant names its method: --merge-method squash|merge|rebase");
+    }
     this.transact(() => {
       this.db
         .prepare("UPDATE publication_grant SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
@@ -7203,8 +7300,9 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO publication_grant
-             (repo, github_repo, remote, head_prefix, base, capabilities, selector, draft, granted_by, granted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (repo, github_repo, remote, head_prefix, base, capabilities, selector, draft, granted_by, granted_at,
+              merge, merge_method, merge_delete_branch)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           grant.repo,
@@ -7217,8 +7315,175 @@ export class Store {
           grant.draft ? 1 : 0,
           grant.grantedBy,
           now.toISOString(),
+          grant.merge === true ? 1 : 0,
+          grant.mergeMethod ?? null,
+          grant.mergeDeleteBranch === true ? 1 : 0,
         );
     });
+  }
+
+  // ---- the merge grant's machinery (v21) ----------------------------------
+
+  /**
+   * Reserve the next observation generation for a PR BEFORE the network
+   * call — the settle below is conditional on still being newest, so a
+   * stalled older response can neither overwrite nor authorize.
+   */
+  reserveObservation(githubRepo: string, prNumber: number): number {
+    return this.transact(() => {
+      const row = this.db
+        .prepare("SELECT generation FROM ci_observation WHERE github_repo = ? AND pr_number = ?")
+        .get(githubRepo, prNumber);
+      const generation = (row === undefined ? 0 : Number(row["generation"])) + 1;
+      if (row === undefined) {
+        this.db
+          .prepare(
+            "INSERT INTO ci_observation (github_repo, pr_number, head_sha, state, generation, observed_at) VALUES (?, ?, '', 'none', ?, '')",
+          )
+          .run(githubRepo, prNumber, generation);
+      } else {
+        this.db
+          .prepare("UPDATE ci_observation SET generation = ? WHERE github_repo = ? AND pr_number = ?")
+          .run(generation, githubRepo, prNumber);
+      }
+      return generation;
+    });
+  }
+
+  /**
+   * Conditional settle: writes ONLY when this generation is still the
+   * newest reserved one, and RETURNS whether it won — a losing response
+   * has no effects and never yields a merge-eligible tuple (round-4
+   * finding 24). Callers gate every side effect on `won`.
+   */
+  settleObservation(
+    observation: { githubRepo: string; prNumber: number; headSha: string; state: "passing" | "failing" | "running" | "none"; generation: number },
+    now: Date,
+  ): { won: boolean } {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE ci_observation SET head_sha = ?, state = ?, observed_at = ?
+          WHERE github_repo = ? AND pr_number = ? AND generation = ?`,
+      )
+      .run(observation.headSha, observation.state, now.toISOString(), observation.githubRepo, observation.prNumber, observation.generation);
+    return { won: Number(changes) === 1 };
+  }
+
+  /** A repair in flight durably blocks its source PR's merge — STICKY:
+   * lifted only by the authenticated unblock act or remote closure. */
+  createMergeBlocker(publication: number, taskId: string, now: Date): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO merge_blocker (publication, reason, task_id, created_at) VALUES (?, 'repair-open', ?, ?)")
+      .run(publication, taskId, now.toISOString());
+  }
+
+  mergeBlockerFor(publication: number): { reason: string; taskId: string | null; createdAt: string } | null {
+    const row = this.db.prepare("SELECT reason, task_id, created_at FROM merge_blocker WHERE publication = ?").get(publication);
+    return row === undefined
+      ? null
+      : { reason: String(row["reason"]), taskId: row["task_id"] === null ? null : String(row["task_id"]), createdAt: String(row["created_at"]) };
+  }
+
+  liftMergeBlocker(publication: number): boolean {
+    return Number(this.db.prepare("DELETE FROM merge_blocker WHERE publication = ?").run(publication).changes) > 0;
+  }
+
+  createMergeIntent(
+    intent: { publication: number; grantTermsHash: string; headSha: string; method: "squash" | "merge" | "rebase"; deleteBranch: boolean },
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO merge_intent (publication, grant_terms_hash, head_sha, method, delete_branch, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(intent.publication, intent.grantTermsHash, intent.headSha, intent.method, intent.deleteBranch ? 1 : 0, now.toISOString());
+  }
+
+  /**
+   * Claim by CAS with an expiring lease and a generation fence (the
+   * delivery-claim discipline): only pending rows, or claimed rows whose
+   * lease EXPIRED, are claimable; every later transition must present the
+   * generation this claim minted, so a reclaimed row's old owner loses
+   * every subsequent write. No permanently-claimed row is representable
+   * (the table CHECK demands owner+expiry on 'claimed').
+   */
+  claimMergeIntent(id: number, by: string, leaseMs: number, now: Date): { generation: number } | null {
+    return this.transact(() => {
+      const row = this.db.prepare("SELECT state, claimed_until, generation FROM merge_intent WHERE id = ?").get(id);
+      if (row === undefined) return null;
+      const state = String(row["state"]);
+      const expired = row["claimed_until"] !== null && String(row["claimed_until"]) <= now.toISOString();
+      if (state !== "pending" && !(state === "claimed" && expired)) return null;
+      const generation = Number(row["generation"]) + 1;
+      const { changes } = this.db
+        .prepare(
+          `UPDATE merge_intent SET state = 'claimed', claimed_by = ?, claimed_until = ?, generation = ?
+            WHERE id = ? AND generation = ?`,
+        )
+        .run(by, new Date(now.getTime() + leaseMs).toISOString(), generation, id, Number(row["generation"]));
+      return Number(changes) === 1 ? { generation } : null;
+    });
+  }
+
+  /** Renew the lease AND re-prove the generation in one CAS — the last
+   * gate before the external call; a failed re-proof aborts the attempt. */
+  renewMergeClaim(id: number, generation: number, leaseMs: number, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE merge_intent SET claimed_until = ? WHERE id = ? AND state = 'claimed' AND generation = ?")
+      .run(new Date(now.getTime() + leaseMs).toISOString(), id, generation);
+    return Number(changes) === 1;
+  }
+
+  settleMergeIntent(
+    id: number,
+    generation: number,
+    state: "merged" | "refused" | "superseded" | "pending",
+    now: Date,
+    detail: { error?: string | null; receipt?: string | null; countAttempt?: boolean } = {},
+  ): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE merge_intent SET state = ?, claimed_by = NULL, claimed_until = NULL,
+           attempts = attempts + ?, last_error = COALESCE(?, last_error), receipt = COALESCE(?, receipt),
+           settled_at = CASE WHEN ? IN ('merged','refused','superseded') THEN ? ELSE settled_at END
+         WHERE id = ? AND generation = ?`,
+      )
+      .run(state, detail.countAttempt === true ? 1 : 0, detail.error ?? null, detail.receipt ?? null, state, now.toISOString(), id, generation);
+    return Number(changes) === 1;
+  }
+
+  /** Refused intents rearm to pending after the operator fixed the cause. */
+  rearmMergeIntent(publication: number): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE merge_intent SET state = 'pending', last_error = NULL WHERE publication = ? AND state = 'refused'")
+      .run(publication);
+    return Number(changes) > 0;
+  }
+
+  mergeIntentFor(publication: number): { id: number; state: string; headSha: string; generation: number; attempts: number; lastError: string | null } | null {
+    const row = this.db
+      .prepare("SELECT id, state, head_sha, generation, attempts, last_error FROM merge_intent WHERE publication = ?")
+      .get(publication);
+    return row === undefined
+      ? null
+      : {
+          id: Number(row["id"]),
+          state: String(row["state"]),
+          headSha: String(row["head_sha"]),
+          generation: Number(row["generation"]),
+          attempts: Number(row["attempts"]),
+          lastError: row["last_error"] === null ? null : String(row["last_error"]),
+        };
+  }
+
+  latestObservation(githubRepo: string, prNumber: number): { headSha: string; state: string; observedAt: string; generation: number } | null {
+    const row = this.db
+      .prepare("SELECT head_sha, state, observed_at, generation FROM ci_observation WHERE github_repo = ? AND pr_number = ?")
+      .get(githubRepo, prNumber);
+    return row === undefined || String(row["observed_at"]) === ""
+      ? null
+      : { headSha: String(row["head_sha"]), state: String(row["state"]), observedAt: String(row["observed_at"]), generation: Number(row["generation"]) };
   }
 
   /** Revocation is immediate: intents not yet pushed die with the grant. */
@@ -7360,9 +7625,9 @@ export class Store {
     const { changes } = this.db
       .prepare(
         `UPDATE notification SET resolved_at = ?
-          WHERE (dedupe_key LIKE ? OR dedupe_key LIKE ?) AND resolved_at IS NULL AND dedupe_key != COALESCE(?, '')`,
+          WHERE (dedupe_key LIKE ? ESCAPE '\\' OR dedupe_key LIKE ? ESCAPE '\\') AND resolved_at IS NULL AND dedupe_key != COALESCE(?, '')`,
       )
-      .run(now.toISOString(), `ci:${githubRepo}:${prNumber}:%`, `ci:${prNumber}:%`, exceptKey);
+      .run(now.toISOString(), `${likeEscape(`ci:${githubRepo}:${prNumber}:`)}%`, `${likeEscape(`ci:${prNumber}:`)}%`, exceptKey);
     return Number(changes);
   }
 
@@ -7374,9 +7639,9 @@ export class Store {
   latestOpenCiEpisode(githubRepo: string, prNumber: number): { headSha: string; createdAt: string } | null {
     const row = this.db
       .prepare(
-        "SELECT dedupe_key, created_at FROM notification WHERE dedupe_key LIKE ? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1",
+        "SELECT dedupe_key, created_at FROM notification WHERE dedupe_key LIKE ? ESCAPE '\\' AND resolved_at IS NULL ORDER BY id DESC LIMIT 1",
       )
-      .get(`ci:${githubRepo}:${prNumber}:%`);
+      .get(`${likeEscape(`ci:${githubRepo}:${prNumber}:`)}%`);
     if (row === undefined) return null;
     const key = String(row["dedupe_key"]);
     const headSha = key.slice(key.lastIndexOf(":") + 1);
@@ -8629,6 +8894,12 @@ function readIncident(row: Record<string, unknown>): Incident {
   };
 }
 
+/** LIKE-prefix escaping (merge-grant round 1, finding 2): `_` and `%` in
+ * a repository name are DATA — `o/a_b` must never match `o/axb`. */
+function likeEscape(prefix: string): string {
+  return prefix.replace(/\\/g, "\\\\").replace(/[%_]/g, match => `\\${match}`);
+}
+
 function readPublicationGrant(row: Record<string, unknown>): PublicationGrant {
   return {
     id: Number(row["id"]),
@@ -8644,6 +8915,12 @@ function readPublicationGrant(row: Record<string, unknown>): PublicationGrant {
     grantedAt: String(row["granted_at"]),
     revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
     revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
+    merge: Number(row["merge"] ?? 0) === 1,
+    mergeMethod:
+      row["merge_method"] === null || row["merge_method"] === undefined
+        ? null
+        : (String(row["merge_method"]) as "squash" | "merge" | "rebase"),
+    mergeDeleteBranch: Number(row["merge_delete_branch"] ?? 0) === 1,
   };
 }
 

@@ -80,6 +80,7 @@ import {
   publicationBody,
   publishPass,
   type PublishExec,
+  sweepMerges,
 } from "./publish.js";
 
 type CapabilityKind = Capability["kind"];
@@ -207,6 +208,18 @@ External trackers — build what a tracker nominates, under local approvals
                                         the dispatch grant: its own explicit
                                         yes, never in any default; writes a
                                         plane marker label to the repository
+  standing-orders publish grant --github <owner/name> --allow-merge
+      --merge-method squash|merge|rebase [--merge-delete-branch] --yes
+                                        auto-merge this plane's own PRs —
+                                        ONLY after CI was OBSERVED green on
+                                        the exact head commit; drafts,
+                                        merge queues, and unreadable
+                                        protection refuse, typed and paged
+  standing-orders publish unblock <pr> --as <you> --token <t>
+                                        lift a repair's merge hold
+  standing-orders publish rearm <pr> --as <you> --token <t>
+                                        re-arm a refused merge after you
+                                        fixed the named cause
   standing-orders sync [--repo <path>]      pull nominated work in as ordinary
                                         local tasks (titles only, validated;
                                         bodies never), refresh every mirror
@@ -391,7 +404,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "project-root", "schedule", "ceiling", "require",
     "provider", "plan-model", "plan-provider",
     "command", "timeout-seconds", "stop-grace", "title", "name",
-    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age",
+    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   ]);
 
   // Every boolean flag any verb reads. A --flag in neither set is a typo,
@@ -400,7 +413,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   // here by name instead (Codex round-4 findings 3/8).
   const booleans = new Set([
     "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
-    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch",
+    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -5022,6 +5035,11 @@ async function publishCommand(
     if (github === undefined || !/^[\w.-]+\/[\w.-]+$/.test(github)) {
       return fail(write, json, "publish grant", "usage", "`--github <owner/name>` is required, exactly", EXIT.usage);
     }
+    const wantsMerge = flags.has("allow-merge");
+    const mergeMethod = text(flags, "merge-method");
+    if (wantsMerge && (mergeMethod === undefined || !["squash", "merge", "rebase"].includes(mergeMethod))) {
+      return fail(write, json, "publish grant", "usage", "--allow-merge names its method: --merge-method squash|merge|rebase", EXIT.usage);
+    }
     const spec = {
       repo,
       githubRepo: github,
@@ -5031,7 +5049,29 @@ async function publishCommand(
       capabilities: ["push-branch", "open-pr"] as ("push-branch" | "open-pr")[],
       selector: (flags.has("all-tasks") ? "all" : "ours") as "all" | "ours",
       draft: !flags.has("ready"),
+      merge: wantsMerge,
+      mergeMethod: wantsMerge ? (mergeMethod as "squash" | "merge" | "rebase") : null,
+      mergeDeleteBranch: wantsMerge && flags.has("merge-delete-branch"),
     };
+    // The merge terms are restated with the ACTUAL credential that would
+    // act (round-2 finding c): the account is shown, and named unpinned.
+    const mergeTerms: string[] = [];
+    if (wantsMerge) {
+      const whoAmI = await (context.publishExec ?? undefined) ?.("gh", ["api", "user", "--jq", ".login"], { timeoutMs: 10_000 })
+        ?? await (await import("./exec.js")).run("gh", ["api", "user", "--jq", ".login"], { timeoutMs: 10_000 });
+      const account = whoAmI.code === 0 ? whoAmI.stdout.trim() : "(gh is not signed in — merges will refuse)";
+      mergeTerms.push(
+        "",
+        "AND auto-merge: pull requests this plane opened or adopted, on " + github + " into " + spec.base + ",",
+        "merge as " + mergeMethod + (spec.mergeDeleteBranch ? " and delete the remote branch" : "") + " — ONLY after CI was OBSERVED green on the exact",
+        "head commit (silence, running, or a moved head never merge; drafts never merge;",
+        "a base with a merge queue, or protection this plane cannot read, pauses with a page).",
+        "Merging acts as the GitHub account signed into gh on the machine that runs the",
+        "sweep — currently: " + account + " — and is NOT pinned; changing gh auth changes who merges.",
+        "CI can turn red on the same commit between the last look and the merge; the",
+        "exact-commit match cannot see that. An all-skipped check rollup reads as passing.",
+      );
+    }
 
     if (!flags.has("yes")) {
       // Unconfirmed, like every other grant preview: ok:false, reason
@@ -5043,6 +5083,7 @@ async function publishCommand(
       }
       write("This grant would allow, unattended:");
       for (const line of describePublicationGrant(spec)) write(line);
+      for (const line of mergeTerms) write(line);
       write("");
       write("Nothing is granted yet. Repeat with --yes --as <you> --token <approver-token> to agree to exactly this.");
       return EXIT.refused;
@@ -5097,8 +5138,42 @@ async function publishCommand(
     return EXIT.ok;
   }
 
+  if (action === "unblock" || action === "rearm") {
+    const prGiven = positional[1];
+    const pr = Number(prGiven);
+    if (prGiven === undefined || !Number.isInteger(pr) || pr <= 0) {
+      return fail(write, json, `publish ${action}`, "usage", `\`standing-orders publish ${action} <pr> --as <you> --token <t>\``, EXIT.usage);
+    }
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, `publish ${action}`, "usage", `${action === "unblock" ? "lifting a repair hold" : "re-arming a refused merge"} takes \`--as <you> --token <t>\` — who decided is recorded, not asserted`, EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, `publish ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, acting.name), EXIT.refused);
+    }
+    const publication = store.openedPublications().find(one => one.prNumber === pr);
+    if (publication === undefined) {
+      return fail(write, json, `publish ${action}`, "unknown", `no open publication holds PR #${pr}`, EXIT.refused);
+    }
+    if (action === "unblock") {
+      const lifted = store.liftMergeBlocker(publication.id);
+      return succeed(write, json, "publish unblock", { pr, lifted }, () => [
+        lifted
+          ? `PR #${pr} no longer holds for its repair — the next sweep may merge it under the granted terms.`
+          : `PR #${pr} was not held by a repair.`,
+      ]);
+    }
+    const rearmed = store.rearmMergeIntent(publication.id);
+    return succeed(write, json, "publish rearm", { pr, rearmed }, () => [
+      rearmed
+        ? `PR #${pr}'s merge is re-armed — the next sweep re-proves everything and tries again.`
+        : `PR #${pr} had no refused merge to re-arm.`,
+    ]);
+  }
+
   if (action !== undefined) {
-    return fail(write, json, "publish", "usage", "`standing-orders publish [grant|revoke|status]`", EXIT.usage);
+    return fail(write, json, "publish", "usage", "`standing-orders publish [grant|revoke|status|unblock|rearm]`", EXIT.usage);
   }
 
   // The pass.
@@ -5107,10 +5182,20 @@ async function publishCommand(
     clock,
     ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
   });
-  const idle = report.pushed === 0 && report.opened === 0 && report.adopted === 0 && report.failed === 0;
+  // The merge sweep rides every publish pass: green, proved, granted work
+  // leaves as MERGED PRs (v21; four review rounds are the spec).
+  const merges = await sweepMerges(store, {
+    repo,
+    clock,
+    ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
+  });
+  const idle =
+    report.pushed === 0 && report.opened === 0 && report.adopted === 0 && report.failed === 0 && merges.merged === 0 && merges.refused === 0;
   const lines = () => [
-    `Pushed ${report.pushed}, opened ${report.opened}, adopted ${report.adopted}, gave up on ${report.failed}.`,
+    `Pushed ${report.pushed}, opened ${report.opened}, adopted ${report.adopted}, gave up on ${report.failed}.` +
+      (merges.merged + merges.refused + merges.skipped > 0 ? ` Merged ${merges.merged}, refused ${merges.refused}, holding ${merges.skipped}.` : ""),
     ...report.problems.map(problem => `  problem: ${problem}`),
+    ...merges.problems.map(problem => `  merge: ${problem}`),
   ];
   if (report.problems.length > 0) {
     return fail(write, json, "publish", "publish-problems", lines().join("\n"), EXIT.failed, { report });

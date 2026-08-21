@@ -2856,6 +2856,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           `/r/${id}`,
         );
       }
+      // The merge blocker rides the SAME breath as the draft (merge grant,
+      // findings 3/12/13): while this repair exists, the source PR merges
+      // NOTHING — sticky until the operator's unblock act or the PR closes.
+      store.createMergeBlocker(publication.id, sealed.id, now);
       return redirect(response, taskHref(sealed.id));
     }
 

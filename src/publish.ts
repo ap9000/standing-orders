@@ -233,6 +233,10 @@ async function openOrAdopt(
       "pr", "list",
       "--repo", publication.githubRepo,
       "--head", publication.head,
+      // The base filter (merge-grant finding 21): a same-head PR aimed at
+      // a DIFFERENT base is not this publication's PR and must never be
+      // adopted under authority granted for another branch.
+      "--base", publication.base,
       "--state", "open",
       "--json", "number,url",
     ],
@@ -318,6 +322,11 @@ export async function observeChecks(
 
   for (const publication of store.openedPublications()) {
     if (publication.prNumber === null) continue;
+    // The observation generation is RESERVED before the network call
+    // (merge grant, findings 20/24): a stalled older response loses its
+    // conditional settle, and a loser has NO effects — not the mirror
+    // row, not remote_state, not check state, not an episode.
+    const generation = store.reserveObservation(publication.githubRepo, publication.prNumber);
     const viewed = await exec(
       "gh",
       [
@@ -354,13 +363,36 @@ export async function observeChecks(
     const remoteState = typeof payload.state === "string" ? payload.state.toUpperCase() : null;
     if (remoteState === "MERGED" || remoteState === "CLOSED") {
       store.transact(() => {
+        const settled = store.settleObservation(
+          { githubRepo: publication.githubRepo, prNumber: publication.prNumber as number, headSha: headOid, state: "none", generation },
+          clock(),
+        );
+        if (!settled.won) return;
         store.recordPublicationRemoteState(publication.id, remoteState, clock());
         report.resolved += store.resolveCiEpisodes(publication.githubRepo, publication.prNumber as number, null, clock());
+        // A closed PR moots its merge blocker and supersedes its intent.
+        store.liftMergeBlocker(publication.id);
+        const intent = store.mergeIntentFor(publication.id);
+        if (intent !== null && (intent.state === "pending" || intent.state === "claimed")) {
+          store.settleMergeIntent(intent.id, intent.generation, remoteState === "MERGED" ? "merged" : "superseded", clock(), {
+            receipt: `observed ${remoteState.toLowerCase()} remotely`,
+          });
+        }
       });
       continue;
     }
 
     const state = summarizeChecks(payload.statusCheckRollup);
+    const settled = store.settleObservation(
+      { githubRepo: publication.githubRepo, prNumber: publication.prNumber, headSha: headOid, state, generation },
+      clock(),
+    );
+    if (!settled.won) {
+      // An out-of-order response: a newer observation already spoke.
+      // Nothing persists from this one (round-4 findings 24/25).
+      report.problems.push(`PR #${publication.prNumber}: superseded observation discarded`);
+      continue;
+    }
     store.recordPublicationCheckState(publication.id, state, clock());
     // The episode identity carries the REPOSITORY (audit C-2): PR #55 in
     // repo A and PR #55 in repo B are different worlds, and one's failure
@@ -433,4 +465,264 @@ function enqueueOpened(store: Store, publication: Publication, url: string, cloc
 
 function firstLine(text: string): string {
   return text.split("\n")[0]?.trim() ?? "";
+}
+
+
+// ---- the merge sweep (v21; four review rounds are the spec) ---------------
+
+export const MERGE_LEASE_MS = 5 * 60_000;
+export const MERGE_MAX_ATTEMPTS = 3;
+
+/** The exact terms a merge intent binds - drift supersedes, never surprises. */
+export function mergeTermsHash(grant: PublicationGrant): string {
+  return createHash("sha256")
+    .update(
+      "merge-terms/v1 " + grant.githubRepo + " " + grant.base + " " + grant.headPrefix + " " + (grant.mergeMethod ?? "") + " " + (grant.mergeDeleteBranch === true ? 1 : 0),
+    )
+    .digest("hex");
+}
+
+export type MergeReport = { merged: number; refused: number; skipped: number; problems: string[] };
+
+/** One fresh, WINNING observation - the only tuple that may authorize. */
+async function observeOne(
+  store: Store,
+  exec: PublishExec,
+  clock: () => Date,
+  githubRepo: string,
+  prNumber: number,
+): Promise<{ ok: true; state: string; headSha: string } | { ok: false; why: string }> {
+  const generation = store.reserveObservation(githubRepo, prNumber);
+  const viewed = await exec(
+    "gh",
+    ["pr", "view", String(prNumber), "--repo", githubRepo, "--json", "statusCheckRollup,headRefOid,state,isDraft,baseRefName"],
+    { timeoutMs: EXEC_TIMEOUT_MS },
+  );
+  if (viewed.code !== 0) return { ok: false, why: firstLine(viewed.stderr) || ("exit " + viewed.code) };
+  let payload: { statusCheckRollup?: unknown; headRefOid?: unknown; state?: unknown; isDraft?: unknown; baseRefName?: unknown };
+  try {
+    payload = JSON.parse(viewed.stdout) as typeof payload;
+  } catch {
+    return { ok: false, why: "gh said something that is not JSON" };
+  }
+  const headSha = typeof payload.headRefOid === "string" ? payload.headRefOid : null;
+  if (headSha === null) return { ok: false, why: "no head OID in the answer" };
+  if (payload.isDraft === true) return { ok: false, why: "draft" };
+  if (String(payload.state ?? "").toUpperCase() === "MERGED") return { ok: false, why: "pr-merged" };
+  if (String(payload.state ?? "").toUpperCase() !== "OPEN") return { ok: false, why: "pr-" + String(payload.state ?? "gone").toLowerCase() };
+  const state = summarizeChecks(payload.statusCheckRollup);
+  const settled = store.settleObservation({ githubRepo, prNumber, headSha, state, generation }, clock());
+  // A losing settle is NO observation (round-4 finding 24).
+  if (!settled.won) return { ok: false, why: "stale-observation" };
+  return { ok: true, state, headSha };
+}
+
+/** A COMPLETE negative proof that no merge queue governs the base - or no
+ * merge (round-4 finding 22): every rules page, plus the classic-protection
+ * probe with a STRUCTURED status; any classic protection at all, or any
+ * unreadable answer, refuses merge-queue-unknown, fail closed. */
+async function proveNoMergeQueue(
+  exec: PublishExec,
+  githubRepo: string,
+  base: string,
+): Promise<{ ok: true } | { ok: false; why: "merge-queue" | "merge-queue-unknown" }> {
+  const rules = await exec(
+    "gh",
+    ["api", "--paginate", "--slurp", "repos/" + githubRepo + "/rules/branches/" + encodeURIComponent(base)],
+    { timeoutMs: EXEC_TIMEOUT_MS },
+  );
+  if (rules.code !== 0) return { ok: false, why: "merge-queue-unknown" };
+  try {
+    const pages = JSON.parse(rules.stdout) as unknown;
+    if (!Array.isArray(pages)) return { ok: false, why: "merge-queue-unknown" };
+    const flat = (pages as unknown[]).flat();
+    for (const rule of flat) {
+      if (typeof rule === "object" && rule !== null && (rule as Record<string, unknown>)["type"] === "merge_queue") {
+        return { ok: false, why: "merge-queue" };
+      }
+    }
+  } catch {
+    return { ok: false, why: "merge-queue-unknown" };
+  }
+  // Classic protection: the endpoint cannot PROVE queue absence, so any
+  // 200 refuses conservatively; only a structured 404 is a readable "no".
+  const classic = await exec(
+    "gh",
+    ["api", "--include", "repos/" + githubRepo + "/branches/" + encodeURIComponent(base) + "/protection"],
+    { timeoutMs: EXEC_TIMEOUT_MS },
+  );
+  const statusLine = classic.stdout.split("\n")[0] ?? "";
+  if (classic.code === 0 && /^HTTP\/[\d.]+ 200/.test(statusLine)) return { ok: false, why: "merge-queue-unknown" };
+  if (/^HTTP\/[\d.]+ 404/.test(statusLine) || /HTTP 404/.test(firstLine(classic.stderr))) return { ok: true };
+  return { ok: false, why: "merge-queue-unknown" };
+}
+
+/**
+ * Merge what the grant allows and the evidence proves: this plane's own
+ * publications, on this repo, whose PR was OBSERVED green on the exact
+ * head - through a claim lease, a live-grant re-read, the queue proof,
+ * and GitHub's own head CAS. Every refusal is typed and durable.
+ */
+export async function sweepMerges(
+  store: Store,
+  options: { repo: string; runner?: string; clock?: () => Date; exec?: PublishExec },
+): Promise<MergeReport> {
+  const clock = options.clock ?? (() => new Date());
+  const exec = options.exec ?? execRun;
+  const who = options.runner ?? "publish";
+  const report: MergeReport = { merged: 0, refused: 0, skipped: 0, problems: [] };
+  const page = (key: string, subject: string, body: string): void => {
+    store.enqueueNotification({ dedupeKey: key, kind: "merge", subject, body }, clock());
+  };
+
+  const grant = store.publicationGrantFor(options.repo);
+  if (grant === null || grant.merge !== true || grant.mergeMethod == null) return report;
+  const method = grant.mergeMethod;
+  const termsHash = mergeTermsHash(grant);
+
+  for (const publication of store.openedPublications()) {
+    if (publication.prNumber === null || publication.headSha === null) continue;
+    const prNumber = publication.prNumber;
+    const headSha = publication.headSha;
+    // The local-repo fence (finding 6): repo B's publication never rides
+    // repo A's sweep, whatever the remote terms coincide on.
+    const ref = store.refForId(publication.taskRef);
+    if (ref === null || ref.repo !== options.repo) continue;
+    if (publication.githubRepo !== grant.githubRepo) continue;
+
+    const blocker = store.mergeBlockerFor(publication.id);
+    if (blocker !== null) {
+      report.skipped++;
+      page(
+        "merge:" + publication.id + ":blocked",
+        "PR #" + prNumber + " holds for a repair",
+        "A CI repair (" + (blocker.taskId ?? "?") + ") is in flight. It merges nothing until you lift it: standing-orders publish unblock " + prNumber + ".",
+      );
+      continue;
+    }
+
+    store.createMergeIntent(
+      { publication: publication.id, grantTermsHash: termsHash, headSha, method, deleteBranch: grant.mergeDeleteBranch === true },
+      clock(),
+    );
+    const intent = store.mergeIntentFor(publication.id);
+    if (intent === null || intent.state === "merged" || intent.state === "refused" || intent.state === "superseded") continue;
+
+    const claim = store.claimMergeIntent(intent.id, who, MERGE_LEASE_MS, clock());
+    if (claim === null) continue; // someone else's live claim
+    const settle = (state: "merged" | "refused" | "superseded" | "pending", detail: { error?: string | null; receipt?: string | null; countAttempt?: boolean } = {}) =>
+      store.settleMergeIntent(intent.id, claim.generation, state, clock(), detail);
+
+    // The live grant, re-read AFTER the claim (finding 7): revocation,
+    // narrowing, or any term drift supersedes rather than merges.
+    const live = store.publicationGrantFor(options.repo);
+    if (live === null || live.merge !== true || mergeTermsHash(live) !== termsHash || intent.headSha !== headSha) {
+      settle("superseded", { error: "the grant or the head moved since this intent was written" });
+      continue;
+    }
+
+    const queue = await proveNoMergeQueue(exec, grant.githubRepo, grant.base);
+    if (!queue.ok) {
+      settle("refused", { error: queue.why });
+      report.refused++;
+      page(
+        "merge:" + publication.id + ":" + queue.why,
+        "PR #" + prNumber + " will not auto-merge",
+        queue.why === "merge-queue"
+          ? "The base branch requires a merge queue - out of this release's scope. Merge it on GitHub, or lift the queue and run: standing-orders publish rearm " + prNumber + "."
+          : "The branch's protection could not be READ well enough to prove no merge queue governs it - auto-merge stays paused. Check access, then run: standing-orders publish rearm " + prNumber + ".",
+      );
+      continue;
+    }
+
+    // One fresh, winning observation - green on the EXACT publication head.
+    const seen = await observeOne(store, exec, clock, grant.githubRepo, prNumber);
+    if (!seen.ok) {
+      if (seen.why === "draft") {
+        settle("refused", { error: "draft" });
+        report.refused++;
+        page(
+          "merge:" + publication.id + ":draft",
+          "PR #" + prNumber + " is a draft",
+          "Drafts never merge themselves. Mark it ready on GitHub, then run: standing-orders publish rearm " + prNumber + ".",
+        );
+      } else if (seen.why.startsWith("pr-")) {
+        settle("superseded", { error: seen.why });
+      } else {
+        settle("pending");
+        report.problems.push("PR #" + prNumber + ": " + seen.why);
+      }
+      continue;
+    }
+    if (seen.headSha !== headSha || seen.state !== "passing") {
+      settle(seen.headSha !== headSha ? "superseded" : "pending", {
+        error: seen.headSha !== headSha ? "the head moved" : "CI is " + seen.state + ", not green",
+      });
+      continue;
+    }
+
+    // The last fence before the external call: renew + generation re-proof.
+    if (!store.renewMergeClaim(intent.id, claim.generation, MERGE_LEASE_MS, clock())) continue;
+
+    const merged = await exec(
+      "gh",
+      [
+        "pr", "merge", String(prNumber),
+        "--repo", grant.githubRepo,
+        "--" + method,
+        "--match-head-commit", headSha,
+        ...(grant.mergeDeleteBranch === true ? ["--delete-branch"] : []),
+      ],
+      { timeoutMs: EXEC_TIMEOUT_MS },
+    );
+
+    if (merged.code === 0) {
+      store.transact(() => {
+        settle("merged", { receipt: "merged " + headSha.slice(0, 12) + " at " + clock().toISOString(), countAttempt: true });
+        store.recordPublicationRemoteState(publication.id, "MERGED", clock());
+        store.resolveCiEpisodes(grant.githubRepo, prNumber, null, clock());
+      });
+      report.merged++;
+      page(
+        "merge:" + publication.id + ":merged",
+        "merged: PR #" + prNumber,
+        (publication.prUrl ?? grant.githubRepo) + " - " + method + " of " + headSha.slice(0, 12) + ", under the merge terms you approved.",
+      );
+      continue;
+    }
+
+    // NEVER classify from the exit code alone (only auth=4 is distinct):
+    // re-read structured state and let the PR say what happened.
+    if (merged.code === 4) {
+      settle("refused", { error: "credential", countAttempt: true });
+      report.refused++;
+      page(
+        "merge:" + publication.id + ":credential",
+        "PR #" + prNumber + ": gh is not signed in",
+        "The merge acts as this machine's GitHub account, and it could not authenticate. Run gh auth login, then: standing-orders publish rearm " + prNumber + ".",
+      );
+      continue;
+    }
+    const after = await observeOne(store, exec, clock, grant.githubRepo, prNumber);
+    if (!after.ok && after.why === "pr-merged") {
+      settle("merged", { receipt: "merged (confirmed by re-read after an ambiguous exit)", countAttempt: true });
+      report.merged++;
+    } else if (!after.ok && (after.why === "draft" || after.why.startsWith("pr-"))) {
+      settle(after.why === "draft" ? "refused" : "superseded", { error: after.why, countAttempt: true });
+      if (after.why === "draft") report.refused++;
+    } else if (after.ok && after.headSha !== headSha) {
+      settle("superseded", { error: "the head moved during the attempt", countAttempt: true });
+    } else if (intent.attempts + 1 >= MERGE_MAX_ATTEMPTS) {
+      settle("refused", { error: firstLine(merged.stderr) || "the merge was rejected", countAttempt: true });
+      report.refused++;
+      page(
+        "merge:" + publication.id + ":rejected",
+        "PR #" + prNumber + " would not merge",
+        (firstLine(merged.stderr) || "GitHub rejected the merge") + " - likely branch protection, required reviews, or a conflict. Fix the cause, then run: standing-orders publish rearm " + prNumber + ".",
+      );
+    } else {
+      settle("pending", { error: firstLine(merged.stderr) || "transport", countAttempt: true });
+    }
+  }
+  return report;
 }

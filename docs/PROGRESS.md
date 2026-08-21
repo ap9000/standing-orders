@@ -1,5 +1,49 @@
 # Progress
 
+**2026-08-21 — the merge grant (v21): wake to MERGED pull requests.**
+Four Codex rounds (REDESIGN, REDESIGN, REDESIGN, APPROVE WITH CHANGES —
+findings 1–25), because this is the arc where the machine touches the
+default branch. What shipped: merge authority as explicit fields on the
+publication grant (`publish grant --allow-merge --merge-method squash
+[--merge-delete-branch]`), whose terms restate the whole truth — this
+plane's own opened-or-adopted PRs only, into the exact granted base,
+ONLY after CI was OBSERVED green on the exact head commit, acting as
+the gh account the preview NAMES (unpinned, said so), drafts never
+merge, the same-head CI race and the all-skipped-rollup fact stated
+rather than hidden. The proof machinery the rounds forced into
+existence: a durable `ci_observation` table binding repo+PR+exact head
+SHA+state, generation-ordered — a writer RESERVES its generation before
+the network call and settles conditionally, and a LOSING settle has no
+effects and can never authorize (the stalled-green race is dead;
+finding 24). Round 1 also caught a live wildcard bug — episode lookups
+LIKE-matched `_` in repository names — fixed with escaped predicates.
+The sweep (rides every publish pass and the watch): claim the durable
+merge intent by CAS with an expiring lease and a generation fence (the
+delivery-claim discipline; an expired claim reclaims, the old owner
+loses every subsequent write, and no permanently-claimed row is
+representable), re-read the LIVE grant and compare the terms hash the
+intent was born under, prove NO merge queue governs the base (every
+rules page via --paginate --slurp, PLUS the classic-protection probe
+with a structured status where any 200 refuses `merge-queue-unknown` —
+gh silently converts merges to queue behavior, so an unprovable "no"
+is a refusal), take one fresh WINNING observation green on the exact
+publication head, renew the lease + re-prove the generation in the
+last instant, then `gh pr merge --match-head-commit <sha>` so GitHub
+itself is the final CAS. Failures classify by structured re-read,
+never the exit code (auth=4 excepted): already-merged confirms,
+moved-head supersedes, drafts/protection refuse with a page naming
+`publish rearm <pr>`; transport retries bounded at 3. A CI-repair
+draft now writes a durable merge_blocker in the same transaction —
+STICKY by design after round 3 proved every lifecycle-based lift
+leaked (requeue, setTaskState, revision chains, tournaments): it lifts
+only by the authenticated `publish unblock <pr>` or the PR closing
+remotely. Adoption itself gained the --base filter round 2 demanded —
+a same-head PR aimed at a different branch can no longer be adopted,
+let alone merged under another base's authority. Ten proofs in
+merge.test.ts, one per finding family; doctored-v20 fixture reopened
+twice. Suite 1041. The README's first sentence is now fully true:
+queue twelve, walk away, come back to pull requests — merged.
+
 **2026-08-21 — 0.3.0 published.** Alex ran the publish (fresh npm login
 after a token expiry masquerading as E404); tag v0.3.0 pushed;
 `npx standing-orders@0.3.0 --help` verified cold from the registry. The
