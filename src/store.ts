@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 21;
+export const SCHEMA_VERSION = 22;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -417,6 +417,23 @@ export const RUN_PHASES = [
   "committing",
 ] as const;
 export type RunPhase = (typeof RUN_PHASES)[number];
+
+/**
+ * One operator steering note (arc 1, v22). Attached ≠ delivered: attachment
+ * says which build the note rode toward; delivery settles only on the
+ * stream's own receipt. Superseded = the task ended with it still pending.
+ */
+export type SteerNote = {
+  id: number;
+  taskRef: number;
+  author: string;
+  note: string;
+  createdAt: string;
+  attachedRun: number | null;
+  attachedAt: string | null;
+  deliveredAt: string | null;
+  supersededAt: string | null;
+};
 
 /** One option of a decision. `reversible` is a field so a scheduler can refuse to auto-apply. */
 export type DecisionOption = {
@@ -1724,6 +1741,26 @@ CREATE TABLE IF NOT EXISTS diff_comment (
   source_key    TEXT
 );
 
+-- Operator steering (arc 1, v22): a note that lands at the next safe
+-- boundary — the next brief the builder composes for this task. Attachment
+-- and delivery are SEPARATE facts: attached_at says which build the note
+-- rode toward; delivered_at settles only on the stream's own receipt (the
+-- agent's first words, or a successful completion). At-least-once, honestly
+-- labeled. Superseded means the task ended with the note still pending.
+CREATE TABLE IF NOT EXISTS task_steer (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  author        TEXT NOT NULL,
+  note          TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  attached_run  INTEGER REFERENCES run(id),
+  attached_at   TEXT,
+  delivered_at  TEXT,
+  superseded_at TEXT,
+  CHECK ((attached_run IS NULL) = (attached_at IS NULL)),
+  CHECK (delivered_at IS NULL OR attached_run IS NOT NULL)
+);
+
 CREATE TABLE IF NOT EXISTS mutation (
   idempotency_key TEXT PRIMARY KEY,
   operation       TEXT NOT NULL,
@@ -1805,7 +1842,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source ON diff_comment (source_ke
 -- the migration, because decision.contestant arrives by addColumn on
 -- existing files (the v11c lesson).
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_decision_per_contestant
-  ON decision (contestant) WHERE contestant IS NOT NULL AND state IN ('open','expired');`);
+  ON decision (contestant) WHERE contestant IS NOT NULL AND state IN ('open','expired');
+-- Pending steering, in filing order (arc 1, v22) — after migration because
+-- task_steer arrives by CREATE TABLE IF NOT EXISTS on existing files.
+CREATE INDEX IF NOT EXISTS task_steer_pending
+  ON task_steer (task_ref, id) WHERE delivered_at IS NULL AND superseded_at IS NULL;`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -2237,6 +2278,22 @@ function migrate(db: Database): void {
     task_id     TEXT,
     created_at  TEXT NOT NULL
   )`);
+  // v22 (arc 1, the live window): operator steering notes. A NEW table —
+  // additive, identical to the fresh SCHEMA; its partial pending index
+  // lives in openStore's post-migration block (the v11c lesson).
+  db.exec(`CREATE TABLE IF NOT EXISTS task_steer (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+    author        TEXT NOT NULL,
+    note          TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    attached_run  INTEGER REFERENCES run(id),
+    attached_at   TEXT,
+    delivered_at  TEXT,
+    superseded_at TEXT,
+    CHECK ((attached_run IS NULL) = (attached_at IS NULL)),
+    CHECK (delivered_at IS NULL OR attached_run IS NOT NULL)
+  )`);
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2605,12 +2662,23 @@ export class Store {
             .get(id);
           if (latched !== undefined) return { ok: false as const, reason: "external-closed" as const };
         }
-        const { changes } = this.db
-          .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
-          .run(state, now.toISOString(), id);
-        if (Number(changes) === 0) return { ok: false as const, reason: "unknown-task" as const };
-        this.bumpWake();
-        return { ok: true as const };
+        return this.transact(() => {
+          const { changes } = this.db
+            .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
+            .run(state, now.toISOString(), id);
+          if (Number(changes) === 0) return { ok: false as const, reason: "unknown-task" as const };
+          // A finished task's pending steering settles superseded in the
+          // SAME transaction (arc 1): shown as what it is, never a note
+          // silently waiting for a build that can no longer happen.
+          if (state === "done" || state === "cancelled") {
+            const ref = this.db
+              .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+              .get(BUILT_IN, id);
+            if (ref !== undefined) this.supersedeSteerNotes(Number(ref["id"]), now);
+          }
+          this.bumpWake();
+          return { ok: true as const };
+        });
       },
       // A refusal mutated nothing, so there is nothing to replay — and
       // recording it would answer "no" forever, including after somebody
@@ -2945,6 +3013,56 @@ export class Store {
       total: Number(row?.["total"] ?? 1),
       column: me["assigned"] === null ? null : String(me["assigned"]),
     };
+  }
+
+  /**
+   * The fleet screen's snapshot: every queued task across projects in
+   * column order (like queueScoped but project-wide). The console layer
+   * still filters each row through the ceiling before rendering — this is
+   * a survey, not an admission, and a repo outside the wall never leaves
+   * the page.
+   */
+  fleetQueue(
+    now: Date,
+  ): {
+    id: string;
+    title: string;
+    repo: string | null;
+    assignedRunner: string | null;
+    approved: boolean;
+    blockers: number;
+    taken: boolean;
+  }[] {
+    const stamp = now.toISOString();
+    return this.db
+      .prepare(
+        `SELECT task.id AS id, task.title AS title, task_ref.repo AS repo,
+                task_ref.assigned_runner AS assigned,
+                EXISTS (SELECT 1 FROM task_scope WHERE task_scope.task_id = task.id
+                  AND task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL) AS approved,
+                (SELECT COUNT(*) FROM task_edge JOIN task AS blocker ON blocker.id = task_edge.blocker
+                  WHERE task_edge.blocked = task.id AND blocker.state <> 'done') AS blockers,
+                (EXISTS (SELECT 1 FROM claim WHERE claim.task_ref = task_ref.id
+                    AND claim.released_at IS NULL AND claim.expires_at > ?
+                    AND claim.lease_generation = (SELECT MAX(newest.lease_generation) FROM claim AS newest
+                      WHERE newest.task_ref = task_ref.id))
+                 OR EXISTS (SELECT 1 FROM contest WHERE contest.task_ref = task_ref.id
+                    AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted'))) AS taken
+           FROM task JOIN task_ref ON task_ref.backend = ? AND task_ref.external_id = task.id
+          WHERE task.state = 'queued'
+          ORDER BY task.priority DESC, task.created_at, task_ref.id
+          LIMIT 400`,
+      )
+      .all(stamp, BUILT_IN)
+      .map(row => ({
+        id: String(row["id"]),
+        title: String(row["title"]),
+        repo: row["repo"] === null ? null : String(row["repo"]),
+        assignedRunner: row["assigned"] === null ? null : String(row["assigned"]),
+        approved: Number(row["approved"]) === 1,
+        blockers: Number(row["blockers"]),
+        taken: Number(row["taken"]) === 1,
+      }));
   }
 
   /** Whether this connection is already inside transact(); see below. */
@@ -6618,6 +6736,129 @@ export class Store {
     return rows.map(row => ({ ...readDecision(row), taskId: String(row["task_id"]) }));
   }
 
+  /**
+   * File one steering note (arc 1). Validation is validateNote EXACTLY —
+   * no bespoke rule — and filing refuses on finished tasks and during open
+   * tournaments (contestants share a task; all-racer delivery is a future
+   * many-to-many, not a silent single-racer lie).
+   */
+  fileSteerNote(
+    taskId: string,
+    author: string,
+    note: string,
+    now: Date,
+    mutation: Mutation = {},
+  ): { ok: true; id: number } | { ok: false; reason: "unknown-task" | "task-finished" | "contest-open" | "invalid-note"; problem?: string } {
+    return this.once(
+      mutation,
+      "fileSteerNote",
+      () =>
+        this.transact(() => {
+          const valid = validateNote(note);
+          if (!valid.ok) return { ok: false as const, reason: "invalid-note" as const, problem: valid.problem };
+          const task = this.db.prepare("SELECT state FROM task WHERE id = ?").get(taskId);
+          const ref = this.db
+            .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+            .get(BUILT_IN, taskId);
+          if (task === undefined || ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
+          const state = String(task["state"]);
+          if (state === "done" || state === "cancelled") return { ok: false as const, reason: "task-finished" as const };
+          const racing = this.db
+            .prepare(
+              `SELECT 1 AS hit FROM contest WHERE task_ref = ?
+                AND state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted') LIMIT 1`,
+            )
+            .get(Number(ref["id"]));
+          if (racing !== undefined) return { ok: false as const, reason: "contest-open" as const };
+          const inserted = this.db
+            .prepare("INSERT INTO task_steer (task_ref, author, note, created_at) VALUES (?, ?, ?, ?)")
+            .run(Number(ref["id"]), author, valid.note, now.toISOString());
+          this.bumpWake();
+          return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+        }),
+      result => result.ok,
+    );
+  }
+
+  /** Every steering note of a task, filing order, delivery state included. */
+  listSteerNotes(taskRef: number): SteerNote[] {
+    return this.db
+      .prepare("SELECT * FROM task_steer WHERE task_ref = ? ORDER BY id")
+      .all(taskRef)
+      .map(readSteerNote);
+  }
+
+  /** Undelivered, unsuperseded notes — the admitContest refusal predicate. */
+  pendingSteerCount(taskRef: number): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM task_steer WHERE task_ref = ? AND delivered_at IS NULL AND superseded_at IS NULL")
+      .get(taskRef);
+    return Number(row?.["n"] ?? 0);
+  }
+
+  /**
+   * The attach transaction (arc 1 finding 9): a DEDICATED pre-invocation
+   * step, called by the builder after the run row exists and immediately
+   * before the spawn. Selects pending notes whose previous attachment — if
+   * any — is provably ABANDONED (finding 12): the attached run concluded,
+   * or its lease is no longer the task's current live lease. Crashed runs
+   * keep outcome NULL forever, so liveness, not finalization, is the
+   * predicate — the same ONE fact the console derives runIsLive from.
+   * Stamps attachment and returns exactly what the brief must quote.
+   */
+  attachSteerNotes(taskRef: number, runId: number, now: Date): SteerNote[] {
+    return this.transact(() => {
+      const run = this.db.prepare("SELECT task_ref, outcome, lease_id FROM run WHERE id = ?").get(runId);
+      if (run === undefined || Number(run["task_ref"]) !== taskRef || run["outcome"] !== null) {
+        throw new Error(`run ${runId} is not an open attempt of this task — steering attaches to nothing else`);
+      }
+      const live = this.currentLiveLease(taskRef, now);
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM task_steer
+            WHERE task_ref = ? AND delivered_at IS NULL AND superseded_at IS NULL
+              AND (
+                attached_run IS NULL
+                OR attached_run = ?
+                OR EXISTS (
+                  SELECT 1 FROM run AS held WHERE held.id = task_steer.attached_run
+                    AND (held.outcome IS NOT NULL OR ? IS NULL OR held.lease_id <> ?)
+                )
+              )
+            ORDER BY id`,
+        )
+        .all(taskRef, runId, live, live);
+      const stamp = now.toISOString();
+      for (const row of rows) {
+        this.db
+          .prepare("UPDATE task_steer SET attached_run = ?, attached_at = ? WHERE id = ?")
+          .run(runId, stamp, Number(row["id"]));
+      }
+      return rows.map(row => readSteerNote({ ...row, attached_run: runId, attached_at: stamp }));
+    });
+  }
+
+  /**
+   * The receipt (arc 1 finding 8): the stream proved the prompt reached the
+   * agent, so every note riding this run settles delivered — immediately,
+   * durably, and independently of how the run later ends. Null-guarded:
+   * first receipt wins, and a replay changes nothing.
+   */
+  settleSteerDelivered(runId: number, now: Date): number {
+    const { changes } = this.db
+      .prepare("UPDATE task_steer SET delivered_at = ? WHERE attached_run = ? AND delivered_at IS NULL")
+      .run(now.toISOString(), runId);
+    return Number(changes);
+  }
+
+  /** A finished task's pending notes settle superseded — shown, typed, done. */
+  supersedeSteerNotes(taskRef: number, now: Date): number {
+    const { changes } = this.db
+      .prepare("UPDATE task_steer SET superseded_at = ? WHERE task_ref = ? AND delivered_at IS NULL AND superseded_at IS NULL")
+      .run(now.toISOString(), taskRef);
+    return Number(changes);
+  }
+
   /** The answers a run was given, exactly as it was given them. */
   answersFor(runId: number): { decision: Decision; choice: string; note: string | null }[] {
     return this.db
@@ -7649,10 +7890,10 @@ export class Store {
   }
 
   /** What is being built right now: current, unexpired claims with their task and holder. */
-  liveClaims(repo: string | null, now: Date): { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null }[] {
+  liveClaims(repo: string | null, now: Date): { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null; repo: string | null }[] {
     return this.db
       .prepare(
-        `SELECT task_ref.external_id AS task_id, claim.runner, claim.acquired_at, claim.expires_at,
+        `SELECT task_ref.external_id AS task_id, task_ref.repo AS repo, claim.runner, claim.acquired_at, claim.expires_at,
                 (SELECT run.model FROM run WHERE run.lease_id = claim.lease_id LIMIT 1) AS model
          FROM claim JOIN task_ref ON task_ref.id = claim.task_ref
          WHERE claim.released_at IS NULL AND claim.expires_at > ?
@@ -7670,6 +7911,7 @@ export class Store {
         claimedAt: String(row["acquired_at"]),
         expiresAt: String(row["expires_at"]),
         model: row["model"] === null || row["model"] === undefined ? null : String(row["model"]),
+        repo: row["repo"] === null ? null : String(row["repo"]),
       }));
   }
 
@@ -8810,6 +9052,20 @@ function readNotification(row: Record<string, unknown>): Notification {
       row["resolved_at"] === null || row["resolved_at"] === undefined
         ? null
         : String(row["resolved_at"]),
+  };
+}
+
+function readSteerNote(row: Record<string, unknown>): SteerNote {
+  return {
+    id: Number(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    author: String(row["author"]),
+    note: String(row["note"]),
+    createdAt: String(row["created_at"]),
+    attachedRun: row["attached_run"] === null ? null : Number(row["attached_run"]),
+    attachedAt: row["attached_at"] === null ? null : String(row["attached_at"]),
+    deliveredAt: row["delivered_at"] === null ? null : String(row["delivered_at"]),
+    supersededAt: row["superseded_at"] === null ? null : String(row["superseded_at"]),
   };
 }
 

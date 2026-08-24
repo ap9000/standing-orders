@@ -39,6 +39,7 @@ import {
 } from "./store.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
+import { sweepLiveLogs } from "./live.js";
 import { readFileSync } from "node:fs";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
@@ -194,6 +195,10 @@ export const OPERATE_HELP = `standing-orders — operating the queue
                                         queue (scheduling only — approval
                                         is still required); --undo puts it
                                         back in filing order
+  standing-orders task steer <id> --note "..."
+                                        guidance for the next attempt — it
+                                        reads the note before starting; a
+                                        running agent is not interrupted
   standing-orders task assign <id> --runner <name> | --anyone
                                         reserve it for one worker (it joins
                                         the back of that worker's queue) or
@@ -2406,6 +2411,11 @@ async function reconcileCommand(
   }
   const reaped = reap(store, clock());
 
+  // Live-window display files age out here (arc 1): finalized runs after a
+  // day, orphans on mtime, active runs untouchable. Never evidence, never
+  // load-bearing — a sweep that finds nothing is the common case.
+  const liveSwept = sweepLiveLogs(store, context.evidenceRoot, clock());
+
   const worktrees = new WorktreePool(store, {
     root: pool,
     ...(context.gitRunner === undefined ? {} : { runner: context.gitRunner }),
@@ -2437,7 +2447,8 @@ async function reconcileCommand(
     recovered.length === 0 &&
     reaped.length === 0 &&
     adoption.adopted.length === 0 &&
-    adoption.forgotten.length === 0;
+    adoption.forgotten.length === 0 &&
+    liveSwept.removed.length === 0;
 
   return succeed(
     write,
@@ -2448,6 +2459,7 @@ async function reconcileCommand(
       reaped: reaped.map(claim => claim.leaseId),
       adopted: adoption.adopted,
       forgotten: adoption.forgotten,
+      liveViewsSwept: liveSwept.removed.length,
     },
     () =>
       nothing
@@ -2460,6 +2472,7 @@ async function reconcileCommand(
             ...(reaped.length === 0 ? [] : [`Reaped ${reaped.length} expired lease(s).`]),
             ...adoption.adopted.map(path => `Adopted ${path} — released, unverified, somebody should look.`),
             ...adoption.forgotten.map(path => `Forgot ${path} — its directory is gone.`),
+            ...(liveSwept.removed.length === 0 ? [] : [`Cleared ${liveSwept.removed.length} finished live view(s).`]),
           ],
   );
 }
@@ -3218,7 +3231,7 @@ async function providersCommand(
     const phases = one["configuredPhases"] as string[];
     if (phases.length > 0) write(`  configured     ${phases.join(", ")} (installation)`);
     const audit = one["audit"] as ProviderAudit;
-    write(`  transport      ${audit.transport}${audit.initSignal === "none" ? " — no init signal; a failed run cannot say whether the harness came up" : ` — init observed via ${audit.initSignal}`}`);
+    write(`  transport      ${audit.transport}${audit.initSignal === "none" ? " — no init signal; a failed run cannot say whether the harness came up" : ` — init signal: ${audit.initSignal}`}`);
     write(`  resume         ${audit.resume}`);
     write(
       `  isolation      ${
@@ -5534,6 +5547,8 @@ function taskCommand(
       return unblockTask(rest, flags, context);
     case "next":
       return nextTask(rest, flags, context);
+    case "steer":
+      return steerTask(rest, flags, context);
     case "assign":
       return assignTask(rest, flags, context);
     case "reopen":
@@ -6001,6 +6016,40 @@ function blockTask(
 
   return succeed(write, json, "task block", { blocked: id, blocker: on }, () => [
     `${id} now waits for ${on}.`,
+  ]);
+}
+
+/**
+ * File a steering note (arc 1): guidance the next attempt's brief quotes,
+ * fenced, inside the approved scope. Scheduling-adjacent like block/next —
+ * no credential; the recorded author is "cli" or --as when given.
+ */
+function steerTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json } = context;
+  const id = positional[0];
+  const note = text(flags, "note");
+  if (id === undefined || note === undefined) {
+    return fail(write, json, "task steer", "usage", "`standing-orders task steer <id> --note \"...\"` — the note reaches the next attempt's brief, fenced, inside the approved scope", EXIT.usage);
+  }
+  const author = text(flags, "as") ?? "cli";
+  const filed = store.fileSteerNote(id, author, note, context.now, mutationFrom(flags, context.now));
+  if (!filed.ok) {
+    const detail =
+      filed.reason === "unknown-task"
+        ? `no task \`${id}\``
+        : filed.reason === "task-finished"
+          ? `${id} is finished — a note has no next attempt to reach`
+          : filed.reason === "contest-open"
+            ? "agents are racing on this task — steering waits until the tournament settles"
+            : (filed.problem ?? "that note will not store");
+    return fail(write, json, "task steer", filed.reason, detail, EXIT.refused);
+  }
+  return succeed(write, json, "task steer", { task: id, note: filed.id }, () => [
+    `Noted. The next attempt at ${id} reads it before starting — a running agent is not interrupted.`,
   ]);
 }
 

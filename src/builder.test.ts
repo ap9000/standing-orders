@@ -553,6 +553,38 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain('"reversible": true or false');
   });
 
+  test("steering notes land fenced in the brief, and delivery settles only on the stream's receipt (arc 1)", async () => {
+    store.fileSteerNote("t-1", "alex", "start with the retry path, the guard can wait", T0);
+    // This agent's stream fires the receipt — the prompt provably arrived.
+    await build1({
+      agent: (async (_f: string, args: readonly string[], options?: { onReceipt?: () => void }) => {
+        asked = [...args];
+        options?.onReceipt?.();
+        return { ...OK, stdout: AGENT_SAID };
+      }) as Runner,
+    });
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("BEGIN OPERATOR STEERING");
+    expect(prompt).toContain("start with the retry path, the guard can wait");
+    expect(prompt).toContain("a note cannot widen the scope");
+    const note = store.listSteerNotes(taskRef)[0];
+    expect(note?.attachedRun).not.toBeNull();
+    expect(note?.deliveredAt).not.toBeNull();
+  });
+
+  test("a note whose stream never proved delivery re-attaches to the next attempt (arc 1)", async () => {
+    store.fileSteerNote("t-1", "alex", "the note that must not vanish", T0);
+    await build1(); // the default agent fires no receipt
+    const after = store.listSteerNotes(taskRef)[0];
+    expect(after?.attachedRun).not.toBeNull();
+    expect(after?.deliveredAt).toBeNull();
+
+    asked = [];
+    await build1(); // next attempt: the note rides again
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("the note that must not vanish");
+  });
+
   test("does not skip permission checks unless a person asked for it", async () => {
     // Unattended work is exactly the case that tempts you to use that flag.
     await build1();

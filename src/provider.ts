@@ -19,8 +19,8 @@
  * shell the model itself launches (Codex provider review, Q5).
  */
 
-import { run, type ExecResult, type RunOptions } from "./exec.js";
-import { runStreamJsonl } from "./exec.js";
+import { type ExecResult, type RunOptions } from "./exec.js";
+import { runStreamJsonl, runClaudeStreamJsonl } from "./exec.js";
 
 export type ProviderId = "claude" | "codex" | "openrouter";
 export const PROVIDER_IDS: readonly ProviderId[] = ["claude", "codex", "openrouter"];
@@ -78,13 +78,22 @@ export type ParsedEnvelope = {
   costUsd: number | null;
   usageRaw: string | null;
   /**
-   * Whether the provider was seen to initialize (codex: thread.started).
-   * null = this transport carries no init signal (claude's buffered JSON),
-   * so absence proves nothing. A `false` here on a failed run means the
-   * harness never came up — config, auth, or install — and the turn must
-   * not be treated as an agent's attempt (M5 provider audit).
+   * Whether the provider was seen to initialize (codex: thread.started;
+   * claude streaming: system/init). null = this transport carries no init
+   * signal (legacy buffered fixtures), so absence proves nothing. A `false`
+   * here on a failed run means the harness never came up — config, auth,
+   * or install — and the turn must not be treated as an agent's attempt
+   * (M5 provider audit).
    */
   initObserved: boolean | null;
+  /**
+   * Structural proof the MAIN QUERY consumed the prompt (arc 1 finding 15):
+   * true only when the primary result is a success. null = this transport
+   * carries no such signal, and the gateway falls back to its historical
+   * nothing-to-show rule. Never derived from result PROSE — an error
+   * result's diagnostic text must not read as an agent's attempt.
+   */
+  promptConsumed: boolean | null;
 };
 
 type Adapter = {
@@ -119,8 +128,14 @@ const claudeArgv = (invocation: Invocation): string[] => [
   "-p",
   invocation.brief,
   ...(invocation.resumeSession === null ? [] : ["--resume", invocation.resumeSession]),
+  // stream-json (arc 1): the terminal result event IS the old buffered
+  // envelope, now arriving as one line of many — the streaming transport
+  // retains it structurally instead of buffering the whole session into
+  // an 8 MiB kill. --verbose is required by the harness for stream-json
+  // with -p and changes nothing else.
   "--output-format",
-  "json",
+  "stream-json",
+  "--verbose",
   "--max-turns",
   String(invocation.maxTurns),
   ...(invocation.skipPermissions
@@ -130,29 +145,90 @@ const claudeArgv = (invocation: Invocation): string[] => [
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
 ];
 
+/** A claude envelope object, whichever line carried it. */
+type ClaudeResultShape = {
+  result?: unknown;
+  session_id?: unknown;
+  usage?: { input_tokens?: unknown; output_tokens?: unknown };
+  total_cost_usd?: unknown;
+  is_error?: unknown;
+  subtype?: unknown;
+  origin?: unknown;
+};
+
+/**
+ * The primary-result allowlist (arc 1 finding 10): only an absent origin or
+ * an explicit human origin can be the main query's accounting envelope.
+ * Every other kind — task-notification, channel, peer, coordinator, and
+ * anything the SDK grows later — fails closed as a non-primary result.
+ */
+function claudePrimaryOrigin(event: ClaudeResultShape): boolean {
+  if (event.origin === undefined || event.origin === null) return true;
+  return typeof event.origin === "object" && String((event.origin as Record<string, unknown>)["kind"] ?? "") === "human";
+}
+
+function claudeEnvelopeOf(
+  result: ClaudeResultShape | null,
+  sessionFromInit: string | null,
+  initObserved: boolean | null,
+): ParsedEnvelope {
+  const input = result?.usage?.input_tokens;
+  const output = result?.usage?.output_tokens;
+  const cost = result?.total_cost_usd;
+  return {
+    sessionId:
+      typeof result?.session_id === "string" ? result.session_id : sessionFromInit,
+    finalMessage: typeof result?.result === "string" ? result.result : null,
+    tokensIn: typeof input === "number" && input >= 0 ? input : null,
+    tokensOut: typeof output === "number" && output >= 0 ? output : null,
+    costUsd: typeof cost === "number" && cost >= 0 ? cost : null,
+    usageRaw: result?.usage === undefined ? null : JSON.stringify(result.usage).slice(0, USAGE_JSON_CAP),
+    initObserved,
+    // Structural, never prose (finding 15): consumed means the primary
+    // result says SUCCESS. An error result keeps its text as diagnostics
+    // while proving nothing about delivery; when the transport carries no
+    // signal (legacy buffered), null defers to the gateway's old rule.
+    promptConsumed:
+      initObserved === null
+        ? null
+        : result !== null && result.is_error !== true && String(result.subtype ?? "") === "success",
+  };
+}
+
+/**
+ * Reads the streaming runner's retained lines: at most one `system`/`init`
+ * and one primary `result`, re-proved here (the parser trusts no transport
+ * to have selected correctly). A single objet without a `type` field is the
+ * legacy buffered envelope — kept for recorded fixtures, carrying no init
+ * signal, exactly as before the transport switch.
+ */
 function claudeParse(stdout: string): ParsedEnvelope {
-  try {
-    const parsed = JSON.parse(stdout) as {
-      result?: unknown;
-      session_id?: unknown;
-      usage?: { input_tokens?: unknown; output_tokens?: unknown };
-      total_cost_usd?: unknown;
-    };
-    const input = parsed.usage?.input_tokens;
-    const output = parsed.usage?.output_tokens;
-    const cost = parsed.total_cost_usd;
-    return {
-      sessionId: typeof parsed.session_id === "string" ? parsed.session_id : null,
-      finalMessage: typeof parsed.result === "string" ? parsed.result : null,
-      tokensIn: typeof input === "number" && input >= 0 ? input : null,
-      tokensOut: typeof output === "number" && output >= 0 ? output : null,
-      costUsd: typeof cost === "number" && cost >= 0 ? cost : null,
-      usageRaw: parsed.usage === undefined ? null : JSON.stringify(parsed.usage).slice(0, USAGE_JSON_CAP),
-      initObserved: null,
-    };
-  } catch {
-    return { sessionId: null, finalMessage: null, tokensIn: null, tokensOut: null, costUsd: null, usageRaw: null, initObserved: null };
+  let initSeen = false;
+  let sessionFromInit: string | null = null;
+  let primary: ClaudeResultShape | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (event === null || typeof event !== "object") continue;
+    const type = event["type"];
+    if (type === undefined) {
+      // Legacy buffered envelope: one JSON object, no event framing.
+      return claudeEnvelopeOf(event as ClaudeResultShape, null, null);
+    }
+    if (String(type) === "system" && String(event["subtype"] ?? "") === "init") {
+      initSeen = true;
+      const id = event["session_id"];
+      if (typeof id === "string" && id !== "") sessionFromInit = id;
+    } else if (String(type) === "result" && primary === null && claudePrimaryOrigin(event as ClaudeResultShape)) {
+      primary = event as ClaudeResultShape;
+    }
   }
+  return claudeEnvelopeOf(primary, sessionFromInit, initSeen);
 }
 
 /**
@@ -220,7 +296,9 @@ function codexParse(stdout: string): ParsedEnvelope {
   }
   // Codex reports no dollars. NULL is the honest cost — unmeasured — and
   // every surface downstream already says so instead of summing a lie.
-  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved };
+  // promptConsumed stays null: codex carries no structural consumption
+  // signal, and the gateway keeps its historical rule for it.
+  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved, promptConsumed: null };
 }
 
 /** Codex wall-clock caps, phase by phase — the turn bound it does not have. */
@@ -235,7 +313,7 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
     binary: "claude",
     argv: claudeArgv,
     parse: claudeParse,
-    defaultRunner: run,
+    defaultRunner: runClaudeStreamJsonl,
     extraOmitEnv: [],
     clampTimeout: (_phase, requested) => requested,
   },
@@ -292,8 +370,10 @@ export type ProviderAudit = {
   transport: "buffered-json" | "streaming-jsonl";
   /** Whether a later invocation can resume this provider's session. */
   resume: "native" | "none";
-  /** The event whose absence on a failed run means "never initialized". */
-  initSignal: "thread.started" | "none";
+  /** The event whose absence on a failed run means "never initialized".
+   * CAPABILITY metadata, not a per-run observation (arc 1 finding 16):
+   * whether a given run actually saw it lives in ParsedEnvelope.initObserved. */
+  initSignal: "thread.started" | "system-init" | "none";
   isolation: {
     /** The harness's hermetic flag, if it has one. We do not pass it. */
     flag: string | null;
@@ -307,9 +387,9 @@ export type ProviderAudit = {
 
 const AUDITS: Record<ProviderId, ProviderAudit> = {
   claude: {
-    transport: "buffered-json",
+    transport: "streaming-jsonl",
     resume: "native",
-    initSignal: "none",
+    initSignal: "system-init",
     isolation: { flag: "--bare", resumeSafe: null, enforced: false },
     configSurface: [
       "~/.claude/CLAUDE.md and settings (hooks, MCP servers, plugins)",

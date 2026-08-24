@@ -44,7 +44,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile, scanForSecrets } from "./evidence.js";
@@ -93,9 +93,11 @@ import {
 } from "./scope.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
+import { readLiveWindow } from "./live.js";
 import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, jointApprovalDigest } from "./contest.js";
 import type { AgentView } from "./contest.js";
 import type { Runner } from "./runner.js";
+import { register as registerRunner, isAlive as runnerAlive } from "./runner.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import {
   authorizedProject,
@@ -112,7 +114,7 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms } from "./store.js";
+import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -170,6 +172,9 @@ const NONCE_CAP = 500;
 const RUNS_PAGE = 50;
 
 const TASK_STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
+
+/** Read-only fragment polls that must never refresh session activity (arc 1). */
+const NO_TOUCH_FRAGMENTS: ReadonlySet<string> = new Set(["1", "facts", "peek", "rail", "transcript"]);
 
 type Session = {
   name: string;
@@ -362,8 +367,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     // A fragment poll is the page keeping itself fresh, not a person acting.
     // It authenticates like any request but must not count as activity —
     // otherwise a board left open on a wall keeps its session alive forever
-    // (Codex board review, finding 4).
-    const touch = !(method === "GET" && url.searchParams.get("fragment") === "1");
+    // (Codex board review, finding 4). EVERY named read-only fragment is
+    // excluded, not just the board's (arc 1, live bug): a 2-second
+    // transcript poll would otherwise hold a session open until the tab
+    // closed, which is no idle expiry at all.
+    const fragmentName = url.searchParams.get("fragment");
+    const touch = !(method === "GET" && fragmentName !== null && NO_TOUCH_FRAGMENTS.has(fragmentName));
     const who = identify(request, touch);
 
     if (url.pathname === "/login" && method === "GET") {
@@ -434,6 +443,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
       url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/workbench" &&
+      url.pathname !== "/fleet" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
@@ -861,6 +871,48 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/fleet") {
+      // Cross-project by design: which agent is on which project is the
+      // question, so this screen is a survey — reads are still filtered
+      // through the ceiling before a card renders. No project needed.
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const queued = store.fleetQueue(clock());
+      const building = store.liveClaims(null, clock());
+      const owned = new Set(queued.map(one => one.assignedRunner).filter((one): one is string => one !== null));
+      const runners = store.listRunners().filter(one => one.retiredAt === null || owned.has(one.name));
+      const body = fleetBody(queued, building, runners, csrf, store.queueRevision(), visible);
+      if (url.searchParams.get("fragment") === "1") {
+        return respond(response, 200, "text/html; charset=utf-8", body);
+      }
+      const said = url.searchParams.get("said");
+      const nonce = randomBytes(16).toString("base64");
+      const html = shell(
+        "fleet",
+        [
+          `<h1>fleet</h1>`,
+          `<p class="hint">one lane per worker — building pins to the top, queued reservations below it, every card wearing its project. Drag a queued card onto another worker to re-reserve it. Registering and retiring a worker are the only acts here, and both take your password.</p>`,
+          ...(said === null ? [] : [`<p class="meta">${escape(said)}</p>`]),
+          `<div id="fleet-region">${body}</div>`,
+          `<p class="meta" id="fleet-region-stamp"></p>`,
+          `<h2>register a worker</h2>`,
+          `<form method="post" action="/fleet/runner/register" class="card">` +
+            `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+            `<label>name<input type="text" name="name" placeholder="builder-2" maxlength="60" required></label>` +
+            `<label>capacity<input type="text" name="capacity" inputmode="numeric" value="1" aria-label="capacity"></label>` +
+            `<label>your password, typed again<input type="password" name="token" autocomplete="current-password" required></label>` +
+            `<button type="submit">register — its token is shown once</button></form>`,
+          `<details class="arm-danger"><summary>retire a worker</summary>` +
+            `<form method="post" action="/fleet/runner/retire" class="card">` +
+            `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+            `<label>which worker<input type="text" name="name" placeholder="builder-1" required></label>` +
+            `<label>your password, typed again<input type="password" name="token" autocomplete="current-password" required></label>` +
+            `<button type="submit" class="danger">retire it</button></form></details>`,
+        ].join("\n"),
+        { chrome: chromeFor(project, "fleet"), live: { nonce, script: fleetScript() + chromeScript() } },
+      );
+      return page(response, 200, html, nonce);
+    }
+
     if (url.pathname === "/tasks/new") {
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const revision = who.via === "cookie" ? who.session.projectRevision : 0;
@@ -912,6 +964,48 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (peeked.retryAfter !== undefined) response.setHeader("retry-after", String(peeked.retryAfter));
         return respond(response, peeked.status, "text/html; charset=utf-8", peeked.body);
       }
+      if (url.searchParams.get("fragment") === "transcript") {
+        // The live transcript window (arc 1): raw sanitized TEXT as JSON —
+        // the sink is textContent, never innerHTML. Guards, enumerated:
+        // cookie session; run visible (proved above); this machine's
+        // runner asserted; byte offsets validated; the file read through
+        // its own descriptor with the exact numeric-id name. Display
+        // state, not evidence — and never cached.
+        response.setHeader("cache-control", "no-store");
+        if (who.via !== "cookie") return respond(response, 403, "application/json", JSON.stringify({ error: "session" }));
+        if (options.localRunner === undefined) {
+          return respond(response, 200, "application/json", JSON.stringify({ error: "off" }));
+        }
+        const fromRaw = url.searchParams.get("from") ?? "0";
+        const from = /^[0-9]{1,15}$/.test(fromRaw) ? Number(fromRaw) : Number.NaN;
+        if (!Number.isSafeInteger(from) || from < 0) {
+          return respond(response, 400, "application/json", JSON.stringify({ error: "offset" }));
+        }
+        const live = runIsLive(found);
+        // The final drain: a finished run's tail — including a torn last
+        // line — may be read until the sweep removes the file.
+        const window = readLiveWindow(evidenceRoot, found.id, from, !live);
+        if (!window.ok) {
+          if (window.reason === "replaced") {
+            return respond(response, 409, "application/json", JSON.stringify({ error: "replaced" }));
+          }
+          // Missing or unreadable: nothing to show. Final only when the
+          // run can never write again.
+          return respond(response, 200, "application/json", JSON.stringify({ text: "", nextOffset: from, final: !live }));
+        }
+        // Re-proof after the read (peek discipline): the run row still says
+        // what admission said, or nothing is shown.
+        const again = store.getRun(found.id);
+        if (again === null || !runVisible(again)) {
+          return respond(response, 200, "application/json", JSON.stringify({ text: "", nextOffset: from, final: true }));
+        }
+        return respond(
+          response,
+          200,
+          "application/json",
+          JSON.stringify({ text: window.text, nextOffset: window.nextOffset, final: !live && window.eof }),
+        );
+      }
       // Pollers and their nonce exist only for a LIVE run — an orphaned
       // null-outcome run would otherwise be refetched forever (finding 15).
       const liveNonce = running ? randomBytes(16).toString("base64") : undefined;
@@ -941,6 +1035,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 script:
                   regionScript("run-facts", "facts", 10) +
                   (options.localRunner === undefined ? "" : regionScript("run-peek", "peek", 15)) +
+                  (options.localRunner === undefined || found.provider !== "claude" ? "" : transcriptScript()) +
                   chromeScript(),
               },
           options.localRunner !== undefined,
@@ -1645,6 +1740,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         runs: ref === null ? [] : store.runsFor(ref.id),
         decisions: ref === null ? [] : store.decisionsForTask(ref.id),
         incidents: ref === null ? [] : store.incidentsForTask(ref.id),
+        steering: ref === null ? [] : store.listSteerNotes(ref.id),
         csrf: who.via === "cookie" ? who.session.csrf : "",
         nonce,
         problem,
@@ -2178,12 +2274,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (project === undefined) {
         return refuse(response, who, 403, "that project is outside what this server was configured to show");
       }
-      if (who.via === "cookie") {
-        const seen = body.get("projectRevision");
-        if (seen !== null && seen !== String(who.session.projectRevision)) {
-          return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", "/queue");
-        }
-      }
+      // The note is a global runner label, not project-scoped work: the
+      // fleet screen (project-less) posts it too, so the null-project gate
+      // applies only to moves, which the task-level check below re-proves.
       if (url.pathname === "/queue/note") {
         const worker = (body.get("runner") ?? "").trim();
         const note = (body.get("note") ?? "").trim();
@@ -2192,20 +2285,45 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         const set = store.setRunnerQueueNote(worker, note === "" ? null : note);
         if (!set.ok) return refuse(response, who, 404, "no such worker", "/queue");
-        return redirect(response, "/queue");
+        return redirect(response, body.get("from") === "fleet" ? "/fleet" : "/queue");
       }
+      if (who.via === "cookie") {
+        const seen = body.get("projectRevision");
+        if (seen !== null && seen !== String(who.session.projectRevision)) {
+          return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", "/queue");
+        }
+      }
+      // A drag posts in place (fetch) when it can; the page re-renders its
+      // own fragment on success. A plain form still works with no script.
+      const inPlace = body.get("respond") === "fragment";
+      const fromFleet = who.via === "cookie" && body.get("projectRevision") === null;
+      const respondMove = (status: number, message: string): void => {
+        if (!inPlace) return status === 409 ? refuse(response, who, 409, message, "/queue") : redirect(response, "/queue");
+        respond(response, status, "text/plain; charset=utf-8", message);
+      };
+      const moveReason = (reason: string): string =>
+        reason === "stale"
+          ? "the queue moved underneath you — it just reloaded"
+          : reason === "claimed" || reason === "contest-open"
+            ? "that task is being taken right now — it keeps its claim"
+            : reason === "worker-retired"
+              ? "that worker is retired — drag its work elsewhere, or register the name again"
+              : reason === "no-such-worker"
+                ? "no such worker"
+                : "that task is not in this queue any more";
       const taskId = (body.get("task") ?? "").trim();
       const columnGiven = (body.get("column") ?? "").trim();
       const toRunner = columnGiven === "" || columnGiven === "anyone" ? null : columnGiven;
       const beforeGiven = (body.get("before") ?? "").trim();
       const revisionGiven = Number(body.get("queueRevision") ?? "");
-      // Both ends must belong to this console's view of the open project.
+      // The queue's own screen enforces the open project; the fleet screen
+      // is cross-project, so the ceiling is the only wall it needs.
       const belongs = (id: string): boolean => {
         const ref = store.lookupRef(id);
-        return ref !== null && visible(ref.repo) && (project === null || ref.repo === null || ref.repo === project);
+        return ref !== null && visible(ref.repo) && (fromFleet || project === null || ref.repo === null || ref.repo === project);
       };
       if (!belongs(taskId) || (beforeGiven !== "" && !belongs(beforeGiven))) {
-        return refuse(response, who, 404, "that task is not in this queue", "/queue");
+        return respondMove(404, "that task is not in this queue");
       }
       const moved = store.moveTask(
         {
@@ -2217,19 +2335,58 @@ export function createDecisionServer(options: ServeOptions): Server {
         clock(),
       );
       if (!moved.ok) {
-        const said =
-          moved.reason === "stale"
-            ? "the queue moved underneath you — it just reloaded"
-            : moved.reason === "claimed" || moved.reason === "contest-open"
-              ? "that task is being taken right now — it keeps its claim"
-              : moved.reason === "worker-retired"
-                ? "that worker is retired — drag its work elsewhere, or register the name again"
-                : moved.reason === "no-such-worker"
-                  ? "no such worker"
-                  : "that task is not in this queue any more";
-        return refuse(response, who, 409, said, "/queue");
+        return respondMove(409, moveReason(moved.reason));
       }
-      return redirect(response, "/queue");
+      return respondMove(200, "moved");
+    }
+
+    // Runner lifecycle, brought in from the terminal behind the same
+    // password step-up the console uses for every other credential-grade
+    // act. Register mints a token that is shown ONCE and stored only as a
+    // hash — the page that shows it renders no self-refreshing script, so
+    // the token is never re-rendered.
+    if (url.pathname === "/fleet/runner/register") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "runner registration is a browser surface");
+      const token = body.get("token") ?? "";
+      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        return refuse(response, who, 403, "registering a worker takes your password, typed again", "/fleet");
+      }
+      const name = (body.get("name") ?? "").trim();
+      if (name === "" || name.length > 60 || /[\r\n\t]/.test(name) || hasForbiddenControls(name)) {
+        return refuse(response, who, 400, "a worker's name is one short line, no control characters", "/fleet");
+      }
+      const capacity = Number((body.get("capacity") ?? "1").trim() || "1");
+      if (!Number.isInteger(capacity) || capacity < 1 || capacity > 64) {
+        return refuse(response, who, 400, "capacity is a whole number of tasks, 1 to 64", "/fleet");
+      }
+      const { token: minted } = registerRunner(store, { name, host: hostname(), capacity, now });
+      const html = shell(
+        "fleet",
+        [
+          `<h1>fleet</h1>`,
+          `<div class="card">`,
+          `<h2 style="margin-top:0">${escape(name)} is registered</h2>`,
+          `<p class="meta">its token — shown once, stored only as a hash, never recoverable:</p>`,
+          `<p class="mono" style="overflow-wrap:anywhere">${escape(minted)}</p>`,
+          `<p class="meta">keep it beside the worker (a 0600 file, a manager). If it is lost, register the name again — the old claims are taken back automatically.</p>`,
+          `</div>`,
+          `<p class="meta"><a href="/fleet">back to the fleet</a></p>`,
+        ].join("\n"),
+        { chrome: chromeFor(projectOf(who, request) ?? null, "fleet") },
+      );
+      return page(response, 200, html);
+    }
+
+    if (url.pathname === "/fleet/runner/retire") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "runner retirement is a browser surface");
+      const token = body.get("token") ?? "";
+      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        return refuse(response, who, 403, "retiring a worker takes your password, typed again", "/fleet");
+      }
+      const name = (body.get("name") ?? "").trim();
+      const retired = store.retireRunner(name, now);
+      if (!retired) return refuse(response, who, 404, `no worker \`${name}\``, "/fleet");
+      return redirect(response, `/fleet?said=${encodeURIComponent(`${name} is retired — its queued work is still here, drag it elsewhere`)}`);
     }
 
     const answer = /^\/d\/([0-9]{1,15})\/answer$/.exec(url.pathname);
@@ -2346,7 +2503,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/contest/${contestId}`);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -2902,6 +3059,27 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     switch (verb) {
+      case "steer": {
+        // Steering is a browser session's act, explicitly (arc 1 v2 §3):
+        // identify() accepts bearer credentials generically, and those are
+        // for machines — a person watching steers, cookie + CSRF only.
+        if (who.via !== "cookie") {
+          return refuse(response, who, 403, "steering is a browser session's act");
+        }
+        const filed = store.fileSteerNote(taskId, who.name, body.get("note") ?? "", now);
+        if (!filed.ok) {
+          const said =
+            filed.reason === "contest-open"
+              ? "agents are racing on this task — steering waits until the tournament settles"
+              : filed.reason === "task-finished"
+                ? "this task is finished — a note has no next attempt to reach"
+                : filed.reason === "invalid-note"
+                  ? (filed.problem ?? "that note will not store")
+                  : "no such task";
+          return taskScreen(response, who, taskId, said, 400);
+        }
+        return redirect(response, taskHref(taskId));
+      }
       case "hold": {
         const reason = (body.get("reason") ?? "").trim() || "held from the console";
         if (reason.length > 200 || hasForbiddenControls(reason)) {
@@ -3680,7 +3858,11 @@ const STYLE = `
     .side nav a { padding: .375rem .5rem; }
     .side .grow { display: none; }
     .side .new-task { margin: 0; padding: .375rem .625rem; white-space: nowrap; }
-    .side .foot { display: none; }
+    /* The phone keeps the whole map: the foot destinations wrap onto their
+       own scrollable row instead of being deleted outright. */
+    .side { flex-wrap: wrap; }
+    .side .foot { flex-basis: 100%; display: flex; flex-wrap: nowrap; overflow-x: auto; padding-top: .125rem; }
+    .side .foot a { font-size: .75rem; padding: .25rem .5rem; min-height: 1.75rem; }
     .content > main, .split > .detail > main { padding: 1.25rem 1.25rem 4rem; }
   }
 
@@ -3768,6 +3950,27 @@ const STYLE = `
   .lane-empty { margin: .75rem 0 .25rem; }
   .plan-doc { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; max-height: 24rem; overflow-y: auto; }
   .lane-more { display: block; margin-top: .5rem; font-size: .75rem; }
+
+  /* Runner lanes (queue + fleet): one column per worker, so the grid is
+     computed from how many workers there are — never the board's fixed
+     five tracks. auto-fit collapses empty space: one worker spans wide,
+     six wrap to a readable minimum instead of scrolling off the edge. */
+  .content > main:has(.lanes) { max-width: none; }
+  .lanes {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: .75rem; padding-bottom: .75rem; align-items: start;
+  }
+  @media (max-width: 40rem) {
+    .lanes { display: flex; flex-direction: column; }
+    .lanes .lane { min-height: 0; }
+  }
+  .lane .lane-live { border-top: 2px solid var(--success); }
+  .runner-note { width: 100%; }
+  /* Fleet/queue cards: a compact two-line block — title row, then the
+     metadata row — so a card reads at a glance instead of stacking. */
+  .queue-card p { margin: 0; }
+  .queue-card .row + .row { margin-top: .125rem; border-bottom: none; }
+  .queue-card p.row { padding: 0; border-bottom: none; }
   .tracks { margin-top: 1.5rem; }
   .tracks > .hint { margin-bottom: .75rem; }
   .track-row { margin-bottom: .6rem; }
@@ -3784,7 +3987,7 @@ const STYLE = `
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "queue" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
+  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -3834,6 +4037,36 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     // abandoned build must not be fetched every beat forever.
     `.then(function(){busy=false;tell();if(region.querySelector("[data-region-stop]")){if(stamp)stamp.textContent="";return;}setTimeout(cycle,wait);});}` +
     `setTimeout(cycle,wait);})();`
+  );
+}
+
+/**
+ * The live transcript's DEDICATED poller (arc 1 §4): a JSON byte-offset
+ * protocol, not an HTML fragment — the response is raw sanitized text and
+ * the ONLY sink is textContent, so nothing here can become markup. One
+ * request in flight, visibility-paused, stops on `final`, and a `replaced`
+ * answer restarts from zero with a visible line — never a silent re-read.
+ */
+function transcriptScript(): string {
+  return (
+    `(function(){var out=document.getElementById("live-transcript");if(!out)return;` +
+    `var from=0,busy=false,stopped=false;` +
+    `function near(){return out.scrollHeight-out.scrollTop-out.clientHeight<40;}` +
+    `function go(){if(stopped)return;if(busy||document.hidden){later();return;}busy=true;` +
+    `fetch(location.pathname+"?fragment=transcript&from="+from,{redirect:"manual",cache:"no-store"})` +
+    `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){stopped=true;return null;}` +
+    `if(r.status===409)return{error:"replaced"};return r.ok?r.json():null;})` +
+    `.then(function(d){busy=false;if(d===null){later();return;}if(stopped)return;` +
+    `if(d.error==="replaced"){from=0;out.textContent="[the view restarted]\\n";later();return;}` +
+    `if(d.error){stopped=true;return;}` +
+    `var stick=near();` +
+    `if(typeof d.text==="string"&&d.text!==""){out.appendChild(document.createTextNode(d.text));if(stick)out.scrollTop=out.scrollHeight;}` +
+    `if(typeof d.nextOffset==="number"&&d.nextOffset>=from){from=d.nextOffset;}` +
+    `if(d.final===true){stopped=true;var m=document.getElementById("live-transcript-state");` +
+    `if(m)m.textContent="the agent finished — the record on this page is the story";return;}` +
+    `later();})` +
+    `.catch(function(){busy=false;later();});}` +
+    `function later(){setTimeout(go,2000);}go();})();`
   );
 }
 
@@ -3954,6 +4187,7 @@ function shell(
     item("inbox", "/", "inbox", chrome.inboxCount),
     item("board", "/board", "board"),
     item("queue", "/queue", "queue"),
+    item("fleet", "/fleet", "fleet"),
     item("workbench", "/workbench", "workbench"),
     item("routines", "/routines", "routines"),
     item("done", "/done", "done"),
@@ -5561,7 +5795,7 @@ function queueBody(
         `<button type="submit">save</button></form>` +
         `<p class="meta">takes from the shared queue when its own is empty</p>`;
   return (
-    `<div class="board" data-queue-revision="${queueRevision}">` +
+    `<div class="lanes" data-queue-revision="${queueRevision}">` +
     column("shared queue", "anyone", `<p class="meta">any free worker takes from here, top first</p>`, shared, "nothing waiting — every task is reserved or running") +
     workers
       .map(worker => column(worker.name + (worker.retired ? " (retired)" : ""), worker.name, noteForm(worker), columnOf(worker.name), "nothing queued — this worker will take from the shared queue"))
@@ -5571,7 +5805,142 @@ function queueBody(
 }
 
 /**
- * The queue page's one nonce'd script: delegated pointer-event drag (it
+ * The fleet screen — one lane per runner, and the work in front of it.
+ * Building claims pin to the top of their worker's lane (live — never
+ * draggable); queued reservations sit below it (draggable to another
+ * worker, re-reserving them). Every card wears its project chip, which is
+ * the whole point: which agent is on which project is the page's answer.
+ * Form-free like the board, except the per-worker note, so the lane stack
+ * can re-render itself while somebody watches.
+ */
+function fleetBody(
+  queued: ReturnType<Store["fleetQueue"]>,
+  building: ReturnType<Store["liveClaims"]>,
+  runners: Runner[],
+  csrf: string,
+  queueRevision: number,
+  visibleRepo: (repo: string | null) => boolean,
+): string {
+  const chip = (repo: string | null): string =>
+    repo === null ? "" : ` <span class="badge">${escape(projectName(repo))}</span>`;
+  const lanes = runners.map(runner => {
+    const own = queued.filter(one => one.assignedRunner === runner.name && visibleRepo(one.repo));
+    const live = building.filter(one => one.runner === runner.name);
+    const retired = runner.retiredAt !== null;
+    const head =
+      retired
+        ? `<p class="meta">this worker is retired — drag these elsewhere, or register the name again</p>`
+        : `<form method="post" action="/queue/note" class="row">` +
+          `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+          `<input type="hidden" name="from" value="fleet">` +
+          `<input type="hidden" name="runner" value="${escape(runner.name)}">` +
+          `<input type="text" name="note" class="runner-note" value="${runner.queueNote === null || runner.queueNote === undefined ? "" : escape(runner.queueNote)}" data-initial="${runner.queueNote === null || runner.queueNote === undefined ? "" : escape(runner.queueNote)}" placeholder="what this worker is working through" aria-label="column note" maxlength="200">` +
+          `</form>` +
+          `<p class="meta">${runnerAlive(runner, new Date()) ? "alive" : "quiet"} · ${live.length}/${runner.capacity} building</p>`;
+    const buildingCards = live
+      .map(
+        claim =>
+          `<div class="lane-card" data-taken="1"><p class="row"><span class="dot dot-ok pulse"></span> ${escape(claim.taskId)}</p>` +
+          `<p class="row meta">building${chip(claim.repo ?? null)}${claim.model === null ? "" : ` · ${escape(claim.model)}`} · ${Math.max(1, Math.round((Date.now() - new Date(claim.claimedAt).getTime()) / 60_000))}m</p></div>`,
+      )
+      .join("\n");
+    const queuedCards = own
+      .map(
+        one =>
+          `<div class="lane-card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}">` +
+          `<p class="row">${one.taken ? "" : `<span class="queue-handle" style="cursor:grab;user-select:none" aria-hidden="true">≡ </span>`}` +
+          `<a href="${taskHref(one.id)}">${escape(one.title)}</a></p>` +
+          `<p class="row meta"><span class="mono">${escape(one.id)}</span>${chip(one.repo)}` +
+          `${one.approved ? "" : ` <span class="badge">unapproved scope</span>`}` +
+          `${one.blockers > 0 ? ` <span class="badge">waits for ${one.blockers}</span>` : ""}` +
+          `${one.taken ? ` <span class="badge">being taken</span>` : ""}</p></div>`,
+      )
+      .join("\n");
+    const empty =
+      live.length === 0 && own.length === 0
+        ? `<p class="meta lane-empty">${retired ? "nothing left" : "idle — will take from the shared queue"}</p>`
+        : "";
+    return (
+      `<section class="lane queue-column${live.length > 0 ? " lane-live" : ""}" data-column="${escape(runner.name)}">` +
+      `<h2>${escape(runner.name)}${retired ? " (retired)" : ""}</h2>${head}${buildingCards}${queuedCards}${empty}</section>`
+    );
+  });
+  // The shared queue: anything reserved for nobody.
+  const shared = queued.filter(one => one.assignedRunner === null && visibleRepo(one.repo));
+  const sharedCards = shared
+    .map(
+      one =>
+        `<div class="lane-card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}">` +
+        `<p class="row">${one.taken ? "" : `<span class="queue-handle" style="cursor:grab;user-select:none" aria-hidden="true">≡ </span>`}` +
+        `<a href="${taskHref(one.id)}">${escape(one.title)}</a></p>` +
+        `<p class="row meta"><span class="mono">${escape(one.id)}</span>${chip(one.repo)}` +
+        `${one.approved ? "" : ` <span class="badge">unapproved scope</span>`}` +
+        `${one.blockers > 0 ? ` <span class="badge">waits for ${one.blockers}</span>` : ""}` +
+        `${one.taken ? ` <span class="badge">being taken</span>` : ""}</p></div>`,
+    )
+    .join("\n");
+  const sharedLane =
+    `<section class="lane queue-column" data-column="anyone"><h2>shared queue</h2>` +
+    `<p class="meta">any free worker takes from here, top first</p>${sharedCards}` +
+    (shared.length === 0 ? `<p class="meta lane-empty">nothing waiting — every task is reserved or running</p>` : "") +
+    `</section>`;
+  return (
+    `<div class="lanes" data-queue-revision="${queueRevision}">` +
+    sharedLane +
+    lanes.join("\n") +
+    `</div>`
+  );
+}
+
+/** Identical drag mechanics to the queue — the pointer events land on the worker's column. */
+function fleetScript(): string {
+  return (
+    `(function(){var region=document.getElementById("fleet-region");if(!region)return;` +
+    `var stamp=document.getElementById("fleet-region-stamp");var dragging=null;` +
+    `function dirty(){if(region.contains(document.activeElement)&&document.activeElement!==document.body)return true;` +
+    `var inputs=region.querySelectorAll("input[type=text]");for(var i=0;i<inputs.length;i++){` +
+    `if(inputs[i].value!==(inputs[i].getAttribute("data-initial")||""))return true;}` +
+    `return false;}` +
+    `function paused(){return dragging!==null||dirty();}` +
+    `var wait=12000;var last=Date.now();var busy=false;` +
+    `function tell(){if(!stamp)return;if(paused()){stamp.textContent="paused while you edit";return;}` +
+    `stamp.textContent="updated "+Math.round((Date.now()-last)/1000)+"s ago";}setInterval(tell,1000);` +
+    `function cycle(){if(document.hidden||busy||paused()){setTimeout(cycle,wait);return;}busy=true;` +
+    `fetch("/fleet?fragment=1",{redirect:"manual",cache:"no-store"})` +
+    `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return null;}` +
+    `return r.ok?r.text():null;})` +
+    `.then(function(t){if(t&&!paused()){region.innerHTML=t;last=Date.now();}})` +
+    `.catch(function(){})` +
+    `.then(function(){busy=false;tell();setTimeout(cycle,wait);});}setTimeout(cycle,wait);` +
+    `region.addEventListener("pointerdown",function(e){var handle=e.target.closest(".queue-handle");if(!handle)return;` +
+    `var card=handle.closest(".queue-card");if(!card||card.getAttribute("data-taken")==="1")return;` +
+    `e.preventDefault();dragging={task:card.getAttribute("data-task"),card:card};card.style.opacity="0.5";});` +
+    `region.addEventListener("pointermove",function(e){if(!dragging)return;e.preventDefault();` +
+    `var over=document.elementFromPoint(e.clientX,e.clientY);if(!over)return;` +
+    `var target=over.closest(".queue-card");var lane=over.closest(".queue-column");` +
+    `region.querySelectorAll(".queue-card,.queue-column").forEach(function(n){n.style.outline="";});` +
+    `if(target&&target!==dragging.card){target.style.outline="2px solid currentColor";}` +
+    `else if(lane){lane.style.outline="2px dashed currentColor";}});` +
+    `region.addEventListener("pointerup",function(e){if(!dragging)return;var drag=dragging;dragging=null;` +
+    `drag.card.style.opacity="";region.querySelectorAll(".queue-card,.queue-column").forEach(function(n){n.style.outline="";});` +
+    `var over=document.elementFromPoint(e.clientX,e.clientY);if(!over){tell();return;}` +
+    `var target=over.closest(".queue-card");var lane=over.closest(".queue-column");if(!lane){tell();return;}` +
+    `var column=lane.getAttribute("data-column");var before=target&&target!==drag.card?target.getAttribute("data-task"):"";` +
+    `if(target&&target.getAttribute("data-taken")==="1"){before="";}` +
+    `var wrap=region.querySelector("[data-queue-revision]");` +
+    `var fields={respond:"fragment",csrf:(region.querySelector("input[name=csrf]")||{value:""}).value,` +
+    `queueRevision:wrap?wrap.getAttribute("data-queue-revision"):"",task:drag.task,column:column,before:before};` +
+    `var post=new URLSearchParams();Object.keys(fields).forEach(function(k){post.append(k,fields[k]);});` +
+    `fetch("/queue/move",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:post.toString(),redirect:"manual"})` +
+    `.then(function(r){return r.ok?fetch("/fleet?fragment=1",{cache:"no-store"}).then(function(f){return f.ok?f.text():null;}):null;})` +
+    `.then(function(t){if(t&&!paused()){region.innerHTML=t;last=Date.now();}else if(t===null){location.href="/fleet";}})` +
+    `.catch(function(){})` +
+    `.then(function(){tell();});});` +
+    `})();`
+  );
+}
+
+/** The /queue page's one nonce'd script: delegated pointer-event drag (it
  * survives every fragment swap — finding 17) plus a poller that re-checks
  * focus, dirty inputs, and an in-flight drag AT SWAP TIME, never only
  * before the fetch. Select dirtiness compares against data-initial
@@ -5616,12 +5985,14 @@ function queueScript(): string {
     `var column=lane.getAttribute("data-column");var before=target&&target!==drag.card?target.getAttribute("data-task"):"";` +
     `if(target&&target.getAttribute("data-taken")==="1"){before="";}` +
     `var wrap=region.querySelector("[data-queue-revision]");` +
-    `var form=document.createElement("form");form.method="post";form.action="/queue/move";` +
-    `var csrfField=region.querySelector("input[name=csrf]");if(!csrfField)return;` +
-    `var fields={csrf:csrfField.value,projectRevision:(region.querySelector("input[name=projectRevision]")||{value:"0"}).value,` +
+    `var fields={respond:"fragment",csrf:(region.querySelector("input[name=csrf]")||{value:""}).value,projectRevision:(region.querySelector("input[name=projectRevision]")||{value:""}).value,` +
     `queueRevision:wrap?wrap.getAttribute("data-queue-revision"):"",task:drag.task,column:column,before:before};` +
-    `Object.keys(fields).forEach(function(k){var f=document.createElement("input");f.type="hidden";f.name=k;f.value=fields[k];form.appendChild(f);});` +
-    `document.body.appendChild(form);form.submit();});` +
+    `var post=new URLSearchParams();Object.keys(fields).forEach(function(k){if(fields[k]!==""||k==="respond")post.append(k,fields[k]);});` +
+    `fetch("/queue/move",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:post.toString(),redirect:"manual"})` +
+    `.then(function(r){return r.ok?fetch("/queue?fragment=1",{cache:"no-store"}).then(function(f){return f.ok?f.text():null;}):null;})` +
+    `.then(function(t){if(t&&!paused()){region.innerHTML=t;last=Date.now();}else if(t===null){location.href="/queue";}})` +
+    `.catch(function(){})` +
+    `.then(function(){tell();});});` +
     `})();`
   );
 }
@@ -5700,6 +6071,8 @@ function taskBody(data: {
   runs: Run[];
   decisions: Decision[];
   incidents: Incident[];
+  /** Operator steering notes (arc 1), delivery state included. */
+  steering?: SteerNote[];
   csrf: string;
   nonce: string;
   problem: string | null;
@@ -5741,6 +6114,35 @@ function taskBody(data: {
           }</a></p>`,
           `</div>`,
         ].join("\n");
+
+  // Operator steering (arc 1): notes for the agent, each wearing exactly
+  // where it stands — waiting, attached, proven delivered, or superseded.
+  const steering = data.steering ?? [];
+  const steerState = (one: SteerNote): string =>
+    one.supersededAt !== null
+      ? "the task ended before this landed"
+      : one.deliveredAt !== null
+        ? `reached build #${one.attachedRun}`
+        : one.attachedRun !== null
+          ? `attached to build #${one.attachedRun} — delivery not yet proven`
+          : "waiting for the next attempt";
+  const steerRows = steering
+    .map(
+      one =>
+        `<p class="row"><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))} · ${escape(steerState(one))}</span> ` +
+        `${escape(one.note)}</p>`,
+    )
+    .join("\n");
+  const steerForm =
+    data.csrf === "" || task.state === "done" || task.state === "cancelled" || (data.contest ?? null) !== null
+      ? ""
+      : `<form method="post" action="${taskHref(task.id)}/steer" class="row">` +
+        `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+        `<input type="text" name="note" placeholder="guidance for the next attempt" aria-label="steering note" style="width:100%;max-width:28rem">` +
+        `<button type="submit">steer</button></form>` +
+        `<p class="meta">lands when the next attempt starts — a running agent is not interrupted, and a note cannot widen the approved scope</p>`;
+  const steeringCard =
+    steerRows === "" && steerForm === "" ? "" : `<h2>steering</h2>${steerRows}${steerForm}`;
 
   const holds =
     data.holds.length === 0
@@ -6154,6 +6556,7 @@ function taskBody(data: {
         }</span></p>`,
     runs,
     spendCard,
+    steeringCard,
     "<h2>scope</h2>",
     scopeCard,
     planCard,
@@ -6549,6 +6952,21 @@ function runPage(
         `<p class="meta" id="run-peek-stamp"></p>`
       : `<h2>what is changing right now</h2>` +
         `<p class="meta">the live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
+  // The live transcript (arc 1): the agent's own words, streamed to a file
+  // beside the run and polled as raw text. Honesty stated on the surface:
+  // this is display only, and the machine running the agent could alter it.
+  const transcript = !running
+    ? ""
+    : !peekable
+      ? `<h2>what the agent is saying</h2>` +
+        `<p class="meta">the live transcript is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`
+      : run.provider !== "claude"
+        ? `<h2>what the agent is saying</h2>` +
+          `<p class="meta">the live transcript needs the claude harness for now \u2014 this build runs on ${escape(run.provider)}</p>`
+        : `<h2>what the agent is saying</h2>` +
+          `<p class="meta">display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
+          `<pre id="live-transcript" class="mono" style="max-height:24rem;overflow:auto;white-space:pre-wrap"></pre>` +
+          `<p class="meta" id="live-transcript-state"></p>`;
   const handoff =
     run.handoff === null
       ? ""
@@ -6631,6 +7049,7 @@ function runPage(
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     `<div id="run-facts">${rows}</div>`,
     running ? `<p class="meta" id="run-facts-stamp"></p>` : "",
+    transcript,
     peek,
     terminal === null ? "" : terminalDiffCard(terminal, run.id),
     reviewCard,

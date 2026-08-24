@@ -1,5 +1,56 @@
 # Progress
 
+**2026-08-24 — the live window (v22): watch the agent work, and steer it.**
+Arc 1 of the attended track. Four Codex rounds (REDESIGN ×3, APPROVE
+WITH CHANGES — findings 1–16), because the arc rewires the money path:
+claude now speaks `--output-format stream-json --verbose`, consumed by
+a NEW streaming runner (`runClaudeStreamJsonl`) that retains only the
+load-bearing lines — the first `system`/`init` event and the FIRST
+primary `result`, selected by an ORIGIN ALLOWLIST (absent or human;
+task-notification/channel/peer/coordinator/unknown kinds fail closed as
+diagnostics) — so a multi-megabyte session can never trip the old 8 MiB
+buffered kill that would have destroyed the accounting envelope
+(finding 1). Claude thereby GAINED the init signal codex always had:
+an empty failed stream now classifies provider-init (retryable infra),
+and — finding 15 — an error result's diagnostic PROSE can no longer
+masquerade as an agent's attempt, because the envelope carries
+structural `promptConsumed` evidence and the gateway trusts only that.
+The audit tells the truth about the transport (streaming-jsonl,
+init signal as CAPABILITY metadata — finding 16). On top of the stream:
+**the live window** — `evidenceRoot/live/<runId>.log`, 0700/0600,
+O_EXCL|O_APPEND|O_NOFOLLOW with the descriptor retained, 2 KiB/line and
+2 MiB/file with a reserved terminal marker, whole-line redaction on any
+credential-shaped hit, tool activity described in a FIXED vocabulary
+that never echoes a tool's name or inputs; display state, NEVER
+evidence, said so on the page, swept by reconcile only after a
+finalized run ages a day (active runs untouchable, orphans on mtime,
+500-file bound). The run page's "what the agent is saying" region polls
+it by BYTE OFFSET as JSON `{text,nextOffset,final}` — raw sanitized
+text into textContent, complete lines only, a shrunken file answers a
+typed `replaced` and the client restarts visibly, and a finished run's
+final drain returns the torn tail. Session-touch fixed alongside (live
+bug): ALL named read-only fragment polls are excluded from activity,
+not just the board's — a 2-second poller no longer holds a session
+open forever. And **steering**: `task_steer` (v22) notes filed from the
+task page or `task steer <id> --note`, validated by validateNote,
+quoted FENCED in the next brief under the cannot-widen-scope rule.
+Attachment is its own pre-invocation transaction (finding 9) after the
+run row exists and every refusal is behind; delivery settles ONLY on
+the stream's own receipt — the first top-level assistant event, or a
+successful primary result as fallback; error results never count
+(finding 11) — via a latched, isolated callback (finding 13). A note
+whose run never proved delivery re-attaches when that run is NO LONGER
+LIVE by the console's one liveness fact (outcome, or lease released/
+expired/superseded — finding 12: crashed runs keep outcome NULL
+forever, so finalization-based re-attach would strand notes; recovery
+paths untouched). At-least-once, honestly labeled: "waiting for the
+next attempt" → "attached to build #N — delivery not yet proven" →
+"reached build #N", superseded when the task ends first. Repair and
+planner briefs never consume steering; tournaments refuse steering and
+steering refuses tournaments, both directions typed. Suite 1041 → 1087
+(live/steer/transcript/streaming suites; tick's "broken agent"
+fixtures now show the init event their story implies). Schema v21→v22.
+
 **2026-08-21 — the merge grant (v21): wake to MERGED pull requests.**
 Four Codex rounds (REDESIGN, REDESIGN, REDESIGN, APPROVE WITH CHANGES —
 findings 1–25), because this is the arc where the machine touches the

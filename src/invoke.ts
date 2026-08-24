@@ -128,14 +128,19 @@ export async function invokeAgent(
       tokensOut: envelope.tokensOut,
       costUsd: envelope.costUsd,
     },
-    // Gated on the run having NOTHING to show (Codex M5-M8 audit, C-8):
-    // "nothing to show" means no final message, full stop. A nonzero exit
-    // WITH an agent message is a failed agent turn — the agent ran, spoke,
-    // and failed — and must be classified as that, never as the harness
-    // failing to come up.
+    // Gated on the run having NOTHING to show (Codex M5-M8 audit, C-8),
+    // where "nothing to show" is STRUCTURAL when the transport can say so
+    // (arc 1 finding 15): a retained error result carries diagnostic text
+    // in finalMessage, and that prose must not read as an agent's attempt.
+    // Transports without the consumption signal keep the historical
+    // no-final-message rule. A nonzero exit WITH a consumed prompt is a
+    // failed agent turn — the agent ran, spoke, and failed — and must be
+    // classified as that, never as the harness failing to come up.
     initFailed:
       envelope.initObserved === false &&
-      envelope.finalMessage === null &&
+      (envelope.promptConsumed === null
+        ? envelope.finalMessage === null
+        : envelope.promptConsumed === false) &&
       !result.timedOut &&
       !result.notFound,
   };

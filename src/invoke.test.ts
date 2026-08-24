@@ -182,11 +182,44 @@ describe("the invocation gateway", () => {
     expect(result.timedOut).toBe(true);
   });
 
-  test("claude's buffered transport proves nothing about initialization — never flagged", async () => {
+  test("claude gained the init signal with the streaming transport — an empty failed stream is an init failure", async () => {
     const result = await invokeAgent(store, runId, CLAUDE, ASK, {
       runner: async () => ({ ...OK, code: 1, stderr: "exploded before the harness" }),
     });
+    expect(result.initFailed).toBe(true);
+  });
+
+  test("an error result's prose never suppresses provider-init (arc 1 finding 15)", async () => {
+    // A startup death that still emitted an origin-less error result: the
+    // diagnostic text lands in finalMessage, but text is not an attempt.
+    store.createTask({ id: "t-err", title: "w" }, T0);
+    const errRun = store.startRun({
+      taskRef: store.refFor("built-in", "t-err").id, leaseId: "lease-err", runner: "builder-1",
+      branch: "b", worktree: "/w", provider: "claude", now: T0,
+    });
+    const stream = JSON.stringify({
+      type: "result", subtype: "error_during_execution", is_error: true,
+      result: "credential rejected before any turn", session_id: "s-dead",
+    });
+    const result = await invokeAgent(store, errRun, CLAUDE, ASK, {
+      runner: async () => ({ ...OK, code: 1, stdout: stream, stderr: "" }),
+    });
+    expect(result.finalMessage).toBe("credential rejected before any turn");
+    expect(result.initFailed).toBe(true);
+  });
+
+  test("an observed init is never an init failure, whatever else went wrong", async () => {
+    store.createTask({ id: "t-init-ok", title: "w" }, T0);
+    const okRun = store.startRun({
+      taskRef: store.refFor("built-in", "t-init-ok").id, leaseId: "lease-io", runner: "builder-1",
+      branch: "b", worktree: "/w", provider: "claude", now: T0,
+    });
+    const stream = JSON.stringify({ type: "system", subtype: "init", session_id: "s-up" });
+    const result = await invokeAgent(store, okRun, CLAUDE, ASK, {
+      runner: async () => ({ ...OK, code: 1, stdout: stream, stderr: "died mid-turn" }),
+    });
     expect(result.initFailed).toBe(false);
+    expect(result.sessionId).toBe("s-up");
   });
 });
 

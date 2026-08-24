@@ -58,7 +58,10 @@ describe("tick, against real git", () => {
     return { ...OK, stdout: AGENT_SAID };
   };
 
-  const brokenAgent: Runner = async () => ({ ...OK, code: 1, stderr: "the model refused" });
+  // "Broken" means the AGENT failed, not the harness: the stream shows the
+  // init event (the harness came up), then a nonzero exit. Without the init
+  // line this would now honestly classify as provider-init (arc 1).
+  const brokenAgent: Runner = async () => ({ ...OK, code: 1, stdout: JSON.stringify({ type: "system", subtype: "init" }), stderr: "the model refused" });
 
   const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
 
@@ -819,7 +822,7 @@ describe("the outbox", () => {
     await exec("git", ["add", "."], { cwd: repo });
     await exec("git", ["commit", "-qm", "first"], { cwd: repo });
 
-    const broken: Runner = async () => ({ ...OK, code: 1, stderr: "the model refused" });
+    const broken: Runner = async () => ({ ...OK, code: 1, stdout: JSON.stringify({ type: "system", subtype: "init" }), stderr: "the model refused" });
     const runWith = (argv: string[]) => {
       const [command = "", ...rest] = argv;
       lines = [];
@@ -863,7 +866,7 @@ describe("the morning briefing", () => {
     await concludeDone(cwd, args);
     return { ...OK, stdout: AGENT_SAID };
   };
-  const broken: Runner = async () => ({ ...OK, code: 1, stderr: "the model refused" });
+  const broken: Runner = async () => ({ ...OK, code: 1, stdout: JSON.stringify({ type: "system", subtype: "init" }), stderr: "the model refused" });
 
   const run = (argv: string[], runner: Runner = agent) => {
     const [command = "", ...rest] = argv;

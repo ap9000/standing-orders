@@ -2967,6 +2967,192 @@ describe("the filesystem browser — confined to what opening allows", () => {
   });
 });
 
+describe("the fleet — runner lanes as the agents × projects surface", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const csrf = (html: string): string => (/name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? "");
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-fleet-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("one lane per runner; a building card pins to the top wearing its project; the grid is auto-fit, not five tracks", async () => {
+    const now = new Date();
+    store.saveRunner(
+      { name: "builder-1", host: "here", capacity: 2, repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: now.toISOString(), retiredAt: null },
+      "hash",
+    );
+    store.saveRunner(
+      { name: "builder-2", host: "here", capacity: 1, repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: now.toISOString(), retiredAt: null },
+      "hash2",
+    );
+    // A live claim on builder-1.
+    store.createTask({ id: "t-live", title: "being built" }, T0);
+    const ref = store.refFor("built-in", "t-live").id;
+    const taken = acquire(store, ref, "builder-1", { now: new Date(now.getTime() - 5 * 60_000), ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim refused");
+    store.startRun({
+      taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
+      branch: "standing-orders/t-live", worktree: "/pool/t-live",
+      model: "claude", now: new Date(now.getTime() - 5 * 60_000),
+    });
+    // A queued reservation on builder-2.
+    store.createTask({ id: "t-queued", title: "reserved work" }, T0);
+    store.moveTask({ taskId: "t-queued", toRunner: "builder-2", beforeTaskId: null }, new Date());
+
+    const cookie = await login();
+    const html = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    expect(html).toContain('class="lanes"');           // auto-fit runner grid
+    expect(html).toContain('<div class="lanes" data-queue-revision=');
+    expect(html).not.toContain('<div class="board" data-queue-revision='); // not the 5-track board container
+    expect(html).toContain("builder-1");
+    expect(html).toContain("builder-2");
+    expect(html).toContain("shared queue");
+    expect(html).toContain("being built");             // the live claim
+    expect(html).toContain("reserved work");           // the queued reservation
+    // The register/retire ceremonies are the only forms here.
+    expect(html).toContain('action="/fleet/runner/register"');
+    expect(html).toContain('action="/fleet/runner/retire"');
+    // Its fragment is the lanes alone, behind the same auth.
+    const fragment = await (await fetch(url("/fleet?fragment=1"), { headers: { cookie } })).text();
+    expect(fragment).toContain('class="lanes"');
+    expect(fragment).not.toContain("<html");
+    expect(fragment).not.toContain("<script");
+  });
+
+  test("registering a worker takes a password and shows its token once; the token is never re-rendered", async () => {
+    const cookie = await login();
+    const page = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    const token = csrf(page);
+
+    // No password: refused, nothing minted.
+    const noPassword = await fetch(url("/fleet/runner/register"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf: token, name: "builder-9", capacity: "1", token: "" }),
+      redirect: "manual",
+    });
+    expect(noPassword.status).toBe(403);
+    expect(store.getRunner("builder-9")).toBeNull();
+
+    // With the password: the token renders on this one response and nowhere else.
+    const created = await fetch(url("/fleet/runner/register"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf: token, name: "builder-9", capacity: "2", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(created.status).toBe(200);
+    const shown = await created.text();
+    expect(shown).toContain("builder-9 is registered");
+    expect(shown).toContain("shown once");
+    // The shown-once page carries no live script that could re-render the token.
+    expect(shown).not.toContain("<script");
+    const runner = store.getRunner("builder-9");
+    expect(runner).not.toBeNull();
+    expect(runner?.runner.capacity).toBe(2);
+    // Only a hash is kept — the raw token is not in the database's runner row.
+    const later = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    expect(later).not.toContain("builder-9 is registered");
+  });
+
+  test("retiring a worker takes a password and refuses the unknown", async () => {
+    store.saveRunner(
+      { name: "builder-1", host: "here", capacity: 1, repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
+      "hash",
+    );
+    const cookie = await login();
+    const page = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    const token = csrf(page);
+
+    const unknown = await fetch(url("/fleet/runner/retire"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf: token, name: "nobody", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(unknown.status).toBe(404);
+
+    const retired = await fetch(url("/fleet/runner/retire"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf: token, name: "builder-1", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(retired.status).toBe(303);
+    expect(store.getRunner("builder-1")?.runner.retiredAt).not.toBeNull();
+  });
+
+  test("dragging across projects: the fleet's move skips the open-project gate, the ceiling still walls reads", async () => {
+    const cookie = await login();
+    const page = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    const token = csrf(page);
+    store.saveRunner(
+      { name: "builder-1", host: "here", capacity: 1, repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
+      "hash",
+    );
+    store.createTask({ id: "t-move", title: "movable" }, T0);
+    store.saveScope({
+      taskId: "t-move", goal: "go", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "d", approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d",
+    });
+    const revision = store.queueRevision();
+
+    // A fleet-origin move (no projectRevision) re-reserves the task.
+    const moved = await fetch(url("/queue/move"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({
+        respond: "fragment", csrf: token, queueRevision: String(revision),
+        task: "t-move", column: "builder-1", before: "",
+      }),
+      redirect: "manual",
+    });
+    expect(moved.status).toBe(200);
+    expect(store.assignedRunnerOf(store.refFor("built-in", "t-move").id)).toBe("builder-1");
+
+    // A stale revision is refused with the move-reason text.
+    const stale = await fetch(url("/queue/move"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({
+        respond: "fragment", csrf: token, queueRevision: String(store.queueRevision() + 9),
+        task: "t-move", column: "anyone", before: "",
+      }),
+      redirect: "manual",
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.text()).toContain("moved underneath you");
+  });
+});
+
 describe("the workbench (attended A1) and the live substrate", () => {
   let store: Store;
   let server: Server;
@@ -3781,5 +3967,70 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     const gone = await (await fetch(url(`/r/${runId}?fragment=peek`), { headers: { cookie } })).text();
     expect(gone).toContain("not actively running");
     expect(gone).toContain("data-region-stop");
+  });
+
+  test("the transcript window: session-only JSON, byte offsets, replaced on shrink, final drain (arc 1)", async () => {
+    const { openLiveLog } = await import("./live.js");
+    const bare = await fetch(url(`/r/${runId}?fragment=transcript&from=0`), { redirect: "manual" });
+    expect([303, 403]).toContain(bare.status);
+    const cookie = await login();
+
+    // No file yet: an empty window, not an error — the view has not started.
+    const empty = await fetch(url(`/r/${runId}?fragment=transcript&from=0`), { headers: { cookie } });
+    expect(empty.status).toBe(200);
+    expect(empty.headers.get("cache-control")).toBe("no-store");
+    expect(await empty.json()).toMatchObject({ text: "", nextOffset: 0, final: false });
+
+    const log = openLiveLog(evidenceRoot, runId);
+    log?.observe({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text: "hello operator" }] } });
+    log?.close();
+
+    const first = await (await fetch(url(`/r/${runId}?fragment=transcript&from=0`), { headers: { cookie } })).json() as { text: string; nextOffset: number; final: boolean };
+    expect(first.text).toBe("hello operator\n");
+    expect(first.final).toBe(false); // the run is still live
+    const again = await (await fetch(url(`/r/${runId}?fragment=transcript&from=${first.nextOffset}`), { headers: { cookie } })).json();
+    expect(again).toMatchObject({ text: "", nextOffset: first.nextOffset });
+
+    // An offset past the file is `replaced` — the client restarts visibly.
+    const shrunk = await fetch(url(`/r/${runId}?fragment=transcript&from=99999`), { headers: { cookie } });
+    expect(shrunk.status).toBe(409);
+    expect(await shrunk.json()).toMatchObject({ error: "replaced" });
+    // A malformed offset refuses outright.
+    expect((await fetch(url(`/r/${runId}?fragment=transcript&from=-1`), { headers: { cookie } })).status).toBe(400);
+
+    // Finalize the run: the drain returns the tail and says final.
+    store.finishRun(runId, { outcome: "built", reason: null, now: new Date() });
+    const drained = await (await fetch(url(`/r/${runId}?fragment=transcript&from=0`), { headers: { cookie } })).json() as { final: boolean; text: string };
+    expect(drained.text).toBe("hello operator\n");
+    expect(drained.final).toBe(true);
+  });
+
+  test("steering: a browser session files a note; the task page shows its state (arc 1)", async () => {
+    const cookie = await login();
+    const taskHtml = await (await fetch(url("/t/peek-1"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(taskHtml)?.[1] ?? "";
+    expect(csrf).not.toBe("");
+    expect(taskHtml).toContain("guidance for the next attempt");
+
+    const posted = await fetch(url("/t/peek-1/steer"), {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, note: "look at the retry path first" }).toString(),
+    });
+    expect(posted.status).toBe(303);
+    const after = await (await fetch(url("/t/peek-1"), { headers: { cookie } })).text();
+    expect(after).toContain("look at the retry path first");
+    expect(after).toContain("waiting for the next attempt");
+
+    // Without a session cookie, steering does not exist as a surface.
+    const bare = await fetch(url("/t/peek-1/steer"), {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ note: "no session" }).toString(),
+    });
+    expect([303, 401, 403]).toContain(bare.status);
+    expect(store.listSteerNotes(store.refFor("built-in", "peek-1", "ours").id).length).toBe(1);
   });
 });

@@ -168,7 +168,8 @@ export type AdmissionRefusal = {
     | "duplicate-provider-model"
     | "quota"
     | "capacity"
-    | "contest-open";
+    | "contest-open"
+    | "steering-pending";
   message: string;
 };
 
@@ -206,6 +207,16 @@ export function admitContest(
     }
     if (store.openContestFor(args.taskRef) !== null) {
       return { ok: false as const, reason: "contest-open" as const, message: "a tournament is already running on this task" };
+    }
+    // Steering and tournaments stay closed in BOTH directions (arc 1): a
+    // pending note would reach exactly one racer and silently miss the
+    // rest, so neither side starts while the other is open.
+    if (store.pendingSteerCount(args.taskRef) > 0) {
+      return {
+        ok: false as const,
+        reason: "steering-pending" as const,
+        message: "a steering note is still waiting to reach an agent — let it land or withdraw it before racing agents on this task",
+      };
     }
     const terms = store.activeTournamentTerms(args.taskRef);
     if (terms === null) {

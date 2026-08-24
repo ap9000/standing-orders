@@ -61,6 +61,21 @@ export type RunOptions = {
   /** Fires once the child exists, with its pid (the process-group id when
    * processGroup is set) — the slot ledger records it (v14 finding 26). */
   onSpawn?: (pid: number) => void;
+  /**
+   * Every parsed stream event, as it arrives (claude's streaming transport
+   * only). Purely observational: exceptions are caught and counted, and
+   * nothing about the run — retention, timeout, exit — changes because a
+   * listener misbehaved. The live window renders these; nothing else may.
+   */
+  onStreamEvent?: (event: Record<string, unknown>) => void;
+  /**
+   * Fires ONCE, the moment the stream proves the prompt reached the agent
+   * (arc 1 finding 11): the first top-level assistant event, or a
+   * successful primary result when no assistant event preceded it. Error
+   * results never fire it — a startup death is not a delivery. Latched
+   * before invocation, so a throwing listener cannot make it fire twice.
+   */
+  onReceipt?: () => void;
 };
 
 /** Live provider children, for the deterministic stop. Registered only when `processGroup` was set. */
@@ -432,6 +447,178 @@ export function runStreamJsonl(
 
     // A failed spawn fires 'error' and may never fire 'close' — both routes
     // settle, exactly once.
+    child.on("error", error => {
+      notFound = (error as NodeJS.ErrnoException).code === "ENOENT";
+      if (stderr === "") stderr = String(error);
+      finish(null);
+    });
+    child.on("close", code => finish(code));
+  });
+}
+
+/**
+ * The streaming transport for claude's stream-json dialect (arc 1).
+ *
+ * Same rationale as `runStreamJsonl`: a long agent session writes far more
+ * event stream than any fixed buffer should hold, and the line that matters
+ * — the terminal result carrying session, usage, and dollars — arrives
+ * LAST. The 8 MiB buffered kill would destroy exactly that accounting
+ * envelope, so stdout is consumed incrementally and only the load-bearing
+ * lines are retained:
+ *
+ *   - the FIRST `system`/`init` event (the harness came up — claude's
+ *     init signal, the classification codex always had)
+ *   - the FIRST primary `result` event, selected STRUCTURALLY (finding 10):
+ *     origin absent or `origin.kind === "human"` — an allowlist, so a
+ *     background task's result (or any future origin kind) can never be
+ *     mistaken for the main query's accounting. Later results are dropped.
+ *
+ * The result's stdout is the retained lines joined — a synthetic, bounded
+ * envelope `claudeParse` reads exactly like test fixtures. Timeout,
+ * process-group, kill, and spawn semantics match `runStreamJsonl`.
+ */
+function primaryResultOrigin(event: Record<string, unknown>): boolean {
+  const origin = event["origin"];
+  if (origin === undefined || origin === null) return true;
+  if (typeof origin === "object" && String((origin as Record<string, unknown>)["kind"] ?? "") === "human") return true;
+  return false; // task-notification, channel, peer, coordinator, unknown: never the envelope
+}
+
+export function runClaudeStreamJsonl(
+  file: string,
+  args: readonly string[],
+  options: RunOptions = {},
+): Promise<ExecResult> {
+  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const childEnv = resolveChildEnv(options);
+
+  return new Promise(resolve => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(file, [...args], {
+        cwd,
+        shell: false,
+        windowsHide: true,
+        detached: options.processGroup === true && process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(childEnv === undefined ? {} : { env: childEnv }),
+      });
+      if (child.pid !== undefined) options.onSpawn?.(child.pid);
+    } catch (error) {
+      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      return;
+    }
+    if (options.processGroup === true) liveProviders.add(child);
+
+    let initLine: string | null = null;
+    let resultLine: string | null = null;
+    let receiptFired = false;
+    let partial = "";
+    let stderr = "";
+    let timedOut = false;
+    let notFound = false;
+
+    // Latch BEFORE invoking (finding 13): a throwing listener has already
+    // consumed its one firing, and the stream goes on unharmed.
+    const fireReceipt = (): void => {
+      if (receiptFired || options.onReceipt === undefined) {
+        receiptFired = true;
+        return;
+      }
+      receiptFired = true;
+      try {
+        options.onReceipt();
+      } catch {
+        // A receipt that cannot be recorded must not alter the run; the
+        // note stays honestly unreceipted and re-attaches later.
+      }
+    };
+
+    const keep = (line: string): void => {
+      if (line.length > JSONL_LINE_CAP) return; // oversized: counted absent, never truncated JSON
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return; // not JSON: not an event; dropped
+      }
+      if (event === null || typeof event !== "object") return;
+      const type = String(event["type"] ?? "");
+      if (type === "system" && String(event["subtype"] ?? "") === "init") {
+        if (initLine === null) {
+          initLine = line;
+          if (options.onSessionId !== undefined) {
+            const id = event["session_id"];
+            if (typeof id === "string" && id !== "") {
+              try {
+                options.onSessionId(id);
+              } catch {
+                // A registry that cannot be written must not kill the turn.
+              }
+            }
+          }
+        }
+      } else if (type === "assistant") {
+        // Top-level only (finding 11): assistant events carry no origin;
+        // parent_tool_use_id is the correlation field, and a subagent's
+        // words prove nothing about the main prompt.
+        const parent = event["parent_tool_use_id"];
+        if (parent === undefined || parent === null) fireReceipt();
+      } else if (type === "result" && resultLine === null && primaryResultOrigin(event)) {
+        resultLine = line;
+        // Fallback receipt (finding 11): a SUCCESSFUL main-query completion
+        // entails the prompt ran even if the stream elided assistant
+        // events. Error results never fire — startup death is not delivery.
+        if (event["is_error"] !== true && String(event["subtype"] ?? "") === "success") fireReceipt();
+      }
+      if (options.onStreamEvent !== undefined) {
+        try {
+          options.onStreamEvent(event);
+        } catch {
+          // Observational only: a broken listener never touches the run.
+        }
+      }
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (options.processGroup === true) killGroup(child);
+      else child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      partial += chunk;
+      let cut = partial.indexOf("\n");
+      while (cut !== -1) {
+        keep(partial.slice(0, cut));
+        partial = partial.slice(cut + 1);
+        cut = partial.indexOf("\n");
+      }
+      if (partial.length > JSONL_LINE_CAP * 2) partial = partial.slice(-JSONL_LINE_CAP);
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (stderr.length < JSONL_STDERR_CAP) stderr += chunk.slice(0, JSONL_STDERR_CAP - stderr.length);
+    });
+
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      liveProviders.delete(child);
+      if (partial.trim() !== "") keep(partial);
+      const lines = [initLine, resultLine].filter((one): one is string => one !== null);
+      resolve({
+        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+        stdout: lines.join("\n"),
+        stderr,
+        timedOut,
+        notFound,
+      });
+    };
+
     child.on("error", error => {
       notFound = (error as NodeJS.ErrnoException).code === "ENOENT";
       if (stderr === "") stderr = String(error);
