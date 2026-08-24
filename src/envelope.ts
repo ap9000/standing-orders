@@ -37,11 +37,24 @@ export type EnvelopePayload = {
 };
 
 let captured: string | null = null;
+let captureHook: ((body: string) => void) | null = null;
+
+/** The entry point's early-flush hook (arc 2): for long-running commands,
+ * `-o` lands the startup envelope the moment it exists. The hook must not
+ * throw — the entry point's own hook catches internally. */
+export function onEnvelopeCaptured(hook: ((body: string) => void) | null): void {
+  captureHook = hook;
+}
 
 /** Serialize one envelope, remembering it for `-o` teeing at the entry point. */
 export function envelopeJson(payload: EnvelopePayload): string {
   const body = JSON.stringify({ envelopeVersion: ENVELOPE_VERSION, ...payload }, null, 2);
   captured = body;
+  try {
+    captureHook?.(body);
+  } catch {
+    // A hook that throws must never reach the command's envelope path.
+  }
   return body;
 }
 

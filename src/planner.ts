@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { run } from "./exec.js";
 import type { Store } from "./store.js";
 import { currentClaim, heartbeat } from "./claim.js";
+import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { parseDecision, type ParsedDecision, type Problem } from "./decision.js";
 import { parsePlan, PLAN_LIMITS, type ParsedPlan, type PlanProblem } from "./plan.js";
 import { invokeAgent } from "./invoke.js";
@@ -47,6 +48,9 @@ export type PlanRequest = {
   taskRef: number;
   runner: string;
   leaseId: string;
+  /** The runner's credential for the credentialed pulse (arc 2 finding 33);
+   * absent, the beat keeps the unauthenticated touch. */
+  runnerToken?: string;
   runId: number;
   worktree: string;
   branch: string;
@@ -208,7 +212,14 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
     const beat = () => {
       try {
         const answer = heartbeat(store, request.leaseId, clock());
-        store.touchRunner(runner, clock());
+        // Credentialed when the caller carries the token (arc 2 finding
+        // 33): a takeover's rotation fences this session at its next beat.
+        if (request.runnerToken !== undefined) {
+          const alive = runnerHeartbeat(store, runner, request.runnerToken, clock());
+          if (!alive.ok) fencedMidPlan = true;
+        } else {
+          store.touchRunner(runner, clock());
+        }
         if (!answer.ok) fencedMidPlan = true;
       } catch {
         fencedMidPlan = true;

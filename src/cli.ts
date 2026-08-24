@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
-import { CAPABILITIES, ENVELOPE_VERSION, capturedEnvelope, envelopeJson, resetCapturedEnvelope } from "./envelope.js";
+import { CAPABILITIES, ENVELOPE_VERSION, capturedEnvelope, envelopeJson, onEnvelopeCaptured, resetCapturedEnvelope } from "./envelope.js";
 import { applyInstall, contextBlock, planInstall } from "./skills.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
@@ -81,6 +81,7 @@ Usage
   standing-orders contract         the machine contract: envelope version + capabilities
   standing-orders skills install   teach a repo's agents this queue exists (preview first)
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
+  standing-orders up               console + worker + browser, one command — the real thing
 
 Operating the queue — \`standing-orders task\` prints the whole surface,
 and any queue command + --help prints it too
@@ -182,6 +183,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
 
 /** The commands that operate the queue rather than report on the world. */
 const OPERATE_COMMANDS = new Set([
+  "up",
   "ready",
   "task",
   "claim",
@@ -266,9 +268,51 @@ export async function main(
   }
 
   resetCapturedEnvelope();
-  const code = await dispatch(args, write, mainOptions);
 
-  if (outputFile !== undefined) {
+  // Long-running commands (serve, up) emit their ONE envelope at startup,
+  // when its URL is useful — so -o is preflighted BEFORE dispatch (an
+  // unwritable target refuses up front) and written the moment the
+  // envelope is captured, through a hook that never throws into the
+  // command (arc 2 findings 23/30).
+  const firstWord = args.find(one => !one.startsWith("-"));
+  const earlyFlush = outputFile !== undefined && (firstWord === "serve" || firstWord === "up");
+  let earlyFlushProblem: string | null = null;
+  if (earlyFlush && outputFile !== undefined) {
+    try {
+      const existing = lstatSync(outputFile, { throwIfNoEntry: false });
+      if (existing !== undefined) {
+        if (!existing.isFile()) {
+          write(`-o refuses ${outputFile}: not a regular file`);
+          return USAGE_EXIT;
+        }
+        unlinkSync(outputFile);
+      }
+      writeFileSync(outputFile, "", { mode: 0o600, flag: "wx" });
+    } catch (error) {
+      write(`-o could not prepare ${outputFile}: ${String((error as Error).message ?? error)}`);
+      return USAGE_EXIT;
+    }
+    onEnvelopeCaptured(body => {
+      try {
+        writeFileSync(outputFile, `${body}\n`, { mode: 0o600 });
+      } catch (error) {
+        earlyFlushProblem = String((error as Error).message ?? error);
+      }
+    });
+  }
+
+  let code: number;
+  try {
+    code = await dispatch(args, write, mainOptions);
+  } finally {
+    if (earlyFlush) onEnvelopeCaptured(null);
+  }
+  if (earlyFlushProblem !== null) {
+    process.stderr.write(`-o could not write ${outputFile}: ${earlyFlushProblem}\n`);
+    return code === 0 ? 1 : code;
+  }
+
+  if (outputFile !== undefined && !earlyFlush) {
     const captured = capturedEnvelope();
     if (captured !== null) {
       // Envelopes can carry one-time credentials (runner register, approver
@@ -1019,6 +1063,7 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
     if (!json) write("Sandbox deleted.");
   } else if (!json) {
     write(`Sandbox kept at ${sandbox} — reopen it any time: standing-orders serve --db ${join(sandbox, "orders.db")}`);
+    write("Ready for your own repository? `standing-orders up --repo <path>` starts the real thing.");
   }
   return 0;
 }

@@ -142,13 +142,147 @@ export function authenticate(store: Store, name: string, token: string): AuthRes
     : { ok: false, reason: "bad-token" };
 }
 
-/** "I am still here." Authenticated, because otherwise anyone could say it. */
+/**
+ * "I am still here." Authenticated AND ATOMIC (arc 2 findings 25/33): the
+ * hash is verified and the heartbeat stamped in one write transaction, so
+ * a takeover that rotates the credential between the check and the touch
+ * cannot receive a stale incarnation's pulse — after rotation commits, the
+ * very next heartbeat refuses, and the caller must treat that as fatal.
+ */
 export function heartbeat(store: Store, name: string, token: string, now: Date): AuthResult {
-  const auth = authenticate(store, name, token);
-  if (!auth.ok) return auth;
+  return store.transact(() => {
+    const auth = authenticate(store, name, token);
+    if (!auth.ok) return auth;
+    store.touchRunner(name, now);
+    return { ok: true, runner: { ...auth.runner, heartbeatAt: now.toISOString() } };
+  });
+}
 
-  store.touchRunner(name, now);
-  return { ok: true, runner: { ...auth.runner, heartbeatAt: now.toISOString() } };
+/**
+ * The one runner-name rule (arc 2 finding 13): nonempty, control-free, at
+ * most 60 characters — the console form's rule, now shared by every door.
+ */
+export const RUNNER_NAME_MAX = 60;
+
+export function validRunnerName(name: string): boolean {
+  if (name === "" || name.length > RUNNER_NAME_MAX) return false;
+  for (const char of name) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
+}
+
+/** A generated base name: lowercase [a-z0-9-], collapsed, trimmed. The
+ * suffix budget (finding 24) is the CALLER's arithmetic — truncate the
+ * base to `RUNNER_NAME_MAX - suffix.length` before appending. */
+export function normalizeRunnerName(raw: string): string {
+  const collapsed = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return (collapsed === "" ? "worker" : collapsed).slice(0, RUNNER_NAME_MAX);
+}
+
+/**
+ * The atomic take-or-refuse door (arc 2 findings 1/15/16/26/31): ONE write
+ * transaction that proves the name is free — absent, retired, or dead by
+ * the same predicate recovery uses, with NO unexpired watch lease — then
+ * finishes every open run the dead holder left (requeueing what no newer
+ * live claim owns), reclaims, and rotates. Two racers serialize: one wins,
+ * the other gets the typed refusal.
+ */
+export function registerRunnerIfIdle(
+  store: Store,
+  options: RegisterOptions,
+):
+  | (Registration & { ok: true; recoveredRuns: number })
+  | { ok: false; reason: "runner-alive" | "watch-live"; detail: string } {
+  const { name, now } = options;
+  return store.transact(() => {
+    const existing = store.getRunner(name);
+    if (existing !== null && existing.runner.retiredAt === null && isAlive(existing.runner, now)) {
+      return {
+        ok: false as const,
+        reason: "runner-alive" as const,
+        detail: `${name} heartbeated ${existing.runner.heartbeatAt} — it looks alive`,
+      };
+    }
+    const lease = store.liveWatchLeaseOf(name, now);
+    if (lease !== null) {
+      return {
+        ok: false as const,
+        reason: "watch-live" as const,
+        detail: `${name} holds a live watch lease on ${lease.repo} until ${lease.until}`,
+      };
+    }
+    // Recovery BEFORE reclaim (finding 16): the open-run evidence must be
+    // read while it still exists; register()'s releaseClaimsOf would
+    // otherwise hide it from every later recovery.
+    const recoveredRuns = existing === null ? 0 : store.recoverRunnerWork(name, now);
+    const registration = register(store, options);
+    return { ok: true as const, ...registration, recoveredRuns };
+  });
+}
+
+/**
+ * The authenticated lease door (arc 2 findings 15/26): credential verified
+ * and lease acquired/renewed in the SAME transaction — after a takeover
+ * rotates the hash, a stale incarnation can neither acquire nor renew. A
+ * takeover of an expired lease recovers the superseded incarnation INSIDE
+ * this transaction, so no crash can separate "B owns the lease" from "A
+ * was recovered".
+ */
+export function acquireWatchLeaseAuthed(
+  store: Store,
+  args: { runner: string; token: string; repo: string; owner: string; ttlMs: number },
+  now: Date,
+):
+  | { ok: true; generation: number; superseded: string | null; recovered: number }
+  | { ok: false; reason: "unknown" | "bad-token" | "retired" | "watch-busy"; holder?: string; until?: string } {
+  return store.transact(() => {
+    const auth = authenticate(store, args.runner, args.token);
+    if (!auth.ok) return { ok: false as const, reason: auth.reason };
+    const got = store.acquireWatchLease(args.runner, args.repo, args.owner, args.ttlMs, now);
+    if (!got.ok) return { ok: false as const, reason: "watch-busy" as const, holder: got.holder, until: got.until };
+    const recovered = got.superseded === null ? 0 : store.recoverIncarnation(args.runner, got.superseded, now);
+    return { ok: true as const, generation: got.generation, superseded: got.superseded, recovered };
+  });
+}
+
+/** The renewal, equally authenticated: a false answer is FATAL to the
+ * caller — a loop that keeps admitting work after losing its lease or its
+ * credential is the exact hole the doors exist to close. */
+export function heartbeatWatchLeaseAuthed(
+  store: Store,
+  args: { runner: string; token: string; repo: string; owner: string; ttlMs: number },
+  now: Date,
+): boolean {
+  return store.transact(() => {
+    const auth = authenticate(store, args.runner, args.token);
+    if (!auth.ok) return false;
+    return store.heartbeatWatchLease(args.runner, args.repo, args.owner, args.ttlMs, now);
+  });
+}
+
+/**
+ * Retirement fenced by THIS holder's credential (arc 2 finding 28): a
+ * successor that already rotated makes the predecessor's cleanup a typed
+ * no-op instead of retiring the winner.
+ */
+export function retireRunnerIfCurrent(
+  store: Store,
+  name: string,
+  token: string,
+  now: Date,
+): { ok: true } | { ok: false; reason: "unknown" | "bad-token" | "retired" } {
+  return store.transact(() => {
+    const auth = authenticate(store, name, token);
+    if (!auth.ok) return { ok: false as const, reason: auth.reason };
+    store.retireRunner(name, now);
+    return { ok: true as const };
+  });
 }
 
 export function isAlive(runner: Runner, now: Date, livenessMs = DEFAULT_LIVENESS_MS): boolean {

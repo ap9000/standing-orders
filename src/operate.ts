@@ -40,7 +40,10 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
-import { readFileSync } from "node:fs";
+import { configPath, loadRepos, saveRepos, addRepos } from "./repos.js";
+import { closeSync, constants as fsConstants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
+import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
 import { readVerifiedArtifact } from "./evidence.js";
@@ -118,8 +121,15 @@ import {
   heartbeat as heartbeatRunner,
   isAlive,
   recoverDead,
+  acquireWatchLeaseAuthed,
+  heartbeatWatchLeaseAuthed,
+  registerRunnerIfIdle,
+  retireRunnerIfCurrent,
+  normalizeRunnerName,
+  validRunnerName,
+  RUNNER_NAME_MAX,
 } from "./runner.js";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken } from "./scope.js";
 import { WorktreePool } from "./worktree.js";
 import {
   approveRoutine,
@@ -269,6 +279,15 @@ External trackers — build what a tracker nominates, under local approvals
                                         [--max <n>] tasks (default 1),
                                         [--base <ref>] for first attempts.
                                         Never pushes.
+  standing-orders up [--repo <path>]...     one command to a working cockpit:
+                                        console + worker + browser. Mints
+                                        your login on first run (saved to
+                                        up-login.txt beside the database),
+                                        registers this machine as a worker,
+                                        and watches every named repository
+                                        (none named: the current one).
+                                        --no-open skips the browser;
+                                        --runner names the worker.
   standing-orders reconcile --repo <path>   the morning sweep: recover dead
                                         runners, reap expired leases, adopt
                                         or forget orphaned worktrees. Run it
@@ -393,11 +412,15 @@ Exit codes
 type Args = {
   positional: string[];
   flags: Map<string, string | true>;
+  /** EVERY --repo occurrence, in order (arc 2 finding 22): the Map keeps its
+   * last-wins behavior for every existing verb; only `up` reads this. */
+  repoList: string[];
 };
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string | true>();
+  const repoList: string[] = [];
   const wantsValue = new Set([
     "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
     "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
@@ -419,6 +442,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
   const booleans = new Set([
     "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
     "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
+    "no-open",
   ]);
 
   for (let index = 0; index < argv.length; index++) {
@@ -446,9 +470,12 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     // flag and leave this one holding a name-shaped lie.
     if (value === undefined || value.startsWith("--")) return { error: `--${name} needs a value` };
     flags.set(name, value);
+    if (name === "repo") {
+      for (const one of value.split(",").map(part => part.trim()).filter(part => part !== "")) repoList.push(one);
+    }
   }
 
-  return { positional, flags };
+  return { positional, flags, repoList };
 }
 
 /** Route an `operate` command. Returns the process exit code. */
@@ -500,6 +527,7 @@ export async function runOperate(
       store,
       write,
       json,
+      repoList: parsed.repoList,
       now,
       clock,
       // Evidence lives beside the database for the same reason the database
@@ -528,6 +556,8 @@ type Context = {
   store: Store;
   write: Write;
   json: boolean;
+  /** Every --repo occurrence in order (arc 2) — only `up` reads it. */
+  repoList?: string[];
   now: Date;
   clock: () => Date;
   evidenceRoot: string;
@@ -613,6 +643,8 @@ async function dispatch(
       return serveCommand(flags, context);
     case "watch":
       return watchCommand(flags, context);
+    case "up":
+      return upCommand(flags, context);
     case "daemon":
       return daemonCommand(positional, flags, context);
     case "bridge":
@@ -1136,6 +1168,7 @@ async function buildCommand(
     taskRef: ref.id,
     runner,
     ...(held === null ? {} : { leaseId: held.leaseId }),
+    runnerToken: token,
     runId,
     evidenceRoot: context.evidenceRoot,
     worktree: leased.worktree.path,
@@ -1464,6 +1497,7 @@ async function tickCommand(
         taskRef: waiting.taskRef,
         runner,
         leaseId: reclaimed.claim.leaseId,
+        runnerToken: token,
         runId: resumeRun,
         evidenceRoot: context.evidenceRoot,
         worktree: leased.worktree.path,
@@ -1896,6 +1930,7 @@ async function tickCommand(
         taskRef: ref.id,
         runner,
         leaseId: lease,
+        runnerToken: token,
         runId: planRunId,
         worktree: planLeased.worktree.path,
         branch: planBranch,
@@ -2021,6 +2056,7 @@ async function tickCommand(
       taskRef: ref.id,
       runner,
       leaseId: lease,
+      runnerToken: token,
       runId,
       evidenceRoot: context.evidenceRoot,
       worktree: leased.worktree.path,
@@ -2838,6 +2874,46 @@ async function decideCommand(
  * TLS proxy in front for anything beyond a trusted network — Tailscale is
  * the intended road, with its name passed via --allow-host.
  */
+/**
+ * The extracted console starter (arc 2 finding 5/20): binds and resolves —
+ * or rejects — with NO signal handlers and NO output. serveCommand wraps it
+ * with its historical greeting and Ctrl-C wait; `up` supervises it beside
+ * the watch loops.
+ */
+async function startConsole(options: {
+  context: Context;
+  host: string;
+  port: number;
+  localRunner?: string;
+  poolRoot: string;
+  allowedHosts?: string[];
+  repos?: string[];
+  projectRoots?: string[];
+}): Promise<{ server: ReturnType<typeof createDecisionServer>; port: number; url: string }> {
+  const { context } = options;
+  const server = createDecisionServer({
+    store: context.store,
+    evidenceRoot: context.evidenceRoot,
+    clock: context.clock,
+    telegramTokenFile: context.telegramTokenFile,
+    configDir: dirname(context.databaseFile),
+    ...(options.localRunner === undefined ? {} : { localRunner: options.localRunner }),
+    poolRoot: options.poolRoot,
+    ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
+    ...(options.repos === undefined ? {} : { repos: options.repos }),
+    ...(options.projectRoots === undefined ? {} : { projectRoots: options.projectRoots }),
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(options.port, options.host, () => resolve());
+  }).catch(error => {
+    throw new Error(`could not listen on ${options.host}:${options.port} — ${describe(error)}`);
+  });
+  const bound = server.address();
+  const port = typeof bound === "object" && bound !== null ? bound.port : options.port;
+  return { server, port, url: `http://${options.host}:${port}/` };
+}
+
 async function serveCommand(
   flags: Map<string, string | true>,
   context: Context,
@@ -2865,28 +2941,18 @@ async function serveCommand(
   const localRunner = text(flags, "runner");
   const poolRoot = text(flags, "pool") ?? join(dirname(context.databaseFile), "worktrees");
 
-  const server = createDecisionServer({
-    store,
-    evidenceRoot: context.evidenceRoot,
-    clock: context.clock,
-    telegramTokenFile: context.telegramTokenFile,
-    configDir: dirname(context.databaseFile),
+  const console_ = await startConsole({
+    context,
+    host,
+    port,
     ...(localRunner === undefined ? {} : { localRunner }),
     poolRoot,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
     ...(repoFlag === undefined ? {} : { repos: repoFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
     ...(rootFlag === undefined ? {} : { projectRoots: rootFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
   });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, host, () => resolve());
-  }).catch(error => {
-    throw new Error(`could not listen on ${host}:${port} — ${describe(error)}`);
-  });
-
-  const bound = server.address();
-  const actual = typeof bound === "object" && bound !== null ? bound.port : port;
+  const server = console_.server;
+  const actual = console_.port;
   if (json) {
     write(envelopeJson({ ok: true, command: "serve", host, port: actual }));
   } else {
@@ -4539,93 +4605,90 @@ const WATCH_HEARTBEAT_MS = 30_000;
  * group (M6.12): runs finalize as failures, worktrees are preserved, and
  * fences keep late output out of every commit.
  */
-async function watchCommand(
-  flags: Map<string, string | true>,
-  context: Context,
-): Promise<number> {
-  const { store, write, json } = context;
-  const demoFence = refuseDemo(context, "watch");
-  if (demoFence !== null) return demoFence;
-  const runner = text(flags, "runner");
-  const token = text(flags, "token") ?? readTokenFile(text(flags, "token-file"));
-  if (runner === undefined || token === undefined) {
-    return fail(write, json, "watch", "usage", "`standing-orders watch --runner <name> --token <t>|--token-file <path> --repo <path> [--for <ms>]`", EXIT.usage);
-  }
-  // Passes built from these flags authenticate with the resolved token.
-  flags.set("token", token);
-  const auth = authenticate(store, runner, token);
-  if (!auth.ok) {
-    return fail(write, json, "watch", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
-  }
-  const repo = repoFrom(flags);
+/**
+ * The extracted watch loop (arc 2 finding 5/20): NON-EMITTING — every line
+ * goes through `args.progress`, every stop decision through the caller's
+ * fences, and the answer is a typed result, never an envelope. watchCommand
+ * wraps it with its historical signals and output; `up` supervises several
+ * of them beside a console. The lease and heartbeat ride the CREDENTIALED
+ * doors (findings 15/25): after a takeover rotates this runner's token,
+ * acquisition refuses and the very next renewal is FATAL — a loop that has
+ * lost its lease or its credential stops admitting work immediately.
+ */
+type WatchLoopResult =
+  | { ok: true; ticks: number; built: number; broke: number; incarnation: string }
+  | { ok: false; reason: "watch-busy" | "lease-lost"; detail: string; ticks: number; built: number; broke: number };
+
+async function runWatchLoop(args: {
+  flags: Map<string, string | true>;
+  context: Context;
+  runner: string;
+  token: string;
+  repo: string;
+  progress: (line: string) => void;
+  /** The caller's admission fence — true stops the loop at the next gate. */
+  isStopping: () => boolean;
+  /** Hands the caller the follower's controller so its stop can abort the long poll. */
+  onFollowController?: (controller: AbortController) => void;
+  /** Resolves the caller's readiness: fired after the lease is held. */
+  onReady?: () => void;
+}): Promise<WatchLoopResult> {
+  const { context, flags, runner, token, repo, progress } = args;
+  const { store } = context;
 
   const tickEveryMs = Number(text(flags, "tick-every") ?? 60_000);
   const bridgeEveryMs = Number(text(flags, "bridge-every") ?? 45_000);
   const reconcileEveryMs = Number(text(flags, "reconcile-every") ?? 5 * 60_000);
   const runFor = text(flags, "for") === undefined ? null : Number(text(flags, "for"));
 
-  // The envelope contract holds for long commands too (Codex M5-M8 audit,
-  // C-1): in --json mode every progress line goes to stderr, and stdout
-  // receives exactly the final envelope.
-  const progress = (line: string): void => {
-    if (json) process.stderr.write(`${line}\n`);
-    else write(line);
-  };
-
   const incarnation = randomUUID();
-  const lease = store.acquireWatchLease(runner, repo, incarnation, WATCH_LEASE_MS, new Date());
+  const lease = acquireWatchLeaseAuthed(
+    store,
+    { runner, token, repo, owner: incarnation, ttlMs: WATCH_LEASE_MS },
+    new Date(),
+  );
   if (!lease.ok) {
-    return fail(
-      write,
-      json,
-      "watch",
-      "watch-busy",
-      `another watch holds ${runner} on ${repo} until ${lease.until} — one watch per runner and repo; cron ticks may coexist, watches may not`,
-      EXIT.refused,
-    );
+    return {
+      ok: false,
+      reason: "watch-busy",
+      detail:
+        lease.reason === "watch-busy"
+          ? `another watch holds ${runner} on ${repo} until ${lease.until} — one watch per runner and repo; cron ticks may coexist, watches may not`
+          : describeAuth(lease.reason, runner),
+      ticks: 0,
+      built: 0,
+      broke: 0,
+    };
   }
-  if (lease.superseded !== null) {
-    const recovered = store.recoverIncarnation(runner, lease.superseded, new Date());
-    if (recovered > 0) {
-      progress(`Recovered ${recovered} claim(s) from the previous watch (${lease.superseded.slice(0, 8)}…) before dispatching anything.`);
-    }
+  if (lease.superseded !== null && lease.recovered > 0) {
+    progress(`Recovered ${lease.recovered} claim(s) from the previous watch (${lease.superseded.slice(0, 8)}…) before dispatching anything.`);
   }
 
   // The night is a row, not "the last 24 hours": everything this watch does
   // attributes to this episode by runner and window, and `brief
   // --latest-watch` bounds itself to exactly it.
   store.startWatchEpisode({ repo, runner, incarnation }, new Date());
+  args.onReady?.();
 
-  let stopping = false;
-  let graceTimer: ReturnType<typeof setTimeout> | undefined;
-  const stopGraceMs = Number(text(flags, "stop-grace") ?? 30_000);
+  // A false renewal is FATAL (arc 2 finding 15): the lease or the
+  // credential is gone, and admitting one more pass would be work done for
+  // an authority this process no longer holds.
+  let leaseLost = false;
   const followController = new AbortController();
-  const hardStop = () => {
-    const terminated = terminateLiveProviders();
-    if (terminated > 0) {
-      progress(`Hard stop: ${terminated} provider process group(s) terminated. Their runs finalize as failures; worktrees are preserved; fences keep late output out of every commit.`);
-    }
-  };
-  const stop = () => {
-    if (stopping) {
-      // Second signal: the operator has waited long enough. The provider
-      // process group dies now; the pass's own finalization still runs.
-      hardStop();
-      return;
-    }
-    stopping = true;
-    // First signal: stop admitting work AND abort the in-flight long poll,
-    // so shutdown is not held hostage by a poll Telegram is still holding.
-    // The grace clock starts here: an agent that outlives it is killed as
-    // a group (M6.12) — deterministic stop is an unattended safety control.
-    followController.abort();
-    graceTimer = setTimeout(hardStop, stopGraceMs);
-  };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
+  args.onFollowController?.(followController);
+  const stopping = (): boolean => args.isStopping() || leaseLost;
 
   const heartbeat = setInterval(() => {
-    store.heartbeatWatchLease(runner, repo, incarnation, WATCH_LEASE_MS, new Date());
+    const renewed = heartbeatWatchLeaseAuthed(
+      store,
+      { runner, token, repo, owner: incarnation, ttlMs: WATCH_LEASE_MS },
+      new Date(),
+    );
+    if (!renewed && !leaseLost) {
+      leaseLost = true;
+      followController.abort();
+      progress(`watch: the lease or credential for ${runner} on ${repo} was taken — stopping without admitting more work`);
+    }
   }, WATCH_HEARTBEAT_MS);
   heartbeat.unref?.();
 
@@ -4670,7 +4733,7 @@ async function watchCommand(
     for (const [key, value] of Object.entries(extra)) copy.set(key, value);
     return copy;
   };
-  const quietContext: Context = { ...context, write: sink, json: true, shouldStop: () => stopping };
+  const quietContext: Context = { ...context, write: sink, json: true, shouldStop: stopping };
 
 
   const startedAt = Date.now();
@@ -4685,7 +4748,7 @@ async function watchCommand(
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   try {
-    while (!stopping && (deadline === null || Date.now() < deadline)) {
+    while (!stopping() && (deadline === null || Date.now() < deadline)) {
       const seqBefore = store.wakeSeq();
       const now = Date.now();
 
@@ -4729,7 +4792,7 @@ async function watchCommand(
       // Except under a stop (audit IV-1): once the signal lands, nothing
       // more is published this incarnation — the durable intent keeps the
       // work safe for the successor.
-      if (!stopping && store.pendingPublications().length > 0) {
+      if (!stopping() && store.pendingPublications().length > 0) {
         const published = await publishPass(store, {
           repo,
           ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
@@ -4787,25 +4850,554 @@ async function watchCommand(
       const step = Math.max(50, Math.min(500, idleUntil));
       const seqIdle = store.wakeSeq();
       const dozeUntil = Date.now() + Math.max(step, 0);
-      while (!stopping && Date.now() < dozeUntil && store.wakeSeq() === seqIdle) {
+      while (!stopping() && Date.now() < dozeUntil && store.wakeSeq() === seqIdle) {
         await sleep(50);
       }
     }
   } finally {
     clearInterval(heartbeat);
-    if (graceTimer !== undefined) clearTimeout(graceTimer);
     followController.abort();
     if (follower !== null) await follower;
-    process.removeListener("SIGINT", stop);
-    process.removeListener("SIGTERM", stop);
     store.endWatchEpisode(incarnation, { ticks, built, broke: brokeCount }, new Date());
     store.releaseWatchLease(runner, repo, incarnation, new Date());
   }
 
-  return succeed(write, json, "watch", { ticks, built, broke: brokeCount, incarnation }, () => [
-    `Watched ${repo} for ${Math.round((Date.now() - startedAt) / 1000)}s: ${ticks} pass(es), ${built} with work, ${brokeCount} broke.`,
+  if (leaseLost) {
+    return { ok: false, reason: "lease-lost", detail: `the watch lease for ${runner} on ${repo} stopped renewing — another process may have taken this worker over`, ticks, built, broke: brokeCount };
+  }
+  return { ok: true, ticks, built, broke: brokeCount, incarnation };
+}
+
+async function watchCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const demoFence = refuseDemo(context, "watch");
+  if (demoFence !== null) return demoFence;
+  const runner = text(flags, "runner");
+  const token = text(flags, "token") ?? readTokenFile(text(flags, "token-file"));
+  if (runner === undefined || token === undefined) {
+    return fail(write, json, "watch", "usage", "`standing-orders watch --runner <name> --token <t>|--token-file <path> --repo <path> [--for <ms>]`", EXIT.usage);
+  }
+  // Passes built from these flags authenticate with the resolved token.
+  flags.set("token", token);
+  const auth = authenticate(store, runner, token);
+  if (!auth.ok) {
+    return fail(write, json, "watch", auth.reason, describeAuth(auth.reason, runner), EXIT.refused);
+  }
+  const repo = repoFrom(flags);
+
+  // The envelope contract holds for long commands too (Codex M5-M8 audit,
+  // C-1): in --json mode every progress line goes to stderr, and stdout
+  // receives exactly the final envelope.
+  const progress = (line: string): void => {
+    if (json) process.stderr.write(`${line}\n`);
+    else write(line);
+  };
+
+  // The historical signal shell, wrapped around the extracted loop: first
+  // signal stops admission and starts the grace clock; the second — or the
+  // clock — SIGKILLs every live provider group (M6.12).
+  let stopping = false;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  let followAbort: AbortController | null = null;
+  const stopGraceMs = Number(text(flags, "stop-grace") ?? 30_000);
+  const hardStop = () => {
+    const terminated = terminateLiveProviders();
+    if (terminated > 0) {
+      progress(`Hard stop: ${terminated} provider process group(s) terminated. Their runs finalize as failures; worktrees are preserved; fences keep late output out of every commit.`);
+    }
+  };
+  const stop = () => {
+    if (stopping) {
+      hardStop();
+      return;
+    }
+    stopping = true;
+    followAbort?.abort();
+    graceTimer = setTimeout(hardStop, stopGraceMs);
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  const startedAt = Date.now();
+  let result: WatchLoopResult;
+  try {
+    result = await runWatchLoop({
+      flags,
+      context,
+      runner,
+      token,
+      repo,
+      progress,
+      isStopping: () => stopping,
+      onFollowController: controller => {
+        followAbort = controller;
+      },
+    });
+  } finally {
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
+
+  if (!result.ok) {
+    return fail(write, json, "watch", result.reason, result.detail, EXIT.refused, {
+      ticks: result.ticks,
+      built: result.built,
+      broke: result.broke,
+    });
+  }
+  return succeed(write, json, "watch", { ticks: result.ticks, built: result.built, broke: result.broke, incarnation: result.incarnation }, () => [
+    `Watched ${repo} for ${Math.round((Date.now() - startedAt) / 1000)}s: ${result.ticks} pass(es), ${result.built} with work, ${result.broke} broke.`,
     "The lease is handed back; cron or the next watch may take it.",
   ]);
+}
+
+// ---- one command to a working cockpit (arc 2) ------------------------------
+
+/**
+ * `standing-orders up` — cold start to an open, working cockpit.
+ *
+ * COMPOSITION ONLY: identities mint through the atomic doors (a first
+ * approver only while none exists; a runner only while its name is idle),
+ * then the extracted console and one watch loop per repository run in this
+ * one process, under one supervisor, over one shared store. Nothing here
+ * loosens a ceremony: approval, budgets, publication, and every fence work
+ * exactly as they do for the long-hand verbs.
+ */
+const UP_LOGIN_FILE = "up-login.txt";
+
+/** Durably create the login file BEFORE the bootstrap commits (arc 2
+ * finding 27): exclusive, 0600, fsynced — file and directory both — so the
+ * row only ever follows a durable secret. Throws on any failure. */
+function writeLoginFileDurably(path: string, name: string, password: string): void {
+  const fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+  try {
+    writeSync(fd, `${name} ${password}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  const dir = openSync(dirname(path), fsConstants.O_RDONLY);
+  try {
+    fsyncSync(dir);
+  } catch {
+    // Some filesystems refuse directory fsync; the file's own fsync stands.
+  } finally {
+    closeSync(dir);
+  }
+}
+
+function readLoginFile(path: string): { name: string; password: string } | null {
+  try {
+    const raw = readFileSync(path, "utf8").trim();
+    const cut = raw.indexOf(" ");
+    if (cut <= 0) return null;
+    const name = raw.slice(0, cut);
+    const password = raw.slice(cut + 1);
+    if (name === "" || password === "") return null;
+    return { name, password };
+  } catch {
+    return null;
+  }
+}
+
+type UpApprover = {
+  approver: string | null;
+  approvers: string[];
+  verified: boolean;
+  passwordFile: string | null;
+  /** The password to print once — set ONLY when this run minted it. */
+  mintedPassword: string | null;
+  notes: string[];
+};
+
+/** The approver decision tree (arc 2 findings 8/21/29/32), exhaustively. */
+async function resolveUpApprover(
+  context: Context,
+  flags: Map<string, string | true>,
+  canPrompt: boolean,
+): Promise<UpApprover | { refusal: string }> {
+  const { store, clock } = context;
+  const loginFile = join(dirname(context.databaseFile), UP_LOGIN_FILE);
+  const asFlag = text(flags, "as");
+  const notes: string[] = [];
+
+  let names = store.listApprovers().map(one => one.name);
+  if (names.length === 0) {
+    // Adoption first (finding 27/32): an orphan file from a crashed
+    // bootstrap is a valid intent — and never OURS to unlink.
+    const orphan = readLoginFile(loginFile);
+    if (orphan !== null) {
+      const adopted = store.bootstrapApproverIfNone(orphan.name, hashApproverToken(orphan.password), clock());
+      if (adopted.ok) {
+        notes.push(`adopted the login from ${UP_LOGIN_FILE} — a previous start was interrupted before it finished`);
+        return { approver: orphan.name, approvers: [orphan.name], verified: true, passwordFile: loginFile, mintedPassword: null, notes };
+      }
+      names = store.listApprovers().map(one => one.name); // a winner appeared; fall through
+    } else {
+      // Mint: the FILE is the durable intent, written and fsynced before
+      // the insert (finding 27). A refused insert unlinks only when an
+      // UNRELATED approver won (finding 32).
+      const name = asFlag ?? process.env["USER"] ?? process.env["USERNAME"] ?? "operator";
+      const password = randomBytes(12).toString("base64url");
+      try {
+        writeLoginFileDurably(loginFile, name, password);
+      } catch (error) {
+        return {
+          refusal: `could not create ${UP_LOGIN_FILE} beside the database (${describe(error)}) — if a file is already there, another \`up\` may be starting; wait a moment, your login will be in it`,
+        };
+      }
+      const made = store.bootstrapApproverIfNone(name, hashApproverToken(password), clock());
+      if (made.ok) {
+        return { approver: name, approvers: [name], verified: true, passwordFile: loginFile, mintedPassword: password, notes };
+      }
+      // Lost the race. Keep the file if the winner IS our identity (an
+      // adopter beat us to our own file); otherwise it is ours to remove.
+      if (authenticateApprover(store, name, password).ok) {
+        return { approver: name, approvers: store.listApprovers().map(one => one.name), verified: true, passwordFile: loginFile, mintedPassword: null, notes };
+      }
+      try {
+        unlinkSync(loginFile);
+      } catch {
+        // already gone
+      }
+      names = store.listApprovers().map(one => one.name);
+    }
+  }
+
+  // Approvers exist. The stale-or-current file is advertised only when it
+  // still authenticates (finding 32).
+  let fileLogin: { name: string; password: string } | null = null;
+  const present = readLoginFile(loginFile);
+  if (present !== null) {
+    if (authenticateApprover(store, present.name, present.password).ok) {
+      fileLogin = present;
+    } else {
+      notes.push(`${UP_LOGIN_FILE} no longer matches any login — it is stale; your current password is the one you know`);
+    }
+  }
+
+  let selected: string | null = null;
+  if (asFlag !== undefined) {
+    if (!names.includes(asFlag)) {
+      return { refusal: `no approver named \`${asFlag}\` — known: ${names.join(", ")}` };
+    }
+    selected = asFlag;
+  } else if (names.length === 1) {
+    selected = names[0] as string;
+  }
+
+  let verified = false;
+  let passwordFile: string | null = null;
+  if (selected !== null && fileLogin !== null && fileLogin.name === selected) {
+    verified = true;
+    passwordFile = loginFile;
+  } else if (selected !== null && canPrompt) {
+    const { askHidden } = await import("./prompt.js");
+    for (let attempt = 1; attempt <= 3 && !verified; attempt += 1) {
+      const typed = await askHidden(`password for ${selected} (${attempt}/3): `);
+      if (typed !== "" && authenticateApprover(store, selected, typed).ok) verified = true;
+    }
+    if (!verified) {
+      notes.push(
+        `could not verify ${selected}'s password — the console will still ask at login. If it is lost: another approver can add you (\`approver add\`), or restore the database/${UP_LOGIN_FILE}.`,
+      );
+    }
+  }
+  return { approver: selected, approvers: names, verified, passwordFile, mintedPassword: null, notes };
+}
+
+/** The platform browser opener — detached, silent, never load-bearing. */
+function openBrowser(url: string): void {
+  const command =
+    process.platform === "darwin" ? ["open", url]
+    : process.platform === "win32" ? ["cmd", "/c", "start", "", url]
+    : ["xdg-open", url];
+  try {
+    const child = spawnChild(command[0] as string, command.slice(1), { detached: true, stdio: "ignore" });
+    child.unref();
+  } catch {
+    // A browser that will not open is a URL the greeting already printed.
+  }
+}
+
+async function upCommand(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const demoFence = refuseDemo(context, "up");
+  if (demoFence !== null) return demoFence;
+
+  // 1. Validation, before anything at all.
+  const portGiven = text(flags, "port");
+  const port = Number(portGiven ?? 4180);
+  if (portGiven !== undefined && (!Number.isInteger(port) || port < 1 || port >= 65536)) {
+    return fail(write, json, "up", "usage", "--port is a whole number under 65536", EXIT.usage);
+  }
+  const forGiven = text(flags, "for");
+  if (forGiven !== undefined && (!Number.isInteger(Number(forGiven)) || Number(forGiven) <= 0)) {
+    return fail(write, json, "up", "usage", "--for takes a positive whole number of milliseconds", EXIT.usage);
+  }
+  const runnerFlag = text(flags, "runner");
+  if (runnerFlag !== undefined && !validRunnerName(runnerFlag)) {
+    return fail(write, json, "up", "usage", `a worker name is 1–${RUNNER_NAME_MAX} characters with no control characters`, EXIT.usage);
+  }
+
+  const progress = (line: string): void => {
+    if (json) process.stderr.write(`${line}\n`);
+    else write(line);
+  };
+
+  // 2. Canonical repository roots (finding 10): the git top-level, then the
+  // real path, deduplicated — printed before any side effect.
+  const inputs = context.repoList !== undefined && context.repoList.length > 0 ? context.repoList : [process.cwd()];
+  const gitRun = context.gitRunner ?? ((file: string, args: readonly string[], opts?: { cwd?: string }) => run(file, [...args], { ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }), timeoutMs: 10_000 }));
+  const repos: string[] = [];
+  for (const input of inputs) {
+    const top = await gitRun("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(input) });
+    if (top.code !== 0) {
+      return fail(
+        write,
+        json,
+        "up",
+        "not-a-repository",
+        `${input} is not inside a git repository — name one with \`--repo <path>\`, or try the sandbox first: \`standing-orders demo\``,
+        EXIT.refused,
+      );
+    }
+    let root: string;
+    try {
+      root = realpathSync(top.stdout.trim());
+    } catch {
+      return fail(write, json, "up", "not-a-repository", `${input} could not be resolved to a real path`, EXIT.refused);
+    }
+    if (!repos.includes(root)) repos.push(root);
+  }
+  for (const repo of repos) progress(`repository  ${repo}`);
+
+  // 3. Reserve the port BEFORE any identity or enrollment mutation
+  // (finding 7/19): a busy port must refuse while the world is untouched.
+  const probe = createNetServer();
+  const reserved = await new Promise<boolean>(resolveProbe => {
+    probe.once("error", () => resolveProbe(false));
+    probe.listen(port, "127.0.0.1", () => resolveProbe(true));
+  });
+  if (!reserved) {
+    return fail(
+      write,
+      json,
+      "up",
+      "port-busy",
+      `port ${port} is taken — another \`up\` or \`serve\` may already be running; stop it, or pick a different --port`,
+      EXIT.refused,
+    );
+  }
+
+  const canPrompt = !json && process.stdin.isTTY === true && process.stdout.isTTY === true;
+  let runnerName = "";
+  let runnerToken = "";
+  let approver: UpApprover | null = null;
+  try {
+    // 4. The approver (findings 2/8/17/21/27/29/32).
+    const approverPlan = await resolveUpApprover(context, flags, canPrompt);
+    if ("refusal" in approverPlan) {
+      return fail(write, json, "up", "login", approverPlan.refusal, EXIT.refused);
+    }
+    approver = approverPlan;
+    for (const note of approverPlan.notes) progress(note);
+
+    // 5. The runner, through the atomic door (findings 1/16/26/31), with
+    // the suffix budget (finding 24) for generated names only.
+    const base = runnerFlag ?? normalizeRunnerName(hostname());
+    let doorAnswer: ReturnType<typeof registerRunnerIfIdle> | null = null;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const suffix = attempt === 1 ? "" : `-${attempt}`;
+      const name = attempt === 1 ? base : `${base.slice(0, RUNNER_NAME_MAX - suffix.length)}${suffix}`;
+      const answer = registerRunnerIfIdle(store, { name, host: hostname(), now: clock() });
+      if (answer.ok) {
+        runnerName = name;
+        runnerToken = answer.token;
+        if (answer.recoveredRuns > 0) progress(`recovered ${answer.recoveredRuns} interrupted attempt(s) left by the previous ${name}`);
+        doorAnswer = answer;
+        break;
+      }
+      doorAnswer = answer;
+      if (runnerFlag !== undefined) break; // an explicit name is never suffixed around
+    }
+    if (runnerName === "") {
+      const detail = doorAnswer !== null && !doorAnswer.ok ? doorAnswer.detail : "no worker name could be taken";
+      return fail(
+        write,
+        json,
+        "up",
+        "runner-alive",
+        `${detail} — that worker looks alive; stop the other \`up\` or watch, or name a different worker with --runner`,
+        EXIT.refused,
+      );
+    }
+
+    // 6. Enrollment: the canonical roots join repos.json so the plain
+    // report and future runs see them.
+    try {
+      const configFile = configPath(process.env, homedir());
+      const loaded = await loadRepos(configFile);
+      const existing = "repos" in loaded ? loaded.repos : [];
+      await saveRepos(configFile, addRepos(existing, repos));
+    } catch {
+      progress("could not update repos.json — the cockpit still runs; enrollment can wait");
+    }
+  } finally {
+    await new Promise<void>(done => probe.close(() => done()));
+  }
+
+  // 7. The console, on the just-released port. The tiny window between the
+  // probe closing and this bind can lose a race; that failure tears down
+  // cleanly below instead of leaving identities half-claimed silently.
+  const pool = join(dirname(context.databaseFile), "worktrees");
+  let console_: Awaited<ReturnType<typeof startConsole>>;
+  try {
+    console_ = await startConsole({
+      context,
+      host: "127.0.0.1",
+      port,
+      localRunner: runnerName,
+      poolRoot: pool,
+      repos,
+    });
+  } catch (error) {
+    retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
+    return fail(write, json, "up", "port-busy", `${describe(error)} — the port was taken while starting; try again`, EXIT.refused);
+  }
+
+  // 8. The watch loops: one per repository, sharing this store and this
+  // supervisor. First signal stops admission and starts the grace clock;
+  // the second — or the clock — hard-stops provider groups (M6.12).
+  let stopping = false;
+  let fatal: string | null = null;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const followControllers: AbortController[] = [];
+  const stopGraceMs = Number(text(flags, "stop-grace") ?? 30_000);
+  const hardStop = () => {
+    const terminated = terminateLiveProviders();
+    if (terminated > 0) progress(`Hard stop: ${terminated} provider process group(s) terminated.`);
+  };
+  const stop = () => {
+    if (stopping) {
+      hardStop();
+      return;
+    }
+    stopping = true;
+    for (const controller of followControllers) controller.abort();
+    graceTimer = setTimeout(hardStop, stopGraceMs);
+    graceTimer.unref?.();
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  const loopFlagsFor = (repo: string): Map<string, string | true> => {
+    const copy = new Map<string, string | true>();
+    copy.set("runner", runnerName);
+    copy.set("token", runnerToken);
+    copy.set("repo", repo);
+    copy.set("pool", pool);
+    if (forGiven !== undefined) copy.set("for", forGiven);
+    return copy;
+  };
+  const prefix = (repo: string): string => (repos.length > 1 ? `[${repo.split("/").pop() ?? repo}] ` : "");
+
+  const readiness: Promise<void>[] = [];
+  const loops = repos.map(repo => {
+    let markReady: () => void = () => {};
+    readiness.push(new Promise<void>(resolveReady => (markReady = resolveReady)));
+    return runWatchLoop({
+      flags: loopFlagsFor(repo),
+      context,
+      runner: runnerName,
+      token: runnerToken,
+      repo,
+      progress: line => progress(`${prefix(repo)}${line}`),
+      isStopping: () => stopping,
+      onFollowController: controller => followControllers.push(controller),
+      onReady: markReady,
+    }).then(
+      result => ({ repo, result }),
+      error => ({ repo, result: { ok: false as const, reason: "lease-lost" as const, detail: describe(error), ticks: 0, built: 0, broke: 0 } }),
+    );
+  });
+
+  // A loop that dies while its siblings live must not leave a partial
+  // cockpit standing silently (finding 5): first failure aborts everything.
+  const watchdog = loops.map(one =>
+    one.then(({ repo, result }) => {
+      if (!result.ok && !stopping) {
+        fatal = `${prefix(repo)}${result.detail}`;
+        stop();
+      }
+    }),
+  );
+
+  // 9. Readiness, then the ONE startup envelope / greeting (finding 11/20).
+  const approverPlan2 = approver as UpApprover;
+  await Promise.race([Promise.all(readiness), Promise.all(loops)]);
+  const url = console_.url;
+  if (fatal === null) {
+    if (json) {
+      write(
+        envelopeJson({
+          ok: true,
+          command: "up",
+          url,
+          repos,
+          runner: runnerName,
+          approver: approverPlan2.approver,
+          approvers: approverPlan2.approvers,
+          approverVerified: approverPlan2.verified,
+          ...(approverPlan2.passwordFile === null ? {} : { passwordFile: approverPlan2.passwordFile }),
+        }),
+      );
+    } else {
+      write("");
+      write(`The console is on ${url}`);
+      if (approverPlan2.mintedPassword !== null && canPrompt) {
+        write(`  login     ${approverPlan2.approver} / ${approverPlan2.mintedPassword}`);
+        write(`  (also saved to ${approverPlan2.passwordFile})`);
+      } else if (approverPlan2.passwordFile !== null) {
+        write(`  login     ${approverPlan2.approver} — the password is in ${approverPlan2.passwordFile}`);
+      } else if (approverPlan2.approver !== null) {
+        write(`  login     ${approverPlan2.approver} — with your password`);
+      } else {
+        write(`  login     one of: ${approverPlan2.approvers.join(", ")}`);
+      }
+      write(`  worker    ${runnerName} is watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`);
+      write("  The inbox checklist shows what remains before approved work builds unattended.");
+      write("  Ctrl-C stops the console and the worker together.");
+    }
+    if (!json && !flags.has("no-open") && process.stdout.isTTY === true) openBrowser(url);
+  }
+
+  // 10. Supervise to the end.
+  const results = await Promise.all(loops);
+  await Promise.all(watchdog);
+  if (graceTimer !== undefined) clearTimeout(graceTimer);
+  process.removeListener("SIGINT", stop);
+  process.removeListener("SIGTERM", stop);
+  retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
+  await new Promise<void>(done => console_.server.close(() => done()));
+
+  if (fatal !== null) {
+    // The startup envelope (when json) already went out; the exit code is
+    // the health signal (finding 11/20) — never a second envelope.
+    process.stderr.write(`up: ${fatal}\n`);
+    return EXIT.failed;
+  }
+  const ticks = results.reduce((sum, one) => sum + one.result.ticks, 0);
+  const built = results.reduce((sum, one) => sum + one.result.built, 0);
+  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. The worker is retired; the next \`up\` reuses its name.`);
+  return EXIT.ok;
 }
 
 // ---- the telegram bridge ---------------------------------------------------

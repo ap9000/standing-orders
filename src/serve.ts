@@ -4358,6 +4358,7 @@ function inboxPage(chrome: Chrome, data: {
       ? ""
       : `<div class="card">` +
         `<p><strong>Getting started</strong> <span class="meta">\u2014 live state, not a saved step; this card retires itself after the first successful unattended run</span></p>` +
+        `<p class="meta">or run <span class="mono">standing-orders up</span> in a repository \u2014 it starts the console and a worker and completes the first steps; the rest of this list still shows what remains.</p>` +
         data.wizard
           .map(
             step =>

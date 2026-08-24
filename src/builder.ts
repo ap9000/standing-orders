@@ -35,6 +35,7 @@ import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, SteerNote, Store } from "./store.js";
 import { approvalOf, type Scope } from "./scope.js";
 import { currentClaim, heartbeat, missingCapability, SYNC_MAX_AGE_MS } from "./claim.js";
+import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
 import { invokeAgent, type AgentOutcome } from "./invoke.js";
@@ -73,6 +74,14 @@ export type BuildRequest = {
    * the same runner started earlier.
    */
   leaseId?: string;
+  /**
+   * The runner's own credential, for the CREDENTIALED pulse (arc 2 finding
+   * 33): with it, every mid-build beat re-proves the token against the
+   * current hash, and a takeover's rotation fences this attempt at its
+   * next beat. Absent (a person driving `build` by hand), the beat falls
+   * back to the unauthenticated touch, exactly as before.
+   */
+  runnerToken?: string;
   /**
    * Real time, read repeatedly. `now` is one instant and a build is not: a
    * lease heartbeated with the timestamp the build started at is a lease that
@@ -530,7 +539,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     const beat = () => {
       try {
         const answer = heartbeat(store, leaseId, clock());
-        store.touchRunner(runner, clock());
+        // The runner pulse is CREDENTIALED when the caller carries the
+        // token (arc 2 finding 33): after a takeover rotates the hash, the
+        // stale incarnation's next beat refuses and latches the fence —
+        // an unconditional touch would heartbeat the SUCCESSOR's row.
+        if (request.runnerToken !== undefined) {
+          const alive = runnerHeartbeat(store, runner, request.runnerToken, clock());
+          if (!alive.ok) fencedMidBuild = true;
+        } else {
+          store.touchRunner(runner, clock());
+        }
         if (!answer.ok) fencedMidBuild = true;
       } catch {
         // A pulse that cannot reach the database proves nothing about the

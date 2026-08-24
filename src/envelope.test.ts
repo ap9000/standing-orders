@@ -124,6 +124,8 @@ describe("the machine envelope", () => {
     // hits first, not only on the happy one.
     const operateTable: Record<string, string[]> = {
       sync: ["--json"],
+      // The usage road terminates without binding a port or minting anything.
+      up: ["--for", "not-a-number", "--json"],
       ready: ["--json"],
       task: ["list", "--json"],
       claim: ["--json"],

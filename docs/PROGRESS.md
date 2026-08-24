@@ -1,5 +1,49 @@
 # Progress
 
+**2026-08-24 — `standing-orders up` (arc 2): one command to a working cockpit.**
+Four Codex rounds (REDESIGN ×3, APPROVE WITH CHANGES — findings 1–34),
+because a convenience command that touches identity is where shortcuts
+hide. `up` is COMPOSITION ONLY, and the rounds forced the composition
+honest. New credentialed doors, each ONE write transaction:
+`registerRunnerIfIdle` (take a runner name only when absent, retired,
+or dead by the recovery predicate AND no watch lease is unexpired —
+then finish every open run the dead holder left BY THE RUNS TABLE,
+deliberately unfiltered by claim released_at so reap-released work
+still requeues, findings 16/26/31), `acquireWatchLeaseAuthed` (token
+verified and lease acquired together; taking over an expired lease
+recovers the superseded incarnation INSIDE the same transaction),
+`heartbeatWatchLeaseAuthed` + the runner heartbeat made transactional
+(findings 15/25/33 — the split authenticate-then-touch let a stale
+incarnation heartbeat its successor's row; now builder and planner
+pulses carry the token and a takeover fences the predecessor at its
+next beat), `retireRunnerIfCurrent` (cleanup fenced by the token THIS
+process minted — a predecessor can never retire its successor, finding
+28), and `bootstrapApproverIfNone` (insert only while the table is
+EMPTY — `up` can never rotate an existing password, finding 2). The
+first login is a DURABLE-INTENT file (finding 27): `up-login.txt` is
+written wx/0600 and fsynced — file AND directory — BEFORE the insert;
+a crash between leaves an orphan the next `up` adopts; an adopter
+never unlinks a file it did not create, and a creator losing the race
+keeps the file when its own identity won through adoption (finding
+32). Ordering proven by test: the port is reserved before ANY
+mutation — a busy port refuses with the world untouched. serveCommand
+and watchCommand were re-expressed over extracted non-emitting
+components (`startConsole`, `runWatchLoop` with ready/done and an
+admission fence) with byte-compatible verbs — and the watch gained
+the honesty it lacked: a lease that stops renewing is now FATAL,
+never silently ignored. The supervisor runs one console + one watch
+loop per repository over ONE shared store, first-signal graceful /
+second-signal hard-stop, retires its runner on the way out (instant
+restarts, no name accumulation), and opens the browser last.
+Repository inputs canonicalize through `git rev-parse --show-toplevel`
++ realpath before anything enrolls (finding 10). `--json` follows
+serve's precedent: ONE startup envelope when the URL is useful (url,
+repos, runner, approver/approvers/approverVerified, passwordFile);
+the exit code is the later health signal; `-o` gains a preflighted
+early flush for serve and up (findings 11/23/30). The demo's --keep
+farewell and the first-run checklist now name the road:
+`standing-orders up`. Suite 1087 → 1107.
+
 **2026-08-24 — the live window (v22): watch the agent work, and steer it.**
 Arc 1 of the attended track. Four Codex rounds (REDESIGN ×3, APPROVE
 WITH CHANGES — findings 1–16), because the arc rewires the money path:

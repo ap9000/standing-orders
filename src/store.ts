@@ -8685,6 +8685,99 @@ export class Store {
       .run(now.toISOString(), runner, repo, owner);
   }
 
+  /** The first still-unexpired watch lease this runner holds, if any (arc 2:
+   * the takeover door refuses while one exists). */
+  liveWatchLeaseOf(runner: string, now: Date): { repo: string; owner: string; until: string } | null {
+    const row = this.db
+      .prepare("SELECT repo, owner, expires_at FROM watch_lease WHERE runner = ? AND expires_at > ? LIMIT 1")
+      .get(runner, now.toISOString());
+    return row === undefined
+      ? null
+      : { repo: String(row["repo"]), owner: String(row["owner"]), until: String(row["expires_at"]) };
+  }
+
+  /**
+   * Finish everything a dead runner left mid-flight, BY THE RUNS TABLE
+   * (arc 2 findings 26/31): every open run recorded against the runner —
+   * deliberately NOT filtered on claim released_at, so work whose claim a
+   * reaper already released still gets its run finished as interrupted and
+   * its task requeued. The requeue guards on the ONE liveness fact: a task
+   * some newer live claim owns is that claim's business, not ours. Also
+   * sweeps tasks stranded `running` with no open run at all (a prior
+   * recovery crashed between finishing the run and requeueing).
+   */
+  recoverRunnerWork(runner: string, now: Date): number {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      let recovered = 0;
+      const open = this.db
+        .prepare("SELECT id, task_ref FROM run WHERE runner = ? AND outcome IS NULL")
+        .all(runner);
+      for (const row of open) {
+        const taskRef = Number(row["task_ref"]);
+        this.db
+          .prepare("UPDATE run SET outcome = 'failed', reason = 'interrupted', finished_at = ? WHERE id = ?")
+          .run(stamp, Number(row["id"]));
+        if (this.currentLiveLease(taskRef, now) === null) {
+          this.db
+            .prepare(
+              `UPDATE task SET state = 'queued', updated_at = ?
+                WHERE state = 'running' AND id = (
+                  SELECT external_id FROM task_ref WHERE id = ? AND backend = ?
+                )`,
+            )
+            .run(stamp, taskRef, BUILT_IN);
+        }
+        this.db
+          .prepare("UPDATE worktree SET released_at = ?, verified = 0 WHERE runner = ? AND task_ref = ? AND released_at IS NULL")
+          .run(stamp, runner, taskRef);
+        recovered += 1;
+      }
+      // Stranded `running` tasks whose newest claim was this runner's and
+      // whose lease is gone: no open run to finish, still not in the ready
+      // set — requeue them too (finding 31's crashed-recovery walk).
+      const stranded = this.db
+        .prepare(
+          `SELECT task_ref.id AS ref, task.id AS task_id FROM task
+             JOIN task_ref ON task_ref.external_id = task.id AND task_ref.backend = ?
+            WHERE task.state = 'running'
+              AND (SELECT claim.runner FROM claim WHERE claim.task_ref = task_ref.id
+                    ORDER BY claim.lease_generation DESC LIMIT 1) = ?
+              AND NOT EXISTS (SELECT 1 FROM run WHERE run.task_ref = task_ref.id AND run.outcome IS NULL)`,
+        )
+        .all(BUILT_IN, runner);
+      for (const row of stranded) {
+        if (this.currentLiveLease(Number(row["ref"]), now) !== null) continue;
+        this.db
+          .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
+          .run(stamp, String(row["task_id"]));
+        recovered += 1;
+      }
+      if (recovered > 0) this.bumpWake();
+      return recovered;
+    });
+  }
+
+  /**
+   * The first-approver door (arc 2 finding 2): INSERT only while the table
+   * is EMPTY, one transaction — `up` can never upsert, never rotate an
+   * existing password, and two cold starts serialize to one winner.
+   */
+  bootstrapApproverIfNone(
+    name: string,
+    credentialHash: string,
+    now: Date,
+  ): { ok: true } | { ok: false; reason: "approvers-exist" } {
+    return this.transact(() => {
+      const count = this.db.prepare("SELECT COUNT(*) AS n FROM approver").get();
+      if (Number(count?.["n"] ?? 0) > 0) return { ok: false as const, reason: "approvers-exist" as const };
+      this.db
+        .prepare("INSERT INTO approver (name, credential_hash, added_at, generation) VALUES (?, ?, ?, 1)")
+        .run(name, credentialHash, now.toISOString());
+      return { ok: true as const };
+    });
+  }
+
   /**
    * Recover everything a dead incarnation still holds, atomically, before
    * its successor dispatches anything: its live claims released as
@@ -8735,8 +8828,41 @@ export class Store {
           )
           .run(stamp, runner, taskRef);
       }
-      if (claims.length > 0) this.bumpWake();
-      return claims.length;
+      // Claims a reaper already released can still have OPEN runs — the
+      // reap stamps released_at without finishing anything (arc 2 findings
+      // 26/31). Their runs finish as interrupted here and their tasks
+      // requeue when no newer live claim owns them, so reaped work cannot
+      // stay `running` outside the ready set forever.
+      let extra = 0;
+      const orphaned = this.db
+        .prepare(
+          `SELECT run.id AS run_id, run.task_ref AS task_ref FROM run
+             JOIN claim ON claim.lease_id = run.lease_id
+            WHERE claim.runner = ? AND claim.incarnation = ? AND run.outcome IS NULL`,
+        )
+        .all(runner, incarnation);
+      for (const row of orphaned) {
+        const taskRef = Number(row["task_ref"]);
+        this.db
+          .prepare("UPDATE run SET outcome = 'failed', reason = 'interrupted', finished_at = ? WHERE id = ?")
+          .run(stamp, Number(row["run_id"]));
+        if (this.currentLiveLease(taskRef, now) === null) {
+          this.db
+            .prepare(
+              `UPDATE task SET state = 'queued', updated_at = ?
+                WHERE state = 'running' AND id = (
+                  SELECT external_id FROM task_ref WHERE id = ? AND backend = ?
+                )`,
+            )
+            .run(stamp, taskRef, BUILT_IN);
+        }
+        this.db
+          .prepare("UPDATE worktree SET released_at = ?, verified = 0 WHERE runner = ? AND task_ref = ? AND released_at IS NULL")
+          .run(stamp, runner, taskRef);
+        extra += 1;
+      }
+      if (claims.length + extra > 0) this.bumpWake();
+      return claims.length + extra;
     });
   }
 
