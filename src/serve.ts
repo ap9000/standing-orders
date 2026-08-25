@@ -910,6 +910,20 @@ export function createDecisionServer(options: ServeOptions): Server {
           worktrees: store.listWorktrees().filter(one => project === null || sameRepo(one.repo, project)),
           episode: project === null ? null : store.latestWatchEpisode(project),
           outboxPending: store.listNotifications("pending").length,
+          // External work at a glance (arc 3 finding 24): every dispatch
+          // grant with its blocked state, plus any open sync episode — the
+          // page a sync-failed push deep-links to now shows the fact.
+          externalWork: store
+            .listGrants()
+            .filter(one => one.dispatch === true && one.remoteRepo != null && visible(one.repo))
+            .map(one => ({
+              remoteRepo: String(one.remoteRepo),
+              blocked: one.dispatchBlocked ?? null,
+              openEpisode:
+                store
+                  .listNotifications("all")
+                  .find(n => n.kind === "sync-failed" && n.resolvedAt === null && n.dedupeKey.startsWith(`sync:${one.remoteRepo}:`))?.subject ?? null,
+            })),
           now,
         }),
       );
@@ -4695,6 +4709,7 @@ function systemPage(chrome: Chrome, data: {
   worktrees: WorktreeRow[];
   episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
   outboxPending: number;
+  externalWork?: { remoteRepo: string; blocked: string | null; openEpisode: string | null }[];
   now: Date;
 }): string {
   const nowMs = data.now.getTime();
@@ -4771,6 +4786,21 @@ function systemPage(chrome: Chrome, data: {
       ? `<p class="meta">no worker machine registered yet \u2014 <code>standing-orders runner register &lt;name&gt;</code>, then <code>standing-orders daemon install</code> keeps the background service running</p>`
       : `<div class="cards">${cards.join("")}</div>`,
     data.outboxPending > 0 ? `<p class="meta">notifications: ${data.outboxPending} pending delivery</p>` : "",
+    (data.externalWork ?? []).length === 0
+      ? ""
+      : `<h2>external work</h2>` +
+        (data.externalWork ?? [])
+          .map(
+            one =>
+              `<p class="row"><span class="mono">${escape(one.remoteRepo)}</span> ` +
+              (one.blocked !== null
+                ? `<span class="badge badge-open">dispatch blocked</span> <span class="meta">the tracker connection needs repair — \`standing-orders sync\` says why</span>`
+                : one.openEpisode !== null
+                  ? `<span class="badge badge-open">sync failing</span> <span class="meta">${escape(one.openEpisode)}</span>`
+                  : `<span class="meta">syncing normally</span>`) +
+              `</p>`,
+          )
+          .join("\n"),
   ].join("\n"), { chrome, refreshSeconds: data.building.length > 0 ? 10 : 60 });
 }
 
