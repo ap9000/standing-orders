@@ -96,6 +96,9 @@ import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS 
 import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
+import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, isLargeRepo } from "./onboard.js";
+import { updateRepos, addRepos } from "./repos.js";
+import { run as execRun } from "./exec.js";
 
 /** A user agent, reduced to safe display words — never echoed raw. */
 function oneLineUa(raw: string | string[] | undefined): string {
@@ -141,6 +144,10 @@ export type ServeOptions = {
    * install/push cards light up. X-Forwarded-* is never consulted.
    */
   publicUrl?: string;
+  /** Where repos.json lives — every enrollment locks exactly this file. */
+  registryPath?: string;
+  /** This console fronts an `up` process: onboarding copy says how to watch. */
+  upConsole?: boolean;
   /** Extra Host values this server answers as (a Tailscale name, a LAN ip:port). */
   allowedHosts?: readonly string[];
   /**
@@ -255,6 +262,9 @@ type Session = {
   project: string | null;
   /** Bumped on every open: stale tabs carry the revision they were rendered under. */
   projectRevision: number;
+  /** Onboarding preview records (arc: repo onboarding, finding 14) —
+   * session-held, swept at mint, at most 3, consumed exactly once. */
+  onboard?: Map<string, { nameWithOwner: string; rootIndex: number; target: string; diskUsageKib: number | null; large: boolean; mintedAt: number }>;
   /** When this session last READ the board — the anchor for "since you
    * last looked". Full page loads move it; fragment polls never do. */
   sawBoardAt: number | null;
@@ -1779,10 +1789,26 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const open = who.via === "cookie" ? who.session.project : null;
     const csrf = who.via === "cookie" ? who.session.csrf : "";
+    // Onboarding availability (findings 2/28/32/39): a cookie session on a
+    // root-configured, non-demo, POSIX serve gets the live card; everybody
+    // else gets the card DISABLED with the reason in words.
+    const onboardState =
+      who.via !== "cookie"
+        ? { enabled: false as const, why: "adding repositories is a browser session's act" }
+        : store.isDemo()
+          ? { enabled: false as const, why: "the sandbox never clones — this is demo data" }
+          : process.platform === "win32"
+            ? { enabled: false as const, why: "adding from GitHub is not supported on Windows yet" }
+            : ceiling.roots.length === 0
+              ? {
+                  enabled: false as const,
+                  why: `naming where repositories live takes --project-root — restart ${options.upConsole === true ? "`standing-orders up --project-root <dir>`" : "serve with --project-root <dir>"} and this card comes alive`,
+                }
+              : { enabled: true as const, roots: ceiling.roots, record: [...(who.session.onboard?.entries() ?? [])][0] ?? null };
     return page(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode, onboardState),
     );
   }
 
@@ -2674,6 +2700,111 @@ export function createDecisionServer(options: ServeOptions): Server {
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
+    }
+
+    if (url.pathname === "/projects/onboard-preview" || url.pathname === "/projects/onboard-confirm") {
+      // Repo onboarding (findings 1-39): bearer and demo refuse BEFORE any
+      // gh call; the console flow exists only on root-configured serves.
+      if (who.via !== "cookie") return refuse(response, who, 403, "adding repositories is a browser session's act");
+      if (store.isDemo()) return refuse(response, who, 403, "the sandbox never clones");
+      if (process.platform === "win32") return refuse(response, who, 403, "adding from GitHub is not supported on Windows yet");
+      if (ceiling.roots.length === 0) return projectsScreen(response, who, "naming where repositories live takes --project-root", 400);
+
+      if (url.pathname === "/projects/onboard-preview") {
+        const shape = parseGithubRepo(body.get("repo") ?? "");
+        if (!shape.ok) return projectsScreen(response, who, shape.problem, 400);
+        // Roots by INDEX (finding 13) — a posted path is never accepted.
+        const rootIndex = Number(body.get("root") ?? "0");
+        const rootRaw = Number.isInteger(rootIndex) ? ceiling.roots[rootIndex] : undefined;
+        if (rootRaw === undefined) return projectsScreen(response, who, "pick one of the configured roots", 400);
+        let root: string;
+        try {
+          root = realpathSync(rootRaw);
+        } catch {
+          return projectsScreen(response, who, "that projects root does not resolve right now", 400);
+        }
+        const previewed = await previewGithubRepo(shape.owner, shape.name);
+        if (!previewed.ok) return projectsScreen(response, who, previewed.message, 400);
+        const reparsed = parseGithubRepo(previewed.preview.nameWithOwner);
+        if (!reparsed.ok) return projectsScreen(response, who, "GitHub named a repository shape this console refuses", 400);
+        const target = join(root, reparsed.name);
+        if (dirname(target) !== root) return projectsScreen(response, who, "the target escaped its root — refused", 400);
+        // The session-held record (finding 14): swept at mint, capped 3.
+        const session = who.session;
+        session.onboard ??= new Map();
+        const cutoff = Date.now() - 10 * 60_000;
+        for (const [key, record] of session.onboard) if (record.mintedAt < cutoff) session.onboard.delete(key);
+        if (session.onboard.size >= 3) return projectsScreen(response, who, "three previews are already waiting — confirm or let one expire", 400);
+        const nonce = randomBytes(16).toString("hex");
+        session.onboard.set(nonce, {
+          nameWithOwner: previewed.preview.nameWithOwner,
+          rootIndex,
+          target,
+          diskUsageKib: previewed.preview.diskUsageKib,
+          large: isLargeRepo(previewed.preview),
+          mintedAt: Date.now(),
+        });
+        return projectsScreen(response, who, null, 200);
+      }
+
+      // CONFIRM: password, then session liveness AGAIN via lookupSession
+      // (finding 22/33) — the record is consumed from the RETURNED live
+      // session, synchronously, before the first await.
+      const password = body.get("token") ?? "";
+      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+        return projectsScreen(response, who, "cloning takes your password, typed again", 403);
+      }
+      const cookieId = /(?:^|;\s*)standing-orders_session=([0-9a-f]{64})/.exec(request.headers.cookie ?? "")?.[1];
+      const live = cookieId === undefined ? null : lookupSession(cookieId, false);
+      if (live === null) return refuse(response, who, 403, "this session ended while the form was open — sign in again");
+      const nonce = body.get("nonce") ?? "";
+      const record = live.onboard?.get(nonce);
+      if (record === undefined || record.mintedAt < Date.now() - 10 * 60_000) {
+        live.onboard?.delete(nonce);
+        return projectsScreen(response, who, "that preview expired or was already used — preview again", 400);
+      }
+      live.onboard?.delete(nonce); // consumed BEFORE the first await
+      if (record.large && body.get("big-ok") !== "1") {
+        return projectsScreen(response, who, "that repository is large (or its size is unknown) — tick the box to clone it anyway", 400);
+      }
+      const rootRaw = ceiling.roots[record.rootIndex];
+      if (rootRaw === undefined) return projectsScreen(response, who, "the configured roots changed — preview again", 400);
+      let root: string;
+      try {
+        root = realpathSync(rootRaw);
+      } catch {
+        return projectsScreen(response, who, "that projects root does not resolve right now", 400);
+      }
+      if (dirname(record.target) !== root) return projectsScreen(response, who, "the configured roots changed — preview again", 400);
+
+      const cloned = await cloneGithubRepo(record.nameWithOwner, root, async (cwd: string) => {
+        const answer = await execRun("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 15_000 });
+        return { code: answer.code, stdout: answer.stdout };
+      });
+      if (!cloned.ok) return projectsScreen(response, who, cloned.message, 400);
+      // authorizedProject AFTER the repository exists (finding 20).
+      const proved = await authorizedProject(ceiling, cloned.target);
+      const admitted = proved ? (canonicalProject(cloned.target) ?? cloned.target) : null;
+      if (admitted === null) {
+        return projectsScreen(response, who, `the clone landed at ${cloned.target} but did not prove under the ceiling — it was left in place; enroll it by hand`, 400);
+      }
+      if (options.registryPath !== undefined) {
+        const enrolled = await updateRepos(options.registryPath, (repos: string[]) => addRepos(repos, [admitted]));
+        if (!enrolled.ok) {
+          return projectsScreen(response, who, `${cloned.target} is cloned but not enrolled — ${enrolled.message}`, 400);
+        }
+      }
+      store.upsertProject(admitted, projectName(admitted), now);
+      who.session.project = admitted;
+      who.session.projectRevision += 1;
+      return projectsScreen(
+        response,
+        who,
+        options.upConsole === true
+          ? `${admitted} is ready — restart \`standing-orders up\` adding --repo ${admitted} to watch it`
+          : `${admitted} is ready and open`,
+        200,
+      );
     }
 
     if (url.pathname === "/push/subscribe") {
@@ -5959,6 +6090,10 @@ function contestCeremonyPage(chrome: Chrome, data: {
   ].filter(one => one !== "").join("\n"), { chrome });
 }
 
+type OnboardCardState =
+  | { enabled: false; why: string }
+  | { enabled: true; roots: readonly string[]; record: [string, { nameWithOwner: string; rootIndex: number; target: string; diskUsageKib: number | null; large: boolean; mintedAt: number }] | null };
+
 function projectsPage(
   chrome: Chrome,
   recent: { path: string; name: string; lastOpenedAt: string }[],
@@ -5968,7 +6103,47 @@ function projectsPage(
   problem: string | null,
   unscopedMode: boolean,
   browsable = false,
+  onboard: OnboardCardState | null = null,
 ): string {
+  // The onboarding card (repo onboarding, findings 1-39): preview first,
+  // then a password-confirmed clone into a configured root. Disabled
+  // states explain themselves in words (finding 28/39).
+  const onboardCard =
+    onboard === null
+      ? ""
+      : !onboard.enabled
+        ? `<h2>add a repository</h2><p class="meta">${escape(onboard.why)}</p>`
+        : [
+            `<h2>add a repository</h2>`,
+            `<p class="meta">paste a GitHub repository — you see what it is before anything is written. The clone acts as the serve process's ambient GitHub credential and lands under your projects root. Large-file (LFS) objects are not downloaded.</p>`,
+            onboard.record === null
+              ? [
+                  `<form method="post" action="/projects/onboard-preview" class="card">`,
+                  `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+                  `<label>repository <input type="text" name="repo" placeholder="owner/name or https://github.com/owner/name"></label>`,
+                  onboard.roots.length > 1
+                    ? `<label>into <select name="root">${onboard.roots.map((one, index) => `<option value="${index}">${escape(one)}</option>`).join("")}</select></label>`
+                    : `<input type="hidden" name="root" value="0"><p class="meta">into ${escape(onboard.roots[0] ?? "")}</p>`,
+                  `<button type="submit">preview</button>`,
+                  `</form>`,
+                ].join("\n")
+              : [
+                  `<div class="card">`,
+                  `<p><strong>${escape(onboard.record[1].nameWithOwner)}</strong> <span class="meta">${
+                    onboard.record[1].diskUsageKib === null ? "size unknown" : `${Math.max(1, Math.round(onboard.record[1].diskUsageKib / 1024))} MiB`
+                  } — will land at ${escape(onboard.record[1].target)}</span></p>`,
+                  `<form method="post" action="/projects/onboard-confirm">`,
+                  `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+                  `<input type="hidden" name="nonce" value="${escape(onboard.record[0])}">`,
+                  onboard.record[1].large
+                    ? `<label class="row"><input type="checkbox" name="big-ok" value="1"> this is a large repository (or its size is unknown) — clone it anyway</label>`
+                    : "",
+                  `<label>your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
+                  `<button type="submit">clone and open</button>`,
+                  `</form>`,
+                  `</div>`,
+                ].join("\n"),
+          ].join("\n");
   const openForm = (path: string, label: string): string =>
     [
       `<form method="post" action="/projects/open" class="inline">`,
@@ -5997,6 +6172,7 @@ function projectsPage(
 
   return shell("projects", [
     `<h1>projects</h1>`,
+    onboardCard,
     `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its board, and its runs</p>`,
     unscopedMode
       ? `<p class="meta">this server was started without a project list, so everything is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`

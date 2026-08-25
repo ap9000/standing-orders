@@ -40,7 +40,7 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
-import { configPath, loadRepos, saveRepos, addRepos } from "./repos.js";
+import { configPath, addRepos, updateRepos } from "./repos.js";
 import { pushPass } from "./push.js";
 import { closeSync, constants as fsConstants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
@@ -2924,6 +2924,8 @@ async function startConsole(options: {
   repos?: string[];
   projectRoots?: string[];
   publicUrl?: string;
+  registryPath?: string;
+  upConsole?: boolean;
 }): Promise<{ server: ReturnType<typeof createDecisionServer>; port: number; url: string }> {
   const { context } = options;
   const server = createDecisionServer({
@@ -2938,6 +2940,8 @@ async function startConsole(options: {
     ...(options.repos === undefined ? {} : { repos: options.repos }),
     ...(options.projectRoots === undefined ? {} : { projectRoots: options.projectRoots }),
     ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
+    ...(options.registryPath === undefined ? {} : { registryPath: options.registryPath }),
+    ...(options.upConsole === undefined ? {} : { upConsole: options.upConsole }),
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -2984,6 +2988,7 @@ async function serveCommand(
     port,
     ...(localRunner === undefined ? {} : { localRunner }),
     ...(publicUrl === undefined ? {} : { publicUrl }),
+    registryPath: configPath(process.env, homedir()),
     poolRoot,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
     ...(repoFlag === undefined ? {} : { repos: repoFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
@@ -5292,13 +5297,15 @@ async function upCommand(
 
     // 6. Enrollment: the canonical roots join repos.json so the plain
     // report and future runs see them.
-    try {
-      const configFile = configPath(process.env, homedir());
-      const loaded = await loadRepos(configFile);
-      const existing = "repos" in loaded ? loaded.repos : [];
-      await saveRepos(configFile, addRepos(existing, repos));
-    } catch {
-      progress("could not update repos.json — the cockpit still runs; enrollment can wait");
+    {
+      // The locked registry primitive (onboarding findings 9/17/25): a
+      // refusal here also retires the runner this start just registered —
+      // never today's silent empty-registry fallback.
+      const enrolled = await updateRepos(configPath(process.env, homedir()), current => addRepos(current, repos));
+      if (!enrolled.ok) {
+        retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
+        return fail(write, json, "up", "registry", `${enrolled.message} — nothing started`, EXIT.refused);
+      }
     }
   } finally {
     await new Promise<void>(done => probe.close(() => done()));
@@ -5317,6 +5324,9 @@ async function upCommand(
       localRunner: runnerName,
       poolRoot: pool,
       repos,
+      upConsole: true,
+      registryPath: configPath(process.env, homedir()),
+      ...(text(flags, "project-root") === undefined ? {} : { projectRoots: [text(flags, "project-root") as string] }),
       ...(text(flags, "public-url") === undefined ? {} : { publicUrl: text(flags, "public-url") as string }),
     });
   } catch (error) {

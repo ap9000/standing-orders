@@ -61,6 +61,161 @@ export async function saveRepos(file: string, repos: readonly string[]): Promise
   await writeFile(file, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
+
+/**
+ * The ONE locked registry update (onboarding findings 9/17/19/25/29/30):
+ * every writer — CLI add/remove, the console, up's enrollment — goes
+ * through here. The lock is an exclusive-create file whose body carries
+ * {pid, token, at}; a LIVE owner's lock is never touched; stale recovery
+ * runs only after kill(pid, 0) proves the owner dead, serialized through
+ * a second exclusive reaper lock that re-reads the exact snapshot it
+ * observed before unlinking. The owner releases only while its hold is
+ * under 25s — past that it abandons WITHOUT unlinking and reports so; the
+ * deadline is checked BEFORE publication, so a committed rename is never
+ * reported as failed. Reads: only ENOENT means an empty registry —
+ * malformed JSON, wrong shape, EACCES, and I/O errors REFUSE.
+ */
+export async function updateRepos(
+  file: string,
+  transform: (repos: string[]) => string[],
+): Promise<{ ok: true; repos: string[] } | { ok: false; reason: "locked" | "registry" | "abandoned"; message: string }> {
+  const { openSync, closeSync, writeSync, readFileSync, unlinkSync, existsSync: exists, mkdirSync, renameSync } = await import("node:fs");
+  const { randomBytes } = await import("node:crypto");
+  mkdirSync(dirname(file), { recursive: true });
+  const lockPath = `${file}.lock`;
+  const reaperPath = `${file}.reaper.lock`;
+  const token = randomBytes(16).toString("hex");
+  const body = JSON.stringify({ pid: process.pid, token, at: Date.now() });
+  const sleep = (ms: number) => new Promise(done => setTimeout(done, ms));
+
+  const tryReap = (): void => {
+    // Recovery only for PROVEN-dead owners, serialized by the reaper lock,
+    // which re-reads the exact snapshot before unlinking (finding 29). An
+    // orphaned reaper lock is itself reaped by the same dead-pid rule.
+    let snapshot: { pid?: number; token?: string } | null = null;
+    try {
+      snapshot = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: number; token?: string };
+    } catch {
+      return;
+    }
+    if (typeof snapshot?.pid !== "number") return;
+    try {
+      process.kill(snapshot.pid, 0);
+      return; // alive: never touched
+    } catch {
+      // ESRCH — dead; continue under the reaper lock
+    }
+    try {
+      const before = readFileSync(reaperPath, "utf8");
+      const parsed = JSON.parse(before) as { pid?: number };
+      if (typeof parsed?.pid === "number") {
+        try {
+          process.kill(parsed.pid, 0);
+          return; // a live reaper is working
+        } catch {
+          try { unlinkSync(reaperPath); } catch { /* raced */ }
+        }
+      }
+    } catch {
+      // no reaper lock — proceed to claim it
+    }
+    let reaperFd: number;
+    try {
+      reaperFd = openSync(reaperPath, "wx");
+    } catch {
+      return; // another reaper won
+    }
+    try {
+      writeSync(reaperFd, JSON.stringify({ pid: process.pid }));
+      // Re-read and require the EXACT observed snapshot + a repeated
+      // dead-pid proof before unlinking (finding 29).
+      const now = readFileSync(lockPath, "utf8");
+      const again = JSON.parse(now) as { pid?: number; token?: string };
+      if (again?.pid === snapshot.pid && again?.token === snapshot.token) {
+        try {
+          process.kill(snapshot.pid, 0);
+        } catch {
+          try { unlinkSync(lockPath); } catch { /* raced */ }
+        }
+      }
+    } catch {
+      // lock vanished or changed — nothing to do
+    } finally {
+      closeSync(reaperFd);
+      try { unlinkSync(reaperPath); } catch { /* already gone */ }
+    }
+  };
+
+  let held = false;
+  const acquiredAt = () => Date.now() - start;
+  let start = 0;
+  for (let attempt = 0; attempt < 6 && !held; attempt += 1) {
+    try {
+      const fd = openSync(lockPath, "wx");
+      writeSync(fd, body);
+      closeSync(fd);
+      held = true;
+      start = Date.now();
+    } catch {
+      tryReap();
+      await sleep(100);
+    }
+  }
+  if (!held) return { ok: false, reason: "locked", message: `${file} is busy — another enrollment holds its lock; try again` };
+
+  try {
+    let current: string[];
+    if (!exists(file)) {
+      current = []; // ONLY the missing-file case is an empty registry
+    } else {
+      let text: string;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch (error) {
+        return { ok: false, reason: "registry", message: `${file} could not be read (${String((error as Error).message)}) — refusing to replace it` };
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return { ok: false, reason: "registry", message: `${file} is not valid JSON — fix or delete it; refusing to replace it` };
+      }
+      const repos = readRepoListStrict(parsed);
+      if (repos === null) {
+        return { ok: false, reason: "registry", message: `${file} does not look like a Standing Orders config — refusing to replace it` };
+      }
+      current = repos;
+    }
+    const next = sortUnique(transform(current));
+    // Deadline BEFORE publication (finding 30): a rename past the hold
+    // window would commit while the lock may already be reaped.
+    if (acquiredAt() > 20_000) {
+      held = false; // abandon: no unlink, no publication
+      return { ok: false, reason: "abandoned", message: "the registry lock aged out before the update could publish — nothing changed; try again" };
+    }
+    const temp = `${file}.${process.pid}.${token.slice(0, 8)}.tmp`;
+    const fd = openSync(temp, "wx");
+    writeSync(fd, `${JSON.stringify({ version: CONFIG_VERSION, repos: next }, null, 2)}
+`);
+    closeSync(fd);
+    renameSync(temp, file);
+    return { ok: true, repos: next };
+  } finally {
+    if (held && acquiredAt() < 25_000) {
+      try { unlinkSync(lockPath); } catch { /* reaped despite liveness rules */ }
+    }
+  }
+}
+
+/** Strict shape for the locked path (finding 36): non-string entries REFUSE. */
+function readRepoListStrict(parsed: unknown): string[] | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { repos } = parsed as { repos?: unknown };
+  if (!Array.isArray(repos)) return null;
+  if (!repos.every((repo): repo is string => typeof repo === "string")) return null;
+  return repos;
+}
+
 export function addRepos(existing: readonly string[], incoming: readonly string[]): string[] {
   return sortUnique([...existing, ...incoming]);
 }

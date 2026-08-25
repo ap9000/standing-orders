@@ -1,5 +1,36 @@
 # Progress
 
+**2026-08-24 — repo onboarding: add a repository from GitHub, as a ceremony.**
+Four Codex rounds (REDESIGN ×3, APPROVE WITH CHANGES — findings 1–39),
+because a network clone writing to the filesystem is new authority. The
+projects screen gains "add a repository": paste owner/name or a
+github.com link, see a PREVIEW (full name via gh, visibility, size —
+GitHub reports KiB, and the 1 GiB gate knows it; unknown counts as
+large) before anything is written, then a password-confirmed clone that
+lands under an EXPLICITLY configured --project-root and opens as the
+current project. The rounds forged the machinery honest: the ceiling is
+IMMUTABLE (clones admit through the existing root-derived
+authorization — console onboarding is root-mode only, and the disabled
+card says so in words everywhere else, up consoles included);
+publication is CLAIM-FIRST (an exclusive mkdir of the final directory —
+a lost race fails with NOTHING written, and the one unavoidable crash
+residue, an empty claimed directory, is named honestly for manual
+removal); gh runs in its own detached tree whose death is PROVEN by
+polling the group to ESRCH on every outcome before any cleanup may run
+(Windows cannot prove that, so onboarding refuses there); the preview
+is a session-held single-use record consumed before the first await,
+with session liveness re-proved at consumption; submodules and LFS
+smudge fetches are off (an installed LFS filter would have fetched
+objects the size gate never counted); and repos.json finally got the
+locked, atomic update primitive every writer now shares — a live
+owner's lock is untouchable, stale recovery requires a proven-dead pid
+serialized through a reaper lock, malformed registries refuse instead
+of being replaced, and up's old silent empty-registry fallback now
+refuses and retires the runner it just registered. A fresh clone
+enters with zero authority — no tasks, no scopes, no grants. The CLI
+verb (repos add-from-github) follows in a small companion change.
+Suite 1130 → 1136.
+
 **2026-08-24 — the phone shell (arc 4, first pass): a real app on a phone.**
 Screenshot-driven: at phone widths the console was the desktop squeezed —
 a permanent sidebar, five lanes crammed side by side, three columns on a
