@@ -1,5 +1,42 @@
 # Progress
 
+**2026-08-24 — arc 4, design polish: motion where a human caused it, a
+board you swipe, keys everywhere it is safe.** Three Codex rounds
+(APPROVE WITH CHANGES, REDESIGN, APPROVE WITH CHANGES — findings 1–24).
+Two rulings held: liveness swaps stay deliberately INSTANT (a board
+update that draws the eye is a defect; motion belongs to navigation,
+presses, and overlays), and there is no bottom-sheet project switcher
+(switching is a POST ceremony; threading its plumbing into every render
+to save one tap was refused). What shipped: cross-document view
+transitions as a 140 ms navigation cross-fade — pure CSS, with opt-outs
+on meta-refresh pages AND inside the noscript fallback, and a
+reduced-motion block that also stills the pulse dots; one restrained
+accent hue used only for "you are here" and "this is alive" (active
+nav, active tab, focus ring, palette selection, the live dot) — never
+on verbs; the phone board became a full-width PAGER (snap-scrolled
+lanes, a deliberate 1.5 rem sliver of the neighbor as the affordance,
+lanes scrolling inside a viewport-bounded strip while the page still
+reaches the headline above and the routines below); the region swapper
+now gives back what it took — focused row, centered lane, and each
+lane's scroll place, restored from bounding rects with focus last and
+preventScroll so the passes cannot fight; and the chrome layer (jump
+palette, g-keys, j/k row roving, a ? shortcuts overlay) went
+console-wide through ONE render helper that owns the nonce, the palette
+index (5 s cache, invalidated by any accepted mutation), script
+composition, and the CSP — script-src only when a script ships,
+connect-src only when it fetches. Sensitivity is judged PER RESPONSE:
+any body showing a password input renders without the chrome additions
+(tolerant classifier + forceSensitive escape hatch), so fleet and
+settings keep only their functional scripts beside credential fields,
+the one-time worker token page carries no script at all, and the same
+task page is bare while an approval waits and chromed after it is
+granted. Ceremony submits (approve-scope, tournament pick, onboarding
+confirm) sit in a sticky bar above the phone tab bar; decision pages,
+being option-per-card, are deliberately excluded. Browser-verified on
+the live console: pager restore math exact (815 → 0 → 815), 24 px
+neighbor sliver measured, overlay focus in/out, j/k roving, palette
+open/close. Suite: 1144.
+
 **2026-08-24 — repo onboarding: add a repository from GitHub, as a ceremony.**
 Four Codex rounds (REDESIGN ×3, APPROVE WITH CHANGES — findings 1–39),
 because a network clone writing to the filesystem is new authority. The

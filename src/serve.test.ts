@@ -15,7 +15,7 @@ import { addApprover, approve, propose } from "./scope.js";
 import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
-import { createDecisionServer } from "./serve.js";
+import { createDecisionServer, SENSITIVE_INPUT } from "./serve.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -1540,9 +1540,12 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const secondMatch = /script-src 'nonce-([^']+)'/.exec(second.headers.get("content-security-policy") ?? "");
     expect(secondMatch?.[1]).not.toBe(match?.[1]);
 
-    // Pages without the live region keep the script-free constant policy.
+    // Pages without a poller carry the chrome layer's nonce but earn NO
+    // network: script-src yes, connect-src no (arc 4, finding 24).
     const inbox = await fetch(url("/"), { headers: { cookie } });
-    expect(inbox.headers.get("content-security-policy")).not.toContain("script-src");
+    const inboxCsp = inbox.headers.get("content-security-policy") ?? "";
+    expect(inboxCsp).toMatch(/script-src 'nonce-/);
+    expect(inboxCsp).not.toContain("connect-src");
   });
 
   test("the fragment is the region alone, behind the same auth", async () => {
@@ -3349,8 +3352,11 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     // so the fragment is the honest place to assert absence.)
     const orphan = await (await fetch(url(`/r/${orphanRun}`), { headers: { cookie } })).text();
     expect(orphan).toContain("never finished");
-    expect(orphan).not.toContain("data-elapsed-since");
+    // The chrome layer's script text mentions the attribute name, so the
+    // markup form (with =) is the honest absence assertion.
+    expect(orphan).not.toContain('data-elapsed-since="');
     expect(orphan).not.toContain('id="run-facts-stamp"');
+    expect(orphan).not.toContain("?fragment=facts");
     const orphanFacts = await (await fetch(url(`/r/${orphanRun}?fragment=facts`), { headers: { cookie } })).text();
     expect(orphanFacts).not.toContain("badge-running");
   });
@@ -4073,5 +4079,211 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     const evil = await post({ csrf, token: approverToken, endpoint: "https://evil.example.com/x", p256dh: "x", auth: "y" });
     expect(evil.headers.get("location")).toContain("push%20service");
     expect(store.listPushSubscriptions().length).toBe(0);
+  });
+});
+
+describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+  let dir: string;
+
+  const url = (path: string) => `${base}${path}`;
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-arc4-"));
+    evidenceRoot = join(dir, "evidence");
+    mkdirSync(evidenceRoot, { recursive: true });
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => new Date(),
+      repo: "/repo/main",
+      telegramTokenFile: join(dir, "telegram-token"),
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the chrome layer is console-wide: /done carries the palette, the overlay, and a no-network nonce", async () => {
+    const cookie = await login();
+    const response = await fetch(url("/done"), { headers: { cookie } });
+    const html = await response.text();
+    expect(html).toContain('id="palette-index"');
+    expect(html).toContain('aria-label="keyboard shortcuts"');
+    const csp = response.headers.get("content-security-policy") ?? "";
+    expect(csp).toMatch(/script-src 'nonce-/);
+    expect(csp).not.toContain("connect-src");
+    // No poller — no noscript auto-refresh to eat what someone was typing.
+    expect(html).not.toContain('http-equiv="refresh"');
+    // The overlay's index lists the new destinations.
+    for (const label of ["fleet", "activity", "system", "builds", "requirements", "projects", "settings"]) {
+      expect(html).toContain(`{"label":"${label}"`);
+    }
+  });
+
+  test("the board keeps its poller privileges: connect-src, the noscript opt-out, and swap preservation", async () => {
+    const cookie = await login();
+    const response = await fetch(url("/board"), { headers: { cookie } });
+    const html = await response.text();
+    const csp = response.headers.get("content-security-policy") ?? "";
+    expect(csp).toMatch(/script-src 'nonce-/);
+    expect(csp).toContain("connect-src 'self'");
+    // Scripting off still means no cross-fade on the fallback reloads.
+    expect(html).toContain('<noscript><meta http-equiv="refresh" content="30"><style>@view-transition { navigation: none; }</style></noscript>');
+    // The swap gives back what it took: focus without re-scroll, the
+    // centered lane, each lane's place.
+    expect(html).toContain("preventScroll");
+    expect(html).toContain("lane-[a-z]+");
+    // The stylesheet ships the motion contracts.
+    expect(html).toContain("@view-transition { navigation: auto; }");
+    expect(html).toContain("prefers-reduced-motion: reduce");
+    expect(html).toContain("scroll-snap-type: x mandatory");
+    expect(html).toContain("--brand:");
+  });
+
+  test("a password on screen strips the chrome additions but keeps the page's own behavior", async () => {
+    const cookie = await login();
+    // /fleet: register/retire take passwords; the reorder poller stays.
+    const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    expect(fleet).not.toContain('id="palette-index"');
+    expect(fleet).not.toContain('aria-label="keyboard shortcuts"');
+    expect((fleet.match(/<script nonce=/g) ?? []).length).toBe(1);
+    expect(fleet).toContain("fleet-region");
+    // /settings: token forms beside the push enrollment script — exactly
+    // one composed script, no palette.
+    const settings = await fetch(url("/settings"), { headers: { cookie } });
+    const settingsHtml = await settings.text();
+    expect(settingsHtml).not.toContain('id="palette-index"');
+    expect((settingsHtml.match(/<script nonce=/g) ?? []).length).toBe(1);
+    expect(settings.headers.get("content-security-policy") ?? "").toContain("connect-src 'self'");
+  });
+
+  test("sensitivity is judged per response: /next with a step-up is bare, all-clear is chromed", async () => {
+    store.createTask({ id: "t-a", title: "needs a yes" }, T0);
+    store.saveScope({
+      taskId: "t-a", goal: "do the thing", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "d".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const cookie = await login();
+    const pending = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    expect(pending).toContain("approve this scope");
+    expect(pending).toContain('class="sticky-actions"');
+    expect(pending).not.toContain('id="palette-index"');
+
+    const granted = approve(store, "t-a", "alex", T0, "d".repeat(32), approverToken);
+    expect(granted.ok).toBe(true);
+    const clear = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    expect(clear).not.toContain("approve this scope");
+    expect(clear).toContain('id="palette-index"');
+  });
+
+  test("a decision's option-per-card forms are never sticky-wrapped", async () => {
+    store.createTask({ id: "t-q", title: "asked" }, T0);
+    const ref = store.refFor("built-in", "t-q").id;
+    const run = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0 });
+    store.saveDecision({
+      run, urgency: "blocking", recap: "Two ways.", question: "Which way?",
+      options: [
+        { id: "a", label: "One", consequence: "x", reversible: true },
+        { id: "b", label: "Two", consequence: "y", reversible: true },
+      ],
+      recommendation: "a",
+    }, T0);
+    const cookie = await login();
+    const html = await (await fetch(url("/d/1"), { headers: { cookie } })).text();
+    expect(html).toContain("Which way?");
+    expect(html).not.toContain('class="sticky-actions"');
+  });
+
+  test("the one-time worker token answer carries no script of any kind", async () => {
+    const cookie = await login();
+    const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(fleet)?.[1] as string;
+    const response = await fetch(url("/fleet/runner/register"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, name: "builder-9", capacity: "1", token: approverToken }),
+    });
+    const html = await response.text();
+    expect(html).toContain("is registered");
+    expect(html).not.toContain("<script");
+  });
+
+  test("the classifier reads every password serialization and no near-miss", () => {
+    for (const yes of [
+      '<input type="password" name="token">',
+      "<input type='password' name='token'>",
+      "<input type=password>",
+      '<input name="token" TYPE="Password" required>',
+      '<input\n  class="wide"\n  type = "password">',
+    ]) {
+      expect(SENSITIVE_INPUT.test(yes), yes).toBe(true);
+    }
+    for (const no of [
+      '<input data-type="password" name="x">',
+      '<input type="text" placeholder="not a password here">',
+      "<p>your password, typed again</p>",
+      '<input type="text" name="password-hint">',
+    ]) {
+      expect(SENSITIVE_INPUT.test(no), no).toBe(false);
+    }
+  });
+
+  test("the palette index is cached between renders, invalidated by an accepted mutation, and escaped", async () => {
+    store.createTask({ id: "t-x", title: 'sharp <b>title</b> & "quotes"' }, T0);
+    const real = store.paletteTasks.bind(store);
+    let calls = 0;
+    (store as { paletteTasks: typeof store.paletteTasks }).paletteTasks = (...args: Parameters<typeof store.paletteTasks>) => {
+      calls += 1;
+      return real(...args);
+    };
+    const cookie = await login();
+    const first = await (await fetch(url("/done"), { headers: { cookie } })).text();
+    const tasks = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
+    expect(calls).toBe(1);
+
+    // Escaping: the raw HTML never spells a closing script tag; parsing
+    // restores the title exactly.
+    const tag = /<script type="application\/json" id="palette-index">(.*?)<\/script>/s.exec(first);
+    expect(tag?.[1]).toContain("\\u003c");
+    expect(tag?.[1]).not.toContain("</script>");
+    const parsed = JSON.parse(tag?.[1] ?? "[]") as { label: string }[];
+    expect(parsed.some(one => one.label.includes('sharp <b>title</b> & "quotes"'))).toBe(true);
+
+    // An accepted mutation invalidates at once.
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(tasks)?.[1] as string;
+    expect(csrf).toBeTruthy();
+    await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, title: "fresh work", repo: "/repo/main" }),
+      redirect: "manual",
+    });
+    await (await fetch(url("/done"), { headers: { cookie } })).text();
+    expect(calls).toBe(2);
   });
 });

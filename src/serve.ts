@@ -607,7 +607,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const root = browseRoots.find(one => canonical === one || canonical.startsWith(`${one}/`)) as string;
       const parent = canonical === root ? null : canonical.slice(0, canonical.lastIndexOf("/")) || root;
       const csrf = who.session.csrf;
-      return page(
+      return sendScreen(
         response,
         200,
         browsePage(chromeFor(who.session.project, "projects"), {
@@ -636,7 +636,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const cancelled = store
         .listCancelledBlockersScoped(project, 10, admission)
         .filter(one => visible(one.repo) && visible(one.blockerRepo));
-      return page(
+      return sendScreen(
         response,
         200,
         inboxPage(chromeFor(project, "inbox"), {
@@ -687,13 +687,13 @@ export function createDecisionServer(options: ServeOptions): Server {
         const nonce = who.via === "cookie" ? mintApprovalNonce(who.name, item.approval.taskId, item.approval.digest) : "";
         const ref = store.lookupRef(item.approval.taskId);
         const scope = store.getScope(item.approval.taskId);
-        return page(response, 200, nextPage(chromeFor(project, "inbox"), {
+        return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
           item, scope,
           planDocument: ref !== null && ref.plan === "drafted" ? planDocumentOf(ref.id) : null,
           csrf, nonce, remaining: remaining.length, skipped: [...skipped], now,
         }));
       }
-      return page(response, 200, nextPage(chromeFor(project, "inbox"), {
+      return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
         item, scope: null, planDocument: null, csrf, nonce: "",
         remaining: remaining.length, skipped: [...skipped], now,
       }));
@@ -735,19 +735,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         const view = taskViewData(selected, who, null);
         detail = view === null ? `<div class="card"><p class="meta">no such task — it may have been outside this console's view</p></div>` : taskBody(view);
       }
-      const nonce = randomBytes(16).toString("base64");
-      return page(
+      return sendScreen(
         response,
         200,
-        shell("workbench", `${detail}\n${paletteIndexTag(project)}`, {
+        screen("workbench", detail, {
           chrome: chromeFor(
             project,
             "workbench",
             `<div id="wb-rail">${rail}</div><p class="meta" id="wb-rail-stamp"></p>`,
           ),
-          live: { nonce, script: regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30) + chromeScript() },
+          functional: { script: regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30), fetches: true },
         }),
-        nonce,
       );
     }
 
@@ -820,16 +818,14 @@ export function createDecisionServer(options: ServeOptions): Server {
         // same ceiling, no shell, no scripts (finding 2).
         return respond(response, 200, "text/html; charset=utf-8", body);
       }
-      const nonce = randomBytes(16).toString("base64");
-      const regionBody = `<div id="board-region">${body}</div><p class="meta" id="board-region-stamp"></p>${paletteIndexTag(project)}`;
-      return page(
+      const regionBody = `<div id="board-region">${body}</div><p class="meta" id="board-region-stamp"></p>`;
+      return sendScreen(
         response,
         200,
-        shell("board", regionBody, {
+        screen("board", regionBody, {
           chrome: chromeFor(project, "board"),
-          live: { nonce, script: regionScript("board-region", "1", buildingCount > 0 ? 10 : 30) + chromeScript() },
+          functional: { script: regionScript("board-region", "1", buildingCount > 0 ? 10 : 30), fetches: true },
         }),
-        nonce,
       );
     }
 
@@ -857,12 +853,12 @@ export function createDecisionServer(options: ServeOptions): Server {
           const rankB = rankOf(b.failing, b.publication.lastCheckState);
           return rankA !== rankB ? rankA - rankB : a.publication.updatedAt.localeCompare(b.publication.updatedAt);
         });
-      return page(response, 200, reviewPage(chromeFor(project, "review"), rows, now));
+      return sendScreen(response, 200, reviewPage(chromeFor(project, "review"), rows, now));
     }
 
     if (url.pathname === "/activity") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
-      return page(
+      return sendScreen(
         response,
         200,
         homePage(chromeFor(project, "activity"), {
@@ -888,7 +884,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/done") {
-      return page(
+      return sendScreen(
         response,
         200,
         donePage(chromeFor(project, "done"), store.listCompletedWorkScoped(project, 50), pr => store.ciFailureObserved(pr)),
@@ -898,7 +894,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/system") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       void since;
-      return page(
+      return sendScreen(
         response,
         200,
         systemPage(chromeFor(project, "system"), {
@@ -954,7 +950,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ? { title: picked.title, goal: picked.goal, not: picked.outOfScope ?? "", touches: picked.touches.join(", ") }
           : null;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
-      return page(
+      return sendScreen(
         response,
         200,
         tasksPage(
@@ -983,17 +979,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (url.searchParams.get("fragment") === "1") {
         return respond(response, 200, "text/html; charset=utf-8", body);
       }
-      const nonce = randomBytes(16).toString("base64");
-      return page(
+      return sendScreen(
         response,
         200,
-        shell("queue", [
+        screen("queue", [
           `<h1>queue</h1>`,
           `<p class="hint">every worker's up-next list — drag a card to reorder or to reserve it for a worker; top is taken first. The order applies at the next selection; work already being taken keeps its claim.</p>`,
           `<div id="queue-region">${body}</div>`,
           `<p class="meta" id="queue-region-stamp"></p>`,
-        ].join("\n"), { chrome: chromeFor(project, "queue"), live: { nonce, script: queueScript() + chromeScript() } }),
-        nonce,
+        ].join("\n"), { chrome: chromeFor(project, "queue"), functional: { script: queueScript(), fetches: true } }),
       );
     }
 
@@ -1011,8 +1005,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return respond(response, 200, "text/html; charset=utf-8", body);
       }
       const said = url.searchParams.get("said");
-      const nonce = randomBytes(16).toString("base64");
-      const html = shell(
+      const fleetScreen = screen(
         "fleet",
         [
           `<h1>fleet</h1>`,
@@ -1034,9 +1027,12 @@ export function createDecisionServer(options: ServeOptions): Server {
             `<label>your password, typed again<input type="password" name="token" autocomplete="current-password" required></label>` +
             `<button type="submit" class="danger">retire it</button></form></details>`,
         ].join("\n"),
-        { chrome: chromeFor(project, "fleet"), live: { nonce, script: fleetScript() + chromeScript() } },
+        // The password fields make this screen sensitive: sendScreen strips
+        // the chrome additions and keeps the reorder poller — the named
+        // functional exception (it never reads the fields).
+        { chrome: chromeFor(project, "fleet"), functional: { script: fleetScript(), fetches: true } },
       );
-      return page(response, 200, html, nonce);
+      return sendScreen(response, 200, fleetScreen);
     }
 
     if (url.pathname === "/tasks/new") {
@@ -1046,7 +1042,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         .listTasksScoped(project, undefined, 100, null)
         .filter(one => one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
         .map(one => ({ id: one.id, title: one.title }));
-      return page(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable));
+      return sendScreen(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable));
     }
 
     const task = matchTaskPath(url.pathname, "");
@@ -1064,7 +1060,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         before = Number(raw);
       }
       const rows = store.listRunsBefore(before, RUNS_PAGE, project);
-      return page(response, 200, runsPage(chromeFor(project, "runs"), rows, liveRunIds(rows), rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
+      return sendScreen(response, 200, runsPage(chromeFor(project, "runs"), rows, liveRunIds(rows), rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
     }
 
     if (url.pathname === "/menu") {
@@ -1164,11 +1160,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           JSON.stringify({ text: window.text, nextOffset: window.nextOffset, final: !live && window.eof }),
         );
       }
-      // Pollers and their nonce exist only for a LIVE run — an orphaned
-      // null-outcome run would otherwise be refetched forever (finding 15).
-      const liveNonce = running ? randomBytes(16).toString("base64") : undefined;
+      // Pollers exist only for a LIVE run — an orphaned null-outcome run
+      // would otherwise be refetched forever (finding 15). The nonce is
+      // sendScreen's business now.
       const artifacts = store.artifactsFor(found.id);
-      return page(
+      return sendScreen(
         response,
         200,
         runPage(
@@ -1186,20 +1182,14 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? { pr: publication.prNumber }
               : null;
           })(),
-          liveNonce === undefined
+          !running
             ? undefined
-            : {
-                nonce: liveNonce,
-                script:
-                  regionScript("run-facts", "facts", 10) +
-                  (options.localRunner === undefined ? "" : regionScript("run-peek", "peek", 15)) +
-                  (options.localRunner === undefined || found.provider !== "claude" ? "" : transcriptScript()) +
-                  chromeScript(),
-              },
+            : regionScript("run-facts", "facts", 10) +
+              (options.localRunner === undefined ? "" : regionScript("run-peek", "peek", 15)) +
+              (options.localRunner === undefined || found.provider !== "claude" ? "" : transcriptScript()),
           options.localRunner !== undefined,
           running,
         ),
-        liveNonce,
       );
     }
 
@@ -1215,9 +1205,9 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     if (url.pathname === "/caps") {
       if (project === null) {
-        return page(response, 200, capsPage(chromeFor(project, "caps"), null, [], ""));
+        return sendScreen(response, 200, capsPage(chromeFor(project, "caps"), null, [], ""));
       }
-      return page(
+      return sendScreen(
         response,
         200,
         capsPage(chromeFor(project, "caps"), store.listCapabilities(project), computeGaps(store, project, now), project, now),
@@ -1234,7 +1224,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // library — a pre-filled form, same guarded submission path.
       const fromTemplate = url.searchParams.get("template");
       const picked = fromTemplate === null ? null : templateByName(fromTemplate);
-      return page(response, 200, routinesPage(chromeFor(project, "routines"), tracks, {
+      return sendScreen(response, 200, routinesPage(chromeFor(project, "routines"), tracks, {
         csrf: who.via === "cookie" ? who.session.csrf : "",
         revision: who.via === "cookie" ? who.session.projectRevision : 0,
         problem: null,
@@ -1260,7 +1250,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const enabled = chatEnablement();
       const pending = store.liveChatTurnFor(who.name);
       const latched = enabled.ok ? store.latchedChatTurns(enabled.credentialKey) : [];
-      return page(
+      return sendScreen(
         response,
         200,
         chatPage(chromeFor(project, "chat"), {
@@ -1298,7 +1288,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The one nonce in chat — this screen restates exact financial terms
       // and re-enables spend, which is precisely what nonces are for.
       const nonce = mintApprovalNonce(who.name, `chat-ack-${turn.id}`, String(turn.reservedMicrousd));
-      return page(response, 200, chatAckPage(chromeFor(project, "chat"), turn, nonce, who.session.csrf));
+      return sendScreen(response, 200, chatAckPage(chromeFor(project, "chat"), turn, nonce, who.session.csrf));
     }
 
     const routineScreen = /^\/routines\/([0-9]{1,15})$/.exec(url.pathname);
@@ -1318,18 +1308,16 @@ export function createDecisionServer(options: ServeOptions): Server {
         options.configDir === undefined
           ? null
           : effectivePrimary(process.env, options.configDir, loadBotToken(process.env, options.telegramTokenFile) !== null);
-      const pushNonce = who.via === "cookie" ? randomBytes(16).toString("base64") : undefined;
       const push = {
         // The card lights only where a secure context exists: the stated
         // public origin, or localhost development (arc 3 finding 2).
         available: options.publicUrl !== undefined || (request.headers.host ?? "").startsWith("localhost") || (request.headers.host ?? "").startsWith("127.0.0.1"),
         devices: who.via === "cookie" ? store.listPushSubscriptions(who.name) : [],
       };
-      return page(
+      return sendScreen(
         response,
         200,
-        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, pushNonce),
-        pushNonce,
+        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push),
       );
     }
 
@@ -1350,7 +1338,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such decision");
       }
       const taskId = taskOf(store, decision);
-      return page(response, 200, decisionPage(chromeFor(project, "none"), decision, taskId, store.evidenceFor(decision.id), who, now));
+      return sendScreen(response, 200, decisionPage(chromeFor(project, "none"), decision, taskId, store.evidenceFor(decision.id), who, now));
     }
 
     const artifact = /^\/d\/([0-9]{1,15})\/evidence\/([0-9]{1,15})$/.exec(url.pathname);
@@ -1677,6 +1665,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       { label: "done", href: "/done" },
       { label: "review queue", href: "/review" },
       { label: "task list", href: "/tasks" },
+      { label: "fleet", href: "/fleet" },
+      { label: "activity", href: "/activity" },
+      { label: "system", href: "/system" },
+      { label: "builds", href: "/runs" },
+      { label: "requirements", href: "/caps" },
+      { label: "projects", href: "/projects" },
+      ...(options.telegramTokenFile !== undefined ? [{ label: "settings", href: "/settings" }] : []),
     ];
     const open = store.paletteTasks(project, 201, admitted).filter(one => one.repo === null || visible(one.repo));
     for (const one of open.slice(0, 200)) {
@@ -1688,9 +1683,61 @@ export function createDecisionServer(options: ServeOptions): Server {
     return `<script type="application/json" id="palette-index">${json}</script>`;
   }
 
+  /**
+   * The palette cache (arc 4, finding 6), and its honest contract: a
+   * render may be up to five seconds stale after OUT-OF-PROCESS changes;
+   * an accepted in-process mutation invalidates immediately (bustBadge),
+   * so "one query per five seconds" holds only between invalidations;
+   * and an OPEN page keeps its navigation-time snapshot until the next
+   * navigation — no refresh mechanism exists or is promised. The key
+   * carries the one configuration bit the entries vary by.
+   */
+  const paletteCache = new Map<string, { at: number; tag: string }>();
+  function paletteTagCached(project: string | null): string {
+    const key = `${project ?? "(none)"} ${options.telegramTokenFile !== undefined}`;
+    const hit = paletteCache.get(key);
+    if (hit !== undefined && Date.now() - hit.at < 5000) return hit.tag;
+    const tag = paletteIndexTag(project);
+    paletteCache.set(key, { at: Date.now(), tag });
+    return tag;
+  }
+
+  /**
+   * Every chromed HTML response leaves through here (arc 4, findings
+   * 5/18): one place owns the sensitivity call, the nonce, the palette
+   * index, the shortcuts overlay, script composition, and the CSP —
+   * at most one nonce-bearing script per response, connect-src only when
+   * that script fetches. The named exception: /fleet and /settings keep
+   * their FUNCTIONAL scripts beside credential fields (a poller and the
+   * push enrollment — neither reads the fields); the chrome additions
+   * are what sensitivity strips.
+   */
+  function sendScreen(response: ServerResponse, status: number, s: Screen): void {
+    const sensitive =
+      s.forceSensitive === true ||
+      SENSITIVE_INPUT.test(s.body) ||
+      (s.chrome?.listPane !== undefined && SENSITIVE_INPUT.test(s.chrome.listPane));
+    const chromeLayer = !sensitive && s.chrome !== undefined;
+    const functional = s.functional?.script ?? "";
+    const script = functional + (chromeLayer ? chromeScript() : "");
+    const nonce = script === "" ? undefined : randomBytes(16).toString("base64");
+    const body = chromeLayer
+      ? `${s.body}\n${paletteTagCached(s.chrome?.project ?? null)}\n${KBD_HELP}`
+      : s.body;
+    const html = shell(s.title, body, {
+      ...(s.chrome === undefined ? {} : { chrome: s.chrome }),
+      ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: s.refreshSeconds }),
+      ...(nonce === undefined ? {} : { live: { nonce, script, fallbackRefresh: s.functional?.fetches === true } }),
+    });
+    return page(response, status, html, nonce, s.functional?.fetches === true);
+  }
+
   /** The badge cache: five seconds per project — mutations invalidate it. */
   const badgeCache = new Map<string, { at: number; count: number; saturated: boolean }>();
-  const bustBadge = (): void => badgeCache.clear();
+  const bustBadge = (): void => {
+    badgeCache.clear();
+    paletteCache.clear();
+  };
 
   /** The sidebar's facts for this request. */
   function chromeFor(
@@ -1805,7 +1852,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                   why: `naming where repositories live takes --project-root — restart ${options.upConsole === true ? "`standing-orders up --project-root <dir>`" : "serve with --project-root <dir>"} and this card comes alive`,
                 }
               : { enabled: true as const, roots: ceiling.roots, record: [...(who.session.onboard?.entries() ?? [])][0] ?? null };
-    return page(
+    return sendScreen(
       response,
       status,
       projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode, onboardState),
@@ -1952,7 +1999,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const data = taskViewData(taskId, who, problem);
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
     const paneProject = who.via === "cookie" ? who.session.project : null;
-    return page(
+    return sendScreen(
       response,
       status,
       taskPage(
@@ -1984,7 +2031,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         ? mintApprovalNonce(who.name, `routine:${routine.id}`, routine.digest)
         : "";
     const paneProject = who.via === "cookie" ? who.session.project : null;
-    return page(
+    return sendScreen(
       response,
       status,
       routineScreenPage(chromeFor(paneProject, "routines"), {
@@ -2250,7 +2297,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     for (const agent of data.view.agents) {
       if (agent.run !== null) diffs.set(agent.contestant.id, terminalDiffView(store.artifactsFor(agent.run.id), evidenceRoot));
     }
-    return page(
+    return sendScreen(
       response,
       status,
       contestPage(chromeFor(paneProject, "tasks"), {
@@ -2369,7 +2416,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const existing = loadBotToken({}, options.telegramTokenFile);
         const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
         const csrf = who.via === "cookie" ? who.session.csrf : "";
-        return page(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message));
+        return sendScreen(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message));
       }
       return redirect(response, "/settings");
     }
@@ -2440,7 +2487,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
       if (!made.ok) {
         const csrf = who.via === "cookie" ? who.session.csrf : "";
-        return page(
+        return sendScreen(
           response,
           made.reason === "backlog-full" ? 429 : 400,
           tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project),
@@ -2554,7 +2601,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 400, "capacity is a whole number of tasks, 1 to 64", "/fleet");
       }
       const { token: minted } = registerRunner(store, { name, host: hostname(), capacity, now });
-      const html = shell(
+      const tokenScreen = screen(
         "fleet",
         [
           `<h1>fleet</h1>`,
@@ -2566,9 +2613,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           `</div>`,
           `<p class="meta"><a href="/fleet">back to the fleet</a></p>`,
         ].join("\n"),
-        { chrome: chromeFor(projectOf(who, request) ?? null, "fleet") },
+        // A one-time secret on screen: no script of any kind rides along.
+        { chrome: chromeFor(projectOf(who, request) ?? null, "fleet"), forceSensitive: true },
       );
-      return page(response, 200, html);
+      return sendScreen(response, 200, tokenScreen);
     }
 
     if (url.pathname === "/fleet/runner/retire") {
@@ -2645,7 +2693,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             now,
           );
           if (!minted.ok) return contestScreen(response, who, contestId, "too many unfinished confirmations are open — finish or let them expire", 429);
-          return page(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
+          return sendScreen(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
             kind: "abandon", contestId, taskId: data.taskId, taskTitle: data.taskTitle,
             agents: view.agents.length, totalMicrousd: data.totalMicrousd, anyUnknown: data.anyUnknown,
             nonceValue, csrf: who.via === "cookie" ? who.session.csrf : "",
@@ -2663,7 +2711,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           now,
         );
         if (!minted.ok) return contestScreen(response, who, contestId, "too many unfinished confirmations are open — finish or let them expire", 429);
-        return page(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
+        return sendScreen(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
           kind: "pick", contestId, taskId: data.taskId, taskTitle: data.taskTitle,
           agents: view.agents.length, totalMicrousd: data.totalMicrousd, anyUnknown: data.anyUnknown,
           chosen: plan.chosen,
@@ -3123,7 +3171,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
       if (!created.ok) {
         const tracks = store.routineTracks(project, now).filter(track => visible(track.routine.repo));
-        return page(response, created.reason === "duplicate" ? 409 : 400, routinesPage(chromeFor(project, "routines"), tracks, {
+        return sendScreen(response, created.reason === "duplicate" ? 409 : 400, routinesPage(chromeFor(project, "routines"), tracks, {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           revision: who.via === "cookie" ? who.session.projectRevision : 0,
           problem: created.message,
@@ -3859,13 +3907,15 @@ function respond(response: ServerResponse, status: number, type: string, body: s
  * response, never shared, never 'unsafe-inline' (Codex board review,
  * finding 9). Everything else keeps the constant script-free policy.
  */
-function page(response: ServerResponse, status: number, html: string, nonce?: string): void {
+function page(response: ServerResponse, status: number, html: string, nonce?: string, fetches?: boolean): void {
   if (nonce === undefined) return respond(response, status, "text/html; charset=utf-8", html);
   response.writeHead(status, {
     ...SAFETY,
     "Content-Security-Policy":
       `default-src 'none'; style-src 'unsafe-inline'; manifest-src 'self'; worker-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; ` +
-      "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      // connect-src only when the page's script actually fetches (a region
+      // poller) — the chrome layer alone gets no network at all.
+      `${fetches === true ? "connect-src 'self'; " : ""}form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
     "Content-Type": "text/html; charset=utf-8",
   });
   response.end(html);
@@ -3943,6 +3993,8 @@ const STYLE = `
     --warning: hsl(35 92% 28%);
     --warning-soft: hsl(48 96% 89%);
     --ring: hsl(240 5% 64.9%);
+    --brand: hsl(250 65% 48%);
+    --brand-soft: hsl(250 80% 96%);
     --radius: 0.625rem;
     --shadow: 0 1px 2px 0 hsl(240 10% 3.9% / 0.05);
     --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
@@ -3969,6 +4021,8 @@ const STYLE = `
       --warning: hsl(45 92% 60%);
       --warning-soft: hsl(36 50% 12%);
       --ring: hsl(240 4.9% 45%);
+      --brand: hsl(250 80% 72%);
+      --brand-soft: hsl(250 40% 16%);
       --shadow: none;
     }
   }
@@ -3992,7 +4046,11 @@ const STYLE = `
   }
   .brand { font-weight: 650; letter-spacing: -0.01em; color: var(--foreground); text-decoration: none;
            display: flex; align-items: center; height: 100%; }
-  .brand .dot { color: var(--muted-foreground); }
+  .brand .dot { color: var(--brand); }
+  /* The one accent hue (arc 4): orientation and liveness only — where you
+     are, what is alive. Never on verbs; buttons and the semantic colors
+     (success/warning/destructive) are untouched. */
+  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
   .topbar nav { display: flex; gap: .25rem; margin-left: auto; height: 100%; }
   .topbar nav a {
     color: var(--muted-foreground); text-decoration: none; font-size: 0.8125rem; font-weight: 500;
@@ -4026,7 +4084,7 @@ const STYLE = `
   .palette input { width: 100%; margin: 0; }
   .palette ul { list-style: none; margin: .5rem 0 0; padding: 0; max-height: 40vh; overflow-y: auto; }
   .palette li { padding: .4375rem .625rem; border-radius: calc(var(--radius) - 4px); cursor: pointer; font-size: .875rem; }
-  .palette li[aria-selected="true"] { background: var(--accent); }
+  .palette li[aria-selected="true"] { background: var(--accent); box-shadow: inset 2px 0 0 var(--brand); }
 
   /* The ledger: the window's harvest as strong figures in a sentence,
      not a metric-card grid. */
@@ -4166,7 +4224,7 @@ const STYLE = `
     color: var(--muted-foreground); font-size: .875rem; font-weight: 500;
   }
   .side nav a:hover { background: var(--accent); color: var(--foreground); }
-  .side nav a.active { background: var(--accent); color: var(--foreground); }
+  .side nav a.active { background: var(--accent); color: var(--foreground); box-shadow: inset 2px 0 0 var(--brand); }
   .side nav a .count { margin-left: auto; }
   .side .grow { flex: 1; }
   .side .new-task {
@@ -4235,7 +4293,8 @@ const STYLE = `
       color: var(--muted-foreground); font-size: .6875rem; font-weight: 600;
     }
     .tabbar a .glyph { font-size: 1.125rem; line-height: 1; }
-    .tabbar a.active { color: var(--foreground); }
+    .tabbar a.active { color: var(--foreground); box-shadow: inset 0 2px 0 var(--brand); }
+    .tabbar a.active .glyph { color: var(--brand); }
     .tabbar a .count { position: absolute; transform: translate(0.9rem, -0.35rem); }
     .tabbar a { position: relative; }
     .content > main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
@@ -4263,6 +4322,7 @@ const STYLE = `
   .dot-off { background: var(--muted-foreground); opacity: .5; }
   .dot-bad { background: var(--destructive-strong); }
   .pulse { animation: pulse 2s ease-in-out infinite; }
+  .dot-ok.pulse { background: var(--brand); }
   @keyframes pulse { 50% { opacity: .35; } }
 
   .login-viewport { min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem 1.25rem; }
@@ -4298,18 +4358,29 @@ const STYLE = `
     display: grid; grid-template-columns: repeat(5, minmax(15rem, 1fr));
     gap: .75rem; overflow-x: auto; padding-bottom: .75rem; align-items: start;
   }
-  /* The phone is the real usage scene: lanes stack, ordered by what the
-     operator came for — needs-you first, then what is moving, then what
-     waits its turn. Empty lanes collapse to their headline. */
-  @media (max-width: 40rem) {
-    .board { display: flex; flex-direction: column; overflow-x: visible; }
-    .board .lane { min-height: 0; }
+  /* The phone board (arc 4): a pager — swipe between lanes, needs-you
+     first. The strip is viewport-bounded and sits in normal flow: the
+     page still scrolls to the headline above it and the routines below
+     it, while a deep lane scrolls INSIDE its own column. The sliver of
+     the next lane is the affordance; the poller's swap restores both
+     the lane you were on and where you were in it. */
+  @media (max-width: 760px) {
+    .board {
+      display: flex; gap: .75rem; overflow-x: auto; overflow-y: hidden;
+      scroll-snap-type: x mandatory; overscroll-behavior-x: contain;
+      height: clamp(22rem, calc(100dvh - 11.5rem), 42rem); padding-bottom: 0;
+    }
+    .board .lane {
+      /* 4.5rem reserved: a 1.5rem sliver of the neighboring lane on each
+         side after the gap — the swipe affordance must be unmissable. */
+      flex: 0 0 calc(100% - 4.5rem); scroll-snap-align: center;
+      overflow-y: auto; min-height: 0; height: 100%;
+    }
     .board .lane-attention { order: 0; }
     .board .lane-building { order: 1; }
     .board .lane-queued { order: 2; }
     .board .lane-waiting { order: 3; }
     .board .lane-done { order: 4; }
-    .board .lane-empty { margin: 0; }
   }
   .lane {
     background: var(--muted); border: 1px solid var(--border);
@@ -4374,6 +4445,70 @@ button { min-height: 44px; }
   input[type=text], input[type=password] { width: 100%; max-width: 100%; box-sizing: border-box; }
   main { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
 }
+
+/* Motion (arc 4): only where a human caused the change — navigation,
+   presses, overlays. Liveness swaps stay deliberately instant; the pulse
+   dot is the one "alive" signal. Everything here dies under
+   prefers-reduced-motion, and the auto-refresh pages opt out of the
+   navigation cross-fade separately (see shell()). */
+@view-transition { navigation: auto; }
+::view-transition-old(root), ::view-transition-new(root) {
+  animation-duration: 140ms; animation-timing-function: ease-out;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .tabbar a, .side nav a { transition: color .15s, background .15s; }
+  button:active { transform: scale(.985); }
+  .palette, .kbd-help { animation: rise 120ms ease-out; }
+  @media (hover: hover) and (pointer: fine) {
+    .lane-card, .decide-card, .menu-row { transition: border-color .15s, transform .15s, box-shadow .15s; }
+    .lane-card:hover, .decide-card:hover, .menu-row:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px -2px hsl(240 10% 3.9% / .12);
+    }
+  }
+}
+@keyframes rise { from { opacity: 0; margin-top: 4px; } }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+  .pulse, .fire-live { animation: none; }
+  .palette, .kbd-help { animation: none; }
+}
+
+/* The shortcuts overlay (arc 4): display-only, toggled by the chrome
+   layer, absent from sensitive pages. A centered card on desktop, a
+   bottom sheet above the tab bar on phones. */
+.kbd-help {
+  position: fixed; top: 18vh; left: 50%; transform: translateX(-50%); width: min(26rem, 92vw);
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 1px 2px hsl(240 10% 3.9% / .08), 0 16px 40px -16px hsl(240 10% 3.9% / .3);
+  padding: 1rem 1.25rem; z-index: 50;
+}
+.kbd-help h2 { margin: 0 0 .5rem; font-size: .9375rem; }
+.kbd-help table { width: 100%; border-collapse: collapse; font-size: .8125rem; }
+.kbd-help td { padding: .25rem 0; vertical-align: top; }
+.kbd-help td:first-child { width: 7.5rem; color: var(--muted-foreground); white-space: nowrap; }
+.kbd-help kbd {
+  font-family: var(--font-mono); font-size: .75rem; background: var(--muted);
+  border: 1px solid var(--border); border-radius: .3rem; padding: .05rem .35rem;
+}
+@media (max-width: 760px) {
+  .kbd-help {
+    top: auto; bottom: 0; left: 0; right: 0; transform: none; width: auto;
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0rem));
+  }
+}
+
+/* Sticky ceremony actions (arc 4): single-primary-action forms keep
+   their submit within thumb reach on phones. Desktop: plain flow. */
+@media (max-width: 760px) {
+  .sticky-actions {
+    position: sticky; bottom: calc(3.5rem + env(safe-area-inset-bottom, 0rem)); z-index: 20;
+    background: var(--background); border-top: 1px solid var(--border);
+    padding: .625rem 0; margin-top: .75rem;
+  }
+  .sticky-actions button { margin: 0; }
+}
 `;
 
 /** Everything the sidebar needs to draw itself for one request. */
@@ -4414,6 +4549,41 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     `(function(){var region=document.getElementById(${JSON.stringify(regionId)});if(!region)return;` +
     `var stamp=document.getElementById(${JSON.stringify(regionId)}+"-stamp");` +
     `var wait=${ms};var last=Date.now();var busy=false;` +
+    // The swap must not steal what the reader was holding (arc 4,
+    // findings 1/15/16): before replacing the region, remember the
+    // focused row (roving set only), each scrolled lane's first visible
+    // card, and which board lane was centered; put them back after —
+    // scroll first, focus last with preventScroll so it cannot undo the
+    // scroll pass. All coordinates come from bounding rects, never
+    // offsetLeft against an unpositioned parent (finding 21).
+    `function laneKey(l){var m=/(^|\\s)(lane-[a-z]+)(\\s|$)/.exec(l.className);return m?m[2]:null;}` +
+    `function keep(){var data={lanes:[],focus:null,pager:-1};` +
+    `var act=document.activeElement;` +
+    `if(act&&region.contains(act)&&act.matches&&act.matches("a.row, a.lane-card"))data.focus=act.getAttribute("href");` +
+    `var board=region.querySelector(".board");` +
+    `if(board&&board.scrollLeft>0){var lanes=board.querySelectorAll(".lane");` +
+    `var bc=board.getBoundingClientRect();var mid=bc.left+bc.width/2;var best=-1,bd=1e9;` +
+    `for(var i=0;i<lanes.length;i++){var r=lanes[i].getBoundingClientRect();var d=Math.abs(r.left+r.width/2-mid);if(d<bd){bd=d;best=i;}}` +
+    `data.pager=best;}` +
+    `var ls=region.querySelectorAll(".lane");` +
+    `for(var i=0;i<ls.length;i++){var l=ls[i];if(l.scrollTop<=0)continue;var key=laneKey(l);if(!key)continue;` +
+    `var first=null,off=0;var cards=l.querySelectorAll("a.lane-card");var lr=l.getBoundingClientRect();` +
+    `for(var j=0;j<cards.length;j++){var cr=cards[j].getBoundingClientRect();if(cr.bottom>lr.top){first=cards[j].getAttribute("href");off=cr.top-lr.top;break;}}` +
+    `data.lanes.push({key:key,href:first,off:off,top:l.scrollTop});}` +
+    `return data;}` +
+    `function restore(data){` +
+    `for(var i=0;i<data.lanes.length;i++){var d=data.lanes[i];var l=region.querySelector(".lane."+d.key);if(!l)continue;` +
+    `var done=false;` +
+    `if(d.href){var cards=l.querySelectorAll("a.lane-card");` +
+    `for(var j=0;j<cards.length;j++){if(cards[j].getAttribute("href")===d.href){` +
+    `l.scrollTop=Math.max(0,l.scrollTop+cards[j].getBoundingClientRect().top-l.getBoundingClientRect().top-d.off);done=true;break;}}}` +
+    `if(!done)l.scrollTop=d.top;}` +
+    `if(data.pager>=0){var board=region.querySelector(".board");` +
+    `if(board){var lanes=board.querySelectorAll(".lane");var at=Math.min(data.pager,lanes.length-1);` +
+    `if(at>=0){var br=board.getBoundingClientRect();var lr=lanes[at].getBoundingClientRect();` +
+    `board.scrollLeft=board.scrollLeft+(lr.left+lr.width/2)-(br.left+br.width/2);}}}` +
+    `if(data.focus!==null){var links=region.querySelectorAll("a.row, a.lane-card");` +
+    `for(var i=0;i<links.length;i++){if(links[i].getAttribute("href")===data.focus){links[i].focus({preventScroll:true});break;}}}}` +
     `function tell(){if(!stamp)return;var s=Math.round((Date.now()-last)/1000);` +
     `stamp.textContent=wait>${ms}?"stale — retrying ("+s+"s old)":"updated "+s+"s ago";}` +
     `setInterval(tell,1000);` +
@@ -4422,7 +4592,7 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     `fetch(location.pathname+q,{redirect:"manual",cache:"no-store"})` +
     `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return null;}` +
     `return r.ok?r.text():null;})` +
-    `.then(function(t){if(t){region.innerHTML=t;last=Date.now();wait=${ms};}else{wait=Math.min(wait*2,${ms}*8);}})` +
+    `.then(function(t){if(t){var kept=keep();region.innerHTML=t;restore(kept);last=Date.now();wait=${ms};}else{wait=Math.min(wait*2,${ms}*8);}})` +
     `.catch(function(){wait=Math.min(wait*2,${ms}*8);})` +
     // A fragment that marks itself final stops the poller: a finished or
     // abandoned build must not be fetched every beat forever.
@@ -4505,22 +4675,107 @@ function chromeScript(): string {
     `else if(ev.key==="ArrowUp"){pick(-1);ev.preventDefault();}` +
     `else if(ev.key==="Enter"){for(var i=0;i<items.length;i++)if(items[i].getAttribute("aria-selected")==="true")go(items[i].getAttribute("data-href"));ev.preventDefault();}});` +
     `render("");input.focus();}` +
-    // key routing: never inside editable targets, no modifiers, no repeats,
-    // no IME composition (finding 4)
+    // the shortcuts overlay: display-only; focus moves in on open and
+    // back out on close; every other shortcut sleeps while it is up
+    `var help=document.querySelector(".kbd-help");var helpBack=null;` +
+    `function helpOpen(){return help!==null&&!help.hidden;}` +
+    `function toggleHelp(){if(!help)return;` +
+    `if(help.hidden){helpBack=document.activeElement;help.hidden=false;help.focus();}` +
+    `else{help.hidden=true;if(helpBack&&helpBack.focus)helpBack.focus();helpBack=null;}}` +
+    `document.addEventListener("click",function(ev){if(helpOpen()&&!help.contains(ev.target))toggleHelp();});` +
+    // j/k: a roving focus over the page's rows — only from body or from
+    // inside the set, clamped at the ends, preventDefault only on a real
+    // move (finding 9); held keys may repeat
+    `function rove(delta,ev){` +
+    `var set=Array.prototype.slice.call(document.querySelectorAll("a.row, a.lane-card"));` +
+    `if(set.length===0)return;` +
+    `var cur=document.activeElement;var at=set.indexOf(cur);` +
+    `if(cur&&cur!==document.body&&cur!==document.documentElement&&at===-1)return;` +
+    `var next=at===-1?(delta>0?0:set.length-1):Math.max(0,Math.min(set.length-1,at+delta));` +
+    `if(next===at)return;` +
+    `set[next].focus();ev.preventDefault();}` +
+    // key routing: never inside editable targets, no modifiers, no IME
+    // composition (finding 4); repeats allowed only for j/k
     `var pending=null;` +
     `document.addEventListener("keydown",function(ev){` +
-    `if(ev.isComposing||ev.repeat||ev.metaKey||ev.ctrlKey||ev.altKey)return;` +
+    `if(ev.isComposing||ev.metaKey||ev.ctrlKey||ev.altKey)return;` +
     `var t=ev.target;var tag=t&&t.tagName?t.tagName.toLowerCase():"";` +
     `if(tag==="input"||tag==="textarea"||tag==="select"||tag==="button"||(t&&t.isContentEditable))return;` +
+    `if(ev.key==="Escape"){if(helpOpen()){toggleHelp();ev.preventDefault();return;}close();return;}` +
+    `if(helpOpen())return;` +
+    `if(ev.repeat&&ev.key!=="j"&&ev.key!=="k")return;` +
     `if(ev.key==="/"){show();ev.preventDefault();return;}` +
-    `if(ev.key==="Escape"){close();return;}` +
+    `if(ev.key==="?"){toggleHelp();ev.preventDefault();return;}` +
+    `if(ev.key==="j"||ev.key==="k"){rove(ev.key==="j"?1:-1,ev);return;}` +
     `if(pending==="g"){pending=null;` +
-    `var map={b:"/board",i:"/",w:"/workbench",r:"/routines",d:"/done"};` +
+    `var map={b:"/board",i:"/",w:"/workbench",r:"/routines",d:"/done",q:"/queue",f:"/fleet",t:"/tasks",a:"/activity",p:"/projects"};` +
     `if(map[ev.key]){go(map[ev.key]);ev.preventDefault();}return;}` +
     `if(ev.key==="g"){pending="g";setTimeout(function(){pending=null;},800);}});` +
     `})();`
   );
 }
+
+/**
+ * A page described, not yet rendered (arc 4): every chromed HTML route
+ * returns one of these and ONE helper (sendScreen, inside the server)
+ * owns the nonce, the palette index, the shortcuts overlay, script
+ * composition, and the CSP. Renderers stopped calling shell() themselves
+ * so those five things cannot drift apart per route.
+ */
+type Screen = {
+  title: string;
+  body: string;
+  chrome?: Chrome;
+  /** The page's own executable behavior (a region poller, the push
+   * enrollment script). fetches: true when it calls fetch — connect-src
+   * is granted only then. */
+  functional?: { script: string; fetches?: boolean };
+  refreshSeconds?: number;
+  /** Render sensitive even when no password field is visible — one-time
+   * secrets and judgment calls the classifier cannot see. */
+  forceSensitive?: boolean;
+};
+
+function screen(
+  title: string,
+  body: string,
+  options: Omit<Screen, "title" | "body"> = {},
+): Screen {
+  return { title, body, ...options };
+}
+
+/**
+ * The sensitivity classifier (arc 4, findings 3/17): a body showing a
+ * password input renders WITHOUT the chrome additions (palette, overlay,
+ * global keys) — the page's own functional script still ships. Tolerant
+ * of quoting, casing, and whitespace; `data-type="password"` and prose
+ * mentioning passwords do not match. This is defense-in-depth over a
+ * file whose only HTML producer is its own double-quoted template
+ * convention — forceSensitive is the escape hatch for what a regex
+ * cannot judge.
+ */
+export const SENSITIVE_INPUT = /<input\b[^>]*[\s"']type\s*=\s*["']?password/i;
+
+/** The shortcuts overlay: display-only, toggled by the chrome layer,
+ * absent from sensitive pages. Navigation help in plain words — no key
+ * ever posts. */
+const KBD_HELP =
+  `<div class="kbd-help" hidden role="dialog" aria-label="keyboard shortcuts" tabindex="-1">` +
+  `<h2>keyboard shortcuts</h2><table>` +
+  `<tr><td><kbd>/</kbd></td><td>jump to a page or an open task</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>i</kbd></td><td>go to the inbox</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>b</kbd></td><td>go to the board</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>q</kbd></td><td>go to the queue</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>f</kbd></td><td>go to the fleet</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>w</kbd></td><td>go to the workbench</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>r</kbd></td><td>go to the routines</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>t</kbd></td><td>go to the task list</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>a</kbd></td><td>go to the activity view</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>p</kbd></td><td>go to the projects</td></tr>` +
+  `<tr><td><kbd>g</kbd> then <kbd>d</kbd></td><td>go to what is done</td></tr>` +
+  `<tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>move through the rows on this page</td></tr>` +
+  `<tr><td><kbd>Escape</kbd></td><td>close this</td></tr>` +
+  `</table></div>`;
 
 function shell(
   title: string,
@@ -4530,8 +4785,11 @@ function shell(
     chrome?: Chrome;
     refreshSeconds?: number;
     /** The page's one nonce'd script: region pollers + the chrome layer,
-     * composed by the caller. Read-only regions only; one nonce per response. */
-    live?: { nonce: string; script: string };
+     * composed by sendScreen. Read-only regions only; one nonce per
+     * response. fallbackRefresh marks a page whose script POLLS — only
+     * those earn the noscript meta-refresh (a chrome-layer-only page with
+     * forms must never re-render what someone was typing). */
+    live?: { nonce: string; script: string; fallbackRefresh?: boolean };
   } = {},
 ): string {
   const head = [
@@ -4541,14 +4799,20 @@ function shell(
     // Live status with zero JavaScript: the page asks the browser to fetch
     // it again. Only ever on read-only briefing pages — a refresh on a page
     // with a form would eat what somebody was typing.
+    // A page that reloads itself on a timer must not cross-fade every
+    // beat — the navigation transition is for navigation someone chose.
     ...(options.refreshSeconds === undefined
       ? []
-      : [`<meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.refreshSeconds))}">`]),
+      : [
+          `<meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.refreshSeconds))}">`,
+          `<style>@view-transition { navigation: none; }</style>`,
+        ]),
     // With the in-place swapper, the whole-page refresh survives only as
-    // the no-JavaScript fallback.
-    ...(options.live === undefined
+    // the no-JavaScript fallback — and CSS view transitions run without
+    // JavaScript, so the fallback carries its own opt-out.
+    ...(options.live?.fallbackRefresh !== true
       ? []
-      : [`<noscript><meta http-equiv="refresh" content="30"></noscript>`]),
+      : [`<noscript><meta http-equiv="refresh" content="30"><style>@view-transition { navigation: none; }</style></noscript>`]),
     `<title>${escape(title)}</title><style>${STYLE}</style></head><body>`,
   ].join("\n");
   const tail =
@@ -4681,7 +4945,7 @@ function inboxPage(chrome: Chrome, data: {
   /** The first-run checklist; null once the installation has succeeded once. */
   wizard: { done: boolean; title: string; detail: string }[] | null;
   now: Date;
-}): string {
+}): Screen {
   /** The row's project, worn openly in the roll-up — null is UNPLACED,
    * said as such, never a silent missing chip (finding 13). */
   const chip = (repo: string | null | undefined): string =>
@@ -4793,7 +5057,7 @@ function inboxPage(chrome: Chrome, data: {
         ).join(" \u00b7 ") +
         `</p></div>`;
 
-  return shell("inbox", [
+  return screen("inbox", [
     `<h1>inbox</h1>`,
     `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, nothing needs your attention</p>`,
     wizard,
@@ -4842,7 +5106,7 @@ function systemPage(chrome: Chrome, data: {
   outboxPending: number;
   externalWork?: { remoteRepo: string; blocked: string | null; openEpisode: string | null }[];
   now: Date;
-}): string {
+}): Screen {
   const nowMs = data.now.getTime();
   const runnerCards = data.runners
     .filter(one => one.retiredAt === null)
@@ -4909,7 +5173,7 @@ function systemPage(chrome: Chrome, data: {
     `<p class="meta">repair always stays on the provider that built — only its model can differ. A routine pins its agent the moment it fires; nothing after that can re-route it.</p>` +
     `</div>`;
 
-  return shell("system", [
+  return screen("system", [
     `<h1>system</h1>`,
     `<p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p>`,
     agentsCard,
@@ -5142,7 +5406,7 @@ function donePage(
   chrome: Chrome,
   rows: ReturnType<Store["listCompletedWorkScoped"]>,
   ciRed: (pr: number) => boolean,
-): string {
+): Screen {
   const list =
     rows.length === 0
       ? `<p class="meta">Nothing completed yet \u2014 finished tasks land here with their final build, cost, and pull request.</p>`
@@ -5163,7 +5427,7 @@ function donePage(
             );
           })
           .join("\n");
-  return shell("done", [
+  return screen("done", [
     `<h1>done</h1>`,
     `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, what it cost, and its pull request</p>`,
     list,
@@ -5259,7 +5523,7 @@ function chatPage(chrome: Chrome, data: {
   openrouterModels: string[] | null;
   csrf: string;
   problem: string | null;
-}): string {
+}): Screen {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
     const openrouterModels = data.openrouterModels ?? PRICED_MODELS.filter(one => one.includes("/"));
@@ -5314,7 +5578,7 @@ function chatPage(chrome: Chrome, data: {
     if (code === "unconfigured" || code === "unpriced" || code === "no-key") {
       parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
     }
-    return shell("chat", parts.join("\n"), { chrome });
+    return screen("chat", parts.join("\n"), { chrome });
   }
   const config = (data.enabled as unknown as { config: { provider: string; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
   parts.push(
@@ -5332,7 +5596,7 @@ function chatPage(chrome: Chrome, data: {
   if (data.pending !== null) {
     parts.push(`<div class="card"><p><strong>asking…</strong> <span class="meta">turn #${data.pending.id}, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
-    return shell("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
+    return screen("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
   }
   const last = data.chat?.lastTurn ?? null;
   if (last !== null) {
@@ -5404,11 +5668,11 @@ function chatPage(chrome: Chrome, data: {
       );
     }
   }
-  return shell("chat", parts.join("\n"), { chrome });
+  return screen("chat", parts.join("\n"), { chrome });
 }
 
-function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): string {
-  return shell("chat", [
+function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): Screen {
+  return screen("chat", [
     `<h1>unknown spend</h1>`,
     `<div class="card">`,
     `<p>Turn <span class="mono">#${turn.id}</span> on <span class="mono">${escape(turn.provider)} · ${escape(turn.model)}</span> ` +
@@ -5434,7 +5698,7 @@ function routinesPage(
     problem: string | null;
     prefill?: { name: string; goal: string; not: string; touches: string; schedule: string } | null;
   },
-): string {
+): Screen {
   const fill = form.prefill ?? null;
   const capture =
     chrome.project === null
@@ -5464,7 +5728,7 @@ function routinesPage(
     tracks.length === 0
       ? `<p class="meta">No standing orders${chrome.project === null ? " — open a project to file one" : " in this project yet — file one below; nothing fires until you approve it"}.</p>`
       : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
-  return shell("routines", [
+  return screen("routines", [
     `<h1>routines</h1>`,
     `<p class="hint">standing orders — repeating work that fires on a schedule, each instance building alone in its own workspace; anything needing you bubbles to the inbox</p>`,
     list,
@@ -5481,7 +5745,7 @@ function routineScreenPage(chrome: Chrome, data: {
   nonce: string;
   problem: string | null;
   now: Date;
-}): string {
+}): Screen {
   const { routine, fires } = data;
   const status = routineStatus(routine);
   const approved = routine.approvedAt !== null && routine.approvedDigest === routine.digest;
@@ -5548,7 +5812,7 @@ function routineScreenPage(chrome: Chrome, data: {
           })
           .join("\n");
 
-  return shell(`routine · ${routine.name}`, [
+  return screen(`routine · ${routine.name}`, [
     `<h1>${escape(routine.name)} <span class="${status.badge}">${escape(status.text)}</span>` +
       `<span class="meta"> · ${escape(projectName(routine.repo))}</span></h1>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
@@ -5585,7 +5849,7 @@ function homePage(chrome: Chrome, data: {
   outboxPending: number;
   settings: boolean;
   now: Date;
-}): string {
+}): Screen {
   const { summary } = data;
   // The night's harvest is the page's reason to exist — strong figures in a
   // sentence, colored by what they mean, never a metric-card grid.
@@ -5720,7 +5984,7 @@ function homePage(chrome: Chrome, data: {
         ].join("\n")
       : "";
 
-  return shell("activity", [
+  return screen("activity", [
     `<h1>activity</h1>`,
     data.repo === null
       ? ""
@@ -5747,7 +6011,7 @@ function tasksPage(
   problem: string | null,
   repo: string | null = null,
   prefill: { title: string; goal: string; not: string; touches: string } | null = null,
-): string {
+): Screen {
   const filters = TASK_STATES.map(
     one => (one === state ? `<strong>${one}</strong>` : `<a href="/tasks?state=${one}">${one}</a>`),
   ).join(" · ");
@@ -5765,7 +6029,7 @@ function tasksPage(
               `${escape(task.title)} <span class="right badge badge-${escape(task.state)}">${escape(task.state)}</span></a>`,
           )
           .join("\n");
-  return shell("tasks", [
+  return screen("tasks", [
     "<h1>tasks</h1>",
     `<p class="meta">work you want done${repo === null ? "" : ` in <span class="mono">${escape(repo)}</span>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
@@ -5796,7 +6060,7 @@ function browsePage(chrome: Chrome, data: {
   parent: string | null;
   entries: { name: string; path: string; git: boolean }[];
   csrf: string;
-}): string {
+}): Screen {
   const crumb = data.at === data.root ? projectName(data.root) : `${projectName(data.root)}${data.at.slice(data.root.length)}`;
   const openForm = (path: string): string =>
     [
@@ -5806,7 +6070,7 @@ function browsePage(chrome: Chrome, data: {
       `<button type="submit">open</button>`,
       `</form>`,
     ].join("");
-  return shell("projects", [
+  return screen("projects", [
     `<h1>choose a folder</h1>`,
     `<p class="meta">git repositories float to the top and can be opened; anything else can be entered — only folders under ${
       data.roots.length === 1 ? `<span class="mono">${escape(projectName(data.root))}</span>` : "the configured roots"
@@ -5928,7 +6192,7 @@ function contestPage(chrome: Chrome, data: {
   liveRuns?: ReadonlySet<number>;
   csrf: string;
   problem: string | null;
-}): string {
+}): Screen {
   const { contest, agents } = data.view;
   const picking = contest.state === "pick-wait";
   const abandonable = ["pick-wait", "exhausted", "interrupted", "decision-wait"].includes(contest.state);
@@ -5991,7 +6255,7 @@ function contestPage(chrome: Chrome, data: {
     return parts.filter(one => one !== "").join("\n");
   };
 
-  return shell("tournament", [
+  return screen("tournament", [
     `<h1>tournament</h1>`,
     `<p class="meta">${agents.length} agents raced on <a href="${taskHref(data.taskId)}">${escape(data.taskTitle)}</a> — ` +
       `only one result will be kept as the task's outcome; the rest stay archived with their evidence</p>`,
@@ -6035,10 +6299,10 @@ function contestCeremonyPage(chrome: Chrome, data: {
   publication?: { githubRepo: string; branch: string; draft: boolean } | null;
   nonceValue: string;
   csrf: string;
-}): string {
+}): Screen {
   const back = `<p class="meta"><a href="/contest/${data.contestId}">back — decide nothing</a></p>`;
   if (data.kind === "abandon") {
-    return shell("tournament", [
+    return screen("tournament", [
       `<h1>abandon this tournament?</h1>`,
       `<div class="card">`,
       `<p class="row">${data.agents} agents raced on <strong>${escape(data.taskTitle)}</strong>. Abandoning picks nothing:</p>`,
@@ -6056,9 +6320,9 @@ function contestCeremonyPage(chrome: Chrome, data: {
     ].join("\n"), { chrome });
   }
   const agent = data.chosen;
-  if (agent === undefined || agent.run === null) return shell("tournament", `<p class="meta">nothing to confirm</p>`, { chrome });
+  if (agent === undefined || agent.run === null) return screen("tournament", `<p class="meta">nothing to confirm</p>`, { chrome });
   const run = agent.run;
-  return shell("tournament", [
+  return screen("tournament", [
     `<h1>pick agent ${agent.contestant.ordinal}'s result?</h1>`,
     `<div class="card">`,
     `<p class="row"><strong>agent ${agent.contestant.ordinal}</strong> — ${escape(agent.contestant.provider)} · ${escape(agent.contestant.model)}</p>`,
@@ -6084,7 +6348,7 @@ function contestCeremonyPage(chrome: Chrome, data: {
     `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
     `<input type="hidden" name="choice" value="${agent.contestant.id}">`,
     `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">yes — pick this result</button>`,
+    `<div class="sticky-actions"><button type="submit">yes — pick this result</button></div>`,
     `</form>`,
     back,
   ].filter(one => one !== "").join("\n"), { chrome });
@@ -6104,7 +6368,7 @@ function projectsPage(
   unscopedMode: boolean,
   browsable = false,
   onboard: OnboardCardState | null = null,
-): string {
+): Screen {
   // The onboarding card (repo onboarding, findings 1-39): preview first,
   // then a password-confirmed clone into a configured root. Disabled
   // states explain themselves in words (finding 28/39).
@@ -6139,7 +6403,7 @@ function projectsPage(
                     ? `<label class="row"><input type="checkbox" name="big-ok" value="1"> this is a large repository (or its size is unknown) — clone it anyway</label>`
                     : "",
                   `<label>your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
-                  `<button type="submit">clone and open</button>`,
+                  `<div class="sticky-actions"><button type="submit">clone and open</button></div>`,
                   `</form>`,
                   `</div>`,
                 ].join("\n"),
@@ -6170,7 +6434,7 @@ function projectsPage(
   const recentRows = recent.map(one => ({ path: one.path, name: one.name, note: `last opened ${when(one.lastOpenedAt)}` }));
   const candidateRows = candidates.map(path => ({ path, name: projectName(path), note: "seen in the queue" }));
 
-  return shell("projects", [
+  return screen("projects", [
     `<h1>projects</h1>`,
     onboardCard,
     `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its board, and its runs</p>`,
@@ -6483,8 +6747,8 @@ function newTaskPage(
   projectRevision: number,
   problem: string | null,
   candidates: { id: string; title: string }[] = [],
-): string {
-  return shell("new task", [
+): Screen {
+  return screen("new task", [
     `<h1>new task</h1>`,
     `<p class="meta">plain words for work you want done${
       project === null ? "" : ` in <span class="mono">${escape(project)}</span>`
@@ -6721,7 +6985,7 @@ function taskBody(data: {
               `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
               `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
           `<label>your password, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>`,
-          `<button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : "approve scope and tournament — one yes covers both"}</button>`,
+          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : "approve scope and tournament — one yes covers both"}</button></div>`,
           `</form>`,
         ].join("\n");
 
@@ -7048,8 +7312,8 @@ function taskBody(data: {
   ].join("\n");
 }
 
-function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): string {
-  return shell(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome });
+function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen {
+  return screen(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome });
 }
 
 /**
@@ -7076,7 +7340,7 @@ function reviewPage(
   chrome: Chrome,
   rows: { publication: Publication; taskId: string; failing: boolean }[],
   now: Date,
-): string {
+): Screen {
   const ageOf = (iso: string): string => {
     const hours = Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / 3_600_000));
     return hours < 1 ? "under an hour" : hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
@@ -7108,7 +7372,7 @@ function reviewPage(
             );
           })
           .join("\n");
-  return shell("review queue", [
+  return screen("review queue", [
     `<h1>review queue</h1>`,
     `<p class="hint">what waits on your review, oldest reviewable first — this console recommends; merging stays yours, on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
     list,
@@ -7208,7 +7472,7 @@ function runOutcomeBadge(run: Run, live: boolean): string {
     : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>`;
 }
 
-function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: ReadonlySet<number>, nextCursor: number | null): string {
+function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: ReadonlySet<number>, nextCursor: number | null): Screen {
   const list =
     rows.length === 0
       ? `<p class="meta">No runs yet \u2014 a run is one unattended build attempt; they appear once the watch dispatches an approved task.</p>`
@@ -7230,7 +7494,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: R
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
-  return shell("builds", [`<h1>builds</h1><p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
+  return screen("builds", [`<h1>builds</h1><p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
 }
 
 /** What the run page shows of the terminal diff — verified bytes or a named problem, never silence. */
@@ -7413,10 +7677,10 @@ function runPage(
   csrf = "",
   comments: DiffComment[] = [],
   ciRepair: { pr: number } | null = null,
-  live?: { nonce: string; script: string },
+  liveScript?: string,
   peekable = false,
   running = false,
-): string {
+): Screen {
   const rows = runFactsRows(run, taskId, running);
   // The live peek region (A2): the poller fills it only on a serve that
   // asserted its runner. Without the assertion the section still appears
@@ -7524,7 +7788,7 @@ function runPage(
         `<button type="submit">add note</button></form>`;
   const notesCard = noteRows === "" && noteForm === "" ? "" : `<h2>operator notes</h2>${noteRows}${noteForm}`;
 
-  return shell(`build #${run.id}`, [
+  return screen(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     `<div id="run-facts">${rows}</div>`,
     running ? `<p class="meta" id="run-facts-stamp"></p>` : "",
@@ -7535,7 +7799,7 @@ function runPage(
     handoff,
     evidence,
     notesCard,
-  ].join("\n"), { chrome, ...(live === undefined ? {} : { live }) });
+  ].join("\n"), { chrome, ...(liveScript === undefined ? {} : { functional: { script: liveScript, fetches: true } }) });
 }
 
 /** The facts region alone, for the open-run poll (A4). A finished run's
@@ -7553,9 +7817,9 @@ export function runFactsFragment(run: Run, taskId: string, live: boolean): strin
   return runFactsRows(run, taskId, live);
 }
 
-function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): string {
+function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): Screen {
   if (caps === null) {
-    return shell("requirements", [
+    return screen("requirements", [
       `<h1>requirements</h1>`,
       `<p class="meta">open a project to see its requirements — <a href="/projects">projects</a></p>`,
     ].join("\n"), { chrome });
@@ -7588,7 +7852,7 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
               `<p class="meta">${escape(gap.instructions)}</p></div>`,
           )
           .join("\n");
-  return shell("requirements", [
+  return screen("requirements", [
     `<h1>requirements</h1>`,
     `<p class="hint">tools and credentials builds need — each is probed on the worker before any build spends money; values never leave your machine</p>`,
     list,
@@ -7606,8 +7870,7 @@ function settingsPage(
   problem: string | null,
   messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
   push: { available: boolean; devices: PushSubscription[] } | null = null,
-  pushNonce?: string,
-): string {
+): Screen {
   const pushCard =
     push === null || csrf === ""
       ? ""
@@ -7638,10 +7901,13 @@ function settingsPage(
                 `</p>`,
             ),
         ].join("\n");
+  // The enrollment behavior rides the ONE composed script (arc 4, finding
+  // 18) — it fills the subscription fields the form posts; it never reads
+  // the password field beside them (the named functional exception).
   const pushScript =
-    push === null || !push.available || pushNonce === undefined
-      ? ""
-      : `<script nonce="${escape(pushNonce)}">(function(){` +
+    push === null || !push.available || csrf === ""
+      ? null
+      : `(function(){` +
         `if(!("serviceWorker" in navigator)||!("PushManager" in window))return;` +
         `var link=document.createElement("link");link.rel="manifest";link.href="/manifest.webmanifest";document.head.appendChild(link);` +
         `navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});` +
@@ -7660,7 +7926,7 @@ function settingsPage(
         `form.querySelector("[name=auth]").value=(raw.keys.auth||"").replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");` +
         `form.dataset.ready="1";form.submit();});` +
         `}).catch(function(){if(state)state.textContent="could not subscribe — the browser said no";});});` +
-        `})();</script>`;
+        `})();`;
   const messagingCard =
     messaging === null || messaging.configured.length === 0
       ? ""
@@ -7689,10 +7955,9 @@ function settingsPage(
       : existing === null
         ? "not set"
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
-  return shell("settings", [
+  return screen("settings", [
     "<h1>settings</h1>",
     pushCard,
-    pushScript,
     messagingCard,
     "<h2>telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,
@@ -7704,7 +7969,7 @@ function settingsPage(
     "</form>",
     `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
     ` <code>standing-orders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
-  ].join("\n"), { chrome });
+  ].join("\n"), { chrome, ...(pushScript === null ? {} : { functional: { script: pushScript, fetches: true } }) });
 }
 
 /**
@@ -7728,11 +7993,11 @@ function nextPage(chrome: Chrome, data: {
   remaining: number;
   skipped: string[];
   now: Date;
-}): string {
+}): Screen {
   const { item } = data;
   if (item === null) {
     const held = data.skipped.length;
-    return shell("next", [
+    return screen("next", [
       `<h1>all clear</h1>`,
       held > 0
         ? `<p>Nothing left except the ${held} you set aside. <a href="/next">Look at those again</a>, or come back later.</p>`
@@ -7772,7 +8037,7 @@ function nextPage(chrome: Chrome, data: {
       `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
       `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
       `<label>your password, typed again — a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>` +
-      `<button type="submit">approve this scope</button>` +
+      `<div class="sticky-actions"><button type="submit">approve this scope</button></div>` +
       `</form>` +
       `<p class="meta"><a href="${taskHref(item.approval.taskId)}">open the full task</a> to edit the scope first</p>`;
   } else if (item.kind === "requeue") {
@@ -7796,7 +8061,7 @@ function nextPage(chrome: Chrome, data: {
       `<div class="card"><p class="meta">prove it filled from the terminal:</p><pre class="recap">${escape(gap.verify)}</pre></div>`;
   }
 
-  return shell("next", [header, card].join("\n"), { chrome });
+  return screen("next", [header, card].join("\n"), { chrome });
 }
 
 /**
@@ -7836,7 +8101,7 @@ function decisionPage(
   artifacts: Artifact[],
   who: Who,
   now: Date,
-): string {
+): Screen {
   const csrf = who.via === "cookie" ? who.session.csrf : "";
   const options = decisionOptionForms(decision, csrf, null);
 
@@ -7860,7 +8125,7 @@ function decisionPage(
           .join("\n") +
         "</div>";
 
-  return shell(`decide \u00b7 ${taskId}`, [
+  return screen(`decide \u00b7 ${taskId}`, [
     `<h1>${escape(taskId)} <span class="badge badge-${escape(decision.state)}">${escape(decision.state)}</span>${
       isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""
     }${decision.deadline === null ? "" : ` <span class="meta">deadline ${escape(decision.deadline)}</span>`}</h1>`,
