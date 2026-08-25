@@ -3777,6 +3777,18 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     expect(after).not.toContain("pick this result");
   });
 
+  test("the comparison reads at a glance (arc 6): one table column per agent, cards side by side, same facts", async () => {
+    const cookie = await login();
+    const html = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
+    expect(html).toContain('class="contest-glance"');
+    expect(html).toContain('class="contest-compare"');
+    // the table and the cards derive from ONE summary — the same diff words
+    expect(html).toContain("1 file(s) · +1 −0");
+    expect((html.match(/agent [0-9]/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // ceremonies untouched: the arm form still points at the same act
+    expect(html).toContain(`/contest/${contestId}/arm`);
+  });
+
   test("abandon: armed by POST, confirmed by password — the task fails requeueably and everything is kept", async () => {
     const cookie = await login();
     const compare = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
@@ -4285,5 +4297,178 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     });
     await (await fetch(url("/done"), { headers: { cookie } })).text();
     expect(calls).toBe(2);
+  });
+});
+
+
+describe("arc 6 — editor links, the review flow, and their guards", () => {
+  test("editorFileHref refuses everything untame and encodes what it links", async () => {
+    const { editorFileHref } = await import("./serve.js");
+    // refusals
+    expect(editorFileHref("relative/worktree", "a.ts")).toBeNull();
+    expect(editorFileHref("/pool/t-1", "../escape.ts")).toBeNull();
+    expect(editorFileHref("/pool/t-1", "src/../../up.ts")).toBeNull();
+    expect(editorFileHref("/pool/t-1", "/absolute.ts")).toBeNull();
+    expect(editorFileHref("/pool/t-1", "windows\\path.ts")).toBeNull();
+    expect(editorFileHref("/pool/t-1", "src//double.ts")).toBeNull();
+    expect(editorFileHref("/pool/t-1", "ctl" + String.fromCharCode(7) + ".ts")).toBeNull();
+    expect(editorFileHref("/pool" + String.fromCharCode(0) + "bad", "a.ts")).toBeNull();
+    expect(editorFileHref("/pool/../t-1", "a.ts")).toBeNull();
+    // links, encoded
+    expect(editorFileHref("/pool/t-1", "src/a.ts")).toBe("vscode://file/pool/t-1/src/a.ts");
+    expect(editorFileHref("/pool/t-1", 'has space/"quote".ts')).toBe(
+      "vscode://file/pool/t-1/has%20space/%22quote%22.ts",
+    );
+    // line bounds: the comment form's own range, nothing looser
+    expect(editorFileHref("/pool/t-1", "a.ts", 42)).toBe("vscode://file/pool/t-1/a.ts:42");
+    expect(editorFileHref("/pool/t-1", "a.ts", 0)).toBe("vscode://file/pool/t-1/a.ts");
+    expect(editorFileHref("/pool/t-1", "a.ts", 1_000_001)).toBe("vscode://file/pool/t-1/a.ts");
+  });
+
+  describe("over real HTTP", () => {
+    let store: Store;
+    let server: Server;
+    let base: string;
+    let evidenceRoot: string;
+    let approverToken: string;
+    let runId: number;
+
+    const url = (path: string) => `${base}${path}`;
+    const login = async (): Promise<string> => {
+      const response = await fetch(url("/login"), {
+        method: "POST",
+        body: new URLSearchParams({ name: "alex", token: approverToken }),
+        redirect: "manual",
+      });
+      return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+    };
+    const csrfOf = async (cookie: string): Promise<string> => {
+      const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      return /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+    };
+    const activate = async (cookie: string, on = true): Promise<void> => {
+      const csrf = await csrfOf(cookie);
+      await fetch(url("/session/editor-links"), {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({ csrf, on: on ? "1" : "0", return: `/r/${runId}` }),
+        redirect: "manual",
+      });
+    };
+
+    beforeEach(async () => {
+      store = openStore(":memory:");
+      evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-arc6-ev-"));
+      const added = addApprover(store, "alex", T0);
+      if (!added.ok) throw new Error("bootstrap failed");
+      approverToken = added.token;
+      store.createTask({ id: "t-review", title: "reviewed work" }, T0);
+      const taskRef = store.refFor("built-in", "t-review").id;
+      runId = store.startRun({
+        taskRef, leaseId: "l-review", runner: "builder-1",
+        branch: "so/t-review", worktree: "/pool/t review", now: T0,
+      });
+      const patch = "diff --git a/src/a.ts b/src/a.ts\n+edited\n";
+      storeEvidence(store, evidenceRoot, runId, "terminal-diff", "terminal-diff.patch",
+        Buffer.from(patch, "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
+      storeEvidence(store, evidenceRoot, runId, "diff-stat", "terminal-diff-stat.json",
+        Buffer.from(JSON.stringify({
+          base: "b".repeat(12), head: "h".repeat(12), fileCount: 2, additions: 3, deletions: 1,
+          binaryCount: 0, filesTruncated: false,
+          files: [{ path: "src/a.ts", additions: 3, deletions: 1 }, { path: "../evil.ts", additions: 0, deletions: 0 }],
+        }), "utf8"), "git diff --numstat (exit 0)", T0, { captureStatus: "ok" });
+      store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
+
+      server = createDecisionServer({
+        store, evidenceRoot, clock: () => new Date(), repo: "/repo/main",
+        localRunner: "builder-1", poolRoot: "/pool",
+        editorLinks: "vscode",
+      });
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (typeof address !== "object" || address === null) throw new Error("no address");
+      base = `http://127.0.0.1:${address.port}`;
+    });
+
+    afterEach(async () => {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      store.close();
+      rmSync(evidenceRoot, { recursive: true, force: true });
+    });
+
+    test("links render only after the SESSION says yes; hostile paths never link; the toggle flips both ways", async () => {
+      const cookie = await login();
+      // capability on, session off: no links, an offer to turn them on
+      const before = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      expect(before).not.toContain("vscode://");
+      expect(before).toContain("open files in VS Code from this device");
+      // session yes: tame paths link (worktree space encoded), traversal never does
+      await activate(cookie);
+      const after = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      expect(after).toContain('href="vscode://file/pool/t%20review/src/a.ts"');
+      expect(after.match(/vscode:[^"]*evil/) ?? []).toEqual([]);
+      expect(after).toContain("on THIS device");
+      // and off again
+      await activate(cookie, false);
+      const off = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      expect(off).not.toContain("vscode://");
+    });
+
+    test("a run owned by ANOTHER runner never links and never offers", async () => {
+      const other = store.startRun({
+        taskRef: store.refFor("built-in", "t-review").id, leaseId: "l-other", runner: "someone-else",
+        branch: "so/other", worktree: "/pool/other", now: T0,
+      });
+      store.finishRun(other, { outcome: "built", committed: true, now: T0 });
+      const cookie = await login();
+      await activate(cookie);
+      const html = await (await fetch(url(`/r/${other}`), { headers: { cookie } })).text();
+      expect(html).not.toContain("vscode://");
+      expect(html).not.toContain("open files in VS Code");
+    });
+
+    test("commenting lands back at the review card with the note field ready; plain loads stay quiet", async () => {
+      const cookie = await login();
+      const csrf = await csrfOf(cookie);
+      const posted = await fetch(url(`/r/${runId}/comment`), {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({ csrf, path: "src/a.ts", line: "3", note: "tighten this" }),
+        redirect: "manual",
+      });
+      expect(posted.status).toBe(303);
+      expect(posted.headers.get("location")).toBe(`/r/${runId}?noted=1#review`);
+      const noted = await (await fetch(url(`/r/${runId}?noted=1`), { headers: { cookie } })).text();
+      expect(noted).toContain('id="review"');
+      expect(noted).toMatch(/name="note"[^>]* autofocus/);
+      const plain = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      expect(plain).not.toContain("autofocus");
+    });
+
+    test("the prefill button and its script ride the page exactly when the comment form does", async () => {
+      const cookie = await login();
+      const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
+      expect(html).toContain('class="pick-file" data-path="src/a.ts"');
+      expect(html).toContain('id="comment-form"');
+      // prefill alone earns no network: script-src yes, connect-src no
+      const csp = (await fetch(url(`/r/${runId}`), { headers: { cookie } })).headers.get("content-security-policy") ?? "";
+      expect(csp).toMatch(/script-src 'nonce-/);
+      expect(csp).not.toContain("connect-src");
+    });
+  });
+
+  test("--editor is validated before anything starts, on both commands", async () => {
+    const { runOperate } = await import("./operate.js");
+    for (const [verb, argv] of [
+      ["serve", ["--editor", "emacs", "--json"]],
+      ["serve", ["--editor", "vscode", "--json"]],
+      ["up", ["--editor", "emacs", "--json"]],
+    ] as const) {
+      const lines: string[] = [];
+      await runOperate(verb, argv as unknown as string[], line => lines.push(line), { databaseFile: ":memory:" });
+      const body = JSON.parse(lines.join("\n")) as { ok: boolean; reason: string };
+      expect(body.ok, `${verb} ${argv.join(" ")}`).toBe(false);
+      expect(body.reason).toBe("usage");
+    }
   });
 });

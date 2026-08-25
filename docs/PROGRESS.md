@@ -1,5 +1,39 @@
 # Progress
 
+**2026-08-24 — arc 6, review niceties: files that open in your editor, a
+review flow without friction, a tournament you can compare at a glance.**
+One Codex round (APPROVE WITH CHANGES, findings 1–8), all implemented —
+and with it the six-arc attended plan is COMPLETE. Editor deep links:
+`serve --editor vscode` (and `up --editor vscode`) is a DEPLOYMENT
+capability, not an activation — vscode:// opens on the browser's
+machine, so links render only when three statements align: the operator
+started the server with the capability AND `--runner`, the run belongs
+to this machine's runner, and the SESSION flipped "open files in VS Code
+from this device" on the build page (per-device, per-session, dies with
+the cookie). Where they render — changed-file rows, review comments'
+path:line, and the live peek's names — every href passes one strict
+helper: absolute control-free worktree, relative single-line path with
+no empty/dot/dot-dot/backslash segments, the comment form's own
+1..1,000,000 line range, encoding failures degrading to plain text. The
+peek links only names its sanitizer provably did not touch — a masked
+credential-shaped name never carries an href disclosing what the mask
+hid — and the peek cache and in-flight coalescer now vary by link mode
+so one session's linked fragment is never served to another. The review
+flow: commenting lands back AT the review card (`?noted=1#review`) with
+the note field focused, and every changed file grew a small "comment"
+button that prefills the path — client-side form mutation named as
+such, riding the one composed functional script, earning neither
+connect-src nor a noscript refresh. This REDUCES the unsent-note hazard
+(typed-but-unsubmitted text can still be lost — said honestly); the
+existing seal-into-one-revision-task remains the real batch operation.
+The tournament page: an at-a-glance table (one column per agent —
+outcome, changed, time, questions, cost) and side-by-side cards on wide
+screens, BOTH rendered from one summary object per agent so the table
+and the cards cannot tell a pick two different stories, with
+verified-zero, missing-summary, and capture-failure each keeping their
+own words. The diff-stat parser stopped accepting "any object with a
+base key" — every rendered field is now type-proved. Suite: 1164.
+
 **2026-08-24 — arc 5, agent ergonomics: the binary teaches its own
 surface.** One Codex round (APPROVE WITH CHANGES, findings 1–8), all
 implemented. Two new answers an agent can get from the exact build it is

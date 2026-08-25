@@ -288,7 +288,11 @@ External trackers — build what a tracker nominates, under local approvals
                                         and watches every named repository
                                         (none named: the current one).
                                         --no-open skips the browser;
-                                        --runner names the worker.
+                                        --runner names the worker;
+                                        --editor vscode links changed files
+                                        to VS Code on the device you browse
+                                        from (turn on per device, in the
+                                        build page's review section).
   standing-orders reconcile --repo <path>   the morning sweep: recover dead
                                         runners, reap expired leases, adopt
                                         or forget orphaned worktrees. Run it
@@ -448,7 +452,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
-  "provider", "plan-model", "plan-provider", "public-url",
+  "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "stop-grace", "title", "name",
   "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
@@ -2950,6 +2954,7 @@ async function startConsole(options: {
   publicUrl?: string;
   registryPath?: string;
   upConsole?: boolean;
+  editorLinks?: "vscode";
 }): Promise<{ server: ReturnType<typeof createDecisionServer>; port: number; url: string }> {
   const { context } = options;
   const server = createDecisionServer({
@@ -2966,6 +2971,7 @@ async function startConsole(options: {
     ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
     ...(options.registryPath === undefined ? {} : { registryPath: options.registryPath }),
     ...(options.upConsole === undefined ? {} : { upConsole: options.upConsole }),
+    ...(options.editorLinks === undefined ? {} : { editorLinks: options.editorLinks }),
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -3005,6 +3011,16 @@ async function serveCommand(
   const localRunner = text(flags, "runner");
   const poolRoot = text(flags, "pool") ?? join(dirname(context.databaseFile), "worktrees");
   const publicUrl = text(flags, "public-url");
+  // Editor deep links (arc 6): a deployment capability whose value is an
+  // allow-list of one, and which is meaningless without the machine's
+  // runner assertion — links bind to runs this machine owns.
+  const editor = text(flags, "editor");
+  if (editor !== undefined && editor !== "vscode") {
+    return fail(write, json, "serve", "usage", "--editor supports: vscode", EXIT.usage);
+  }
+  if (editor !== undefined && localRunner === undefined) {
+    return fail(write, json, "serve", "usage", "--editor needs --runner <name> — links bind to the worktrees this machine's runner owns", EXIT.usage);
+  }
 
   const console_ = await startConsole({
     context,
@@ -3012,6 +3028,7 @@ async function serveCommand(
     port,
     ...(localRunner === undefined ? {} : { localRunner }),
     ...(publicUrl === undefined ? {} : { publicUrl }),
+    ...(editor === undefined ? {} : { editorLinks: "vscode" as const }),
     registryPath: configPath(process.env, homedir()),
     poolRoot,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
@@ -5226,6 +5243,10 @@ async function upCommand(
   if (portGiven !== undefined && (!Number.isInteger(port) || port < 1 || port >= 65536)) {
     return fail(write, json, "up", "usage", "--port is a whole number under 65536", EXIT.usage);
   }
+  const editorGiven = text(flags, "editor");
+  if (editorGiven !== undefined && editorGiven !== "vscode") {
+    return fail(write, json, "up", "usage", "--editor supports: vscode", EXIT.usage);
+  }
   const forGiven = text(flags, "for");
   if (forGiven !== undefined && (!Number.isInteger(Number(forGiven)) || Number(forGiven) <= 0)) {
     return fail(write, json, "up", "usage", "--for takes a positive whole number of milliseconds", EXIT.usage);
@@ -5361,6 +5382,7 @@ async function upCommand(
       registryPath: configPath(process.env, homedir()),
       ...(text(flags, "project-root") === undefined ? {} : { projectRoots: [text(flags, "project-root") as string] }),
       ...(text(flags, "public-url") === undefined ? {} : { publicUrl: text(flags, "public-url") as string }),
+      ...(text(flags, "editor") === undefined ? {} : { editorLinks: "vscode" as const }),
     });
   } catch (error) {
     retireRunnerIfCurrent(store, runnerName, runnerToken, clock());

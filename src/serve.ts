@@ -186,6 +186,15 @@ export type ServeOptions = {
   localRunner?: string;
   /** The checkout pool root the peek confines itself to (realpath-proved). */
   poolRoot?: string;
+  /**
+   * Editor deep links (arc 6): a DEPLOYMENT capability, not an activation.
+   * vscode:// links open on the BROWSER's machine, so links render only
+   * when three statements align: the operator started serve with
+   * --editor vscode AND --runner (this machine owns the worktrees), the
+   * run belongs to that runner, and THIS session turned links on for
+   * this device. "vscode" is the only value; the scheme is never data.
+   */
+  editorLinks?: "vscode";
 };
 
 const SESSION_COOKIE = "standing-orders_session";
@@ -271,6 +280,10 @@ type Session = {
   /** Fleet chat (v13): drafts and the last reply live HERE and nowhere
    * durable — restart or logout loses them by design (v2 finding 12). */
   chat?: SessionChat;
+  /** Editor links (arc 6): the SESSION's half of the activation — "this
+   * browser runs on the machine that holds the worktrees" is a statement
+   * only the person at the browser can make. Dies with the session. */
+  editorLinks?: boolean;
 };
 
 type ChatCandidate = {
@@ -1113,7 +1126,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         // The live peek: cookie sessions only (v2 §3), never stored, never
         // cached by anything downstream.
         if (who.via !== "cookie") return respond(response, 403, "text/plain; charset=utf-8", "the live peek is a browser session's view");
-        const peeked = await peekFragment(found.id, who.session.csrf);
+        const peeked = await peekFragment(
+          found.id,
+          who.session.csrf,
+          options.editorLinks !== undefined && found.runner === options.localRunner && who.session.editorLinks === true,
+        );
         response.setHeader("cache-control", "no-store");
         if (peeked.retryAfter !== undefined) response.setHeader("retry-after", String(peeked.retryAfter));
         return respond(response, peeked.status, "text/html; charset=utf-8", peeked.body);
@@ -1189,6 +1206,23 @@ export function createDecisionServer(options: ServeOptions): Server {
               (options.localRunner === undefined || found.provider !== "claude" ? "" : transcriptScript()),
           options.localRunner !== undefined,
           running,
+          // Editor links (arc 6): three statements align or nothing renders —
+          // the deployment capability, THIS machine's runner owning the run,
+          // and the session's own device-side yes.
+          options.editorLinks !== undefined &&
+          options.localRunner !== undefined &&
+          found.runner === options.localRunner &&
+          who.via === "cookie" &&
+          who.session.editorLinks === true
+            ? { worktree: found.worktree }
+            : null,
+          options.editorLinks !== undefined &&
+          options.localRunner !== undefined &&
+          found.runner === options.localRunner &&
+          who.via === "cookie"
+            ? { on: who.session.editorLinks === true }
+            : null,
+          url.searchParams.get("noted") === "1",
         ),
       );
     }
@@ -2056,7 +2090,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   // be asked for again; hits still re-prove the whole guard list.
   const peekCache = new Map<string, { fragment: string; at: number }>();
   let peekCacheBytes = 0;
-  const peekInFlight = new Map<number, Promise<string>>();
+  const peekInFlight = new Map<string, Promise<string>>();
   const peekBySession = new Map<string, number>();
   const PEEK_CACHE_TTL_MS = 10_000;
   const PEEK_CACHE_ENTRIES = 8;
@@ -2144,11 +2178,14 @@ export function createDecisionServer(options: ServeOptions): Server {
     return { ok: true, admit: { run, epoch: row.leaseEpoch, entries: snapshot } };
   }
 
-  async function peekFragment(runId: number, sessionKey: string): Promise<{ status: number; body: string; retryAfter?: number }> {
+  async function peekFragment(runId: number, sessionKey: string, editorMode = false): Promise<{ status: number; body: string; retryAfter?: number }> {
     const guarded = peekGuards(runId);
     if (!guarded.ok) return { status: 200, body: peekSay(guarded.message, guarded.final === true) };
     const { run, epoch, entries } = guarded.admit;
-    const key = `${runId}:${run.baseRevision}:${epoch}`;
+    // The cache and the in-flight coalescer both vary by LINK MODE (arc 6,
+    // finding 3): a linked fragment rendered for one session must never be
+    // served to a session that has not activated links on its device.
+    const key = `${runId}:${run.baseRevision}:${epoch}:${editorMode ? "links" : "plain"}`;
     const cached = peekCache.get(key);
     if (cached !== undefined && Date.now() - cached.at <= PEEK_CACHE_TTL_MS) {
       return { status: 200, body: cached.fragment };
@@ -2158,7 +2195,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       peekCacheBytes -= Buffer.byteLength(cached.fragment);
     }
     // Coalesce per run; bound per session and globally (finding 10).
-    const inFlight = peekInFlight.get(runId);
+    const flightKey = `${runId}:${editorMode ? "links" : "plain"}`;
+    const inFlight = peekInFlight.get(flightKey);
     if (inFlight !== undefined) return { status: 200, body: await inFlight };
     if (peekInFlight.size >= PEEK_GLOBAL_INFLIGHT) return { status: 429, body: peekSay("the live view is busy — it retries by itself"), retryAfter: 10 };
     if ((peekBySession.get(sessionKey) ?? 0) >= PEEK_SESSION_INFLIGHT) {
@@ -2186,8 +2224,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (changed.length === 0 && deleted.length === 0 && fresh.total === 0) {
         parts.push(`<p class="row">nothing has changed against the starting point yet</p>`);
       }
+      // A name is linked ONLY when sanitize provably changed nothing (arc 6,
+      // finding 3): a masked or normalized label must never carry an href
+      // that discloses what the mask hid. Collapsed labels never link.
+      const linkedName = (path: string): string => {
+        const shown = peekName(path);
+        if (!editorMode || shown !== escape(path)) return shown;
+        const href = editorFileHref(run.worktree, path);
+        return href === null ? shown : `<a href="${escape(href)}">${shown}</a>`;
+      };
       const line = (row: { path: string; detail: string }, mark: string): string =>
-        `<p class="row mono">${mark} ${peekName(row.path)} <span class="meta">${escape(row.detail)}</span></p>`;
+        `<p class="row mono">${mark} ${linkedName(row.path)} <span class="meta">${escape(row.detail)}</span></p>`;
       for (const row of changed) parts.push(line(row, "~"));
       for (const row of deleted) parts.push(line(row, "−"));
       if (fresh.total > 0) {
@@ -2221,11 +2268,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       peekEvict();
       return fragment;
     })();
-    peekInFlight.set(runId, work);
+    peekInFlight.set(flightKey, work);
     try {
       return { status: 200, body: await work };
     } finally {
-      peekInFlight.delete(runId);
+      peekInFlight.delete(flightKey);
       const left = (peekBySession.get(sessionKey) ?? 1) - 1;
       if (left <= 0) peekBySession.delete(sessionKey);
       else peekBySession.set(sessionKey, left);
@@ -3239,7 +3286,23 @@ export function createDecisionServer(options: ServeOptions): Server {
         { artifactId: terminal.id, runId: id, path: rawPath === "" ? null : rawPath, line, note: note.note, author: who.name },
         now,
       );
-      return redirect(response, `/r/${id}`);
+      // Land back AT the review card with the note field ready — writing
+      // five comments in a row must cost five keystrokes of navigation,
+      // not five scrolls (arc 6, finding 5/6: this REDUCES the unsent-note
+      // hazard; the seal below remains the real batch operation).
+      return redirect(response, `/r/${id}?noted=1#review`);
+    }
+
+    if (url.pathname === "/session/editor-links") {
+      // The session half of the editor-link activation (arc 6, finding 1):
+      // only the person at the browser can say "this device holds the
+      // worktrees". Per-session, dies with the session, grants nothing —
+      // it only lets already-authorized pages RENDER vscode links.
+      if (who.via !== "cookie") return refuse(response, who, 403, "editor links are a browser session's choice");
+      if (options.editorLinks === undefined) return refuse(response, who, 404, "editor links are not enabled on this server");
+      who.session.editorLinks = body.get("on") === "1";
+      const back = body.get("return") ?? "/";
+      return redirect(response, /^\/[a-z0-9/_-]*$/i.test(back) ? back : "/");
     }
 
     const revise = /^\/r\/([0-9]{1,15})\/revise$/.exec(url.pathname);
@@ -3952,6 +4015,32 @@ function refuse(
   );
 }
 
+/**
+ * A vscode://file href, or null (arc 6, finding 2): the link exists only
+ * when every part is provably tame — an absolute, control-free worktree;
+ * a relative, single-line path whose segments contain no empty, dot,
+ * dot-dot, or backslash components (so lexical resolution stays below the
+ * worktree); a line inside the same 1..1,000,000 range the comment form
+ * enforces. Encoding failures return null — a file row degrades to plain
+ * text, never to a 500. The scheme is a constant, never data.
+ */
+export function editorFileHref(worktree: string, path: string, line?: number | null): string | null {
+  if (!worktree.startsWith("/") || /[\u0000-\u001f\u007f]/.test(worktree)) return null;
+  if (path === "" || /[\u0000-\u001f\u007f]/.test(path) || path.startsWith("/") || path.includes("\\")) return null;
+  const segments = path.split("/");
+  if (segments.some(segment => segment === "" || segment === "." || segment === "..")) return null;
+  const rootSegments = worktree.replace(/\/+$/, "").split("/");
+  if (rootSegments.some(segment => segment === "." || segment === "..")) return null;
+  try {
+    const root = rootSegments.map(segment => encodeURIComponent(segment)).join("/");
+    const file = segments.map(segment => encodeURIComponent(segment)).join("/");
+    const at = line !== undefined && line !== null && Number.isInteger(line) && line >= 1 && line <= 1_000_000 ? `:${line}` : "";
+    return `vscode://file${root}/${file}${at}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
   return text
@@ -4498,6 +4587,25 @@ button { min-height: 44px; }
     padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0rem));
   }
 }
+
+/* The tournament comparison (arc 6): an at-a-glance table (one column per
+   agent, scrolling in its own box on phones) and side-by-side cards on
+   wide screens — single column below 1100px, stated explicitly. */
+.scroll-x { overflow-x: auto; max-width: 100%; }
+.contest-glance { border-collapse: collapse; font-size: .8125rem; min-width: 34rem; margin: .75rem 0; }
+.contest-glance th, .contest-glance td { text-align: left; padding: .375rem .75rem .375rem 0; vertical-align: top; border-bottom: 1px solid var(--border); }
+.contest-glance th { font-weight: 600; }
+.contest-glance tr:last-child td { border-bottom: none; }
+.contest-compare { display: grid; grid-template-columns: 1fr; gap: .75rem; align-items: start; }
+@media (min-width: 1100px) {
+  .content > main:has(.contest-compare) { max-width: none; }
+  .contest-compare { grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr)); }
+}
+.contest-compare .card { margin: 0; }
+
+/* The per-file comment button (arc 6): a small real button beside a diff
+   row — keyboard-reachable, never fighting the editor link for a click. */
+button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; box-shadow: none; }
 
 /* Sticky ceremony actions (arc 4): single-primary-action forms keep
    their submit within thumb reach on phones. Desktop: plain flow. */
@@ -6197,9 +6305,13 @@ function contestPage(chrome: Chrome, data: {
   const picking = contest.state === "pick-wait";
   const abandonable = ["pick-wait", "exhausted", "interrupted", "decision-wait"].includes(contest.state);
 
-  const agentCard = (agent: AgentView): string => {
+  // ONE summary per agent (arc 6, finding 7): the at-a-glance table and the
+  // cards below both render from this object, so the two can never tell a
+  // pick two different stories. Every diff state keeps its own words —
+  // verified-zero, changes, missing, and capture problems are not the same
+  // fact and are never collapsed into "no diff".
+  const summarize = (agent: AgentView) => {
     const { contestant, run } = agent;
-    const winner = contest.winnerContestant === contestant.id;
     const outcome =
       run === null
         ? "never produced a finished attempt"
@@ -6220,11 +6332,50 @@ function contestPage(chrome: Chrome, data: {
       run === null || run.finishedAt === null
         ? null
         : Math.max(1, Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 60_000));
-    const asked = data.questions.get(contestant.id) ?? 0;
-    const cost = contestant.unknownSpend
-      ? `${contestDollars(contestant.accountedMicrousd)} — the exact figure was unknowable, so the full reservation was charged`
-      : contestDollars(contestant.accountedMicrousd);
     const diff = data.diffs.get(contestant.id) ?? null;
+    const diffWords =
+      diff === null || diff.stat === null
+        ? "no change summary"
+        : "problem" in diff.stat
+          ? "summary capture failed"
+          : diff.stat.fileCount === 0
+            ? "no changes, verified"
+            : `${diff.stat.fileCount} file(s) · +${diff.stat.additions} −${diff.stat.deletions}`;
+    return {
+      agent,
+      contestant,
+      run,
+      winner: contest.winnerContestant === contestant.id,
+      outcome,
+      minutes,
+      asked: data.questions.get(contestant.id) ?? 0,
+      cost: contestant.unknownSpend
+        ? `${contestDollars(contestant.accountedMicrousd)} — the exact figure was unknowable, so the full reservation was charged`
+        : contestDollars(contestant.accountedMicrousd),
+      diff,
+      diffWords,
+    };
+  };
+  const summaries = agents.map(summarize);
+
+  // The at-a-glance table: one COLUMN per agent, the same derived facts as
+  // the cards. Wide content scrolls in its own box (the arc-4 rule).
+  const glance =
+    summaries.length < 2
+      ? ""
+      : `<div class="scroll-x"><table class="contest-glance">` +
+        `<tr><td></td>${summaries.map(one => `<th>agent ${one.contestant.ordinal}<span class="meta"> · ${escape(one.contestant.provider)} · ${escape(one.contestant.model)}</span>${one.winner ? ` <span class="badge badge-done">picked</span>` : ""}</th>`).join("")}</tr>` +
+        `<tr><td class="meta">outcome</td>${summaries.map(one => `<td>${escape(one.outcome)}</td>`).join("")}</tr>` +
+        `<tr><td class="meta">changed</td>${summaries.map(one => `<td>${escape(one.diffWords)}</td>`).join("")}</tr>` +
+        `<tr><td class="meta">time</td>${summaries.map(one => `<td>${one.minutes === null ? "—" : `${one.minutes} min`}</td>`).join("")}</tr>` +
+        `<tr><td class="meta">questions</td>${summaries.map(one => `<td>${one.asked}</td>`).join("")}</tr>` +
+        `<tr><td class="meta">cost</td>${summaries.map(one => `<td>${escape(one.cost)}</td>`).join("")}</tr>` +
+        `<tr><td></td>${summaries.map(one => `<td>${one.run === null ? "" : `<a href="/r/${one.run.id}">the build</a>`}</td>`).join("")}</tr>` +
+        `</table></div>`;
+
+  const agentCard = (summary: (typeof summaries)[number]): string => {
+    const { contestant, run, winner, outcome, minutes, asked, cost, diff } = summary;
+    const agent = summary.agent;
     const parts = [
       `<div class="card${winner ? " approve-form" : ""}">`,
       `<p><strong>agent ${contestant.ordinal}</strong> <span class="meta">${escape(contestant.provider)} · ${escape(contestant.model)}</span>` +
@@ -6264,7 +6415,8 @@ function contestPage(chrome: Chrome, data: {
     contest.pickedBy === null ? "" : `<p class="meta">picked by ${escape(contest.pickedBy)} at ${escape(when(contest.pickedAt ?? ""))}</p>`,
     `<p class="row"><strong>charged so far</strong> ${escape(contestDollars(data.totalMicrousd))}` +
       `${data.anyUnknown ? ` <span class="meta">— includes at least one agent charged its full reservation because the exact figure was unknowable</span>` : ""}</p>`,
-    ...agents.map(agentCard),
+    glance,
+    `<div class="contest-compare">${summaries.map(agentCard).join("\n")}</div>`,
     abandonable
       ? [
           `<div class="card">`,
@@ -7552,9 +7704,32 @@ function terminalDiffView(artifacts: Artifact[], root: string): TerminalDiffView
         view.stat = { problem: `stored but unverifiable — ${read.problem}` };
       } else {
         try {
-          const parsed = JSON.parse(read.content.toString("utf8")) as TerminalDiffView["stat"];
-          view.stat =
-            parsed !== null && typeof parsed === "object" && "base" in parsed ? parsed : { problem: "stat is not the shape this page knows" };
+          const parsed = JSON.parse(read.content.toString("utf8")) as Record<string, unknown> | null;
+          // Every field this page renders is type-proved (arc 6, finding 7):
+          // "an object with a base key" was accepting any shape at all.
+          const count = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+          const wellFormed =
+            parsed !== null &&
+            typeof parsed === "object" &&
+            typeof parsed["base"] === "string" &&
+            typeof parsed["head"] === "string" &&
+            count(parsed["fileCount"]) &&
+            count(parsed["additions"]) &&
+            count(parsed["deletions"]) &&
+            count(parsed["binaryCount"]) &&
+            typeof parsed["filesTruncated"] === "boolean" &&
+            Array.isArray(parsed["files"]) &&
+            (parsed["files"] as unknown[]).every(
+              one =>
+                one !== null &&
+                typeof one === "object" &&
+                typeof (one as Record<string, unknown>)["path"] === "string" &&
+                (count((one as Record<string, unknown>)["additions"]) || (one as Record<string, unknown>)["additions"] === null) &&
+                (count((one as Record<string, unknown>)["deletions"]) || (one as Record<string, unknown>)["deletions"] === null),
+            );
+          view.stat = wellFormed
+            ? (parsed as unknown as TerminalDiffView["stat"])
+            : { problem: "stat is not the shape this page knows" };
         } catch {
           view.stat = { problem: "stat did not parse as JSON" };
         }
@@ -7565,8 +7740,17 @@ function terminalDiffView(artifacts: Artifact[], root: string): TerminalDiffView
   return view;
 }
 
-/** Render the terminal diff card: stat and capture health first, the bounded patch beneath a fold. */
-function terminalDiffCard(view: TerminalDiffView, runId: number): string {
+/** Render the terminal diff card: stat and capture health first, the bounded
+ * patch beneath a fold. `editor` (arc 6) links file rows to vscode:// on the
+ * reviewing device; `commentable` adds a per-file "comment" button the
+ * page's prefill script reads — a real button, keyboard-reachable, separate
+ * from the link so the two never fight over one click (finding 4). */
+function terminalDiffCard(
+  view: TerminalDiffView,
+  runId: number,
+  editor: { worktree: string } | null = null,
+  commentable = false,
+): string {
   const parts: string[] = ["<h2>what changed</h2>"];
 
   if (view.stat === null) {
@@ -7586,19 +7770,27 @@ function terminalDiffCard(view: TerminalDiffView, runId: number): string {
         `</p>`,
     );
     if (!zero) {
+      const fileName = (path: string): string => {
+        const href = editor === null ? null : editorFileHref(editor.worktree, path);
+        return href === null ? escape(path) : `<a href="${escape(href)}">${escape(path)}</a>`;
+      };
       parts.push(
         `<div class="evidence">` +
           s.files
             .slice(0, 40)
             .map(
               file =>
-                `<p class="row mono">${escape(file.path)}${file.renamedFrom === undefined ? "" : ` (was ${escape(file.renamedFrom)})`} ` +
-                `<span class="meta">${file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`}</span></p>`,
+                `<p class="row mono">${fileName(file.path)}${file.renamedFrom === undefined ? "" : ` (was ${escape(file.renamedFrom)})`} ` +
+                `<span class="meta">${file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`}</span>` +
+                `${commentable ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">comment</button>` : ""}</p>`,
             )
             .join("\n") +
           (s.files.length > 40 ? `<p class="meta">…and ${s.files.length - 40} more file(s)</p>` : "") +
           `</div>`,
       );
+      if (editor !== null) {
+        parts.push(`<p class="meta">file links open in VS Code on THIS device — if the build's worktree is gone, a link opens nothing</p>`);
+      }
     }
   }
 
@@ -7680,6 +7872,9 @@ function runPage(
   liveScript?: string,
   peekable = false,
   running = false,
+  editor: { worktree: string } | null = null,
+  editorToggle: { on: boolean } | null = null,
+  noted = false,
 ): Screen {
   const rows = runFactsRows(run, taskId, running);
   // The live peek region (A2): the poller fills it only on a serve that
@@ -7731,23 +7926,42 @@ function runPage(
   // plain — the ceremony lives on the revision task's approval screen,
   // which restates the batch; this button only creates the unapproved task.
   const hasTerminalDiff = terminal !== null && terminal.patch !== null && !("problem" in (terminal.patch as object));
+  const commentPathWords = (path: string, line: number | null): string => {
+    const shown = `${path}${line === null ? "" : `:${line}`}`;
+    const href = editor === null ? null : editorFileHref(editor.worktree, path, line);
+    return href === null
+      ? `<span class="mono">${escape(shown)}</span> `
+      : `<a class="mono" href="${escape(href)}">${escape(shown)}</a> `;
+  };
   const commentRows = comments
     .map(
       one =>
         `<p class="row"><span class="meta">${escape(one.author)}</span> ` +
-        `${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}` +
+        `${one.path === null ? "" : commentPathWords(one.path, one.line)}` +
         `${escape(one.note)}</p>`,
     )
     .join("\n");
   const commentForm =
     csrf === "" || !hasTerminalDiff
       ? ""
-      : `<form method="post" action="/r/${run.id}/comment" class="row">` +
+      : `<form method="post" action="/r/${run.id}/comment" class="row" id="comment-form">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<input type="text" name="path" placeholder="file (optional)" aria-label="file" class="mono" style="width:14rem">` +
         `<input type="text" name="line" placeholder="line" aria-label="line" inputmode="numeric" style="width:4.5rem">` +
-        `<input type="text" name="note" placeholder="what should change here" aria-label="review comment" style="width:100%;max-width:22rem">` +
+        `<input type="text" name="note" placeholder="what should change here" aria-label="review comment" style="width:100%;max-width:22rem"${noted ? " autofocus" : ""}>` +
         `<button type="submit">comment</button></form>`;
+  // The device-side half of the editor-link activation (arc 6, finding 1):
+  // rendered only when the server capability exists and this run belongs
+  // to this machine's runner — the person at the browser flips it.
+  const editorToggleForm =
+    editorToggle === null || csrf === ""
+      ? ""
+      : `<form method="post" action="/session/editor-links" class="row">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="hidden" name="on" value="${editorToggle.on ? "0" : "1"}">` +
+        `<input type="hidden" name="return" value="/r/${run.id}">` +
+        `<button type="submit">${editorToggle.on ? "stop opening files in VS Code from this device" : "open files in VS Code from this device"}</button>` +
+        `<span class="meta"> — only useful when this browser runs on the machine that holds the worktrees</span></form>`;
   const reviseForm =
     csrf === "" || comments.length === 0
       ? ""
@@ -7767,7 +7981,7 @@ function runPage(
         `<span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form></div>`;
 
   const reviewCard =
-    (commentRows === "" && commentForm === "" ? "" : `<h2>review</h2>${commentRows}${commentForm}${reviseForm}`) + repairCard;
+    (commentRows === "" && commentForm === "" ? "" : `<h2 id="review">review</h2>${commentRows}${commentForm}${reviseForm}${editorToggleForm}`) + repairCard;
 
   const noteRows =
     notes.length === 0
@@ -7794,12 +8008,43 @@ function runPage(
     running ? `<p class="meta" id="run-facts-stamp"></p>` : "",
     transcript,
     peek,
-    terminal === null ? "" : terminalDiffCard(terminal, run.id),
+    terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
     reviewCard,
     handoff,
     evidence,
     notesCard,
-  ].join("\n"), { chrome, ...(liveScript === undefined ? {} : { functional: { script: liveScript, fetches: true } }) });
+  ].join("\n"), {
+    chrome,
+    // One composed functional script (arc 4 contract): the pollers when the
+    // run is live, the comment prefill when the form exists. Prefill alone
+    // never fetches — it earns neither connect-src nor the noscript refresh.
+    ...(liveScript === undefined && commentForm === ""
+      ? {}
+      : {
+          functional: {
+            script: (liveScript ?? "") + (commentForm === "" ? "" : prefillScript()),
+            fetches: liveScript !== undefined,
+          },
+        }),
+  });
+}
+
+/**
+ * Click-to-prefill (arc 6, finding 4): client-side FORM mutation, named as
+ * such — a "comment" button beside each changed file copies its path into
+ * the comment form and focuses the note field. No fetch, no endpoint, no
+ * submit; comments still leave through the same CSRF'd form POST. Reads a
+ * data attribute, writes an input value — never markup.
+ */
+function prefillScript(): string {
+  return (
+    `(function(){var form=document.getElementById("comment-form");if(!form)return;` +
+    `document.addEventListener("click",function(ev){` +
+    `var button=ev.target&&ev.target.closest?ev.target.closest("button.pick-file"):null;if(!button)return;` +
+    `var path=form.querySelector("[name=path]");var note=form.querySelector("[name=note]");` +
+    `if(path)path.value=button.getAttribute("data-path")||"";` +
+    `if(note)note.focus();});})();`
+  );
 }
 
 /** The facts region alone, for the open-run poll (A4). A finished run's

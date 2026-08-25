@@ -103,6 +103,8 @@ and any queue command + --help prints it too
   standing-orders tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
   standing-orders serve --repo <path>  the console; watch, decide, approve
+                               (--editor vscode with --runner: file links
+                               open in VS Code on the device you browse from)
   standing-orders watch / daemon install   the unattended loop, kept running
   standing-orders reconcile        recover what the last stretch left behind
 
