@@ -1,5 +1,39 @@
 # Progress
 
+**2026-08-24 — arc 5, agent ergonomics: the binary teaches its own
+surface.** One Codex round (APPROVE WITH CHANGES, findings 1–8), all
+implemented. Two new answers an agent can get from the exact build it is
+driving: `skills list` / `skills get <name>` serve five operating guides
+(operating, runner, steering, external-work, tournaments) as compiled
+string constants — version-matched by construction, no file reads, no
+network — and the installed SKILL.md body now COMPOSES from the same
+`operating` source, so the snapshot and the served guide cannot drift
+apart within a version (a hard-coded legacy fixture proves files written
+by older versions are still ours to replace). `contract --commands`
+dumps the DECLARED COMMAND GUIDE: every routed verb with synopsis,
+audience, truthful mutation semantics (`keyed` / `identity-idempotent` /
+`unkeyed` / `none` — a boolean would have lied), intended flags, and
+curated reasons — with its limits stated machine-readably IN the
+envelope (`authority: documentation`, flags intended-not-proven, reasons
+curated-not-exhaustive), because a source comment is invisible to
+consumers. Operator ceremonies are listed but DETAIL-FREE at the
+subcommand level (`task approve`, `decide`, `publish grant`, `routine
+run-now`, `serve`, `up`, …): a schema is not permission, and the text
+dump says so in words. The guide is held to the code, not to good
+intentions: the dispatchers for task/publish/config/approver/routine/
+contest now consult EXPORTED action lists (unknown actions refuse naming
+the real inventory — which surfaced that bare `publish` IS an action,
+the publication pass), the parser's global flag vocabularies are
+exported and every declared flag is tested against them with its arity,
+keyed rows must declare `--key`, and every documented reason token must
+appear as a literal in the source. `skills` and `contract` grew real
+parsers along the way — unknown flags, missing values, and stray
+positionals refuse instead of being silently ignored — and `applyInstall`
+had its preflight fixed: damaged AGENTS.md markers now refuse BEFORE the
+skill file is written, so "nothing was written" is true when said. Two
+capability tokens joined the contract: `command-schema/1`,
+`skill-guides/1`. Suite: 1157.
+
 **2026-08-24 — arc 4, design polish: motion where a human caused it, a
 board you swipe, keys everywhere it is safe.** Three Codex rounds
 (APPROVE WITH CHANGES, REDESIGN, APPROVE WITH CHANGES — findings 1–24).

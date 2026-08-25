@@ -28,6 +28,40 @@ export const CAPABILITIES: readonly string[] = [
   "idempotency-keys", //    every mutation takes --key; retries return the first answer
   "exit-codes/0-1-2-3", //  0 ok · 1 broke · 2 usage · 3 ran fine, answer is no
   "output-file", //         -o <file> writes the same envelope to a file
+  "command-schema/1", //    contract --commands dumps the declared command guide
+  "skill-guides/1", //      skills list / skills get serve version-matched guides
+];
+
+/**
+ * DOCUMENTED reasons — the curated vocabulary the command guide's
+ * `notableReasons` may cite. Deliberately named for what it is: a list of
+ * tokens that are DOCUMENTED, not a proof of runtime exhaustiveness (the
+ * runtime `reason` field remains the truth; consumers branch on tokens
+ * and ignore ones they do not recognize). A test ties every entry to a
+ * literal in the source so a typo cannot ship.
+ */
+export const DOCUMENTED_REASONS: readonly string[] = [
+  "usage", //             the invocation itself was malformed
+  "unknown-task", //      the named task does not exist
+  "unknown-skill", //     the named guide does not exist (skills get)
+  "unconfirmed", //       a preview answered; add --yes to apply
+  "not-an-approver", //   the credential offered does not authenticate
+  "held", //              somebody else holds it
+  "fenced", //            a newer lease superseded yours — stop
+  "claimed", //           already being worked
+  "unapproved", //        no person has agreed to the scope yet
+  "reserved", //          the task belongs to another worker's queue
+  "external", //          a tracker mirror is not dispatchable (see detail)
+  "contest-open", //      a tournament is running; a person picks
+  "steering-pending", //  a steering note is waiting; contests refuse
+  "not-ready", //         blocked, held, or otherwise not dispatchable
+  "not-leased", //        the lease does not exist or already ended
+  "not-yours", //         held or reserved by someone else
+  "no-op", //             nothing to do — an answer, not an error
+  "duplicate", //         the identity already exists
+  "empty", //             nothing matched
+  "quota", //             a budget or cap refused the act
+  "not-a-repo", //        the path has no .git
 ];
 
 export type EnvelopePayload = {

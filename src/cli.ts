@@ -18,6 +18,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
 import { CAPABILITIES, ENVELOPE_VERSION, capturedEnvelope, envelopeJson, onEnvelopeCaptured, resetCapturedEnvelope } from "./envelope.js";
 import { applyInstall, contextBlock, planInstall } from "./skills.js";
+import { GUIDES, guideNamed } from "./guides.js";
+import { COMMAND_GUIDE, SURFACE_NOTES, SURFACE_SCHEMA_VERSION } from "./surface.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
 import {
@@ -79,7 +81,10 @@ Usage
   standing-orders link             put \`standing-orders\` on your PATH
   standing-orders unlink           take it off again
   standing-orders contract         the machine contract: envelope version + capabilities
+                                   (--commands dumps the declared command guide)
   standing-orders skills install   teach a repo's agents this queue exists (preview first)
+  standing-orders skills list      the guides this exact binary serves
+  standing-orders skills get <name>  print one guide (version-matched, never stale)
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
   standing-orders up               console + worker + browser, one command — the real thing
 
@@ -182,7 +187,16 @@ export function parseArgs(argv: readonly string[]): ParseResult {
 }
 
 /** The commands that operate the queue rather than report on the world. */
-const OPERATE_COMMANDS = new Set([
+/** Every verb the CLI routes OUTSIDE runOperate. Exported (with
+ * OPERATE_COMMANDS) so the declared command guide's drift tests compare
+ * exact sets instead of regex-reading source. "" is the no-verb report,
+ * which answers as `scan`. */
+export const TOP_LEVEL_COMMANDS: readonly string[] = [
+  "", "pulls", "graph", "repos", "repos add", "repos remove",
+  "link", "unlink", "contract", "skills list", "skills get", "skills install", "demo",
+];
+
+export const OPERATE_COMMANDS = new Set([
   "up",
   "ready",
   "task",
@@ -937,17 +951,87 @@ async function runUnlink(dir: string, yes: boolean, write: Write): Promise<numbe
  * optional managed AGENTS.md block. Preview by default; --yes writes;
  * a skill file this installer did not write is refused, never eaten.
  */
+/** The skills subcommands and their EXACT flag vocabularies — consulted
+ * by the parser above and compared verbatim by the command guide's tests
+ * (arc-5 review, finding 5). */
+export const SKILLS_ACTIONS = ["install", "list", "get"] as const;
+export const SKILLS_FLAGS = {
+  install: { json: "flag", yes: "flag", "write-context": "flag", repo: "value" },
+  list: { json: "flag" },
+  get: { json: "flag" },
+} as const;
+
 function runSkillsCommand(argv: readonly string[], write: Write): number {
   const json = argv.includes("--json");
   const action = argv.find(argument => !argument.startsWith("-"));
-  if (action !== "install") {
-    write(json ? envelopeJson({ ok: false, command: "skills", reason: "usage", message: "`standing-orders skills install [--repo <path>] [--write-context] [--yes]`" }) : "`standing-orders skills install [--repo <path>] [--write-context] [--yes]`");
+  const usage = (message: string): number => {
+    write(json ? envelopeJson({ ok: false, command: action === undefined ? "skills" : `skills ${action}`, reason: "usage", message }) : message);
     return USAGE_EXIT;
+  };
+  if (action === undefined || !(SKILLS_ACTIONS as readonly string[]).includes(action)) {
+    return usage("`standing-orders skills install [--repo <path>] [--write-context] [--yes]` · `skills list` · `skills get <name>` — all take --json");
   }
+
+  // Exact per-action vocabularies (arc-5 review, finding 5): an unknown
+  // flag, a flagless --repo, or a stray positional is a usage refusal
+  // here, never a silent ignore.
+  const allowed = SKILLS_FLAGS[action as keyof typeof SKILLS_FLAGS];
+  const positionals: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index] as string;
+    if (!argument.startsWith("-")) {
+      positionals.push(argument);
+      continue;
+    }
+    const name = argument.replace(/^--?/, "");
+    if (name === "h" || name === "help") return usage(`\`standing-orders skills ${action}\` — flags: ${Object.keys(allowed).map(one => `--${one}`).join(" ")}`);
+    const arity = allowed[name as keyof typeof allowed] as "value" | "flag" | undefined;
+    if (arity === undefined) return usage(`unknown option --${name} for \`skills ${action}\``);
+    if (arity === "value") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return usage(`--${name} needs a value`);
+      index += 1;
+    }
+  }
+
+  if (action === "list") {
+    if (positionals.length > 1) return usage("`skills list` takes no arguments");
+    if (json) {
+      write(envelopeJson({ ok: true, command: "skills list", guides: GUIDES.map(one => ({ name: one.name, title: one.title, oneLiner: one.oneLiner })) }));
+      return 0;
+    }
+    write("Guides this exact binary serves — `standing-orders skills get <name>`:");
+    for (const guide of GUIDES) write(`  ${guide.name.padEnd(14)} ${guide.oneLiner}`);
+    return 0;
+  }
+
+  if (action === "get") {
+    const name = positionals[1];
+    if (name === undefined || positionals.length > 2) return usage("`standing-orders skills get <name>` — one guide name from `skills list`");
+    const guide = guideNamed(name);
+    if (guide === null) {
+      // The command was valid and the named guide is absent: exit 3, the
+      // answer is no — same shape as an unknown task or template.
+      write(json
+        ? envelopeJson({ ok: false, command: "skills get", reason: "unknown-skill", message: `no guide named ${name} — the guides are: ${GUIDES.map(one => one.name).join(", ")}` })
+        : `no guide named ${name} — the guides are: ${GUIDES.map(one => one.name).join(", ")}`);
+      return 3;
+    }
+    if (json) {
+      write(envelopeJson({ ok: true, command: "skills get", name: guide.name, title: guide.title, content: guide.content }));
+      return 0;
+    }
+    // Raw markdown alone — an agent pipes or reads it; no banner.
+    write(guide.content);
+    return 0;
+  }
+
+  // install
   const repoAt = argv.indexOf("--repo");
-  const repo = repoAt !== -1 && typeof argv[repoAt + 1] === "string" ? resolve(argv[repoAt + 1] as string) : process.cwd();
+  const repo = repoAt !== -1 ? resolve(argv[repoAt + 1] as string) : process.cwd();
   const writeContext = argv.includes("--write-context");
   const confirmed = argv.includes("--yes");
+  if (positionals.length > 1) return usage("`skills install` takes no arguments beyond its flags");
 
   if (!existsSync(join(repo, ".git"))) {
     write(json ? envelopeJson({ ok: false, command: "skills install", reason: "not-a-repo", message: `${repo} has no .git — name the repository with --repo` }) : `${repo} has no .git — name the repository with --repo`);
@@ -1073,8 +1157,64 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
  * version and the capability tokens an agent consumer can feature-detect on.
  * Behaviors, not versions — consumers ignore tokens they do not recognize.
  */
+/** contract's EXACT flags — consulted below and compared by the command
+ * guide's tests (arc-5 review, finding 5). */
+export const CONTRACT_FLAGS = ["json", "commands"] as const;
+
 function runContractCommand(argv: readonly string[], write: Write): number {
   const json = argv.includes("--json");
+  // Exact parsing (arc-5 review, finding 5): unknown flags and stray
+  // positionals refuse instead of being silently ignored.
+  for (const argument of argv) {
+    const bad = (message: string): number => {
+      write(json ? envelopeJson({ ok: false, command: "contract", reason: "usage", message }) : message);
+      return USAGE_EXIT;
+    };
+    if (!argument.startsWith("-")) return bad(`\`standing-orders contract\` takes no arguments — flags: ${CONTRACT_FLAGS.map(one => `--${one}`).join(" ")}`);
+    const name = argument.replace(/^--?/, "");
+    if (name === "h" || name === "help") return bad(`\`standing-orders contract [--commands] [--json]\``);
+    if (!(CONTRACT_FLAGS as readonly string[]).includes(name)) return bad(`unknown option ${argument} for \`contract\``);
+  }
+  const commands = argv.includes("--commands");
+
+  if (commands) {
+    if (json) {
+      write(envelopeJson({
+        ok: true,
+        command: "contract",
+        schemaVersion: SURFACE_SCHEMA_VERSION,
+        notes: SURFACE_NOTES,
+        commands: COMMAND_GUIDE,
+      }));
+      return 0;
+    }
+    write(`standing-orders declared command guide — schema v${SURFACE_SCHEMA_VERSION}`);
+    write("");
+    write(`authority: ${SURFACE_NOTES.authority}`);
+    write(`flags: ${SURFACE_NOTES.flags}`);
+    write(`reasons: ${SURFACE_NOTES.reasons}`);
+    write("");
+    const agentRows = COMMAND_GUIDE.filter(row => row.agentMayInvoke);
+    const operatorRows = COMMAND_GUIDE.filter(row => !row.agentMayInvoke);
+    write("Agent surface:");
+    for (const row of agentRows) {
+      const name = row.invocation === "" ? "(no verb)" : row.invocation;
+      write(`  ${name.padEnd(18)} ${row.synopsis}  [${row.mutation}]`);
+      for (const flag of row.flags ?? []) {
+        write(`      --${flag.name}${flag.takesValue ? " <value>" : ""}  ${flag.meaning}`);
+      }
+      if (row.notableReasons !== undefined && row.notableReasons.length > 0) {
+        write(`      reasons: ${row.notableReasons.join(", ")}`);
+      }
+    }
+    write("");
+    write("Operator ceremonies and infrastructure — an agent must not invoke");
+    write("these, even when credentials are within reach; the credential IS the");
+    write("person:");
+    for (const row of operatorRows) write(`  ${row.invocation.padEnd(18)} ${row.synopsis}`);
+    return 0;
+  }
+
   if (json) {
     write(envelopeJson({ ok: true, command: "contract", capabilities: [...CAPABILITIES] }));
     return 0;
@@ -1088,6 +1228,8 @@ function runContractCommand(argv: readonly string[], write: Write): number {
   write("");
   write("Capabilities:");
   for (const capability of CAPABILITIES) write(`  ${capability}`);
+  write("");
+  write("`contract --commands` dumps the declared command guide.");
   return 0;
 }
 

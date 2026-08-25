@@ -118,7 +118,7 @@ standing-orders release <lease>                # done holding it
 
 Four properties make that loop safe to run unattended.
 
-**Every outcome is data.** `--json` returns the same envelope from every command, failures included: `{ ok, command, reason, message }`. `reason` is a stable token — `held`, `fenced`, `unknown-task` — because prose gets reworded and anything branching on it breaks silently.
+**Every outcome is data.** `--json` returns the same envelope from every command, failures included: `{ ok, command, reason, message }`. `reason` is a stable token — `held`, `fenced`, `unknown-task` — because prose gets reworded and anything branching on it breaks silently. The binary teaches its own surface: `contract --commands` dumps the declared command guide, and `skills get <name>` serves version-matched operating guides straight from the exact build an agent is driving — never a stale snapshot.
 
 **Exit codes separate "no" from "broken".** `0` got it · `1` something broke · `2` bad usage · `3` ran fine, the answer is no. Losing a claim race and finding the ready set empty are correct answers, not errors, and a loop that stops on them is as wrong as one that ignores real breakage.
 

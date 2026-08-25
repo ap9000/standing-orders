@@ -418,33 +418,57 @@ type Args = {
   repoList: string[];
 };
 
+/**
+ * The subcommand inventories the dispatchers consult (arc 5): each verb's
+ * runner refuses an action outside its list BEFORE its switch, so these
+ * exports are behavior, not commentary — and the declared command guide
+ * (surface.ts) is tested for exact equality against them.
+ */
+export const TASK_ACTIONS = [
+  "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
+  "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
+] as const;
+export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm"] as const;
+export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
+export const APPROVER_ACTIONS = ["list", "add"] as const;
+export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "pause", "resume", "run-now"] as const;
+export const CONTEST_ACTIONS = ["show", "exclude"] as const;
+
+/**
+ * The GLOBAL flag vocabulary (exported for the command guide's drift
+ * tests): every value-taking flag any verb reads, and every boolean.
+ * A --flag in neither set is a typo, refused by name.
+ */
+export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
+  "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
+  "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
+  "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
+  "choose", "note", "max-open-decisions", "port", "host", "allow-host",
+  "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
+  "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
+  "project-root", "schedule", "ceiling", "require",
+  "provider", "plan-model", "plan-provider", "public-url",
+  "command", "timeout-seconds", "stop-grace", "title", "name",
+  "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
+]);
+export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
+  "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
+  "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
+  "no-open",
+]);
+
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string | true>();
   const repoList: string[] = [];
-  const wantsValue = new Set([
-    "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
-    "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
-    "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
-    "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
-    "choose", "note", "max-open-decisions", "port", "host", "allow-host",
-    "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
-    "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
-    "project-root", "schedule", "ceiling", "require",
-    "provider", "plan-model", "plan-provider", "public-url",
-    "command", "timeout-seconds", "stop-grace", "title", "name",
-    "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
-  ]);
+  const wantsValue = OPERATE_VALUE_FLAGS;
 
   // Every boolean flag any verb reads. A --flag in neither set is a typo,
   // and a typo silently becoming `true` (with its intended value demoted to
   // a positional) surfaces later as a different, wronger error — refuse it
   // here by name instead (Codex round-4 findings 3/8).
-  const booleans = new Set([
-    "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
-    "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
-    "no-open",
-  ]);
+  const booleans = OPERATE_BOOLEAN_FLAGS;
 
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index] as string;
@@ -3372,6 +3396,9 @@ async function configCommand(
 ): Promise<number> {
   const { store, write, json, clock } = context;
   const [action, phase] = positional;
+  if (action !== undefined && !(CONFIG_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "config", "usage", `unknown \`config ${action}\` — try ${CONFIG_ACTIONS.join(", ")}`, EXIT.usage);
+  }
   const repoGiven = text(flags, "repo");
   const scope = repoGiven === undefined ? INSTALLATION_SCOPE : canonicalProject(repoGiven) ?? resolve(repoGiven);
 
@@ -4002,6 +4029,9 @@ function contestCommand(
 ): Promise<number> | number {
   const { store, write, json, clock } = context;
   const [action, idGiven, ordinalGiven] = positional;
+  if (action === undefined || !(CONTEST_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "contest", "usage", `unknown \`contest ${action ?? ""}\` — try ${CONTEST_ACTIONS.join(", ")}`, EXIT.usage);
+  }
   if (action === "show") {
     const contest = store.getContest(Number(idGiven));
     if (contest === null) return fail(write, json, "contest show", "unknown", "no tournament with that id", EXIT.refused);
@@ -4281,6 +4311,9 @@ async function routineCommand(
 ): Promise<number> {
   const { store, write, json, clock } = context;
   const [action, name] = positional;
+  if (action !== undefined && !(ROUTINE_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "routine", "usage", `unknown \`routine ${action}\` — try ${ROUTINE_ACTIONS.join(", ")}`, EXIT.usage);
+  }
 
   if (action === undefined || action === "list") {
     const repoFilter = text(flags, "repo");
@@ -5695,6 +5728,11 @@ async function publishCommand(
   if (demoFence !== null) return demoFence;
   const repo = repoFrom(flags);
   const [action] = positional;
+  // Bare `publish` IS an action: the publication pass (push branches,
+  // open PRs, sweep merges) — only a NAMED unknown action refuses.
+  if (action !== undefined && !(PUBLISH_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "publish", "usage", `unknown \`publish ${action}\` — try ${PUBLISH_ACTIONS.join(", ")}, or bare \`publish\` for the publication pass`, EXIT.usage);
+  }
 
   if (action === "grant") {
     const github = text(flags, "github");
@@ -6237,7 +6275,7 @@ function taskCommand(
         context.json,
         "task",
         "usage",
-        `unknown \`task ${action ?? ""}\` — try add, list, show, state, block, unblock, next, assign, reopen, scope, approve, hold, unhold, require, requeue, plan`,
+        `unknown \`task ${action ?? ""}\` — try ${TASK_ACTIONS.join(", ")}`,
         EXIT.usage,
       );
   }
@@ -7232,6 +7270,9 @@ async function approverCommand(
 ): Promise<number> {
   const { store, write, json, now } = context;
   const [action, name] = positional;
+  if (action !== undefined && !(APPROVER_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "approver", "usage", `unknown \`approver ${action}\` — try ${APPROVER_ACTIONS.join(", ")}`, EXIT.usage);
+  }
 
   if (action === "list" || action === undefined) {
     const approvers = store.listApprovers();
