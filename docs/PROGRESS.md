@@ -1,5 +1,19 @@
 # Progress
 
+**2026-08-24 — the phone shell (arc 4, first pass): a real app on a phone.**
+Screenshot-driven: at phone widths the console was the desktop squeezed —
+a permanent sidebar, five lanes crammed side by side, three columns on a
+task page, and the "switch project" link literally display:none on
+phones. Now, below 760px: the sidebar disappears; a sticky top bar
+carries the brand, the PROJECT PILL (the open project's name, one tap to
+/projects), and a quick "+ task" button; a fixed bottom tab bar carries
+inbox (with its badge), board, queue, builds, and "more" — which opens
+/menu, an honest no-JavaScript page listing every other destination with
+a one-line hint each. Board lanes keep their needs-you-first stacking;
+the task page's editing surfaces (steering, scope, waits-for, acts) run
+single-column and full-width. Desktop is untouched above 760px. Suite
+stays 1130.
+
 **2026-08-24 — the phone (arc 3, v23): installable console + web push.**
 Three Codex rounds (REDESIGN ×2, APPROVE WITH CHANGES — findings 1–29).
 The console installs to a phone's Home Screen (manifest + icons + a

@@ -1043,6 +1043,38 @@ export function createDecisionServer(options: ServeOptions): Server {
       return page(response, 200, runsPage(chromeFor(project, "runs"), rows, liveRunIds(rows), rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
     }
 
+    if (url.pathname === "/menu") {
+      // The phone's overflow drawer as an honest page: every destination
+      // the bottom bar does not carry, one tap away, no JavaScript.
+      const rows = (
+        [
+          ["/fleet", "fleet", "who is working, and on what"],
+          ["/workbench", "workbench", "the rail and the selected task"],
+          ["/routines", "routines", "scheduled tracks and their firings"],
+          ["/done", "done", "what finished recently"],
+          ["/activity", "activity", "the full ledger, newest first"],
+          ["/review", "review queue", "published work waiting on review"],
+          ["/tasks", "task list", "everything, filterable"],
+          ["/system", "system", "workers, providers, and grants"],
+          ["/caps", "requirements", "tools and credentials builds need"],
+          ["/projects", "switch project", "open another enrolled repository"],
+          ["/settings", "settings", "alerts, messaging, credentials"],
+        ] as const
+      )
+        .map(
+          ([href, label, hint]) =>
+            `<a class="menu-row" href="${href}"><strong>${label}</strong><span class="meta">${hint}</span></a>`,
+        )
+        .join("\n");
+      return page(
+        response,
+        200,
+        shell("menu", [`<h1>everything else</h1>`, `<div class="menu-list">${rows}</div>`].join("\n"), {
+          chrome: chromeFor(project, "menu"),
+        }),
+      );
+    }
+
     const run = /^\/r\/([0-9]{1,15})$/.exec(url.pathname);
     if (run !== null) {
       const found = store.getRun(Number(run[1]));
@@ -4019,25 +4051,56 @@ const STYLE = `
   .split > .detail { min-width: 0; }
   .split > .detail > main { max-width: 52rem; padding: 1.75rem 2rem 4rem; }
   @media (max-width: 980px) { .split { grid-template-columns: 1fr; } .list-pane { display: none; } }
+  /* The phone shell (arc 4): the sidebar disappears; a top bar carries the
+     project (one tap to switch) and quick capture; a bottom tab bar carries
+     the four destinations a thumb actually visits, and everything else
+     lives one tap away behind "more". Desktop is untouched. */
+  .mobile-top, .tabbar { display: none; }
   @media (max-width: 760px) {
     .app { display: block; }
-    .side { position: sticky; height: auto; flex-direction: row; align-items: center;
-            border-right: none; border-bottom: 1px solid var(--border); padding: .5rem .75rem;
-            gap: .375rem; z-index: 10; overflow-x: auto; overflow-y: hidden; }
-    .side .brand { padding: 0 .375rem; }
-    .side-project { margin: 0; padding: .25rem .5rem; }
-    .side-project .name { font-size: .75rem; }
-    .side-project a { display: none; }
-    .side nav { flex-direction: row; }
-    .side nav a { padding: .375rem .5rem; }
-    .side .grow { display: none; }
-    .side .new-task { margin: 0; padding: .375rem .625rem; white-space: nowrap; }
-    /* The phone keeps the whole map: the foot destinations wrap onto their
-       own scrollable row instead of being deleted outright. */
-    .side { flex-wrap: wrap; }
-    .side .foot { flex-basis: 100%; display: flex; flex-wrap: nowrap; overflow-x: auto; padding-top: .125rem; }
-    .side .foot a { font-size: .75rem; padding: .25rem .5rem; min-height: 1.75rem; }
-    .content > main, .split > .detail > main { padding: 1.25rem 1.25rem 4rem; }
+    .side { display: none; }
+    .mobile-top {
+      display: flex; align-items: center; gap: .5rem; position: sticky; top: 0; z-index: 30;
+      background: var(--card); border-bottom: 1px solid var(--border);
+      padding: .5rem .75rem calc(.5rem + env(safe-area-inset-top, 0rem) * 0);
+    }
+    .mobile-top .brand-mini { font-weight: 700; font-size: .9375rem; text-decoration: none; color: var(--foreground); }
+    .mobile-top .project-pill {
+      flex: 1; min-width: 0; display: flex; align-items: center; gap: .375rem;
+      border: 1px solid var(--border); border-radius: 999px; background: var(--background);
+      padding: .375rem .75rem; text-decoration: none; color: var(--foreground);
+      font-size: .875rem; font-weight: 600;
+    }
+    .mobile-top .project-pill .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mobile-top .project-pill .chev { color: var(--muted-foreground); font-size: .75rem; flex: 0 0 auto; }
+    .mobile-top .mobile-new {
+      flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+      min-height: 2.5rem; padding: 0 .875rem; border-radius: 999px;
+      background: var(--primary); color: var(--primary-foreground);
+      font-weight: 600; font-size: .875rem; text-decoration: none;
+    }
+    .tabbar {
+      display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+      background: var(--card); border-top: 1px solid var(--border);
+      padding: .25rem .25rem calc(.25rem + env(safe-area-inset-bottom, 0rem));
+    }
+    .tabbar a {
+      flex: 1; display: flex; flex-direction: column; align-items: center; gap: .125rem;
+      padding: .375rem 0 .25rem; min-height: 3rem; text-decoration: none;
+      color: var(--muted-foreground); font-size: .6875rem; font-weight: 600;
+    }
+    .tabbar a .glyph { font-size: 1.125rem; line-height: 1; }
+    .tabbar a.active { color: var(--foreground); }
+    .tabbar a .count { position: absolute; transform: translate(0.9rem, -0.35rem); }
+    .tabbar a { position: relative; }
+    .content > main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
+  }
+
+  .menu-list { display: flex; flex-direction: column; gap: .375rem; margin-top: .75rem; }
+  .menu-row {
+    display: flex; flex-direction: column; gap: .125rem; text-decoration: none;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    padding: .75rem .875rem; color: var(--foreground); min-height: 44px; justify-content: center;
   }
 
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .625rem; margin: .5rem 0; }
@@ -4170,7 +4233,7 @@ button { min-height: 44px; }
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "none";
+  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "menu" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -4405,7 +4468,33 @@ function shell(
         `<div class="detail"><main>${body}</main></div>` +
         `</div></div>`;
 
-  return [head, `<div class="app">`, side, content, `</div>`, tail].join("\n");
+  // The phone chrome (arc 4): a top bar with the project one tap from
+  // switching and quick capture, and a bottom tab bar with the four
+  // destinations a thumb visits — everything else behind /menu. CSS shows
+  // these only below 760px; desktop keeps the sidebar untouched.
+  const mobileTop = [
+    `<header class="mobile-top">`,
+    `<a class="brand-mini" href="/">s·o</a>`,
+    `<a class="project-pill" href="/projects"><span class="name">${
+      chrome.project === null ? "no project open" : escape(projectName(chrome.project))
+    }</span><span class="chev">▾</span></a>`,
+    `<a class="mobile-new" href="/tasks/new">+ task</a>`,
+    `</header>`,
+  ].join("");
+  const tab = (key: Chrome["active"], href: string, glyph: string, label: string, count?: number): string =>
+    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}><span class="glyph">${glyph}</span>${label}` +
+    `${count !== undefined && count > 0 ? `<span class="count badge badge-open">${count}</span>` : ""}</a>`;
+  const tabbar = [
+    `<nav class="tabbar">`,
+    tab("inbox", "/", "◉", "inbox", chrome.inboxCount),
+    tab("board", "/board", "▦", "board"),
+    tab("queue", "/queue", "≡", "queue"),
+    tab("runs", "/runs", "⚒", "builds"),
+    tab("menu", "/menu", "⋯", "more"),
+    `</nav>`,
+  ].join("");
+
+  return [head, `<div class="app">`, side, mobileTop, content, tabbar, `</div>`, tail].join("\n");
 }
 
 
