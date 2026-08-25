@@ -366,7 +366,7 @@ export function fireRoutine(
         // recurrence (Codex review, L1) — the slot stamp keys each afresh.
         store.enqueueRoutineEpisode(
           page.prefix,
-          { kind: "routine-blocked", subject: page.subject, body: page.body },
+          { kind: "routine-blocked", subject: page.subject, body: page.body, pushClass: "attention", link: `/routines/${routineId}` },
           scheduledFor,
           now,
         );
@@ -403,6 +403,8 @@ export function fireRoutine(
           `routine-agent:${routineId}`,
           {
             kind: "routine-blocked",
+            pushClass: "attention",
+            link: `/routines/${routineId}`,
             subject: `${routine.name} cannot fire: its agent is misconfigured`,
             body: `${agent.problem}. Fix it with \`standing-orders config\`; the due slot fires on the next pass.`,
           },

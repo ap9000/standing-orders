@@ -755,6 +755,10 @@ export function finalizeParkFenced(
         kind: "decision",
         subject: `${taskId} parked a decision`,
         body: `${oneLine(decision.question, 200)}\n\`standing-orders decide ${decisionId}\``,
+        // The push stamp (arc 3): class + machine-minted link, at enqueue
+        // or never. Fixed phrases ride the push service; this subject does not.
+        pushClass: "decision",
+        link: `/d/${decisionId}`,
       },
       now,
     );
@@ -816,6 +820,8 @@ export function finalizeMalformedFenced(
       {
         dedupeKey: `malformed:${runId}`,
         kind: "malformed-decision",
+        pushClass: "attention",
+        link: `/r/${runId}`,
         subject: `${taskId}: the agent parked but could not say what`,
         body: [
           `Repair ran out. The task is held until somebody looks.`,
@@ -917,6 +923,8 @@ export function finalizeFailureFenced(
         {
           dedupeKey: `commit-failure:${runId}`,
           kind: "commit-failure",
+          pushClass: "attention",
+          link: `/r/${runId}`,
           subject: `${taskId}: the commit itself failed`,
           body: `${oneLine(message, 200)}\nThe work is preserved, uncommitted, in ${args.worktree}. Prove it and \`standing-orders task requeue ${taskId}\`.`,
         },
@@ -947,6 +955,8 @@ export function finalizeFailureFenced(
         {
           dedupeKey: `stalled:${run.taskRef}`,
           kind: "attempts-exhausted",
+          pushClass: "attention",
+          link: `/r/${runId}`,
           subject: `${taskId} stalled after ${strikes} straight failures`,
           body: `Last failure (${failureClass}): ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`standing-orders task requeue ${taskId}\`.`,
         },
@@ -1149,6 +1159,8 @@ export function finalizePlanFailureFenced(
         {
           dedupeKey: `malformed-plan:${runId}`,
           kind: "malformed-plan",
+          pushClass: "attention",
+          link: `/r/${runId}`,
           subject: `${taskId}: the planner's plan failed validation`,
           body: `${oneLine(message, 300)}\nResolve the incident to let planning retry.`,
         },
@@ -1174,6 +1186,8 @@ export function finalizePlanFailureFenced(
         {
           dedupeKey: `plan-stalled:${run.taskRef}`,
           kind: "plan-attempts-exhausted",
+          pushClass: "attention",
+          link: `/r/${runId}`,
           subject: `${taskId}: planning stalled after ${strikes} straight failures`,
           body: `Last failure: ${oneLine(message, 200)}\nResolve the incident to let planning retry, or write the scope yourself.`,
         },

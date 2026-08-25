@@ -41,6 +41,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
 import { configPath, loadRepos, saveRepos, addRepos } from "./repos.js";
+import { pushPass } from "./push.js";
 import { closeSync, constants as fsConstants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
@@ -430,7 +431,7 @@ export function parseOperateArgs(argv: readonly string[]): Args | { error: strin
     "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
     "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
     "project-root", "schedule", "ceiling", "require",
-    "provider", "plan-model", "plan-provider",
+    "provider", "plan-model", "plan-provider", "public-url",
     "command", "timeout-seconds", "stop-grace", "title", "name",
     "github", "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   ]);
@@ -1531,7 +1532,7 @@ async function tickCommand(
       if (resumeResult.ok && resumeResult.parked !== undefined) {
         resumedOutcome = "parked";
         const asked = resumeResult.parked.decision;
-        store.saveDecision(
+        const racerDecision = store.saveDecision(
           {
             run: resumeRun,
             contestant: racer.id,
@@ -1542,6 +1543,19 @@ async function tickCommand(
             recommendation: asked.recommendation,
             ...(asked.assignee === null ? {} : { assignee: asked.assignee }),
             ...(asked.deadline === null ? {} : { deadline: asked.deadline }),
+          },
+          clock(),
+        );
+        // A racing agent's question pages like any other (arc 3 finding 21):
+        // aggregation stays quiet ASSUMING this row already spoke.
+        store.enqueueNotification(
+          {
+            dedupeKey: `decision:${racerDecision}`,
+            kind: "decision",
+            subject: `${taskId} parked a decision (tournament agent)`,
+            body: `\`standing-orders decide ${racerDecision}\``,
+            pushClass: "decision",
+            link: `/d/${racerDecision}`,
           },
           clock(),
         );
@@ -1826,7 +1840,7 @@ async function tickCommand(
             // The question still reaches the operator, tagged with its agent;
             // decision-wait mechanics land in stage 4 — the card works today.
             const asked = result.parked.decision;
-            store.saveDecision(
+            const contestantDecision = store.saveDecision(
               {
                 run: entry.runId,
                 contestant: entry.contestantId,
@@ -1837,6 +1851,17 @@ async function tickCommand(
                 recommendation: asked.recommendation,
                 ...(asked.assignee === null ? {} : { assignee: asked.assignee }),
                 ...(asked.deadline === null ? {} : { deadline: asked.deadline }),
+              },
+              clock(),
+            );
+            store.enqueueNotification(
+              {
+                dedupeKey: `decision:${contestantDecision}`,
+                kind: "decision",
+                subject: `${id} parked a decision (tournament agent)`,
+                body: `\`standing-orders decide ${contestantDecision}\``,
+                pushClass: "decision",
+                link: `/d/${contestantDecision}`,
               },
               clock(),
             );
@@ -2418,16 +2443,25 @@ async function reconcileCommand(
   for (const dispatchGrant of store.listGrants().filter(one => one.dispatch === true && one.remoteRepo != null && one.repo === repo)) {
     syncReports.push(await syncPass(store, dispatchGrant, context.dispatchAdapter ?? ghDispatchAdapter(), clock));
   }
-  for (const report of syncReports.filter(one => one.outcome === "failed" || one.outcome === "blocked")) {
-    store.enqueueNotification(
-      {
-        dedupeKey: `sync:${report.remoteRepo}:${report.outcome}`,
-        kind: "sync-failed",
-        subject: `syncing ${report.remoteRepo} ${report.outcome === "blocked" ? "is blocked" : "failed"}`,
-        body: `${report.detail ?? "the pass did not finish"} — external work keeps its last verified state and stops dispatching past its freshness window.`,
-      },
-      clock(),
-    );
+  for (const report of syncReports) {
+    if (report.outcome === "failed" || report.outcome === "blocked") {
+      // Episodic and stamped (arc 3 findings 14/23): one open episode per
+      // remote nags, a clean pass closes it, a recurrence pages again.
+      store.enqueueEpisode(
+        `sync:${report.remoteRepo}`,
+        {
+          kind: "sync-failed",
+          pushClass: "attention",
+          link: "/system",
+          subject: `syncing ${report.remoteRepo} ${report.outcome === "blocked" ? "is blocked" : "failed"}`,
+          body: `${report.detail ?? "the pass did not finish"} — external work keeps its last verified state and stops dispatching past its freshness window.`,
+        },
+        clock().toISOString(),
+        clock(),
+      );
+    } else {
+      store.resolveEpisodes(`sync:${report.remoteRepo}`, clock());
+    }
   }
 
   const recovered = recoverDead(store, clock());
@@ -2889,6 +2923,7 @@ async function startConsole(options: {
   allowedHosts?: string[];
   repos?: string[];
   projectRoots?: string[];
+  publicUrl?: string;
 }): Promise<{ server: ReturnType<typeof createDecisionServer>; port: number; url: string }> {
   const { context } = options;
   const server = createDecisionServer({
@@ -2902,6 +2937,7 @@ async function startConsole(options: {
     ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
     ...(options.repos === undefined ? {} : { repos: options.repos }),
     ...(options.projectRoots === undefined ? {} : { projectRoots: options.projectRoots }),
+    ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -2940,12 +2976,14 @@ async function serveCommand(
   // the checkout pool root the peek confines itself to.
   const localRunner = text(flags, "runner");
   const poolRoot = text(flags, "pool") ?? join(dirname(context.databaseFile), "worktrees");
+  const publicUrl = text(flags, "public-url");
 
   const console_ = await startConsole({
     context,
     host,
     port,
     ...(localRunner === undefined ? {} : { localRunner }),
+    ...(publicUrl === undefined ? {} : { publicUrl }),
     poolRoot,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
     ...(repoFlag === undefined ? {} : { repos: repoFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
@@ -4741,6 +4779,7 @@ async function runWatchLoop(args: {
   let lastTick = 0;
   let lastBridge = 0;
   let lastReconcile = 0;
+  let lastPush = 0;
   let ticks = 0;
   let built = 0;
   let brokeCount = 0;
@@ -4802,6 +4841,17 @@ async function runWatchLoop(args: {
             `watch: published — pushed ${published.pushed}, opened ${published.opened}, adopted ${published.adopted}` +
               (published.failed > 0 ? `, gave up on ${published.failed}` : ""),
           );
+        }
+      }
+
+      // Push rides its OWN cadence, whether or not Telegram holds the wire
+      // (arc 3 finding 8): the pair ledger's claims fence concurrent loops.
+      if (now - lastPush >= 45_000) {
+        lastPush = now;
+        try {
+          await pushPass(context.store, { configDir: dirname(context.databaseFile), clock: () => new Date() });
+        } catch {
+          // Push is additive; a broken pass never stops the watch.
         }
       }
 
@@ -5267,6 +5317,7 @@ async function upCommand(
       localRunner: runnerName,
       poolRoot: pool,
       repos,
+      ...(text(flags, "public-url") === undefined ? {} : { publicUrl: text(flags, "public-url") as string }),
     });
   } catch (error) {
     retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
@@ -5763,6 +5814,7 @@ async function publishCommand(
     }
     if (action === "unblock") {
       const lifted = store.liftMergeBlocker(publication.id);
+      store.resolveEpisodes(`merge-attn:${publication.id}`, context.clock());
       return succeed(write, json, "publish unblock", { pr, lifted }, () => [
         lifted
           ? `PR #${pr} no longer holds for its repair — the next sweep may merge it under the granted terms.`
@@ -5770,6 +5822,7 @@ async function publishCommand(
       ]);
     }
     const rearmed = store.rearmMergeIntent(publication.id);
+    store.resolveEpisodes(`merge-attn:${publication.id}`, context.clock());
     return succeed(write, json, "publish rearm", { pr, rearmed }, () => [
       rearmed
         ? `PR #${pr}'s merge is re-armed — the next sweep re-proves everything and tries again.`
@@ -5870,10 +5923,19 @@ async function outboxCommand(
     // person twice. The claim is a short lease on the act of sending; a
     // deliverer that dies mid-send leaves rows that unclaim by expiry.
     const owner = `outbox-${randomUUID()}`;
+    // Push first, independently (arc 3 finding 8): its pair ledger does not
+    // depend on globally-undelivered notifications — Telegram or a webhook
+    // may already have stamped delivered_at.
+    let pushed = 0;
+    try {
+      pushed = (await pushPass(store, { configDir: dirname(context.databaseFile), clock })).accepted;
+    } catch {
+      // additive; the shell delivery below still runs
+    }
     const pending = store.claimDeliveries(owner, 2 * 60_000, clock());
     if (pending.length === 0) {
-      return succeed(write, json, "outbox deliver", { delivered: 0, failed: 0 }, () => [
-        "Nothing waiting to be delivered.",
+      return succeed(write, json, "outbox deliver", { delivered: 0, failed: 0, pushed }, () => [
+        pushed > 0 ? `Nothing for the shell command; ${pushed} push(es) accepted.` : "Nothing waiting to be delivered.",
       ]);
     }
 

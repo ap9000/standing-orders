@@ -94,6 +94,18 @@ import {
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { readLiveWindow } from "./live.js";
+import { dirname } from "node:path";
+import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
+
+/** A user agent, reduced to safe display words — never echoed raw. */
+function oneLineUa(raw: string | string[] | undefined): string {
+  const text = Array.isArray(raw) ? (raw[0] ?? "") : (raw ?? "");
+  if (/iphone|ipad/i.test(text)) return "an iPhone or iPad";
+  if (/android/i.test(text)) return "an Android device";
+  if (/mac os/i.test(text)) return "a Mac";
+  if (/windows/i.test(text)) return "a Windows machine";
+  return "a device";
+}
 import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, jointApprovalDigest } from "./contest.js";
 import type { AgentView } from "./contest.js";
 import type { Runner } from "./runner.js";
@@ -114,13 +126,21 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote } from "./store.js";
+import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
   store: Store;
   evidenceRoot: string;
   clock?: () => Date;
+  /**
+   * The console's canonical https origin, when TLS terminates in front
+   * (arc 3 finding 2/16): EXACTLY an origin — no path, query, credentials.
+   * The one trust anchor for secure-context features: it joins the allowed
+   * hosts, its origin authorizes POSTs, cookies turn Secure, and the
+   * install/push cards light up. X-Forwarded-* is never consulted.
+   */
+  publicUrl?: string;
   /** Extra Host values this server answers as (a Tailscale name, a LAN ip:port). */
   allowedHosts?: readonly string[];
   /**
@@ -175,6 +195,54 @@ const TASK_STATES: readonly TaskState[] = ["queued", "running", "done", "failed"
 
 /** Read-only fragment polls that must never refresh session activity (arc 1). */
 const NO_TOUCH_FRAGMENTS: ReadonlySet<string> = new Set(["1", "facts", "peek", "rail", "transcript"]);
+
+// ---- the phone (arc 3): install assets, served BEFORE authentication — they
+// contain nothing secret, and a background service-worker update that met a
+// login redirect would fail MIME validation and unregister itself.
+const PWA_ICON_192 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAB1klEQVR42u3bMQ0AIAxFwepgQgD+TSECPJSBQO/nKSA30lhmBwtPYAAZQAaQAWQGkAFkABlAZgAZQPY4oNaHagaQABJAAkgAASSABJAAEkAACSABJIAEEEACSAAJIAEEkAASQAJIAHlHgAASQAJIAAkggASQABJAAgggASSABJAAAkgACSABJIAAAgggASSAss3aAwgggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggORLK0AAASSABJAAEkAACSABJIAEEEACSAAJIAEEkAASQAJIAAEkgASQAHKV4SoDIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAJIfiR6R4AAEkACSAAJIIAEkAASQAIIIAEkgASQAAJIAAkgASSAAAIIIAEkgFxluMoACCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggAACCCCAAAIIIIAAAggggACSH4kCCCABJIAEkAACSAAJIAEkgAASQAJIAAkggASQABJAAggggAASQAJIAAkggASQABJAAgggASSABJAAAkgACSB9BMgMIAPIADKAzAAygAwgA8gAMgPI7mwDbzYVUJcW7UcAAAAASUVORK5CYII=";
+const PWA_ICON_512 = "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAIAAAB7GkOtAAAJF0lEQVR42u3VwQ0AEBBFQXU4KUD/TW0R3JzcRLJhfqYCwivDzMy+XHEEZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmJgBmZiYAZmYmAGZmJgBmZiYAZmYmAGZmJgDb1dYBOCEAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACAIAAACAAAAgAAAIAgAAAIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACAIAAACAAAAgAAAIAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIAAACAIAAACAAAAgAAAIAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIAAACAIAAACAAAAgAAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACcF+Y5Z5HKgACIAAmAAgAAmACgAAgACYACAACYAKAACAAJgAIAAJgAoAAIAAmAAgAAmACIAACgP/FBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQABMABAAARAAEwAEAAEwAUAAEAATAAQAATABQAAQABMABAABMAFAABAAEwABEAAEwARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEAEAABABAAAQAQAAAEAAABAAAAQBAAAAQAAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAANwcgAAAIAAACAAAAgCAAAAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIAgAAAIAAACAAAAgCAAAAgAAACIAC/C7Pc80gFQAAEwAQAAUAATAAQAATABAABQABMABAABMAEAAFAAEwAEAAEwAQAAUAATAAEQADwv5gACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgAkAAiAAAmACgAAgACYACAACYAKAACAAJgAIAAJgAoAAIAAmAAgAAmACIAACgACYAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAACIAAAAiAAAAIAAACAIAAACAAAAgAAAIAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAmwMQAAAEAAABAEAAABAAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAAQAAAEAAABAEAAABAAAASAJcxyzyMVAAEQABMABAABMAFAABAAEwAEAAEwAUAAEAATAAQAATABQAAQABMABAABMAEQAAHA/2ICIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgACYACIAACIAJAAKAAJgAIAAIgAkAAoAAmAAgAAiACQACgACYACAACIAJgAAIAAJgAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIAIAACACAAAgAgAAAIAAACAIAAACAAAAgAAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAbg5AAAAQAAAEAAABAEAAABAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAAQBAAAAQAAAEAAABAEAAABAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABcHkAAgCAAAAgAAAIAAACAIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgJmZPT4BMDMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMwEwMzMBMDMzATAzMwEwMzMBMDOzJzYBVJhD+Nnu218AAAAASUVORK5CYII=";
+const PWA_ICON_APPLE = "iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAIAAACyr5FlAAABqklEQVR42u3aMQ0AIAxFwepgQgD+TSECFHQiYWjv5ylobmwcs2ThBAaHwWFwGBwGh8FhcBgcBofBkW7MparBITgEh+AQHIJDcAgOwQEHHHDAAYfgEByCQ3AIDsEhOASHI8IBBxxwCA7BITgEh+AQHIJDcAgOOOCAQ3AIDsEhOASH4BAcguNPu9PggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOOCAAw44PPsIDsEhOASH4BAcgkNwCA444IADDjgEh+AQHIJDcAgOwSE44IDDg7EHYzjggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOOCAAw559hEcgkNwwAEHHHDAITgEh+AQHIJDcAgOwQEHHHDAAYfgEByCQ3B4MIYDDjjggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOODw7OPZBw7BITgEh+AQHIJDcAgOOOCAAw44BIfgEByCQ3AIDsEhOAQHHHDAITgEh+AQHIJDcAgOwSE44IADDjgecVjbwWFwGBwGh8FhcBgcBofBYeV3AaohX51oqNRKAAAAAElFTkSuQmCC";
+const PWA_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="6" y="6" width="88" height="88" rx="14" fill="#1a202c"/><rect x="28" y="28" width="44" height="8" rx="4" fill="#ebebeb"/><rect x="28" y="47" width="44" height="8" rx="4" fill="#ebebeb"/><rect x="28" y="66" width="44" height="8" rx="4" fill="#ebebeb"/></svg>`;
+const PWA_MANIFEST = JSON.stringify({
+  name: "standing orders",
+  short_name: "standing orders",
+  id: "/",
+  scope: "/",
+  start_url: "/",
+  display: "standalone",
+  background_color: "#ffffff",
+  theme_color: "#1a202c",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    { src: "/icon.svg", sizes: "any", type: "image/svg+xml" },
+  ],
+});
+// The service worker, DELIBERATELY MINIMAL: no fetch handler — no cache, no
+// offline copy of authenticated pages, nothing intercepting requests. Push
+// and the tap, only. notificationclick resolves ONLY allow-listed relative
+// paths — the payload URL is data, revalidated, never handed raw to the
+// browser (arc 3 finding 5).
+const PWA_WORKER = `// standing orders — push only; deliberately NO fetch handler (no offline cache of an authenticated console).
+const SHAPES = [/^\\/next$/, /^\\/review$/, /^\\/system$/, /^\\/routines$/, /^\\/routines\\/[0-9]+$/, /^\\/d\\/[0-9]+$/, /^\\/contest\\/[0-9]+$/, /^\\/r\\/[0-9]+$/];
+self.addEventListener("push", function (event) {
+  var data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (e) {}
+  var body = typeof data.body === "string" ? data.body : "the console needs you";
+  var tag = typeof data.tag === "string" ? data.tag : "standing-orders";
+  var url = typeof data.url === "string" && SHAPES.some(function (s) { return s.test(data.url); }) ? data.url : "/next";
+  event.waitUntil(self.registration.showNotification("standing orders", { body: body, tag: tag, data: { url: url } }));
+});
+self.addEventListener("notificationclick", function (event) {
+  event.notification.close();
+  var url = event.notification.data && event.notification.data.url;
+  var target = new URL(SHAPES.some(function (s) { return s.test(url); }) ? url : "/next", self.location.origin).href;
+  event.waitUntil(clients.matchAll({ type: "window" }).then(function (open) {
+    for (var i = 0; i < open.length; i++) { if (open[i].url === target && open[i].focus) return open[i].focus(); }
+    return clients.openWindow(target);
+  }));
+});
+`;
 
 type Session = {
   name: string;
@@ -262,6 +330,24 @@ export function createDecisionServer(options: ServeOptions): Server {
     });
   });
 
+  // --public-url (arc 3): validated to EXACTLY an https origin. Its host
+  // joins the allowed set, its origin authorizes POSTs, and cookies turn
+  // Secure. Anything malformed refuses at startup, loudly.
+  const publicOrigin = (() => {
+    if (options.publicUrl === undefined) return null;
+    let parsed: URL;
+    try {
+      parsed = new URL(options.publicUrl);
+    } catch {
+      throw new Error("--public-url is not a URL");
+    }
+    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" || parsed.search !== "" || (parsed.pathname !== "/" && parsed.pathname !== "")) {
+      throw new Error("--public-url is exactly an https origin — no path, query, or credentials");
+    }
+    return parsed;
+  })();
+  const cookieSecure = publicOrigin === null ? "" : "; Secure";
+
   /** The names this server answers as. Anything else is a rebind, refused. */
   const allowedHost = (host: string | undefined): boolean => {
     if (host === undefined) return false;
@@ -269,7 +355,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const port = typeof address === "object" && address !== null ? address.port : null;
     const locals =
       port === null ? [] : [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
-    return [...locals, ...(options.allowedHosts ?? [])].includes(host);
+    return [...locals, ...(options.allowedHosts ?? []), ...(publicOrigin === null ? [] : [publicOrigin.host])].includes(host);
   };
 
   /**
@@ -364,6 +450,22 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const method = request.method ?? "GET";
+    // The install assets (arc 3): pre-auth by design; nothing secret rides
+    // them, and each carries nosniff + its own conservative caching/CSP.
+    if (method === "GET") {
+      const asset = (type: string, body: string | Buffer, csp?: string): void => {
+        response.setHeader("x-content-type-options", "nosniff");
+        response.setHeader("cache-control", url.pathname === "/sw.js" ? "no-store" : "public, max-age=3600");
+        if (csp !== undefined) response.setHeader("content-security-policy", csp);
+        respond(response, 200, type, body as string);
+      };
+      if (url.pathname === "/manifest.webmanifest") return asset("application/manifest+json", PWA_MANIFEST);
+      if (url.pathname === "/icon.svg") return asset("image/svg+xml", PWA_ICON_SVG);
+      if (url.pathname === "/icon-192.png") return asset("image/png", Buffer.from(PWA_ICON_192, "base64"));
+      if (url.pathname === "/icon-512.png") return asset("image/png", Buffer.from(PWA_ICON_512, "base64"));
+      if (url.pathname === "/apple-touch-icon.png") return asset("image/png", Buffer.from(PWA_ICON_APPLE, "base64"));
+      if (url.pathname === "/sw.js") return asset("text/javascript; charset=utf-8", PWA_WORKER, "default-src 'none'");
+    }
     // A fragment poll is the page keeping itself fresh, not a person acting.
     // It authenticates like any request but must not count as activity —
     // otherwise a board left open on a wall keeps its session alive forever
@@ -400,7 +502,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       });
       response.setHeader(
         "Set-Cookie",
-        `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/`,
+        `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`,
       );
       return redirect(response, "/");
     }
@@ -409,7 +511,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const cookies = request.headers.cookie ?? "";
       const match = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{64})`).exec(cookies);
       if (match !== null) sessions.delete(match[1] as string);
-      response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+      response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${cookieSecure}`);
       return redirect(response, "/login");
     }
 
@@ -1160,7 +1262,27 @@ export function createDecisionServer(options: ServeOptions): Server {
         options.configDir === undefined
           ? null
           : effectivePrimary(process.env, options.configDir, loadBotToken(process.env, options.telegramTokenFile) !== null);
-      return page(response, 200, settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, null, messaging));
+      const pushNonce = who.via === "cookie" ? randomBytes(16).toString("base64") : undefined;
+      const push = {
+        // The card lights only where a secure context exists: the stated
+        // public origin, or localhost development (arc 3 finding 2).
+        available: options.publicUrl !== undefined || (request.headers.host ?? "").startsWith("localhost") || (request.headers.host ?? "").startsWith("127.0.0.1"),
+        devices: who.via === "cookie" ? store.listPushSubscriptions(who.name) : [],
+      };
+      return page(
+        response,
+        200,
+        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, pushNonce),
+        pushNonce,
+      );
+    }
+
+    if (url.pathname === "/push/key") {
+      // Session-gated: the key is not secret, but strangers get nothing.
+      if (who.via !== "cookie") return respond(response, 403, "application/json", JSON.stringify({ error: "session" }));
+      const keys = loadOrCreateVapidKeys(dirname(options.telegramTokenFile ?? "."));
+      response.setHeader("cache-control", "no-store");
+      return respond(response, 200, "application/json", JSON.stringify({ key: keys.publicKey }));
     }
 
     const one = /^\/d\/([0-9]{1,15})$/.exec(url.pathname);
@@ -2508,6 +2630,55 @@ export function createDecisionServer(options: ServeOptions): Server {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
 
+    if (url.pathname === "/push/subscribe") {
+      // Enrolling a durable notification sink is a CEREMONY (arc 3 finding
+      // 6): browser session + CSRF + the password typed again; bearer
+      // identities are machines and are refused outright.
+      if (who.via !== "cookie") return refuse(response, who, 403, "push enrollment is a browser session's act");
+      if (store.isDemo()) return refuse(response, who, 403, "the sandbox never pushes");
+      const password = body.get("token") ?? "";
+      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+        return redirect(response, `/settings?said=${encodeURIComponent("enrolling this device takes your password, typed again")}`);
+      }
+      const endpoint = body.get("endpoint") ?? "";
+      const p256dh = body.get("p256dh") ?? "";
+      const auth = body.get("auth") ?? "";
+      const checked = validatePushEndpoint(endpoint);
+      if (!checked.ok) return redirect(response, `/settings?said=${encodeURIComponent(checked.problem)}`);
+      const p256dhBytes = Buffer.from(p256dh, "base64url");
+      const authBytes = Buffer.from(auth, "base64url");
+      if (p256dhBytes.length !== 65 || p256dhBytes[0] !== 4 || authBytes.length !== 16) {
+        return redirect(response, `/settings?said=${encodeURIComponent("that subscription's keys are not the shape a browser mints")}`);
+      }
+      const keys = loadOrCreateVapidKeys(dirname(options.telegramTokenFile ?? "."));
+      const generation = store.approverGeneration(who.name) ?? 1;
+      const enrolled = store.enrollPushSubscription(
+        {
+          endpoint,
+          p256dh,
+          auth,
+          approver: who.name,
+          approverGeneration: generation,
+          uaWords: oneLineUa(request.headers["user-agent"]),
+          vapidFingerprint: keys.fingerprint,
+        },
+        clock(),
+      );
+      if (!enrolled.ok) {
+        return redirect(response, `/settings?said=${encodeURIComponent(enrolled.reason === "approver-cap" ? "five devices per person — remove one first" : "twenty devices per installation — remove one first")}`);
+      }
+      return redirect(response, `/settings?said=${encodeURIComponent("this device now gets a buzz when the plane needs a person")}`);
+    }
+
+    if (url.pathname === "/push/remove") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "push removal is a browser session's act");
+      const id = Number(body.get("id") ?? "");
+      const mine = store.listPushSubscriptions(who.name).find(one => one.id === id && one.retiredAt === null);
+      if (mine === undefined) return redirect(response, `/settings?said=${encodeURIComponent("that device is not yours to remove, or it is already gone")}`);
+      store.retirePushSubscription(mine.id, `removed by ${who.name}`, clock());
+      return redirect(response, `/settings?said=${encodeURIComponent("removed — that device stops receiving pushes")}`);
+    }
+
     if (url.pathname === "/chat/config") {
       // The console's own door into `config set chat` (operator request:
       // chat lives mainly in the web UI). Same ceremony weight as the CLI
@@ -3491,14 +3662,17 @@ function isOverdue(decision: Decision, now: Date): boolean {
 
 const SAFETY = {
   "Content-Security-Policy":
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; manifest-src 'self'; worker-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Cache-Control": "no-store",
 } as const;
 
 function respond(response: ServerResponse, status: number, type: string, body: string): void {
-  response.writeHead(status, { ...SAFETY, "Content-Type": type });
+  // A route that set its OWN policy (the service worker's default-src
+  // 'none') keeps it — writeHead's headers would otherwise win.
+  const own = response.getHeader("content-security-policy");
+  response.writeHead(status, { ...SAFETY, ...(own === undefined ? {} : { "content-security-policy": own as string }), "Content-Type": type });
   response.end(body);
 }
 
@@ -3513,7 +3687,7 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
   response.writeHead(status, {
     ...SAFETY,
     "Content-Security-Policy":
-      `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; ` +
+      `default-src 'none'; style-src 'unsafe-inline'; manifest-src 'self'; worker-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; ` +
       "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     "Content-Type": "text/html; charset=utf-8",
   });
@@ -3983,6 +4157,15 @@ const STYLE = `
   .fire-bad { background: var(--destructive-strong); }
   .fire-live { background: var(--success); animation: pulse 1.6s ease-in-out infinite; }
   .fire-skip { background: transparent; border: 1.5px solid var(--muted); }
+
+/* the phone (arc 3): fingers, not cursors — tested at 320/390px */
+input, select, textarea { font-size: 16px; }
+button { min-height: 44px; }
+@media (max-width: 40rem) {
+  form.card button[type=submit], form > button[type=submit] { width: 100%; }
+  input[type=text], input[type=password] { width: 100%; max-width: 100%; box-sizing: border-box; }
+  main { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
+}
 `;
 
 /** Everything the sidebar needs to draw itself for one request. */
@@ -7127,7 +7310,62 @@ function settingsPage(
   csrf: string,
   problem: string | null,
   messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
+  push: { available: boolean; devices: PushSubscription[] } | null = null,
+  pushNonce?: string,
 ): string {
+  const pushCard =
+    push === null || csrf === ""
+      ? ""
+      : [
+          "<h2>receives alerts on this device</h2>",
+          push.available
+            ? [
+                `<p class="meta">a buzz when a decision, a tournament pick, or a pull request needs a person — fixed phrases only; task content never rides a notification. Notifications show on this device's lock screen, and tapping one opens whatever console session is signed in here.</p>`,
+                `<p class="meta">on iPhone or iPad: add this console to the Home Screen first, then enable from inside it.</p>`,
+                `<form method="post" action="/push/subscribe" id="push-form" class="card">`,
+                `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+                `<input type="hidden" name="endpoint" value=""><input type="hidden" name="p256dh" value=""><input type="hidden" name="auth" value="">`,
+                `<label>your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
+                `<button type="submit" id="push-enable">get alerts on this device</button>`,
+                `<p class="meta" id="push-state"></p>`,
+                `</form>`,
+              ].join("\n")
+            : `<p class="meta">alerts to this device need a secure address — put TLS in front (tailscale serve works) and start serve with --public-url https://…</p>`,
+          ...push.devices
+            .filter(one => one.retiredAt === null || one.retiredReason === "gone")
+            .map(
+              one =>
+                `<p class="row">${escape(one.uaWords)} · since ${escape(when(one.createdAt))}` +
+                `${one.retiredAt !== null ? ` · <span class="meta">expired</span>` : one.consecutiveFailures >= 20 ? ` · <span class="meta">failing</span>` : ""}` +
+                (one.retiredAt === null
+                  ? ` <form method="post" action="/push/remove" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}"><button type="submit">remove</button></form>`
+                  : "") +
+                `</p>`,
+            ),
+        ].join("\n");
+  const pushScript =
+    push === null || !push.available || pushNonce === undefined
+      ? ""
+      : `<script nonce="${escape(pushNonce)}">(function(){` +
+        `if(!("serviceWorker" in navigator)||!("PushManager" in window))return;` +
+        `var link=document.createElement("link");link.rel="manifest";link.href="/manifest.webmanifest";document.head.appendChild(link);` +
+        `navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});` +
+        `var form=document.getElementById("push-form");if(!form)return;` +
+        `form.addEventListener("submit",function(event){` +
+        `if(form.dataset.ready==="1")return;` +
+        `event.preventDefault();var state=document.getElementById("push-state");` +
+        `Notification.requestPermission().then(function(granted){` +
+        `if(granted!=="granted"){if(state)state.textContent="notifications are blocked for this site in the browser settings";return;}` +
+        `return fetch("/push/key").then(function(r){return r.json();}).then(function(d){` +
+        `return navigator.serviceWorker.ready.then(function(reg){` +
+        `return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:Uint8Array.from(atob(d.key.replace(/-/g,"+").replace(/_/g,"/")),function(c){return c.charCodeAt(0);})});});` +
+        `}).then(function(sub){var raw=sub.toJSON();` +
+        `form.querySelector("[name=endpoint]").value=sub.endpoint;` +
+        `form.querySelector("[name=p256dh]").value=(raw.keys.p256dh||"").replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");` +
+        `form.querySelector("[name=auth]").value=(raw.keys.auth||"").replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");` +
+        `form.dataset.ready="1";form.submit();});` +
+        `}).catch(function(){if(state)state.textContent="could not subscribe — the browser said no";});});` +
+        `})();</script>`;
   const messagingCard =
     messaging === null || messaging.configured.length === 0
       ? ""
@@ -7158,6 +7396,8 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return shell("settings", [
     "<h1>settings</h1>",
+    pushCard,
+    pushScript,
     messagingCard,
     "<h2>telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,

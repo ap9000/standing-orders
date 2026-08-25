@@ -370,8 +370,10 @@ export async function observeChecks(
         if (!settled.won) return;
         store.recordPublicationRemoteState(publication.id, remoteState, clock());
         report.resolved += store.resolveCiEpisodes(publication.githubRepo, publication.prNumber as number, null, clock());
-        // A closed PR moots its merge blocker and supersedes its intent.
+        // A closed PR moots its merge blocker and supersedes its intent —
+        // and its person-needed episode (arc 3 finding 23).
         store.liftMergeBlocker(publication.id);
+        store.resolveEpisodes(`merge-attn:${publication.id}`, clock());
         const intent = store.mergeIntentFor(publication.id);
         if (intent !== null && (intent.state === "pending" || intent.state === "claimed")) {
           store.settleMergeIntent(intent.id, intent.generation, remoteState === "MERGED" ? "merged" : "superseded", clock(), {
@@ -571,8 +573,20 @@ export async function sweepMerges(
   const exec = options.exec ?? execRun;
   const who = options.runner ?? "publish";
   const report: MergeReport = { merged: 0, refused: 0, skipped: 0, problems: [] };
+  // Person-needed merge episodes are STAMPED and episodic (arc 3 findings
+  // 14/22/23): one open episode per publication nags, resolution closes it,
+  // and a recurrence after repair pages again. Success and plain status
+  // pages stay classless — a merged PR needs nobody.
   const page = (key: string, subject: string, body: string): void => {
     store.enqueueNotification({ dedupeKey: key, kind: "merge", subject, body }, clock());
+  };
+  const pagePerson = (publicationId: number, suffix: string, subject: string, body: string): void => {
+    store.enqueueEpisode(
+      `merge-attn:${publicationId}`,
+      { kind: "merge", subject, body, pushClass: "merge", link: "/review" },
+      suffix,
+      clock(),
+    );
   };
 
   const grant = store.publicationGrantFor(options.repo);
@@ -593,8 +607,8 @@ export async function sweepMerges(
     const blocker = store.mergeBlockerFor(publication.id);
     if (blocker !== null) {
       report.skipped++;
-      page(
-        "merge:" + publication.id + ":blocked",
+      pagePerson(
+        publication.id, "blocked",
         "PR #" + prNumber + " holds for a repair",
         "A CI repair (" + (blocker.taskId ?? "?") + ") is in flight. It merges nothing until you lift it: standing-orders publish unblock " + prNumber + ".",
       );
@@ -625,8 +639,8 @@ export async function sweepMerges(
     if (!queue.ok) {
       settle("refused", { error: queue.why });
       report.refused++;
-      page(
-        "merge:" + publication.id + ":" + queue.why,
+      pagePerson(
+        publication.id, queue.why,
         "PR #" + prNumber + " will not auto-merge",
         queue.why === "merge-queue"
           ? "The base branch requires a merge queue - out of this release's scope. Merge it on GitHub, or lift the queue and run: standing-orders publish rearm " + prNumber + "."
@@ -641,8 +655,8 @@ export async function sweepMerges(
       if (seen.why === "draft") {
         settle("refused", { error: "draft" });
         report.refused++;
-        page(
-          "merge:" + publication.id + ":draft",
+        pagePerson(
+          publication.id, "draft",
           "PR #" + prNumber + " is a draft",
           "Drafts never merge themselves. Mark it ready on GitHub, then run: standing-orders publish rearm " + prNumber + ".",
         );
@@ -683,6 +697,7 @@ export async function sweepMerges(
         store.resolveCiEpisodes(grant.githubRepo, prNumber, null, clock());
       });
       report.merged++;
+      store.resolveEpisodes(`merge-attn:${publication.id}`, clock());
       page(
         "merge:" + publication.id + ":merged",
         "merged: PR #" + prNumber,
@@ -696,8 +711,8 @@ export async function sweepMerges(
     if (merged.code === 4) {
       settle("refused", { error: "credential", countAttempt: true });
       report.refused++;
-      page(
-        "merge:" + publication.id + ":credential",
+      pagePerson(
+        publication.id, "credential",
         "PR #" + prNumber + ": gh is not signed in",
         "The merge acts as this machine's GitHub account, and it could not authenticate. Run gh auth login, then: standing-orders publish rearm " + prNumber + ".",
       );
@@ -715,8 +730,8 @@ export async function sweepMerges(
     } else if (intent.attempts + 1 >= MERGE_MAX_ATTEMPTS) {
       settle("refused", { error: firstLine(merged.stderr) || "the merge was rejected", countAttempt: true });
       report.refused++;
-      page(
-        "merge:" + publication.id + ":rejected",
+      pagePerson(
+        publication.id, "rejected",
         "PR #" + prNumber + " would not merge",
         (firstLine(merged.stderr) || "GitHub rejected the merge") + " - likely branch protection, required reviews, or a conflict. Fix the cause, then run: standing-orders publish rearm " + prNumber + ".",
       );

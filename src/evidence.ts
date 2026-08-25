@@ -579,6 +579,8 @@ export async function captureTerminalDiff(
       {
         dedupeKey: `secret:${runId}`,
         kind: "secret-detected",
+        pushClass: "attention",
+        link: `/r/${runId}`,
         subject: `possible committed secret: run #${runId}`,
         body:
           `${hits.length} high-confidence secret shape(s) in the accepted diff (${[...new Set(hits.map(one => one.name))].join(", ")}). ` +

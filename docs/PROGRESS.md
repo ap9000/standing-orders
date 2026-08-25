@@ -1,5 +1,47 @@
 # Progress
 
+**2026-08-24 — the phone (arc 3, v23): installable console + web push.**
+Three Codex rounds (REDESIGN ×2, APPROVE WITH CHANGES — findings 1–29).
+The console installs to a phone's Home Screen (manifest + icons + a
+DELIBERATELY MINIMAL service worker: push and the tap only, NO fetch
+handler — an offline cache of an authenticated console is a data store
+outside the session's control, refused by design), and the phone buzzes
+when a person is needed — over a ZERO-DEPENDENCY web push stack:
+RFC 8291 aes128gcm encryption byte-exact against the Appendix A vector,
+RFC 8292 VAPID ES256 in P1363 form, VAPID keys minted atomically
+(wx + loser-re-read + pair validation) beside the database. PAYLOAD
+DISCIPLINE is the load-bearing rule: what transits Apple's and Google's
+servers is a fixed phrase keyed on a CLOSED, server-owned class stamped
+by producers at enqueue (decision / pick / merge / attention) plus a
+machine-minted numeric console path — task titles, scope text, branch
+and repo names never leave the machine, and /t/<free-form-id> is banned
+from payloads outright. Push is ADDITIVE: its own (notification ×
+subscription) pair ledger with owner+generation CAS transitions,
+seeding gated by a transactional enrollment high-water mark (a new
+phone is never backfilled with old faults), send-time fences re-proving
+subscription/generation/fact-open, honest AT-LEAST-ONCE with an opaque
+tag collapsing crash-duplicates, and the full RFC 8030 outcome table —
+'accepted' means the push service took it, 404/410 retires the device,
+401/403 is a credential episode (never device retirement), Retry-After
+and exponential backoff for the rest. The outbox's own delivered_at is
+never touched, so Telegram and webhooks are never suppressed. The
+review rounds also fixed real gaps: tournament agents' parked questions
+now page (they previously enqueued NOTHING), merge/sync faults became
+EPISODES that resolve transactionally and can recur (fixed dedupe keys
+had suppressed recurrence forever), and one canonical plane episode
+replaced a hundred-row fan-out. Enrollment is a ceremony: password
+typed again + cookie + CSRF, bearer refused, five devices per person,
+bound to the approver's credential generation (rotation retires them),
+lock-screen honesty on the card. The secure-origin contract is
+explicit: serve/up gain --public-url (EXACTLY an https origin — the one
+trust anchor; X-Forwarded-* is never consulted) which joins the Host/
+Origin gates and turns cookies Secure; TLS terminates in a proxy in
+front. Watch gained an independent push cadence (it runs whether or not
+Telegram holds the wire); outbox deliver gained an independent push
+phase; phones got the polish floor (16px inputs, 44px targets,
+full-width primaries, safe-area padding). Suite 1107 → 1130. Schema
+v22→v23.
+
 **2026-08-24 — `standing-orders up` (arc 2): one command to a working cockpit.**
 Four Codex rounds (REDESIGN ×3, APPROVE WITH CHANGES — findings 1–34),
 because a convenience command that touches identity is where shortcuts

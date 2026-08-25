@@ -4033,4 +4033,45 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     expect([303, 401, 403]).toContain(bare.status);
     expect(store.listSteerNotes(store.refFor("built-in", "peek-1", "ours").id).length).toBe(1);
   });
+
+  test("the install assets serve pre-auth with their disciplines; sw.js has no fetch handler (arc 3)", async () => {
+    const manifest = await fetch(url("/manifest.webmanifest"));
+    expect(manifest.status).toBe(200);
+    const parsed = (await manifest.json()) as Record<string, unknown>;
+    expect(parsed["display"]).toBe("standalone");
+    expect(parsed["scope"]).toBe("/");
+    const worker = await fetch(url("/sw.js"));
+    expect(worker.status).toBe(200);
+    expect(worker.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(worker.headers.get("cache-control")).toBe("no-store");
+    expect(worker.headers.get("content-security-policy")).toBe("default-src 'none'");
+    const body = await worker.text();
+    expect(body).toContain("notificationclick");
+    expect(body).not.toContain('addEventListener("fetch"');
+    expect((await fetch(url("/icon-192.png"))).status).toBe(200);
+    expect((await fetch(url("/apple-touch-icon.png"))).status).toBe(200);
+  });
+
+  test("push enrollment is a password ceremony and validates the endpoint (arc 3)", async () => {
+    const cookie = await login();
+    // This suite's server has no telegram file, so /settings is off — any
+    // authenticated page carries the same session csrf.
+    const taskHtml = await (await fetch(url("/t/peek-1"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(taskHtml)?.[1] ?? "";
+    const post = (body: Record<string, string>) =>
+      fetch(url("/push/subscribe"), {
+        method: "POST",
+        redirect: "manual",
+        headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(body).toString(),
+      });
+    // No password: refused with words, nothing enrolled.
+    const bare = await post({ csrf, endpoint: "https://fcm.googleapis.com/fcm/send/x", p256dh: "x", auth: "y" });
+    expect(bare.status).toBe(303);
+    expect(bare.headers.get("location")).toContain("password");
+    // Password + a NON-allow-listed endpoint: refused.
+    const evil = await post({ csrf, token: approverToken, endpoint: "https://evil.example.com/x", p256dh: "x", auth: "y" });
+    expect(evil.headers.get("location")).toContain("push%20service");
+    expect(store.listPushSubscriptions().length).toBe(0);
+  });
 });

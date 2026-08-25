@@ -393,6 +393,8 @@ export function maybeAggregate(store: Store, contestId: number, now: Date): Cont
       {
         dedupeKey: `contest-${target}:${contestId}`,
         kind: "contest-finished",
+        // Only a PICKABLE finish pushes (arc 3): exhausted has nothing to tap.
+        ...(target === "pick-wait" ? { pushClass: "pick" as const, link: `/contest/${contestId}` } : {}),
         subject:
           target === "pick-wait"
             ? `tournament finished: ${taskId} — compare and pick`

@@ -37,7 +37,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 22;
+export const SCHEMA_VERSION = 23;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -361,6 +361,10 @@ export type Notification = {
   lastError: string | null;
   deliveredAt: string | null;
   receipt: string | null;
+  /** The closed push attention class, or null = this fact never pushes. */
+  pushClass: "decision" | "pick" | "merge" | "attention" | null;
+  /** The machine-minted console path a push may deep-link — never free text. */
+  link: string | null;
   /**
    * When the fact stopped wanting a person — a decision answered, an incident
    * resolved. Distinct from delivery, and it never deletes the row: receipts
@@ -433,6 +437,40 @@ export type SteerNote = {
   attachedAt: string | null;
   deliveredAt: string | null;
   supersededAt: string | null;
+};
+
+/** One phone enrollment for web push (arc 3, v23). A row per ACTIVATION —
+ * retirement is history, never deletion. */
+export type PushSubscription = {
+  id: number;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  approver: string;
+  approverGeneration: number;
+  uaWords: string;
+  vapidFingerprint: string;
+  startsAfterNotification: number;
+  createdAt: string;
+  lastOkAt: string | null;
+  consecutiveFailures: number;
+  retiredAt: string | null;
+  retiredReason: string | null;
+};
+
+/** One (notification, subscription) push delivery. `accepted` = the push
+ * SERVICE took it (RFC 8030) — nothing claims a phone displayed it. */
+export type PushPair = {
+  id: number;
+  notification: number;
+  subscription: number;
+  state: "pending" | "claimed" | "accepted" | "rejected" | "undeliverable" | "retired";
+  claimOwner: string | null;
+  claimGeneration: number;
+  attempts: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+  acceptedAt: string | null;
 };
 
 /** One option of a decision. `reversible` is a field so a scheduler can refuse to auto-apply. */
@@ -1208,7 +1246,12 @@ CREATE TABLE IF NOT EXISTS notification (
   delivered_at    TEXT,
   -- What the delivery command said on success — the closest thing to a
   -- provider receipt a shell command can hand back.
-  receipt         TEXT
+  receipt         TEXT,
+  -- The push surface (arc 3, v23): a CLOSED attention class and a
+  -- machine-minted console link, stamped by producers at enqueue.
+  -- Unstamped kinds never reach a phone; subject/body never do either.
+  push_class      TEXT CHECK (push_class IN ('decision','pick','merge','attention')),
+  link            TEXT
 );
 
 -- Permission to write to a tracker, one row per repository and backend.
@@ -1761,6 +1804,56 @@ CREATE TABLE IF NOT EXISTS task_steer (
   CHECK (delivered_at IS NULL OR attached_run IS NOT NULL)
 );
 
+-- A phone enrolled for web push (arc 3, v23). One row PER ACTIVATION —
+-- re-enrolling a retired endpoint is a new row with its own binding and
+-- audit trail; the partial unique index below keeps one LIVE row per
+-- endpoint. starts_after_notification is the transactional high-water
+-- mark: only notifications newer than the enrollment are ever paged.
+CREATE TABLE IF NOT EXISTS push_subscription (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint                  TEXT NOT NULL,
+  p256dh                    TEXT NOT NULL,
+  auth                      TEXT NOT NULL,
+  approver                  TEXT NOT NULL,
+  approver_generation       INTEGER NOT NULL,
+  ua_words                  TEXT NOT NULL,
+  vapid_fingerprint         TEXT NOT NULL,
+  starts_after_notification INTEGER NOT NULL,
+  created_at                TEXT NOT NULL,
+  last_ok_at                TEXT,
+  consecutive_failures      INTEGER NOT NULL DEFAULT 0,
+  retired_at                TEXT,
+  retired_reason            TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS push_subscription_live
+  ON push_subscription (endpoint) WHERE retired_at IS NULL;
+
+-- One (notification, subscription) delivery pair (arc 3): push's OWN
+-- ledger — the outbox's delivered_at/claim columns are never consulted
+-- and never written, so push stays additive to every other channel.
+-- 'accepted' means the PUSH SERVICE took it (RFC 8030); nothing here
+-- claims a phone displayed anything. At-least-once: a crash between
+-- acceptance and settlement re-sends after the lease expires.
+CREATE TABLE IF NOT EXISTS push_delivery (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  notification     INTEGER NOT NULL REFERENCES notification(id) ON DELETE CASCADE,
+  subscription     INTEGER NOT NULL REFERENCES push_subscription(id) ON DELETE CASCADE,
+  state            TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (state IN ('pending','claimed','accepted','rejected','undeliverable','retired')),
+  claim_owner      TEXT,
+  claim_expires_at TEXT,
+  claim_generation INTEGER NOT NULL DEFAULT 0,
+  attempts         INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at  TEXT,
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  accepted_at      TEXT,
+  UNIQUE (notification, subscription),
+  CHECK (state <> 'claimed' OR (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS push_delivery_due
+  ON push_delivery (state, next_attempt_at) WHERE state IN ('pending','claimed');
+
 CREATE TABLE IF NOT EXISTS mutation (
   idempotency_key TEXT PRIMARY KEY,
   operation       TEXT NOT NULL,
@@ -2278,6 +2371,51 @@ function migrate(db: Database): void {
     task_id     TEXT,
     created_at  TEXT NOT NULL
   )`);
+  // v23 (arc 3, the phone): the push surface. Two NEW tables (their own
+  // indexes may ride beside them — the whole tables are new) plus two
+  // additive notification columns stamped by producers: a closed
+  // attention class and a machine-minted console link. Kinds without a
+  // class never push.
+  addColumn(db, "notification", "push_class", "TEXT CHECK (push_class IN ('decision','pick','merge','attention'))");
+  addColumn(db, "notification", "link", "TEXT");
+  db.exec(`CREATE TABLE IF NOT EXISTS push_subscription (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint                  TEXT NOT NULL,
+    p256dh                    TEXT NOT NULL,
+    auth                      TEXT NOT NULL,
+    approver                  TEXT NOT NULL,
+    approver_generation       INTEGER NOT NULL,
+    ua_words                  TEXT NOT NULL,
+    vapid_fingerprint         TEXT NOT NULL,
+    starts_after_notification INTEGER NOT NULL,
+    created_at                TEXT NOT NULL,
+    last_ok_at                TEXT,
+    consecutive_failures      INTEGER NOT NULL DEFAULT 0,
+    retired_at                TEXT,
+    retired_reason            TEXT
+  )`);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS push_subscription_live
+    ON push_subscription (endpoint) WHERE retired_at IS NULL`);
+  db.exec(`CREATE TABLE IF NOT EXISTS push_delivery (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    notification     INTEGER NOT NULL REFERENCES notification(id) ON DELETE CASCADE,
+    subscription     INTEGER NOT NULL REFERENCES push_subscription(id) ON DELETE CASCADE,
+    state            TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (state IN ('pending','claimed','accepted','rejected','undeliverable','retired')),
+    claim_owner      TEXT,
+    claim_expires_at TEXT,
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  TEXT,
+    last_error       TEXT,
+    created_at       TEXT NOT NULL,
+    accepted_at      TEXT,
+    UNIQUE (notification, subscription),
+    CHECK (state <> 'claimed' OR (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL))
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS push_delivery_due
+    ON push_delivery (state, next_attempt_at) WHERE state IN ('pending','claimed')`);
+
   // v22 (arc 1, the live window): operator steering notes. A NEW table —
   // additive, identical to the fresh SCHEMA; its partial pending index
   // lives in openStore's post-migration block (the v11c lesson).
@@ -3876,6 +4014,15 @@ export class Store {
     this.db
       .prepare("DELETE FROM telegram_pairing WHERE approver = ? AND consumed_at IS NULL")
       .run(approver);
+    // Push enrollments are derived authority too (arc 3 finding 6): the
+    // rotation retires every live subscription of the old credential and
+    // terminally settles its delivery pairs — claimed ones included, so an
+    // in-flight sender's fence fails instead of paging a stranded device.
+    const subscriptions = this.db
+      .prepare("SELECT id FROM push_subscription WHERE approver = ? AND retired_at IS NULL")
+      .all(approver)
+      .map(row => Number(row["id"]));
+    for (const id of subscriptions) this.retirePushSubscription(id, "credential-rotation", now);
   }
 
   listApprovers(): { name: string; addedAt: string }[] {
@@ -6069,7 +6216,7 @@ export class Store {
    */
   enqueueRoutineEpisode(
     prefix: string,
-    notification: { kind: string; subject: string; body: string },
+    notification: { kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string },
     suffix: string,
     now: Date,
   ): boolean {
@@ -6135,15 +6282,18 @@ export class Store {
 
   // ---- the outbox ---------------------------------------------------------
 
-  /** True if this is a new fact; false if the episode already knows. */
+  /** True if this is a new fact; false if the episode already knows.
+   * `pushClass`/`link` (arc 3): the CLOSED attention class and machine-
+   * minted console path a phone may be paged with — stamped here at
+   * enqueue or never; subject and body never reach a push service. */
   enqueueNotification(
-    notification: { dedupeKey: string; kind: string; subject: string; body: string },
+    notification: { dedupeKey: string; kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string },
     now: Date,
   ): boolean {
     const { changes } = this.db
       .prepare(
-        `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at, push_class, link)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         notification.dedupeKey,
@@ -6151,8 +6301,48 @@ export class Store {
         notification.subject,
         notification.body,
         now.toISOString(),
+        notification.pushClass ?? null,
+        notification.link ?? null,
       );
     return Number(changes) > 0;
+  }
+
+  /**
+   * Episode semantics for recurring faults (arc 3 finding 23, generalizing
+   * the routine-episode pattern): one OPEN row per prefix nags; a RESOLVED
+   * one is history, and a fresh suffix keys a new row past the dedupe
+   * uniqueness so a recurrence pages again instead of being suppressed
+   * forever by its own past.
+   */
+  enqueueEpisode(
+    prefix: string,
+    notification: { kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string },
+    suffix: string,
+    now: Date,
+  ): boolean {
+    return this.transact(() => {
+      const head = `${prefix}:`;
+      const open = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM notification
+            WHERE substr(dedupe_key, 1, ?) = ? AND resolved_at IS NULL LIMIT 1`,
+        )
+        .get(head.length, head);
+      if (open !== undefined) return false;
+      return this.enqueueNotification({ dedupeKey: `${head}${suffix}`, ...notification }, now);
+    });
+  }
+
+  /** Close every open episode under a prefix — the fault is provably gone. */
+  resolveEpisodes(prefix: string, now: Date): number {
+    const head = `${prefix}:`;
+    const { changes } = this.db
+      .prepare(
+        `UPDATE notification SET resolved_at = ?
+          WHERE resolved_at IS NULL AND substr(dedupe_key, 1, ?) = ?`,
+      )
+      .run(now.toISOString(), head.length, head);
+    return Number(changes);
   }
 
   listNotifications(only: "pending" | "all" = "pending"): Notification[] {
@@ -9050,6 +9240,275 @@ export class Store {
     return Number(changes) > 0;
   }
 
+  // ---- web push (arc 3) ----------------------------------------------------
+
+  /**
+   * Enroll a phone. One transaction: the high-water mark is MAX
+   * (notification.id) read HERE (finding 11 — only newer facts ever page
+   * this device); an identical live enrollment (same endpoint, approver,
+   * generation) returns idempotent success; a CONFLICTING live binding —
+   * different approver or a stale generation — is retired 'replaced' with
+   * its pairs settled, and the fresh activation gets its own row
+   * (finding 28).
+   */
+  enrollPushSubscription(
+    args: {
+      endpoint: string;
+      p256dh: string;
+      auth: string;
+      approver: string;
+      approverGeneration: number;
+      uaWords: string;
+      vapidFingerprint: string;
+    },
+    now: Date,
+  ): { ok: true; id: number; replayed: boolean } | { ok: false; reason: "approver-cap" | "installation-cap" } {
+    return this.transact(() => {
+      const live = this.db
+        .prepare("SELECT * FROM push_subscription WHERE endpoint = ? AND retired_at IS NULL")
+        .get(args.endpoint);
+      if (live !== undefined) {
+        if (
+          String(live["approver"]) === args.approver &&
+          Number(live["approver_generation"]) === args.approverGeneration &&
+          String(live["vapid_fingerprint"]) === args.vapidFingerprint
+        ) {
+          return { ok: true as const, id: Number(live["id"]), replayed: true };
+        }
+        this.retirePushSubscription(Number(live["id"]), "replaced", now);
+      }
+      const mine = this.db
+        .prepare("SELECT COUNT(*) AS n FROM push_subscription WHERE approver = ? AND retired_at IS NULL")
+        .get(args.approver);
+      if (Number(mine?.["n"] ?? 0) >= 5) return { ok: false as const, reason: "approver-cap" as const };
+      const all = this.db.prepare("SELECT COUNT(*) AS n FROM push_subscription WHERE retired_at IS NULL").get();
+      if (Number(all?.["n"] ?? 0) >= 20) return { ok: false as const, reason: "installation-cap" as const };
+      const mark = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS top FROM notification").get();
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO push_subscription
+             (endpoint, p256dh, auth, approver, approver_generation, ua_words, vapid_fingerprint,
+              starts_after_notification, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          args.endpoint,
+          args.p256dh,
+          args.auth,
+          args.approver,
+          args.approverGeneration,
+          args.uaWords,
+          args.vapidFingerprint,
+          Number(mark?.["top"] ?? 0),
+          now.toISOString(),
+        );
+      return { ok: true as const, id: Number(inserted.lastInsertRowid), replayed: false };
+    });
+  }
+
+  /**
+   * Retire an enrollment and terminally settle EVERY unsettled pair —
+   * pending AND claimed (finding 25): an in-flight sender's fence or
+   * settlement fails instead of paging a device that was just removed.
+   */
+  retirePushSubscription(id: number, reason: string, now: Date): void {
+    this.transact(() => {
+      const stamp = now.toISOString();
+      this.db
+        .prepare("UPDATE push_subscription SET retired_at = ?, retired_reason = ? WHERE id = ? AND retired_at IS NULL")
+        .run(stamp, reason, id);
+      this.db
+        .prepare(
+          `UPDATE push_delivery SET state = 'retired', claim_owner = NULL, claim_expires_at = NULL,
+                                    claim_generation = claim_generation + 1
+            WHERE subscription = ? AND state IN ('pending','claimed')`,
+        )
+        .run(id);
+    });
+  }
+
+  listPushSubscriptions(approver?: string): PushSubscription[] {
+    const rows =
+      approver === undefined
+        ? this.db.prepare("SELECT * FROM push_subscription ORDER BY id").all()
+        : this.db.prepare("SELECT * FROM push_subscription WHERE approver = ? ORDER BY id").all(approver);
+    return rows.map(readPushSubscription);
+  }
+
+  /** Retire every live enrollment whose VAPID key is not the current one
+   * (finding 27): a subscription is bound to the key it enrolled under and
+   * rejects any other — after a key regeneration they are dead weight. */
+  retirePushSubscriptionsOfOtherKeys(currentFingerprint: string, now: Date): number {
+    const stale = this.db
+      .prepare("SELECT id FROM push_subscription WHERE retired_at IS NULL AND vapid_fingerprint <> ?")
+      .all(currentFingerprint)
+      .map(row => Number(row["id"]));
+    for (const id of stale) this.retirePushSubscription(id, "key-rotated", now);
+    return stale.length;
+  }
+
+  /**
+   * Seed pairs (arc 3 finding 1): one per (eligible notification, live
+   * subscription), INSERT OR IGNORE — eligibility is a STAMPED class, an
+   * unresolved row, and an id NEWER than the subscription's high-water
+   * mark. The outbox's delivered_at is deliberately not consulted.
+   */
+  seedPushPairs(now: Date): number {
+    const { changes } = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO push_delivery (notification, subscription, created_at)
+         SELECT notification.id, push_subscription.id, ?
+           FROM notification, push_subscription
+          WHERE notification.push_class IS NOT NULL
+            AND notification.resolved_at IS NULL
+            AND push_subscription.retired_at IS NULL
+            AND notification.id > push_subscription.starts_after_notification`,
+      )
+      .run(now.toISOString());
+    return Number(changes);
+  }
+
+  /**
+   * Claim due pairs: pending (respecting next_attempt_at) or claimed-but-
+   * expired (reclaim bumps the generation — the old owner loses every
+   * subsequent conditional write, the merge-ledger discipline).
+   */
+  claimPushPairs(owner: string, ttlMs: number, limit: number, now: Date): PushPair[] {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const expires = new Date(now.getTime() + ttlMs).toISOString();
+      const due = this.db
+        .prepare(
+          `SELECT id FROM push_delivery
+            WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+               OR (state = 'claimed' AND claim_expires_at <= ?)
+            ORDER BY id LIMIT ?`,
+        )
+        .all(stamp, stamp, limit)
+        .map(row => Number(row["id"]));
+      const taken: number[] = [];
+      for (const id of due) {
+        const { changes } = this.db
+          .prepare(
+            `UPDATE push_delivery SET state = 'claimed', claim_owner = ?, claim_expires_at = ?,
+                                      claim_generation = claim_generation + 1
+              WHERE id = ? AND (
+                (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+                OR (state = 'claimed' AND claim_expires_at <= ?)
+              )`,
+          )
+          .run(owner, expires, id, stamp, stamp);
+        if (Number(changes) > 0) taken.push(id);
+      }
+      return taken
+        .map(id => this.db.prepare("SELECT * FROM push_delivery WHERE id = ?").get(id))
+        .filter((row): row is Record<string, unknown> => row !== undefined)
+        .map(readPushPair);
+    });
+  }
+
+  /** Renew a claim this owner+generation still holds — false is FATAL to the send. */
+  renewPushClaim(id: number, owner: string, generation: number, ttlMs: number, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE push_delivery SET claim_expires_at = ?
+          WHERE id = ? AND state = 'claimed' AND claim_owner = ? AND claim_generation = ?`,
+      )
+      .run(new Date(now.getTime() + ttlMs).toISOString(), id, owner, generation);
+    return Number(changes) > 0;
+  }
+
+  /**
+   * The send-time fence (finding 12/25), one read: the pair still ours,
+   * the subscription live under its enrolled generation, the notification
+   * unresolved and still stamped. Null = do not transmit.
+   */
+  pushSendFence(id: number, owner: string, generation: number): (PushPair & { subscriptionRow: PushSubscription; notificationRow: Notification }) | null {
+    const pair = this.db
+      .prepare(
+        `SELECT * FROM push_delivery
+          WHERE id = ? AND state = 'claimed' AND claim_owner = ? AND claim_generation = ?`,
+      )
+      .get(id, owner, generation);
+    if (pair === undefined) return null;
+    const subscription = this.db
+      .prepare("SELECT * FROM push_subscription WHERE id = ? AND retired_at IS NULL")
+      .get(Number(pair["subscription"]));
+    if (subscription === undefined) return null;
+    const approver = this.db.prepare("SELECT generation FROM approver WHERE name = ?").get(String(subscription["approver"]));
+    if (approver === undefined || Number(approver["generation"]) !== Number(subscription["approver_generation"])) return null;
+    const notification = this.db
+      .prepare("SELECT * FROM notification WHERE id = ? AND resolved_at IS NULL AND push_class IS NOT NULL")
+      .get(Number(pair["notification"]));
+    if (notification === undefined) return null;
+    return { ...readPushPair(pair), subscriptionRow: readPushSubscription(subscription), notificationRow: readNotification(notification) };
+  }
+
+  /** Settle a pair, conditionally on owner + generation (finding 25). */
+  settlePushPair(
+    id: number,
+    owner: string,
+    generation: number,
+    outcome:
+      | { kind: "accepted" }
+      | { kind: "rejected"; error: string }
+      | { kind: "undeliverable"; error: string }
+      | { kind: "backoff"; nextAttemptAt: Date; error: string },
+    now: Date,
+  ): boolean {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const fence = "id = ? AND state = 'claimed' AND claim_owner = ? AND claim_generation = ?";
+      if (outcome.kind === "accepted") {
+        const { changes } = this.db
+          .prepare(
+            `UPDATE push_delivery SET state = 'accepted', accepted_at = ?, attempts = attempts + 1,
+                                      claim_owner = NULL, claim_expires_at = NULL, last_error = NULL
+              WHERE ${fence}`,
+          )
+          .run(stamp, id, owner, generation);
+        if (Number(changes) > 0) {
+          this.db
+            .prepare(
+              `UPDATE push_subscription SET last_ok_at = ?, consecutive_failures = 0
+                WHERE id = (SELECT subscription FROM push_delivery WHERE id = ?)`,
+            )
+            .run(stamp, id);
+        }
+        return Number(changes) > 0;
+      }
+      if (outcome.kind === "backoff") {
+        const { changes } = this.db
+          .prepare(
+            `UPDATE push_delivery SET state = 'pending', next_attempt_at = ?, attempts = attempts + 1,
+                                      last_error = ?, claim_owner = NULL, claim_expires_at = NULL
+              WHERE ${fence}`,
+          )
+          .run(outcome.nextAttemptAt.toISOString(), outcome.error, id, owner, generation);
+        if (Number(changes) > 0) this.bumpPushFailures(id);
+        return Number(changes) > 0;
+      }
+      const { changes } = this.db
+        .prepare(
+          `UPDATE push_delivery SET state = ?, attempts = attempts + 1, last_error = ?,
+                                    claim_owner = NULL, claim_expires_at = NULL
+            WHERE ${fence}`,
+        )
+        .run(outcome.kind, outcome.error, id, owner, generation);
+      if (Number(changes) > 0) this.bumpPushFailures(id);
+      return Number(changes) > 0;
+    });
+  }
+
+  private bumpPushFailures(pairId: number): void {
+    this.db
+      .prepare(
+        `UPDATE push_subscription SET consecutive_failures = consecutive_failures + 1
+          WHERE id = (SELECT subscription FROM push_delivery WHERE id = ?)`,
+      )
+      .run(pairId);
+  }
+
   // ---- idempotency --------------------------------------------------------
 
   /**
@@ -9178,6 +9637,45 @@ function readNotification(row: Record<string, unknown>): Notification {
       row["resolved_at"] === null || row["resolved_at"] === undefined
         ? null
         : String(row["resolved_at"]),
+    pushClass:
+      row["push_class"] === null || row["push_class"] === undefined
+        ? null
+        : (String(row["push_class"]) as Notification["pushClass"]),
+    link: row["link"] === null || row["link"] === undefined ? null : String(row["link"]),
+  };
+}
+
+function readPushSubscription(row: Record<string, unknown>): PushSubscription {
+  return {
+    id: Number(row["id"]),
+    endpoint: String(row["endpoint"]),
+    p256dh: String(row["p256dh"]),
+    auth: String(row["auth"]),
+    approver: String(row["approver"]),
+    approverGeneration: Number(row["approver_generation"]),
+    uaWords: String(row["ua_words"]),
+    vapidFingerprint: String(row["vapid_fingerprint"]),
+    startsAfterNotification: Number(row["starts_after_notification"]),
+    createdAt: String(row["created_at"]),
+    lastOkAt: row["last_ok_at"] === null ? null : String(row["last_ok_at"]),
+    consecutiveFailures: Number(row["consecutive_failures"]),
+    retiredAt: row["retired_at"] === null ? null : String(row["retired_at"]),
+    retiredReason: row["retired_reason"] === null ? null : String(row["retired_reason"]),
+  };
+}
+
+function readPushPair(row: Record<string, unknown>): PushPair {
+  return {
+    id: Number(row["id"]),
+    notification: Number(row["notification"]),
+    subscription: Number(row["subscription"]),
+    state: String(row["state"]) as PushPair["state"],
+    claimOwner: row["claim_owner"] === null ? null : String(row["claim_owner"]),
+    claimGeneration: Number(row["claim_generation"]),
+    attempts: Number(row["attempts"]),
+    nextAttemptAt: row["next_attempt_at"] === null ? null : String(row["next_attempt_at"]),
+    lastError: row["last_error"] === null ? null : String(row["last_error"]),
+    acceptedAt: row["accepted_at"] === null ? null : String(row["accepted_at"]),
   };
 }
 
