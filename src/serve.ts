@@ -195,6 +195,11 @@ export type ServeOptions = {
    * this device. "vscode" is the only value; the scheme is never data.
    */
   editorLinks?: "vscode";
+  /** Injected by tests: the onboarding ceremony's gh-facing halves — the
+   * ceremony's gating, nonce, and enrollment logic is what the HTTP tests
+   * prove; gh itself is proved by onboard.test.ts. */
+  ghPreview?: typeof previewGithubRepo;
+  ghClone?: typeof cloneGithubRepo;
 };
 
 const SESSION_COOKIE = "standing-orders_session";
@@ -2510,7 +2515,43 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const id = (body.get("id") ?? "").trim();
       const title = body.get("title") ?? "";
-      const repo = (body.get("repo") ?? "").trim() || (project ?? "");
+      // The EFFECTIVE placement (repo onboarding, findings 15/35): the
+      // trimmed, nonempty posted repo, else the open project — an empty
+      // input falls through correctly. In root mode the effective path is
+      // proved by authorizedProject EXACTLY as typed-then-canonicalized,
+      // and [canonical] is the admitted list — a fresh clone under a root
+      // must be able to receive its first task without waiting to appear
+      // in any table.
+      const repoGiven = (body.get("repo") ?? "").trim();
+      const effective = repoGiven !== "" ? repoGiven : (project ?? "");
+      // A scoped console refuses an EMPTY placement server-side (verification
+      // finding 1): the form's `required` is a courtesy, not the guard — a
+      // direct POST with no project open must not mint an unplaced task
+      // under a ceiling. Unscoped mode keeps its historic unplaced filings.
+      if (!unscopedMode && effective === "") {
+        const csrf = who.via === "cookie" ? who.session.csrf : "";
+        return sendScreen(
+          response,
+          400,
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project),
+        );
+      }
+      let repo = effective;
+      let admitted: string[] | null = unscopedMode ? null : admissionList() ?? [];
+      const rootMode = !unscopedMode && ceiling.roots.length > 0;
+      if (rootMode && effective !== "") {
+        const canonical = (await authorizedProject(ceiling, effective)) ? canonicalProject(effective) : null;
+        if (canonical === null || canonical === undefined) {
+          const csrf = who.via === "cookie" ? who.session.csrf : "";
+          return sendScreen(
+            response,
+            403,
+            tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project),
+          );
+        }
+        repo = canonical;
+        admitted = [canonical];
+      }
       const goal = (body.get("goal") ?? "").trim();
       const notThis = (body.get("not") ?? "").trim();
       const touchesGiven = (body.get("touches") ?? "")
@@ -2528,7 +2569,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           outOfScope: notThis === "" ? null : notThis,
           touches: touchesGiven,
           filedVia: "console",
-          ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
+          ...(admitted === null ? {} : { admittedRepos: admitted }),
         },
         now,
       );
@@ -2540,6 +2581,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project),
         );
       }
+      // A proved root-mode placement joins the project table (finding 15):
+      // the new task's home is openable and admissible from now on.
+      if (rootMode && repo !== "") store.upsertProject(repo, projectName(repo), now);
       // "starts after": a chain filed with the work. The task ALREADY
       // exists at this point, so a bad chain must not lose it — the new
       // task's page renders with the un-made wait named instead.
@@ -2818,10 +2862,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         } catch {
           return projectsScreen(response, who, "that projects root does not resolve right now", 400);
         }
-        const previewed = await previewGithubRepo(shape.owner, shape.name);
+        const previewed = await (options.ghPreview ?? previewGithubRepo)(shape.owner, shape.name);
         if (!previewed.ok) return projectsScreen(response, who, previewed.message, 400);
         const reparsed = parseGithubRepo(previewed.preview.nameWithOwner);
         if (!reparsed.ok) return projectsScreen(response, who, "GitHub named a repository shape this console refuses", 400);
+        // The hook boundary is NORMALIZED like the real preview would be
+        // (verification finding 2): a size that is not a nonnegative finite
+        // number is unknown, and unknown is LARGE.
+        const diskUsageKib =
+          typeof previewed.preview.diskUsageKib === "number" && Number.isFinite(previewed.preview.diskUsageKib) && previewed.preview.diskUsageKib >= 0
+            ? previewed.preview.diskUsageKib
+            : null;
         const target = join(root, reparsed.name);
         if (dirname(target) !== root) return projectsScreen(response, who, "the target escaped its root — refused", 400);
         // The session-held record (finding 14): swept at mint, capped 3.
@@ -2835,8 +2886,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           nameWithOwner: previewed.preview.nameWithOwner,
           rootIndex,
           target,
-          diskUsageKib: previewed.preview.diskUsageKib,
-          large: isLargeRepo(previewed.preview),
+          diskUsageKib,
+          large: isLargeRepo({ ...previewed.preview, diskUsageKib }),
           mintedAt: Date.now(),
         });
         return projectsScreen(response, who, null, 200);
@@ -2872,11 +2923,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       if (dirname(record.target) !== root) return projectsScreen(response, who, "the configured roots changed — preview again", 400);
 
-      const cloned = await cloneGithubRepo(record.nameWithOwner, root, async (cwd: string) => {
+      const cloned = await (options.ghClone ?? cloneGithubRepo)(record.nameWithOwner, root, async (cwd: string) => {
         const answer = await execRun("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 15_000 });
         return { code: answer.code, stdout: answer.stdout };
       });
       if (!cloned.ok) return projectsScreen(response, who, cloned.message, 400);
+      // The clone answer is BOUND to the record's exact target (verification
+      // finding 2): whatever produced it — the real primitive or a test
+      // hook — an answer naming any other path never enrolls or opens.
+      if (cloned.target !== record.target) {
+        return projectsScreen(response, who, "the clone answered with a different path than the preview promised — refused; nothing was enrolled", 400);
+      }
       // authorizedProject AFTER the repository exists (finding 20).
       const proved = await authorizedProject(ceiling, cloned.target);
       const admitted = proved ? (canonicalProject(cloned.target) ?? cloned.target) : null;
@@ -3196,6 +3253,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const name = (body.get("name") ?? "").trim();
       const ceilingGiven = (body.get("ceiling") ?? "").trim();
+      // Root mode proves the CURRENT project exactly (repo onboarding,
+      // finding 24): canonicalize, authorize, and pass [canonical] as the
+      // admitted list — the same discipline as task filing, so a routine
+      // can land in a fresh clone too.
+      const routineRootMode = !unscopedMode && ceiling.roots.length > 0;
+      let routineRepo = project;
+      let routineAdmitted: string[] | null = unscopedMode ? null : admissionList() ?? [];
+      if (routineRootMode) {
+        const canonical = (await authorizedProject(ceiling, project)) ? canonicalProject(project) : null;
+        if (canonical === null || canonical === undefined) {
+          return refuse(response, who, 403, "the open project is outside what this server was configured to show", "/routines");
+        }
+        routineRepo = canonical;
+        routineAdmitted = [canonical];
+      }
       // One filing door for every surface (Codex adoption review, finding
       // 7): the service validates, canonicalizes, digests, and stamps
       // provenance; the admission list makes the ceiling explicit even
@@ -3204,7 +3276,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         store,
         {
           name,
-          repo: project,
+          repo: routineRepo,
           goal: (body.get("goal") ?? "").trim(),
           outOfScope: (body.get("not") ?? "").trim() || null,
           touches: (body.get("touches") ?? "").split(/[\n,]/).map(one => one.trim()).filter(one => one !== ""),
@@ -3212,10 +3284,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           schedule: (body.get("schedule") ?? "").trim(),
           costCeilingUsd: ceilingGiven === "" ? null : Number(ceilingGiven),
           filedVia: "console",
-          ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
+          ...(routineAdmitted === null ? {} : { admittedRepos: routineAdmitted }),
         },
         now,
       );
+      if (created.ok && routineRootMode) store.upsertProject(routineRepo, projectName(routineRepo), now);
       if (!created.ok) {
         const tracks = store.routineTracks(project, now).filter(track => visible(track.routine.repo));
         return sendScreen(response, created.reason === "duplicate" ? 409 : 400, routinesPage(chromeFor(project, "routines"), tracks, {
@@ -6151,7 +6224,9 @@ function tasksPage(
       : `<p class="meta">pre-filled from a template — edit anything; it files UNAPPROVED like every task</p>`,
     `<label>id<input type="text" name="id" placeholder="fix-payout-guard"></label>`,
     `<label>title<input type="text" name="title" value="${prefill === null ? "" : escape(prefill.title)}"></label>`,
-    `<label>repo <span class="meta">(optional)</span><input type="text" name="repo"></label>`,
+    repo === null
+      ? `<label>repo <span class="meta">(required — no project is open, so the task must say where it belongs)</span><input type="text" name="repo" required></label>`
+      : `<label>repo <span class="meta">(optional — empty files into the open project)</span><input type="text" name="repo"></label>`,
     `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
     `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
     `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
@@ -6909,6 +6984,11 @@ function newTaskPage(
     `<form method="post" action="/tasks/add" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="projectRevision" value="${projectRevision}">`,
+    // No project open: the placement must be said (verification finding 1 —
+    // the server refuses an empty one, this field is how you answer it).
+    project === null
+      ? `<label>repo <span class="meta">(required — no project is open, so the task must say where it belongs)</span><input type="text" name="repo" required></label>`
+      : "",
     `<label>title<input type="text" name="title" placeholder="Add a sliding-window rate limiter to the public API"></label>`,
     `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
       `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,

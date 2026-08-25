@@ -15,10 +15,12 @@ import { existsSync, lstatSync, realpathSync, unlinkSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
+import { configPath, loadRepos, addRepos, removeRepos, updateRepos } from "./repos.js";
 import { CAPABILITIES, ENVELOPE_VERSION, capturedEnvelope, envelopeJson, onEnvelopeCaptured, resetCapturedEnvelope } from "./envelope.js";
 import { applyInstall, contextBlock, planInstall } from "./skills.js";
 import { GUIDES, guideNamed } from "./guides.js";
+import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, isLargeRepo } from "./onboard.js";
+import { run as execRun } from "./exec.js";
 import { COMMAND_GUIDE, SURFACE_NOTES, SURFACE_SCHEMA_VERSION } from "./surface.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
@@ -78,6 +80,8 @@ Usage
   standing-orders repos            list connected repositories, and how to adjust
   standing-orders repos add <path> connect one (no path: the repo you are in)
   standing-orders repos remove <path>
+  standing-orders repos add-from-github <owner/name> --root <dir>
+                                   preview, then clone and connect (--yes)
   standing-orders link             put \`standing-orders\` on your PATH
   standing-orders unlink           take it off again
   standing-orders contract         the machine contract: envelope version + capabilities
@@ -194,7 +198,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
  * exact sets instead of regex-reading source. "" is the no-verb report,
  * which answers as `scan`. */
 export const TOP_LEVEL_COMMANDS: readonly string[] = [
-  "", "pulls", "graph", "repos", "repos add", "repos remove",
+  "", "pulls", "graph", "repos", "repos add", "repos remove", "repos add-from-github",
   "link", "unlink", "contract", "skills list", "skills get", "skills install", "demo",
 ];
 
@@ -237,7 +241,14 @@ export const OPERATE_COMMANDS = new Set([
 ]);
 
 /** binSource exists so tests can exercise linking without depending on a build. */
-export type MainOptions = { binSource?: string; operate?: OperateOptions };
+export type MainOptions = {
+  binSource?: string;
+  operate?: OperateOptions;
+  /** Injected by tests: the gh-facing halves of `repos add-from-github` —
+   * the verb's parsing, gating, and enrollment are what CLI tests prove;
+   * gh itself is proved by onboard.test.ts. */
+  onboard?: { preview?: typeof previewGithubRepo; clone?: typeof cloneGithubRepo };
+};
 
 /**
  * Strip `-o <file>` / `--output <file>` before dispatch. The flag belongs to
@@ -371,7 +382,7 @@ async function dispatch(
   if (first === "contract") return runContractCommand(rest, write);
   if (first === "demo") return runDemoCommand(rest, write);
   if (first === "skills") return runSkillsCommand(rest, write);
-  if (first === "repos") return runReposCommand(rest, write);
+  if (first === "repos") return runReposCommand(rest, write, mainOptions.onboard);
   if (first === "pulls") return runPullsCommand(rest, write);
   if (first === "graph") return runGraphCommand(rest, write);
   if (first !== undefined && OPERATE_COMMANDS.has(first)) {
@@ -548,13 +559,20 @@ function renderMissingJson(roots: readonly string[], missingRoots: readonly stri
  * it, so the way to adjust the list is visible at the moment you are looking
  * at it — rather than being something you have to remember a flag for.
  */
-async function runReposCommand(argv: readonly string[], write: Write): Promise<number> {
+async function runReposCommand(argv: readonly string[], write: Write, onboard?: MainOptions["onboard"]): Promise<number> {
   // `repos` honors the machine contract like everything else (audit TG-3):
   // --json answers with one envelope, whatever the outcome.
   const json = argv.includes("--json");
   const bare = argv.filter(argument => argument !== "--json");
   const [action, ...paths] = bare;
   const file = configFile();
+  // Dispatched BEFORE the registry load (verification finding 3): a
+  // malformed registry must not mask this command's own parsing, its
+  // read-only preview, or its taxonomy — enrollment reads the registry
+  // through the locked primitive at the moment it writes.
+  if (action === "add-from-github") {
+    return addFromGithubCommand(bare.slice(1), json, file, write, onboard);
+  }
   const loaded = await loadRepos(file);
   if ("error" in loaded) {
     write(json ? envelopeJson({ ok: false, command: "repos", reason: "unreadable", message: loaded.error }) : loaded.error);
@@ -569,7 +587,7 @@ async function runReposCommand(argv: readonly string[], write: Write): Promise<n
     return listRepos(loaded.repos, file, write);
   }
   if (action !== "add" && action !== "remove") {
-    const message = `unknown command \`repos ${action}\` — try \`repos\`, \`repos add\`, or \`repos remove\``;
+    const message = `unknown command \`repos ${action}\` — try \`repos\`, \`repos add\`, \`repos remove\`, or \`repos add-from-github <owner/name>\``;
     write(json ? envelopeJson({ ok: false, command: "repos", reason: "usage", message }) : message);
     return USAGE_EXIT;
   }
@@ -578,15 +596,16 @@ async function runReposCommand(argv: readonly string[], write: Write): Promise<n
   const targets = (paths.length > 0 ? paths : [process.cwd()]).map(path => resolve(path));
   if (json) {
     const lines: string[] = [];
+    const said: { reason?: string } = {};
     const code =
       action === "add"
-        ? await addToRepos(loaded.repos, targets, file, line => lines.push(line))
-        : await removeFromRepos(loaded.repos, targets, file, line => lines.push(line));
+        ? await addToRepos(loaded.repos, targets, file, line => lines.push(line), said)
+        : await removeFromRepos(loaded.repos, targets, file, line => lines.push(line), said);
     write(
       envelopeJson({
         ok: code === 0,
         command: `repos ${action}`,
-        ...(code === 0 ? {} : { reason: "usage" }),
+        ...(code === 0 ? {} : { reason: said.reason ?? "usage" }),
         message: lines.join(" "),
         targets,
       }),
@@ -613,6 +632,7 @@ function listRepos(repos: readonly string[], file: string, write: Write): number
   write("");
   write("  standing-orders repos add <path>      connect another");
   write("  standing-orders repos remove <path>   disconnect one");
+  write("  standing-orders repos add-from-github <owner/name> --root <dir>   clone from GitHub and connect");
   write("  standing-orders --all                 report everything, ignoring this list");
   write(`  ${file}`);
   return 0;
@@ -623,17 +643,26 @@ async function addToRepos(
   targets: readonly string[],
   file: string,
   write: Write,
+  said?: { reason?: string },
 ): Promise<number> {
   // Enrolling something that is not a repository would fail later and further
   // away, so it fails here instead.
   const rejected = targets.filter(path => !existsSync(join(path, ".git")));
   if (rejected.length > 0) {
     for (const path of rejected) write(`${path} is not a git repository.`);
+    if (said !== undefined) said.reason = "usage";
     return USAGE_EXIT;
   }
 
   const added = targets.filter(path => !existing.includes(path));
-  await saveRepos(file, addRepos(existing, targets));
+  const wrote = await updateRepos(file, repos => addRepos(repos, targets));
+  if (!wrote.ok) {
+    // The updater's own taxonomy survives (verification finding 4): a held
+    // lock or a malformed registry is an operational fact, never "usage".
+    if (said !== undefined) said.reason = wrote.reason;
+    write(`could not update the connected list — ${wrote.message}`);
+    return 1;
+  }
 
   if (added.length === 0) {
     write(`Already connected: ${targets.join(", ")}`);
@@ -650,6 +679,7 @@ async function removeFromRepos(
   targets: readonly string[],
   file: string,
   write: Write,
+  said?: { reason?: string },
 ): Promise<number> {
   const removed = targets.filter(path => existing.includes(path));
   if (removed.length === 0) {
@@ -657,8 +687,121 @@ async function removeFromRepos(
     return 0;
   }
 
-  await saveRepos(file, removeRepos(existing, targets));
+  const wrote = await updateRepos(file, repos => removeRepos(repos, targets));
+  if (!wrote.ok) {
+    if (said !== undefined) said.reason = wrote.reason;
+    write(`could not update the connected list — ${wrote.message}`);
+    return 1;
+  }
   for (const path of removed) write(`Disconnected ${path}`);
+  return 0;
+}
+
+/**
+ * `repos add-from-github <owner/name>` — the console onboarding ceremony's
+ * CLI twin (onboarding rounds 1-4; named in the ledger as the companion):
+ * strict parse, gh preview BEFORE any write, the same large-repo gate, the
+ * claim-first clone, and enrollment through the ONE locked registry
+ * primitive. Preview by default; --yes clones. Windows refuses like the
+ * console does — tree death cannot be proven there.
+ */
+async function addFromGithubCommand(argv: readonly string[], json: boolean, file: string, write: Write, onboard?: MainOptions["onboard"]): Promise<number> {
+  const command = "repos add-from-github";
+  const answer = (reason: string, message: string, code: number, extra: Record<string, unknown> = {}): number => {
+    write(json ? envelopeJson({ ok: false, command, reason, message, ...extra }) : message);
+    return code;
+  };
+  const usage = "`standing-orders repos add-from-github <owner/name | github.com link> --root <dir> [--large-ok] [--yes] [--json]`";
+  let spec: string | undefined;
+  let rootGiven: string | undefined;
+  let yes = false;
+  let largeOk = false;
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index] as string;
+    if (!argument.startsWith("-")) {
+      if (spec !== undefined) return answer("usage", "one repository at a time", USAGE_EXIT);
+      spec = argument;
+      continue;
+    }
+    if (argument === "--yes") { yes = true; continue; }
+    if (argument === "--large-ok") { largeOk = true; continue; }
+    if (argument === "--root") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return answer("usage", "--root needs a directory", USAGE_EXIT);
+      rootGiven = value;
+      index += 1;
+      continue;
+    }
+    if (argument === "-h" || argument === "--help") return answer("usage", usage, USAGE_EXIT);
+    return answer("usage", `unknown option ${argument} for \`repos add-from-github\``, USAGE_EXIT);
+  }
+  if (spec === undefined) return answer("usage", usage, USAGE_EXIT);
+  const shape = parseGithubRepo(spec);
+  if (!shape.ok) return answer("usage", shape.problem, USAGE_EXIT);
+  if (rootGiven === undefined) return answer("usage", "--root <dir> names where the clone lands (an existing directory)", USAGE_EXIT);
+  let root: string;
+  try {
+    root = realpathSync(resolve(rootGiven));
+  } catch {
+    return answer("usage", `--root ${rootGiven} does not exist`, USAGE_EXIT);
+  }
+  if (!lstatSync(root).isDirectory()) return answer("usage", `--root ${rootGiven} is not a directory`, USAGE_EXIT);
+  // The platform refusal comes AFTER the invocation is proved well-formed
+  // (verification finding 3): a Windows user still learns their typo first.
+  if (process.platform === "win32") {
+    return answer("platform", "adding from GitHub is not supported on Windows yet — the clone's process tree cannot be proven dead there", 1);
+  }
+
+  const previewed = await (onboard?.preview ?? previewGithubRepo)(shape.owner, shape.name);
+  if (!previewed.ok) return answer(previewed.reason, previewed.message, 1);
+  const reparsed = parseGithubRepo(previewed.preview.nameWithOwner);
+  if (!reparsed.ok) return answer("malformed", "GitHub named a repository shape this command refuses — nothing was written", 1);
+  const target = join(root, reparsed.name);
+  if (dirname(target) !== root) return answer("usage", "the target escaped its root — refused; nothing was written", USAGE_EXIT);
+  const diskUsageKib =
+    typeof previewed.preview.diskUsageKib === "number" && Number.isFinite(previewed.preview.diskUsageKib) && previewed.preview.diskUsageKib >= 0
+      ? previewed.preview.diskUsageKib
+      : null;
+  const large = isLargeRepo({ ...previewed.preview, diskUsageKib });
+  const size = diskUsageKib === null ? "size unknown" : `${Math.max(1, Math.round(diskUsageKib / 1024))} MiB`;
+
+  if (!yes) {
+    if (json) {
+      write(envelopeJson({
+        ok: false, command, reason: "unconfirmed",
+        preview: { nameWithOwner: previewed.preview.nameWithOwner, visibility: previewed.preview.visibility, diskUsageKib, large, target },
+      }));
+      return 3;
+    }
+    write("Would clone, exactly:");
+    write(`  ${previewed.preview.nameWithOwner}  (${previewed.preview.visibility} · ${size}${large ? " — LARGE or unknown; --large-ok will be required" : ""})`);
+    write(`  into ${target}, then connect it`);
+    write("");
+    write("Nothing was written. Re-run with --yes to apply.");
+    return 3;
+  }
+  if (large && !largeOk) {
+    return answer("large", `${previewed.preview.nameWithOwner} is large or of unknown size (${size}) — add --large-ok to clone it anyway; nothing was written`, 3);
+  }
+
+  const cloned = await (onboard?.clone ?? cloneGithubRepo)(previewed.preview.nameWithOwner, root, async (cwd: string) => {
+    const proof = await execRun("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 15_000 });
+    return { code: proof.code, stdout: proof.stdout };
+  });
+  if (!cloned.ok) return answer(cloned.reason, cloned.message, 1);
+  if (cloned.target !== target) {
+    return answer("malformed", "the clone answered with a different path than the preview promised — refused; nothing was connected", 1);
+  }
+  const enrolled = await updateRepos(file, repos => addRepos(repos, [cloned.target]));
+  if (!enrolled.ok) {
+    return answer(enrolled.reason, `${cloned.target} is cloned but not connected — ${enrolled.message}; connect it with \`repos add ${cloned.target}\``, 1);
+  }
+  if (json) {
+    write(envelopeJson({ ok: true, command, target: cloned.target, nameWithOwner: previewed.preview.nameWithOwner }));
+    return 0;
+  }
+  write(`Cloned ${previewed.preview.nameWithOwner} into ${cloned.target} and connected it.`);
+  write("Large-file objects were not downloaded — run `git lfs pull` in the repository when you need them.");
   return 0;
 }
 

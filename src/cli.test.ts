@@ -384,3 +384,115 @@ describe("the unified report envelope", () => {
     expect(parsed.options.all).toBe(false);
   });
 });
+
+describe("repos add-from-github — the refusals that need no network", () => {
+  let lines: string[] = [];
+  const write = (line: string) => lines.push(line);
+  const out = () => lines.join("\n");
+
+  test("strict parsing: bad shapes, missing root, unknown flags, extra positionals", async () => {
+    const { main } = await import("./cli.js");
+    lines = [];
+    expect(await main(["repos", "add-from-github"], write)).toBe(2);
+    lines = [];
+    expect(await main(["repos", "add-from-github", "bad name", "--root", "/tmp"], write)).toBe(2);
+    expect(out()).toContain("owner/name");
+    lines = [];
+    expect(await main(["repos", "add-from-github", "a/b"], write)).toBe(2);
+    expect(out()).toContain("--root");
+    lines = [];
+    expect(await main(["repos", "add-from-github", "a/b", "--root", "/definitely/not/here-xyz"], write)).toBe(2);
+    lines = [];
+    expect(await main(["repos", "add-from-github", "a/b", "c/d", "--root", "/tmp"], write)).toBe(2);
+    expect(out()).toContain("one repository at a time");
+    lines = [];
+    expect(await main(["repos", "add-from-github", "a/b", "--frobnicate"], write)).toBe(2);
+    expect(out()).toContain("--frobnicate");
+    lines = [];
+    expect(await main(["repos", "add-from-github", "a/b", "--root", "/tmp", "--json", "--frobnicate"], write)).toBe(2);
+    const body = JSON.parse(out()) as { ok: boolean; reason: string };
+    expect(body).toMatchObject({ ok: false, reason: "usage" });
+  });
+});
+
+
+describe("repos add-from-github — behavior through injected gh halves", () => {
+  let lines: string[] = [];
+  const write = (line: string) => lines.push(line);
+  const out = () => lines.join("\n");
+
+  const preview = (kib: number | null) => async (owner: string, name: string) => ({
+    ok: true as const,
+    preview: { nameWithOwner: `${owner}/${name}`, visibility: "public", diskUsageKib: kib, description: "" },
+  });
+  const cloneInto = async (nameWithOwner: string, root: string) => {
+    const { mkdirSync } = await import("node:fs");
+    const target = join(root, nameWithOwner.split("/")[1] as string);
+    mkdirSync(join(target, ".git"), { recursive: true });
+    return { ok: true as const, target };
+  };
+
+  test("preview is exit 3 with the shape, large gates on --large-ok, --yes clones and connects through the locked registry", async () => {
+    const { main } = await import("./cli.js");
+    const { mkdtempSync, rmSync, realpathSync, readFileSync, writeFileSync, existsSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const home = mkdtempSync(join(tmpdir(), "so-afg-home-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "so-afg-root-")));
+    const env = process.env["XDG_CONFIG_HOME"];
+    process.env["XDG_CONFIG_HOME"] = home;
+    const registry = join(home, "standing-orders", "repos.json");
+    try {
+      const onboard = { preview: preview(512), clone: cloneInto };
+      // preview: exit 3, nothing written
+      lines = [];
+      expect(await main(["repos", "add-from-github", "o/thing", "--root", root, "--json"], write, { onboard })).toBe(3);
+      expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "unconfirmed", preview: { nameWithOwner: "o/thing", large: false } });
+      expect(existsSync(join(root, "thing"))).toBe(false);
+
+      // large (unknown size) gates until --large-ok
+      lines = [];
+      expect(await main(["repos", "add-from-github", "o/huge", "--root", root, "--yes", "--json"], write, { onboard: { preview: preview(null), clone: cloneInto } })).toBe(3);
+      expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "large" });
+
+      // --yes clones and connects
+      lines = [];
+      expect(await main(["repos", "add-from-github", "o/thing", "--root", root, "--yes", "--json"], write, { onboard })).toBe(0);
+      expect(JSON.parse(out())).toMatchObject({ ok: true, target: join(root, "thing") });
+      expect(readFileSync(registry, "utf8")).toContain("thing");
+
+      // a live lock refuses with the updater's own reason, never "usage"
+      writeFileSync(`${registry}.lock`, JSON.stringify({ pid: process.pid, token: "x", at: Date.now() }));
+      lines = [];
+      expect(await main(["repos", "add-from-github", "o/thing2", "--root", root, "--yes", "--json"], write, { onboard: { preview: preview(1), clone: cloneInto } })).toBe(1);
+      expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "locked" });
+    } finally {
+      if (env === undefined) delete process.env["XDG_CONFIG_HOME"];
+      else process.env["XDG_CONFIG_HOME"] = env;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a clone answering with a foreign path never connects", async () => {
+    const { main } = await import("./cli.js");
+    const { mkdtempSync, rmSync, realpathSync, existsSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const home = mkdtempSync(join(tmpdir(), "so-afg-home2-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "so-afg-root2-")));
+    const env = process.env["XDG_CONFIG_HOME"];
+    process.env["XDG_CONFIG_HOME"] = home;
+    const registry = join(home, "standing-orders", "repos.json");
+    try {
+      const liar = async () => ({ ok: true as const, target: "/somewhere/else" });
+      lines = [];
+      expect(await main(["repos", "add-from-github", "o/thing", "--root", root, "--yes", "--json"], write, { onboard: { preview: preview(1), clone: liar } })).toBe(1);
+      expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "malformed" });
+      expect(existsSync(registry)).toBe(false);
+    } finally {
+      if (env === undefined) delete process.env["XDG_CONFIG_HOME"];
+      else process.env["XDG_CONFIG_HOME"] = env;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

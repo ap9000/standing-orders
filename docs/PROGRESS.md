@@ -1,5 +1,36 @@
 # Progress
 
+**2026-08-24 — the onboarding follow-ups, closed: a clone can receive its
+first task, the CLI grew the ceremony's twin, and the ceremony is proved
+over HTTP.** The three items the repo-onboarding review left named (its
+findings 15/24/35 and the companion verb), implemented and then verified
+by one more Codex pass (findings 1–5, all closed). Placement: /tasks/add
+now computes the EFFECTIVE home — the trimmed posted repo, else the open
+project — and in root mode proves exactly that path with
+authorizedProject, admits exactly [canonical], and upserts it into the
+projects on success, so a freshly cloned repository can receive its
+first task without appearing in any table first; /routines/add proves
+the open project the same way. The verification pass caught the guard's
+shadow: an EMPTY placement on a scoped console now refuses server-side
+(a form's `required` is a courtesy, not the guard), the no-project
+filing form says the rule in words, and unscoped consoles keep their
+historic unplaced filings. `repos add-from-github <owner/name> --root
+<dir>`: the console ceremony as a CLI verb — strict dedicated parsing
+dispatched BEFORE the registry load (a malformed registry cannot mask a
+typo or block a read-only preview), preview by default with exit 3,
+the same large-or-unknown gate behind --large-ok, the claim-first
+clone, enrollment through the locked updateRepos — and the plain CLI
+`repos add/remove` writers were converted to that same locked
+primitive, keeping the updater's own failure taxonomy (a held lock is
+`locked`, never "usage"). Both the console and the CLI now BIND the
+clone answer to the exact promised target and normalize hook-supplied
+sizes, so the new test hooks (ServeOptions.ghPreview/ghClone,
+MainOptions.onboard) cannot bypass a gate the real path enforces. The
+ceremony finally has HTTP proofs: card gating in both modes, preview →
+password → clone → enroll → open with a real git repository, wrong
+passwords, spent-nonce replays, the large checkbox, and the placement
+matrix across root, repo-list, and unscoped consoles. Suite: 1176.
+
 **2026-08-24 — arc 6, review niceties: files that open in your editor, a
 review flow without friction, a tournament you can compare at a glance.**
 One Codex round (APPROVE WITH CHANGES, findings 1–8), all implemented —

@@ -4472,3 +4472,322 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
     }
   });
 });
+
+
+describe("the onboarding ceremony over real HTTP, and root-mode placement proofs", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+  let root: string;
+  const T0 = new Date("2026-08-14T12:00:00.000Z");
+
+  const url = (path: string) => `${base}${path}`;
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+  const csrfFrom = async (cookie: string): Promise<string> => {
+    const html = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+    return /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+  };
+
+  const boot = async (options: Record<string, unknown>) => {
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), ...options });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  /** A ghClone stand-in that actually creates a real git repository at the
+   * claimed target — authorizedProject's proof runs REAL git afterwards. */
+  const fakeClone = async (nameWithOwner: string, intoRoot: string) => {
+    const { execSync } = await import("node:child_process");
+    const name = nameWithOwner.split("/")[1] as string;
+    const target = join(intoRoot, name);
+    mkdirSync(target);
+    execSync("git init -q", { cwd: target });
+    return { ok: true as const, target };
+  };
+  const fakePreview = async (owner: string, name: string) => ({
+    ok: true as const,
+    preview: { nameWithOwner: `${owner}/${name}`, visibility: "public", diskUsageKib: 512, description: "a test repo" },
+  });
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-onb-ev-"));
+    root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-onb-root-")));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("the card gates on roots: absent ceremony refuses in words; present, the whole flow works once", async () => {
+    await boot({ repos: ["/repo/elsewhere"] });
+    const cookie = await login();
+    // repo-list console: the ceremony refuses with the configuration named
+    const csrf = await csrfFrom(cookie);
+    const refused = await fetch(url("/projects/onboard-preview"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, repo: "ap9000/thing", root: "0" }),
+      redirect: "manual",
+    });
+    expect(await refused.text()).toContain("--project-root");
+  });
+
+  test("preview mints a single-use record; confirm takes the password, clones, enrolls, opens; replay refuses", async () => {
+    const registry = join(root, "repos.json");
+    await boot({ projectRoots: [root], registryPath: registry, ghPreview: fakePreview, ghClone: fakeClone });
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    const previewed = await fetch(url("/projects/onboard-preview"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, repo: "ap9000/fresh-thing", root: "0" }),
+      redirect: "manual",
+    });
+    const page = await previewed.text();
+    expect(page).toContain("ap9000/fresh-thing");
+    const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(page)?.[1] as string;
+    expect(nonce).toBeTruthy();
+
+    // wrong password refuses, record survives
+    const badPw = await fetch(url("/projects/onboard-confirm"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, nonce, token: "wrong" }),
+      redirect: "manual",
+    });
+    expect(await badPw.text()).toContain("password");
+
+    const confirmed = await fetch(url("/projects/onboard-confirm"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, nonce, token: approverToken }),
+      redirect: "manual",
+    });
+    const done = await confirmed.text();
+    expect(done).toContain("is ready");
+    // cloned for real, enrolled for real, opened for real
+    expect(existsSync(join(root, "fresh-thing", ".git"))).toBe(true);
+    expect(readFileSync(registry, "utf8")).toContain("fresh-thing");
+    expect(store.listProjects().some(one => one.path.endsWith("fresh-thing"))).toBe(true);
+
+    // the nonce is spent — replaying it refuses
+    const replayed = await fetch(url("/projects/onboard-confirm"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, nonce, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(await replayed.text()).toContain("expired or was already used");
+  });
+
+  test("a large or unknown-size preview demands the checkbox at confirm", async () => {
+    const bigPreview = async (owner: string, name: string) => ({
+      ok: true as const,
+      preview: { nameWithOwner: `${owner}/${name}`, visibility: "public", diskUsageKib: null, description: "" },
+    });
+    await boot({ projectRoots: [root], registryPath: join(root, "repos.json"), ghPreview: bigPreview, ghClone: fakeClone });
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    const previewed = await (await fetch(url("/projects/onboard-preview"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, repo: "ap9000/huge", root: "0" }),
+      redirect: "manual",
+    })).text();
+    const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(previewed)?.[1] as string;
+    const withoutBox = await (await fetch(url("/projects/onboard-confirm"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, nonce, token: approverToken }),
+      redirect: "manual",
+    })).text();
+    expect(withoutBox).toContain("tick the box");
+    expect(existsSync(join(root, "huge"))).toBe(false);
+  });
+
+  test("root mode: a task files into a fresh repo under the root (findings 15/35), outside refuses, and the home joins the projects", async () => {
+    const { execSync } = await import("node:child_process");
+    const fresh = join(root, "fresh-clone");
+    mkdirSync(fresh);
+    execSync("git init -q", { cwd: fresh });
+    await boot({ projectRoots: [root] });
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    // NOT admitted anywhere yet — exactly the gap the finding names
+    expect(store.knownRepos()).not.toContain(realpathSync(fresh));
+    expect(store.listProjects().some(one => one.path === realpathSync(fresh))).toBe(false);
+    const filed = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, id: "first-task", title: "first work in the clone", repo: fresh }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    expect(store.getTask("first-task")).not.toBeNull();
+    expect(store.knownRepos()).toContain(realpathSync(fresh));
+    expect(store.listProjects().some(one => one.path === realpathSync(fresh))).toBe(true);
+
+    // outside the root: refused with the ceiling named
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-outside-")));
+    try {
+      execSync("git init -q", { cwd: outside });
+      const refused = await fetch(url("/tasks/add"), {
+        method: "POST",
+        headers: { cookie, origin: base },
+        body: new URLSearchParams({ csrf, id: "smuggled", title: "outside work", repo: outside }),
+        redirect: "manual",
+      });
+      expect(await refused.text()).toContain("outside what this server was configured to show");
+      expect(store.getTask("smuggled")).toBeNull();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+
+  test("the card itself gates: disabled with words on a repo-list console, a live form under roots", async () => {
+    await boot({ repos: ["/repo/elsewhere"] });
+    const cookie = await login();
+    const listMode = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+    expect(listMode).toContain("--project-root");
+    expect(listMode).not.toContain('action="/projects/onboard-preview"');
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    store = openStore(":memory:");
+    const again = addApprover(store, "alex", T0);
+    if (!again.ok) throw new Error("bootstrap failed");
+    approverToken = again.token;
+    await boot({ projectRoots: [root] });
+    const cookie2 = await login();
+    const rootMode = await (await fetch(url("/projects"), { headers: { cookie: cookie2 } })).text();
+    expect(rootMode).toContain('action="/projects/onboard-preview"');
+  });
+
+  test("placement across the modes: blank falls into the open project; scoped-no-project refuses; unscoped keeps unplaced", async () => {
+    const { execSync } = await import("node:child_process");
+    const home = join(root, "home-repo");
+    mkdirSync(home);
+    execSync("git init -q", { cwd: home });
+    await boot({ projectRoots: [root] });
+    const cookie = await login();
+    let csrf = await csrfFrom(cookie);
+
+    // scoped console, NO project open, blank repo: refused server-side —
+    // the form's `required` is a courtesy, not the guard (finding 1)
+    const blankRefused = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, id: "unplaced-smuggle", title: "no home" }),
+      redirect: "manual",
+    });
+    expect(await blankRefused.text()).toContain("no project is open");
+    expect(store.getTask("unplaced-smuggle")).toBeNull();
+
+    // open the project: a BLANK repo now falls into it
+    await fetch(url("/projects/open"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, path: home }),
+      redirect: "manual",
+    });
+    csrf = await csrfFrom(cookie);
+    const filed = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, id: "fell-home", title: "blank falls into the open project" }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    expect(store.lookupRef("fell-home")?.repo).toBe(realpathSync(home));
+  });
+
+  test("repo-list mode still admits by the list: a listed repo files, an unlisted one refuses", async () => {
+    await boot({ repos: ["/repo/listed"] });
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    const listed = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, id: "in-list", title: "listed work", repo: "/repo/listed" }),
+      redirect: "manual",
+    });
+    expect(listed.status).toBe(303);
+    const unlisted = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, id: "off-list", title: "unlisted work", repo: "/repo/other" }),
+      redirect: "manual",
+    });
+    expect(unlisted.status).not.toBe(303);
+    expect(store.getTask("off-list")).toBeNull();
+  });
+
+  test("unscoped mode keeps its historic unplaced filings", async () => {
+    await boot({});
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+    const filed = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, id: "free-floating", title: "unplaced by design" }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    expect(store.lookupRef("free-floating")?.repo).toBeNull();
+    // where a no-project filing form DOES render, the field says the rule
+    const form = await (await fetch(url("/tasks/new"), { headers: { cookie } })).text();
+    expect(form).toContain("no project is open, so the task must say where it belongs");
+  });
+
+  test("root mode: a routine files into the open project through the same proof (finding 24)", async () => {
+    const { execSync } = await import("node:child_process");
+    const home = join(root, "routine-home");
+    mkdirSync(home);
+    execSync("git init -q", { cwd: home });
+    await boot({ projectRoots: [root] });
+    const cookie = await login();
+    let csrf = await csrfFrom(cookie);
+    // open the fresh repo as the project first
+    await fetch(url("/projects/open"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, path: home }),
+      redirect: "manual",
+    });
+    const routinesPageHtml = await (await fetch(url("/routines"), { headers: { cookie } })).text();
+    csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(routinesPageHtml)?.[1] as string;
+    const revision = /name="projectRevision" value="([0-9]+)"/.exec(routinesPageHtml)?.[1] ?? "0";
+    const filed = await fetch(url("/routines/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({
+        csrf, name: "nightly-check", goal: "look things over", schedule: "daily:03:00",
+        projectRevision: revision,
+      }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    const routines = store.listRoutines(null);
+    expect(routines.some(one => one.name === "nightly-check" && one.repo === realpathSync(home))).toBe(true);
+  });
+});

@@ -95,6 +95,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   { invocation: "repos", synopsis: "list connected repositories", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
   operator("repos add", "connect a repository to the installation"),
   operator("repos remove", "disconnect a repository"),
+  operator("repos add-from-github", "preview, clone from GitHub, and connect - the console onboarding ceremony as a CLI verb"),
   { invocation: "contract", synopsis: "the machine contract: envelope version + capability tokens; --commands dumps this guide", audience: "agent", agentMayInvoke: true, mutation: "none",
     flags: [jsonFlag, { name: "commands", takesValue: false, meaning: "dump the declared command guide" }] },
   { invocation: "skills list", synopsis: "name the guides this exact binary serves", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
