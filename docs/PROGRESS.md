@@ -1,5 +1,47 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 2E.2: the conversation — a held session
+becomes a two-way channel.** The coordinator stops concluding at the
+first settled turn and CLASSIFIES it (v2 S1f): a terminal handoff
+concludes through the shared settlement; a park records the decision
+and the session STAYS HELD; an `error_max_budget_usd` result ends the
+hold typed; and a settled turn that left neither file is simply a
+pause — the session waits, watching. The mid-session park
+(`finalizeParkHeld` in claim.ts) preserves the payload as evidence and
+unlinks it exactly like the ordinary road, records and pages the
+decision WITHOUT ending anything — no lease release, no run outcome,
+no task-state change — and stamps `decision.session_turn`, the causal
+link the round-6 review demanded, with the one-unresolved-per-run
+partial unique refusing a second open question. Answers persisted from
+ANY surface reach the live session: the coordinator's pulse scans
+`undeliveredDecisionsOf` (an index-backed read), the beat and answer
+pokes trigger it immediately, and the injection rides the same
+delivery-CAS as everything else — exactly-once whatever raced, with
+`run_decision` attaching only at the turn's proven acceptance. A
+malformed park takes the HELD REPAIR road (round-6 finding 3): the
+repair prompt is a machine-authored ledger turn in the SAME session,
+correlated to the PRODUCING TURN (a malformed mailbox has no decision
+id to correlate by), bounded per source; exhaustion disposes through
+the shared malformed machinery — incident, hold, page — never a
+silent interruption. The operator's own voice ships with it: the run
+page grows a CONVERSATION card — every stdin injection as the ledger
+records it, machine turns labeled as machine, unconfirmed turns
+saying honestly that the agent may or may not have seen them — and a
+TURN BOX (POST /r/<id>/turn, cookie-only, 500 characters) whose every
+hard gate re-proves atomically inside the recording transaction; the
+route only maps refusal tokens to sentences ("answer the waiting
+question first", "the agent is still working on the last message").
+The per-turn wall deadline became a single re-armed timer — armed at
+every write, cleared at every settlement — so a conversation is
+bounded per exchange, not per session-lifetime. The whole loop is
+proven end-to-end by one test: brief → idle hold → operator turn →
+mid-session park with its causal link → free-form speech refused
+while the question waits → answer injected exactly-once → the handoff
+written on the answer turn concluding as a real `no-change` — three
+ledger rows, every injection accounted. Suite 1225. Remaining in 2E:
+continuation, state dots, the badge count, and the :4180 restart.
+
+
 **2026-08-26 — Parity II Phase 2E.1: the attended ceremony reaches the
 console — mint, beat, revoke, and the race exclusion made atomic.**
 The road shipped in 2A–2D gains its human end. A task with a filed,

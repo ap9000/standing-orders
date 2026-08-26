@@ -83,6 +83,7 @@ import {
   type Task,
   type TaskState,
   type WorktreeRow,
+  type SessionTurn,
 } from "./store.js";
 import { attendedLivenessState } from "./liveness.js";
 import {
@@ -1245,6 +1246,20 @@ export function createDecisionServer(options: ServeOptions): Server {
             ? { on: who.session.editorLinks === true }
             : null,
           url.searchParams.get("noted") === "1",
+          (() => {
+            const held = store.heldSessionOf(found.id);
+            if (held === null) return null;
+            const authorization = store.readAuthorization(held.authorizationId);
+            return {
+              turns: store.sessionTurnsOf(found.id),
+              open: held.endedAt === null && held.state === "open",
+              state:
+                authorization === null
+                  ? "session record"
+                  : attendedWatchWords(authorization.lastBeatAt, now, authorization.absoluteExpiry),
+              cap: authorization?.maxSessionTurns ?? 0,
+            };
+          })(),
         ),
       );
     }
@@ -3456,6 +3471,41 @@ export function createDecisionServer(options: ServeOptions): Server {
       who.session.editorLinks = body.get("on") === "1";
       const back = body.get("return") ?? "/";
       return redirect(response, /^\/[a-z0-9/_-]*$/i.test(back) ? back : "/");
+    }
+
+    const turnAct = /^\/r\/([0-9]{1,15})\/turn$/.exec(url.pathname);
+    if (turnAct !== null) {
+      // The operator's turn (Phase 2E, v2 S1g): cookie-only — a watching
+      // person, never a bearer machine — and every hard gate (custody,
+      // lease, cap, budget, open decision, single flight) re-proves
+      // ATOMICALLY inside the recording transaction. Words here only map
+      // the refusal tokens to sentences.
+      if (who.via !== "cookie") return refuse(response, who, 403, "turns are a browser session's act");
+      const id = Number(turnAct[1]);
+      const found = store.getRun(id);
+      if (found === null || !visible(taskRepoOf(found.taskRef))) {
+        return refuse(response, who, 404, "no such run");
+      }
+      const text = (body.get("text") ?? "").trim();
+      if (text === "" || text.length > 500) {
+        return refuse(response, who, 400, "a turn is 1 to 500 characters", `/r/${id}`);
+      }
+      const coordinator = options.attended?.coordinator;
+      if (coordinator === undefined) return refuse(response, who, 409, "this console is not holding the session", `/r/${id}`);
+      const injected = coordinator.injectOperatorTurn(id, who.name, text);
+      if (!injected.ok) {
+        const words: Record<string, string> = {
+          "no-held-session": "the session is not held here anymore",
+          fenced: "the session is winding down — nothing more reaches it",
+          "turn-open": "the agent is still working on the last message — wait for it to settle",
+          "turn-cap": "the session's message cap is reached — authorize a new session for more",
+          "budget-exhausted": "the session's budget is spent",
+          "decision-open": "answer the waiting question first — it is on this page",
+          "write-failed": "the message could not reach the agent — it was not charged",
+        };
+        return refuse(response, who, 409, words[injected.reason] ?? injected.reason, `/r/${id}`);
+      }
+      return redirect(response, `/r/${id}`);
     }
 
     const revise = /^\/r\/([0-9]{1,15})\/revise$/.exec(url.pathname);
@@ -8312,8 +8362,50 @@ function runPage(
   editor: { worktree: string } | null = null,
   editorToggle: { on: boolean } | null = null,
   noted = false,
+  heldTurns: { turns: SessionTurn[]; open: boolean; state: string; cap: number } | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running);
+  // The conversation (Phase 2E, v2 S1g): every stdin injection as the
+  // ledger records it — author named for operator turns, machine turns
+  // say so — and the TURN BOX while the session is held. An unconfirmed
+  // turn says honestly that the agent may or may not have seen it.
+  const turnWords = (turn: SessionTurn): string =>
+    turn.state === "settled"
+      ? ""
+      : turn.state === "uncertain"
+        ? " · unconfirmed — the agent may or may not have seen this; its cost is counted at worst case"
+        : turn.state === "cancelled"
+          ? " · never reached the agent"
+          : " · the agent is working on this";
+  const conversation =
+    heldTurns === null
+      ? ""
+      : `<h2>conversation</h2>` +
+        (heldTurns.turns.length === 0
+          ? `<p class="meta">nothing said yet</p>`
+          : heldTurns.turns
+              .map(
+                turn =>
+                  `<p class="row"><span class="meta">${
+                    turn.sourceKind === "operator"
+                      ? escape(turn.author ?? "operator")
+                      : turn.sourceKind === "brief"
+                        ? "the brief"
+                        : turn.sourceKind === "answer"
+                          ? "your answer"
+                          : "repair (machine)"
+                  } · ${escape(when(turn.recordedAt))}${turnWords(turn)}</span> ${escape(oneLineOf(turn.text, 240))}</p>`,
+              )
+              .join("\n")) +
+        (heldTurns.open && csrf !== ""
+          ? `<form method="post" action="/r/${run.id}/turn" class="row">` +
+            `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+            `<input type="text" name="text" maxlength="500" placeholder="say something to the agent — it reads this as its next instruction, inside the approved scope" aria-label="turn" style="width:100%;max-width:34rem">` +
+            `<button type="submit">send</button></form>` +
+            `<p class="meta">${escape(heldTurns.state)} · ${heldTurns.turns.length}/${heldTurns.cap} messages · a waiting question must be answered before free-form messages</p>`
+          : heldTurns.open
+            ? ""
+            : `<p class="meta">the session has ended — the record above is complete</p>`);
   // The live peek region (A2): the poller fills it only on a serve that
   // asserted its runner. Without the assertion the section still appears
   // for a running build and says honestly why it is empty \u2014 a page that
@@ -8443,6 +8535,7 @@ function runPage(
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     `<div id="run-facts">${rows}</div>`,
     running ? `<p class="meta" id="run-facts-stamp"></p>` : "",
+    conversation,
     transcript,
     peek,
     terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
@@ -8846,4 +8939,10 @@ function attendedWatchWords(lastBeatAt: string | null, now: Date, absoluteExpiry
     Date.parse(absoluteExpiry),
   );
   return state === "live" ? "watching" : state === "grace" ? "watching (a beat behind)" : state === "expired" ? "expired" : "not watching — reopen this page to resume";
+}
+
+/** One display line, bounded — turn text is data, never layout. */
+function oneLineOf(text: string, cap: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= cap ? flat : `${flat.slice(0, cap - 1)}…`;
 }

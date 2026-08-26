@@ -29,7 +29,10 @@ import { disposeBuildOutcome, type DisposeContext, type Disposition } from "./di
 import { heldSocketPathProblem, startClaudeHeldSession, type HeldSessionHandle } from "./exec.js";
 import { invokeHeldAgent } from "./invoke.js";
 import { claudeHeldArgv } from "./provider.js";
-import { heartbeat, release } from "./claim.js";
+import { existsSync } from "node:fs";
+import { finalizeParkHeld, heartbeat, release } from "./claim.js";
+import { parseDecision, repairPrompt } from "./decision.js";
+import { captureParkEvidence, readMailbox, storeEvidence } from "./evidence.js";
 import { profileDigestOf } from "./scope.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
 import type { AgentOutcome } from "./invoke.js";
@@ -76,6 +79,8 @@ type Controller = {
   handle: HeldSessionHandle | null;
   timers: ReturnType<typeof setTimeout>[];
   intervals: ReturnType<typeof setInterval>[];
+  /** The per-turn wall deadline — armed at every write, cleared at settle. */
+  turnTimer: ReturnType<typeof setTimeout> | null;
   done: Promise<void>;
   finish: () => void;
 };
@@ -263,12 +268,80 @@ export class HeldSessionCoordinator {
     ]);
   }
 
-  /** The beat endpoint and revocation poke this directly (v2 S1d). */
+  /** The beat endpoint, answers, and revocation poke this directly (v2 S1d). */
   poke(runId: number): void {
-    // Lapse is re-checked on its own interval; the poke exists so a
-    // revocation acts within a beat, not a pulse.
     const controller = this.sessions.get(runId);
     if (controller === undefined) return;
+    const args = this.launches.get(runId);
+    if (args !== undefined) void this.injectPendingAnswers(args);
+  }
+
+  /**
+   * The operator's own turn (v2 S1g, ruling 12-as-accepted): session-grade
+   * speech, recorded through the SAME gated transaction every injection
+   * takes — cap, single-flight, budget, open-decision, lease — so every
+   * refusal is typed and atomic.
+   */
+  injectOperatorTurn(
+    runId: number,
+    author: string,
+    text: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const args = this.launches.get(runId);
+    const controller = this.sessions.get(runId);
+    if (args === undefined || controller === undefined || controller.fenceStarted || controller.concluded) {
+      return { ok: false, reason: "no-held-session" };
+    }
+    return this.injectTurn(args, controller, { sourceKind: "operator", sourceId: null, author, text });
+  }
+
+  private injectTurn(
+    args: HeldLaunchArgs,
+    controller: Controller,
+    turn: { sourceKind: "answer" | "operator" | "repair"; sourceId: number | null; author: string | null; text: string },
+  ): { ok: true } | { ok: false; reason: string } {
+    const recorded = args.store.recordSessionTurn({
+      run: args.runId,
+      sourceKind: turn.sourceKind,
+      sourceId: turn.sourceId,
+      author: turn.author,
+      text: turn.text,
+      repairLimit: 2,
+      now: args.clock(),
+    });
+    if (!recorded.ok) return { ok: false, reason: recorded.reason };
+    const json = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: turn.text }] },
+    });
+    if (controller.handle === null || !controller.handle.writeTurn(json)) {
+      args.store.settleTurnTerminal(recorded.turn.id, "cancelled", args.clock());
+      return { ok: false, reason: "write-failed" };
+    }
+    args.store.markTurnWritten(recorded.turn.id, args.clock());
+    this.armTurnTimer(args, controller);
+    return { ok: true };
+  }
+
+  private async injectPendingAnswers(args: HeldLaunchArgs): Promise<void> {
+    const controller = this.sessions.get(args.runId);
+    if (controller === undefined || controller.fenceStarted || controller.concluded) return;
+    for (const decision of args.store.undeliveredDecisionsOf(args.runId)) {
+      const text = [
+        `The operator answered your question (decision ${decision.id}):`,
+        `chose "${decision.choice ?? decision.recommendation}"${decision.note === null || decision.note === "" ? "" : ` — ${decision.note}`}.`,
+        "Continue the work within the approved scope. When you finish, write your handoff exactly as the brief instructed.",
+      ].join(" ");
+      const injected = this.injectTurn(args, controller, {
+        sourceKind: "answer",
+        sourceId: decision.id,
+        author: null,
+        text,
+      });
+      // One at a time: single-flight means a second undelivered answer
+      // waits for the next scan after this turn settles.
+      if (injected.ok) break;
+    }
   }
 
   // ---- internals -----------------------------------------------------------
@@ -287,6 +360,7 @@ export class HeldSessionCoordinator {
       handle: null,
       timers: [],
       intervals: [],
+      turnTimer: null,
       done,
       finish,
     };
@@ -325,8 +399,15 @@ export class HeldSessionCoordinator {
         }
         if (args.runnerToken !== undefined) {
           const alive = runnerHeartbeat(args.store, args.runner, args.runnerToken, args.clock());
-          if (!alive.ok) void this.fence(args, "lease-lost");
+          if (!alive.ok) {
+            void this.fence(args, "lease-lost");
+            return;
+          }
         }
+        // Answers persisted by ANY surface reach the live session here
+        // (v3 R3): the delivery-CAS inside recordSessionTurn makes the
+        // injection exactly-once whatever raced.
+        void this.injectPendingAnswers(args);
       } catch {
         void this.fence(args, "lease-lost");
       }
@@ -338,9 +419,10 @@ export class HeldSessionCoordinator {
   }
 
   private armTurnTimer(args: HeldLaunchArgs, controller: Controller): void {
+    if (controller.turnTimer !== null) clearTimeout(controller.turnTimer);
     const timer = setTimeout(() => void this.fence(args, "turn-timeout"), args.captured.effective.timeoutMs);
     timer.unref?.();
-    controller.timers.push(timer);
+    controller.turnTimer = timer;
   }
 
   private onTurnInit(args: HeldLaunchArgs, seq: number): void {
@@ -367,10 +449,127 @@ export class HeldSessionCoordinator {
       await this.fence(args, "telemetry");
       return;
     }
-    // Phase 2D: the first settled turn concludes the hold — the shared
-    // settlement classifies whatever the agent left (handoff, park, or
-    // nothing). The conversation loop lands with its console surfaces.
-    await this.conclude(args, event);
+    if (controller.turnTimer !== null) {
+      clearTimeout(controller.turnTimer);
+      controller.turnTimer = null;
+    }
+    // CLASSIFY (v2 S1f, v6 W4): a terminal handoff concludes through the
+    // shared settlement; a park records the decision and the session STAYS
+    // HELD for the answer; a budget-exhausted result ends the hold; and a
+    // settled turn that left neither file is a conversation pause — the
+    // session waits for the operator.
+    const donePath = join(args.cwd, args.captured.done);
+    const mailboxPath = join(args.cwd, args.captured.mailbox);
+    if (String(event["subtype"] ?? "") === "error_max_budget_usd") {
+      await this.fence(args, "budget-exhausted");
+      return;
+    }
+    if (existsSync(donePath)) {
+      await this.conclude(args, event);
+      return;
+    }
+    if (existsSync(mailboxPath)) {
+      await this.heldPark(args, turn.id, event);
+      return;
+    }
+    // Idle: held, watching, awaiting the next turn.
+  }
+
+  /**
+   * A park inside a held session (v2 S1f + round-6 finding 3): payload
+   * preserved as evidence and unlinked exactly like the ordinary road,
+   * the decision recorded WITHOUT ending anything, causally linked to the
+   * turn that produced it. A malformed payload takes the held repair road
+   * — a machine-authored ledger turn in the SAME session, correlated to
+   * the producing turn (a malformed mailbox has no decision id), bounded;
+   * exhaustion disposes through the shared malformed machinery.
+   */
+  private async heldPark(args: HeldLaunchArgs, producingTurn: number, lastResult: Record<string, unknown>): Promise<void> {
+    const controller = this.sessions.get(args.runId);
+    if (controller === undefined || controller.fenceStarted || controller.concluded) return;
+    const store = args.store;
+    const path = join(args.cwd, args.captured.mailbox);
+    const read = readMailbox(path);
+    if (!read.ok) {
+      if (!read.missing) {
+        try {
+          const { unlinkSync } = await import("node:fs");
+          unlinkSync(path);
+        } catch {
+          // Unremovable is survivable; the commit path excludes the name.
+        }
+      }
+      return;
+    }
+    storeEvidence(store, args.captured.root, args.runId, "park-payload", "park.json", read.raw, `mailbox ${args.captured.mailbox}`, args.clock());
+    try {
+      const { unlinkSync } = await import("node:fs");
+      unlinkSync(path);
+    } catch {
+      // The bytes are already in evidence.
+    }
+    const parsed = parseDecision(read.raw.toString("utf8"));
+    if (parsed.ok) {
+      const evidence = await captureParkEvidence(store, args.captured.git, args.cwd, args.captured.baseRevision, args.captured.root, args.runId, args.clock());
+      const payload = store.artifactsFor(args.runId).find(artifact => artifact.kind === "park-payload");
+      const sealed = finalizeParkHeld(store, {
+        runId: args.runId,
+        taskId: args.captured.taskId,
+        decision: parsed.decision,
+        artifactIds: [...(payload === undefined ? [] : [payload.id]), ...evidence],
+        sessionTurn: producingTurn,
+        now: args.clock(),
+      });
+      if (!sealed.ok) await this.fence(args, sealed.reason);
+      return; // held: the answer arrives as the next turn
+    }
+    // Malformed: the held repair road (round-6 finding 3).
+    const repair = this.injectTurn(args, controller, {
+      sourceKind: "repair",
+      sourceId: producingTurn,
+      author: null,
+      text: repairPrompt(parsed.problems, args.captured.mailbox),
+    });
+    if (!repair.ok && repair.reason === "repair-exhausted") {
+      controller.concluded = true;
+      this.clearClocks(controller);
+      args.store.endHeldSession(args.runId, "malformed-decision", args.clock());
+      controller.handle?.endInput();
+      await Promise.race([
+        controller.handle?.exited ?? Promise.resolve({ code: null }),
+        new Promise<{ code: number | null }>(pass =>
+          setTimeout(() => {
+            controller.handle?.killHard();
+            pass({ code: null });
+          }, (args.graceMs ?? 10_000) + 10_000),
+        ),
+      ]);
+      const disposition = disposeBuildOutcome(
+        {
+          store: args.store,
+          policy: "tick",
+          leaseId: args.leaseId,
+          runId: args.runId,
+          taskId: args.captured.taskId,
+          taskRef: args.captured.taskRef,
+          runner: args.runner,
+          repo: args.dispose.repo,
+          branch: args.captured.branch,
+          origin: args.dispose.origin,
+          provider: args.dispose.provider,
+          model: args.dispose.model,
+          worktreePath: args.cwd,
+          clock: args.clock,
+        },
+        { ok: false, reason: "malformed-decision", message: "the agent parked, but the payload is not a decision — twice over", problems: parsed.problems },
+      );
+      await args.releaseWorktree(args.cwd);
+      args.store.closeAuthorization(args.authorization.id, "malformed-decision", args.clock());
+      args.liveLog?.close();
+      args.onDisposed?.(disposition);
+      this.drop(args.runId);
+    }
+    void lastResult;
   }
 
   private async onExit(args: HeldLaunchArgs, code: number | null): Promise<void> {

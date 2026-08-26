@@ -7976,6 +7976,15 @@ export class Store {
     });
   }
 
+  /** Answered decisions on a held run whose answer has not yet been
+   * injected — the coordinator's per-pulse scan (v3 R3). */
+  undeliveredDecisionsOf(run: number): Decision[] {
+    return this.db
+      .prepare("SELECT * FROM decision WHERE run = ? AND state = 'answered' AND delivered_turn IS NULL ORDER BY id")
+      .all(run)
+      .map(readDecision);
+  }
+
   readSessionTurn(id: number): SessionTurn | null {
     const row = this.db.prepare("SELECT * FROM session_turn WHERE id = ?").get(id);
     return row === undefined ? null : readSessionTurnRow(row);

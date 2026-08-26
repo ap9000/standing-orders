@@ -756,6 +756,68 @@ export function completeFenced(
  * the fence, not "duplicate": a park hands the task to a person, and nothing
  * the runner says afterwards is that person's answer.
  */
+/**
+ * The HELD park (Phase 2E, v2 S1f): the decision is recorded, paged, and
+ * causally linked to the session turn that produced it — and NOTHING else
+ * ends. The lease stays; the run stays open; the process stays held. The
+ * conversation continues when the answer is injected as the next turn.
+ * The one-unresolved-per-run partial unique refuses a second open park.
+ */
+export function finalizeParkHeld(
+  store: Store,
+  args: {
+    runId: number;
+    taskId: string;
+    decision: ParsedDecision;
+    artifactIds: readonly number[];
+    sessionTurn: number;
+    now: Date;
+  },
+): { ok: true; decisionId: number } | { ok: false; reason: "decision-open" | "not-held" } {
+  const { runId, taskId, decision, artifactIds, sessionTurn, now } = args;
+  return inTransaction(store, () => {
+    const held = store.heldSessionOf(runId);
+    if (held === null || held.endedAt !== null || held.state !== "open") {
+      return { ok: false as const, reason: "not-held" as const };
+    }
+    const run = store.getRun(runId);
+    if (run === null || run.outcome !== null) return { ok: false as const, reason: "not-held" as const };
+    let decisionId: number;
+    try {
+      decisionId = store.saveDecision(
+        {
+          run: runId,
+          urgency: decision.urgency,
+          recap: decision.recap,
+          question: decision.question,
+          options: decision.options,
+          recommendation: decision.recommendation,
+          ...(decision.assignee === null ? {} : { assignee: decision.assignee }),
+          ...(decision.deadline === null ? {} : { deadline: decision.deadline }),
+        },
+        now,
+      );
+    } catch {
+      // The partial unique: one unresolved question per run at a time.
+      return { ok: false as const, reason: "decision-open" as const };
+    }
+    store.handle.prepare("UPDATE decision SET session_turn = ? WHERE id = ?").run(sessionTurn, decisionId);
+    for (const artifact of artifactIds) store.linkEvidence(decisionId, artifact);
+    store.enqueueNotification(
+      {
+        dedupeKey: `decision:${decisionId}`,
+        kind: "decision",
+        subject: `${taskId} asked a question mid-session`,
+        body: `${oneLine(decision.question, 200)}\n\`standing-orders decide ${decisionId}\``,
+        pushClass: "decision",
+        link: `/d/${decisionId}`,
+      },
+      now,
+    );
+    return { ok: true as const, decisionId };
+  });
+}
+
 export function finalizeParkFenced(
   store: Store,
   args: {

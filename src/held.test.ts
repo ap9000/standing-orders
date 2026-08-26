@@ -466,3 +466,230 @@ describe("the round-6 cross-check fixes", () => {
     store.close();
   });
 });
+
+describe("the conversation loop (Phase 2E.2)", () => {
+  test("brief → idle hold → operator turn → mid-session park → answer injection → handoff concludes; every link causal", async () => {
+    const store = openStore(":memory:");
+    const coordinator = new HeldSessionCoordinator();
+    const dir = mkdtempSync(join(tmpdir(), "so-conv-wt-"));
+    const git = async (...args: string[]) => {
+      const answer = await runExec("git", args, { cwd: dir, timeoutMs: 15_000 });
+      if (answer.code !== 0) throw new Error(`git ${args[0]}: ${answer.stderr}`);
+      return answer.stdout.trim();
+    };
+    await git("init", "-b", "so/t-att");
+    await git("config", "user.email", "t@example.com");
+    await git("config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "hello\n");
+    await git("add", "-A");
+    await git("commit", "-m", "base");
+    const head = await git("rev-parse", "HEAD");
+
+    let sent = 0;
+    const starter = fakeStarterOf(seq => {
+      sent = seq;
+      if (seq === 1) return { events: true, files: [] }; // brief: answer, no files — idle hold
+      if (seq === 2) {
+        // operator turn: the agent PARKS a question
+        writeFileSync(
+          join(dir, "SO-MAILBOX-test.json"),
+          JSON.stringify({
+            urgency: "blocking",
+            recap: "the operator asked for a change",
+            question: "which flavor?",
+            options: [
+              { id: "a", label: "flavor a", consequence: "a it is", reversible: true },
+              { id: "b", label: "flavor b", consequence: "b it is", reversible: true },
+            ],
+            recommendation: "a",
+          }),
+        );
+        return { events: true, files: [] };
+      }
+      // the answer turn: finish with a no-change handoff
+      writeFileSync(
+        join(dir, "SO-DONE-test.json"),
+        JSON.stringify({ version: 1, status: "no-change", conclusion: "done as discussed in the session" }),
+      );
+      return { events: true, files: [] };
+    });
+
+    // fixture (mirrors the earlier launchArgsFor, real-time clocks)
+    store.createTask({ id: "t-att", title: "watched" }, T0);
+    const ref = store.refFor("built-in", "t-att");
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO task_scope (task_id, goal, out_of_scope, touches, proposed_at, digest)
+         VALUES ('t-att', 'the goal', NULL, '[]', ?, 'feedface'||substr('00000000000000000000000000000000',1,24))`,
+      )
+      .run(T0.toISOString());
+    const scopeDigest = String(store.raw().prepare("SELECT digest FROM task_scope WHERE task_id = 't-att'").get()!["digest"]);
+    const terms = {
+      scopeDigest,
+      profileDigest: profileDigestOf(PROFILE),
+      profileJson: canonicalProfileJson(PROFILE),
+      repo: "/repo",
+      head,
+    };
+    expect(
+      store.mintAttendedAuthorization({
+        id: "auth-att",
+        taskRef: ref.id,
+        approver: "alex",
+        runner: "mac-a",
+        runnerGeneration: 1,
+        compositeDigest: "d".repeat(32),
+        termsJson: JSON.stringify(terms),
+        maxSessionTurns: 10,
+        budgetMicrousd: 2_000_000,
+        absoluteExpiry: new Date(Date.now() + 3_600_000).toISOString(),
+        now: T0,
+      }).ok,
+    ).toBe(true);
+    store.beatAuthorization("auth-att", new Date());
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES ('lease-att', ?, 1, 'mac-a', ?, ?, ?)`,
+      )
+      .run(ref.id, T0.toISOString(), new Date(Date.now() + 900_000).toISOString(), T0.toISOString());
+    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-att", runner: "mac-a", branch: "so/t-att", worktree: dir, now: T0 });
+    const scope = store.getScope("t-att");
+    let disposed: unknown = null;
+    const captured = {
+      store,
+      request: { taskId: "t-att", taskRef: ref.id, runner: "mac-a", runId, worktree: dir, branch: "so/t-att", leaseId: "lease-att", now: T0 } as never,
+      agent: undefined,
+      git: runExec as never,
+      worktree: dir,
+      branch: "so/t-att",
+      baseRevision: head,
+      taskId: "t-att",
+      taskRef: ref.id,
+      runner: "mac-a",
+      provider: "claude",
+      scope,
+      effective: { model: "sonnet", maxTurns: 40, timeoutMs: 60_000, skipPermissions: false, profile: PROFILE },
+      answers: [],
+      timeoutMs: 60_000,
+      root: mkdtempSync(join(tmpdir(), "so-conv-root-")),
+      mailbox: "SO-MAILBOX-test.json",
+      done: "SO-DONE-test.json",
+      clock: () => new Date(),
+      fenced: () => false,
+    };
+    const launched = await coordinator.launch({
+      store,
+      captured: captured as never,
+      authorization: store.readAuthorization("auth-att")!,
+      runId,
+      leaseId: "lease-att",
+      runner: "mac-a",
+      upIncarnation: "inc-test",
+      brief: "the brief",
+      cwd: dir,
+      socketDir: tmpdir(),
+      releaseWorktree: async () => {},
+      liveLog: null,
+      omitEnv: [],
+      dispose: { repo: "/repo", origin: "theirs", provider: "claude", model: "sonnet" },
+      clock: () => new Date(),
+      starter,
+      onDisposed: d => (disposed = d),
+    } as never);
+    expect(launched).toMatchObject({ ok: true });
+
+    // 1. the brief settles and the session IDLES — held, nothing concluded
+    await new Promise(pass => setTimeout(pass, 250));
+    expect(sent).toBe(1);
+    expect(store.getRun(runId)?.outcome).toBeNull();
+    expect(store.heldSessionOf(runId)?.endedAt).toBeNull();
+
+    // 2. the operator speaks; the agent parks a question; the session STAYS held
+    const spoke = coordinator.injectOperatorTurn(runId, "alex", "make it teal");
+    expect(spoke).toMatchObject({ ok: true });
+    await new Promise(pass => setTimeout(pass, 350));
+    const parked = store.raw().prepare("SELECT id, state, session_turn FROM decision WHERE run = ?").get(runId)!;
+    expect(String(parked["state"])).toBe("open");
+    // causal: the decision names the turn that produced it
+    const operatorTurn = store.sessionTurnsOf(runId).find(one => one.sourceKind === "operator");
+    expect(Number(parked["session_turn"])).toBe(operatorTurn?.id);
+    expect(store.getRun(runId)?.outcome).toBeNull();
+    // free-form speech refuses while the question waits
+    expect(coordinator.injectOperatorTurn(runId, "alex", "also more contrast")).toMatchObject({ ok: false, reason: "decision-open" });
+
+    // 3. the answer (any surface) reaches the live session as the next turn
+    const answered = store.answerDecision({ id: Number(parked["id"]), choice: "a", by: "alex", via: "web" }, new Date());
+    expect(answered.ok).toBe(true);
+    coordinator.poke(runId);
+    await new Promise(pass => setTimeout(pass, 400));
+    const turns = store.sessionTurnsOf(runId);
+    const answerTurn = turns.find(one => one.sourceKind === "answer");
+    expect(answerTurn).toBeDefined();
+    expect(answerTurn?.sourceId).toBe(Number(parked["id"]));
+    // delivered exactly-once, attached at acceptance
+    expect(store.raw().prepare("SELECT delivered_turn FROM decision WHERE id = ?").get(Number(parked["id"]))!["delivered_turn"]).toBe(answerTurn?.id);
+    expect(Number(store.raw().prepare("SELECT COUNT(*) AS n FROM run_decision WHERE decision = ?").get(Number(parked["id"]))!["n"])).toBe(1);
+
+    // 4. the handoff written on the answer turn CONCLUDES through the shared machinery
+    await new Promise(pass => setTimeout(pass, 300));
+    expect(disposed).not.toBeNull();
+    expect(store.getRun(runId)?.outcome).toBe("no-change");
+    expect(store.heldSessionOf(runId)?.endedAt).not.toBeNull();
+    expect(store.readAuthorization("auth-att")?.endReason).toBe("finished");
+    expect(turns.length).toBe(3); // brief, operator, answer — every injection a ledger row
+
+    rmSync(dir, { recursive: true, force: true });
+    store.close();
+  }, 30_000);
+});
+
+/** A scripted fake transport: per-turn behavior, driven by seq. */
+function fakeStarterOf(onTurn: (seq: number) => { events: boolean; files: string[] }) {
+  const state: {
+    events?: {
+      onTurnInit?: (seq: number) => void;
+      onTurnResult?: (seq: number, event: Record<string, unknown>) => void;
+      onExit?: (info: { code: number | null }) => void;
+    };
+  } = {};
+  let seq = 0;
+  let exitResolve: (info: { code: number | null }) => void = () => {};
+  const exited = new Promise<{ code: number | null }>(pass => (exitResolve = pass));
+  const handle: HeldSessionHandle = {
+    supervisorPid: 4242,
+    agentPgid: 4243,
+    writeTurn(): boolean {
+      seq += 1;
+      const mine = seq;
+      onTurn(mine);
+      setTimeout(() => {
+        state.events?.onTurnInit?.(mine);
+        state.events?.onTurnResult?.(mine, {
+          type: "result",
+          subtype: "success",
+          total_cost_usd: mine * 0.01,
+          usage: { output_tokens: mine },
+          result: `turn ${mine}`,
+        });
+      }, 60);
+      return true;
+    },
+    endInput(): void {
+      exitResolve({ code: 0 });
+    },
+    terminate(): void {
+      exitResolve({ code: 143 });
+    },
+    killHard(): void {
+      exitResolve({ code: null });
+    },
+    exited,
+  };
+  return ((_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+    state.events = options.events;
+    return Promise.resolve({ ok: true, handle } as HeldSessionStart);
+  }) as typeof import("./exec.js").startClaudeHeldSession;
+}
