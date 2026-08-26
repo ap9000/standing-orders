@@ -1668,3 +1668,468 @@ describe("the v24 migration (Parity II foundations, rulings 10/11)", () => {
     rmSync(dirname(file), { recursive: true, force: true });
   });
 });
+
+describe("the v25 attended core: migration, authorizations, the turn ledger, custody", () => {
+  const T0 = new Date("2026-08-25T22:00:00.000Z");
+  const later = (seconds: number): Date => new Date(T0.getTime() + seconds * 1000);
+
+  const v24Db = (seed: (db: ReturnType<typeof openStore>) => void): string => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v25-migr-"));
+    const file = join(dir, "db.sqlite");
+    const store = openStore(file);
+    seed(store);
+    store.raw().prepare("UPDATE schema_version SET version = 24").run();
+    store.close();
+    return file;
+  };
+
+  /** A live held run: task, claim, run bound to a minted authorization,
+   * open custody row — the shape every ledger gate assumes. */
+  const heldFixture = (store: ReturnType<typeof openStore>) => {
+    store.createTask({ id: "t-held", title: "watched work" }, T0);
+    const ref = store.refFor("built-in", "t-held");
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES ('lease-held', ?, 1, 'mac-a', ?, ?, ?)`,
+      )
+      .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
+    const minted = store.mintAttendedAuthorization({
+      id: "auth-1",
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "mac-a",
+      runnerGeneration: 1,
+      compositeDigest: "d".repeat(32),
+      termsJson: "{}",
+      maxSessionTurns: 4,
+      budgetMicrousd: 1_000_000,
+      absoluteExpiry: later(3600).toISOString(),
+      now: T0,
+    });
+    expect(minted.ok).toBe(true);
+    const run = store.startRun({
+      taskRef: ref.id,
+      leaseId: "lease-held",
+      runner: "mac-a",
+      branch: "so/t-held",
+      worktree: "/tmp/wt",
+      now: T0,
+    });
+    expect(store.consumeAuthorization("auth-1", run, T0)).toBe(true);
+    const custody = store.openHeldSession({
+      run,
+      authorizationId: "auth-1",
+      runner: "mac-a",
+      leaseId: "lease-held",
+      upIncarnation: "inc-1",
+      cookie: "c".repeat(32),
+      socketPath: "/tmp/so.sock",
+      now: T0,
+    });
+    expect(custody.ok).toBe(true);
+    return { ref, run };
+  };
+
+  test("a v24 database reaches v25: the decision table admits many decisions per run, runs admit 'interrupted', existing rows survive byte-for-byte", () => {
+    const file = v24Db(db => {
+      db.createTask({ id: "t-m", title: "migrated" }, T0);
+      const ref = db.refFor("built-in", "t-m");
+      db.raw()
+        .prepare(
+          `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+           VALUES ('lease-m', ?, 1, 'w', ?, ?, ?)`,
+        )
+        .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
+      const run = db.startRun({ taskRef: ref.id, leaseId: "lease-m", runner: "w", branch: "b", worktree: "/w", now: T0 });
+      db.raw()
+        .prepare(
+          `INSERT INTO decision (run, urgency, state, recap, question, options, recommendation, created_at, answered_at, answered_by, answered_via, choice)
+           VALUES (?, 'blocking', 'answered', 'r', 'q', '[]', 'rec', ?, ?, 'alex', 'web', 'go')`,
+        )
+        .run(run, T0.toISOString(), later(60).toISOString());
+    });
+    const store = openStore(file);
+    const run = Number(store.raw().prepare("SELECT id FROM run").get()!["id"]);
+    // the old row survived, fields intact
+    const old = store.raw().prepare("SELECT * FROM decision").get()!;
+    expect(String(old["choice"])).toBe("go");
+    expect(String(old["answered_by"])).toBe("alex");
+    // a second decision on the SAME run now files (the UNIQUE is gone)
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO decision (run, urgency, state, recap, question, options, recommendation, created_at)
+         VALUES (?, 'blocking', 'open', 'r2', 'q2', '[]', 'rec2', ?)`,
+      )
+      .run(run, later(120).toISOString());
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM decision WHERE run = ?").get(run)!["n"]).toBe(2);
+    // but never two UNRESOLVED at once
+    expect(() =>
+      store
+        .raw()
+        .prepare(
+          `INSERT INTO decision (run, urgency, state, recap, question, options, recommendation, created_at)
+           VALUES (?, 'blocking', 'open', 'r3', 'q3', '[]', 'rec3', ?)`,
+        )
+        .run(run, later(180).toISOString()),
+    ).toThrow();
+    // and the rebuilt run table takes the real word for a cut-down session
+    store.finishRun(run, { outcome: "interrupted", reason: "orphaned", now: later(240) });
+    expect(store.getRun(run)?.outcome).toBe("interrupted");
+    store.close();
+    rmSync(dirname(file), { recursive: true, force: true });
+  });
+
+  test("a v23 database climbs BOTH passes in order: steering quarantined by v24, decision freed by v25", () => {
+    const file = (() => {
+      const dir = mkdtempSync(join(tmpdir(), "so-v25-two-"));
+      const f = join(dir, "db.sqlite");
+      const db = openStore(f);
+      db.createTask({ id: "t-two", title: "double climb" }, T0);
+      const ref = db.refFor("built-in", "t-two").id;
+      db.raw()
+        .prepare("INSERT INTO task_steer (task_ref, author, note, created_at) VALUES (?, 'cli', 'legacy words', ?)")
+        .run(ref, T0.toISOString());
+      db.raw().prepare("UPDATE task_steer SET authorship_state = 'unverified-legacy'").run();
+      db.raw().prepare("UPDATE schema_version SET version = 23").run();
+      db.close();
+      return f;
+    })();
+    const store = openStore(file);
+    const note = store.raw().prepare("SELECT superseded_reason FROM task_steer").get()!;
+    expect(String(note["superseded_reason"])).toBe("unverified-author");
+    const decisionDdl = String(
+      store.raw().prepare("SELECT sql FROM sqlite_master WHERE name = 'decision'").get()!["sql"],
+    );
+    expect(decisionDdl).toContain("delivered_turn");
+    expect(decisionDdl).not.toContain("UNIQUE REFERENCES run(id)");
+    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()!["version"])).toBe(25);
+    store.close();
+    rmSync(dirname(file), { recursive: true, force: true });
+  });
+
+  test("authorization lifecycle: an expired predecessor is closed inside the mint; a live one refuses; consume is once", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "t-a", title: "authorized" }, T0);
+    const ref = store.refFor("built-in", "t-a");
+    const first = store.mintAttendedAuthorization({
+      id: "auth-old",
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "mac-a",
+      runnerGeneration: 1,
+      compositeDigest: "a".repeat(32),
+      termsJson: "{}",
+      maxSessionTurns: 4,
+      budgetMicrousd: 500_000,
+      absoluteExpiry: later(60).toISOString(),
+      now: T0,
+    });
+    expect(first.ok).toBe(true);
+    // still live: a second mint refuses — revoke, never silently supersede
+    const refused = store.mintAttendedAuthorization({
+      id: "auth-refused",
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "mac-a",
+      runnerGeneration: 1,
+      compositeDigest: "b".repeat(32),
+      termsJson: "{}",
+      maxSessionTurns: 4,
+      budgetMicrousd: 500_000,
+      absoluteExpiry: later(3600).toISOString(),
+      now: later(10),
+    });
+    expect(refused).toMatchObject({ ok: false, reason: "authorization-open" });
+    // past expiry the mint closes the corpse itself, in its own transaction
+    const second = store.mintAttendedAuthorization({
+      id: "auth-new",
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "mac-a",
+      runnerGeneration: 1,
+      compositeDigest: "c".repeat(32),
+      termsJson: "{}",
+      maxSessionTurns: 4,
+      budgetMicrousd: 500_000,
+      absoluteExpiry: later(3600).toISOString(),
+      now: later(120),
+    });
+    expect(second.ok).toBe(true);
+    expect(store.readAuthorization("auth-old")?.endReason).toBe("expired");
+    expect(store.openAuthorizationFor(ref.id)?.id).toBe("auth-new");
+    // the one attempt: a second consumer loses the CAS
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES ('lease-a', ?, 1, 'mac-a', ?, ?, ?)`,
+      )
+      .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
+    const run = store.startRun({ taskRef: ref.id, leaseId: "lease-a", runner: "mac-a", branch: "b", worktree: "/w", now: T0 });
+    expect(store.consumeAuthorization("auth-new", run, later(130))).toBe(true);
+    expect(store.consumeAuthorization("auth-new", run, later(131))).toBe(false);
+    expect(store.getRun(run)?.attendedAuthorization).toBe("auth-new");
+    store.close();
+  });
+
+  test("the beat is durable with 5-second duplicate suppression, and closure stops it", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "t-b", title: "beaten" }, T0);
+    const ref = store.refFor("built-in", "t-b");
+    store.mintAttendedAuthorization({
+      id: "auth-b",
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "mac-a",
+      runnerGeneration: 1,
+      compositeDigest: "a".repeat(32),
+      termsJson: "{}",
+      maxSessionTurns: 4,
+      budgetMicrousd: 500_000,
+      absoluteExpiry: later(3600).toISOString(),
+      now: T0,
+    });
+    expect(store.beatAuthorization("auth-b", later(15))).toBe(true);
+    // a duplicate tab inside the 5s window is suppressed — the clock does not regress or churn
+    expect(store.beatAuthorization("auth-b", later(17))).toBe(false);
+    // the scheduled next beat lands
+    expect(store.beatAuthorization("auth-b", later(30))).toBe(true);
+    expect(store.readAuthorization("auth-b")?.lastBeatAt).toBe(later(30).toISOString());
+    expect(store.closeAuthorization("auth-b", "revoked", later(40))).toBe(true);
+    expect(store.beatAuthorization("auth-b", later(50))).toBe(false);
+    store.close();
+  });
+
+  test("the turn ledger's happy path: recorded → written → accepted → settled, with marginal-delta accounting advancing the baseline and the run aggregates", () => {
+    const store = openStore(":memory:");
+    const { run } = heldFixture(store);
+    const first = store.recordSessionTurn({ run, sourceKind: "brief", text: "the brief", now: later(1) });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    // reservation = the whole remaining budget
+    expect(first.turn.reservedMicrousd).toBe(1_000_000);
+    expect(store.markTurnWritten(first.turn.id, later(2))).toBe(true);
+    expect(store.markTurnAccepted(first.turn.id, later(3))).toBe(true);
+    const settled = store.settleTurn(first.turn.id, { cumulativeMicrousd: 30_000, outputTokens: 40, now: later(8) });
+    expect(settled).toMatchObject({ ok: true, measuredMicrousd: 30_000 });
+    // a second turn: reservation shrank by exactly the measured spend
+    const second = store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "now the tests", now: later(9) });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.turn.reservedMicrousd).toBe(970_000);
+    // cumulative totals: turn 2's measured charge is the DELTA, not the total
+    store.markTurnWritten(second.turn.id, later(10));
+    store.markTurnAccepted(second.turn.id, later(11));
+    const settled2 = store.settleTurn(second.turn.id, { cumulativeMicrousd: 34_000, outputTokens: 10, now: later(15) });
+    expect(settled2).toMatchObject({ ok: true, measuredMicrousd: 4_000 });
+    const runRow = store.getRun(run)!;
+    expect(runRow.costUsd).toBeCloseTo(0.034, 6);
+    expect(runRow.tokensOut).toBe(50);
+    store.close();
+  });
+
+  test("the recording gates: single-flight, the cap, budget exhaustion, and the open-decision rule each refuse typed", () => {
+    const store = openStore(":memory:");
+    const { run } = heldFixture(store);
+    const first = store.recordSessionTurn({ run, sourceKind: "brief", text: "one", now: later(1) });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    // single flight: the last turn is unsettled
+    expect(store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "two", now: later(2) })).toMatchObject({
+      ok: false,
+      reason: "turn-open",
+    });
+    store.settleTurnTerminal(first.turn.id, "cancelled", later(3));
+    // an open decision outranks free-form speech
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO decision (run, urgency, state, recap, question, options, recommendation, created_at)
+         VALUES (?, 'blocking', 'open', 'r', 'q', '[]', 'rec', ?)`,
+      )
+      .run(run, later(4).toISOString());
+    expect(store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "three", now: later(5) })).toMatchObject({
+      ok: false,
+      reason: "decision-open",
+    });
+    store.raw().prepare("UPDATE decision SET state = 'answered', answered_at = ?, answered_by = 'alex' WHERE run = ?").run(later(6).toISOString(), run);
+    // budget: an uncertain turn charged its whole reservation exhausts the authorization
+    const burner = store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "four", now: later(7) });
+    expect(burner.ok).toBe(true);
+    if (!burner.ok) return;
+    store.markTurnWritten(burner.turn.id, later(8));
+    store.settleTurnTerminal(burner.turn.id, "uncertain", later(9));
+    expect(store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "five", now: later(10) })).toMatchObject({
+      ok: false,
+      reason: "budget-exhausted",
+    });
+    store.close();
+  });
+
+  test("the turn cap counts EVERY injection and refuses past it", () => {
+    const store = openStore(":memory:");
+    const { run } = heldFixture(store);
+    for (let i = 0; i < 4; i += 1) {
+      const turn = store.recordSessionTurn({ run, sourceKind: "brief", text: `t${i}`, now: later(i + 1) });
+      expect(turn.ok).toBe(true);
+      if (turn.ok) {
+        store.markTurnWritten(turn.turn.id, later(i + 1));
+        store.markTurnAccepted(turn.turn.id, later(i + 1));
+        expect(store.settleTurn(turn.turn.id, { cumulativeMicrousd: (i + 1) * 1000, outputTokens: 1, now: later(i + 2) }).ok).toBe(true);
+      }
+    }
+    expect(store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "past the cap", now: later(20) })).toMatchObject({
+      ok: false,
+      reason: "turn-cap",
+    });
+    store.close();
+  });
+
+  test("answers deliver exactly once, attach only at ACCEPTANCE, and revert when the turn never got there", () => {
+    const store = openStore(":memory:");
+    const { run } = heldFixture(store);
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO decision (run, urgency, state, recap, question, options, recommendation, created_at, answered_at, answered_by, choice)
+         VALUES (?, 'blocking', 'answered', 'r', 'q', '[]', 'rec', ?, ?, 'alex', 'option-a')`,
+      )
+      .run(run, later(1).toISOString(), later(2).toISOString());
+    const decision = Number(store.raw().prepare("SELECT id FROM decision WHERE run = ?").get(run)!["id"]);
+    const answer = store.recordSessionTurn({ run, sourceKind: "answer", sourceId: decision, text: "alex chose option-a", now: later(3) });
+    expect(answer.ok).toBe(true);
+    if (!answer.ok) return;
+    // the delivery-CAS is taken: a duplicate injection refuses
+    expect(store.recordSessionTurn({ run, sourceKind: "answer", sourceId: decision, text: "again", now: later(4) })).toMatchObject({
+      ok: false,
+      reason: "turn-open",
+    });
+    // written but the process died before this turn's init: terminal, and the
+    // delivery claim REVERTS so the ordinary road can deliver later
+    store.markTurnWritten(answer.turn.id, later(5));
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run_decision WHERE decision = ?").get(decision)!["n"]).toBe(0);
+    store.settleTurnTerminal(answer.turn.id, "uncertain", later(6));
+    expect(store.raw().prepare("SELECT delivered_turn FROM decision WHERE id = ?").get(decision)!["delivered_turn"]).toBeNull();
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run_decision WHERE decision = ?").get(decision)!["n"]).toBe(0);
+    // the uncertain charge consumed the WHOLE reservation — which was the
+    // whole remaining budget — so the session cannot retry in-place: that is
+    // the conservative arithmetic, not a bug. The decision is redeliverable
+    // by the ORDINARY road: state answered, no run_decision row, delivery
+    // claim cleared — exactly what attachAnswers consumes on the next attempt.
+    const retry = store.recordSessionTurn({ run, sourceKind: "answer", sourceId: decision, text: "again", now: later(7) });
+    expect(retry).toMatchObject({ ok: false, reason: "budget-exhausted" });
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES ('lease-next', (SELECT task_ref FROM run WHERE id = ?), 2, 'mac-a', ?, ?, ?)`,
+      )
+      .run(run, later(8).toISOString(), later(1000).toISOString(), later(8).toISOString());
+    const resumed = store.startRun({
+      taskRef: Number(store.raw().prepare("SELECT task_ref FROM run WHERE id = ?").get(run)!["task_ref"]),
+      leaseId: "lease-next",
+      runner: "mac-a",
+      branch: "so/t-held",
+      worktree: "/tmp/wt2",
+      now: later(9),
+    });
+    const attached = store.attachAnswers(resumed, Number(store.raw().prepare("SELECT task_ref FROM run WHERE id = ?").get(run)!["task_ref"]));
+    expect(attached.map(one => one.id)).toContain(decision);
+    store.close();
+  });
+
+  test("a regressing cumulative total is a TELEMETRY failure: reservation charged, baseline kept, never silently zero", () => {
+    const store = openStore(":memory:");
+    const { run } = heldFixture(store);
+    const first = store.recordSessionTurn({ run, sourceKind: "brief", text: "one", now: later(1) });
+    if (!first.ok) throw new Error("fixture");
+    store.markTurnWritten(first.turn.id, later(2));
+    store.markTurnAccepted(first.turn.id, later(3));
+    expect(store.settleTurn(first.turn.id, { cumulativeMicrousd: 50_000, outputTokens: 5, now: later(4) }).ok).toBe(true);
+    const second = store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "two", now: later(5) });
+    if (!second.ok) throw new Error("fixture");
+    store.markTurnWritten(second.turn.id, later(6));
+    store.markTurnAccepted(second.turn.id, later(7));
+    const settled = store.settleTurn(second.turn.id, { cumulativeMicrousd: 10_000, outputTokens: 1, now: later(8) });
+    expect(settled).toMatchObject({ ok: false, reason: "telemetry" });
+    const turn = store.readSessionTurn(second.turn.id)!;
+    expect(turn.state).toBe("uncertain");
+    expect(turn.accountedMicrousd).toBe(turn.reservedMicrousd);
+    // the baseline did not regress
+    expect(store.heldSessionOf(run)?.cumulativeMicrousd).toBe(50_000);
+    store.close();
+  });
+
+  test("a result whose init was missed still settles — and back-fills the acceptance it proves", () => {
+    const store = openStore(":memory:");
+    const { run } = heldFixture(store);
+    const turn = store.recordSessionTurn({ run, sourceKind: "brief", text: "one", now: later(1) });
+    if (!turn.ok) throw new Error("fixture");
+    store.markTurnWritten(turn.turn.id, later(2));
+    const settled = store.settleTurn(turn.turn.id, { cumulativeMicrousd: 9_000, outputTokens: 2, now: later(6) });
+    expect(settled.ok).toBe(true);
+    const after = store.readSessionTurn(turn.turn.id)!;
+    expect(after.state).toBe("settled");
+    expect(after.acceptedAt).not.toBeNull();
+    store.close();
+  });
+
+  test("custody: one held session per runner, seize fences the lease inside ONE transaction, takeover waits for the deadline", () => {
+    const store = openStore(":memory:");
+    const { ref, run } = heldFixture(store);
+    // the runner's second hold refuses typed
+    store.createTask({ id: "t-second", title: "another" }, T0);
+    const ref2 = store.refFor("built-in", "t-second");
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES ('lease-2', ?, 1, 'mac-a', ?, ?, ?)`,
+      )
+      .run(ref2.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
+    const run2 = store.startRun({ taskRef: ref2.id, leaseId: "lease-2", runner: "mac-a", branch: "b2", worktree: "/w2", now: T0 });
+    expect(
+      store.openHeldSession({
+        run: run2,
+        authorizationId: "auth-1",
+        runner: "mac-a",
+        leaseId: "lease-2",
+        upIncarnation: "inc-1",
+        cookie: "d".repeat(32),
+        socketPath: "/tmp/so2.sock",
+        now: later(1),
+      }),
+    ).toMatchObject({ ok: false, reason: "runner-holding" });
+    // seize: CAS open→fencing AND the lease dies in the same transaction
+    const seized = store.seizeHeldSession(run, "fencer-a", later(120), later(10));
+    expect(seized.ok).toBe(true);
+    expect(store.currentLiveLease(ref.id, later(11))).toBeNull();
+    // a fenced coordinator's next injection fails INSIDE the recording transaction
+    expect(store.recordSessionTurn({ run, sourceKind: "operator", author: "alex", text: "late", now: later(12) })).toMatchObject({
+      ok: false,
+      reason: "fenced",
+    });
+    // a second fencer loses while the first is live…
+    expect(store.seizeHeldSession(run, "fencer-b", later(240), later(13)).ok).toBe(false);
+    expect(store.takeoverHeldFencing(run, "fencer-b", later(240), later(14))).toBe(false);
+    // …and takes over once the deadline expires
+    expect(store.takeoverHeldFencing(run, "fencer-b", later(300), later(130))).toBe(true);
+    // only the CURRENT owner closes
+    expect(store.closeHeldFencing(run, "fencer-a", "orphaned", later(131))).toBe(false);
+    expect(store.closeHeldFencing(run, "fencer-b", "orphaned", later(132))).toBe(true);
+    expect(store.heldSessionOf(run)?.endReason).toBe("orphaned");
+    store.close();
+  });
+
+  test("a held claim does not occupy the runner's capacity slot; an ended one does again", () => {
+    const store = openStore(":memory:");
+    const { run } = heldFixture(store);
+    expect(store.liveClaimCount("mac-a", later(1))).toBe(0);
+    store.endHeldSession(run, "finished", later(2));
+    expect(store.liveClaimCount("mac-a", later(3))).toBe(1);
+    store.close();
+  });
+});

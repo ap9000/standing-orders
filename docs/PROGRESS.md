@@ -1,5 +1,52 @@
 # Progress
 
+**2026-08-25 — Parity II Phase 2 groundwork (2A): schema v25 and the
+attended-core store primitives, spec-first through nine adversarial
+review rounds.** The attended-core spec ran four Codex REDESIGN rounds
+(findings 1–13, then 8, then 7, then 5 — each round closing more than
+it opened), then, with Codex rate-limited, a three-lens competing
+review (ledger, process/concurrency, admission/migration — every
+finding verified against source before adoption) whose REDESIGN verdict
+produced v6; a Codex cross-check of v6 is queued. Two extra protocol
+probes closed the money questions: `--max-budget-usd` is CUMULATIVE
+across a held process (the crossing turn dies `error_max_budget_usd`,
+later turns refuse with zero spend — so the argv cap is a real
+session-level backstop and the signed budget is worded as a STOP
+THRESHOLD), and result usage totals are cumulative per process (the
+original spike note said per-turn and was corrected), so measured turn
+cost is a MARGINAL DELTA from a durable baseline. This commit is the
+storage layer that implements those rulings. Schema v25:
+`attended_authorization` (pre-minted UUID as the ruling-12 attempt
+identity; signed terms carry a per-session turn cap and the budget;
+consumed-but-open lifecycle with explicit closure; one OPEN per task by
+partial unique; durable `last_beat_at` with 5-second duplicate
+suppression as the authoritative liveness clock), `session_turn` (every
+stdin injection a row — brief, answer, operator, repair — recorded
+before written, accepted only at ITS init or proven by ITS result,
+settled at the marginal delta with the baseline advanced atomically;
+terminal `uncertain` charges its reservation and is never reinjected;
+a regressing provider total is a telemetry failure charged
+conservatively, never silently zero), `held_session` (durable crash
+custody: lease-based orphan predicate, helpable `fencing` state with
+deadline takeover, the settlement baseline), a `run` rebuild whose
+outcome admits the real word `interrupted` plus the authorization
+stamp, and a `decision` rebuild that drops the one-decision-per-run
+UNIQUE (a held session parks, is answered, and parks again) while a
+partial unique keeps at most one UNRESOLVED question per run and
+`delivered_turn` becomes the concrete delivery-CAS target — answers
+attach `run_decision` only at ACCEPTANCE, revert their claim if the
+turn never got there, and the ordinary resume road redelivers exactly
+as today. The recording transaction is the gate where the turn cap,
+the single-flight rule, the budget reservation (= remaining budget,
+the true worst case under the CLI's cumulative cap), the open-decision
+rule, and a SYNCHRONOUS lease re-proof all hold or refuse atomically —
+and `liveClaimCount` now excludes held claims, so one watched
+conversation no longer freezes a default capacity-1 runner's whole
+queue (the competing review's critical find). Migration is the
+recognized-exactly rebuild recipe with the FK envelope, proven fresh,
+v24→v25, and v23→v25 (both passes in order); suite 1203.
+
+
 **2026-08-25 — Parity II Phase 1, foundations: approvals now bind WHAT
 RUNS, and steering speaks only with a verified voice.** Three Codex
 rounds on the spec (REDESIGN ×2, then APPROVE WITH CHANGES — findings

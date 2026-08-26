@@ -38,7 +38,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 24;
+export const SCHEMA_VERSION = 25;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -398,8 +398,11 @@ export type Run = {
   branch: string;
   worktree: string;
   model: string | null;
-  outcome: "built" | "failed" | "refused" | "parked" | "no-change" | null;
+  /** 'interrupted' (v25) = a held attended session cut down mid-flight. */
+  outcome: "built" | "failed" | "refused" | "parked" | "no-change" | "interrupted" | null;
   reason: string | null;
+  /** The attended authorization this run consumed (v25); null = ordinary dispatch. */
+  attendedAuthorization?: string | null;
   committed: boolean | null;
   startedAt: string;
   finishedAt: string | null;
@@ -430,6 +433,102 @@ export const RUN_PHASES = [
   "committing",
 ] as const;
 export type RunPhase = (typeof RUN_PHASES)[number];
+
+// ---- attended core (v25, Parity II Phase 2) --------------------------------
+
+/**
+ * One person's signed authority for ONE watched attempt (ruling 12). The id
+ * is a pre-minted UUID — it IS the attempt identity the dispatch proof
+ * consumes. Consumed (attemptRun set) is NOT closed: the authorization
+ * stays active across its held session; closure is explicit and terminal.
+ */
+export type AttendedAuthorization = {
+  id: string;
+  taskRef: number;
+  approver: string;
+  runner: string;
+  runnerGeneration: number;
+  compositeDigest: string;
+  termsJson: string;
+  maxSessionTurns: number;
+  /** A STOP THRESHOLD, not a ceiling: the agent halts when its total crosses it. */
+  budgetMicrousd: number;
+  /** Continuation: the finished parent attempt, also inside the signed terms. */
+  parentRun: number | null;
+  followup: string | null;
+  createdAt: string;
+  absoluteExpiry: string;
+  lastBeatAt: string | null;
+  attemptRun: number | null;
+  consumedAt: string | null;
+  closedAt: string | null;
+  endReason: string | null;
+};
+
+/**
+ * One stdin injection into a held session (ruling 15). Author is a verified
+ * operator name for 'operator' turns ONLY — brief and repair turns are
+ * machine-authored and say so with null. 'uncertain' is TERMINAL: written
+ * (or accepted) but never proven settled; charged at its reservation and
+ * NEVER reinjected.
+ */
+export type SessionTurn = {
+  id: number;
+  run: number;
+  seq: number;
+  sourceKind: "brief" | "answer" | "operator" | "repair";
+  /** The decision id for 'answer' turns, the triggering decision for 'repair'. */
+  sourceId: number | null;
+  author: string | null;
+  text: string;
+  reservedMicrousd: number;
+  accountedMicrousd: number | null;
+  accountedAt: string | null;
+  recordedAt: string;
+  writtenAt: string | null;
+  acceptedAt: string | null;
+  settledAt: string | null;
+  /** Marginal delta from the held session's durable cumulative baseline. */
+  measuredMicrousd: number | null;
+  outputTokens: number | null;
+  state: "recorded" | "written" | "accepted" | "settled" | "uncertain" | "cancelled";
+};
+
+/**
+ * Durable crash custody for one held session (ruling 15). The orphan
+ * predicate is lease-based; 'fencing' is a helpable, leased state with
+ * deadline takeover. cumulativeMicrousd is the settlement baseline the
+ * provider's cumulative totals are diffed against.
+ */
+export type HeldSession = {
+  run: number;
+  authorizationId: string;
+  runner: string;
+  leaseId: string;
+  upIncarnation: string;
+  cookie: string;
+  socketPath: string;
+  supervisorPid: number | null;
+  agentPgid: number | null;
+  cumulativeMicrousd: number;
+  cumulativeTokensOut: number;
+  state: "open" | "fencing";
+  fencer: string | null;
+  fencingDeadline: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  endReason: string | null;
+};
+
+export type RecordTurnRefusal =
+  | "no-held-session"
+  | "fenced"
+  | "turn-cap"
+  | "turn-open"
+  | "budget-exhausted"
+  | "decision-open"
+  | "repair-exhausted"
+  | "answer-delivered";
 
 /**
  * One operator steering note (arc 1, v22). Attached ≠ delivered: attachment
@@ -1143,9 +1242,17 @@ CREATE TABLE IF NOT EXISTS run (
   branch        TEXT NOT NULL,
   worktree      TEXT NOT NULL,
   model         TEXT,
-  outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change')),
+  -- 'interrupted' (v25) is a held attended session cut down mid-flight —
+  -- fence, expiry, crash custody, or shutdown. A real word, never a
+  -- synthesized park; the one-shot road keeps writing failed/interrupted
+  -- as outcome+reason exactly as before.
+  outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change','interrupted')),
   reason        TEXT,
   committed     INTEGER,
+  -- The attended authorization this run consumed (v25) — the ruling-12
+  -- attempt identity, stamped in the same transaction that consumes the
+  -- one attempt. NULL = ordinary approved/tournament dispatch.
+  attended_authorization TEXT REFERENCES attended_authorization(id),
   started_at    TEXT NOT NULL,
   finished_at   TEXT,
   -- Stamped by the invocation gateway the instant before the provider
@@ -1170,13 +1277,16 @@ CREATE TABLE IF NOT EXISTS run (
 
 -- The decision record (§7): the judgement call an agent refused to guess at,
 -- typed so it renders identically every time and fits on a phone. "run" is
--- UNIQUE and is the decision's whole identity — task, repo, branch, and lease
--- are reached by joining through it, never stored again here, because two
--- copies of an identity is how a decision ends up holding one task while
--- showing another task's evidence.
+-- the decision's whole identity — task, repo, branch, and lease are reached
+-- by joining through it, never stored again here, because two copies of an
+-- identity is how a decision ends up holding one task while showing another
+-- task's evidence. v25 dropped the one-decision-per-run UNIQUE: a held
+-- attended session parks, is answered, continues, and parks again — many
+-- decisions, one run. At most ONE unresolved decision per run (partial
+-- unique, post-migration block).
 CREATE TABLE IF NOT EXISTS decision (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  run            INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+  run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
   urgency        TEXT NOT NULL CHECK (urgency IN ('blocking')),
   state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','expired','answered')),
   recap          TEXT NOT NULL,
@@ -1199,7 +1309,14 @@ CREATE TABLE IF NOT EXISTS decision (
   closed_reason  TEXT CHECK (closed_reason IN ('excluded')),
   answered_via   TEXT CHECK (answered_via IN ('cli','web','telegram')),
   choice         TEXT,
-  note           TEXT
+  note           TEXT,
+  -- v25 held-session linkage. session_turn = the turn whose settlement
+  -- produced this park (causal, held runs only). delivered_turn = the
+  -- answer turn that claimed delivery into the live session — the
+  -- delivery-CAS target: set once (WHERE delivered_turn IS NULL), reverted
+  -- only when that turn terminally never reached acceptance.
+  session_turn   INTEGER REFERENCES session_turn(id),
+  delivered_turn INTEGER REFERENCES session_turn(id)
 );
 
 -- Evidence, by reference (§4): the file lives on the runner under the
@@ -1910,6 +2027,104 @@ CREATE TABLE IF NOT EXISTS mutation (
   created_at      TEXT NOT NULL
 );
 
+-- The attended authorization (v25, Parity II Phase 2 ruling 12): one person,
+-- one password, signing EVERY rendered term of one watched attempt — repo,
+-- task, runner + its generation, scope digest, execution profile, budget as
+-- a STOP THRESHOLD (the agent halts when its total crosses it; the final
+-- step may run a little past), a per-session turn cap, per-turn clock, the
+-- exact head it builds from, and an absolute expiry. The id is a pre-minted
+-- UUID: it IS the attempt identity the dispatch proof consumes. "Live" is a
+-- liveness.ts computation over last_beat_at/absolute_expiry — never an
+-- index predicate. A CONSUMED authorization (attempt_run set) stays OPEN
+-- across its held session; closure is explicit (run end, expiry,
+-- revocation), and minting closes an expired predecessor transactionally.
+CREATE TABLE IF NOT EXISTS attended_authorization (
+  id                TEXT PRIMARY KEY,
+  task_ref          INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  approver          TEXT NOT NULL,
+  runner            TEXT NOT NULL,
+  runner_generation INTEGER NOT NULL,
+  composite_digest  TEXT NOT NULL,
+  terms_json        TEXT NOT NULL,
+  max_session_turns INTEGER NOT NULL,
+  budget_microusd   INTEGER NOT NULL,
+  -- Continuation (A4): the finished parent attempt this authorization
+  -- continues, and the follow-up text — BOTH also inside the signed
+  -- terms_json; these columns exist so admission can join without parsing.
+  parent_run        INTEGER REFERENCES run(id),
+  followup          TEXT,
+  created_at        TEXT NOT NULL,
+  absolute_expiry   TEXT NOT NULL,
+  last_beat_at      TEXT,
+  attempt_run       INTEGER UNIQUE REFERENCES run(id),
+  consumed_at       TEXT,
+  closed_at         TEXT,
+  end_reason        TEXT
+);
+
+-- The turn ledger (v25, ruling 15): every stdin injection into a held
+-- session is a row — the initial brief, every decision answer, every
+-- operator turn, every machine repair turn. Recorded DURABLY before any
+-- write; the recording transaction is where the turn cap, the single-flight
+-- rule, the budget reservation, and the lease re-proof all gate. The
+-- input-acceptance boundary (spike fact 5): stdin-write success is NOT
+-- acceptance — acceptance is THIS turn's system/init (or its result,
+-- retroactively). A written turn whose acceptance never arrives settles
+-- terminal 'uncertain': charged at its reservation, NEVER reinjected.
+-- measured_microusd is the MARGINAL delta from held_session's durable
+-- cumulative baseline (the provider's totals are cumulative per process).
+CREATE TABLE IF NOT EXISTS session_turn (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  run                INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  seq                INTEGER NOT NULL,
+  source_kind        TEXT NOT NULL CHECK (source_kind IN ('brief','answer','operator','repair')),
+  source_id          INTEGER,
+  -- Verified operator name for source_kind 'operator' ONLY; brief and
+  -- repair turns are machine-authored and say so with NULL.
+  author             TEXT,
+  text               TEXT NOT NULL,
+  reserved_microusd  INTEGER NOT NULL,
+  accounted_microusd INTEGER,
+  accounted_at       TEXT,
+  recorded_at        TEXT NOT NULL,
+  written_at         TEXT,
+  accepted_at        TEXT,
+  settled_at         TEXT,
+  measured_microusd  INTEGER,
+  output_tokens      INTEGER,
+  state              TEXT NOT NULL DEFAULT 'recorded'
+                       CHECK (state IN ('recorded','written','accepted','settled','uncertain','cancelled')),
+  UNIQUE (run, seq)
+);
+
+-- Crash custody for held sessions (v25, ruling 15): written as a custody
+-- INTENT in the same transaction as the dispatch proof, stamped with the
+-- supervisor pid + agent process group immediately after spawn. The orphan
+-- predicate is LEASE-BASED (the recorded lease is no longer the task's
+-- current live lease) — never mere incarnation difference, because two live
+-- up processes may share this database. 'fencing' is a helpable, leased
+-- state: a fencer that dies is taken over at its deadline, and every step
+-- is CAS-protected so a loser stops only while a live fencer owns the work.
+CREATE TABLE IF NOT EXISTS held_session (
+  run                   INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  authorization_id      TEXT NOT NULL REFERENCES attended_authorization(id),
+  runner                TEXT NOT NULL,
+  lease_id              TEXT NOT NULL,
+  up_incarnation        TEXT NOT NULL,
+  cookie                TEXT NOT NULL,
+  socket_path           TEXT NOT NULL,
+  supervisor_pid        INTEGER,
+  agent_pgid            INTEGER,
+  cumulative_microusd   INTEGER NOT NULL DEFAULT 0,
+  cumulative_tokens_out INTEGER NOT NULL DEFAULT 0,
+  state                 TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','fencing')),
+  fencer                TEXT,
+  fencing_deadline      TEXT,
+  started_at            TEXT NOT NULL,
+  ended_at              TEXT,
+  end_reason            TEXT
+);
+
 CREATE INDEX IF NOT EXISTS task_by_state ON task (state);
 CREATE INDEX IF NOT EXISTS edge_by_blocker ON task_edge (blocker);
 CREATE INDEX IF NOT EXISTS claim_by_task ON claim (task_ref, lease_generation DESC);
@@ -1987,7 +2202,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_decision_per_contestant
 -- Pending steering, in filing order (arc 1, v22) — after migration because
 -- task_steer arrives by CREATE TABLE IF NOT EXISTS on existing files.
 CREATE INDEX IF NOT EXISTS task_steer_pending
-  ON task_steer (task_ref, id) WHERE delivered_at IS NULL AND superseded_at IS NULL;`);
+  ON task_steer (task_ref, id) WHERE delivered_at IS NULL AND superseded_at IS NULL;
+-- v25 attended-core uniqueness rules — after migration because decision is
+-- rebuilt there and the new tables arrive by IF NOT EXISTS on existing files.
+-- One OPEN authorization per task (closure is explicit, so this is a plain
+-- column predicate, never a time computation).
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_authorization_per_task
+  ON attended_authorization (task_ref) WHERE closed_at IS NULL;
+-- One open held session per runner: capacity governs unattended work; the
+-- attended bound is its own (v6 W2).
+CREATE UNIQUE INDEX IF NOT EXISTS one_held_session_per_runner
+  ON held_session (runner) WHERE ended_at IS NULL;
+-- Answer exactly-once: a retried answer cannot inject twice while a prior
+-- injection is live or proven. Terminal failures (uncertain never-accepted,
+-- cancelled) release the slot — the delivery-CAS on decision.delivered_turn
+-- is the live gate, this index the backstop (v6 W5).
+CREATE UNIQUE INDEX IF NOT EXISTS session_turn_answer_once
+  ON session_turn (source_kind, source_id)
+  WHERE source_kind = 'answer' AND state NOT IN ('uncertain','cancelled');
+-- Many decisions per run (v25 rebuild dropped the UNIQUE), but at most one
+-- UNRESOLVED at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_decision_per_run
+  ON decision (run) WHERE state IN ('open','expired');
+-- The coordinator's per-pulse scan: resolved decisions on held runs whose
+-- answer has not yet been injected.
+CREATE INDEX IF NOT EXISTS decision_undelivered
+  ON decision (run, id) WHERE state = 'answered' AND delivered_turn IS NULL;`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -2509,6 +2749,22 @@ function migrate(db: Database): void {
   // be "grandfathered" by its own migration on the next open.
   const stored = db.prepare("SELECT version FROM schema_version").get() as { version?: number } | undefined;
   if (stored !== undefined && Number(stored.version) < 24) migrateToV24(db);
+
+  // v25 (attended core): two shape rebuilds, each recognized exactly and
+  // idempotent, ordered AFTER every addColumn above so the only pre-v25
+  // shape they ever see is the full v24 one. The three new tables arrive
+  // through the fresh SCHEMA's IF NOT EXISTS (the v8 routines precedent);
+  // their foreign keys into `run` survive the rename-swap by name, and the
+  // rebuild's own foreign_key_check proves it.
+  rebuildForV4(
+    db,
+    "run",
+    "'built','failed','refused','parked','no-change'",
+    "'interrupted'",
+    V25_RUN_DDL("run_next"),
+    V25_RUN_COLUMNS,
+  );
+  rebuildDecisionForV25(db);
 }
 
 /**
@@ -2744,6 +3000,135 @@ const V4_RUN_COLUMNS = [
   "committed", "started_at", "finished_at", "provider_started_at", "tokens_in",
   "tokens_out", "cost_usd", "usage_json", "head_revision", "handoff",
 ];
+
+/**
+ * The v25 run shape: outcome admits 'interrupted' and the attended
+ * authorization stamp arrives. The column list is the FULL v24 set —
+ * this rebuild runs after every addColumn in migrate(), so the only
+ * pre-v25 shape it ever sees carries all of them, and the intersection
+ * copy tolerates an interrupted earlier migration exactly like v4's.
+ */
+function V25_RUN_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+    lease_id      TEXT NOT NULL,
+    runner        TEXT NOT NULL,
+    scope_digest     TEXT,
+    profile_digest   TEXT,
+    provider_version TEXT,
+    role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner')),
+    provider      TEXT NOT NULL DEFAULT 'claude',
+    parent_run    INTEGER REFERENCES run(id),
+    session_id    TEXT,
+    base_revision TEXT,
+    branch        TEXT NOT NULL,
+    worktree      TEXT NOT NULL,
+    model         TEXT,
+    phase         TEXT,
+    contestant    INTEGER REFERENCES contestant(id),
+    outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change','interrupted')),
+    reason        TEXT,
+    committed     INTEGER,
+    attended_authorization TEXT REFERENCES attended_authorization(id),
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT,
+    provider_started_at TEXT,
+    tokens_in     INTEGER,
+    tokens_out    INTEGER,
+    cost_usd      REAL,
+    usage_json    TEXT,
+    head_revision TEXT,
+    handoff       TEXT
+  )`;
+}
+
+const V25_RUN_COLUMNS = [
+  "id", "task_ref", "lease_id", "runner", "scope_digest", "profile_digest",
+  "provider_version", "role", "provider", "parent_run", "session_id",
+  "base_revision", "branch", "worktree", "model", "phase", "contestant",
+  "outcome", "reason", "committed", "attended_authorization", "started_at",
+  "finished_at", "provider_started_at", "tokens_in", "tokens_out", "cost_usd",
+  "usage_json", "head_revision", "handoff",
+];
+
+/**
+ * v25: the decision table sheds its one-decision-per-run UNIQUE (a held
+ * session parks, is answered, and parks again — many decisions, one run)
+ * and gains the held-session linkage columns. Recognized exactly: the only
+ * pre-v25 shape is rebuildDecisionVia's output (or the fresh pre-v25
+ * SCHEMA, which is byte-compatible on the recognizer fragments); anything
+ * else refuses loudly. The one-unresolved-per-run rule moves to a partial
+ * unique index in openStore's post-migration block.
+ */
+function rebuildDecisionForV25(db: Database): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decision'")
+    .get();
+  if (row === undefined) return;
+  const ddl = String(row["sql"]);
+  if (ddl.includes("delivered_turn")) return;
+  if (!ddl.includes("UNIQUE REFERENCES run(id)")) {
+    throw new Error(
+      "the decision table's DDL is not a shape this migration knows — refusing to rebuild it",
+    );
+  }
+
+  const present = new Set(
+    db.prepare("PRAGMA table_info(decision)").all().map(one => String(one["name"])),
+  );
+  const target = [
+    "id", "run", "urgency", "state", "recap", "question", "options",
+    "recommendation", "assignee", "deadline", "created_at", "answered_at",
+    "answered_by", "contestant", "closed_reason", "answered_via", "choice", "note",
+  ];
+  const carried = target.filter(column => present.has(column));
+  const names = carried.join(", ");
+
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(
+        `CREATE TABLE decision_next (
+           id             INTEGER PRIMARY KEY AUTOINCREMENT,
+           run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+           urgency        TEXT NOT NULL CHECK (urgency IN ('blocking')),
+           state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','expired','answered')),
+           recap          TEXT NOT NULL,
+           question       TEXT NOT NULL,
+           options        TEXT NOT NULL,
+           recommendation TEXT NOT NULL,
+           assignee       TEXT,
+           deadline       TEXT,
+           created_at     TEXT NOT NULL,
+           answered_at    TEXT,
+           answered_by    TEXT,
+           contestant     INTEGER REFERENCES contestant(id),
+           closed_reason  TEXT CHECK (closed_reason IN ('excluded')),
+           answered_via   TEXT CHECK (answered_via IN ('cli','web','telegram')),
+           choice         TEXT,
+           note           TEXT,
+           session_turn   INTEGER REFERENCES session_turn(id),
+           delivered_turn INTEGER REFERENCES session_turn(id)
+         )`,
+      );
+      db.exec(`INSERT INTO decision_next (${names}) SELECT ${names} FROM decision`);
+      db.exec("DROP TABLE decision");
+      db.exec("ALTER TABLE decision_next RENAME TO decision");
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) {
+        throw new Error(`decision rebuild left ${broken.length} dangling foreign key(s)`);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
 
 /**
  * One v4 CHECK widening: recognized exactly, refused otherwise. The copy
@@ -6891,7 +7276,7 @@ export class Store {
   finishRun(
     id: number,
     result: {
-      outcome: "built" | "failed" | "refused" | "parked" | "no-change";
+      outcome: "built" | "failed" | "refused" | "parked" | "no-change" | "interrupted";
       reason?: string;
       committed?: boolean;
       now: Date;
@@ -7313,6 +7698,551 @@ export class Store {
         .run(runId, Number(row["id"]), row["choice"], row["note"]);
     }
     return rows.map(row => ({ ...readDecision(row), taskId: String(row["task_id"]) }));
+  }
+
+  // ---- attended core (v25) -------------------------------------------------
+
+  /**
+   * Mint one attended authorization. Expired predecessors are closed in the
+   * SAME transaction (end reason 'expired'); a live one refuses — revoke
+   * first, never silently supersede a signature.
+   */
+  mintAttendedAuthorization(
+    input: {
+      id: string;
+      taskRef: number;
+      approver: string;
+      runner: string;
+      runnerGeneration: number;
+      compositeDigest: string;
+      termsJson: string;
+      maxSessionTurns: number;
+      budgetMicrousd: number;
+      parentRun?: number | null;
+      followup?: string | null;
+      absoluteExpiry: string;
+      now: Date;
+    },
+    mutation: Mutation = {},
+  ): { ok: true; authorization: AttendedAuthorization } | { ok: false; reason: "authorization-open" } {
+    return this.once(mutation, "mintAttendedAuthorization", () =>
+      this.transact(() => {
+        const now = input.now.toISOString();
+        this.db
+          .prepare(
+            `UPDATE attended_authorization SET closed_at = ?, end_reason = 'expired'
+              WHERE task_ref = ? AND closed_at IS NULL AND absolute_expiry <= ?`,
+          )
+          .run(now, input.taskRef, now);
+        const open = this.db
+          .prepare("SELECT 1 AS hit FROM attended_authorization WHERE task_ref = ? AND closed_at IS NULL LIMIT 1")
+          .get(input.taskRef);
+        if (open !== undefined) return { ok: false as const, reason: "authorization-open" as const };
+        this.db
+          .prepare(
+            `INSERT INTO attended_authorization
+               (id, task_ref, approver, runner, runner_generation, composite_digest, terms_json,
+                max_session_turns, budget_microusd, parent_run, followup, created_at, absolute_expiry)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            input.id,
+            input.taskRef,
+            input.approver,
+            input.runner,
+            input.runnerGeneration,
+            input.compositeDigest,
+            input.termsJson,
+            input.maxSessionTurns,
+            input.budgetMicrousd,
+            input.parentRun ?? null,
+            input.followup ?? null,
+            now,
+            input.absoluteExpiry,
+          );
+        const minted = this.readAuthorization(input.id);
+        if (minted === null) throw new Error("attended authorization vanished inside its own mint");
+        return { ok: true as const, authorization: minted };
+      }),
+      result => result.ok,
+    );
+  }
+
+  readAuthorization(id: string): AttendedAuthorization | null {
+    const row = this.db.prepare("SELECT * FROM attended_authorization WHERE id = ?").get(id);
+    return row === undefined ? null : readAuthorizationRow(row);
+  }
+
+  /** The one OPEN authorization for a task, or null. */
+  openAuthorizationFor(taskRef: number): AttendedAuthorization | null {
+    const row = this.db
+      .prepare("SELECT * FROM attended_authorization WHERE task_ref = ? AND closed_at IS NULL")
+      .get(taskRef);
+    return row === undefined ? null : readAuthorizationRow(row);
+  }
+
+  /**
+   * One durable liveness beat. The DURABLE COLUMN IS THE AUTHORITATIVE
+   * CLOCK; the only suppressed writes are duplicate-tab beats landing
+   * within 5 seconds of the stored value, so observed grace never shrinks
+   * below 40 of the nominal 45 seconds.
+   */
+  beatAuthorization(id: string, now: Date): boolean {
+    const cutoff = new Date(now.getTime() - 5_000).toISOString();
+    const { changes } = this.db
+      .prepare(
+        `UPDATE attended_authorization SET last_beat_at = ?
+          WHERE id = ? AND closed_at IS NULL
+            AND (last_beat_at IS NULL OR last_beat_at <= ?)`,
+      )
+      .run(now.toISOString(), id, cutoff);
+    return Number(changes) > 0;
+  }
+
+  /** Explicit terminal closure — run end, expiry, or revocation. CAS on open. */
+  closeAuthorization(id: string, endReason: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE attended_authorization SET closed_at = ?, end_reason = ? WHERE id = ? AND closed_at IS NULL")
+      .run(now.toISOString(), endReason, id);
+    return Number(changes) > 0;
+  }
+
+  /**
+   * Consume the ONE attempt — called inside the final dispatch-proof
+   * transaction, immediately before spawn. CAS: a second consumer loses.
+   */
+  consumeAuthorization(id: string, run: number, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE attended_authorization SET attempt_run = ?, consumed_at = ?
+          WHERE id = ? AND closed_at IS NULL AND attempt_run IS NULL`,
+      )
+      .run(run, now.toISOString(), id);
+    if (Number(changes) > 0) {
+      this.db.prepare("UPDATE run SET attended_authorization = ? WHERE id = ?").run(id, run);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Money already committed against an authorization: settled and uncertain
+   * turns at their accounted charge, plus the live reservation of any
+   * unsettled turn. The budget gate reads THIS, never run.cost_usd.
+   */
+  authorizationSpendMicrousd(id: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE
+            WHEN st.state IN ('settled','uncertain') THEN COALESCE(st.accounted_microusd, 0)
+            WHEN st.state IN ('recorded','written','accepted') THEN st.reserved_microusd
+            ELSE 0 END), 0) AS spent
+           FROM session_turn st JOIN run r ON r.id = st.run
+          WHERE r.attended_authorization = ?`,
+      )
+      .get(id);
+    return Number(row?.["spent"] ?? 0);
+  }
+
+  /**
+   * Record one turn — the gate where the cap, the single-flight rule, the
+   * budget reservation, the lease re-proof, and the open-decision rule all
+   * hold or refuse ATOMICALLY (v6 W6: a fenced coordinator fails inside
+   * this transaction, not at its next poll). For 'answer' turns the
+   * delivery-CAS on decision.delivered_turn happens here; run_decision
+   * attaches only at ACCEPTANCE (v6 W5).
+   */
+  recordSessionTurn(input: {
+    run: number;
+    sourceKind: SessionTurn["sourceKind"];
+    sourceId?: number | null;
+    author?: string | null;
+    text: string;
+    repairLimit?: number;
+    now: Date;
+  }): { ok: true; turn: SessionTurn } | { ok: false; reason: RecordTurnRefusal } {
+    return this.transact(() => {
+      const now = input.now.toISOString();
+      const held = this.heldSessionOf(input.run);
+      if (held === null || held.endedAt !== null) return { ok: false as const, reason: "no-held-session" as const };
+      if (held.state !== "open") return { ok: false as const, reason: "fenced" as const };
+      const run = this.db.prepare("SELECT task_ref, attended_authorization FROM run WHERE id = ?").get(input.run);
+      if (run === undefined || run["attended_authorization"] === null) {
+        return { ok: false as const, reason: "no-held-session" as const };
+      }
+      const authorization = this.readAuthorization(String(run["attended_authorization"]));
+      if (authorization === null || authorization.closedAt !== null) {
+        return { ok: false as const, reason: "fenced" as const };
+      }
+      // The synchronous lease re-proof (v6 W6): the recorded lease must be
+      // the task's current live lease at this instant.
+      if (this.currentLiveLease(Number(run["task_ref"]), input.now) !== held.leaseId) {
+        return { ok: false as const, reason: "fenced" as const };
+      }
+      // The per-authorization turn cap counts EVERY injection across the
+      // authorization's runs.
+      const counted = this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM session_turn st JOIN run r ON r.id = st.run
+            WHERE r.attended_authorization = ?`,
+        )
+        .get(authorization.id);
+      if (Number(counted?.["n"] ?? 0) >= authorization.maxSessionTurns) {
+        return { ok: false as const, reason: "turn-cap" as const };
+      }
+      // Single flight: one unsettled turn at a time, by design.
+      const unsettled = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM session_turn
+            WHERE run = ? AND state IN ('recorded','written','accepted') LIMIT 1`,
+        )
+        .get(input.run);
+      if (unsettled !== undefined) return { ok: false as const, reason: "turn-open" as const };
+      // A waiting question outranks free-form speech: answer it first.
+      if (input.sourceKind === "operator") {
+        const open = this.db
+          .prepare("SELECT 1 AS hit FROM decision WHERE run = ? AND state IN ('open','expired') LIMIT 1")
+          .get(input.run);
+        if (open !== undefined) return { ok: false as const, reason: "decision-open" as const };
+      }
+      // Machine repair is bounded per triggering decision, like REPAIR_TURNS.
+      if (input.sourceKind === "repair") {
+        const limit = input.repairLimit ?? 2;
+        const prior = this.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM session_turn WHERE run = ? AND source_kind = 'repair' AND source_id IS ?",
+          )
+          .get(input.run, input.sourceId ?? null);
+        if (Number(prior?.["n"] ?? 0) >= limit) return { ok: false as const, reason: "repair-exhausted" as const };
+      }
+      // Reservation = remaining budget: under the stop-threshold semantic
+      // and the CLI's cumulative cap, that is the true worst case.
+      const spent = this.authorizationSpendMicrousd(authorization.id);
+      const remaining = authorization.budgetMicrousd - spent;
+      if (remaining <= 0) return { ok: false as const, reason: "budget-exhausted" as const };
+      // Answer exactly-once: the delivery-CAS (v6 W5). This whole method is
+      // one transaction, so read-then-set is serialized; the partial unique
+      // index is the backstop.
+      if (input.sourceKind === "answer") {
+        const decision = this.db
+          .prepare("SELECT delivered_turn FROM decision WHERE id = ?")
+          .get(input.sourceId ?? -1);
+        if (decision === undefined || decision["delivered_turn"] !== null) {
+          return { ok: false as const, reason: "answer-delivered" as const };
+        }
+      }
+      const top = this.db.prepare("SELECT MAX(seq) AS top FROM session_turn WHERE run = ?").get(input.run);
+      const seq = Number(top?.["top"] ?? 0) + 1;
+      const { lastInsertRowid } = this.db
+        .prepare(
+          `INSERT INTO session_turn
+             (run, seq, source_kind, source_id, author, text, reserved_microusd, recorded_at, state)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded')`,
+        )
+        .run(
+          input.run,
+          seq,
+          input.sourceKind,
+          input.sourceId ?? null,
+          input.author ?? null,
+          input.text,
+          remaining,
+          now,
+        );
+      const id = Number(lastInsertRowid);
+      if (input.sourceKind === "answer") {
+        const claimed = this.db
+          .prepare("UPDATE decision SET delivered_turn = ? WHERE id = ? AND delivered_turn IS NULL")
+          .run(id, input.sourceId ?? -1);
+        if (Number(claimed.changes) === 0) throw new Error("answer delivery lost a race inside its own transaction");
+      }
+      const turn = this.readSessionTurn(id);
+      if (turn === null) throw new Error("session turn vanished inside its own recording");
+      return { ok: true as const, turn };
+    });
+  }
+
+  readSessionTurn(id: number): SessionTurn | null {
+    const row = this.db.prepare("SELECT * FROM session_turn WHERE id = ?").get(id);
+    return row === undefined ? null : readSessionTurnRow(row);
+  }
+
+  sessionTurnsOf(run: number): SessionTurn[] {
+    return this.db
+      .prepare("SELECT * FROM session_turn WHERE run = ? ORDER BY seq")
+      .all(run)
+      .map(readSessionTurnRow);
+  }
+
+  /** Bytes flushed to stdin. Write success is NOT acceptance (spike fact 5). */
+  markTurnWritten(id: number, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE session_turn SET state = 'written', written_at = ? WHERE id = ? AND state = 'recorded'")
+      .run(now.toISOString(), id);
+    return Number(changes) > 0;
+  }
+
+  /**
+   * Acceptance — THIS turn's system/init (or its result, retroactively).
+   * For answer turns this is also where run_decision attaches: delivery is
+   * claimed only once the agent provably received the words (v6 W5).
+   */
+  markTurnAccepted(id: number, now: Date): boolean {
+    return this.transact(() => {
+      const { changes } = this.db
+        .prepare(
+          `UPDATE session_turn SET state = 'accepted', accepted_at = ?
+            WHERE id = ? AND state IN ('recorded','written')`,
+        )
+        .run(now.toISOString(), id);
+      if (Number(changes) === 0) return false;
+      const turn = this.readSessionTurn(id);
+      if (turn !== null && turn.sourceKind === "answer" && turn.sourceId !== null) {
+        const decision = this.db
+          .prepare("SELECT choice, note FROM decision WHERE id = ?")
+          .get(turn.sourceId);
+        if (decision !== undefined) {
+          this.db
+            .prepare("INSERT OR IGNORE INTO run_decision (run, decision, choice, note) VALUES (?, ?, ?, ?)")
+            .run(turn.run, turn.sourceId, decision["choice"], decision["note"]);
+        }
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Settle a turn from its result. The provider's totals are CUMULATIVE per
+   * process, so the measured charge is the marginal delta from the held
+   * session's durable baseline, advanced here atomically. A missing or
+   * regressing total is a TELEMETRY FAILURE: the turn settles uncertain at
+   * its reservation, the baseline stays, and the caller must end the hold.
+   * Run aggregates gain the same delta so attended spend never disappears
+   * from routine reporting (v3 R4).
+   */
+  settleTurn(
+    id: number,
+    result: { cumulativeMicrousd: number | null; outputTokens: number | null; now: Date },
+  ): { ok: true; measuredMicrousd: number } | { ok: false; reason: "telemetry" | "not-unsettled" } {
+    return this.transact(() => {
+      const turn = this.readSessionTurn(id);
+      if (turn === null || !["recorded", "written", "accepted"].includes(turn.state)) {
+        return { ok: false as const, reason: "not-unsettled" as const };
+      }
+      const held = this.heldSessionOf(turn.run);
+      if (held === null) return { ok: false as const, reason: "not-unsettled" as const };
+      const now = result.now.toISOString();
+      if (result.cumulativeMicrousd === null || result.cumulativeMicrousd < held.cumulativeMicrousd) {
+        // Conservative posture: charge the reservation, never invent zero.
+        this.db
+          .prepare(
+            `UPDATE session_turn SET state = 'uncertain', settled_at = ?,
+                    accounted_microusd = reserved_microusd, accounted_at = ? WHERE id = ?`,
+          )
+          .run(now, now, id);
+        this.chargeRunAggregates(turn.run, turn.reservedMicrousd, 0);
+        return { ok: false as const, reason: "telemetry" as const };
+      }
+      const measured = result.cumulativeMicrousd - held.cumulativeMicrousd;
+      const tokens = result.outputTokens ?? 0;
+      // Result proves acceptance when the init was missed (spike-consistent).
+      this.db
+        .prepare(
+          `UPDATE session_turn SET state = 'settled', settled_at = ?,
+                  accepted_at = COALESCE(accepted_at, ?),
+                  measured_microusd = ?, output_tokens = ?,
+                  accounted_microusd = ?, accounted_at = ? WHERE id = ?`,
+        )
+        .run(now, now, measured, result.outputTokens ?? null, measured, now, id);
+      if (turn.sourceKind === "answer" && turn.sourceId !== null && turn.acceptedAt === null) {
+        // The acceptance this settlement back-filled attaches the answer too.
+        const decision = this.db.prepare("SELECT choice, note FROM decision WHERE id = ?").get(turn.sourceId);
+        if (decision !== undefined) {
+          this.db
+            .prepare("INSERT OR IGNORE INTO run_decision (run, decision, choice, note) VALUES (?, ?, ?, ?)")
+            .run(turn.run, turn.sourceId, decision["choice"], decision["note"]);
+        }
+      }
+      this.db
+        .prepare(
+          `UPDATE held_session SET cumulative_microusd = ?, cumulative_tokens_out = cumulative_tokens_out + ?
+            WHERE run = ?`,
+        )
+        .run(result.cumulativeMicrousd, tokens, turn.run);
+      this.chargeRunAggregates(turn.run, measured, tokens);
+      return { ok: true as const, measuredMicrousd: measured };
+    });
+  }
+
+  /**
+   * Terminal conservative settlement on process exit (ruling 15).
+   * 'cancelled' = recorded but never written: charged zero. 'uncertain' =
+   * written or accepted but never proven settled: charged its reservation.
+   * A turn that never reached ACCEPTANCE reverts its delivery claim so the
+   * ordinary road can deliver the answer later (v6 W5); an accepted turn
+   * keeps its attach — acceptance is the proof.
+   */
+  settleTurnTerminal(id: number, terminal: "uncertain" | "cancelled", now: Date): boolean {
+    return this.transact(() => {
+      const turn = this.readSessionTurn(id);
+      if (turn === null || !["recorded", "written", "accepted"].includes(turn.state)) return false;
+      const at = now.toISOString();
+      const charge = terminal === "uncertain" ? turn.reservedMicrousd : 0;
+      this.db
+        .prepare(
+          `UPDATE session_turn SET state = ?, settled_at = ?, accounted_microusd = ?, accounted_at = ?
+            WHERE id = ?`,
+        )
+        .run(terminal, at, charge, at, id);
+      if (turn.sourceKind === "answer" && turn.sourceId !== null && turn.acceptedAt === null) {
+        this.db.prepare("UPDATE decision SET delivered_turn = NULL WHERE delivered_turn = ?").run(id);
+      }
+      if (charge > 0) this.chargeRunAggregates(turn.run, charge, 0);
+      return true;
+    });
+  }
+
+  private chargeRunAggregates(run: number, microusd: number, tokensOut: number): void {
+    this.db
+      .prepare(
+        `UPDATE run SET cost_usd = COALESCE(cost_usd, 0) + ?,
+                tokens_out = COALESCE(tokens_out, 0) + ? WHERE id = ?`,
+      )
+      .run(microusd / 1_000_000, tokensOut, run);
+  }
+
+  /**
+   * Custody intent — INSERTed in the final dispatch-proof transaction,
+   * before spawn. The one-held-session-per-runner partial unique refuses a
+   * second hold typed, not by accident.
+   */
+  openHeldSession(input: {
+    run: number;
+    authorizationId: string;
+    runner: string;
+    leaseId: string;
+    upIncarnation: string;
+    cookie: string;
+    socketPath: string;
+    now: Date;
+  }): { ok: true } | { ok: false; reason: "runner-holding" | "run-held" } {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO held_session
+             (run, authorization_id, runner, lease_id, up_incarnation, cookie, socket_path, started_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.run,
+          input.authorizationId,
+          input.runner,
+          input.leaseId,
+          input.upIncarnation,
+          input.cookie,
+          input.socketPath,
+          input.now.toISOString(),
+        );
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // SQLite names the COLUMN in unique violations, never the index.
+      if (message.includes("held_session.runner")) return { ok: false, reason: "runner-holding" };
+      if (message.includes("UNIQUE") || message.includes("PRIMARY KEY")) return { ok: false, reason: "run-held" };
+      throw error;
+    }
+  }
+
+  /** Stamp pids after spawn. False = the row closed underneath the spawn — kill the child. */
+  stampHeldSession(run: number, supervisorPid: number, agentPgid: number): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE held_session SET supervisor_pid = ?, agent_pgid = ? WHERE run = ? AND ended_at IS NULL")
+      .run(supervisorPid, agentPgid, run);
+    return Number(changes) > 0;
+  }
+
+  heldSessionOf(run: number): HeldSession | null {
+    const row = this.db.prepare("SELECT * FROM held_session WHERE run = ?").get(run);
+    return row === undefined ? null : readHeldSessionRow(row);
+  }
+
+  /** Every un-ended custody row — the fence sweep's and hard-stop's read. */
+  openHeldSessions(): HeldSession[] {
+    return this.db
+      .prepare("SELECT * FROM held_session WHERE ended_at IS NULL ORDER BY run")
+      .all()
+      .map(readHeldSessionRow);
+  }
+
+  /** Ordinary close by the owning coordinator. CAS on un-ended. */
+  endHeldSession(run: number, endReason: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare("UPDATE held_session SET ended_at = ?, end_reason = ? WHERE run = ? AND ended_at IS NULL")
+      .run(now.toISOString(), endReason, run);
+    return Number(changes) > 0;
+  }
+
+  /**
+   * SEIZE custody for fencing (v6, after v4 Q5): CAS open→fencing AND fence
+   * the recorded lease in ONE transaction, so a wedged owner's heartbeat
+   * revival and every later coordinator write fail before any kill happens.
+   */
+  seizeHeldSession(
+    run: number,
+    fencer: string,
+    deadline: Date,
+    now: Date,
+  ): { ok: true; session: HeldSession } | { ok: false; reason: "not-open" } {
+    return this.transact(() => {
+      const { changes } = this.db
+        .prepare(
+          `UPDATE held_session SET state = 'fencing', fencer = ?, fencing_deadline = ?
+            WHERE run = ? AND state = 'open' AND ended_at IS NULL`,
+        )
+        .run(fencer, deadline.toISOString(), run);
+      if (Number(changes) === 0) return { ok: false as const, reason: "not-open" as const };
+      const session = this.heldSessionOf(run);
+      if (session === null) throw new Error("held session vanished inside its own seize");
+      this.db
+        .prepare("UPDATE claim SET released_at = ?, released_by = 'held-fence' WHERE lease_id = ? AND released_at IS NULL")
+        .run(now.toISOString(), session.leaseId);
+      return { ok: true as const, session };
+    });
+  }
+
+  /**
+   * Take over a fencing operation whose owner went quiet (v5 P3): CAS on
+   * the EXPIRED deadline. A loser stops only while a live fencer owns it.
+   */
+  takeoverHeldFencing(run: number, fencer: string, deadline: Date, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE held_session SET fencer = ?, fencing_deadline = ?
+          WHERE run = ? AND state = 'fencing' AND ended_at IS NULL AND fencing_deadline <= ?`,
+      )
+      .run(fencer, deadline.toISOString(), run, now.toISOString());
+    return Number(changes) > 0;
+  }
+
+  /** Re-arm the fencing deadline while the work continues. Owner-CASed. */
+  renewHeldFencing(run: number, fencer: string, deadline: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        "UPDATE held_session SET fencing_deadline = ? WHERE run = ? AND state = 'fencing' AND fencer = ?",
+      )
+      .run(deadline.toISOString(), run, fencer);
+    return Number(changes) > 0;
+  }
+
+  /** Final close of a fenced session — owner-CASed, after kill + settlement. */
+  closeHeldFencing(run: number, fencer: string, endReason: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE held_session SET ended_at = ?, end_reason = ?
+          WHERE run = ? AND state = 'fencing' AND fencer = ? AND ended_at IS NULL`,
+      )
+      .run(now.toISOString(), endReason, run, fencer);
+    return Number(changes) > 0;
   }
 
   /**
@@ -9528,7 +10458,13 @@ export class Store {
     return Number(changes) > 0;
   }
 
-  /** Live claims this runner holds right now — the occupied slots of §8's capacity gate. */
+  /**
+   * Live claims this runner holds right now — the occupied slots of §8's
+   * capacity gate. A claim whose run is a HELD attended session is EXCLUDED
+   * (v6 W2): capacity governs unattended work; the attended bound is the
+   * one-held-session-per-runner rule, so a watched conversation never
+   * freezes the runner's whole queue.
+   */
   liveClaimCount(runner: string, now: Date): number {
     const row = this.db
       .prepare(
@@ -9537,7 +10473,8 @@ export class Store {
             AND lease_generation = (
               SELECT MAX(newest.lease_generation) FROM claim AS newest
               WHERE newest.task_ref = claim.task_ref
-            )`,
+            )
+            AND lease_id NOT IN (SELECT lease_id FROM held_session WHERE ended_at IS NULL)`,
       )
       .get(runner, now.toISOString());
     return Number(row?.["n"] ?? 0);
@@ -9974,6 +10911,10 @@ function readRun(row: Record<string, unknown>): Run {
         : String(row["base_revision"]),
     scopeDigest: row["scope_digest"] === null || row["scope_digest"] === undefined ? null : String(row["scope_digest"]),
     profileDigest: row["profile_digest"] === null || row["profile_digest"] === undefined ? null : String(row["profile_digest"]),
+    attendedAuthorization:
+      row["attended_authorization"] === null || row["attended_authorization"] === undefined
+        ? null
+        : String(row["attended_authorization"]),
     branch: String(row["branch"]),
     worktree: String(row["worktree"]),
     model: row["model"] === null ? null : String(row["model"]),
@@ -10000,6 +10941,73 @@ function readRun(row: Record<string, unknown>): Run {
         : (RUN_PHASES as readonly string[]).includes(String(row["phase"]))
           ? (String(row["phase"]) as RunPhase)
           : null,
+  };
+}
+
+function readAuthorizationRow(row: Record<string, unknown>): AttendedAuthorization {
+  return {
+    id: String(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    approver: String(row["approver"]),
+    runner: String(row["runner"]),
+    runnerGeneration: Number(row["runner_generation"]),
+    compositeDigest: String(row["composite_digest"]),
+    termsJson: String(row["terms_json"]),
+    maxSessionTurns: Number(row["max_session_turns"]),
+    budgetMicrousd: Number(row["budget_microusd"]),
+    parentRun: row["parent_run"] === null ? null : Number(row["parent_run"]),
+    followup: row["followup"] === null ? null : String(row["followup"]),
+    createdAt: String(row["created_at"]),
+    absoluteExpiry: String(row["absolute_expiry"]),
+    lastBeatAt: row["last_beat_at"] === null ? null : String(row["last_beat_at"]),
+    attemptRun: row["attempt_run"] === null ? null : Number(row["attempt_run"]),
+    consumedAt: row["consumed_at"] === null ? null : String(row["consumed_at"]),
+    closedAt: row["closed_at"] === null ? null : String(row["closed_at"]),
+    endReason: row["end_reason"] === null ? null : String(row["end_reason"]),
+  };
+}
+
+function readSessionTurnRow(row: Record<string, unknown>): SessionTurn {
+  return {
+    id: Number(row["id"]),
+    run: Number(row["run"]),
+    seq: Number(row["seq"]),
+    sourceKind: String(row["source_kind"]) as SessionTurn["sourceKind"],
+    sourceId: row["source_id"] === null ? null : Number(row["source_id"]),
+    author: row["author"] === null ? null : String(row["author"]),
+    text: String(row["text"]),
+    reservedMicrousd: Number(row["reserved_microusd"]),
+    accountedMicrousd: row["accounted_microusd"] === null ? null : Number(row["accounted_microusd"]),
+    accountedAt: row["accounted_at"] === null ? null : String(row["accounted_at"]),
+    recordedAt: String(row["recorded_at"]),
+    writtenAt: row["written_at"] === null ? null : String(row["written_at"]),
+    acceptedAt: row["accepted_at"] === null ? null : String(row["accepted_at"]),
+    settledAt: row["settled_at"] === null ? null : String(row["settled_at"]),
+    measuredMicrousd: row["measured_microusd"] === null ? null : Number(row["measured_microusd"]),
+    outputTokens: row["output_tokens"] === null ? null : Number(row["output_tokens"]),
+    state: String(row["state"]) as SessionTurn["state"],
+  };
+}
+
+function readHeldSessionRow(row: Record<string, unknown>): HeldSession {
+  return {
+    run: Number(row["run"]),
+    authorizationId: String(row["authorization_id"]),
+    runner: String(row["runner"]),
+    leaseId: String(row["lease_id"]),
+    upIncarnation: String(row["up_incarnation"]),
+    cookie: String(row["cookie"]),
+    socketPath: String(row["socket_path"]),
+    supervisorPid: row["supervisor_pid"] === null ? null : Number(row["supervisor_pid"]),
+    agentPgid: row["agent_pgid"] === null ? null : Number(row["agent_pgid"]),
+    cumulativeMicrousd: Number(row["cumulative_microusd"]),
+    cumulativeTokensOut: Number(row["cumulative_tokens_out"]),
+    state: String(row["state"]) as HeldSession["state"],
+    fencer: row["fencer"] === null ? null : String(row["fencer"]),
+    fencingDeadline: row["fencing_deadline"] === null ? null : String(row["fencing_deadline"]),
+    startedAt: String(row["started_at"]),
+    endedAt: row["ended_at"] === null ? null : String(row["ended_at"]),
+    endReason: row["end_reason"] === null ? null : String(row["end_reason"]),
   };
 }
 
