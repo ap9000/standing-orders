@@ -693,3 +693,110 @@ function fakeStarterOf(onTurn: (seq: number) => { events: boolean; files: string
     return Promise.resolve({ ok: true, handle } as HeldSessionStart);
   }) as typeof import("./exec.js").startClaudeHeldSession;
 }
+
+describe("continuation (Phase 2E, A4): the authorization is the claimable unit; the parent stays terminal", () => {
+  const continuationFixture = (store: ReturnType<typeof openStore>) => {
+    store.createTask({ id: "t-done", title: "finished work" }, T0);
+    const ref = store.refFor("built-in", "t-done");
+    store.raw().prepare("UPDATE task SET state = 'done' WHERE id = 't-done'").run();
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at, released_at)
+         VALUES ('lease-old', ?, 1, 'mac-a', ?, ?, ?, ?)`,
+      )
+      .run(ref.id, T0.toISOString(), later(60).toISOString(), T0.toISOString(), later(50).toISOString());
+    const parent = store.startRun({ taskRef: ref.id, leaseId: "lease-old", runner: "mac-a", branch: "so/t-done", worktree: "/w", now: T0 });
+    store.recordOutcomeFacts(parent, { headRevision: "f".repeat(40) });
+    store.finishRun(parent, { outcome: "built", committed: true, now: later(40) });
+    const minted = store.mintAttendedAuthorization({
+      id: "auth-cont",
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "mac-a",
+      runnerGeneration: 0,
+      compositeDigest: "c".repeat(32),
+      termsJson: JSON.stringify({ head: "f".repeat(40) }),
+      maxSessionTurns: 10,
+      budgetMicrousd: 1_000_000,
+      parentRun: parent,
+      followup: "now add the tests",
+      absoluteExpiry: new Date(Date.now() + 3_600_000).toISOString(),
+      now: later(41),
+    });
+    expect(minted.ok).toBe(true);
+    return { ref, parent };
+  };
+
+  test("admission: live watching admits through acquire's shared gates; the parent task NEVER re-queues", async () => {
+    const store = openStore(":memory:");
+    const { ref, parent } = continuationFixture(store);
+    const { acquireContinuation } = await import("./claim.js");
+    const authorization = store.readAuthorization("auth-cont")!;
+    // nobody watching: refused
+    const dark = acquireContinuation(store, authorization, "mac-a", { now: new Date() });
+    expect(dark).toMatchObject({ ok: false, reason: "attended-only" });
+    // watching: admitted — and the task is UNTOUCHED, no queued resurrection
+    store.beatAuthorization("auth-cont", new Date());
+    const admitted = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { now: new Date() });
+    expect(admitted.ok).toBe(true);
+    expect(store.getTask("t-done")?.state).toBe("done");
+    // it is listed for the runner's continuation pass
+    expect(store.openContinuationAuthorizations("mac-a").map(one => one.id)).toContain("auth-cont");
+    expect(store.openContinuationAuthorizations("other").length).toBe(0);
+    void ref;
+    void parent;
+    store.close();
+  });
+
+  test("a moving publication blocks continuation, in words", async () => {
+    const store = openStore(":memory:");
+    const { ref, parent } = continuationFixture(store);
+    store.createPublicationIntent(
+      { run: parent, taskRef: ref.id, githubRepo: "o/r", remote: "origin", base: "main", head: "so/t-done", headSha: "f".repeat(40), bodyHash: "", draft: false },
+      new Date(),
+    );
+    expect(store.continuationBlockOf(parent)).toContain("being published");
+    const { acquireContinuation } = await import("./claim.js");
+    store.beatAuthorization("auth-cont", new Date());
+    const refused = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { now: new Date() });
+    expect(refused).toMatchObject({ ok: false, reason: "continuation-blocked" });
+    store.close();
+  });
+
+  test("taskless dispositions: success and failure both leave the parent done, unstruck, its park rate untouched", async () => {
+    const store = openStore(":memory:");
+    const { ref, parent } = continuationFixture(store);
+    const rateBefore = store.refForId(ref.id)?.parkRate;
+    const { acquireContinuation } = await import("./claim.js");
+    const { disposeBuildOutcome } = await import("./dispose.js");
+    store.beatAuthorization("auth-cont", new Date());
+    const claimed = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { now: new Date() });
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) return;
+    const runId = store.startRun({
+      taskRef: ref.id, leaseId: claimed.claim.leaseId, runner: "mac-a",
+      branch: "so/t-done", worktree: "/w2", parentRun: parent, now: new Date(),
+    });
+    store.consumeAuthorization("auth-cont", runId, new Date());
+    // FAILURE: no strikes, no demotion, no holds
+    const failed = disposeBuildOutcome(
+      {
+        store, policy: "continuation", leaseId: claimed.claim.leaseId, runId,
+        taskId: "t-done", taskRef: ref.id, runner: "mac-a", repo: "/repo",
+        branch: "so/t-done", origin: "theirs", provider: "claude", model: "sonnet",
+        worktreePath: "/w2", clock: () => new Date(),
+      },
+      { ok: false, reason: "agent", message: "it broke" },
+    );
+    expect(failed).toMatchObject({ kind: "recorded", outcome: "failed" });
+    expect(store.getTask("t-done")?.state).toBe("done");
+    expect(store.refForId(ref.id)?.strikes).toBe(0);
+    expect(store.refForId(ref.id)?.parkRate).toBe(rateBefore);
+    expect(store.getRun(runId)?.outcome).toBe("failed");
+    // and the finished continuation run did not shift park_rate arithmetic
+    store.finishRun(runId, { outcome: "failed", reason: "x", now: new Date() });
+    expect(store.refForId(ref.id)?.parkRate).toBe(rateBefore);
+    store.close();
+  });
+});

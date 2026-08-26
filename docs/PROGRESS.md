@@ -1,5 +1,40 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 2E.4: continuation — and Phase 2
+closes.** The last A4 piece, to the reviewed rulings (v3 R7, v4 Q7, v5
+P5, round-6 findings 3/5 already closed). A finished attempt's run
+page offers "continue this attempt while you watch": the follow-up
+text the operator types ENTERS THE SIGNED TERMS — rendered on the
+confirm screen beside the parent attempt and its ACCEPTED head (built
+→ the head it produced; no-change → its base; a failed parent refuses
+in words and points at filing a follow-up task — a dirty preserved
+tree cannot promise a clean continuation), with a moving publication
+('intended', 'pushed', an open PR, a pending or claimed merge — the
+concrete states, enumerated and tested) blocking the mint. The
+AUTHORIZATION IS THE CLAIMABLE UNIT: `acquireContinuation` re-proves
+liveness, the named runner, and the unspent attempt, then admits
+through acquire's own shared gates — reservation, external mirror,
+attended — while the finished parent task NEVER re-queues; its state,
+strikes, holds, dependents, and (proven by test) its measured park
+rate stay exactly as it finished, the park-rate arithmetic now
+excluding continuation runs on both sides. tick grew the continuation
+pass: open continuation authorizations named to this runner dispatch
+onto the PARENT'S BRANCH — the final proof compares the leased
+worktree's head against the signed accepted head, so a moved branch
+refuses naming the head — and the follow-up rides the brief inside an
+OPERATOR FOLLOW-UP fence, operator speech exactly like turns. The
+disposition service gained the `continuation` policy: success
+finishes the run, releases the claim, and opens the publication
+intent under the SAME completion latch the ordinary road holds — all
+one transaction — and failure records the run and releases, never a
+strike, never a demotion; three failed continuations leave the parent
+`done`. Suite 1230 (5 new). PHASE 2 IS COMPLETE: the attended core —
+authorization, custody, ledger, conversation, continuation — is
+end-to-end machinery, six ship commits from spec chain v1→v6 through
+six adversarial review rounds. Next: Phase 0 release prep (0.4.0),
+then the one funded adapter.
+
+
 **2026-08-26 — Parity II Phase 2E.3: the badge, the dots, and the
 design record.** The app-icon badge (v2 S4, round-1 finding 13's
 delivery question answered): every push now carries the server-computed

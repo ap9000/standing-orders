@@ -63,8 +63,10 @@ export type HeldLaunchArgs = {
   releaseWorktree: (path: string) => Promise<unknown>;
   liveLog: { observe(event: Record<string, unknown>): void; close(): void } | null;
   omitEnv: readonly string[];
-  /** Fields the disposition service needs that the capture does not carry. */
-  dispose: Pick<DisposeContext, "repo" | "origin" | "provider" | "model">;
+  /** Fields the disposition service needs that the capture does not carry.
+   * `policy` distinguishes the continuation road (taskless dispositions,
+   * v4 Q7); absent = the ordinary tick policy. */
+  dispose: Pick<DisposeContext, "repo" | "origin" | "provider" | "model"> & { policy?: DisposeContext["policy"] };
   clock: () => Date;
   /** Test seams. */
   starter?: typeof startClaudeHeldSession;
@@ -547,7 +549,7 @@ export class HeldSessionCoordinator {
       const disposition = disposeBuildOutcome(
         {
           store: args.store,
-          policy: "tick",
+          policy: args.dispose.policy ?? "tick",
           leaseId: args.leaseId,
           runId: args.runId,
           taskId: args.captured.taskId,
@@ -619,7 +621,7 @@ export class HeldSessionCoordinator {
     const disposition = disposeBuildOutcome(
       {
         store: args.store,
-        policy: "tick",
+        policy: args.dispose.policy ?? "tick",
         leaseId: args.leaseId,
         runId: args.runId,
         taskId: args.captured.taskId,

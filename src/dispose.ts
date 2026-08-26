@@ -31,7 +31,7 @@ import type { Store } from "./store.js";
  * publication (its historical shape). The held road reuses 'tick' —
  * an attended session is still the task's real attempt.
  */
-export type DisposePolicy = "tick" | "standalone";
+export type DisposePolicy = "tick" | "standalone" | "continuation";
 
 export type DisposeContext = {
   store: Store;
@@ -122,6 +122,58 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
   }
 
   if (result.ok) {
+    if (policy === "continuation") {
+      // The taskless success (v4 Q7 + v5 P5): run finished, claim released,
+      // publication intent under the SAME completion latch the ordinary
+      // road holds — and the parent task untouched in state, strikes,
+      // holds, and derived stats. All one transaction.
+      const sealed = store.transact((): { disowned: boolean } => {
+        const latchOpen = store.mirrorAllowsCompletion(taskId);
+        store.finishRun(runId, {
+          outcome: result.noChange === true ? "no-change" : "built",
+          ...(result.noChange === true ? { reason: "handoff" } : {}),
+          committed: result.committed,
+          now: clock(),
+        });
+        if (leaseId !== undefined) release(store, leaseId, clock());
+        if (!latchOpen) return { disowned: true };
+        if (result.noChange !== true && result.committed) {
+          const grant = store.publicationGrantFor(repo);
+          const headSha = store.getRun(runId)?.headRevision ?? null;
+          if (
+            grant !== null &&
+            headSha !== null &&
+            branch.startsWith(grant.headPrefix) &&
+            (grant.selector === "all" || origin === "ours")
+          ) {
+            const intentId = store.createPublicationIntent(
+              {
+                run: runId,
+                taskRef,
+                githubRepo: grant.githubRepo,
+                remote: grant.remote,
+                base: grant.base,
+                head: branch,
+                headSha,
+                bodyHash: "",
+                draft: grant.draft,
+              },
+              clock(),
+            );
+            const publication = store.publicationForRun(runId);
+            if (publication !== null) {
+              store.handle
+                .prepare("UPDATE publication SET body_hash = ? WHERE id = ?")
+                .run(bodyHashOf(publicationBody(store, publication)), intentId);
+            }
+          }
+        }
+        return { disowned: false };
+      });
+      store.clearQuota(runner, provider, model ?? "");
+      if (sealed.disowned) return { kind: "disowned" };
+      return { kind: "built", committed: result.committed, noChange: result.noChange === true };
+    }
     if (policy === "standalone") {
       store.finishRun(runId, {
         outcome: result.noChange === true ? "no-change" : "built",
@@ -219,6 +271,16 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
   }
 
   // ---- refusals and failures -----------------------------------------------
+
+  if (policy === "continuation") {
+    // The taskless failure (v4 Q7): the run says what happened, the claim
+    // releases — NO strikes, NO holds, NO done→failed demotion; three
+    // failed continuations still leave the parent exactly as it finished.
+    const outcome = result.reason === "fenced" ? "refused" : "failed";
+    store.finishRun(runId, { outcome, reason: result.reason, now: clock() });
+    if (leaseId !== undefined) release(store, leaseId, clock());
+    return { kind: "recorded", outcome };
+  }
 
   if (policy === "standalone") {
     if (result.reason === "malformed-decision" && leaseId !== undefined) {

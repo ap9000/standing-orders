@@ -73,7 +73,7 @@ export type AttendedDispatch = {
   upIncarnation: string;
   socketDir: string;
   releaseWorktree: (path: string) => Promise<unknown>;
-  dispose: { repo: string; origin: string; provider: string; model: string | null };
+  dispose: { repo: string; origin: string; provider: string; model: string | null; policy?: import("./dispose.js").DisposePolicy };
   starter?: import("./exec.js").HeldSessionStart extends never ? never : typeof import("./exec.js").startClaudeHeldSession;
   graceMs?: number;
   onDisposed?: import("./held.js").HeldLaunchArgs["onDisposed"];
@@ -860,6 +860,14 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // settling: the run, the lease, and the worktree are the coordinator's.
   if (attended !== undefined) {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
+    // The follow-up is NEW INSTRUCTION inside the signed terms (v2 S3c):
+    // it rides the brief in an OPERATOR fence, after the scope text —
+    // operator speech, exactly like turns, never widening scope.
+    const followup = attended.authorization.followup;
+    const heldBrief =
+      followup === null || followup === undefined
+        ? briefText
+        : `${briefText}\n\n=== OPERATOR FOLLOW-UP (this session continues finished attempt #${attended.authorization.parentRun ?? "?"}) ===\n${followup}\n=== END OPERATOR FOLLOW-UP ===`;
     const captured: CapturedBuild = {
       store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
       runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done,
@@ -874,7 +882,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       runner,
       ...(request.runnerToken === undefined ? {} : { runnerToken: request.runnerToken }),
       upIncarnation: attended.upIncarnation,
-      brief: briefText,
+      brief: heldBrief,
       cwd: worktree,
       socketDir: attended.socketDir,
       releaseWorktree: attended.releaseWorktree,

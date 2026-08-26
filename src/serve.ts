@@ -1273,6 +1273,13 @@ export function createDecisionServer(options: ServeOptions): Server {
               cap: authorization?.maxSessionTurns ?? 0,
             };
           })(),
+          options.attended !== undefined &&
+          who.via === "cookie" &&
+          !store.isDemo() &&
+          (found.outcome === "built" || found.outcome === "no-change") &&
+          store.openAuthorizationFor(found.taskRef) === null
+            ? { taskId }
+            : null,
         ),
       );
     }
@@ -3724,7 +3731,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   async function liveAttendedTerms(
     taskId: string,
-    inputs: { minutes: number; turns: number; budgetMicrousd: number; expiry?: string },
+    inputs: { minutes: number; turns: number; budgetMicrousd: number; expiry?: string; parent?: number; followup?: string },
     now: Date,
   ): Promise<{ ok: true; terms: AttendedTerms } | { ok: false; problem: string }> {
     if (options.attended === undefined) return { ok: false, problem: "this console cannot hold a session — start it with `standing-orders up`" };
@@ -3732,7 +3739,30 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (ref === null) return { ok: false, problem: "no such task" };
     const scope = store.getScope(taskId);
     if (scope === null) return { ok: false, problem: "file a scope first — the terms come from it" };
-    if (approvalOf(scope).approved) return { ok: false, problem: "the scope is approved — it already dispatches unattended" };
+    // CONTINUATION (A4): the parent attempt and the follow-up enter the
+    // SIGNED terms; the head is the parent's accepted commit per outcome;
+    // a moving publication blocks; failed parents are refused outright for
+    // now (a dirty preserved tree cannot promise a clean continuation) —
+    // stated, not hidden.
+    let continuation: { parentRun: number; followup: string; head: string } | null = null;
+    if (inputs.parent !== undefined) {
+      const parent = store.getRun(inputs.parent);
+      if (parent === null || parent.taskRef !== ref.id) return { ok: false, problem: "no such finished attempt on this task" };
+      const followup = (inputs.followup ?? "").trim();
+      if (followup === "" || followup.length > 2000) {
+        return { ok: false, problem: "say what to do next — 1 to 2000 characters" };
+      }
+      if (parent.outcome !== "built" && parent.outcome !== "no-change") {
+        return { ok: false, problem: "only a built or no-change attempt can be continued — for a failed one, file a follow-up task" };
+      }
+      const accepted = parent.outcome === "built" ? parent.headRevision : parent.baseRevision;
+      if (accepted === null) return { ok: false, problem: "the attempt's accepted head was never recorded — file a follow-up task" };
+      const blocked = store.continuationBlockOf(parent.id);
+      if (blocked !== null) return { ok: false, problem: blocked };
+      continuation = { parentRun: parent.id, followup, head: accepted };
+    } else if (approvalOf(scope).approved) {
+      return { ok: false, problem: "the scope is approved — it already dispatches unattended" };
+    }
     const pinned = scope.profileState === "resolved" ? (scope.profile ?? null) : null;
     if (pinned === null) {
       return { ok: false, problem: "the scope cannot say exactly what runs — name a model (task scope --model, or config set build)" };
@@ -3745,7 +3775,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const repo = ref.repo;
     if (repo === null) return { ok: false, problem: "place the task in a repository first — the terms pin the exact head" };
-    const head = await options.attended.headOf(repo);
+    const head = continuation !== null ? continuation.head : await options.attended.headOf(repo);
     if (head === null) return { ok: false, problem: `the head of ${repo} cannot be read right now` };
     const minutes = Math.max(5, Math.min(240, Math.floor(inputs.minutes) || 60));
     const turns = Math.max(1, Math.min(100, Math.floor(inputs.turns) || 20));
@@ -3764,6 +3794,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         maxSessionTurns: turns,
         budgetMicrousd: budget,
         turnTimeoutSeconds: pinned.timeoutSeconds,
+        ...(continuation === null ? {} : { parentRun: continuation.parentRun, followup: continuation.followup }),
         // The expiry is FIXED at preview and carried through the confirm —
         // a timestamp recomputed at signing time would change the digest
         // every millisecond and make the proof unmatchable. The confirm's
@@ -3799,11 +3830,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       `<input type="hidden" name="turns" value="${inputs.turns}">` +
       `<input type="hidden" name="budget" value="${inputs.budgetMicrousd}">` +
       `<input type="hidden" name="expiry" value="${escape(terms.absoluteExpiry)}">` +
+      (terms.parentRun == null ? "" : `<input type="hidden" name="parent" value="${terms.parentRun}">`) +
+      (terms.followup == null ? "" : `<input type="hidden" name="followup" value="${escape(terms.followup)}">`) +
       `<p><strong>your password signs exactly this:</strong></p>` +
       `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? "")}</p>` +
       `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
       `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
       `<p class="meta">runs on</p><p class="recap" style="margin-top:0">claude · ${escape(String((JSON.parse(terms.profileJson) as { profile?: { model?: string } }).profile?.model ?? ""))} — asks before edits outside the worktree (acceptEdits)</p>` +
+      (terms.parentRun == null
+        ? ""
+        : `<p class="meta">continues</p><p class="recap" style="margin-top:0">attempt <a href="/r/${terms.parentRun}" class="mono">#${terms.parentRun}</a>, from exactly where it finished</p>` +
+          `<p class="meta">the follow-up — this is the instruction</p><p class="recap" style="margin-top:0">${escape(terms.followup ?? "")}</p>`) +
       `<p class="meta">repository · head</p><p class="recap mono" style="margin-top:0">${escape(terms.repo)} @ ${escape(terms.head.slice(0, 12))}</p>` +
       `<p class="meta">worker</p><p class="recap" style="margin-top:0">${escape(terms.runner)} (this machine)</p>` +
       `<p class="meta">spending</p><p class="recap" style="margin-top:0">up to about $${(terms.budgetMicrousd / 1_000_000).toFixed(2)} — the agent stops as soon as its total crosses this; the final step may run a little past it</p>` +
@@ -3839,11 +3876,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, taskHref(taskId));
     }
 
+    const parentGiven = body.get("parent");
+    const followupGiven = body.get("followup");
     const inputs = {
       minutes: Number(body.get("minutes") ?? "60"),
       turns: Number(body.get("turns") ?? "20"),
       budgetMicrousd: Number(body.get("budget") ?? String(store.getScope(taskId)?.budgetMicrousd ?? 2_000_000)),
       ...(body.get("expiry") === null ? {} : { expiry: body.get("expiry") as string }),
+      ...(parentGiven === null || parentGiven === "" ? {} : { parent: Number(parentGiven) }),
+      ...(followupGiven === null ? {} : { followup: followupGiven }),
     };
     if (store.openAuthorizationFor(ref.id) !== null) {
       return refuse(response, who, 409, "an authorization is already open — revoke it first", taskHref(taskId));
@@ -3880,6 +3921,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       termsJson: attendedTermsJson(live.terms),
       maxSessionTurns: live.terms.maxSessionTurns,
       budgetMicrousd: live.terms.budgetMicrousd,
+      ...(live.terms.parentRun == null ? {} : { parentRun: live.terms.parentRun }),
+      ...(live.terms.followup == null ? {} : { followup: live.terms.followup }),
       absoluteExpiry: live.terms.absoluteExpiry,
       now,
     });
@@ -8410,6 +8453,7 @@ function runPage(
   editorToggle: { on: boolean } | null = null,
   noted = false,
   heldTurns: { turns: SessionTurn[]; open: boolean; state: string; cap: number } | null = null,
+  continueOffer: { taskId: string } | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
@@ -8578,6 +8622,21 @@ function runPage(
         `<button type="submit">add note</button></form>`;
   const notesCard = noteRows === "" && noteForm === "" ? "" : `<h2>operator notes</h2>${noteRows}${noteForm}`;
 
+  // Continuation (Phase 2E, A4): a finished attempt offers a watched
+  // follow-up — the text you type here enters the SIGNED terms on the
+  // confirm screen; nothing runs until your password agrees to exactly it.
+  const continueCard =
+    continueOffer === null || csrf === ""
+      ? ""
+      : `<form method="post" action="${taskHref(continueOffer.taskId)}/attend-preview" class="card">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="hidden" name="parent" value="${run.id}">` +
+        `<p><strong>continue this attempt while you watch</strong></p>` +
+        `<p class="meta">picks up from exactly where this attempt finished — one watched session, your password signs every term including the follow-up below</p>` +
+        `<label>what next<textarea name="followup" rows="2" maxlength="2000" placeholder="what should the agent do next, within the same scope"></textarea></label>` +
+        `<button type="submit">read the terms</button>` +
+        `</form>`;
+
   return screen(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     `<div id="run-facts">${rows}</div>`,
@@ -8587,6 +8646,7 @@ function runPage(
     peek,
     terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
     reviewCard,
+    continueCard,
     handoff,
     evidence,
     notesCard,

@@ -7296,6 +7296,10 @@ export class Store {
     // gate reads it inside a claim transaction and must never trust a number
     // something else remembered to update.
     if (result.outcome === "parked" || result.outcome === "built" || result.outcome === "no-change") {
+      // Continuation runs are EXCLUDED (Phase 2E, v4 Q7/v5 P5): a watched
+      // follow-up neither counts toward nor triggers the parent task's
+      // measured park rate — "never mutates the parent task" includes its
+      // derived statistics.
       this.db
         .prepare(
           `UPDATE task_ref SET park_rate = COALESCE((
@@ -7304,9 +7308,13 @@ export class Store {
               WHERE run.task_ref = task_ref.id
                 AND run.role = 'builder'
                 AND run.outcome IN ('built', 'parked', 'no-change')
+                AND NOT EXISTS (SELECT 1 FROM attended_authorization aa
+                                 WHERE aa.id = run.attended_authorization AND aa.parent_run IS NOT NULL)
            ), 0)
            WHERE id = (SELECT task_ref FROM run
-                        WHERE run.id = ? AND run.role = 'builder')`,
+                        WHERE run.id = ? AND run.role = 'builder'
+                          AND NOT EXISTS (SELECT 1 FROM attended_authorization aa
+                                           WHERE aa.id = run.attended_authorization AND aa.parent_run IS NOT NULL))`,
         )
         .run(id);
     }
@@ -7785,6 +7793,55 @@ export class Store {
   readAuthorization(id: string): AttendedAuthorization | null {
     const row = this.db.prepare("SELECT * FROM attended_authorization WHERE id = ?").get(id);
     return row === undefined ? null : readAuthorizationRow(row);
+  }
+
+  /** Open continuation authorizations named to this runner (Phase 2E, A4):
+   * unconsumed, carrying a parent attempt — tick's continuation pass reads
+   * this; liveness is the caller's check, as everywhere. */
+  openContinuationAuthorizations(runner: string): AttendedAuthorization[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM attended_authorization
+          WHERE closed_at IS NULL AND attempt_run IS NULL AND parent_run IS NOT NULL AND runner = ?
+          ORDER BY created_at`,
+      )
+      .all(runner)
+      .map(readAuthorizationRow);
+  }
+
+  /**
+   * Why a finished run cannot be continued right now, in words — or null.
+   * The ENUMERATED non-terminal publication states (round-3 R7 demanded
+   * the concrete list, not "open intents"): a publication still moving
+   * ('intended','pushed', or 'opened' with the remote not yet settled) and
+   * a merge intent still live ('pending','claimed') both block.
+   */
+  continuationBlockOf(runId: number): string | null {
+    const publication = this.db
+      .prepare(
+        `SELECT state, remote_state FROM publication WHERE run = ?
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(runId);
+    if (publication !== undefined) {
+      const state = String(publication["state"]);
+      const remote = publication["remote_state"] === null ? null : String(publication["remote_state"]);
+      if (state === "intended" || state === "pushed") {
+        return `this attempt is being published (${state}) — continue after the pull request settles`;
+      }
+      if (state === "opened" && (remote === null || remote === "open")) {
+        return "this attempt's pull request is open — review it there, or close it before continuing";
+      }
+      const intent = this.db
+        .prepare(
+          `SELECT merge_intent.state AS state FROM merge_intent
+            JOIN publication ON publication.id = merge_intent.publication
+           WHERE publication.run = ? AND merge_intent.state IN ('pending','claimed') LIMIT 1`,
+        )
+        .get(runId);
+      if (intent !== undefined) return "a merge is in flight for this attempt — continue after it settles";
+    }
+    return null;
   }
 
   /** The one OPEN authorization for a task, or null. */

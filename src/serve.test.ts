@@ -5047,3 +5047,121 @@ describe("the attended authorization ceremony (Phase 2E)", () => {
     expect(racedPreview.status).toBe(409);
   });
 });
+
+describe("the continuation ceremony (Phase 2E, A4)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+  let taskRef: number;
+  let parentRun: number;
+
+  const url = (path: string) => `${base}${path}`;
+  const T1 = new Date("2026-08-26T03:00:00.000Z");
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T1);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "so-cont-ev-"));
+    const added = addApprover(store, "alex", T1);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    store.createTask({ id: "t-fin", title: "finished" }, T1);
+    const ref = store.refFor("built-in", "t-fin");
+    taskRef = ref.id;
+    store.raw().prepare("UPDATE task_ref SET repo = '/repo' WHERE id = ?").run(ref.id);
+    propose(store, { taskId: "t-fin", goal: "the finished goal", outOfScope: null, touches: [], now: T1 });
+    store.raw().prepare("UPDATE task SET state = 'done' WHERE id = 't-fin'").run();
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at, released_at)
+         VALUES ('lease-fin', ?, 1, 'mac-a', ?, ?, ?, ?)`,
+      )
+      .run(ref.id, T1.toISOString(), new Date(T1.getTime() + 60_000).toISOString(), T1.toISOString(), new Date(T1.getTime() + 50_000).toISOString());
+    parentRun = store.startRun({ taskRef: ref.id, leaseId: "lease-fin", runner: "mac-a", branch: "so/t-fin", worktree: "/w", now: T1 });
+    store.recordOutcomeFacts(parentRun, { headRevision: "b".repeat(40) });
+    store.finishRun(parentRun, { outcome: "built", committed: true, now: T1 });
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => new Date(),
+      attended: { runner: "mac-a", headOf: async () => "a".repeat(40) },
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("a finished run offers continuation; the follow-up enters the SIGNED terms; the mint binds parent and head", async () => {
+    const cookie = await login();
+    const page = await (await fetch(url(`/r/${parentRun}`), { headers: { cookie } })).text();
+    expect(page).toContain("continue this attempt while you watch");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
+
+    const preview = await fetch(url("/t/t-fin/attend-preview"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf, parent: String(parentRun), followup: "now add the tests for the new guard" }),
+    });
+    expect(preview.status).toBe(200);
+    const confirm = await preview.text();
+    // the follow-up and the parent are ON the signed form, with the
+    // parent's accepted head — not the repo's current head
+    expect(confirm).toContain("now add the tests for the new guard");
+    expect(confirm).toContain(`#${parentRun}`);
+    expect(confirm).toContain("bbbbbbbbbbbb");
+    expect(confirm).not.toContain("aaaaaaaaaaaa");
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(confirm)?.[1] as string;
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(confirm)?.[1] as string;
+    const expiry = /name="expiry" value="([^"]+)"/.exec(confirm)?.[1] as string;
+
+    const minted = await fetch(url("/t/t-fin/attend"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({
+        csrf, nonce, digest, expiry,
+        parent: String(parentRun), followup: "now add the tests for the new guard",
+        minutes: "60", turns: "20", budget: "2000000", token: approverToken,
+      }),
+    });
+    expect(minted.status).toBe(303);
+    const open = store.openAuthorizationFor(taskRef);
+    expect(open?.parentRun).toBe(parentRun);
+    expect(open?.followup).toBe("now add the tests for the new guard");
+    expect(store.openContinuationAuthorizations("mac-a").length).toBe(1);
+  });
+
+  test("a failed parent refuses in words — file a follow-up task instead", async () => {
+    const cookie = await login();
+    store.raw().prepare("UPDATE run SET outcome = 'failed' WHERE id = ?").run(parentRun);
+    const page = await (await fetch(url(`/r/${parentRun}`), { headers: { cookie } })).text();
+    expect(page).not.toContain("continue this attempt while you watch");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
+    const preview = await fetch(url("/t/t-fin/attend-preview"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf, parent: String(parentRun), followup: "try again" }),
+    });
+    expect(preview.status).toBe(409);
+    expect(await preview.text()).toContain("file a follow-up task");
+  });
+});

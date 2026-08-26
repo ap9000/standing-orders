@@ -757,6 +757,45 @@ export function completeFenced(
  * the runner says afterwards is that person's answer.
  */
 /**
+ * Continuation admission (Phase 2E, A4 / v3 R7): the AUTHORIZATION is the
+ * claimable unit — the finished parent task is never re-queued, its state,
+ * strikes, holds, and dependents untouched. Every shared gate still runs
+ * (acquireLocked: reservation, external mirror, the attended gates, the
+ * lease CAS); the queued-state readiness gate alone is replaced by
+ * construction. Liveness, the named runner, and the unspent attempt are
+ * re-proved HERE at claim time and again at the final dispatch proof.
+ */
+export function acquireContinuation(
+  store: Store,
+  authorization: import("./store.js").AttendedAuthorization,
+  runner: string,
+  options: AcquireOptions,
+): AcquireResult | { ok: false; reason: "attended-only" | "contest-open" | "continuation-blocked"; message: string } {
+  const live = store.readAuthorization(authorization.id);
+  if (
+    live === null ||
+    live.closedAt !== null ||
+    live.attemptRun !== null ||
+    live.parentRun === null ||
+    live.runner !== runner
+  ) {
+    return { ok: false, reason: "attended-only", message: "the authorization is not an open continuation for this runner" };
+  }
+  const watching = attendedWatchState(live.lastBeatAt, options.now, live.absoluteExpiry);
+  if (watching !== "live" && watching !== "grace") {
+    return { ok: false, reason: "attended-only", message: "the operator is not watching" };
+  }
+  if (store.activeTournamentTerms(live.taskRef) !== null) {
+    return { ok: false, reason: "contest-open", message: "a tournament raced onto this task — continuation waits" };
+  }
+  const blocked = store.continuationBlockOf(live.parentRun);
+  if (blocked !== null) {
+    return { ok: false, reason: "continuation-blocked", message: blocked };
+  }
+  return acquire(store, live.taskRef, runner, options);
+}
+
+/**
  * The HELD park (Phase 2E, v2 S1f): the decision is recorded, paged, and
  * causally linked to the session turn that produced it — and NOTHING else
  * ends. The lease stays; the run stays open; the process stays held. The

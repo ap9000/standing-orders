@@ -107,6 +107,7 @@ import {
   currentClaim,
   DEFAULT_LEASE_MS,
   SYNC_MAX_AGE_MS,
+  acquireContinuation,
 } from "./claim.js";
 import { disposeBuildOutcome } from "./dispose.js";
 import { attendedLivenessState } from "./liveness.js";
@@ -2300,6 +2301,129 @@ async function tickCommand(
         dispatched.push({ id, outcome: "failed", reason: disposition.reason });
         broke++;
         break;
+    }
+  }
+
+  // THE CONTINUATION PASS (Phase 2E, A4): open continuation authorizations
+  // named to this runner dispatch here — the finished parent task never
+  // re-enters the queue; the authorization is the claimable unit (v3 R7).
+  // Only a co-located coordinator can hold the session, and everything
+  // else (liveness, one attempt, the final proof at the parent's exact
+  // head) is re-proved on the way in.
+  if (context.heldCoordinator !== undefined) {
+    for (const continuation of store.openContinuationAuthorizations(runner)) {
+      if (context.shouldStop?.() === true) break;
+      const watching = attendedLivenessState(
+        continuation.lastBeatAt === null ? null : Date.parse(continuation.lastBeatAt),
+        clock().getTime(),
+        Date.parse(continuation.absoluteExpiry),
+      );
+      if (watching !== "live" && watching !== "grace") continue;
+      const parent = continuation.parentRun === null ? null : store.getRun(continuation.parentRun);
+      const parentRef = parent === null ? null : store.refForId(parent.taskRef);
+      if (parent === null || parentRef === null) continue;
+      if (parentRef.repo !== null && parentRef.repo !== repo) continue;
+      const taskId = parentRef.externalId;
+
+      let pinned: { provider: ProviderId; model: string | null } | null = null;
+      try {
+        const terms = JSON.parse(continuation.termsJson) as { profileJson?: unknown };
+        const profile = profileFromJson(typeof terms.profileJson === "string" ? terms.profileJson : null);
+        if (profile !== null) pinned = { provider: profile.provider, model: profile.model };
+      } catch {
+        pinned = null;
+      }
+      if (pinned === null) {
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "attended-only", detail: "the continuation's pinned profile cannot be read" });
+        continue;
+      }
+
+      const claimed = acquireContinuation(store, continuation, runner, { now: clock(), ttlMs: leaseTtlMs });
+      if (!claimed.ok) {
+        dispatched.push({ id: taskId, outcome: "skipped", reason: claimed.reason, ...("message" in claimed ? { detail: claimed.message } : {}) });
+        continue;
+      }
+      const lease = claimed.claim.leaseId;
+      // The parent's branch, at the head the terms signed — a moved branch
+      // fails the final proof with words naming the head.
+      const leased = await worktrees.lease({ repo, branch: parent.branch, runner, taskRef: parent.taskRef, now: clock() });
+      if (!leased.ok) {
+        release(store, lease, clock());
+        dispatched.push({ id: taskId, outcome: "failed", reason: leased.reason });
+        broke++;
+        continue;
+      }
+      const runId = store.startRun({
+        taskRef: parent.taskRef,
+        leaseId: lease,
+        runner,
+        branch: parent.branch,
+        worktree: leased.worktree.path,
+        parentRun: parent.id,
+        ...(pinned.model === null ? {} : { model: pinned.model }),
+        now: clock(),
+      });
+      const result = await build(store, {
+        taskId,
+        taskRef: parent.taskRef,
+        runner,
+        leaseId: lease,
+        runnerToken: token,
+        runId,
+        evidenceRoot: context.evidenceRoot,
+        worktree: leased.worktree.path,
+        branch: parent.branch,
+        now: clock(),
+        clock,
+        provider: pinned.provider,
+        ...(pinned.model === null ? {} : { model: pinned.model }),
+        ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+        ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+        ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
+        attended: {
+          authorization: continuation,
+          coordinator: context.heldCoordinator,
+          upIncarnation: context.upIncarnation ?? "unknown",
+          socketDir: context.heldSocketDir ?? tmpdir(),
+          releaseWorktree: async (path: string) => worktrees.release(path, clock()),
+          dispose: { repo, origin: parentRef.origin, provider: pinned.provider, model: pinned.model, policy: "continuation" },
+          ...(context.heldStarter === undefined ? {} : { starter: context.heldStarter }),
+          ...(context.heldGraceMs === undefined ? {} : { graceMs: context.heldGraceMs }),
+        },
+      });
+      if (result.ok && result.parked === undefined && result.held === true) {
+        dispatched.push({ id: taskId, outcome: "held", branch: parent.branch, worktree: leased.worktree.path });
+        continue;
+      }
+      // A refusal before the hold (stale proof, spawn failure): record it
+      // through the continuation policy — taskless, always — and release.
+      await worktrees.release(leased.worktree.path, clock());
+      const disposition = disposeBuildOutcome(
+        {
+          store,
+          policy: "continuation",
+          leaseId: lease,
+          runId,
+          taskId,
+          taskRef: parent.taskRef,
+          runner,
+          repo,
+          branch: parent.branch,
+          origin: parentRef.origin,
+          provider: pinned.provider,
+          model: pinned.model,
+          worktreePath: leased.worktree.path,
+          clock,
+        },
+        result,
+      );
+      dispatched.push({
+        id: taskId,
+        outcome: disposition.kind === "built" ? "built" : "failed",
+        ...(result.ok ? {} : { reason: result.reason }),
+        worktree: leased.worktree.path,
+      });
+      if (disposition.kind !== "built") broke++;
     }
   }
 
