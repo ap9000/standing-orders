@@ -1,5 +1,47 @@
 # Progress
 
+**2026-08-25 — Parity II Phase 2B: the supervisor, the held transport,
+and the held invocation gateway.** The process layer under the attended
+core, to the v5-P4/v6-W7+W9 rulings. `src/supervisor.mjs` — plain
+zero-dependency JavaScript, shipped verbatim by postbuild — is a
+minimal parent whose whole value is PARENTHOOD: it spawns the agent
+detached into its own fresh process group and holds the handle, so the
+eventual kill is provable (POSIX pins the child's PID while its parent
+lives unreaped) instead of a PID-plus-timestamp guess. Its stdout opens
+with exactly one control frame (`ready` with the agent's pgid, or
+`spawn-failed` — the two-hop handshake), then relays the agent's
+stream byte-for-byte; stdin relays turns in; stdin EOF, SIGTERM, and
+SIGHUP all take the same AUTONOMOUS FENCE (EOF to the agent, grace,
+group SIGKILL) — so an `up` crash cleans its own session up before any
+database fencer runs. A cookie-authenticated unix socket (0600, path
+length asserted against sun_path at spawn) answers `status` and
+`kill`, where kill replies only after the group is PROVEN gone
+(ESRCH-polled) — and the supervisor's own exit DEFERS until that reply
+has flushed, because a fencer must hear the proof from the process
+that made it (found by the new tests: the exit path raced the reply
+and ate it). exec.ts gains `startClaudeHeldSession` — no timers, no
+policy: it settles the start on the control frame, counts each
+system/init and each primary-origin result in stream order as the
+per-turn acceptance and settlement marks (the arc-1 origin allowlist
+unchanged), and hands back a handle (writeTurn / endInput / terminate
+/ killHard / exited). Held supervisors register in their OWN hard-stop
+registry: the sweep SIGTERMs them first — the graceful fence through
+the one handle that cannot miss — and only a repeat sweep SIGKILLs,
+the documented residual hole. invoke.ts gains `invokeHeldAgent`, the
+held door beside the one-shot gateway: same open-run verification,
+claude-only (nothing else can hold in Phase 2), same
+stamp-before-spawn honesty, returning the live handle because
+ownership belongs to the coordinator, never to a promise chain that
+would stall the watch. provider.ts exports `claudeHeldArgv` — the
+one-shot family minus the positional prompt (every turn rides stdin)
+plus `--input-format stream-json`, with the remaining authorization
+budget as the Probe-6 cumulative backstop. Eight new tests run the
+REAL supervisor around a fake agent: per-turn counting with a split
+mid-line write proving relay byte-exactness, forged control frames
+dropped, spawn-failed and socket-path refusals, cookie-refused and
+proven kills, and both autonomous fence roads; suite 1210.
+
+
 **2026-08-25 — Parity II Phase 2 groundwork (2A): schema v25 and the
 attended-core store primitives, spec-first through nine adversarial
 review rounds.** The attended-core spec ran four Codex REDESIGN rounds

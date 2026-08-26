@@ -8,6 +8,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 export type ExecResult = {
   /** Process exit code, or one of the synthetic codes below. */
@@ -81,6 +82,16 @@ export type RunOptions = {
 /** Live provider children, for the deterministic stop. Registered only when `processGroup` was set. */
 const liveProviders = new Set<import("node:child_process").ChildProcess>();
 
+/**
+ * Live held-session SUPERVISORS (v6 W7). Not in liveProviders: SIGKILLing a
+ * supervisor's group would orphan the agent living in its own fresh group.
+ * The sweep's contract here is SIGTERM first — the supervisor's handler
+ * fences its child (EOF → grace → group SIGKILL) — and SIGKILL only on a
+ * repeat sweep, which is the one road that can orphan an agent and is why
+ * it is the escalation, never the opener.
+ */
+const heldSupervisors = new Map<import("node:child_process").ChildProcess, "fresh" | "termed">();
+
 /** SIGKILL the child's whole process group; fall back to the child alone. */
 function killGroup(child: import("node:child_process").ChildProcess): void {
   const pid = child.pid;
@@ -121,6 +132,24 @@ export function terminateLiveProviders(): number {
   let terminated = 0;
   for (const child of liveProviders) {
     killGroup(child);
+    terminated += 1;
+  }
+  // Held supervisors take the graceful road first (v6 W7): SIGTERM makes
+  // the supervisor fence its own agent race-free through the handle only
+  // it holds. A second sweep escalates to SIGKILL — the documented
+  // residual hole, reachable only by double-escalation, with the startup
+  // orphan fence paging for anything that lingers.
+  for (const [supervisor, stage] of heldSupervisors) {
+    try {
+      if (stage === "fresh") {
+        supervisor.kill("SIGTERM");
+        heldSupervisors.set(supervisor, "termed");
+      } else {
+        supervisor.kill("SIGKILL");
+      }
+    } catch {
+      // Already gone.
+    }
     terminated += 1;
   }
   return terminated;
@@ -625,5 +654,271 @@ export function runClaudeStreamJsonl(
       finish(null);
     });
     child.on("close", code => finish(code));
+  });
+}
+
+// ---- the held session transport (Parity II Phase 2, spec v2 S0a + v6 W9) ----
+
+/**
+ * Where the supervisor script lives: a plain-.mjs sibling of this module in
+ * BOTH layouts (src/ under tsx, dist/ after build — postbuild copies it).
+ */
+export function supervisorPath(): string {
+  return fileURLToPath(new URL("./supervisor.mjs", import.meta.url));
+}
+
+/**
+ * Darwin's sun_path is 104 bytes including the terminator; Linux allows a
+ * hair more. Refusing at spawn beats failing inside bind() with a raw
+ * ENAMETOOLONG after custody was already recorded.
+ */
+export const HELD_SOCKET_PATH_LIMIT = 103;
+
+export function heldSocketPathProblem(path: string): string | null {
+  const bytes = Buffer.byteLength(path, "utf8");
+  if (bytes > HELD_SOCKET_PATH_LIMIT) {
+    return `the control socket path is ${bytes} bytes — the platform limit is ${HELD_SOCKET_PATH_LIMIT}: ${path}`;
+  }
+  return null;
+}
+
+export type HeldSessionEvents = {
+  /** The nth system/init observed (1-based) — acceptance of the nth written turn. */
+  onTurnInit?: (seq: number) => void;
+  /** The nth primary-origin result (1-based) — settlement material for the nth turn. */
+  onTurnResult?: (seq: number, event: Record<string, unknown>) => void;
+  /** Every parsed stream event, arc-1 isolation rules unchanged. */
+  onStreamEvent?: (event: Record<string, unknown>) => void;
+  onSessionId?: (id: string) => void;
+  /** The supervisor exited: the hold is over, however it ended. */
+  onExit?: (info: { code: number | null }) => void;
+};
+
+export type HeldSessionHandle = {
+  supervisorPid: number | null;
+  agentPgid: number | null;
+  /** One turn as a stream-json line. False = the pipe is gone; nothing was written. */
+  writeTurn(json: string): boolean;
+  /** The EOF road: the supervisor fences (EOF → grace → group kill) on its own. */
+  endInput(): void;
+  /** SIGTERM the supervisor — the same fence, for expiry/revocation/lapse. */
+  terminate(): void;
+  /** Last resort only: SIGKILL the supervisor itself (can orphan the agent). */
+  killHard(): void;
+  exited: Promise<{ code: number | null }>;
+};
+
+export type HeldSessionStart =
+  | { ok: true; handle: HeldSessionHandle }
+  | { ok: false; reason: "socket-path" | "spawn-failed" | "ready-timeout"; message: string };
+
+/**
+ * Hold one claude process open across stream-json turns, under a
+ * supervisor whose parenthood makes the eventual kill provable. Returns
+ * once the supervisor's control frame settles the spawn either way.
+ *
+ * No timers live here: the per-turn wall deadline, liveness lapse, and
+ * absolute expiry are the coordinator's exact timers (v2 S1d) — this
+ * transport only moves bytes and counts the protocol's own marks.
+ */
+export function startClaudeHeldSession(
+  file: string,
+  args: readonly string[],
+  options: RunOptions & {
+    socketPath: string;
+    cookie: string;
+    graceMs?: number;
+    events?: HeldSessionEvents;
+    readyTimeoutMs?: number;
+  },
+): Promise<HeldSessionStart> {
+  const pathProblem = heldSocketPathProblem(options.socketPath);
+  if (pathProblem !== null) {
+    return Promise.resolve({ ok: false, reason: "socket-path", message: pathProblem });
+  }
+  const childEnv = resolveChildEnv(options) ?? { ...process.env };
+  const events = options.events ?? {};
+
+  return new Promise(resolveStart => {
+    let supervisor: ReturnType<typeof spawn>;
+    try {
+      supervisor = spawn(process.execPath, [supervisorPath(), file, ...args], {
+        cwd: options.cwd,
+        shell: false,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...childEnv,
+          SO_HELD_SOCKET: options.socketPath,
+          SO_HELD_COOKIE: options.cookie,
+          SO_HELD_GRACE_MS: String(options.graceMs ?? 10_000),
+        },
+      });
+    } catch (error) {
+      resolveStart({ ok: false, reason: "spawn-failed", message: String(error) });
+      return;
+    }
+
+    heldSupervisors.set(supervisor, "fresh");
+
+    let settledStart = false;
+    let agentPgid: number | null = null;
+    let initSeq = 0;
+    let resultSeq = 0;
+    let sessionSeen = false;
+    let partial = "";
+    let exitResolve: (info: { code: number | null }) => void = () => {};
+    const exited = new Promise<{ code: number | null }>(pass => {
+      exitResolve = pass;
+    });
+
+    const readyTimer = setTimeout(() => {
+      if (settledStart) return;
+      settledStart = true;
+      try {
+        supervisor.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+      resolveStart({ ok: false, reason: "ready-timeout", message: "the supervisor never sent its control frame" });
+    }, options.readyTimeoutMs ?? 10_000);
+
+    const handle: HeldSessionHandle = {
+      supervisorPid: null,
+      agentPgid: null,
+      writeTurn(json: string): boolean {
+        const stdin = supervisor.stdin;
+        if (stdin === null || stdin.destroyed || !stdin.writable) return false;
+        try {
+          stdin.write(json.endsWith("\n") ? json : `${json}\n`);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      endInput(): void {
+        try {
+          supervisor.stdin?.end();
+        } catch {
+          // Already closed.
+        }
+      },
+      terminate(): void {
+        try {
+          supervisor.kill("SIGTERM");
+          heldSupervisors.set(supervisor, "termed");
+        } catch {
+          // Already gone.
+        }
+      },
+      killHard(): void {
+        try {
+          supervisor.kill("SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      },
+      exited,
+    };
+
+    const keep = (line: string): void => {
+      if (line.length > JSONL_LINE_CAP) return;
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (event === null || typeof event !== "object") return;
+
+      // The control frame settles the start, exactly once, before any
+      // agent byte — the two-hop handshake (v6 W9).
+      if (!settledStart && typeof event["so_supervisor"] === "string") {
+        settledStart = true;
+        clearTimeout(readyTimer);
+        if (event["so_supervisor"] === "ready") {
+          agentPgid = typeof event["agentPgid"] === "number" ? event["agentPgid"] : null;
+          handle.agentPgid = agentPgid;
+          handle.supervisorPid =
+            typeof event["supervisorPid"] === "number" ? event["supervisorPid"] : (supervisor.pid ?? null);
+          resolveStart({ ok: true, handle });
+        } else {
+          const message = typeof event["message"] === "string" ? event["message"] : "spawn failed";
+          resolveStart({ ok: false, reason: "spawn-failed", message });
+        }
+        return;
+      }
+      if (typeof event["so_supervisor"] === "string") return; // never two frames; drop strays
+
+      const type = String(event["type"] ?? "");
+      if (type === "system" && String(event["subtype"] ?? "") === "init") {
+        initSeq += 1;
+        if (!sessionSeen && events.onSessionId !== undefined) {
+          const id = event["session_id"];
+          if (typeof id === "string" && id !== "") {
+            sessionSeen = true;
+            try {
+              events.onSessionId(id);
+            } catch {
+              // A registry that cannot be written must not kill the turn.
+            }
+          }
+        }
+        try {
+          events.onTurnInit?.(initSeq);
+        } catch {
+          // Observational.
+        }
+      } else if (type === "result" && primaryResultOrigin(event)) {
+        resultSeq += 1;
+        try {
+          events.onTurnResult?.(resultSeq, event);
+        } catch {
+          // Observational.
+        }
+      }
+      try {
+        events.onStreamEvent?.(event);
+      } catch {
+        // Observational only, arc-1 rule unchanged.
+      }
+    };
+
+    supervisor.stdout?.setEncoding("utf8");
+    supervisor.stdout?.on("data", (chunk: string) => {
+      partial += chunk;
+      let cut = partial.indexOf("\n");
+      while (cut !== -1) {
+        keep(partial.slice(0, cut));
+        partial = partial.slice(cut + 1);
+        cut = partial.indexOf("\n");
+      }
+      if (partial.length > JSONL_LINE_CAP * 2) partial = partial.slice(-JSONL_LINE_CAP);
+    });
+
+    supervisor.on("error", error => {
+      heldSupervisors.delete(supervisor);
+      if (!settledStart) {
+        settledStart = true;
+        clearTimeout(readyTimer);
+        resolveStart({ ok: false, reason: "spawn-failed", message: String(error) });
+      }
+      exitResolve({ code: null });
+    });
+    supervisor.on("close", code => {
+      heldSupervisors.delete(supervisor);
+      if (partial.trim() !== "") keep(partial);
+      if (!settledStart) {
+        settledStart = true;
+        clearTimeout(readyTimer);
+        resolveStart({ ok: false, reason: "spawn-failed", message: "the supervisor exited before its control frame" });
+      }
+      try {
+        events.onExit?.({ code });
+      } catch {
+        // Observational.
+      }
+      exitResolve({ code });
+    });
   });
 }

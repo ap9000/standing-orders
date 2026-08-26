@@ -124,6 +124,31 @@ const OPENROUTER_PROVIDER_KEY = "standing-orders_openrouter";
 export const OPENROUTER_ENV_KEY = "OPENROUTER_API_KEY";
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
+/**
+ * The held-session argv (Parity II Phase 2): the same family as
+ * claudeArgv MINUS the positional prompt — every turn, the brief
+ * included, rides stdin as stream-json — plus the input format flag.
+ * maxBudgetUsd is the Probe-6 backstop: the CLI's cap is cumulative
+ * across the whole process, so the remaining authorization budget rides
+ * the argv and later turns cannot spend past it.
+ */
+export const claudeHeldArgv = (invocation: Omit<Invocation, "brief">): string[] => [
+  "-p",
+  ...(invocation.resumeSession === null ? [] : ["--resume", invocation.resumeSession]),
+  "--input-format",
+  "stream-json",
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--max-turns",
+  String(invocation.maxTurns),
+  ...(invocation.skipPermissions
+    ? ["--dangerously-skip-permissions"]
+    : ["--permission-mode", invocation.permissionMode]),
+  ...(invocation.model === null ? [] : ["--model", invocation.model]),
+  ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
+];
+
 const claudeArgv = (invocation: Invocation): string[] => [
   "-p",
   invocation.brief,

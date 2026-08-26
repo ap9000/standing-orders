@@ -17,6 +17,7 @@
  */
 
 import { adapterFor, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
+import { startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
 
@@ -144,4 +145,69 @@ export async function invokeAgent(
       !result.timedOut &&
       !result.notFound,
   };
+}
+
+/**
+ * The HELD invocation gateway (Parity II Phase 2, spec v2 S0b): the only
+ * door to the held-session transport, symmetric with invokeAgent — same
+ * open-run verification, same provider-match rule (claude only in Phase
+ * 2: nothing else can hold), same stamp-before-spawn honesty. It returns
+ * the live handle rather than awaiting session end: ownership of the
+ * hold belongs to the coordinator, never to a promise chain that would
+ * stall the watch.
+ */
+export async function invokeHeldAgent(
+  store: Store,
+  runId: number,
+  spec: AgentSpec,
+  argv: readonly string[],
+  options: import("./exec.js").RunOptions & {
+    socketPath: string;
+    cookie: string;
+    graceMs?: number;
+    events?: import("./exec.js").HeldSessionEvents;
+    readyTimeoutMs?: number;
+    clock?: () => Date;
+    starter?: typeof startClaudeHeldSession;
+  },
+): Promise<import("./exec.js").HeldSessionStart> {
+  const clock = options.clock ?? (() => new Date());
+  const run = store.getRun(runId);
+  if (run === null || run.outcome !== null) {
+    throw new Error(
+      `run ${runId} is not an open attempt — nothing spends without a run record that will outlive it`,
+    );
+  }
+  if (spec.provider !== "claude" || run.provider !== "claude") {
+    throw new Error(
+      `run ${runId}: only claude can hold a session in Phase 2 — ${run.provider}/${spec.provider} cannot`,
+    );
+  }
+
+  const adapter = adapterFor("claude");
+  const { clock: _clock, starter, socketPath, cookie, graceMs, events, readyTimeoutMs, ...runOptions } = options;
+
+  // The stamp precedes the spawn — same direction as the one-shot gateway.
+  store.stampProviderStart(runId, clock());
+
+  const start = starter ?? startClaudeHeldSession;
+  return start(adapter.binary, argv, {
+    ...runOptions,
+    omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
+    socketPath,
+    cookie,
+    ...(graceMs === undefined ? {} : { graceMs }),
+    ...(readyTimeoutMs === undefined ? {} : { readyTimeoutMs }),
+    events: {
+      ...events,
+      onSessionId: id => {
+        store.stampRun(runId, { sessionId: id });
+        try {
+          events?.onSessionId?.(id);
+        } catch {
+          // Observational.
+        }
+      },
+    },
+  });
 }
