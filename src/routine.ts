@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { hasForbiddenControls } from "./decision.js";
 import { BUILT_IN, parseCapabilityKey, type Routine, type Store } from "./store.js";
-import { authenticateApprover, digestOf } from "./scope.js";
+import { authenticateApprover, digestOf, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
 import { reportsCost } from "./provider.js";
 
@@ -123,7 +123,7 @@ export type RoutineTerms = {
  * and length as a scope digest, and for the same reason: approval binds to
  * this value, and editing any term strands the old yes.
  */
-export function routineDigestOf(terms: RoutineTerms): string {
+export function routineDigestOf(terms: RoutineTerms, profile?: ExecutionProfile | null): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -136,6 +136,9 @@ export function routineDigestOf(terms: RoutineTerms): string {
         singleFlight: terms.singleFlight,
         costCeilingUsd: terms.costCeilingUsd,
         ...(terms.budgetPerRunMicrousd == null ? {} : { budgetPerRun: terms.budgetPerRunMicrousd }),
+        // v24: absent and null identical — legacy routine digests keep
+        // their bytes; profile-bearing routines bind their routing.
+        ...(profile == null ? {} : { profileDigest: profileDigestOf(profile) }),
       }),
       "utf8",
     )
@@ -211,7 +214,7 @@ export const BUDGET_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 export type ApproveRoutineResult =
   | { ok: true; routine: Routine }
-  | { ok: false; reason: "no-such-routine" | "changed" | "no-approvers" | "not-an-approver" };
+  | { ok: false; reason: "no-such-routine" | "profile-unresolved" | "changed" | "no-approvers" | "not-an-approver" };
 
 /**
  * A person agrees to the standing order — schedule, budget, and "each
@@ -234,10 +237,15 @@ export function approveRoutine(
     const routine = store.getRoutine(routineId);
     if (routine === null) return { ok: false as const, reason: "no-such-routine" as const };
     if (sawDigest !== routine.digest) return { ok: false as const, reason: "changed" as const };
+    // A routine that cannot say exactly what would run is unapprovable
+    // (v24, same rule as scopes) — restatement is the road.
+    if (routine.profile === null || routine.profile === undefined) {
+      return { ok: false as const, reason: "profile-unresolved" as const };
+    }
     // The digest is re-derived from the stored terms, never trusted as a
     // column (Codex Phase C review, H1): a row whose digest does not match
     // its own terms is not something a person can meaningfully agree to.
-    if (routineDigestOf(termsOf(routine)) !== routine.digest) {
+    if (routineDigestOf(termsOf(routine), routine.profile) !== routine.digest) {
       return { ok: false as const, reason: "changed" as const };
     }
 
@@ -309,7 +317,7 @@ export function fireRoutine(
     if (
       routine.approvedAt === null ||
       routine.approvedDigest !== routine.digest ||
-      routineDigestOf(termsOf(routine)) !== routine.digest
+      routineDigestOf(termsOf(routine), routine.profile ?? null) !== routine.digest
     ) {
       return {
         ok: false as const,
@@ -495,16 +503,29 @@ export function fireRoutine(
       touches: [...routine.touches],
       ...(routine.budgetPerRunMicrousd == null ? {} : { budgetMicrousd: routine.budgetPerRunMicrousd }),
     };
-    store.saveScope({
-      taskId,
-      ...draft,
-      proposedAt: now.toISOString(),
-      digest: digestOf(draft),
-      budgetMicrousd: routine.budgetPerRunMicrousd ?? null,
-      approvedAt: routine.approvedAt,
-      approvedBy: routine.approvedBy,
-      approvedDigest: digestOf(draft),
-    });
+    // v24 (foundations 3d): the instance's profile is the routine's
+    // APPROVED snapshot — never fresh resolution. The instance digest
+    // binds it, the approval stamp covers it, and saveScope is handed the
+    // profile EXPLICITLY so its own resolution never runs here.
+    const instanceProfile = routine.approvedProfile ?? null;
+    const instanceDigest = digestOf(draft, instanceProfile);
+    store.saveScope(
+      {
+        taskId,
+        ...draft,
+        proposedAt: now.toISOString(),
+        digest: instanceDigest,
+        budgetMicrousd: routine.budgetPerRunMicrousd ?? null,
+        approvedAt: routine.approvedAt,
+        approvedBy: routine.approvedBy,
+        approvedDigest: instanceDigest,
+      },
+      {},
+      instanceProfile === null ? {} : { profile: instanceProfile },
+    );
+    if (instanceProfile !== null) {
+      store.sealScopeApproval(taskId, routine.approvedBy ?? "routine", now);
+    }
 
     store.recordRoutineFire(
       { routineId, scheduledFor: slotKey, outcome: "fired", reason: manual ? "manual" : null, instanceTaskRef: ref.id },

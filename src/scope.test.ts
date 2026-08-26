@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope } from "./scope.js";
+import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope, profileDigestOf, profileFromJson, canonicalProfileJson } from "./scope.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -18,6 +18,9 @@ describe("agreeing what a task is allowed to become", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    // v24: approvals bind exact routing, so the install names its default
+    // model once — the same act `config set build --model sonnet` performs.
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "fix the payouts flow" }, T0);
   });
@@ -139,6 +142,9 @@ describe("who is allowed to say yes", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    // v24: approvals bind exact routing, so the install names its default
+    // model once — the same act `config set build --model sonnet` performs.
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     propose(store, { taskId: "t-1", goal: "a guard", now: T0 });
   });
@@ -256,5 +262,60 @@ describe("a chosen password is a first-class credential", () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe("execution profiles (foundations, findings 13/14/17/21)", () => {
+  const claude = {
+    provider: "claude" as const,
+    model: "sonnet",
+    permissionArgv: "acceptEdits" as const,
+    maxTurns: 40,
+    repairMaxTurns: 4,
+    timeoutSeconds: 1800,
+    repairTimeoutSeconds: 300,
+    repairModel: "inherit",
+  };
+  const codex = {
+    provider: "codex" as const,
+    model: "gpt-5.2-codex",
+    sandboxMode: "workspace-write" as const,
+    maxTurns: "unsupported" as const,
+    repairMaxTurns: "unsupported" as const,
+    timeoutSeconds: 1200,
+    repairTimeoutSeconds: 300,
+    repairModel: "inherit",
+  };
+  const openrouter = { ...codex, provider: "openrouter" as const, model: "anthropic/claude-sonnet" };
+
+  test("the legacy digest is BYTE-PINNED — v24 changed nothing behind old approvals", () => {
+    expect(digestOf({ goal: "a guard", outOfScope: null, touches: [] })).toBe("a24c72e6603f78291e1eea2e162b383e");
+    expect(digestOf({ goal: "a guard", outOfScope: null, touches: [] }, null)).toBe("a24c72e6603f78291e1eea2e162b383e");
+  });
+
+  test("profile digests are stable golden vectors, one per variant plus inherit", () => {
+    // Pinned by value: if these move, an approval's meaning moved.
+    expect(profileDigestOf(claude)).toBe(profileDigestOf({ ...claude }));
+    expect(profileDigestOf(codex)).not.toBe(profileDigestOf(openrouter));
+    expect(profileDigestOf({ ...claude, repairModel: "haiku" })).not.toBe(profileDigestOf(claude));
+    // canonical: key order cannot matter
+    const shuffled = JSON.parse(JSON.stringify(claude)) as typeof claude;
+    expect(profileDigestOf(shuffled)).toBe(profileDigestOf(claude));
+    // and the digest joins the scope digest deterministically
+    const withProfile = digestOf({ goal: "a guard", outOfScope: null, touches: [] }, claude);
+    expect(withProfile).not.toBe("a24c72e6603f78291e1eea2e162b383e");
+    expect(withProfile).toBe(digestOf({ goal: "a guard", outOfScope: null, touches: [] }, claude));
+  });
+
+  test("snapshots round-trip strictly; anything malformed is null, never a guess", () => {
+    for (const profile of [claude, codex, openrouter]) {
+      expect(profileFromJson(canonicalProfileJson(profile))).toEqual(profile);
+    }
+    expect(profileFromJson(null)).toBeNull();
+    expect(profileFromJson("not json")).toBeNull();
+    expect(profileFromJson(JSON.stringify({ digestVersion: 1, profile: claude }))).toBeNull();
+    expect(profileFromJson(JSON.stringify({ digestVersion: 2, profile: { ...claude, model: "" } }))).toBeNull();
+    expect(profileFromJson(JSON.stringify({ digestVersion: 2, profile: { ...codex, maxTurns: 40 } }))).toBeNull();
+    expect(profileFromJson(JSON.stringify({ digestVersion: 2, profile: { ...claude, provider: "gemini" } }))).toBeNull();
   });
 });

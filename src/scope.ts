@@ -68,6 +68,153 @@ function sameDigest(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * The execution profile (Parity II foundations, findings 1/2/13/14/22):
+ * WHAT RUNS, bound into what the operator signs. A discriminated union —
+ * each variant asserts only what its provider actually supports, with the
+ * EFFECTIVE constants the argv will carry, never aspirations. The model
+ * is always an exact string and always emitted on the argv: nothing in an
+ * approved profile is left for later resolution to decide (ruling 10).
+ * providerVersion and resolvedFrom are PROVENANCE and live outside these
+ * shapes (finding 20) — they never enter a digest.
+ */
+export const CLAUDE_LIMITS = {
+  maxTurns: 40,
+  repairMaxTurns: 4,
+  timeoutSeconds: 1800,
+  repairTimeoutSeconds: 300,
+} as const;
+export const CODEX_SHAPED_LIMITS = {
+  timeoutSeconds: 1200,
+  repairTimeoutSeconds: 300,
+} as const;
+
+export type ClaudeProfile = {
+  provider: "claude";
+  /** The exact model string the argv carries. Never empty, never "default". */
+  model: string;
+  /** Claude's real argv semantic: --permission-mode acceptEdits, or the
+   * separate --dangerously-skip-permissions flag. Phase 1 files
+   * acceptEdits ONLY (finding 22); bypass arrives with the attended
+   * authorization work. */
+  permissionArgv: "acceptEdits" | "bypassPermissions";
+  maxTurns: number;
+  repairMaxTurns: number;
+  timeoutSeconds: number;
+  repairTimeoutSeconds: number;
+  /** Exact model for repairs, or the stable literal "inherit" (= the
+   * build model, which is itself exact). */
+  repairModel: string;
+};
+
+export type CodexShapedProfile = {
+  provider: "codex" | "openrouter";
+  model: string;
+  /** Codex's real constraint surface: the sandbox argument. There is no
+   * separate permission argument, so no invented field. */
+  sandboxMode: "workspace-write";
+  /** The tool has no turn limit; the wall clock is the bound. Stored as
+   * the literal so the approval words can say so honestly. */
+  maxTurns: "unsupported";
+  repairMaxTurns: "unsupported";
+  timeoutSeconds: number;
+  repairTimeoutSeconds: number;
+  repairModel: string;
+};
+
+export type ExecutionProfile = ClaudeProfile | CodexShapedProfile;
+
+export const PROFILE_DIGEST_VERSION = 2;
+
+/** Deterministic JSON: object keys sorted recursively, arrays in order. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** The stored snapshot bytes: version embedded IN the snapshot (finding 17). */
+export function canonicalProfileJson(profile: ExecutionProfile): string {
+  return canonicalJson({ digestVersion: PROFILE_DIGEST_VERSION, profile });
+}
+
+/** sha256 over a domain-separated canonical encoding, truncated to the
+ * same 128 bits every other safety digest here uses (finding 21). */
+export function profileDigestOf(profile: ExecutionProfile): string {
+  return createHash("sha256")
+    .update(`standing-orders:profile:${canonicalProfileJson(profile)}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/** Strict re-hydration of a stored snapshot — every field type-proved;
+ * anything unexpected is null, never a guess. */
+export function profileFromJson(json: string | null): ExecutionProfile | null {
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const wrapper = parsed as { digestVersion?: unknown; profile?: unknown };
+  if (wrapper.digestVersion !== PROFILE_DIGEST_VERSION) return null;
+  const p = wrapper.profile as Record<string, unknown> | null | undefined;
+  if (p === null || p === undefined || typeof p !== "object") return null;
+  const str = (v: unknown): v is string => typeof v === "string" && v !== "";
+  const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  if (p["provider"] === "claude") {
+    if (
+      str(p["model"]) &&
+      (p["permissionArgv"] === "acceptEdits" || p["permissionArgv"] === "bypassPermissions") &&
+      num(p["maxTurns"]) && num(p["repairMaxTurns"]) &&
+      num(p["timeoutSeconds"]) && num(p["repairTimeoutSeconds"]) &&
+      str(p["repairModel"])
+    ) {
+      return {
+        provider: "claude",
+        model: p["model"],
+        permissionArgv: p["permissionArgv"],
+        maxTurns: p["maxTurns"],
+        repairMaxTurns: p["repairMaxTurns"],
+        timeoutSeconds: p["timeoutSeconds"],
+        repairTimeoutSeconds: p["repairTimeoutSeconds"],
+        repairModel: p["repairModel"],
+      };
+    }
+    return null;
+  }
+  if (p["provider"] === "codex" || p["provider"] === "openrouter") {
+    if (
+      str(p["model"]) &&
+      p["sandboxMode"] === "workspace-write" &&
+      p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
+      num(p["timeoutSeconds"]) && num(p["repairTimeoutSeconds"]) &&
+      str(p["repairModel"])
+    ) {
+      return {
+        provider: p["provider"],
+        model: p["model"],
+        sandboxMode: "workspace-write",
+        maxTurns: "unsupported",
+        repairMaxTurns: "unsupported",
+        timeoutSeconds: p["timeoutSeconds"],
+        repairTimeoutSeconds: p["repairTimeoutSeconds"],
+        repairModel: p["repairModel"],
+      };
+    }
+    return null;
+  }
+  return null;
+}
+
 export type Scope = {
   taskId: string;
   /** What success looks like, in the operator's words. */
@@ -87,6 +234,14 @@ export type Scope = {
   approvedBy: string | null;
   /** The digest that was actually agreed to, which may now be stale. */
   approvedDigest: string | null;
+  /** v24 (optional so hand-built scopes in tests stay valid): the working
+   * execution profile, its resolution state, and the immutable snapshot
+   * the approval act sealed. */
+  profile?: ExecutionProfile | null;
+  profileState?: "resolved" | "unresolved";
+  unresolvedReason?: string | null;
+  approvedProfile?: ExecutionProfile | null;
+  digestVersion?: number;
 };
 
 export type Approval =
@@ -98,6 +253,9 @@ export type ScopeInput = {
   goal: string;
   outOfScope?: string | null;
   touches?: readonly string[];
+  /** v24: an EXPLICIT profile skips resolution in the store (routine
+   * firings and the demo's illustrative scopes use this road). */
+  profile?: ExecutionProfile;
   /** Integer micro-dollars per build attempt; digest-bound when present. */
   budgetMicrousd?: number | null;
   now: Date;
@@ -111,7 +269,10 @@ export type ScopeInput = {
  * change what an operator would have said, it has to move the digest, or the
  * approval it invalidates would be an approval of something else.
  */
-export function digestOf(scope: Pick<Scope, "goal" | "outOfScope" | "touches"> & { budgetMicrousd?: number | null }): string {
+export function digestOf(
+  scope: Pick<Scope, "goal" | "outOfScope" | "touches"> & { budgetMicrousd?: number | null },
+  profile?: ExecutionProfile | null,
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -121,6 +282,11 @@ export function digestOf(scope: Pick<Scope, "goal" | "outOfScope" | "touches"> &
         // Absent and null digest identically, so every pre-v15 approval
         // stays exactly as approved.
         ...(scope.budgetMicrousd == null ? {} : { budget: scope.budgetMicrousd }),
+        // Same discipline for the execution profile (v24): absent and null
+        // are byte-identical with history — the legacy golden test pins
+        // this. A profile enters by ITS digest, so the scope digest binds
+        // routing/permissions/limits without re-serializing them here.
+        ...(profile == null ? {} : { profileDigest: profileDigestOf(profile) }),
       }),
       "utf8",
     )
@@ -133,7 +299,7 @@ export function digestOf(scope: Pick<Scope, "goal" | "outOfScope" | "touches"> &
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {} } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile } = input;
 
   const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd };
   const previous = store.getScope(taskId);
@@ -153,8 +319,10 @@ export function propose(store: Store, input: ScopeInput): Scope {
     approvedDigest: previous?.approvedDigest ?? null,
   };
 
-  store.saveScope(scope, mutation);
-  return scope;
+  store.saveScope(scope, mutation, profile === undefined ? {} : { profile });
+  // The store may have RECOMPUTED the digest to bind the resolved profile
+  // (v24 filing invariant) — what callers display must be what is stored.
+  return store.getScope(taskId) ?? scope;
 }
 
 export type GuardedProposeResult =
@@ -266,7 +434,7 @@ export function addApprover(
 
 export type ApproveResult =
   | { ok: true; scope: Scope }
-  | { ok: false; reason: "no-scope" | "changed" | "no-approvers" | "not-an-approver" };
+  | { ok: false; reason: "no-scope" | "changed" | "no-approvers" | "not-an-approver" | "profile-unresolved" };
 
 /**
  * Whether this name-and-token pair is a person the store knows. Shared by
@@ -316,13 +484,20 @@ export function approve(
     // the new one in silence — which is the whole failure this guards.
     if (sawDigest !== scope.digest) return { ok: false as const, reason: "changed" as const };
 
-    const approved: Scope = {
-      ...scope,
-      approvedAt: now.toISOString(),
-      approvedBy: by,
-      approvedDigest: scope.digest,
-    };
-    store.saveScope(approved, mutation);
+    // An unresolved scope cannot say exactly what would run, so nobody can
+    // agree to it (foundations finding 16) — restatement is the road.
+    if (scope.profileState === "unresolved") {
+      return { ok: false as const, reason: "profile-unresolved" as const };
+    }
+
+    // SEAL, never re-resolve: the approval snapshots the stored working
+    // profile — the exact bytes the digest the approver signed was bound
+    // to. Routing saveScope here would re-run resolution and could sign a
+    // profile nobody saw.
+    const sealed = store.sealScopeApproval(taskId, by, now, mutation);
+    if (!sealed) return { ok: false as const, reason: "changed" as const };
+    const approved = store.getScope(taskId);
+    if (approved === null) return { ok: false as const, reason: "no-scope" as const };
     return { ok: true as const, scope: approved };
   });
 }

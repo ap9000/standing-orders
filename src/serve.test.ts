@@ -16,6 +16,7 @@ import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT } from "./serve.js";
+import { resolveScopeProfile } from "./agentconfig.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -51,6 +52,7 @@ describe("the web decision view", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-serve-ev-"));
 
     const added = addApprover(store, "alex", T0);
@@ -424,6 +426,7 @@ describe("the settings card", () => {
   beforeEach(async () => {
     const { mkdtempSync } = await import("node:fs");
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     dir = mkdtempSync(join(tmpdir(), "standing-orders-serve-settings-"));
     evidenceRoot = join(dir, "evidence");
     mkdirSync(evidenceRoot, { recursive: true });
@@ -546,6 +549,7 @@ describe("the operations console", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-console-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -1251,6 +1255,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-v2-ev-"));
     // Two real directories: A is inside the ceiling, B is not.
     repoA = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-v2-repoA-")));
@@ -1466,6 +1471,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-board-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -1763,13 +1769,20 @@ describe("routines — standing orders on the console", () => {
   };
 
   const file = (name: string, terms = TERMS): number => {
-    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, T0);
+    // v24: filing binds the profile the config resolves, like the real door.
+    const resolved = resolveScopeProfile(store, terms.repo, undefined, {});
+    if (!resolved.ok) throw new Error(resolved.problem);
+    const created = store.createRoutine(
+      { name, ...terms, digest: routineDigestOf(terms, resolved.profile), profile: resolved.profile },
+      T0,
+    );
     if (!created.ok) throw new Error("duplicate in setup");
     return created.id;
   };
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-routine-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -1974,6 +1987,7 @@ describe("routines — standing orders on the console", () => {
 describe("the agents card — configuration, readable at a glance", () => {
   test("says what each phase runs on, who chose it, and that the browser cannot change it", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-agents-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -2013,6 +2027,7 @@ describe("the agents card — configuration, readable at a glance", () => {
 describe("mutations from browsers that omit Origin", () => {
   test("absent Origin + valid CSRF proceeds; a present wrong Origin still refuses", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-origin-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -2077,6 +2092,7 @@ describe("/next — clearing the queue one thing at a time", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-next-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -2143,7 +2159,7 @@ describe("/next — clearing the queue one thing at a time", () => {
     const approved = await fetch(url("/t/t-a/approve"), {
       method: "POST",
       headers: { cookie, origin: base },
-      body: new URLSearchParams({ csrf: csrf2, nonce, digest: "d".repeat(32), token: approverToken, return: "next" }),
+      body: new URLSearchParams({ csrf: csrf2, nonce, digest: store.getScope("t-a")?.digest as string, token: approverToken, return: "next" }),
       redirect: "manual",
     });
     expect(approved.status).toBe(303);
@@ -2189,6 +2205,7 @@ describe("/next — clearing the queue one thing at a time", () => {
 describe("since you last looked", () => {
   test("a return visit says what concluded in between; fragment polls never move the anchor", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-delta-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -2232,6 +2249,7 @@ describe("since you last looked", () => {
 describe("quick capture — from thought to the approve card in two steps", () => {
   test("title + goal on the inbox lands on the task screen with the step-up ready", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-capture-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -2277,6 +2295,7 @@ describe("quick capture — from thought to the approve card in two steps", () =
 describe("the roll-up inbox — every project, one ceiling, links only", () => {
   test("a projectless session sees admitted rows with chips; foreign repos neither render nor count", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-rollup-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -2534,6 +2553,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-chat-ev-"));
     repoDir = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-chat-repo-")));
     clockNow = T0;
@@ -2911,6 +2931,7 @@ describe("the filesystem browser — confined to what opening allows", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-browse-ev-"));
     root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-browse-root-")));
     mkdirSync(join(root, "payments-api", ".git"), { recursive: true });
@@ -2993,6 +3014,7 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-fleet-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -3178,6 +3200,7 @@ describe("the workbench (attended A1) and the live substrate", () => {
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-wb-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -3298,6 +3321,7 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-live-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -3628,6 +3652,7 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-contest-ev-"));
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -3843,6 +3868,7 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     const { storeEvidence } = await import("./evidence.js");
     const { mkdirSync } = await import("node:fs");
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = realpathSync(mkdtempSync(join(tmpdir(), "peek-serve-ev-")));
     poolRoot = realpathSync(mkdtempSync(join(tmpdir(), "peek-serve-pool-")));
     worktree = join(poolRoot, "wt-1");
@@ -4114,6 +4140,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
 
   beforeEach(async () => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     dir = mkdtempSync(join(tmpdir(), "standing-orders-arc4-"));
     evidenceRoot = join(dir, "evidence");
     mkdirSync(evidenceRoot, { recursive: true });
@@ -4206,7 +4233,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(pending).toContain('class="sticky-actions"');
     expect(pending).not.toContain('id="palette-index"');
 
-    const granted = approve(store, "t-a", "alex", T0, "d".repeat(32), approverToken);
+    const granted = approve(store, "t-a", "alex", T0, store.getScope("t-a")?.digest as string, approverToken);
     expect(granted.ok).toBe(true);
     const clear = await (await fetch(url("/next"), { headers: { cookie } })).text();
     expect(clear).not.toContain("approve this scope");
@@ -4358,6 +4385,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
 
     beforeEach(async () => {
       store = openStore(":memory:");
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
       evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-arc6-ev-"));
       const added = addApprover(store, "alex", T0);
       if (!added.ok) throw new Error("bootstrap failed");
@@ -4523,6 +4551,7 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-onb-ev-"));
     root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-onb-root-")));
     const added = addApprover(store, "alex", T0);
@@ -4674,6 +4703,7 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     await new Promise<void>(resolve => server.close(() => resolve()));
     store.close();
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const again = addApprover(store, "alex", T0);
     if (!again.ok) throw new Error("bootstrap failed");
     approverToken = again.token;

@@ -36,6 +36,16 @@ import { approveRoutine, fireRoutine } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import { storeEvidence, budgetedStatJson, type DiffStat } from "./evidence.js";
 
+// The demo demonstrates a CONFIGURED install: routing is named once, the
+// way `config set build` would, so approvals bind it like production.
+const DEMO_PROFILE = {
+  provider: "claude" as const,
+  model: "sonnet",
+  permissionArgv: "acceptEdits" as const,
+  maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300,
+  repairModel: "inherit",
+};
+
 export type DemoSeed = {
   login: { name: string; password: string };
   repos: string[];
@@ -155,6 +165,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     "Add per-endpoint concurrency caps and timeout budgets to webhook delivery.",
   );
   const proposedBuilding = propose(store, {
+    profile: DEMO_PROFILE,
     taskId: building,
     goal: "Add per-endpoint concurrency caps and timeout budgets to webhook delivery.",
     outOfScope: "No changes to the public webhook payload shape.",
@@ -187,6 +198,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     "Find and fix the half-cent drift in payout settlement; prove it with ledger-fixture tests.",
   );
   const doneProposed = propose(store, {
+    profile: DEMO_PROFILE,
     taskId: done,
     goal: "Find and fix the half-cent drift in payout settlement; prove it with ledger-fixture tests.",
     outOfScope: "No ledger schema changes.",
@@ -259,6 +271,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     "Remove LEGACY_PAYOUT and every branch behind it.",
   );
   const failedProposed = propose(store, {
+    profile: DEMO_PROFILE,
     taskId: failed,
     goal: "Remove LEGACY_PAYOUT and every branch behind it.",
     now: hoursAgo(16),
@@ -287,6 +300,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   store.hold(store.refFor("built-in", held).id, "waiting on the vendor sandbox account", null, hoursAgo(12));
 
   // --- a standing order with a track record ------------------------------
+  store.setPhaseConfig("installation", "build", "claude", "sonnet", "demo", now);
   const routine = fileRoutineProposal(
     store,
     {

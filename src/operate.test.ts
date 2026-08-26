@@ -1,3 +1,5 @@
+import { mkdtempSync } from "node:fs";
+import { openStore } from "./store.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -751,6 +753,8 @@ describe("agreeing to a scope from the command line", () => {
   const scopeIt = async () => {
     await run(["approver", "add", "alex", "--json"]);
     approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "fix the payouts flow", "--id", "pay"]);
     await run(["task", "scope", "pay", "--goal", "add a guard", "--json"]);
     return payload().scope.digest as string;
@@ -840,6 +844,8 @@ describe("routine — standing orders from the command line", () => {
   test("file, refuse to fire unapproved, approve with the credential, run now", async () => {
     await run(["approver", "add", "alex", "--json"]);
     const token = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
 
     const filed = await run([
       "routine", "add", "nightly-deps",
@@ -922,6 +928,8 @@ describe("config — spend routing is authenticated authority", () => {
   test("set requires the credential, records who, and show explains the layers", async () => {
     await run(["approver", "add", "alex", "--json"]);
     const token = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
 
     // No credential, no routing change.
     const bare = await run(["config", "set", "build", "--provider", "codex", "--json"]);
@@ -979,6 +987,8 @@ describe("setup — the approved worktree setup is authenticated authority (M5.7
   test("set restates the terms, takes the credential, lands with --yes; clear revokes", async () => {
     await run(["approver", "add", "alex", "--json"]);
     const token = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
 
     // No credential: refused as usage — an approved command runs unattended forever.
     expect(await run(["setup", "set", "--repo", "/code/thing", "--command", "npm ci", "--json"])).toBe(EXIT.usage);
@@ -1084,6 +1094,8 @@ describe("intake — labeled issues become unapproved proposals, preview-first (
     ghCalls = [];
     await run(["approver", "add", "alex", "--json"]);
     const token = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
 
     // No grant: preview refuses — detection is not authorization.
     const ungated = await run(["intake", "preview", "--repo", "/code/thing", "--json"], ghAnswers([]));
@@ -1103,6 +1115,8 @@ describe("intake — labeled issues become unapproved proposals, preview-first (
   test("preview lists candidates without creating; run creates deduped unapproved proposals; titles with control characters refuse", async () => {
     await run(["approver", "add", "alex", "--json"]);
     const token = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
     await run(["intake", "grant", "--repo", "/code/thing", "--github", "ap9000/thing", "--label", "agent-ok", "--as", "alex", "--token", token, "--yes", "--json"]);
 
     const issues = [
@@ -1159,6 +1173,7 @@ describe("intake pr-comments — named reviewers only, idempotent by comment id 
   test("ingests only granted reviewers' comments, once each, bound to the terminal diff", async () => {
     const { openStore } = await import("./store.js");
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     store.createTask({ id: "t-pub", title: "shipped" }, T0);
     const ref = store.refFor("built-in", "t-pub").id;
     store.placeTask(ref, "/code/thing");
@@ -1185,6 +1200,8 @@ describe("intake pr-comments — named reviewers only, idempotent by comment id 
 
     await run(["approver", "add", "alex", "--json"]);
     const token = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
     await run(["intake", "grant", "--repo", "/code/thing", "--github", "ap9000/thing", "--label", "agent-ok", "--reviewers", "goodreviewer", "--as", "alex", "--token", token, "--yes", "--json"]);
 
     const gh = async (_file: string, args: readonly string[]) => ({
@@ -1220,6 +1237,8 @@ describe("intake pr-comments — named reviewers only, idempotent by comment id 
   test("a grant without reviewers keeps PR-comment intake off", async () => {
     await run(["approver", "add", "alex", "--json"]);
     const token = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
     await run(["intake", "grant", "--repo", "/code/thing", "--github", "ap9000/thing", "--label", "agent-ok", "--as", "alex", "--token", token, "--yes", "--json"]);
     const code = await run(["intake", "pr-comments", "--repo", "/code/thing", "--json"]);
     expect(code).toBe(EXIT.refused);
@@ -1240,5 +1259,41 @@ describe("the CLI router", () => {
     const routed = /const OPERATE_COMMANDS = new Set\(\[([^\]]+)\]\)/.exec(cli)?.[1] ?? "";
     const missing = [...new Set(dispatched)].filter(verb => !routed.includes(`"${verb}"`));
     expect(missing).toEqual([]);
+  });
+});
+
+describe("task steer takes the operator's credential (v24, ruling 11)", () => {
+  let lines: string[] = [];
+  let db = "";
+  const write = (line: string) => lines.push(line);
+  const payload = () => JSON.parse(lines.join("\n"));
+  const run = (argv: string[]) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, write, { databaseFile: db });
+  };
+
+  beforeEach(() => {
+    db = join(mkdtempSync(join(tmpdir(), "so-steer-cli-")), "db.sqlite");
+  });
+
+  test("anonymous refuses as usage; a wrong credential is not-an-approver; the verified name is the author", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"]);
+    await run(["task", "add", "steered work", "--id", "t-s", "--json"]);
+
+    expect(await run(["task", "steer", "t-s", "--note", "check the guard", "--json"])).toBe(2);
+    expect(payload()).toMatchObject({ ok: false, reason: "usage" });
+
+    expect(await run(["task", "steer", "t-s", "--note", "check the guard", "--as", "alex", "--token", "wrong", "--json"])).toBe(3);
+    expect(payload()).toMatchObject({ ok: false, reason: "not-an-approver" });
+
+    expect(await run(["task", "steer", "t-s", "--note", "check the guard", "--as", "alex", "--token", token, "--json"])).toBe(0);
+    const store = openStore(db);
+    const ref = store.refFor("built-in", "t-s").id;
+    const notes = store.listSteerNotes(ref);
+    expect(notes[0]).toMatchObject({ author: "alex", authorshipState: "verified" });
+    store.close();
   });
 });

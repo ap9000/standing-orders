@@ -97,6 +97,7 @@ import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, isLargeRepo } from "./onboard.js";
+import { verifiedAuthor } from "./store.js";
 import { updateRepos, addRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
 
@@ -2398,7 +2399,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         const approved = approveRoutine(store, routineId, who.name, now, digest, token);
         if (!approved.ok) {
           const status = approved.reason === "changed" ? 409 : 403;
-          return routinePage(response, who, routineId, `not approved: ${approved.reason}`, status);
+          const words =
+            approved.reason === "profile-unresolved"
+              ? "not approved: the routine cannot say exactly what would run — set a build model (config set build --model \u2026) and restate it"
+              : `not approved: ${approved.reason}`;
+          return routinePage(response, who, routineId, words, status);
         }
         return redirect(response, `/routines/${routineId}`);
       }
@@ -3598,7 +3603,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (who.via !== "cookie") {
           return refuse(response, who, 403, "steering is a browser session's act");
         }
-        const filed = store.fileSteerNote(taskId, who.name, body.get("note") ?? "", now);
+        // The session IS the verified principal here — cookie + CSRF proved it.
+        const filed = store.fileSteerNote(taskId, verifiedAuthor(who.name), body.get("note") ?? "", now);
         if (!filed.ok) {
           const said =
             filed.reason === "contest-open"
@@ -4112,6 +4118,25 @@ export function editorFileHref(worktree: string, path: string, line?: number | n
   } catch {
     return null;
   }
+}
+
+/** The execution profile in plain words (v24): what the password signs
+ * says WHAT RUNS — provider, exact model, permissions, and the real
+ * bounds — or says honestly that it cannot yet. */
+function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion">): string {
+  if (scope.profileState === "unresolved") {
+    return `<p class="meta"><strong>filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}. Restate the scope to fix it.</p>`;
+  }
+  const profile = scope.profile ?? null;
+  if (profile === null) {
+    return (scope.digestVersion ?? 1) < 2
+      ? `<p class="meta">approved before routing was bound — pinned at upgrade to the configuration of that day</p>`
+      : "";
+  }
+  const repair = profile.repairModel === "inherit" ? "same model" : profile.repairModel;
+  return profile.provider === "claude"
+    ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — edits auto-accepted inside its leased worktree, ${profile.maxTurns} turns / ${Math.round(profile.timeoutSeconds / 60)} min per attempt; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+    : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
 }
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
@@ -7094,7 +7119,9 @@ function taskBody(data: {
   // where it stands — waiting, attached, proven delivered, or superseded.
   const steering = data.steering ?? [];
   const steerState = (one: SteerNote): string =>
-    one.supersededAt !== null
+    one.authorshipState !== "verified"
+      ? "recorded before steering required a credential — never delivered"
+      : one.supersededAt !== null
       ? "the task ended before this landed"
       : one.deliveredAt !== null
         ? `reached build #${one.attachedRun}`
@@ -7202,6 +7229,7 @@ function taskBody(data: {
           `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          profileWords(scope),
           scope.budgetMicrousd === null
             ? ""
             : `<p class="meta">each build attempt may spend $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} — the agent is stopped at this figure</p>`,
@@ -8358,6 +8386,7 @@ function nextPage(chrome: Chrome, data: {
       `<input type="hidden" name="digest" value="${escape(item.approval.digest)}">` +
       `<input type="hidden" name="return" value="next">` +
       `<p><strong>approve exactly this:</strong></p>` +
+      (scope === null ? "" : profileWords(scope)) +
       `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? item.approval.goal)}</p>` +
       `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
       `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +

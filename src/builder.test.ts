@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
-import { propose, approve, addApprover } from "./scope.js";
+import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { build, PROTECTED, type Runner } from "./builder.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
@@ -105,6 +105,7 @@ describe("the builder's gates", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -276,7 +277,14 @@ describe("the builder's gates", () => {
     const parked = store.startRun({
       taskRef, leaseId: "l-park", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
     });
-    store.stampRun(parked, { baseRevision: "feat/a", sessionId: "sess-park-1" });
+    const sealedScope = store.getScope("t-1");
+    store.stampRun(parked, {
+      baseRevision: "feat/a",
+      sessionId: "sess-park-1",
+      // v24: warm resume matches sealed terms — the park carries them.
+      scopeDigest: sealedScope?.approvedDigest as string,
+      profileDigest: profileDigestOf(sealedScope?.approvedProfile as ExecutionProfile),
+    });
     store.finishRun(parked, { outcome: "parked", now: T0 });
     const decisionId = store.saveDecision(
       {
@@ -490,6 +498,7 @@ describe("what the builder tells the agent", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -594,17 +603,26 @@ describe("what the builder tells the agent", () => {
     expect(asked).not.toContain("--dangerously-skip-permissions");
   });
 
-  test("skips them only when told to, and then says nothing else", async () => {
-    await build1({ skipPermissions: true });
+  test("skipping permissions on approved work refuses, typed — the approval bound acceptEdits (v24)", async () => {
+    const result = await build1({ skipPermissions: true });
 
-    expect(asked).toContain("--dangerously-skip-permissions");
-    expect(asked).not.toContain("--permission-mode");
+    expect(result).toMatchObject({ ok: false, reason: "stale-approval" });
+    expect(asked).not.toContain("--dangerously-skip-permissions");
   });
 
-  test("bounds the run by turns as well as by clock", async () => {
-    await build1({ maxTurns: 7 });
+  test("re-routing approved work refuses: the sealed provider governs whatever later flags say (v24, ruling 10)", async () => {
+    const rerouted = await build1({ provider: "codex" });
+    expect(rerouted).toMatchObject({ ok: false, reason: "stale-approval" });
+    const remodeled = await build1({ model: "opus" });
+    expect(remodeled).toMatchObject({ ok: false, reason: "stale-approval" });
+  });
 
-    expect(asked[asked.indexOf("--max-turns") + 1]).toBe("7");
+  test("the turn bound is the SEALED one: divergence refuses, the snapshot's rides the argv (v24)", async () => {
+    const diverged = await build1({ maxTurns: 7 });
+    expect(diverged).toMatchObject({ ok: false, reason: "stale-approval" });
+
+    await build1({});
+    expect(asked[asked.indexOf("--max-turns") + 1]).toBe("40");
   });
 
   test("runs in the leased worktree and nowhere else", async () => {
@@ -634,6 +652,7 @@ describe("what the builder does afterwards", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -828,6 +847,7 @@ describe("the gates cannot be talked around", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -926,6 +946,7 @@ describe("scope text is data, not instructions", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -994,6 +1015,7 @@ describe("the lease marker never reaches a commit", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1068,6 +1090,7 @@ describe("the commit message", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1180,6 +1203,7 @@ describe("the pulse", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1391,6 +1415,7 @@ describe("the park", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1606,6 +1631,7 @@ describe("bounded repair", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
@@ -1716,14 +1742,22 @@ describe("bounded repair", () => {
     expect(repairs.map(r => r.outcome).sort()).toEqual(["built", "failed"]);
   });
 
-  test("repair turns run on the repair model when one is routed", async () => {
+  test("repair turns run on the SEALED repair model — flags no longer route approved work (v24)", async () => {
+    // Divergent flags refuse before any spawn.
+    const refusedRun = await build(store, request({ agent: staged([invalid, valid]).agent, model: "opus", repairModel: "haiku" }));
+    expect(refusedRun).toMatchObject({ ok: false, reason: "stale-approval" });
+
+    // The sealed road: restate the scope with the repair model and approve.
+    store.setPhaseConfig("installation", "repair", "claude", "haiku", "test", T0);
+    const restated = propose(store, { taskId: "t-1", goal: "the goal", now: T0 });
+    const yes = approve(store, "t-1", "alex", T0, restated.digest, approverToken);
+    expect(yes.ok).toBe(true);
+
     const { agent, calls } = staged([invalid, valid]);
-
-    await build(store, request({ agent, model: "opus", repairModel: "haiku" }));
-
+    await build(store, request({ agent }));
     const main = calls[0] ?? [];
     const repair = calls[1] ?? [];
-    expect(main[main.indexOf("--model") + 1]).toBe("opus");
+    expect(main[main.indexOf("--model") + 1]).toBe("sonnet");
     expect(repair[repair.indexOf("--model") + 1]).toBe("haiku");
     const child = store.runsFor(taskRef).find(r => r.role === "repair");
     expect(child?.model).toBe("haiku");

@@ -26,6 +26,7 @@
  * and stays inert until the operator's own ceremony says otherwise.
  */
 
+import { resolveScopeProfile } from "./agentconfig.js";
 import { resolve } from "node:path";
 import { hasForbiddenControls, hasDisguisedText } from "./decision.js";
 import { canonicalProject } from "./project.js";
@@ -250,10 +251,21 @@ export function fileRoutineProposal(
     const named = problems.map(one => `${one.field}: ${one.problem}`).join("; ");
     return refuse(problems.some(one => one.field === "name") ? "bad-name" : "bad-terms", named);
   }
+  // v24 filing invariant, routine flavor: resolve the execution profile
+  // once, here, and bind it into the digest a person will sign. Unresolved
+  // saves too (finding 19) — approval then refuses until restated.
+  const resolvedProfile = resolveScopeProfile(store, repo.repo, undefined, {});
+  const routineProfile = resolvedProfile.ok ? resolvedProfile.profile : null;
   const created = store.createRoutine(
-    { name: input.name, ...terms, digest: routineDigestOf(terms), filedVia: input.filedVia },
+    {
+      name: input.name,
+      ...terms,
+      digest: routineDigestOf(terms, routineProfile),
+      filedVia: input.filedVia,
+      ...(routineProfile === null ? {} : { profile: routineProfile }),
+    },
     now,
   );
   if (!created.ok) return refuse("duplicate", `a routine named ${input.name} already exists`);
-  return { ok: true, id: created.id, digest: routineDigestOf(terms) };
+  return { ok: true, id: created.id, digest: routineDigestOf(terms, routineProfile) };
 }

@@ -183,6 +183,8 @@ describe("planning mode, against real git", () => {
     expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "parked" }));
 
     const store = openStore(db);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const decision = store.listDecisions("unanswered")[0];
     expect(decision).toBeDefined();
     expect(decision?.question).toBe("Per-user or per-tenant?");
@@ -251,6 +253,8 @@ describe("planning mode, against real git", () => {
     );
 
     const store = openStore(db);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     // No decision was ingested from the dirty workspace.
     expect(store.listDecisions("unanswered")).toHaveLength(0);
     // The failure took a PLANNING strike and left a backoff hold — never a
@@ -280,6 +284,8 @@ describe("planning mode, against real git", () => {
     expect(failed).toBe(EXIT.failed);
 
     const store = openStore(db);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const incidents = store.openIncidents();
     expect(incidents.some(one => one.kind === "malformed-plan")).toBe(true);
     // The incident's hold blocks redispatch until a person resolves it —

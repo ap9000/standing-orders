@@ -9,6 +9,7 @@ import { openStore, BUILT_IN, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { approveRoutine, fireRoutine, routineDigestOf, type RoutineTerms } from "./routine.js";
+import { resolveScopeProfile } from "./agentconfig.js";
 
 const T0 = new Date("2026-08-13T22:00:00.000Z");
 const HOUR = 60 * 60_000;
@@ -95,9 +96,14 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
   afterEach(() => store.close());
 
   const arm = (terms: RoutineTerms, name: string): number => {
-    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, T0);
+    // v24: filing resolves the profile from the config the test just set,
+    // exactly as fileRoutineProposal does — the digest binds it.
+    const resolved = resolveScopeProfile(store, terms.repo, undefined, {});
+    if (!resolved.ok) throw new Error(`setup: ${resolved.problem}`);
+    const digest = routineDigestOf(terms, resolved.profile);
+    const created = store.createRoutine({ name, ...terms, digest, profile: resolved.profile }, T0);
     if (!created.ok) throw new Error("setup");
-    const approved = approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms), token);
+    const approved = approveRoutine(store, created.id, "alex", T0, digest, token);
     expect(approved.ok).toBe(true);
     return created.id;
   };
@@ -126,8 +132,16 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
     expect(fires[0]).toMatchObject({ outcome: "skipped" });
     expect(fires[0]?.reason).toContain("unmeasured-provider");
     expect(store.listNotifications("all").some(one => one.subject.includes("cannot honor a cost ceiling"))).toBe(true);
-    // Drop the provider back to claude: the next slot fires.
+    // v24: dropping the config is no longer enough — the approved profile
+    // IS the routing. The road is restatement onto claude and a fresh yes.
     store.clearPhaseConfig("/work/repo", "build");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    const restated = resolveScopeProfile(store, "/work/repo", undefined, {});
+    if (!restated.ok) throw new Error(restated.problem);
+    const terms = { ...TERMS, costCeilingUsd: 5 };
+    const newDigest = routineDigestOf(terms, restated.profile);
+    expect(store.updateRoutineTerms(id, { ...terms, digest: newDigest, profile: restated.profile }, new Date(T0.getTime() + 2 * HOUR))).toBe(true);
+    expect(approveRoutine(store, id, "alex", new Date(T0.getTime() + 2 * HOUR), newDigest, token).ok).toBe(true);
     const fired = fireRoutine(store, id, new Date(T0.getTime() + 3 * HOUR));
     expect(fired.ok).toBe(true);
   });

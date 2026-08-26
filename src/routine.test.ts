@@ -27,6 +27,14 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+const V24_PROFILE = {
+  provider: "claude" as const,
+  model: "sonnet",
+  permissionArgv: "acceptEdits" as const,
+  maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300,
+  repairModel: "inherit",
+};
+
 describe("the schedule algebra", () => {
   test("parses the two shapes and refuses everything else", () => {
     expect(parseSchedule("every:60")).toEqual({ kind: "every", minutes: 60 });
@@ -118,7 +126,7 @@ describe("firing, inside one proving transaction", () => {
 
   const create = (terms: RoutineTerms = TERMS, name = "deps") => {
     const created = store.createRoutine(
-      { name, ...terms, digest: routineDigestOf(terms) },
+      { name, ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
       T0,
     );
     if (!created.ok) throw new Error("duplicate routine in test setup");
@@ -310,7 +318,7 @@ describe("firing, inside one proving transaction", () => {
   });
 
   test("two standing orders cannot share a name", () => {
-    expect(store.createRoutine({ name: "deps", ...TERMS, digest: routineDigestOf(TERMS) }, T0)).toMatchObject({
+    expect(store.createRoutine({ name: "deps", ...TERMS, digest: routineDigestOf(TERMS, V24_PROFILE), profile: V24_PROFILE }, T0)).toMatchObject({
       ok: false,
       reason: "duplicate",
     });
@@ -336,7 +344,7 @@ describe("the review's regressions (Codex Phase C findings)", () => {
   let routineId: number;
 
   const create = (terms: RoutineTerms = TERMS, name = "deps") => {
-    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms) }, T0);
+    const created = store.createRoutine({ name, ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE }, T0);
     if (!created.ok) throw new Error("duplicate routine in test setup");
     return created.id;
   };

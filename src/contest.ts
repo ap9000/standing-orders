@@ -28,6 +28,8 @@
  * re-admission and checkout custody (stage 4), cleanup (stage 6).
  */
 
+import { profileDigestOf } from "./scope.js";
+import { contestantProfileOf } from "./store.js";
 import { createHash } from "node:crypto";
 import { release } from "./claim.js";
 import { buildPriceOf, oneCallTailMicrousd, BUILD_PRICE_VERSION } from "./pricing.js";
@@ -41,7 +43,12 @@ export type RaceAgent = { provider: string; model: string; repairModel: string }
 
 // ---------------------------------------------------------------- digests
 
-/** Canonical and order-preserving: the agents race in the order approved. */
+/** Canonical and order-preserving: the agents race in the order approved.
+ * v2 (foundations finding 8): each lane's FULL execution profile enters the
+ * fingerprint — permissions and limits included, not just routing — via the
+ * same profile digest every other approval binds. Stored v1 fingerprints
+ * keep verifying byte-for-byte (admission compares stored values; nothing
+ * recomputes a v1). */
 export function raceDigestOf(terms: {
   agents: readonly RaceAgent[];
   perAgentBudgetMicrousd: number;
@@ -50,15 +57,20 @@ export function raceDigestOf(terms: {
   publicationPolicy: string;
 }): string {
   const canonical = JSON.stringify({
-    v: 1,
-    agents: terms.agents.map(agent => [agent.provider, agent.model, agent.repairModel]),
+    v: 2,
+    agents: terms.agents.map(agent => [
+      agent.provider,
+      agent.model,
+      agent.repairModel,
+      profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel)),
+    ]),
     per: terms.perAgentBudgetMicrousd,
     total: terms.totalBudgetMicrousd,
     prices: terms.priceVersion,
     retries: 0,
     publication: terms.publicationPolicy,
   });
-  return createHash("sha256").update(`race/v1\u0000${canonical}`).digest("hex");
+  return createHash("sha256").update(`race/v2\u0000${canonical}`).digest("hex");
 }
 
 /** tournament-approval/v1 (finding 31): one yes covers both documents. */

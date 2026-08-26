@@ -33,6 +33,8 @@ import {
   BUILT_IN,
   DEFAULT_ACTOR,
   parseCapabilityKey,
+  verifiedAuthor,
+  contestantProfileOf,
   type Capability,
   type Store,
   type TaskState,
@@ -130,7 +132,7 @@ import {
   validRunnerName,
   RUNNER_NAME_MAX,
 } from "./runner.js";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, type ExecutionProfile } from "./scope.js";
 import { WorktreePool } from "./worktree.js";
 import {
   approveRoutine,
@@ -145,7 +147,7 @@ import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./propo
 import { TEMPLATES, templateByName } from "./templates.js";
 import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
 import { priceOf, PRICED_MODELS } from "./converse.js";
-import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { resolvePhaseAgent, resolveScopeProfile, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
 import {
@@ -1533,10 +1535,11 @@ async function tickCommand(
         branch: racer.branch,
         now: clock(),
         clock,
-        timeoutMs,
         provider: racer.provider as "claude" | "codex" | "openrouter",
-        model: racer.model,
-        repairModel: racer.repairModel,
+        // v24: the contestant's OWN sealed profile is the authority — the
+        // proof holds the lane to it (model, limits, permissions), so no
+        // flag-shaped overrides ride along.
+        contestProfile: racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel),
         maxBudgetUsd: remaining / 1_000_000,
         ...(resumeSlot === undefined
           ? {}
@@ -1672,6 +1675,12 @@ async function tickCommand(
       continue;
     }
 
+    // TOURNAMENT TERMS FIRST (foundations finding 8's reorder): an approved
+    // race's admission is governed by its own fingerprinted terms, and pass
+    // flags must not be able to shape it — so the terms are discovered
+    // before any flag-shaped resolution runs, and a raced task's build
+    // resolution ignores the flags outright.
+    const racedAhead = wantsPlan ? null : store.activeTournamentTerms(ref.id);
     // The phase agent, resolved BEFORE anything is claimed and snapshotted
     // into the run: pin > flags > project > installation > default. Planner
     // flags fall back to the pass flags, which is exactly today's behavior
@@ -1681,7 +1690,9 @@ async function tickCommand(
           provider: planProvider ?? providerFlag,
           model: planModel ?? model,
         })
-      : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
+      : racedAhead !== null
+        ? resolvePhaseAgent(store, "build", repo, {}, ref)
+        : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
     if (!resolution.ok) {
       dispatched.push({ id, outcome: "skipped", reason: "agent-config", detail: resolution.problem });
       continue;
@@ -1738,7 +1749,7 @@ async function tickCommand(
     // agents instead of one builder. Everything after admission either
     // reaches the ready barrier for ALL agents or interrupts the whole
     // tournament — a partial race is never dispatched (finding 19).
-    const raceTerms = wantsPlan ? null : store.activeTournamentTerms(ref.id);
+    const raceTerms = racedAhead;
     if (raceTerms !== null && raceTerms.approvedDigest === raceTerms.raceDigest) {
       const scopeRow = store.getScope(id);
       const admitted = admitContest(
@@ -1836,10 +1847,8 @@ async function tickCommand(
             branch: entry.branch,
             now: clock(),
             clock,
-            timeoutMs,
             provider: agent.provider as "claude" | "codex" | "openrouter",
-            model: agent.model,
-            repairModel: agent.repairModel,
+            contestProfile: contestantProfileOf(agent.provider, agent.model, agent.repairModel),
             maxBudgetUsd: agent.budgetMicrousd / 1_000_000,
             onProviderSpawn: pid =>
               store.markSlotRunning(entry.slotId, { run: entry.runId, contestant: entry.contestantId, incarnation: text(flags, "incarnation") ?? null, processGroup: pid }, clock()),
@@ -6748,19 +6757,29 @@ function blockTask(
  * fenced, inside the approved scope. Scheduling-adjacent like block/next —
  * no credential; the recorded author is "cli" or --as when given.
  */
-function steerTask(
+async function steerTask(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json } = context;
   const id = positional[0];
   const note = text(flags, "note");
   if (id === undefined || note === undefined) {
-    return fail(write, json, "task steer", "usage", "`standing-orders task steer <id> --note \"...\"` — the note reaches the next attempt's brief, fenced, inside the approved scope", EXIT.usage);
+    return fail(write, json, "task steer", "usage", "`standing-orders task steer <id> --note \"...\" --as <you> --token <t>` — steering speaks with the operator's voice, so it takes your credential; the note reaches the next attempt's brief, fenced, inside the approved scope", EXIT.usage);
   }
-  const author = text(flags, "as") ?? "cli";
-  const filed = store.fileSteerNote(id, author, note, context.now, mutationFrom(flags, context.now));
+  // Ruling 11: authorship derives from a VERIFIED principal, never a flag.
+  // Missing credentials are usage (the invocation is incomplete); present
+  // but wrong is not-an-approver — the same taxonomy as every ceremony.
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task steer", "usage", "steering takes `--as <you> --token <t>` — anonymous notes never reach an agent's brief", EXIT.usage);
+  }
+  const authed = authenticateApprover(store, acting.name, acting.token);
+  if (!authed.ok) {
+    return fail(write, json, "task steer", "not-an-approver", "that is not an approver, or the token does not match", EXIT.refused);
+  }
+  const filed = store.fileSteerNote(id, verifiedAuthor(acting.name), note, context.now, mutationFrom(flags, context.now));
   if (!filed.ok) {
     const detail =
       filed.reason === "unknown-task"
@@ -7063,12 +7082,32 @@ function scopeTask(
     }
   }
 
+  // v24 routing flags (foundations finding 5 — these used to be silently
+  // swallowed by the global parser): explicit flags resolve HERE, and an
+  // explicit ask that cannot resolve refuses rather than filing unresolved.
+  const routingAsked =
+    text(flags, "provider") !== undefined || text(flags, "model") !== undefined || text(flags, "repair-model") !== undefined;
+  let explicitProfile: ExecutionProfile | undefined;
+  if (routingAsked) {
+    const scopeRef = store.lookupRef(id);
+    const resolvedRouting = resolveScopeProfile(
+      store,
+      scopeRef?.repo ?? null,
+      scopeRef === null ? undefined : { agentProvider: scopeRef.agentProvider, agentModel: scopeRef.agentModel },
+      { provider: text(flags, "provider"), model: text(flags, "model"), repairModel: text(flags, "repair-model") },
+    );
+    if (!resolvedRouting.ok) {
+      return fail(write, json, "task scope", resolvedRouting.reason, resolvedRouting.problem, EXIT.usage);
+    }
+    explicitProfile = resolvedRouting.profile;
+  }
   const scope = propose(store, {
     taskId: id,
     goal,
     outOfScope: text(flags, "not") ?? null,
     touches,
     ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
+    ...(explicitProfile === undefined ? {} : { profile: explicitProfile }),
     now,
     mutation: mutationFrom(flags, now),
   });

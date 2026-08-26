@@ -141,6 +141,8 @@ describe("the night: twelve tasks, one fake clock", () => {
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"], T0);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0);
 
     for (const id of TASKS) {
       await run(["task", "add", `night work ${id}`, "--id", id], T0);
@@ -193,6 +195,7 @@ describe("the night: twelve tasks, one fake clock", () => {
 
     // -- Morning. Every task finished; the ledger can say how.
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       for (const id of TASKS) {
         expect(store.getTask(id)?.state, id).toBe("done");

@@ -103,6 +103,8 @@ describe("tick, against real git", () => {
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     return { runnerToken, approverToken };
   };
 
@@ -484,6 +486,7 @@ describe("reconcile, against real git", () => {
     // "reimaged": the directory vanishes and git is told to forget it too.
     await run(["runner", "register", "builder-1", "--json"]);
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const wt = join(pool, "repo", "gone");
     await exec("git", ["worktree", "add", "-b", "standing-orders/gone", wt], { cwd: repo });
     store.saveWorktree({
@@ -521,6 +524,7 @@ describe("reconcile, against real git", () => {
     // Adopted released and unverified: visible, but nothing may build in it
     // until something looks.
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const row = store.getWorktree(wt);
     store.close();
     expect(row).toMatchObject({ verified: false });
@@ -584,6 +588,8 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
 
     // The probe is written once and never edited again: supplying the
     // capability, not redefining it, is what must open the gate.
@@ -686,6 +692,8 @@ describe("gaps", () => {
   test("ranks by what filling would actually free, and counts honestly", async () => {
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["cap", "add", "ALPHA", "--repo", repo]);
     await run(["cap", "add", "BETA", "--repo", repo]);
 
@@ -711,6 +719,8 @@ describe("gaps", () => {
   test("a requirement nobody recorded is a gap the moment a task names it", async () => {
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await approvedTask("t-1", approverToken, "mcp:supabase");
 
     await run(["gaps", "--repo", repo, "--json"]);
@@ -757,6 +767,7 @@ describe("the outbox", () => {
 
   test("a gap nags once per episode, and again after it recurs", async () => {
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const enqueue = () =>
       store.enqueueNotification(
         { dedupeKey: `gap:${repo}:env:KEY`, kind: "gap", subject: "env:KEY blocks work", body: "…" },
@@ -781,6 +792,7 @@ describe("the outbox", () => {
 
   test("deliver hands the text over as environment, records a receipt, and keeps failures pending", async () => {
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     store.enqueueNotification(
       { dedupeKey: "n-1", kind: "build-failed", subject: 'subject with "quotes" and $DOLLARS', body: "line one\nline two" },
       T0,
@@ -837,6 +849,8 @@ describe("the outbox", () => {
     const token = payload().token as string;
     await runWith(["approver", "add", "alex", "--json"]);
     const approver = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await runWith(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]);
     await runWith(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await runWith(["task", "scope", "t-1", "--goal", "add a guard"]);
     await runWith(["task", "approve", "t-1", "--json"]);
@@ -903,6 +917,8 @@ describe("the morning briefing", () => {
     const token = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approver = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]);
     return { token, approver };
   };
 
@@ -1033,6 +1049,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1"]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1065,6 +1083,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
 
     // The decision is real, open, and carries the machine's own evidence.
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       const decision = store.getDecision(1);
       expect(decision).toMatchObject({ state: "open", recommendation: "closed" });
@@ -1095,6 +1114,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     await tick(runnerToken);
 
     const store = openStore(db);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const worktree = store.getRun(1)?.worktree;
     store.close();
     expect(worktree).toBeDefined();
@@ -1115,6 +1136,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     expect(payload()).toMatchObject({ ok: false, reason: "empty" });
 
     const store = openStore(db);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       expect(store.listDecisions("all")).toHaveLength(1);
     } finally {
@@ -1132,6 +1155,8 @@ describe("the park, end to end — a judgement call survives the night", () => {
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "failed", reason: "malformed-decision" }]);
 
     const store = openStore(db);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       // No decision — an incident, held by it, paged once.
       expect(store.listDecisions("all")).toHaveLength(0);
@@ -1222,6 +1247,8 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1"]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1307,6 +1334,7 @@ describe("decide, end to end — the morning answers and the machine hears it", 
 
     // The causal record: the resume run was given exactly this answer.
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       expect(store.answersFor(2)).toMatchObject([{ choice: "closed", note: "pause is fine, retry hourly" }]);
     } finally {
@@ -1454,6 +1482,8 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1"]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1506,6 +1536,7 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
 
     // The tap, from the paired person, on the message the keyboard rode.
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const placedOn = store.getTelegramAction(closed!.callback_data)?.messageId;
     store.close();
     script.updates.push([
@@ -1550,6 +1581,8 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1"]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
@@ -1660,6 +1693,8 @@ describe("watch — the loop, zero tokens idle", () => {
     const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
+    // v24: approvals bind exact routing — the install names its model once.
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     return { runnerToken, approverToken };
   };
 
@@ -1708,6 +1743,8 @@ describe("watch — the loop, zero tokens idle", () => {
     ]);
 
     const store = openStore(db);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const episode = store.latestWatchEpisode(realpathSync(repo));
     store.close();
     expect(episode).not.toBeNull();
@@ -1726,6 +1763,7 @@ describe("watch — the loop, zero tokens idle", () => {
   test("watch + watch is a loud refusal; the lease names the holder", async () => {
     const { runnerToken } = await setup();
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     store.acquireWatchLease("builder-1", realpathSync(repo), "someone-else", 60_000, new Date());
     store.close();
 
@@ -1746,6 +1784,7 @@ describe("watch — the loop, zero tokens idle", () => {
     // its task stranded mid-flight — the crash liveness cannot see, because
     // the runner name will be back and heartbeating immediately.
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const ref = store.refFor("built-in", "t-1").id;
     const past = new Date(Date.now() - 10 * 60_000);
     store.acquireWatchLease("builder-1", realpathSync(repo), "inc-dead", 1_000, past);

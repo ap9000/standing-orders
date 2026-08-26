@@ -310,6 +310,50 @@ A builder is never resumed *to drive the gate*, but **is** resumed when a findin
 
 ---
 
+## 9b. Principals, and what each may do (Parity II foundations)
+
+Four principals, not two — because "the agent" conflates the supervised
+process with the machinery that supervises it:
+
+| Principal | Credential | May |
+|---|---|---|
+| **operator** | password (scrypt, typed again per act) | approve scopes and routines, steer, pick tournament winners, grant/revoke authority, answer decisions, enroll devices, clone repositories |
+| **coordinator** | *reserved — no credential type exists yet; arrives with MCP writes. Until then every coordinator-shaped act is operator-only.* | (future) rate-limited proposal filing |
+| **runner** | minted token, hashed, shown once | claim, heartbeat, release, tick; every beat re-authenticated |
+| **attempt** | none — it is the supervised process | submit its prescribed outputs (handoff, park decision) through the builder's own protocol files; nothing else |
+
+Authorship always derives from an authenticated principal. A
+caller-supplied author string is FORBIDDEN as authority anywhere — the
+compile-level `VerifiedAuthor` brand on steering enforces the rule at
+its sharpest point, and briefs promote only verified notes into the
+OPERATOR STEERING fence.
+
+**The execution-profile rule (ruling 10).** An approval binds WHAT RUNS:
+provider, exact model (always on the argv — nothing resolves later),
+permission argv, sandbox mode, turn and clock bounds, and the repair
+model, sealed as an immutable snapshot at the yes. Dispatch REDERIVES
+the approved digest from the live fields plus the snapshot immediately
+before every invocation — builder and repair alike — and anything that
+moved refuses with `stale-approval`. Scopes that cannot say exactly what
+would run are `profile-unresolved`: filed, visible, unapprovable until
+restated. Approvals from before v24 are grandfathered: their signed
+bytes untouched, their effective profile pinned at migration and
+labeled.
+
+**Attended liveness (defined once, consumed by attended features).** A
+browser proves presence only by renewing a heartbeat (15s beat; live ≤
+20s; one missed beat forgiven ≤ 45s; lapsed after; a future timestamp is
+lapsed — strict means strict). Renewal can extend nothing past an
+absolute expiry and can never mint or broaden authority. Session cookies
+(12h idle / 7d absolute) are a different thing and are untouched.
+
+**The positioning turn, stated.** Standing Orders remains
+unattended-first. Attended features are admitted only where they reuse
+the authority primitives above — never as a second product. The
+maintenance budget is explicit: exactly ONE tier-2 provider adapter is
+funded; adding another requires retiring the first or a new reviewed
+strategy decision.
+
 ## 10. Milestones
 
 | | Scope | Ships when |

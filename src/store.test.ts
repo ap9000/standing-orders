@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, BUILT_IN, type Capability, type Store } from "./store.js";
 import { acquire } from "./claim.js";
@@ -1532,3 +1535,136 @@ describe("the same-day upgrade shape (audit TG-8)", () => {
   });
 });
 
+
+describe("the v24 migration (Parity II foundations, rulings 10/11)", () => {
+  const T0 = new Date("2026-08-11T22:00:00.000Z");
+
+  /** A faithful v23 simulation: rows written WITHOUT the v24 columns (the
+   * ALTER defaults are the legacy classification), version wound back,
+   * store reopened so migrateToV24 runs exactly once. */
+  const legacyDb = (seed: (db: ReturnType<typeof openStore>) => void): string => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v24-migr-"));
+    const file = join(dir, "db.sqlite");
+    const store = openStore(file);
+    seed(store);
+    store.raw().prepare("UPDATE schema_version SET version = 23").run();
+    store.close();
+    return file;
+  };
+
+  test("an approved scope is PINNED and grandfathered: signed bytes untouched, snapshot resolved from the config of the day", () => {
+    const file = legacyDb(db => {
+      db.setPhaseConfig("installation", "build", "claude", "sonnet", "old", T0);
+      db.createTask({ id: "t-old", title: "approved long ago" }, T0);
+      db.refFor("built-in", "t-old");
+      db.raw()
+        .prepare(
+          `INSERT INTO task_scope (task_id, goal, out_of_scope, touches, proposed_at, digest, approved_at, approved_by, approved_digest)
+           VALUES ('t-old', 'a guard', NULL, '[]', ?, 'a24c72e6603f78291e1eea2e162b383e', ?, 'alex', 'a24c72e6603f78291e1eea2e162b383e')`,
+        )
+        .run(T0.toISOString(), T0.toISOString());
+    });
+    const store = openStore(file);
+    const scope = store.getScope("t-old");
+    // the golden bytes survived the migration untouched
+    expect(scope?.digest).toBe("a24c72e6603f78291e1eea2e162b383e");
+    expect(scope?.approvedDigest).toBe("a24c72e6603f78291e1eea2e162b383e");
+    expect(scope?.digestVersion).toBe(1);
+    // and the effective profile of the day is sealed beside them
+    expect(scope?.approvedProfile).toMatchObject({ provider: "claude", model: "sonnet" });
+    expect(scope?.profileState).toBe("resolved");
+    store.close();
+    rmSync(dirname(file), { recursive: true, force: true });
+  });
+
+  test("an approved scope with NO resolvable model becomes unresolved — unapprovable and undispatchable, never guessed", () => {
+    const file = legacyDb(db => {
+      db.createTask({ id: "t-stranded", title: "no routing anywhere" }, T0);
+      db.refFor("built-in", "t-stranded");
+      db.raw()
+        .prepare(
+          `INSERT INTO task_scope (task_id, goal, out_of_scope, touches, proposed_at, digest, approved_at, approved_by, approved_digest)
+           VALUES ('t-stranded', 'work', NULL, '[]', ?, 'deadbeefdeadbeefdeadbeefdeadbeef', ?, 'alex', 'deadbeefdeadbeefdeadbeefdeadbeef')`,
+        )
+        .run(T0.toISOString(), T0.toISOString());
+    });
+    const store = openStore(file);
+    const scope = store.getScope("t-stranded");
+    expect(scope?.profileState).toBe("unresolved");
+    expect(scope?.approvedProfile ?? null).toBeNull();
+    store.close();
+    rmSync(dirname(file), { recursive: true, force: true });
+  });
+
+  test("undelivered legacy steering is QUARANTINED: labeled, superseded, and never attachable to a brief", () => {
+    const file = legacyDb(db => {
+      db.createTask({ id: "t-note", title: "steered once" }, T0);
+      const ref = db.refFor("built-in", "t-note").id;
+      db.raw()
+        .prepare("INSERT INTO task_steer (task_ref, author, note, created_at) VALUES (?, 'mystery-cli', 'do it my way', ?)")
+        .run(ref, T0.toISOString());
+    });
+    const store = openStore(file);
+    const ref = store.refFor("built-in", "t-note").id;
+    const notes = store.listSteerNotes(ref);
+    expect(notes[0]).toMatchObject({ authorshipState: "unverified-legacy", supersededReason: "unverified-author" });
+    expect(notes[0]?.supersededAt).not.toBeNull();
+    const run = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b", branch: "br", worktree: "/w", now: T0 });
+    expect(store.attachSteerNotes(ref, run, T0)).toEqual([]);
+    store.close();
+    rmSync(dirname(file), { recursive: true, force: true });
+  });
+
+  test("an approved routine that cannot resolve is PARKED — approval demoted, said in provenance", () => {
+    const file = legacyDb(db => {
+      db.raw()
+        .prepare(
+          `INSERT INTO routine (name, repo, goal, touches, requirements, schedule, digest, approved_at, approved_by, approved_digest, next_fire_at, created_at, updated_at)
+           VALUES ('nightly', '/repo/x', 'check things', '[]', '[]', 'every:60', 'cafecafecafecafecafecafecafecafe', ?, 'alex', 'cafecafecafecafecafecafecafecafe', ?, ?, ?)`,
+        )
+        .run(T0.toISOString(), T0.toISOString(), T0.toISOString(), T0.toISOString());
+    });
+    const store = openStore(file);
+    const routine = store.listRoutines(null).find(one => one.name === "nightly");
+    expect(routine?.approvedAt).toBeNull();
+    expect(routine?.approvedDigest).toBeNull();
+    expect(routine?.nextFireAt).toBeNull();
+    store.close();
+    rmSync(dirname(file), { recursive: true, force: true });
+  });
+
+  test("legacy contestants get snapshots under race semantics 1; the stored fingerprint bytes survive", () => {
+    const file = legacyDb(db => {
+      db.createTask({ id: "t-race", title: "raced" }, T0);
+      const ref = db.refFor("built-in", "t-race").id;
+      db.raw()
+        .prepare(
+          `INSERT INTO tournament_terms (task_ref, generation, race_digest, agents, n, per_agent_budget_microusd, overrun_reserve_microusd, total_budget_microusd, price_version, retries, publication_policy, created_at)
+           VALUES (?, 1, 'feedfacefeedface', '[]', 2, 1000, 100, 5000, 1, 0, 'none', ?)`,
+        )
+        .run(ref, T0.toISOString());
+      const terms = Number(db.raw().prepare("SELECT id FROM tournament_terms").get()!["id"]);
+      db.raw()
+        .prepare(
+          `INSERT INTO contest (task_ref, terms, state, scope_digest, race_digest, created_at)
+           VALUES (?, ?, 'pick-wait', 'aaaa', 'feedfacefeedface', ?)`,
+        )
+        .run(ref, terms, T0.toISOString());
+      const contest = Number(db.raw().prepare("SELECT id FROM contest").get()!["id"]);
+      db.raw()
+        .prepare(
+          `INSERT INTO contestant (contest, ordinal, provider, model, repair_model, branch, budget_microusd, reserve_microusd)
+           VALUES (?, 1, 'claude', 'claude-sonnet-5', 'inherit', 'race/a', 1000, 100)`,
+        )
+        .run(contest);
+    });
+    const store = openStore(file);
+    const contestRow = store.raw().prepare("SELECT race_semantics, race_digest FROM contest").get()!;
+    expect(Number(contestRow["race_semantics"])).toBe(1);
+    expect(String(contestRow["race_digest"])).toBe("feedfacefeedface");
+    const contestant = store.raw().prepare("SELECT profile_json FROM contestant").get()!;
+    expect(String(contestant["profile_json"])).toContain("claude-sonnet-5");
+    store.close();
+    rmSync(dirname(file), { recursive: true, force: true });
+  });
+});

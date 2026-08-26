@@ -21,6 +21,14 @@ const T0 = new Date("2026-08-13T22:00:00.000Z");
 const HOUR = 60 * 60_000;
 const SAID = JSON.stringify({ result: "done" });
 
+const V24_PROFILE = {
+  provider: "claude" as const,
+  model: "sonnet",
+  permissionArgv: "acceptEdits" as const,
+  maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300,
+  repairModel: "inherit",
+};
+
 describe("routines, against real git", () => {
   let base: string;
   let repo: string;
@@ -103,12 +111,12 @@ describe("routines, against real git", () => {
     };
     const store = openStore(db);
     const created = store.createRoutine(
-      { name: "notes", ...terms, digest: routineDigestOf(terms) },
+      { name: "notes", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
       T0,
     );
     expect(created.ok).toBe(true);
     if (!created.ok) return;
-    const approved = approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms), approverToken);
+    const approved = approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms, V24_PROFILE), approverToken);
     expect(approved.ok).toBe(true);
     store.close();
 
@@ -170,11 +178,11 @@ describe("routines, against real git", () => {
     };
     const store = openStore(db);
     const created = store.createRoutine(
-      { name: "flaky", ...terms, digest: routineDigestOf(terms) },
+      { name: "flaky", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
       T0,
     );
     if (!created.ok) throw new Error("setup");
-    approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms), approverToken);
+    approveRoutine(store, created.id, "alex", T0, routineDigestOf(terms, V24_PROFILE), approverToken);
     store.close();
 
     // A builder that always breaks: the instance fails and stays unfinished.

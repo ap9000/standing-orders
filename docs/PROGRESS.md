@@ -1,5 +1,54 @@
 # Progress
 
+**2026-08-25 — Parity II Phase 1, foundations: approvals now bind WHAT
+RUNS, and steering speaks only with a verified voice.** Three Codex
+rounds on the spec (REDESIGN ×2, then APPROVE WITH CHANGES — findings
+1–22, all implemented), governed by the two-round-approved Parity II
+strategy. Schema v24. The heart: every scope carries an EXECUTION
+PROFILE — a per-provider discriminated union of what actually runs
+(claude: exact model, permission argv, 40-turn/30-minute bounds, repair
+model and its 4-turn/5-minute bounds; codex/openrouter: exact model,
+workspace-write sandbox, the honest "no turn limit, the 20-minute clock
+is the bound") — resolved ONCE at filing through one store-level
+invariant every filing road shares, bound into the digest the password
+signs, and SEALED as an immutable snapshot at approval. Dispatch
+rederives the approved digest from the live fields plus the snapshot
+immediately before every invocation — builder AND repair — and anything
+that moved refuses with `stale-approval` naming the field: a config
+change after approval can no longer re-route approved work, flags can no
+longer override it (`--skip-permissions` on approved acceptEdits work
+now refuses outright), and the exact model always rides the argv —
+nothing is left for later resolution to decide. A scope that cannot say
+exactly what runs is `profile-unresolved`: saved atomically ("filed but
+unapprovable"), visible, blocked from approval and dispatch until
+restated — which also means a fresh install now names its model once
+(`config set build --model …`) before anything can be approved.
+Routines bind the profile in their own digest and FIRE from the
+approved snapshot, never fresh resolution; tournaments race under v2
+fingerprints carrying per-contestant profiles, each lane proved against
+its own snapshot, with terms discovered before flags so a pass cannot
+shape an approved race; warm resume now matches the sealed scope AND
+profile digests stamped on every run, or goes honestly cold. The v24
+migration grandfathers every existing approval — signed bytes untouched
+(byte-pinned golden test), effective profile of the day sealed beside
+them, auditable provenance — parks approved routines that cannot
+resolve, and QUARANTINES every undelivered pre-migration steering note.
+Which closes the live hole this phase led with: CLI `task steer`
+accepted any name with no credential while briefs promoted its note
+under OPERATOR STEERING; steering now takes the operator's password,
+authorship is a compile-enforced `VerifiedAuthor` brand constructible
+only by the two authenticated callers, the attach path takes verified
+rows only, and the agent guides flipped — steering moved from the
+may-do list to the never-do list, in the binary-served words agents
+actually read. Approval screens say what the password signs in plain
+words (including the grandfathered and unapprovable states);
+`task scope` gained real `--provider/--model/--repair-model` flags
+(previously swallowed silently); `src/liveness.ts` defines attended
+presence exactly (15s beat, 20s live, 45s grace, future = lapsed,
+renewal never mints authority) for the attended work to consume; and
+DESIGN.md now carries the four-principal model, the profile rule, and
+the positioning turn with its one-adapter budget. Suite: 1191.
+
 **2026-08-24 — the onboarding follow-ups, closed: a clone can receive its
 first task, the CLI grew the ceremony's twin, and the ceremony is proved
 over HTTP.** The three items the repo-onboarding review left named (its

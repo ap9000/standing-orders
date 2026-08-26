@@ -56,6 +56,8 @@ describe("the v14 migration", () => {
       raw.close();
 
       store = openStore(file);
+
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
       const holds = store.activeHolds(ref, T0);
       expect(holds).toHaveLength(1);
       expect(holds[0]?.reason).toBe("waiting on a vendor");
@@ -82,6 +84,7 @@ describe("tournament terms — immutable rows, one active pointer", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     store.createTask({ id: "race-me", title: "the raced work" }, T0);
     taskRef = store.refFor("built-in", "race-me", "ours").id;
   });
@@ -128,6 +131,7 @@ describe("contest and contestant state moves are compare-and-swap, generation-bu
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     store.createTask({ id: "race-me", title: "raced" }, T0);
     const taskRef = store.refFor("built-in", "race-me", "ours").id;
     const terms = store.fileTournamentTerms(
@@ -203,6 +207,7 @@ describe("worker-process slots and durable ceremony nonces", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
   });
 
   afterEach(() => store.close());
@@ -334,6 +339,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
 
   test("admission is all or none: a capacity shortfall persists NOTHING", () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { taskRef, leaseId } = setUpApproved(store);
     const refused = admit(store, taskRef, leaseId, { capacity: 1 });
     expect(refused).toMatchObject({ ok: false, reason: "capacity" });
@@ -344,6 +350,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
 
   test("admission proves quota per distinct key and refuses a doubled half-open key", () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { taskRef, leaseId } = setUpApproved(store);
     expect(admit(store, taskRef, leaseId, { quotaBlocked: () => "exhausted" })).toMatchObject({ ok: false, reason: "quota" });
     expect(store.openContestFor(taskRef)).toBeNull();
@@ -352,6 +359,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
 
   test("the happy path creates the whole skeleton, slots bound to agents", () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { taskRef, leaseId } = setUpApproved(store);
     const admitted = admit(store, taskRef, leaseId);
     if (!admitted.ok) throw new Error(admitted.reason);
@@ -387,6 +395,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
 
   test("REGRESSION of the round-1 hole: the first agent finishing must NOT release the parent claim", () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { taskRef, leaseId, contestId, slotIds } = raceToRacing(store);
     const [first, second] = store.contestants(contestId);
     if (first === undefined || second === undefined) throw new Error("setup");
@@ -417,6 +426,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
 
   test("all agents failing ends in 'exhausted', never an automatic selection", () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { taskRef, leaseId, contestId, slotIds } = raceToRacing(store);
     const agents = store.contestants(contestId);
     for (const [index, agent] of agents.entries()) {
@@ -437,6 +447,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
 
   test("recovery: a dead lease interrupts the tournament; never-started agents stay at zero", () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { taskRef, leaseId, contestId } = raceToRacing(store);
     const [first] = store.contestants(contestId);
     if (first === undefined) throw new Error("setup");
@@ -469,6 +480,7 @@ describe("stage 3a — the CLI: filing with --race, one yes for both documents, 
     db = join(dir, "orders.db");
     lines = [];
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { addApprover } = await import("./scope.js");
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -585,6 +597,8 @@ describe("stage 3b — a whole tournament through the real tick, against real gi
       const runnerToken = payload().token as string;
       await run(["approver", "add", "alex", "--json"]);
       const approverToken = payload().token as string;
+      // v24: approvals bind exact routing — the install names its model once.
+      await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
 
       await run(["task", "add", "the raced work", "--id", "race-e2e"]);
       await run([
@@ -607,6 +621,8 @@ describe("stage 3b — a whole tournament through the real tick, against real gi
       expect(ticked.dispatched[0]).toMatchObject({ id: "race-e2e", outcome: "contest", reason: "pick-wait" });
 
       const store = openStore(db);
+
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
       const ref = store.refFor("built-in", "race-e2e").id;
       const contest = store.openContestFor(ref) ?? store.contestsInStates(["pick-wait"])[0];
       if (contest === undefined || contest === null) throw new Error("no contest");
@@ -719,6 +735,8 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
       const runnerToken = payload().token as string;
       await run(["approver", "add", "alex", "--json"]);
       const approverToken = payload().token as string;
+      // v24: approvals bind exact routing — the install names its model once.
+      await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
       await run(["task", "add", "the parked race", "--id", "race-park"]);
       await run([
         "task", "scope", "race-park",
@@ -735,6 +753,8 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
       expect(payload().dispatched[0]).toMatchObject({ id: "race-park", outcome: "contest", reason: "decision-wait" });
 
       const store = openStore(db);
+
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
       const ref = store.refFor("built-in", "race-park").id;
       const contest = store.contestsInStates(["decision-wait"])[0];
       if (contest === undefined) throw new Error("no waiting tournament");
@@ -771,6 +791,7 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
 
   test("the exclude ceremony: a question nobody will answer stops its agent and un-sticks the race", () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     store.createTask({ id: "race-x", title: "raced" }, T0);
     const taskRef = store.refFor("built-in", "race-x", "ours").id;
     const terms = store.fileTournamentTerms(
@@ -830,6 +851,7 @@ describe("v15 — dollar thresholds: per-task terms, global defaults, real enfor
     db = join(dir, "orders.db");
     lines = [];
     const store = openStore(db);
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const { addApprover } = await import("./scope.js");
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap");
@@ -893,6 +915,7 @@ describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremo
 
   beforeEach(() => {
     store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     root = mkdtempSync(join(tmpdir(), "standing-orders-pick-"));
   });
   afterEach(() => {
@@ -1332,6 +1355,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
 
   test("a routine's per-run cap lands in each instance's scope, digest-bound; a routine without one digests as before", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       const { routineDigestOf, approveRoutine, fireRoutine } = await import("./routine.js");
       const { fileRoutineProposal } = await import("./proposal.js");
@@ -1366,6 +1390,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
 
   test("cleanup: a decided tournament's checkouts go home; one that will not release cleanly is flagged and paged, not forced", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       const { sweepContestCleanup } = await import("./contest.js");
       // Two contestants of a picked contest, worktrees recorded to this runner.
@@ -1420,6 +1445,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
 
   test("a tournament waiting fourteen days pages exactly once, and never abandons itself", async () => {
     const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     try {
       const { escalateOverdueContests } = await import("./contest.js");
       store.createTask({ id: "slow-pick", title: "waiting" }, T0);

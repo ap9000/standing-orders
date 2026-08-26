@@ -62,6 +62,8 @@ export const DOCUMENTED_REASONS: readonly string[] = [
   "empty", //             nothing matched
   "quota", //             a budget or cap refused the act
   "not-a-repo", //        the path has no .git
+  "stale-approval", //    what would run no longer matches what was approved
+  "profile-unresolved", // the scope cannot say exactly what would run — restate it
 ];
 
 export type EnvelopePayload = {

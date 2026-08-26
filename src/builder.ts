@@ -33,7 +33,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, SteerNote, Store } from "./store.js";
-import { approvalOf, type Scope } from "./scope.js";
+import { approvalOf, digestOf, profileDigestOf, type ExecutionProfile, type Scope } from "./scope.js";
+import { execFileSync } from "node:child_process";
 import { currentClaim, heartbeat, missingCapability, SYNC_MAX_AGE_MS } from "./claim.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
@@ -82,6 +83,10 @@ export type BuildRequest = {
    * back to the unauthenticated touch, exactly as before.
    */
   runnerToken?: string;
+  /** A tournament contestant's OWN approved profile (v24): under the joint
+   * race approval, this — not the scope's single snapshot — is what the
+   * dispatch proof holds the invocation to. */
+  contestProfile?: ExecutionProfile;
   /**
    * Real time, read repeatedly. `now` is one instant and a build is not: a
    * lease heartbeated with the timestamp the build started at is a lease that
@@ -161,6 +166,7 @@ export type BuildResult =
 export type BuildRefusal =
   | "unapproved"
   | "scope-changed"
+  | "stale-approval"
   | "capability"
   | "no-claim"
   | "not-yours"
@@ -248,6 +254,103 @@ export function redactSecretText(text: string): string {
 }
 
 /**
+ * The last-mile profile proof (v24, foundations findings 6/17): given the
+ * scope (or a contestant's own race-approved profile), verify the approval
+ * record and hold the invocation to EXACTLY the sealed terms. Returns the
+ * effective parameters — the snapshot's values — so an unset request field
+ * can never float, and refuses divergence in words.
+ */
+/** The repair model under v24: the sealed snapshot's word ("inherit" = the
+ * build model, itself exact); request flags only govern profile-less roads. */
+function repairModelOf(profile: ExecutionProfile | undefined, request: BuildRequest): string | null {
+  if (profile !== undefined) {
+    return profile.repairModel === "inherit" ? profile.model : profile.repairModel;
+  }
+  return (request.repairModel ?? request.model) ?? null;
+}
+
+const PROVIDER_VERSIONS = new Map<string, string | null>();
+/** Provenance only (finding 20): a best-effort `--version` probe, cached
+ * per process, null on any failure — never authority, never a refusal. */
+function providerVersionOf(provider: string): string | null {
+  if (PROVIDER_VERSIONS.has(provider)) return PROVIDER_VERSIONS.get(provider) ?? null;
+  let version: string | null = null;
+  try {
+    const bin = provider === "claude" ? "claude" : "codex";
+    version = execFileSync(bin, ["--version"], { timeout: 2_000, encoding: "utf8" }).trim().slice(0, 100) || null;
+  } catch {
+    version = null;
+  }
+  PROVIDER_VERSIONS.set(provider, version);
+  return version;
+}
+
+export function proveApprovedProfile(
+  scope: Scope | null,
+  contestProfile: ExecutionProfile | null,
+  given: {
+    provider: string;
+    model: string | undefined;
+    maxTurns: number | undefined;
+    timeoutMs: number | undefined;
+    skipPermissions: boolean;
+  },
+):
+  | { ok: true; effective: { model: string; maxTurns: number | undefined; timeoutMs: number; skipPermissions: boolean; profile: ExecutionProfile } }
+  | { ok: false; message: string } {
+  const snapshot = contestProfile ?? scope?.approvedProfile ?? null;
+  if (snapshot === null) {
+    return {
+      ok: false,
+      message:
+        "the approval predates bound routing and carries no pinned profile — re-approve the scope so it says exactly what runs (stale-approval)",
+    };
+  }
+  // Rederive the approved digest from the LIVE fields plus the snapshot —
+  // the column is bookkeeping, the recomputation is the proof. Grandfathered
+  // v1 approvals rederive without the profile (their signed bytes) and are
+  // held to the snapshot pinned at migration.
+  if (contestProfile === null && scope !== null) {
+    const rederived =
+      (scope.digestVersion ?? 1) >= 2
+        ? digestOf(
+            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+            snapshot,
+          )
+        : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd });
+    if (rederived !== scope.approvedDigest) {
+      return { ok: false, message: "the approval record does not verify against the stored terms — re-approve (stale-approval)" };
+    }
+  }
+  if (given.provider !== snapshot.provider) {
+    return { ok: false, message: `approved to run on ${snapshot.provider}, asked to run on ${given.provider} — re-approve to re-route (stale-approval)` };
+  }
+  if (given.model !== undefined && given.model !== snapshot.model) {
+    return { ok: false, message: `approved on model ${snapshot.model}, asked for ${given.model} — re-approve to re-route (stale-approval)` };
+  }
+  const wantSkip = snapshot.provider === "claude" && snapshot.permissionArgv === "bypassPermissions";
+  if (given.skipPermissions && !wantSkip) {
+    return { ok: false, message: "the approval binds acceptEdits permissions — skipping them was never agreed to (stale-approval)" };
+  }
+  if (snapshot.provider === "claude" && given.maxTurns !== undefined && given.maxTurns !== snapshot.maxTurns) {
+    return { ok: false, message: `approved with a ${snapshot.maxTurns}-turn limit, asked for ${given.maxTurns} — re-approve to change it (stale-approval)` };
+  }
+  if (given.timeoutMs !== undefined && given.timeoutMs !== snapshot.timeoutSeconds * 1000) {
+    return { ok: false, message: `approved with a ${snapshot.timeoutSeconds}s clock, asked for ${Math.round(given.timeoutMs / 1000)}s — re-approve to change it (stale-approval)` };
+  }
+  return {
+    ok: true,
+    effective: {
+      model: snapshot.model,
+      maxTurns: snapshot.provider === "claude" ? (snapshot.maxTurns as number) : given.maxTurns,
+      timeoutMs: snapshot.timeoutSeconds * 1000,
+      skipPermissions: wantSkip,
+      profile: snapshot,
+    },
+  };
+}
+
+/**
  * Build one task, if everything says it may.
  *
  * The gates are re-checked here rather than assumed from the caller, because
@@ -287,6 +390,38 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
           message: `${taskId} has no approved scope — \`standing-orders task scope\` then \`task approve\``,
         };
   }
+
+  // v24 DISPATCH PROOF (foundations rulings 10/12, findings 6/17): what is
+  // about to run must EQUAL what was sealed at approval — provider, model,
+  // permissions, limits — with the approved digest REDERIVED from the live
+  // fields plus the snapshot, never trusted as a column. The profile is
+  // the authority: request fields left unset take its values; request
+  // fields that DIVERGE refuse, typed, naming what moved. A contestant
+  // proves against its own race-approved profile.
+  const proof = proveApprovedProfile(scope, request.contestProfile ?? null, {
+    provider,
+    model: request.model,
+    maxTurns: request.maxTurns,
+    timeoutMs: request.timeoutMs,
+    skipPermissions,
+  });
+  if (!proof.ok) {
+    return { ok: false, reason: "stale-approval", message: `${taskId}: ${proof.message}` };
+  }
+  const effective = proof.effective;
+  // The dispatch stamps (finding 21's order): written the moment the proof
+  // passes, before anything provider-shaped happens — the run row then says
+  // exactly which sealed terms this invocation was held to, and warm
+  // resume below can match on them honestly.
+  const provenScopeDigest = request.contestProfile !== undefined ? (scope?.digest ?? "") : (scope?.approvedDigest ?? "");
+  const provenProfileDigest = profileDigestOf(effective.profile);
+  store.stampRun(request.runId, {
+    scopeDigest: provenScopeDigest,
+    profileDigest: provenProfileDigest,
+    ...(request.agent === undefined && providerVersionOf(provider) !== null
+      ? { providerVersion: providerVersionOf(provider) as string }
+      : {}),
+  });
 
   // The external-mirror re-proof, pre-spawn (dispatch v3 §2): admission
   // already refused stale/closed/revoked/blocked mirrors, but a latch can
@@ -498,7 +633,12 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       candidate !== null &&
       !candidate.tried &&
       candidate.run.sessionId !== null &&
-      candidate.run.baseRevision === baseRevision
+      candidate.run.baseRevision === baseRevision &&
+      // v24 (finding 17): a session may only warm-resume into an attempt
+      // proved against the SAME sealed terms — scope digest and profile
+      // digest both. Anything else goes cold, which is honest.
+      candidate.run.scopeDigest === provenScopeDigest &&
+      candidate.run.profileDigest === provenProfileDigest
     ) {
       resumeSession = candidate.run.sessionId;
       // Causal parentage, stamped before the spawn: whatever happens next,
@@ -658,19 +798,21 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     result = await invokeAgent(
       store,
       request.runId,
-      { provider, model: model ?? null },
+      // The PROVEN profile speaks (v24): exact model always on the argv,
+      // limits and permissions from the sealed snapshot, never the flags.
+      { provider, model: effective.model },
       {
         phase: "build",
         brief: brief(scope as Scope, branch, mailbox, done, answers, planDocument, revisionBrief, previousHandoff, steering),
-        maxTurns,
+        maxTurns: effective.maxTurns ?? maxTurns,
         permissionMode,
-        skipPermissions,
+        skipPermissions: effective.skipPermissions,
         resumeSession,
         ...(request.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: request.maxBudgetUsd }),
       },
       {
         cwd: worktree,
-        timeoutMs,
+        timeoutMs: effective.timeoutMs,
         omitEnv: AGENT_ENV_DENYLIST,
         ...(agent === undefined ? {} : { runner: agent }),
         ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
@@ -754,6 +896,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     store.stampRun(request.runId, { sessionId: result.sessionId });
   }
   const parked = await ingestPark({
+    profile: effective.profile,
     store,
     request,
     agent,
@@ -970,6 +1113,9 @@ async function ingestPark(args: {
   baseRevision: string | null;
   root: string;
   sessionId: string | undefined;
+  /** v24: the sealed profile the dispatch proof passed — repair invocations
+   * are paid work under the SAME approval and route from it. */
+  profile?: ExecutionProfile;
 }): Promise<
   | { ok: true; park: ParkPackage }
   | { ok: false; problems: Problem[] }
@@ -1072,9 +1218,9 @@ async function ingestPark(args: {
       runner: request.runner,
       branch: request.branch,
       worktree,
-      ...((request.repairModel ?? request.model) === undefined
+      ...((repairModelOf(args.profile, request) ?? undefined) === undefined
         ? {}
-        : { model: (request.repairModel ?? request.model) as string }),
+        : { model: repairModelOf(args.profile, request) as string }),
       role: "repair",
       // Repair inherits the parent's provider, structurally: the session
       // id it resumes has no meaning anywhere else (Codex review, Q3).
@@ -1087,16 +1233,30 @@ async function ingestPark(args: {
     const spoken = await invokeAgent(
       store,
       repairRun,
-      { provider: request.provider ?? "claude", model: (request.repairModel ?? request.model) ?? null },
+      { provider: request.provider ?? "claude", model: repairModelOf(args.profile, request) },
       {
         phase: "repair",
         brief: repairPrompt(problems, mailbox),
-        maxTurns: REPAIR_MAX_TURNS,
+        // The sealed repair bounds where a profile exists (v24) — the
+        // constants remain the truth for profile-less roads (planner).
+        maxTurns:
+          args.profile !== undefined && args.profile.provider === "claude"
+            ? (args.profile.repairMaxTurns as number)
+            : REPAIR_MAX_TURNS,
         permissionMode: request.permissionMode ?? "acceptEdits",
-        skipPermissions: request.skipPermissions ?? false,
+        skipPermissions:
+          args.profile !== undefined
+            ? args.profile.provider === "claude" && args.profile.permissionArgv === "bypassPermissions"
+            : (request.skipPermissions ?? false),
         resumeSession: sessionId,
       },
-      { cwd: worktree, timeoutMs: REPAIR_TIMEOUT_MS, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
+      {
+        cwd: worktree,
+        timeoutMs: args.profile !== undefined ? args.profile.repairTimeoutSeconds * 1000 : REPAIR_TIMEOUT_MS,
+        omitEnv: AGENT_ENV_DENYLIST,
+        ...(agent === undefined ? {} : { runner: agent }),
+        clock,
+      },
     );
 
     if (request.leaseId !== undefined) {

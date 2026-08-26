@@ -31,13 +31,14 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { digestOf } from "./scope.js";
+import { digestOf, canonicalProfileJson, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, type ExecutionProfile } from "./scope.js";
+import { resolveScopeProfile } from "./agentconfig.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 23;
+export const SCHEMA_VERSION = 24;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -160,6 +161,8 @@ export type Contest = {
 export type ContestantState = "pending" | "ready" | "building" | "parked" | "built" | "failed" | "stopped";
 
 export type Contestant = {
+  /** v24: the contestant's own sealed execution profile. */
+  profile?: ExecutionProfile | null;
   id: number;
   contest: number;
   ordinal: number;
@@ -288,6 +291,9 @@ export type Routine = {
   filedVia: string | null;
   createdAt: string;
   updatedAt: string;
+  /** v24: the working execution profile and the approval's sealed snapshot. */
+  profile?: ExecutionProfile | null;
+  approvedProfile?: ExecutionProfile | null;
 };
 
 /** One scheduled slot's outcome, fired or skipped — never silent. */
@@ -386,6 +392,9 @@ export type Run = {
   parentRun: number | null;
   sessionId: string | null;
   baseRevision: string | null;
+  /** v24 dispatch stamps; null on runs from before them. */
+  scopeDigest?: string | null;
+  profileDigest?: string | null;
   branch: string;
   worktree: string;
   model: string | null;
@@ -428,6 +437,9 @@ export type RunPhase = (typeof RUN_PHASES)[number];
  * stream's own receipt. Superseded = the task ended with it still pending.
  */
 export type SteerNote = {
+  /** v24 (ruling 11): "verified" = credentialed authorship; anything else is history, never brief-bound. */
+  authorshipState: "verified" | "unverified-legacy";
+  supersededReason: string | null;
   id: number;
   taskRef: number;
   author: string;
@@ -753,6 +765,12 @@ CREATE TABLE IF NOT EXISTS routine (
   approved_at      TEXT,
   approved_by      TEXT,
   approved_digest  TEXT,
+  -- v24: the routine's execution profile; firings stamp instances FROM
+  -- the APPROVED snapshot, never from fresh resolution.
+  profile_json          TEXT,
+  approved_profile_json TEXT,
+  digest_version        INTEGER NOT NULL DEFAULT 1,
+  profile_provenance    TEXT,
   -- The next scheduled occurrence. NULL until approved; advanced by the
   -- fire transaction and nothing else, aligned to cadence (finding 10).
   next_fire_at     TEXT,
@@ -834,7 +852,10 @@ CREATE TABLE IF NOT EXISTS contest (
   picked_at          TEXT,
   picked_by          TEXT,
   winner_contestant  INTEGER,
-  overdue_paged      INTEGER NOT NULL DEFAULT 0
+  overdue_paged      INTEGER NOT NULL DEFAULT 0,
+  -- v24: 1 = legacy race digest (provider/model/repair only) — admission
+  -- keeps byte-comparing the stored fingerprint; 2 = full-profile terms.
+  race_semantics     INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS contest_by_task ON contest (task_ref, id DESC);
@@ -852,6 +873,8 @@ CREATE TABLE IF NOT EXISTS contestant (
   provider            TEXT NOT NULL,
   model               TEXT NOT NULL,
   repair_model        TEXT NOT NULL,
+  -- v24: the contestant's full execution-profile snapshot (canonical JSON).
+  profile_json        TEXT,
   branch              TEXT NOT NULL,
   worktree            TEXT,
   generation          INTEGER NOT NULL DEFAULT 1,
@@ -1093,6 +1116,12 @@ CREATE TABLE IF NOT EXISTS run (
   task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
   lease_id      TEXT NOT NULL,
   runner        TEXT NOT NULL,
+  -- v24 dispatch stamps: the digests this invocation was PROVED against
+  -- (warm resume matches on both), and the provider CLI version as
+  -- provenance — never authority.
+  scope_digest     TEXT,
+  profile_digest   TEXT,
+  provider_version TEXT,
   -- 'repair' is a resumed session mending its own malformed park payload.
   -- Deliberately NOT 'driver': the design's driver is the event-woken gate
   -- role that first exists at M4, and recording repair under that name now
@@ -1404,7 +1433,21 @@ CREATE TABLE IF NOT EXISTS task_scope (
   budget_microusd INTEGER,
   approved_at     TEXT,
   approved_by     TEXT,
-  approved_digest TEXT
+  approved_digest TEXT,
+  -- The execution profile (v24, Parity II foundations): WHAT RUNS, bound
+  -- into what the operator signs. profile_json = the working profile;
+  -- approved_profile_json = the immutable snapshot the approval act took;
+  -- digest_version 1 = legacy fields-only digest (grandfathered), 2 =
+  -- profile-bearing. profile_state 'unresolved' blocks dispatch AND
+  -- approval, with its reason in words. Provenance (resolvedFrom,
+  -- grandfathered, provider version) lives in profile_provenance and
+  -- NEVER enters a digest.
+  profile_json          TEXT,
+  profile_state         TEXT NOT NULL DEFAULT 'resolved' CHECK (profile_state IN ('resolved','unresolved')),
+  unresolved_reason     TEXT,
+  approved_profile_json TEXT,
+  digest_version        INTEGER NOT NULL DEFAULT 1,
+  profile_provenance    TEXT
 );
 
 -- Whoever is allowed to say yes to a scope.
@@ -1800,6 +1843,11 @@ CREATE TABLE IF NOT EXISTS task_steer (
   attached_at   TEXT,
   delivered_at  TEXT,
   superseded_at TEXT,
+  -- v24 (ruling 11): authorship is a VERIFIED principal or it is history.
+  -- The default is the legacy label so any road that forgets to say
+  -- otherwise fails closed into "unverified".
+  authorship_state  TEXT NOT NULL DEFAULT 'unverified-legacy' CHECK (authorship_state IN ('verified','unverified-legacy')),
+  superseded_reason TEXT,
   CHECK ((attached_run IS NULL) = (attached_at IS NULL)),
   CHECK (delivered_at IS NULL OR attached_run IS NOT NULL)
 );
@@ -2432,6 +2480,231 @@ function migrate(db: Database): void {
     CHECK ((attached_run IS NULL) = (attached_at IS NULL)),
     CHECK (delivered_at IS NULL OR attached_run IS NOT NULL)
   )`);
+
+  // v24 (Parity II foundations): the execution-profile columns, added with
+  // LEGACY defaults — an existing row is grandfathered/unverified until the
+  // data pass below classifies it; every new INSERT writes these columns
+  // explicitly, so a road that forgets fails closed into the legacy label.
+  addColumn(db, "task_scope", "profile_json", "TEXT");
+  addColumn(db, "task_scope", "profile_state", "TEXT NOT NULL DEFAULT 'resolved'");
+  addColumn(db, "task_scope", "unresolved_reason", "TEXT");
+  addColumn(db, "task_scope", "approved_profile_json", "TEXT");
+  addColumn(db, "task_scope", "digest_version", "INTEGER NOT NULL DEFAULT 1");
+  addColumn(db, "task_scope", "profile_provenance", "TEXT");
+  addColumn(db, "routine", "profile_json", "TEXT");
+  addColumn(db, "routine", "approved_profile_json", "TEXT");
+  addColumn(db, "routine", "digest_version", "INTEGER NOT NULL DEFAULT 1");
+  addColumn(db, "routine", "profile_provenance", "TEXT");
+  addColumn(db, "contest", "race_semantics", "INTEGER NOT NULL DEFAULT 1");
+  addColumn(db, "contestant", "profile_json", "TEXT");
+  addColumn(db, "run", "scope_digest", "TEXT");
+  addColumn(db, "run", "profile_digest", "TEXT");
+  addColumn(db, "run", "provider_version", "TEXT");
+  addColumn(db, "task_steer", "authorship_state", "TEXT NOT NULL DEFAULT 'unverified-legacy'");
+  addColumn(db, "task_steer", "superseded_reason", "TEXT");
+  // The v24 DATA pass runs exactly once — on a database whose stored
+  // version predates it. A fresh database (no version row yet) has
+  // nothing to classify, and a v24 database must never be re-classified:
+  // a freshly approved routine with no profile column YET would otherwise
+  // be "grandfathered" by its own migration on the next open.
+  const stored = db.prepare("SELECT version FROM schema_version").get() as { version?: number } | undefined;
+  if (stored !== undefined && Number(stored.version) < 24) migrateToV24(db);
+}
+
+/**
+ * The v24 DATA pass (foundations findings 10/16 + rulings 10/11): runs once
+ * per database — idempotent because every UPDATE keys on the legacy state
+ * it is classifying away from.
+ *
+ * - APPROVED scopes/routines (the full predicate: approved_digest equals
+ *   the stored digest — reproposal keeps historical approval fields, so
+ *   approved_at alone lies) get their EFFECTIVE profile resolved with
+ *   today's precedence (pin > project > installation > default) and
+ *   snapshotted as the approval profile, GRANDFATHERED (digest untouched,
+ *   provenance says so). Unresolvable = profile_state 'unresolved': not
+ *   dispatchable, not re-approvable, until restated.
+ * - UNAPPROVED scopes get a working profile and their digest RECOMPUTED to
+ *   v2 (nothing signed is altered — there is no live approval).
+ * - Legacy contestants get per-contestant snapshots under race semantics 1;
+ *   stored race fingerprints stay byte-identical.
+ * - Every pre-v24 steer note is unverified-legacy (the column default);
+ *   UNDELIVERED ones are additionally superseded so they can never enter
+ *   a future brief (ruling 11's quarantine).
+ */
+function migrateToV24(db: Database): void {
+  const now = new Date().toISOString();
+
+  // -- steering quarantine ---------------------------------------------
+  db.prepare(
+    `UPDATE task_steer SET superseded_at = ?, superseded_reason = 'unverified-author'
+      WHERE authorship_state = 'unverified-legacy' AND delivered_at IS NULL AND superseded_at IS NULL`,
+  ).run(now);
+
+  // -- effective-profile resolution, replicated for raw-db use ----------
+  const KNOWN = new Set(["claude", "codex", "openrouter"]);
+  const configRow = (scope: string): { provider: string; model: string | null } | null => {
+    const row = db.prepare("SELECT provider, model FROM phase_config WHERE scope = ? AND phase = 'build'").get(scope) as
+      | { provider: string; model: string | null }
+      | undefined;
+    return row ?? null;
+  };
+  const effective = (
+    repo: string | null,
+    pinProvider: string | null,
+    pinModel: string | null,
+  ): { ok: true; profile: ExecutionProfile; resolvedFrom: string } | { ok: false; reason: string } => {
+    let provider: string | null = null;
+    let model: string | null = null;
+    let resolvedFrom = "default";
+    if (pinProvider !== null) {
+      provider = pinProvider;
+      model = pinModel;
+      resolvedFrom = "pinned";
+    } else {
+      const row = (repo === null ? null : configRow(repo)) ?? configRow("installation");
+      if (row !== null) {
+        provider = row.provider;
+        model = row.model;
+        resolvedFrom = "config";
+      } else {
+        provider = "claude";
+        model = null;
+      }
+    }
+    if (!KNOWN.has(provider)) return { ok: false, reason: `unknown provider \`${provider}\`` };
+    if (model === null || model === "") return { ok: false, reason: "no configured model — name one and re-approve" };
+    // Legacy effective repair behavior was inherit-the-build-model (flags
+    // were per-invocation, never per-task), so "inherit" is the honest pin.
+    const profile: ExecutionProfile =
+      provider === "claude"
+        ? {
+            provider: "claude",
+            model,
+            permissionArgv: "acceptEdits",
+            maxTurns: CLAUDE_LIMITS.maxTurns,
+            repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
+            timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,
+            repairTimeoutSeconds: CLAUDE_LIMITS.repairTimeoutSeconds,
+            repairModel: "inherit",
+          }
+        : {
+            provider: provider as "codex" | "openrouter",
+            model,
+            sandboxMode: "workspace-write",
+            maxTurns: "unsupported",
+            repairMaxTurns: "unsupported",
+            timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
+            repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
+            repairModel: "inherit",
+          };
+    return { ok: true, profile, resolvedFrom };
+  };
+
+  // -- scopes ------------------------------------------------------------
+  const scopes = db
+    .prepare(
+      `SELECT ts.task_id AS taskId, ts.goal, ts.out_of_scope AS outOfScope, ts.touches,
+              ts.budget_microusd AS budget, ts.digest, ts.approved_digest AS approvedDigest,
+              tr.repo AS repo, tr.agent_provider AS pinProvider, tr.agent_model AS pinModel
+         FROM task_scope ts
+         LEFT JOIN task_ref tr ON tr.id = (SELECT id FROM task_ref WHERE external_id = ts.task_id ORDER BY id LIMIT 1)
+        WHERE ts.profile_json IS NULL AND ts.profile_state = 'resolved' AND ts.approved_profile_json IS NULL`,
+    )
+    .all() as {
+    taskId: string; goal: string; outOfScope: string | null; touches: string;
+    budget: number | null; digest: string; approvedDigest: string | null;
+    repo: string | null; pinProvider: string | null; pinModel: string | null;
+  }[];
+  const setUnresolved = db.prepare(
+    "UPDATE task_scope SET profile_state = 'unresolved', unresolved_reason = ? WHERE task_id = ?",
+  );
+  const pinApproved = db.prepare(
+    `UPDATE task_scope SET profile_json = ?, approved_profile_json = ?, profile_provenance = ? WHERE task_id = ?`,
+  );
+  const stampUnapproved = db.prepare(
+    `UPDATE task_scope SET profile_json = ?, digest = ?, digest_version = 2, profile_provenance = ? WHERE task_id = ?`,
+  );
+  for (const row of scopes) {
+    const approved = row.approvedDigest !== null && row.approvedDigest === row.digest;
+    const resolved = effective(row.repo, row.pinProvider, row.pinModel);
+    if (!resolved.ok) {
+      setUnresolved.run(resolved.reason, row.taskId);
+      continue;
+    }
+    const snapshot = canonicalProfileJson(resolved.profile);
+    const provenance = JSON.stringify({ resolvedFrom: resolved.resolvedFrom, grandfathered: approved, pinnedAt: now });
+    if (approved) {
+      // digest + digest_version stay EXACTLY as signed (golden-tested).
+      pinApproved.run(snapshot, snapshot, provenance, row.taskId);
+    } else {
+      let touches: string[] = [];
+      try { touches = JSON.parse(row.touches) as string[]; } catch { touches = []; }
+      const recomputed = digestOf(
+        { goal: row.goal, outOfScope: row.outOfScope, touches, budgetMicrousd: row.budget },
+        resolved.profile,
+      );
+      stampUnapproved.run(snapshot, recomputed, provenance, row.taskId);
+    }
+  }
+
+  // -- routines ----------------------------------------------------------
+  const routines = db
+    .prepare(
+      `SELECT id, repo, digest, approved_digest AS approvedDigest FROM routine
+        WHERE profile_json IS NULL AND approved_profile_json IS NULL`,
+    )
+    .all() as { id: number; repo: string; digest: string; approvedDigest: string | null }[];
+  const pinRoutine = db.prepare(
+    "UPDATE routine SET profile_json = ?, approved_profile_json = ?, profile_provenance = ? WHERE id = ?",
+  );
+  const parkRoutine = db.prepare(
+    `UPDATE routine SET approved_at = NULL, approved_by = NULL, approved_digest = NULL, next_fire_at = NULL,
+            profile_provenance = ? WHERE id = ?`,
+  );
+  const stampRoutine = db.prepare("UPDATE routine SET profile_json = ?, profile_provenance = ? WHERE id = ?");
+  for (const row of routines) {
+    const approved = row.approvedDigest !== null && row.approvedDigest === row.digest;
+    const resolved = effective(row.repo, null, null);
+    if (!resolved.ok) {
+      if (approved) {
+        // A standing order may not keep firing on floating authority
+        // (ruling 10): the approval is demoted, said in provenance; the
+        // routines screen shows it pending like any unapproved routine.
+        parkRoutine.run(JSON.stringify({ demoted: "profile-unresolved", reason: resolved.reason, at: now }), row.id);
+      } else {
+        stampRoutine.run(null, JSON.stringify({ unresolved: resolved.reason, at: now }), row.id);
+      }
+      continue;
+    }
+    const snapshot = canonicalProfileJson(resolved.profile);
+    const provenance = JSON.stringify({ resolvedFrom: resolved.resolvedFrom, grandfathered: approved, pinnedAt: now });
+    if (approved) pinRoutine.run(snapshot, snapshot, provenance, row.id);
+    else stampRoutine.run(snapshot, provenance, row.id);
+  }
+
+  // -- legacy contestants: exact provider/model/repair already stored -----
+  const contestants = db
+    .prepare("SELECT id, provider, model, repair_model AS repairModel FROM contestant WHERE profile_json IS NULL")
+    .all() as { id: number; provider: string; model: string; repairModel: string }[];
+  const stampContestant = db.prepare("UPDATE contestant SET profile_json = ? WHERE id = ?");
+  for (const row of contestants) {
+    if (!KNOWN.has(row.provider)) continue; // stays null; admission keeps byte-comparing v1 fingerprints
+    const profile: ExecutionProfile =
+      row.provider === "claude"
+        ? {
+            provider: "claude", model: row.model, permissionArgv: "acceptEdits",
+            maxTurns: CLAUDE_LIMITS.maxTurns, repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
+            timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds, repairTimeoutSeconds: CLAUDE_LIMITS.repairTimeoutSeconds,
+            repairModel: row.repairModel,
+          }
+        : {
+            provider: row.provider as "codex" | "openrouter", model: row.model,
+            sandboxMode: "workspace-write", maxTurns: "unsupported", repairMaxTurns: "unsupported",
+            timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds, repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
+            repairModel: row.repairModel,
+          };
+    stampContestant.run(canonicalProfileJson(profile), row.id);
+  }
 }
 
 /** The v4 run shape, shared by the fresh SCHEMA, the M2 rebuild, and the v3→v4 rebuild. */
@@ -2696,6 +2969,12 @@ function defaultConnect(file: string): Database {
 
 export class Store {
   constructor(private readonly db: Database) {}
+
+  /** TESTS ONLY: raw database access for migration fixtures. Production
+   * code never calls this — the typed methods are the API. */
+  raw(): Database {
+    return this.db;
+  }
 
   /** Exposed so `claim.ts` can run its compare-and-swap in one transaction. */
   get handle(): Database {
@@ -3921,19 +4200,57 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile } = {}): void {
     this.once(mutation, "saveScope", () => {
+      // THE filing invariant (foundations findings 5/13/19): every scope
+      // row leaves this method either RESOLVED (working profile stamped,
+      // digest recomputed to bind it, version 2) or UNRESOLVED with its
+      // reason in words — saved atomically either way, because refusing
+      // after the caller already validated everything else would strand
+      // planner and revision output (finding 19). An explicit options
+      // profile wins (routine firings stamp the routine's APPROVED
+      // profile; demo stamps its illustrative one); otherwise resolution
+      // runs pin > project > installation > default with the exact-model
+      // rule.
+      let profile: ExecutionProfile | null = options.profile ?? null;
+      let unresolvedReason: string | null = null;
+      let provenance: string | null = options.profile === undefined ? null : JSON.stringify({ resolvedFrom: "explicit" });
+      if (profile === null) {
+        const ref = this.lookupRef(scope.taskId);
+        const resolved = resolveScopeProfile(
+          this,
+          ref?.repo ?? null,
+          ref === null ? undefined : { agentProvider: ref.agentProvider, agentModel: ref.agentModel },
+          {},
+        );
+        if (resolved.ok) {
+          profile = resolved.profile;
+          provenance = JSON.stringify(resolved.provenance);
+        } else {
+          unresolvedReason = resolved.problem;
+        }
+      }
+      const digest = profile === null
+        ? scope.digest
+        : digestOf(
+            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+            profile,
+          );
       this.db
         .prepare(
           `INSERT INTO task_scope
-             (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest,
+              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (task_id) DO UPDATE SET
              goal = excluded.goal, out_of_scope = excluded.out_of_scope,
              touches = excluded.touches, budget_microusd = excluded.budget_microusd,
              proposed_at = excluded.proposed_at,
              digest = excluded.digest, approved_at = excluded.approved_at,
-             approved_by = excluded.approved_by, approved_digest = excluded.approved_digest`,
+             approved_by = excluded.approved_by, approved_digest = excluded.approved_digest,
+             profile_json = excluded.profile_json, profile_state = excluded.profile_state,
+             unresolved_reason = excluded.unresolved_reason, digest_version = excluded.digest_version,
+             profile_provenance = excluded.profile_provenance`,
         )
         .run(
           scope.taskId,
@@ -3942,13 +4259,39 @@ export class Store {
           JSON.stringify(scope.touches),
           scope.budgetMicrousd ?? null,
           scope.proposedAt,
-          scope.digest,
+          digest,
           scope.approvedAt,
           scope.approvedBy,
           scope.approvedDigest,
+          profile === null ? null : canonicalProfileJson(profile),
+          profile === null ? "unresolved" : "resolved",
+          unresolvedReason,
+          profile === null ? 1 : 2,
+          provenance,
         );
       return null;
     });
+  }
+
+  /** The approval SEAL (foundations finding 4/17): stamps the approval
+   * fields and snapshots the CURRENT working profile as the immutable
+   * approved profile — one UPDATE, no re-resolution, so what is sealed is
+   * exactly what the signed digest was bound to. Returns false when the
+   * scope vanished mid-ceremony. */
+  sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}): boolean {
+    return (
+      this.once(mutation, "sealScopeApproval", () => {
+        const changed = this.db
+          .prepare(
+            `UPDATE task_scope
+                SET approved_at = ?, approved_by = ?, approved_digest = digest,
+                    approved_profile_json = profile_json
+              WHERE task_id = ?`,
+          )
+          .run(now.toISOString(), by, taskId);
+        return changed.changes > 0;
+      }) === true
+    );
   }
 
   getScope(taskId: string): Scope | null {
@@ -4975,6 +5318,9 @@ export class Store {
       digest: string;
       /** Immutable provenance (v12), same contract as createConsoleTask's. */
       filedVia?: string;
+      /** v24: resolved at filing by the caller who computed the digest —
+       * stored verbatim so digest and profile can never disagree. */
+      profile?: ExecutionProfile;
     },
     now: Date,
   ): { ok: true; id: number } | { ok: false; reason: "duplicate" } {
@@ -4986,8 +5332,9 @@ export class Store {
         .prepare(
           `INSERT INTO routine
              (name, repo, goal, out_of_scope, touches, requirements, schedule,
-              single_flight, cost_ceiling_usd, budget_per_run_microusd, digest, created_at, updated_at, filed_via)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              single_flight, cost_ceiling_usd, budget_per_run_microusd, digest, created_at, updated_at, filed_via,
+              profile_json, digest_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           spec.name,
@@ -5004,6 +5351,8 @@ export class Store {
           stamp,
           stamp,
           spec.filedVia ?? null,
+          spec.profile === undefined ? null : canonicalProfileJson(spec.profile),
+          spec.profile === undefined ? 1 : 2,
         );
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
     });
@@ -5163,8 +5512,8 @@ export class Store {
   ): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO contest (task_ref, terms, state, scope_digest, race_digest, created_at)
-         VALUES (?, ?, 'dispatching', ?, ?, ?)`,
+        `INSERT INTO contest (task_ref, terms, state, scope_digest, race_digest, created_at, race_semantics)
+         VALUES (?, ?, 'dispatching', ?, ?, ?, 2)`,
       )
       .run(spec.taskRef, spec.terms, spec.scopeDigest, spec.raceDigest, now.toISOString());
     return Number(inserted.lastInsertRowid);
@@ -5236,10 +5585,23 @@ export class Store {
         const inserted = this.db
           .prepare(
             `INSERT INTO contestant
-               (contest, ordinal, provider, model, repair_model, branch, budget_microusd, reserve_microusd)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+               (contest, ordinal, provider, model, repair_model, branch, budget_microusd, reserve_microusd, profile_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(contest, index + 1, agent.provider, agent.model, agent.repairModel, agent.branch, agent.budgetMicrousd, agent.reserveMicrousd);
+          .run(
+            contest,
+            index + 1,
+            agent.provider,
+            agent.model,
+            agent.repairModel,
+            agent.branch,
+            agent.budgetMicrousd,
+            agent.reserveMicrousd,
+            // v24: the contestant's OWN sealed profile — race terms carry
+            // exact models already; the effective limits join them here so
+            // the dispatch proof holds each lane to its lane.
+            canonicalProfileJson(contestantProfileOf(agent.provider, agent.model, agent.repairModel)),
+          );
         return Number(inserted.lastInsertRowid);
       }),
     );
@@ -6016,13 +6378,16 @@ export class Store {
       schedule: string;
       costCeilingUsd: number | null;
       digest: string;
+      /** v24: restatement carries the profile its digest binds. */
+      profile?: ExecutionProfile | null;
     },
     now: Date,
   ): boolean {
     const { changes } = this.db
       .prepare(
         `UPDATE routine SET goal = ?, out_of_scope = ?, touches = ?, requirements = ?,
-                            schedule = ?, cost_ceiling_usd = ?, digest = ?, updated_at = ?
+                            schedule = ?, cost_ceiling_usd = ?, digest = ?, updated_at = ?,
+                            profile_json = COALESCE(?, profile_json)
           WHERE id = ?`,
       )
       .run(
@@ -6034,6 +6399,7 @@ export class Store {
         terms.costCeilingUsd,
         terms.digest,
         now.toISOString(),
+        terms.profile === undefined || terms.profile === null ? null : canonicalProfileJson(terms.profile),
         id,
       );
     return Number(changes) > 0;
@@ -6047,6 +6413,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE routine SET approved_at = ?, approved_by = ?, approved_digest = ?,
+                            approved_profile_json = profile_json,
                             next_fire_at = ?, updated_at = ?
           WHERE id = ?`,
       )
@@ -6451,15 +6818,37 @@ export class Store {
    * envelope comes back. COALESCE, never overwrite — the first stamp is the
    * true one.
    */
-  stampRun(id: number, facts: { baseRevision?: string; sessionId?: string; parentRun?: number }): void {
+  stampRun(
+    id: number,
+    facts: {
+      baseRevision?: string;
+      sessionId?: string;
+      parentRun?: number;
+      /** v24 dispatch stamps: what this invocation was PROVED against. */
+      scopeDigest?: string;
+      profileDigest?: string;
+      providerVersion?: string;
+    },
+  ): void {
     this.db
       .prepare(
         `UPDATE run SET base_revision = COALESCE(base_revision, ?),
                         session_id = COALESCE(session_id, ?),
-                        parent_run = COALESCE(parent_run, ?)
+                        parent_run = COALESCE(parent_run, ?),
+                        scope_digest = COALESCE(scope_digest, ?),
+                        profile_digest = COALESCE(profile_digest, ?),
+                        provider_version = COALESCE(provider_version, ?)
           WHERE id = ?`,
       )
-      .run(facts.baseRevision ?? null, facts.sessionId ?? null, facts.parentRun ?? null, id);
+      .run(
+        facts.baseRevision ?? null,
+        facts.sessionId ?? null,
+        facts.parentRun ?? null,
+        facts.scopeDigest ?? null,
+        facts.profileDigest ?? null,
+        facts.providerVersion ?? null,
+        id,
+      );
   }
 
   /**
@@ -6934,7 +7323,7 @@ export class Store {
    */
   fileSteerNote(
     taskId: string,
-    author: string,
+    author: VerifiedAuthor,
     note: string,
     now: Date,
     mutation: Mutation = {},
@@ -6961,8 +7350,8 @@ export class Store {
             .get(Number(ref["id"]));
           if (racing !== undefined) return { ok: false as const, reason: "contest-open" as const };
           const inserted = this.db
-            .prepare("INSERT INTO task_steer (task_ref, author, note, created_at) VALUES (?, ?, ?, ?)")
-            .run(Number(ref["id"]), author, valid.note, now.toISOString());
+            .prepare("INSERT INTO task_steer (task_ref, author, note, created_at, authorship_state) VALUES (?, ?, ?, ?, 'verified')")
+            .run(Number(ref["id"]), author as unknown as string, valid.note, now.toISOString());
           this.bumpWake();
           return { ok: true as const, id: Number(inserted.lastInsertRowid) };
         }),
@@ -7006,7 +7395,11 @@ export class Store {
       const rows = this.db
         .prepare(
           `SELECT * FROM task_steer
-            WHERE task_ref = ? AND delivered_at IS NULL AND superseded_at IS NULL
+            -- Only VERIFIED authorship may enter a brief (ruling 11): the
+            -- quarantine superseded legacy rows, and this predicate is the
+            -- belt to that braces.
+            WHERE task_ref = ? AND authorship_state = 'verified'
+              AND delivered_at IS NULL AND superseded_at IS NULL
               AND (
                 attached_run IS NULL
                 OR attached_run = ?
@@ -9579,6 +9972,8 @@ function readRun(row: Record<string, unknown>): Run {
       row["base_revision"] === null || row["base_revision"] === undefined
         ? null
         : String(row["base_revision"]),
+    scopeDigest: row["scope_digest"] === null || row["scope_digest"] === undefined ? null : String(row["scope_digest"]),
+    profileDigest: row["profile_digest"] === null || row["profile_digest"] === undefined ? null : String(row["profile_digest"]),
     branch: String(row["branch"]),
     worktree: String(row["worktree"]),
     model: row["model"] === null ? null : String(row["model"]),
@@ -9690,6 +10085,8 @@ function readSteerNote(row: Record<string, unknown>): SteerNote {
     attachedAt: row["attached_at"] === null ? null : String(row["attached_at"]),
     deliveredAt: row["delivered_at"] === null ? null : String(row["delivered_at"]),
     supersededAt: row["superseded_at"] === null ? null : String(row["superseded_at"]),
+    authorshipState: row["authorship_state"] === "verified" ? "verified" : "unverified-legacy",
+    supersededReason: row["superseded_reason"] === null || row["superseded_reason"] === undefined ? null : String(row["superseded_reason"]),
   };
 }
 
@@ -9925,6 +10322,10 @@ function readRoutine(row: Record<string, unknown>): Routine {
     filedVia: row["filed_via"] === null || row["filed_via"] === undefined ? null : String(row["filed_via"]),
     createdAt: String(row["created_at"]),
     updatedAt: String(row["updated_at"]),
+    profile: profileFromJson(row["profile_json"] === null || row["profile_json"] === undefined ? null : String(row["profile_json"])),
+    approvedProfile: profileFromJson(
+      row["approved_profile_json"] === null || row["approved_profile_json"] === undefined ? null : String(row["approved_profile_json"]),
+    ),
   };
 }
 
@@ -9980,6 +10381,7 @@ function readContestant(row: Record<string, unknown>): Contestant {
     contest: Number(row["contest"]),
     ordinal: Number(row["ordinal"]),
     provider: String(row["provider"]),
+    profile: profileFromJson(row["profile_json"] === null || row["profile_json"] === undefined ? null : String(row["profile_json"])),
     model: String(row["model"]),
     repairModel: String(row["repair_model"]),
     branch: String(row["branch"]),
@@ -10116,6 +10518,32 @@ export type WorktreeSetup = {
   revokedBy: string | null;
 };
 
+/** A contestant's execution profile (v24): exact ids from the race terms,
+ * effective limits from the same constants every dispatch uses. */
+export function contestantProfileOf(provider: string, model: string, repairModel: string): ExecutionProfile {
+  return provider === "claude"
+    ? {
+        provider: "claude",
+        model,
+        permissionArgv: "acceptEdits",
+        maxTurns: CLAUDE_LIMITS.maxTurns,
+        repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
+        timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,
+        repairTimeoutSeconds: CLAUDE_LIMITS.repairTimeoutSeconds,
+        repairModel,
+      }
+    : {
+        provider: provider === "openrouter" ? "openrouter" : "codex",
+        model,
+        sandboxMode: "workspace-write",
+        maxTurns: "unsupported",
+        repairMaxTurns: "unsupported",
+        timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
+        repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
+        repairModel,
+      };
+}
+
 function readScope(row: Record<string, unknown>): Scope {
   return {
     taskId: String(row["task_id"]),
@@ -10128,6 +10556,13 @@ function readScope(row: Record<string, unknown>): Scope {
     approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
     approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
     approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),
+    profile: profileFromJson(row["profile_json"] === null || row["profile_json"] === undefined ? null : String(row["profile_json"])),
+    profileState: row["profile_state"] === "unresolved" ? "unresolved" : "resolved",
+    unresolvedReason: row["unresolved_reason"] === null || row["unresolved_reason"] === undefined ? null : String(row["unresolved_reason"]),
+    approvedProfile: profileFromJson(
+      row["approved_profile_json"] === null || row["approved_profile_json"] === undefined ? null : String(row["approved_profile_json"]),
+    ),
+    digestVersion: row["digest_version"] === undefined ? 1 : Number(row["digest_version"]),
   };
 }
 
@@ -10279,4 +10714,16 @@ function readJsonArray(value: unknown): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * A steering author the plane VERIFIED (ruling 11): constructible only by
+ * the two authenticated callers — the console's cookie session (who.name)
+ * and the CLI's password ceremony. The brand makes "just pass a string"
+ * a compile error, which is the whole point: the OPERATOR STEERING fence
+ * in briefs is reachable by no unverified road.
+ */
+export type VerifiedAuthor = string & { readonly __verifiedAuthor: unique symbol };
+export function verifiedAuthor(name: string): VerifiedAuthor {
+  return name as VerifiedAuthor;
 }
