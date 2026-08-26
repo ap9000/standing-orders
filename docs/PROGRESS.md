@@ -1,5 +1,42 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 2, round-6 cross-check fixes.** Codex's
+round-6 review of spec v6 (the cross-check queued behind its rate
+limit, landing after 2A–2D had shipped) returned REDESIGN with eight
+findings; each was verified against the shipped code, six applied, and
+all six are fixed. (1) CRITICAL, terminal fencing vs the transactional
+gates: the coordinator's fence now opens with a TERMINAL SEIZURE —
+CAS to 'fencing' plus the lease fence — so during the grace window a
+late external admission or stale write refuses in ITS OWN transaction,
+not merely against this process's in-memory flag; losing the CAS means
+an external fencer owns settlement and the coordinator steps aside;
+conclusion likewise stamps ended_at BEFORE anything awaits. (2)
+CRITICAL, answers riding the brief: the builder's ordinary pre-spawn
+attach claimed delivery the agent never proved — the held road now
+WITHDRAWS those run_decision rows, CASes each decision's
+delivered_turn to the brief turn, and acceptance re-attaches exactly
+like an answer turn; a brief that dies unaccepted reverts every claim
+it held, and the revert/attach machinery is generalized to any turn
+carrying deliveries. (4) group drain: a tool can outlive its agent
+leader, so the supervisor now drains the WHOLE process group to
+proven-gone before custody releases on any child exit, and `status`
+reports group custody, never one pid's liveness. (6) the held road's
+receipt: attached steering settles delivered at the brief's
+acceptance — the same proof the one-shot transport's onReceipt
+carried. (7) capacity vs attended admission: attended authority now
+skips the capacity gate (its bound is one-held-per-runner), so a full
+unattended ledger cannot refuse the operator who is watching. (8)
+expired-but-unconsumed authorizations: past absolute expiry the claim
+gate honors nothing (an approved task is never locked to a corpse's
+named runner), and tick sweeps them durably closed each pass. The two
+remaining findings target 2E surfaces not yet built and are carried
+into that slice: held repair correlates to the producing session_turn
+(a malformed mailbox has no decision id) with evidence obligations and
+the signed same-model/same-turns repair terms rendered on the form;
+and the race-filing exclusion must share ONE transaction with scope
+proposal on the race branch. Suite 1220 (3 new).
+
+
 **2026-08-26 — Parity II Phase 2D: the attended road runs end-to-end —
 coordinator, dispatch splice, claim gates, custody fence.** The
 HeldSessionCoordinator (new src/held.ts) is the one owner of held

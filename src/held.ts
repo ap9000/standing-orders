@@ -169,6 +169,15 @@ export class HeldSessionCoordinator {
       store.endHeldSession(runId, `refused:${recorded.reason}`, clock());
       return { ok: false, reason: recorded.reason, message: `the brief could not be recorded (${recorded.reason})` };
     }
+    // Answers riding the brief (round-6 finding 2): the builder's ordinary
+    // pre-spawn attach claimed delivery the agent has not proven — withdraw
+    // it, CAS each decision's delivery to the brief turn, and let
+    // acceptance re-attach exactly like an answer turn.
+    store.bindBriefDeliveries(
+      runId,
+      recorded.turn.id,
+      captured.answers.map(one => one.decision.id),
+    );
 
     const remainingMicrousd =
       args.authorization.budgetMicrousd - store.authorizationSpendMicrousd(args.authorization.id);
@@ -337,6 +346,10 @@ export class HeldSessionCoordinator {
   private onTurnInit(args: HeldLaunchArgs, seq: number): void {
     const turn = args.store.sessionTurnsOf(args.runId).find(one => one.seq === seq);
     if (turn !== undefined) args.store.markTurnAccepted(turn.id, args.clock());
+    // The brief's acceptance is the held road's receipt (round-6 finding
+    // 6): attached steering settles delivered on the same proof the
+    // one-shot transport's onReceipt carried.
+    if (seq === 1) void args.store.settleSteerDelivered(args.runId, args.clock());
   }
 
   private async onTurnResult(args: HeldLaunchArgs, seq: number, event: Record<string, unknown>): Promise<void> {
@@ -372,6 +385,12 @@ export class HeldSessionCoordinator {
     if (controller === undefined || controller.concluded || controller.fenceStarted) return;
     controller.concluded = true;
     this.clearClocks(controller);
+
+    // The admission door closes BEFORE anything awaits (round-6 finding
+    // 1): with ended_at stamped, a late external turn recording refuses
+    // inside ITS transaction, and a late result cannot re-open settlement
+    // (its turn is already settled or terminal).
+    args.store.endHeldSession(args.runId, "finished", args.clock());
 
     // End the hold: EOF, let the supervisor fence its own child, bounded.
     controller.handle?.endInput();
@@ -418,7 +437,6 @@ export class HeldSessionCoordinator {
       result,
     );
     await args.releaseWorktree(args.cwd);
-    args.store.endHeldSession(args.runId, "finished", args.clock());
     args.store.closeAuthorization(args.authorization.id, "finished", args.clock());
     args.liveLog?.close();
     args.onDisposed?.(disposition);
@@ -442,6 +460,20 @@ export class HeldSessionCoordinator {
     controller.fenceStarted = true;
     this.clearClocks(controller);
 
+    // TERMINAL SEIZURE before any waiting (round-6 finding 1): the CAS to
+    // 'fencing' + the lease fence make every late admission and every
+    // stale write refuse in ITS OWN transaction during the grace window —
+    // in-memory flags guard only this process. Losing the CAS means an
+    // external fencer owns settlement: kill our handle and step aside.
+    const fencer = `coordinator:${process.pid}`;
+    const seized = args.store.seizeHeldSession(args.runId, fencer, new Date(args.clock().getTime() + 120_000), args.clock());
+    if (!seized.ok) {
+      controller.handle?.terminate();
+      args.liveLog?.close();
+      this.drop(args.runId);
+      return;
+    }
+
     controller.handle?.terminate();
     await Promise.race([
       controller.handle?.exited ?? Promise.resolve({ code: null }),
@@ -461,9 +493,8 @@ export class HeldSessionCoordinator {
       }
     }
     store.finishRun(args.runId, { outcome: "interrupted", reason, now: args.clock() });
-    store.endHeldSession(args.runId, reason, args.clock());
+    store.closeHeldFencing(args.runId, fencer, reason, args.clock());
     store.closeAuthorization(args.authorization.id, reason, args.clock());
-    release(store, args.leaseId, args.clock());
     // The worktree is PRESERVED on interruption (released to the pool
     // unverified — same as every failure road; the work stays on disk).
     await args.releaseWorktree(args.cwd);

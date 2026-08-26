@@ -367,3 +367,102 @@ describe("the orphan fence sweep (fence-first, page-not-guess)", () => {
     store.close();
   }, 15_000);
 });
+
+describe("the round-6 cross-check fixes", () => {
+  test("an EXPIRED authorization gates nothing: other runners claim an approved task again", () => {
+    const store = openStore(":memory:");
+    const { ref } = attendedFixture(store, { beat: later(1), expiry: later(60) });
+    // approve the scope so the task has real authority of its own
+    store
+      .raw()
+      .prepare("UPDATE task_scope SET approved_at = ?, approved_by = 'alex', approved_digest = digest WHERE task_id = 't-att'")
+      .run(later(2).toISOString());
+    // while live, the foreign runner is refused
+    expect(acquire(store, ref.id, "other-machine", { now: later(10) })).toMatchObject({ ok: false, reason: "attended-held" });
+    // past expiry the corpse gates nothing — and the sweep closes it durably
+    const late = acquire(store, ref.id, "other-machine", { now: later(120) });
+    expect(late.ok).toBe(true);
+    expect(store.sweepExpiredAuthorizations(later(121))).toBe(1);
+    expect(store.readAuthorization("auth-att")?.endReason).toBe("expired");
+    store.close();
+  });
+
+  test("attended admission skips the capacity gate: a full unattended ledger does not refuse the watching operator", async () => {
+    const store = openStore(":memory:");
+    const { ref } = attendedFixture(store, { beat: later(1) });
+    const { register } = await import("./runner.js");
+    register(store, { name: "mac-a", host: "h", now: later(0) });
+    // an unrelated unattended claim occupies the ONLY slot (capacity 1)
+    store.createTask({ id: "t-busy", title: "busy" }, T0);
+    const busy = store.refFor("built-in", "t-busy");
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES ('lease-busy', ?, 1, 'mac-a', ?, ?, ?)`,
+      )
+      .run(busy.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
+    const admitted = acquireIfReady(store, ref.id, "mac-a", { now: later(5) });
+    expect(admitted.ok).toBe(true);
+    store.close();
+  });
+
+  test("answers riding the brief attach only at ITS acceptance, and revert when the brief never got there", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "t-brf", title: "brief answers" }, T0);
+    const ref = store.refFor("built-in", "t-brf");
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES ('lease-brf', ?, 1, 'mac-a', ?, ?, ?)`,
+      )
+      .run(ref.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO attended_authorization
+           (id, task_ref, approver, runner, runner_generation, composite_digest, terms_json,
+            max_session_turns, budget_microusd, created_at, absolute_expiry)
+         VALUES ('auth-brf', ?, 'alex', 'mac-a', 1, 'x', '{}', 10, 1000000, ?, ?)`,
+      )
+      .run(ref.id, T0.toISOString(), later(3600).toISOString());
+    const runId = store.startRun({ taskRef: ref.id, leaseId: "lease-brf", runner: "mac-a", branch: "b", worktree: "/w", now: T0 });
+    store.consumeAuthorization("auth-brf", runId, later(1));
+    expect(
+      store.openHeldSession({
+        run: runId,
+        authorizationId: "auth-brf",
+        runner: "mac-a",
+        leaseId: "lease-brf",
+        upIncarnation: "i",
+        cookie: "c".repeat(32),
+        socketPath: "/tmp/so-brf.sock",
+        now: later(1),
+      }).ok,
+    ).toBe(true);
+    // an answered decision, pre-attached by the builder's ordinary road
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO decision (run, urgency, state, recap, question, options, recommendation, created_at, answered_at, answered_by, choice)
+         VALUES (?, 'blocking', 'answered', 'r', 'q', '[]', 'rec', ?, ?, 'alex', 'go')`,
+      )
+      .run(runId, later(2).toISOString(), later(3).toISOString());
+    const decision = Number(store.raw().prepare("SELECT id FROM decision WHERE run = ?").get(runId)!["id"]);
+    store.raw().prepare("INSERT INTO run_decision (run, decision, choice, note) VALUES (?, ?, 'go', NULL)").run(runId, decision);
+
+    const brief = store.recordSessionTurn({ run: runId, sourceKind: "brief", text: "the brief with answers", now: later(4) });
+    expect(brief.ok).toBe(true);
+    if (!brief.ok) return;
+    store.bindBriefDeliveries(runId, brief.turn.id, [decision]);
+    // withdrawn until proof
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run_decision WHERE run = ?").get(runId)!["n"]).toBe(0);
+    // the brief dies unaccepted: the delivery claim reverts entirely
+    store.markTurnWritten(brief.turn.id, later(5));
+    store.settleTurnTerminal(brief.turn.id, "uncertain", later(6));
+    expect(store.raw().prepare("SELECT delivered_turn FROM decision WHERE id = ?").get(decision)!["delivered_turn"]).toBeNull();
+    expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run_decision WHERE run = ?").get(runId)!["n"]).toBe(0);
+    store.close();
+  });
+});

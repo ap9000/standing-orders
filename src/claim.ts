@@ -180,7 +180,13 @@ function acquireLocked(
       // OPEN attended authorization dispatches only to its named runner,
       // and a task whose ONLY authority is attended dispatches only while
       // the operator is watching, with the one attempt unspent.
-      const attendedOpen = store.openAuthorizationFor(taskRef);
+      // An authorization past its absolute expiry gates NOTHING (round-6
+      // finding 8): it is a corpse the sweep will close, and letting it
+      // keep refusing other runners on an approved task would be a
+      // permanent lock nobody signed.
+      const attendedRow = store.openAuthorizationFor(taskRef);
+      const attendedOpen =
+        attendedRow !== null && Date.parse(attendedRow.absoluteExpiry) > now.getTime() ? attendedRow : null;
       if (attendedOpen !== null) {
         if (attendedOpen.runner !== runner) {
           return { ok: false as const, reason: "attended-held" as const, runner: attendedOpen.runner };
@@ -338,7 +344,9 @@ export function acquireIfReady(
       if (approvedScope !== undefined) {
         return { ok: false as const, reason: "not-ready" as const, message: "the scope is already approved — nothing left to plan" };
       }
-    } else if (approvedScope === undefined) {
+    }
+    let attendedAuthority = false;
+    if (role !== "planner" && approvedScope === undefined) {
       // The authority union (v6 W1): an unapproved scope still dispatches
       // when a LIVE attended authorization names THIS runner and its one
       // attempt is unspent — the authorization IS the authority. Everything
@@ -348,12 +356,12 @@ export function acquireIfReady(
         authorization === null
           ? null
           : attendedWatchState(authorization.lastBeatAt, options.now, authorization.absoluteExpiry);
-      const attendedAdmits =
+      attendedAuthority =
         authorization !== null &&
         authorization.runner === runner &&
         (watching === "live" || watching === "grace") &&
         authorization.attemptRun === null;
-      if (!attendedAdmits) {
+      if (!attendedAuthority) {
         return { ok: false as const, reason: "not-ready" as const, message: "the scope is not approved" };
       }
     }
@@ -368,7 +376,10 @@ export function acquireIfReady(
     // registered runners; a runner the store has never met is a test driving
     // the API directly, and the CLI always registers.
     const registered = store.getRunner(runner);
-    if (registered !== null) {
+    if (registered !== null && !attendedAuthority) {
+      // Capacity governs UNATTENDED work (v6 W2 + round-6 finding 7): an
+      // attended session's bound is one-held-per-runner, so a full
+      // unattended ledger must not refuse the operator who is watching.
       const held = store.liveClaimCount(runner, options.now);
       if (held >= registered.runner.capacity) {
         return {

@@ -1638,6 +1638,10 @@ async function tickCommand(
   const ready = store.listReady(clock(), runner);
   const considered = ready.length;
   const dispatched: TickOutcome[] = [...resumed];
+  // Expired attended authorizations close durably each pass (round-6
+  // finding 8): the partial unique frees, and the claim gates stop
+  // honoring corpses.
+  store.sweepExpiredAuthorizations(clock());
   // The stale-scan (dispatch v3, finding 20): mirrors the courtesy filter
   // kept out of ready are REPORTED here, typed, with a paged episode —
   // an undispatakable tracker item is a 9am fact, not a silent absence.

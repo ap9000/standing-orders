@@ -136,8 +136,10 @@ server = createServer(connection => {
       return;
     }
     if (order.verb === "status") {
+      const pgid = child?.pid;
+      const group = pgid !== undefined && groupAlive(pgid);
       connection.end(
-        `${JSON.stringify({ ok: true, alive: !exited, agentPgid: child.pid ?? null, exitCode })}\n`,
+        `${JSON.stringify({ ok: true, alive: !exited || group, groupAlive: group, agentPgid: pgid ?? null, exitCode })}\n`,
       );
       return;
     }
@@ -212,10 +214,18 @@ server.listen(socketPath, () => {
   });
 
   child.on("close", code => {
-    // stdio flushed and the process reaped — the honest end of the hold.
+    // stdio flushed and the process reaped. The GROUP may still have
+    // members — a tool the agent launched can outlive its leader (round-6
+    // finding 4) — so the whole group is drained and PROVEN gone before
+    // custody releases; the whole-tree invariant is the group, never the
+    // one pid.
     exitCode = exitCode ?? code ?? 1;
-    exitWanted = true;
-    maybeExit();
+    const pgid = child.pid;
+    const drained = pgid !== undefined && groupAlive(pgid) ? killGroupSettled(pgid) : Promise.resolve(true);
+    drained.then(() => {
+      exitWanted = true;
+      maybeExit();
+    });
   });
 });
 

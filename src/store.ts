@@ -7768,6 +7768,20 @@ export class Store {
     );
   }
 
+  /** Close every authorization past its absolute expiry (round-6 finding
+   * 8): the durable closure the gates and the partial unique rely on —
+   * an expired corpse must not keep a task locked to its named runner. */
+  sweepExpiredAuthorizations(now: Date): number {
+    const stamp = now.toISOString();
+    const { changes } = this.db
+      .prepare(
+        `UPDATE attended_authorization SET closed_at = ?, end_reason = 'expired'
+          WHERE closed_at IS NULL AND absolute_expiry <= ?`,
+      )
+      .run(stamp, stamp);
+    return Number(changes);
+  }
+
   readAuthorization(id: string): AttendedAuthorization | null {
     const row = this.db.prepare("SELECT * FROM attended_authorization WHERE id = ?").get(id);
     return row === undefined ? null : readAuthorizationRow(row);
@@ -7983,8 +7997,30 @@ export class Store {
   }
 
   /**
+   * Bind pending answers to the BRIEF turn (round-6 finding 2): a held
+   * build's brief carries every answered-but-undelivered decision, and the
+   * builder's ordinary pre-spawn attach would claim delivery the agent
+   * never proved. The pre-attached run_decision rows are WITHDRAWN here and
+   * each decision's delivery-CAS points at the brief turn — run_decision
+   * re-attaches only at that turn's acceptance, exactly like answer turns.
+   */
+  bindBriefDeliveries(runId: number, briefTurn: number, decisionIds: readonly number[]): void {
+    if (decisionIds.length === 0) return;
+    this.transact(() => {
+      for (const decision of decisionIds) {
+        this.db.prepare("DELETE FROM run_decision WHERE run = ? AND decision = ?").run(runId, decision);
+        this.db
+          .prepare("UPDATE decision SET delivered_turn = ? WHERE id = ? AND delivered_turn IS NULL")
+          .run(briefTurn, decision);
+      }
+    });
+  }
+
+  /**
    * Acceptance — THIS turn's system/init (or its result, retroactively).
-   * For answer turns this is also where run_decision attaches: delivery is
+   * This is also where run_decision attaches, for EVERY decision whose
+   * delivery-CAS points at this turn (answer turns claim one at recording;
+   * a brief turn claims every pending answer it carried): delivery is
    * claimed only once the agent provably received the words (v6 W5).
    */
   markTurnAccepted(id: number, now: Date): boolean {
@@ -7997,18 +8033,20 @@ export class Store {
         .run(now.toISOString(), id);
       if (Number(changes) === 0) return false;
       const turn = this.readSessionTurn(id);
-      if (turn !== null && turn.sourceKind === "answer" && turn.sourceId !== null) {
-        const decision = this.db
-          .prepare("SELECT choice, note FROM decision WHERE id = ?")
-          .get(turn.sourceId);
-        if (decision !== undefined) {
-          this.db
-            .prepare("INSERT OR IGNORE INTO run_decision (run, decision, choice, note) VALUES (?, ?, ?, ?)")
-            .run(turn.run, turn.sourceId, decision["choice"], decision["note"]);
-        }
-      }
+      if (turn !== null) this.attachDeliveriesOf(turn.run, id);
       return true;
     });
+  }
+
+  private attachDeliveriesOf(runId: number, turnId: number): void {
+    const carried = this.db
+      .prepare("SELECT id, choice, note FROM decision WHERE delivered_turn = ?")
+      .all(turnId);
+    for (const decision of carried) {
+      this.db
+        .prepare("INSERT OR IGNORE INTO run_decision (run, decision, choice, note) VALUES (?, ?, ?, ?)")
+        .run(runId, Number(decision["id"]), decision["choice"], decision["note"]);
+    }
   }
 
   /**
@@ -8054,14 +8092,10 @@ export class Store {
                   accounted_microusd = ?, accounted_at = ? WHERE id = ?`,
         )
         .run(now, now, measured, result.outputTokens ?? null, measured, now, id);
-      if (turn.sourceKind === "answer" && turn.sourceId !== null && turn.acceptedAt === null) {
-        // The acceptance this settlement back-filled attaches the answer too.
-        const decision = this.db.prepare("SELECT choice, note FROM decision WHERE id = ?").get(turn.sourceId);
-        if (decision !== undefined) {
-          this.db
-            .prepare("INSERT OR IGNORE INTO run_decision (run, decision, choice, note) VALUES (?, ?, ?, ?)")
-            .run(turn.run, turn.sourceId, decision["choice"], decision["note"]);
-        }
+      if (turn.acceptedAt === null) {
+        // The acceptance this settlement back-filled attaches whatever
+        // deliveries the turn carried (answers, or a brief's pending set).
+        this.attachDeliveriesOf(turn.run, id);
       }
       this.db
         .prepare(
@@ -8094,7 +8128,10 @@ export class Store {
             WHERE id = ?`,
         )
         .run(terminal, at, charge, at, id);
-      if (turn.sourceKind === "answer" && turn.sourceId !== null && turn.acceptedAt === null) {
+      if (turn.acceptedAt === null) {
+        // Never-accepted: EVERY delivery claim this turn held reverts —
+        // an answer turn's one decision, or a brief turn's pending set —
+        // so the ordinary road can deliver later (v6 W5, round-6 f2).
         this.db.prepare("UPDATE decision SET delivered_turn = NULL WHERE delivered_turn = ?").run(id);
       }
       if (charge > 0) this.chargeRunAggregates(turn.run, charge, 0);
