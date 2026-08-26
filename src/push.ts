@@ -233,7 +233,7 @@ export function safePushLink(pushClass: NonNullable<Notification["pushClass"]>, 
   return CLASS_FALLBACK[pushClass];
 }
 
-export function buildPushPayload(notification: Notification): string {
+export function buildPushPayload(notification: Notification, waiting: number | null = null): string {
   const pushClass = notification.pushClass as NonNullable<Notification["pushClass"]>;
   const words = PUSH_WORDS[pushClass];
   return JSON.stringify({
@@ -242,6 +242,11 @@ export function buildPushPayload(notification: Notification): string {
     url: safePushLink(pushClass, notification.link),
     // The opaque tag collapses a crash-duplicate on the lock screen.
     tag: `so-${notification.id}`,
+    // The app-icon badge (Phase 2E, v2 S4): the server-computed
+    // waiting-on-you COUNT at send time — a number, never content, so the
+    // closed-class discipline holds. The console page recomputes and
+    // clears; a stale push never outranks a fresh page.
+    ...(waiting === null ? {} : { waiting }),
   });
 }
 
@@ -313,7 +318,14 @@ export async function pushPass(
 
     let body: Buffer;
     try {
-      body = encryptPushPayload(subscription.p256dh, subscription.auth, buildPushPayload(fenced.notificationRow));
+      body = encryptPushPayload(
+        subscription.p256dh,
+        subscription.auth,
+        // The badge count rides every push: the same inbox classifier the
+        // console's own sidebar badge reads, unscoped (a phone has no
+        // project pane), computed at send time.
+        buildPushPayload(fenced.notificationRow, store.countInboxScoped(null, clock(), 100, null).count),
+      );
     } catch {
       // Off-curve or malformed subscriber material: the device, not us.
       store.retirePushSubscription(subscription.id, "invalid-keys", clock());

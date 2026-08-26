@@ -1,5 +1,28 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 2E.3: the badge, the dots, and the
+design record.** The app-icon badge (v2 S4, round-1 finding 13's
+delivery question answered): every push now carries the server-computed
+waiting-on-you COUNT — the same saturated inbox classifier the
+console's own sidebar badge reads, computed at send time; a number,
+never content, so the closed-class push discipline holds. The service
+worker sets the badge on push where supported (honest no-op
+elsewhere), clears it on the notification tap, and — because a page is
+always more current than a push — every chrome page load messages the
+worker the server-rendered count, clearing stale badges at zero. State
+dots (A5): one vocabulary — working pulses brand, waiting-on-you
+warns, done succeeds, failed is destructive, queued is muted — derived
+from EXISTING state fields only, ambiguous muted never green, now on
+task list rows, the build list, and the task page's own run rows,
+joining the board cards and fleet stats that already had it. DESIGN.md
+§9c records the attended core: the signed stop-threshold budget, the
+session-fatal per-turn clock, the ledger's acceptance boundary and
+marginal-delta accounting, parenthood custody, and the lease-based
+orphan predicate. Suite 1225. Phase 2 remaining, named: continuation
+(A4 — mint from a finished run with the follow-up in the signed
+terms, its own claim path, taskless dispositions).
+
+
 **2026-08-26 — Parity II Phase 2E.2: the conversation — a held session
 becomes a two-way channel.** The coordinator stops concluding at the
 first settled turn and CLASSIFIES it (v2 S1f): a terminal handoff

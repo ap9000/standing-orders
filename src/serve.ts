@@ -270,10 +270,23 @@ self.addEventListener("push", function (event) {
   var body = typeof data.body === "string" ? data.body : "the console needs you";
   var tag = typeof data.tag === "string" ? data.tag : "standing-orders";
   var url = typeof data.url === "string" && SHAPES.some(function (s) { return s.test(data.url); }) ? data.url : "/next";
+  if (typeof data.waiting === "number" && data.waiting >= 0 && self.registration.setAppBadge) {
+    // A count, never content. Honest no-op where unsupported.
+    event.waitUntil(self.registration.setAppBadge(Math.floor(data.waiting)).catch(function () {}));
+  }
   event.waitUntil(self.registration.showNotification("standing orders", { body: body, tag: tag, data: { url: url } }));
+});
+self.addEventListener("message", function (event) {
+  // The page recomputes on load/focus and is authoritative over any stale
+  // push: {badge: N} sets, {badge: 0} clears.
+  var badge = event.data && typeof event.data.badge === "number" ? event.data.badge : null;
+  if (badge === null || !self.registration.setAppBadge) return;
+  if (badge <= 0 && self.registration.clearAppBadge) { self.registration.clearAppBadge().catch(function () {}); return; }
+  self.registration.setAppBadge(Math.floor(badge)).catch(function () {});
 });
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
+  if (self.registration.clearAppBadge) self.registration.clearAppBadge().catch(function () {});
   var url = event.notification.data && event.notification.data.url;
   var target = new URL(SHAPES.some(function (s) { return s.test(url); }) ? url : "/next", self.location.origin).href;
   event.waitUntil(clients.matchAll({ type: "window" }).then(function (open) {
@@ -5159,6 +5172,13 @@ function transcriptScript(): string {
 function chromeScript(): string {
   return (
     `(function(){` +
+    // The app-icon badge (Phase 2E): the page's server-rendered waiting
+    // count is authoritative over any stale push — synced on every chrome
+    // page load through the worker, cleared at zero, honest no-op where
+    // push never enrolled.
+    `try{var waiting=document.querySelector("[data-waiting]");` +
+    `if(waiting&&navigator.serviceWorker&&navigator.serviceWorker.controller){` +
+    `navigator.serviceWorker.controller.postMessage({badge:Number(waiting.getAttribute("data-waiting"))||0});}}catch(e){}` +
     // elapsed tickers: server timestamps, client arithmetic, display only
     `function tick(){var nodes=document.querySelectorAll("time[data-elapsed-since]");` +
     `for(var i=0;i<nodes.length;i++){var t=Date.parse(nodes[i].getAttribute("data-elapsed-since"));` +
@@ -5346,7 +5366,7 @@ function shell(
 
   const chrome = options.chrome;
   const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
-    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}>${label}` +
+    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
   const side = [
@@ -6544,7 +6564,7 @@ function tasksPage(
       : tasks
           .map(
             task =>
-              `<a class="row" href="${taskHref(task.id)}"><span class="mono">${escape(task.id)}</span> ` +
+              `<a class="row" href="${taskHref(task.id)}">${taskDot(task.state)}<span class="mono">${escape(task.id)}</span> ` +
               `${escape(task.title)} <span class="right badge badge-${escape(task.state)}">${escape(task.state)}</span></a>`,
           )
           .join("\n");
@@ -7690,7 +7710,7 @@ function taskBody(data: {
               run.parentRun !== null ? `↳ of #${run.parentRun}` : null,
             ].filter((bit): bit is string => bit !== null);
             return (
-              `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
+              `<p class="row">${runDot(run, run.id === liveRunId)}<a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               runOutcomeBadge(run, run.id === liveRunId) +
               `${run.reason === null ? "" : ` <span class="meta">${escape(reasonWords(run.reason))}</span>`}` +
               ` <span class="meta mono">${escape(bits.join(" · "))}</span>` +
@@ -8111,6 +8131,33 @@ function runOutcomeBadge(run: Run, live: boolean): string {
     : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>`;
 }
 
+
+/**
+ * The state dot (Phase 2E, A5): one vocabulary everywhere — working
+ * (brand pulse), waiting-on-you (warning), done (success), failed
+ * (destructive), queued/idle (muted). Derived from EXISTING state fields
+ * only; anything ambiguous is muted, never green.
+ */
+function taskDot(state: TaskState): string {
+  const cls =
+    state === "running" ? "dot-ok pulse" : state === "done" ? "dot-ok" : state === "failed" ? "dot-bad" : "dot-off";
+  return `<span class="dot ${cls}" aria-hidden="true"></span> `;
+}
+
+function runDot(run: Run, live: boolean): string {
+  const cls =
+    run.outcome === null
+      ? live
+        ? "dot-ok pulse"
+        : "dot-off"
+      : run.outcome === "built" || run.outcome === "no-change"
+        ? "dot-ok"
+        : run.outcome === "parked"
+          ? "dot-warn"
+          : "dot-bad";
+  return `<span class="dot ${cls}" aria-hidden="true"></span> `;
+}
+
 function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: ReadonlySet<number>, nextCursor: number | null): Screen {
   const list =
     rows.length === 0
@@ -8118,7 +8165,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: R
       : rows
           .map(
             run =>
-              `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
+              `<p class="row">${runDot(run, liveIds.has(run.id))}<a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
               runOutcomeBadge(run, liveIds.has(run.id)) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +

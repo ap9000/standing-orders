@@ -354,6 +354,45 @@ maintenance budget is explicit: exactly ONE tier-2 provider adapter is
 funded; adding another requires retiring the first or a new reviewed
 strategy decision.
 
+## 9c. The attended core (Parity II Phase 2)
+
+An attended session is ONE watched attempt under a signed authorization
+(ruling 12): the mint form renders every term — scope, pinned claude
+profile, repository at the exact head, named runner, the budget as a
+STOP THRESHOLD (the agent halts when its cumulative total crosses it;
+the final step may overrun a little — the CLI's own semantics, proven
+by probe), a per-session message cap, a per-turn wall clock whose
+expiry is SESSION-FATAL (the protocol has no turn abort), and an
+absolute expiry — and one password signs their composite digest.
+"While you watch" is literal: the console page beats a durable clock
+every 15 seconds while visible; lapse winds the session down. Expiry
+never converts attended work into unattended work.
+
+The held session is a durable state machine, not a promise chain: the
+HeldSessionCoordinator owns run, lease, and worktree after the builder
+hands over at its spawn point, so the watch loop keeps dispatching
+(held claims are excluded from the capacity count). Every stdin
+injection — brief, decision answer, operator turn, machine repair — is
+a ledger row recorded BEFORE writing, accepted only at ITS init (or
+proven by ITS result), and settled at the MARGINAL delta of the
+provider's cumulative totals; an unconfirmed turn is terminal
+'uncertain', charged at its reservation, never reinjected (ruling 15).
+A mid-session park records the decision — causally linked to the turn
+that produced it — and the session stays held; the answer, from any
+surface, injects exactly once through a delivery-CAS, and run_decision
+attaches only at proven acceptance. Malformed parks repair IN the same
+session, bounded, correlated to the producing turn.
+
+Custody survives crashes by parenthood, not guesswork: a supervisor
+process spawns the agent into its own group and holds the handle (a
+PID pinned by an unreaped child cannot be recycled), relays bytes,
+fences autonomously when its pipe breaks, and answers a
+cookie-authenticated kill socket only after the group is PROVEN gone.
+The orphan predicate is lease-based — a live peer's sessions are
+untouchable — the fence seizes custody transactionally BEFORE any
+kill, an unreachable supervisor pages rather than guess-kills, and
+generic recovery excludes open custody rows entirely.
+
 ## 10. Milestones
 
 | | Scope | Ships when |
