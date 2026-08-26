@@ -830,6 +830,55 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     liveLog?.close();
   }
 
+  const captured: CapturedBuild = {
+    store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
+    runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done,
+    clock, fenced: () => fencedMidBuild,
+  };
+  return settleProviderOutcome(captured, result);
+}
+
+/**
+ * Everything the post-provider settlement closes over (Parity II Phase 2,
+ * v4 Q2 / v6 W8): an explicit record, so the held road's coordinator can
+ * run THE SAME settlement the one-shot road runs — one state machine,
+ * never a paraphrase. `fenced()` reads the pulse's live flag: settlement
+ * decisions are about NOW, not about the moment of capture.
+ */
+export type CapturedBuild = {
+  store: Store;
+  request: BuildRequest;
+  agent: BuildRequest["agent"];
+  git: Runner;
+  worktree: string;
+  branch: string;
+  baseRevision: string;
+  taskId: string;
+  taskRef: number;
+  runner: string;
+  provider: string;
+  scope: Scope | null;
+  effective: { model: string; maxTurns: number | undefined; timeoutMs: number; skipPermissions: boolean; profile: ExecutionProfile };
+  answers: { decision: Decision & { taskId: string }; choice: string; note: string | null }[];
+  timeoutMs: number;
+  root: string;
+  mailbox: string;
+  done: string;
+  clock: () => Date;
+  fenced: () => boolean;
+};
+
+/**
+ * The post-provider state machine, extracted verbatim from build(): the
+ * timeout/init/agent classification, the synchronous fence re-proof, park
+ * ingestion (with its repair turns), the branch and HEAD laws, handoff
+ * validation, evidence capture, and the commit. build() calls it inline —
+ * behavior byte-identical — and a held session's coordinator calls it
+ * when the stream reaches a terminal handoff. Only this pair of callers:
+ * a run completes through THIS function or not at all.
+ */
+export async function settleProviderOutcome(captured: CapturedBuild, result: AgentOutcome): Promise<BuildResult> {
+  const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, clock } = captured;
   if (result.timedOut) {
     // A mailbox cut down mid-write is quarantined, never ingested: whatever
     // half-sentence it holds, no lease vouches for it as a decision.
@@ -859,7 +908,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // pulse said. An interval that fired cleanly a moment ago is a fact about
   // a moment ago; the commit below is about now. For a leased build the
   // final beat also extends the lease across the commit itself.
-  if (fencedMidBuild) {
+  if (captured.fenced()) {
     return {
       ok: false,
       reason: "fenced",

@@ -1,5 +1,32 @@
 # Progress
 
+**2026-08-25 — Parity II Phase 2C: the settlement and disposition
+extractions.** The two refactors the held road stands on, each proven
+byte-identical by the untouched suite. builder.ts's post-provider state
+machine — timeout/init/agent classification, the synchronous fence
+re-proof, park ingestion with its repair turns, the branch and HEAD
+laws, handoff validation, evidence capture, the commit — is now
+`settleProviderOutcome(captured, result)` over an explicit
+`CapturedBuild` record (v4 Q2 / v6 W8): the body moved verbatim under a
+destructuring header, `build()` calls it inline, and the capture's
+`fenced()` closure reads the pulse's LIVE flag because settlement
+decisions are about now, not the moment of capture. And the operations
+that actually END an attempt — sealing parks, accepting completions
+behind the completion fence with the disowned arm and the publication
+intent, strikes, quota, failure classes with their backoff/stall
+dispositions — moved from tick's inlined finalizers and the standalone
+build command's separate road into `disposeBuildOutcome` (new
+src/dispose.ts) under an explicit POLICY record: 'tick' is the full
+loop behavior, 'standalone' is that road's deliberate historical shape
+(no task completion, no strikes, no publication, its own narrower
+broke-list) — stated as policy, never forked logic. Both call sites
+are now pure reporting over a typed Disposition. The coordinator
+(Phase 2D) becomes the third caller of both functions, which is the
+whole point: a held run will complete through exactly the machinery
+every other road uses, or not at all. Suite 1211 green, unmodified —
+the refactor's own proof.
+
+
 **2026-08-25 — Parity II Phase 2B: the supervisor, the held transport,
 and the held invocation gateway.** The process layer under the attended
 core, to the v5-P4/v6-W7+W9 rulings. `src/supervisor.mjs` — plain

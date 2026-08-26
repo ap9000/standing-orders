@@ -108,6 +108,7 @@ import {
   DEFAULT_LEASE_MS,
   SYNC_MAX_AGE_MS,
 } from "./claim.js";
+import { disposeBuildOutcome } from "./dispose.js";
 import {
   proposeGrant,
   describeGrant,
@@ -1217,19 +1218,31 @@ async function buildCommand(
   // unverified and is reported rather than cleaned.
   const handedBack = await worktrees.release(leased.worktree.path, now);
 
+  // Disposition through the shared service (Phase 2C), on the standalone
+  // policy: run records only — no task completion, no strikes, no
+  // publication — exactly this road's historical shape.
+  const disposition = disposeBuildOutcome(
+    {
+      store,
+      policy: "standalone",
+      leaseId: held?.leaseId,
+      runId,
+      taskId: id,
+      taskRef: ref.id,
+      runner,
+      repo,
+      branch,
+      origin: ref.origin,
+      provider: "claude",
+      model: text(flags, "model") ?? null,
+      worktreePath: leased.worktree.path,
+      clock: context.clock,
+    },
+    result,
+  );
+
   if (result.ok && result.parked !== undefined) {
-    const sealed =
-      held === null
-        ? null
-        : finalizeParkFenced(store, {
-            leaseId: held.leaseId,
-            runId,
-            taskId: id,
-            decision: result.parked.decision,
-            artifactIds: result.parked.artifactIds,
-            now: context.clock(),
-          });
-    if (sealed === null || !sealed.ok) {
+    if (disposition.kind !== "parked") {
       return fail(write, json, "build", "fenced", `${id} parked, but the lease was gone before the decision could be sealed`, EXIT.refused, {
         worktree: leased.worktree.path,
       });
@@ -1238,38 +1251,16 @@ async function buildCommand(
       write,
       json,
       "build",
-      { parked: true, decision: sealed.decisionId, worktree: leased.worktree.path },
+      { parked: true, decision: disposition.decisionId, worktree: leased.worktree.path },
       () => [
         `${id} parked a decision instead of guessing.`,
-        `  decision  ${sealed.decisionId} — \`standing-orders decide ${sealed.decisionId}\``,
+        `  decision  ${disposition.decisionId} — \`standing-orders decide ${disposition.decisionId}\``,
         `  worktree  ${leased.worktree.path} (work in progress preserved)`,
       ],
     );
   }
 
   if (!result.ok) {
-    if (result.reason === "malformed-decision" && held !== null) {
-      finalizeMalformedFenced(store, {
-        leaseId: held.leaseId,
-        runId,
-        taskId: id,
-        problems: result.problems ?? [],
-        now: context.clock(),
-      });
-    } else {
-      const brokeish =
-        result.reason === "agent" ||
-        result.reason === "agent-reported" ||
-        result.reason === "no-op" ||
-        result.reason === "moved-head" ||
-        result.reason === "timeout" ||
-        result.reason === "git";
-      store.finishRun(runId, {
-        outcome: brokeish ? "failed" : "refused",
-        reason: result.reason,
-        now: context.clock(),
-      });
-    }
     // The exit-code contract separates "no" from "broken", and a build whose
     // agent crashed or timed out *broke* — 3 here taught callers that a dead
     // model and an unapproved scope were the same kind of news. Refusals —
@@ -1287,12 +1278,6 @@ async function buildCommand(
     });
   }
 
-  store.finishRun(runId, {
-    outcome: result.noChange === true ? "no-change" : "built",
-    ...(result.noChange === true ? { reason: "handoff" } : {}),
-    committed: result.committed,
-    now: context.clock(),
-  });
   return succeed(
     write,
     json,
@@ -2143,245 +2128,79 @@ async function tickCommand(
     // unverified rather than cleaned, same as `build`.
     await worktrees.release(leased.worktree.path, clock());
 
-    if (result.ok && result.parked !== undefined) {
-      // The seal is one fenced transaction: decision, hold, run outcome, and
-      // outbox row exist together or — if the lease was superseded between
-      // the builder's last proof and this write — not at all.
-      const sealed = finalizeParkFenced(store, {
+    // Disposition through the ONE shared service (Phase 2C): sealing,
+    // completion fences, publication intents, strikes, and failure classes
+    // all live in disposeBuildOutcome now; this loop only reports.
+    const disposition = disposeBuildOutcome(
+      {
+        store,
+        policy: "tick",
         leaseId: lease,
         runId,
         taskId: id,
-        decision: result.parked.decision,
-        artifactIds: result.parked.artifactIds,
-        now: clock(),
-      });
-      if (sealed.ok) {
-        // A park is the system working: the agent refused to guess, the
-        // question is in the attention surface, the pass moves on — and it
-        // ends any failure streak: refusing to guess is not failing.
-        store.resetStrikes(ref.id);
-        dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}`, worktree: leased.worktree.path });
+        taskRef: ref.id,
+        runner,
+        repo,
+        branch,
+        origin: ref.origin,
+        provider: spec.provider,
+        model: spec.model,
+        worktreePath: leased.worktree.path,
+        clock,
+      },
+      result,
+    );
+    switch (disposition.kind) {
+      case "parked":
+        dispatched.push({ id, outcome: "parked", reason: `decision:${disposition.decisionId}`, worktree: leased.worktree.path });
         parked++;
-      } else {
+        break;
+      case "park-fenced":
         dispatched.push({ id, outcome: "failed", reason: "fenced", worktree: leased.worktree.path });
         broke++;
-      }
-      continue;
-    }
-
-    if (result.ok) {
-      // The completion has to be *accepted*, not assumed. A fence here means
-      // the world moved past this lease between the builder's final check and
-      // now; the commit exists on the branch, but the task is not ours to
-      // close, and reporting "built" would count work the fence disowned.
-      // One transaction around all of it: the fenced release, the run's
-      // outcome, and — when a grant covers this task — the publication
-      // intent, so "done" and "this must reach a PR" cannot come apart.
-      const sealed = store.transact(() => {
-        const fence = completeFenced(store, lease, "done", clock());
-        if (!fence.ok) return fence;
-        // The disowned arm (external dispatch, v4 §24): the tracker closed
-        // this mirror while it was being built. The task is already
-        // cancelled inside completeFenced; the run says what happened, the
-        // branch stays as evidence, and NO publication intent exists
-        // because this arm never reaches the intent block.
-        if (fence.arm === "disowned") {
-          store.finishRun(runId, { outcome: "failed", reason: "external-closed", committed: result.committed, now: clock() });
-          store.enqueueNotification(
-            {
-              dedupeKey: `run:${runId}:external-closed`,
-              kind: "external-closed",
-              subject: `${id}: the tracker closed this while it was being built`,
-              body: `The branch ${branch} is kept as evidence; nothing is published. Reopen the tracker item and \`standing-orders task reopen ${id}\` if the work should continue.`,
-            },
-            clock(),
-          );
-          return fence;
-        }
-        store.finishRun(runId, {
-          outcome: result.noChange === true ? "no-change" : "built",
-          ...(result.noChange === true ? { reason: "handoff" } : {}),
-          committed: result.committed,
-          now: clock(),
-        });
-        // A stated no-change publishes nothing — there is nothing to push,
-        // and an empty PR would be noise wearing a grant.
-        if (result.noChange !== true && result.committed) {
-          const grant = store.publicationGrantFor(repo);
-          const headSha = store.getRun(runId)?.headRevision ?? null;
-          if (
-            grant !== null &&
-            headSha !== null &&
-            branch.startsWith(grant.headPrefix) &&
-            (grant.selector === "all" || ref.origin === "ours")
-          ) {
-            const intentId = store.createPublicationIntent(
-              {
-                run: runId,
-                taskRef: ref.id,
-                githubRepo: grant.githubRepo,
-                remote: grant.remote,
-                base: grant.base,
-                head: branch,
-                headSha,
-                bodyHash: "",
-                draft: grant.draft,
-              },
-              clock(),
-            );
-            // The body's identity is computed from the rows this very
-            // transaction made durable — reproducible after any crash.
-            const publication = store.publicationForRun(runId);
-            if (publication !== null) {
-              store.handle
-                .prepare("UPDATE publication SET body_hash = ? WHERE id = ?")
-                .run(bodyHashOf(publicationBody(store, publication)), intentId);
-            }
-          }
-        }
-        return fence;
-      });
-      if (sealed.ok && sealed.arm === "disowned") {
+        break;
+      case "disowned":
         dispatched.push({ id, outcome: "failed", reason: "external-closed", branch, worktree: leased.worktree.path });
         broke++;
-        continue;
-      }
-      if (sealed.ok) {
-        // A concluded success ends the failure streak and its backoff —
-        // and proves the credential, clearing any quota stamp it was
-        // dispatched through as a half-open probe.
-        store.resetStrikes(ref.id);
-        store.clearQuota(runner, spec.provider, spec.model ?? "");
-        dispatched.push({
-          id,
-          outcome: "built",
-          committed: result.committed,
-          branch,
-          worktree: leased.worktree.path,
-        });
+        break;
+      case "built":
+        dispatched.push({ id, outcome: "built", committed: disposition.committed, branch, worktree: leased.worktree.path });
         built++;
-      } else {
-        // The run record is canonical; the report and any notification say
-        // exactly what it says, in one transaction, so a crash between them
-        // cannot leave a failure nobody hears about.
-        store.transact(() => {
-          store.finishRun(runId, { outcome: "failed", reason: "fenced", committed: result.committed, now: clock() });
-          store.enqueueNotification(
-            {
-              dedupeKey: `run:${runId}:fenced`,
-              kind: "build-fenced",
-              subject: `${id}: completed, but the lease was gone`,
-              body: `The commit exists on ${branch}, but the world moved past this lease before the completion was accepted. Look before anything reuses it.`,
-            },
-            clock(),
-          );
-        });
+        break;
+      case "built-fenced":
         dispatched.push({ id, outcome: "failed", reason: "fenced", branch, worktree: leased.worktree.path });
         broke++;
-      }
-      continue;
+        break;
+      case "skipped":
+        dispatched.push({ id, outcome: "skipped", reason: disposition.reason });
+        break;
+      case "fenced":
+        dispatched.push({ id, outcome: "failed", reason: "fenced", worktree: leased.worktree.path });
+        broke++;
+        break;
+      case "malformed":
+        dispatched.push({ id, outcome: "failed", reason: disposition.sealed ? "malformed-decision" : "fenced", worktree: leased.worktree.path });
+        broke++;
+        break;
+      case "failed":
+        dispatched.push({
+          id,
+          outcome: "failed",
+          reason: disposition.sealed
+            ? `${disposition.failureClass}${disposition.disposition === "backoff" ? ` — retry ${disposition.strikes}/3` : disposition.disposition === "stalled" ? " — stalled" : ""}`
+            : "fenced",
+          worktree: leased.worktree.path,
+        });
+        broke++;
+        break;
+      case "recorded":
+        // The standalone-only arm; unreachable under the tick policy.
+        break;
+      case "invariant":
+        dispatched.push({ id, outcome: "failed", reason: disposition.reason });
+        broke++;
+        break;
     }
-
-    if (result.reason === "unapproved" || result.reason === "scope-changed") {
-      // Approval drifted between our prefilter and the builder's own gate.
-      // That is a person's pending decision, not a fault.
-      release(store, lease, clock());
-      store.finishRun(runId, { outcome: "refused", reason: result.reason, now: clock() });
-      dispatched.push({ id, outcome: "skipped", reason: result.reason });
-      continue;
-    }
-
-    if (result.reason === "fenced") {
-      // The lease did not survive the build. Nothing is ours to release or to
-      // mark; the work sits in the worktree for whoever holds the task now.
-      store.finishRun(runId, { outcome: "refused", reason: "fenced", now: clock() });
-      dispatched.push({ id, outcome: "failed", reason: "fenced", worktree: leased.worktree.path });
-      broke++;
-      continue;
-    }
-
-    if (result.reason === "malformed-decision") {
-      // The agent tried to park and could not say what, twice over. The
-      // fenced transaction records the incident, holds the task so the next
-      // pass does not spend the same tokens on the same wall, and pages a
-      // person — atomically, so a crash cannot leave the stall silent.
-      const sealed = finalizeMalformedFenced(store, {
-        leaseId: lease,
-        runId,
-        taskId: id,
-        problems: result.problems ?? [],
-        now: clock(),
-      });
-      dispatched.push({
-        id,
-        outcome: "failed",
-        reason: sealed.ok ? "malformed-decision" : "fenced",
-        worktree: leased.worktree.path,
-      });
-      broke++;
-      continue;
-    }
-
-    if (
-      result.reason === "agent" ||
-      result.reason === "agent-reported" ||
-      result.reason === "no-op" ||
-      result.reason === "moved-head" ||
-      result.reason === "moved-branch" ||
-      result.reason === "timeout" ||
-      result.reason === "git" ||
-      result.reason === "commit-failure" ||
-      result.reason === "provider-init" ||
-      result.reason === "setup" ||
-      result.reason === "revision-brief" ||
-      result.reason === "stopped"
-    ) {
-      // The attempt itself broke. One fenced transaction decides what that
-      // means — a strike and a doubling backoff, a stall after three, or a
-      // commit-failure incident guarding the preserved worktree — and the
-      // run record is canonical over anything this summary says. The
-      // classification trusts only what the machine itself observed
-      // (finding 19): a timeout is retryable infrastructure, protocol
-      // violations are the agent's, commit-stage breakage is its own thing,
-      // and every other nonzero exit is 'unknown' with bounded retry.
-      const failureClass: FailureClass =
-        result.reason === "agent-reported"
-          ? "agent-reported"
-          : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
-            ? "no-op"
-            : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "stopped"
-              ? "retryable-infra"
-              : result.reason === "commit-failure"
-                ? "commit-failure"
-                : "unknown";
-      const sealed = finalizeFailureFenced(store, {
-        leaseId: lease,
-        runId,
-        taskId: id,
-        failureClass,
-        message: result.message,
-        worktree: leased.worktree.path,
-        now: clock(),
-      });
-      dispatched.push({
-        id,
-        outcome: "failed",
-        reason: sealed.ok
-          ? `${failureClass}${sealed.disposition === "backoff" ? ` — retry ${sealed.strikes}/3` : sealed.disposition === "stalled" ? " — stalled" : ""}`
-          : "fenced",
-        worktree: leased.worktree.path,
-      });
-      broke++;
-      continue;
-    }
-
-    // no-claim, not-yours, not-leased, protected-branch, wrong-branch,
-    // moved-branch: invariants this dispatcher was supposed to uphold. The
-    // task is left queued for a correct pass; this one admits it broke.
-    release(store, lease, clock());
-    store.finishRun(runId, { outcome: "refused", reason: result.reason, now: clock() });
-    dispatched.push({ id, outcome: "failed", reason: result.reason });
-    broke++;
   }
 
   const summary = () => {
