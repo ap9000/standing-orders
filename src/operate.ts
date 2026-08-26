@@ -2883,6 +2883,7 @@ async function startConsole(options: {
   registryPath?: string;
   upConsole?: boolean;
   editorLinks?: "vscode";
+  attended?: import("./serve.js").ServeOptions["attended"];
 }): Promise<{ server: ReturnType<typeof createDecisionServer>; port: number; url: string }> {
   const { context } = options;
   const server = createDecisionServer({
@@ -2900,6 +2901,7 @@ async function startConsole(options: {
     ...(options.registryPath === undefined ? {} : { registryPath: options.registryPath }),
     ...(options.upConsole === undefined ? {} : { upConsole: options.upConsole }),
     ...(options.editorLinks === undefined ? {} : { editorLinks: options.editorLinks }),
+    ...(options.attended === undefined ? {} : { attended: options.attended }),
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -5331,6 +5333,14 @@ async function upCommand(
       poolRoot: pool,
       repos,
       upConsole: true,
+      attended: {
+        runner: runnerName,
+        coordinator: context.heldCoordinator,
+        headOf: async (repo: string) => {
+          const answer = await gitRun("git", ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: repo });
+          return answer.code === 0 ? answer.stdout.trim() : null;
+        },
+      },
       registryPath: configPath(process.env, homedir()),
       ...(text(flags, "project-root") === undefined ? {} : { projectRoots: [text(flags, "project-root") as string] }),
       ...(text(flags, "public-url") === undefined ? {} : { publicUrl: text(flags, "public-url") as string }),
@@ -7047,33 +7057,59 @@ function scopeTask(
     }
     explicitProfile = resolvedRouting.profile;
   }
-  const scope = propose(store, {
-    taskId: id,
-    goal,
-    outOfScope: text(flags, "not") ?? null,
-    touches,
-    ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
-    ...(explicitProfile === undefined ? {} : { profile: explicitProfile }),
-    now,
-    mutation: mutationFrom(flags, now),
+  // The race branch shares ONE transaction with the scope save (round-6
+  // finding 5): the attended exclusion refuses BEFORE anything writes, and
+  // a filing failure rolls the proposal back — a refused race never leaves
+  // a rewritten scope behind it.
+  const filed = store.transact(():
+    | { ok: true; scope: ReturnType<typeof propose> }
+    | { ok: false; reason: string; message: string } => {
+    if (plannedRace !== null && plannedRace.ok) {
+      const raceRef = store.refFor(BUILT_IN, id);
+      if (store.openAuthorizationFor(raceRef.id) !== null) {
+        return {
+          ok: false,
+          reason: "attended-open",
+          message: "an attended authorization is open on this task — revoke it before filing a tournament",
+        };
+      }
+    }
+    const proposed = propose(store, {
+      taskId: id,
+      goal,
+      outOfScope: text(flags, "not") ?? null,
+      touches,
+      ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
+      ...(explicitProfile === undefined ? {} : { profile: explicitProfile }),
+      now,
+      mutation: mutationFrom(flags, now),
+    });
+    if (plannedRace !== null && plannedRace.ok) {
+      const plan = plannedRace.plan;
+      const raceRef = store.refFor(BUILT_IN, id);
+      store.fileTournamentTerms(
+        {
+          taskRef: raceRef.id,
+          raceDigest: plan.raceDigest,
+          agents: plan.agents,
+          perAgentBudgetMicrousd: plan.perAgentBudgetMicrousd,
+          overrunReserveMicrousd: plan.overrunReserveMicrousd,
+          totalBudgetMicrousd: plan.totalBudgetMicrousd,
+          priceVersion: plan.priceVersion,
+          publicationPolicy: plan.publicationPolicy,
+        },
+        now,
+      );
+    }
+    return { ok: true, scope: proposed };
   });
+  if (!filed.ok) {
+    return fail(write, json, "task scope", filed.reason, filed.message, EXIT.refused);
+  }
+  const scope = filed.scope;
 
   if (plannedRace !== null && plannedRace.ok) {
     const plan = plannedRace.plan;
-    const ref = store.refFor(BUILT_IN, id);
-    store.fileTournamentTerms(
-      {
-        taskRef: ref.id,
-        raceDigest: plan.raceDigest,
-        agents: plan.agents,
-        perAgentBudgetMicrousd: plan.perAgentBudgetMicrousd,
-        overrunReserveMicrousd: plan.overrunReserveMicrousd,
-        totalBudgetMicrousd: plan.totalBudgetMicrousd,
-        priceVersion: plan.priceVersion,
-        publicationPolicy: plan.publicationPolicy,
-      },
-      now,
-    );
     const worst = plan.perAgentReserveMicrousd.reduce((sum, reserve) => sum + plan.perAgentBudgetMicrousd + reserve, 0);
     return succeed(write, json, "task scope", { scope, race: plan }, () => [
       `Scope and tournament written for ${id}. Nothing builds until somebody approves BOTH, with one yes:`,

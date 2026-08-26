@@ -541,3 +541,45 @@ function describeApproval(approval: Approval): string {
   }
   return "no — nothing will build this until somebody agrees to it";
 }
+
+// ---- attended authorization terms (Parity II Phase 2E, ruling 12) ----------
+
+/**
+ * EVERY rendered term of one watched attempt — what the form shows is what
+ * the password signs, byte for byte. The subset the dispatch proof
+ * re-derives (scopeDigest, profileDigest, profileJson, repo, head) is read
+ * back by the builder and the coordinator; the rest are the product terms
+ * the ceremony renders in words: the budget as a STOP THRESHOLD, the turn
+ * cap, the per-turn clock whose expiry is SESSION-FATAL, and the absolute
+ * expiry. Continuation carries the parent attempt and the follow-up text
+ * INSIDE the signed terms (v3 R7).
+ */
+export type AttendedTerms = {
+  taskId: string;
+  scopeDigest: string;
+  profileDigest: string;
+  profileJson: string;
+  repo: string;
+  runner: string;
+  runnerGeneration: number;
+  head: string;
+  maxSessionTurns: number;
+  budgetMicrousd: number;
+  turnTimeoutSeconds: number;
+  absoluteExpiry: string;
+  parentRun?: number | null;
+  followup?: string | null;
+};
+
+/** Deterministic bytes: sorted keys, undefined dropped — the signed text. */
+export function attendedTermsJson(terms: AttendedTerms): string {
+  return canonicalJson(terms);
+}
+
+/** The composite digest one password signs (ruling 12), domain-separated. */
+export function attendedDigestOf(terms: AttendedTerms): string {
+  return createHash("sha256")
+    .update(`standing-orders:attended:${attendedTermsJson(terms)}`)
+    .digest("hex")
+    .slice(0, 32);
+}

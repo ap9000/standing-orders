@@ -42,7 +42,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -84,11 +84,17 @@ import {
   type TaskState,
   type WorktreeRow,
 } from "./store.js";
+import { attendedLivenessState } from "./liveness.js";
 import {
   approvalOf,
   approve as approveScope,
+  attendedDigestOf,
+  attendedTermsJson,
   authenticateApprover,
+  canonicalProfileJson,
+  profileDigestOf,
   proposeGuarded,
+  type AttendedTerms,
   type Scope,
 } from "./scope.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
@@ -196,6 +202,16 @@ export type ServeOptions = {
    * this device. "vscode" is the only value; the scheme is never data.
    */
   editorLinks?: "vscode";
+  /**
+   * The attended-mint capability (Phase 2E): present only on a co-located
+   * `up` console, which alone can hold a session. `headOf` reads the
+   * repository's CURRENT head — the exact commit the signed terms pin.
+   */
+  attended?: {
+    runner: string;
+    headOf: (repo: string) => Promise<string | null>;
+    coordinator?: import("./held.js").HeldSessionCoordinator;
+  };
   /** Injected by tests: the onboarding ceremony's gh-facing halves — the
    * ceremony's gating, nonce, and enrollment logic is what the HTTP tests
    * prove; gh itself is proved by onboard.test.ts. */
@@ -2025,6 +2041,38 @@ export function createDecisionServer(options: ServeOptions): Server {
         csrf: who.via === "cookie" ? who.session.csrf : "",
         nonce,
         problem,
+        attended: (() => {
+          if (options.attended === undefined || ref === null || who.via !== "cookie" || store.isDemo()) return null;
+          const open = store.openAuthorizationFor(ref.id);
+          if (open !== null) {
+            const spent = store.authorizationSpendMicrousd(open.id);
+            const turnsUsed =
+              open.attemptRun === null ? 0 : store.sessionTurnsOf(open.attemptRun).length;
+            const state = attendedWatchWords(open.lastBeatAt, now, open.absoluteExpiry);
+            return {
+              canMint: false,
+              open: {
+                id: open.id,
+                state,
+                expiresAt: open.absoluteExpiry,
+                turnsUsed,
+                cap: open.maxSessionTurns,
+                spentMicrousd: spent,
+                budgetMicrousd: open.budgetMicrousd,
+                running: open.attemptRun !== null,
+              },
+            };
+          }
+          const canMint =
+            scope !== null &&
+            !approvalOf(scope).approved &&
+            scope.profileState === "resolved" &&
+            (scope.profile?.provider ?? "") === "claude" &&
+            ref.repo !== null &&
+            store.activeTournamentTerms(ref.id) === null &&
+            store.getTask(taskId)?.state === "queued";
+          return { canMint, open: null };
+        })(),
         now,
       };
   }
@@ -2841,6 +2889,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/contest/${contestId}`);
     }
 
+    const attendAct = matchTaskPath(url.pathname, "/(attend-preview|attend|attend-revoke)$");
+    if (attendAct !== null) {
+      return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
+    }
+
     const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
@@ -3371,6 +3424,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/r/${id}?noted=1#review`);
     }
 
+    if (url.pathname === "/session/attended-beat") {
+      // The liveness beat (Phase 2E, v2 S2f as amended): cookie-only, and
+      // it CARRIES the authorization id — a page watching task A can never
+      // keep task B's authorization alive. The durable column is the
+      // authoritative clock; the store suppresses only duplicate-tab
+      // writes inside 5 seconds. Never extends cookies, never touches
+      // absolute expiry.
+      if (who.via !== "cookie") return refuse(response, who, 403, "watching is a browser session's act");
+      const authorizationId = body.get("authorization") ?? "";
+      const beaten = store.readAuthorization(authorizationId);
+      if (beaten === null || beaten.closedAt !== null) {
+        return respond(response, 410, "application/json; charset=utf-8", JSON.stringify({ ok: false, reason: "closed" }));
+      }
+      const beatRef = store.refForId(beaten.taskRef);
+      if (beatRef === null || !visible(beatRef.repo)) {
+        return refuse(response, who, 404, "no such authorization");
+      }
+      store.beatAuthorization(authorizationId, now);
+      if (beaten.attemptRun !== null) options.attended?.coordinator?.poke(beaten.attemptRun);
+      return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true }));
+    }
+
     if (url.pathname === "/session/editor-links") {
       // The session half of the editor-link activation (arc 6, finding 1):
       // only the person at the browser can say "this device holds the
@@ -3579,6 +3654,178 @@ export function createDecisionServer(options: ServeOptions): Server {
     return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
   }
 
+  /**
+   * Assemble the LIVE rendered terms of one watched attempt, or say in
+   * words why there are none (Phase 2E, ruling 12). Everything here is
+   * re-read at confirm time — the digest is the proof the world held.
+   */
+  async function liveAttendedTerms(
+    taskId: string,
+    inputs: { minutes: number; turns: number; budgetMicrousd: number; expiry?: string },
+    now: Date,
+  ): Promise<{ ok: true; terms: AttendedTerms } | { ok: false; problem: string }> {
+    if (options.attended === undefined) return { ok: false, problem: "this console cannot hold a session — start it with `standing-orders up`" };
+    const ref = store.lookupRef(taskId);
+    if (ref === null) return { ok: false, problem: "no such task" };
+    const scope = store.getScope(taskId);
+    if (scope === null) return { ok: false, problem: "file a scope first — the terms come from it" };
+    if (approvalOf(scope).approved) return { ok: false, problem: "the scope is approved — it already dispatches unattended" };
+    const pinned = scope.profileState === "resolved" ? (scope.profile ?? null) : null;
+    if (pinned === null) {
+      return { ok: false, problem: "the scope cannot say exactly what runs — name a model (task scope --model, or config set build)" };
+    }
+    if (pinned.provider !== "claude") {
+      return { ok: false, problem: `${pinned.provider} cannot hold a watched session yet — this road is claude-only for now` };
+    }
+    if (store.activeTournamentTerms(ref.id) !== null) {
+      return { ok: false, problem: "this task races a tournament — one attempt cannot authorize N racers" };
+    }
+    const repo = ref.repo;
+    if (repo === null) return { ok: false, problem: "place the task in a repository first — the terms pin the exact head" };
+    const head = await options.attended.headOf(repo);
+    if (head === null) return { ok: false, problem: `the head of ${repo} cannot be read right now` };
+    const minutes = Math.max(5, Math.min(240, Math.floor(inputs.minutes) || 60));
+    const turns = Math.max(1, Math.min(100, Math.floor(inputs.turns) || 20));
+    const budget = Math.max(100_000, Math.min(50_000_000, Math.floor(inputs.budgetMicrousd) || 2_000_000));
+    return {
+      ok: true,
+      terms: {
+        taskId,
+        scopeDigest: scope.digest,
+        profileDigest: profileDigestOf(pinned),
+        profileJson: canonicalProfileJson(pinned),
+        repo,
+        runner: options.attended.runner,
+        runnerGeneration: 0,
+        head,
+        maxSessionTurns: turns,
+        budgetMicrousd: budget,
+        turnTimeoutSeconds: pinned.timeoutSeconds,
+        // The expiry is FIXED at preview and carried through the confirm —
+        // a timestamp recomputed at signing time would change the digest
+        // every millisecond and make the proof unmatchable. The confirm's
+        // bound check keeps a stale form honest.
+        absoluteExpiry:
+          inputs.expiry !== undefined &&
+          Date.parse(inputs.expiry) > now.getTime() &&
+          Date.parse(inputs.expiry) <= now.getTime() + 241 * 60_000
+            ? inputs.expiry
+            : new Date(now.getTime() + minutes * 60_000).toISOString(),
+      },
+    };
+  }
+
+  /** The signed form, rendered from EXACT terms — what you read is what the password signs. */
+  function attendConfirmScreen(
+    response: ServerResponse,
+    who: Who,
+    terms: AttendedTerms,
+    inputs: { minutes: number; turns: number; budgetMicrousd: number },
+    digest: string,
+    nonce: string,
+    csrf: string,
+  ): void {
+    const scope = store.getScope(terms.taskId);
+    const body =
+      `<h1>run ${escape(terms.taskId)} once, while you watch</h1>` +
+      `<form method="post" action="${taskHref(terms.taskId)}/attend" class="card approve-form">` +
+      `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+      `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
+      `<input type="hidden" name="digest" value="${escape(digest)}">` +
+      `<input type="hidden" name="minutes" value="${inputs.minutes}">` +
+      `<input type="hidden" name="turns" value="${inputs.turns}">` +
+      `<input type="hidden" name="budget" value="${inputs.budgetMicrousd}">` +
+      `<input type="hidden" name="expiry" value="${escape(terms.absoluteExpiry)}">` +
+      `<p><strong>your password signs exactly this:</strong></p>` +
+      `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? "")}</p>` +
+      `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
+      `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
+      `<p class="meta">runs on</p><p class="recap" style="margin-top:0">claude · ${escape(String((JSON.parse(terms.profileJson) as { profile?: { model?: string } }).profile?.model ?? ""))} — asks before edits outside the worktree (acceptEdits)</p>` +
+      `<p class="meta">repository · head</p><p class="recap mono" style="margin-top:0">${escape(terms.repo)} @ ${escape(terms.head.slice(0, 12))}</p>` +
+      `<p class="meta">worker</p><p class="recap" style="margin-top:0">${escape(terms.runner)} (this machine)</p>` +
+      `<p class="meta">spending</p><p class="recap" style="margin-top:0">up to about $${(terms.budgetMicrousd / 1_000_000).toFixed(2)} — the agent stops as soon as its total crosses this; the final step may run a little past it</p>` +
+      `<p class="meta">conversation</p><p class="recap" style="margin-top:0">at most ${terms.maxSessionTurns} messages to the agent, this whole session; each may work up to ${Math.round(terms.turnTimeoutSeconds / 60)} minutes — one that runs past that ends the whole session. If it needs a repair, the repair uses the same session, model, and clock.</p>` +
+      `<p class="meta">while you watch</p><p class="recap" style="margin-top:0">this page being open is what keeps it running — close it and the session winds down within a minute. Everything ends by ${escape(when(terms.absoluteExpiry))} regardless. One attempt; it never converts into unattended work.</p>` +
+      `<label>your password, typed again — a signed-in session alone cannot authorize work<input type="password" name="token" autocomplete="current-password"></label>` +
+      `<div class="sticky-actions"><button type="submit">run it while I watch</button></div>` +
+      `</form>` +
+      `<p class="meta"><a href="${taskHref(terms.taskId)}">back to the task</a></p>`;
+    return sendScreen(response, 200, screen(`attend \u00b7 ${terms.taskId}`, body, { chrome: chromeFor(null, "tasks") }));
+  }
+
+  async function attendMutation(
+    response: ServerResponse,
+    who: Who,
+    taskId: string,
+    verb: string,
+    body: URLSearchParams,
+    now: Date,
+  ): Promise<void> {
+    const ref = store.lookupRef(taskId);
+    if (ref === null || store.getTask(taskId) === null || !visible(ref.repo)) {
+      return refuse(response, who, 404, "no such task", "/tasks");
+    }
+    if (who.via !== "cookie") return refuse(response, who, 403, "watching is a browser session's act");
+    if (store.isDemo()) return refuse(response, who, 403, "the demo authorizes nothing");
+
+    if (verb === "attend-revoke") {
+      const open = store.openAuthorizationFor(ref.id);
+      if (open === null) return refuse(response, who, 409, "nothing to revoke", taskHref(taskId));
+      store.closeAuthorization(open.id, "revoked", now);
+      if (open.attemptRun !== null) options.attended?.coordinator?.poke(open.attemptRun);
+      return redirect(response, taskHref(taskId));
+    }
+
+    const inputs = {
+      minutes: Number(body.get("minutes") ?? "60"),
+      turns: Number(body.get("turns") ?? "20"),
+      budgetMicrousd: Number(body.get("budget") ?? String(store.getScope(taskId)?.budgetMicrousd ?? 2_000_000)),
+      ...(body.get("expiry") === null ? {} : { expiry: body.get("expiry") as string }),
+    };
+    if (store.openAuthorizationFor(ref.id) !== null) {
+      return refuse(response, who, 409, "an authorization is already open — revoke it first", taskHref(taskId));
+    }
+    const live = await liveAttendedTerms(taskId, inputs, now);
+    if (!live.ok) return refuse(response, who, 409, live.problem, taskHref(taskId));
+    const digest = attendedDigestOf(live.terms);
+
+    if (verb === "attend-preview") {
+      const nonce = mintApprovalNonce(who.name, `attend-${taskId}`, digest);
+      return attendConfirmScreen(response, who, live.terms, inputs, digest, nonce, who.session.csrf);
+    }
+
+    // attend: the yes. The nonce proves THIS form; the digest re-derived
+    // from live state proves the world held between reading and signing.
+    const nonce = body.get("nonce") ?? "";
+    if (!consumeApprovalNonce(nonce, who.name, `attend-${taskId}`, body.get("digest") ?? "")) {
+      return refuse(response, who, 409, "that form is stale — read it again", taskHref(taskId));
+    }
+    if (digest !== (body.get("digest") ?? "")) {
+      return refuse(response, who, 409, "the world moved while you were reading (scope, model, or head) — read it again", taskHref(taskId));
+    }
+    const token = body.get("token") ?? "";
+    if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      return refuse(response, who, 403, "authorizing takes your password, typed again", taskHref(taskId));
+    }
+    const minted = store.mintAttendedAuthorization({
+      id: randomUUID(),
+      taskRef: ref.id,
+      approver: who.name,
+      runner: live.terms.runner,
+      runnerGeneration: live.terms.runnerGeneration,
+      compositeDigest: digest,
+      termsJson: attendedTermsJson(live.terms),
+      maxSessionTurns: live.terms.maxSessionTurns,
+      budgetMicrousd: live.terms.budgetMicrousd,
+      absoluteExpiry: live.terms.absoluteExpiry,
+      now,
+    });
+    if (!minted.ok) return refuse(response, who, 409, "an authorization is already open — revoke it first", taskHref(taskId));
+    // The first beat is the mint itself: the person is visibly here.
+    store.beatAuthorization(minted.authorization.id, now);
+    return redirect(response, taskHref(taskId));
+  }
+
   function taskMutation(
     response: ServerResponse,
     who: Who,
@@ -3766,30 +4013,44 @@ export function createDecisionServer(options: ServeOptions): Server {
           }
           plannedRace = planned.plan;
         }
-        const proposed = proposeGuarded(store, {
-          taskId,
-          goal: body.get("goal") ?? "",
-          outOfScope: body.get("not") ?? null,
-          touches: (body.get("touches") ?? "").split(/[\n,]/),
-          ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
-          sawDigest: sawDigest === null || sawDigest === "" ? null : sawDigest,
-          taskRef: ref.id,
-          now,
-        });
-        if (!proposed.ok) {
-          const status = proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400;
-          return taskScreen(response, who, taskId, `scope not saved: ${proposed.reason}`, status);
-        }
-        if (plannedRace === null) {
-          // Switching back to "one agent" withdraws a standing race — the
-          // deactivated row survives as history, and the approval card
-          // returns to the scope alone.
-          store.retractTournamentTerms(ref.id);
-        }
+        // Refusals that must hold ATOMICALLY with the save (round-6 finding
+        // 5): a race request refused AFTER proposeGuarded would still have
+        // rewritten the scope — so proposal, the attended exclusion, and
+        // race-term filing share one transaction, and every refusal inside
+        // it rolls the whole act back.
         if (plannedRace !== null && store.mirrorByTask(taskId) !== null) {
           return taskScreen(response, who, taskId, "external work races in a follow-up release — file the tournament on a local task", 409);
         }
-        if (plannedRace !== null) {
+        const saved = store.transact(():
+          | { ok: true }
+          | { ok: false; status: number; message: string } => {
+          if (plannedRace !== null && store.openAuthorizationFor(ref.id) !== null) {
+            return { ok: false, status: 409, message: "an attended authorization is open on this task — revoke it before filing a tournament" };
+          }
+          const proposed = proposeGuarded(store, {
+            taskId,
+            goal: body.get("goal") ?? "",
+            outOfScope: body.get("not") ?? null,
+            touches: (body.get("touches") ?? "").split(/[\n,]/),
+            ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
+            sawDigest: sawDigest === null || sawDigest === "" ? null : sawDigest,
+            taskRef: ref.id,
+            now,
+          });
+          if (!proposed.ok) {
+            return {
+              ok: false,
+              status: proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400,
+              message: `scope not saved: ${proposed.reason}`,
+            };
+          }
+          if (plannedRace === null) {
+            // Switching back to "one agent" withdraws a standing race — the
+            // deactivated row survives as history, and the approval card
+            // returns to the scope alone.
+            store.retractTournamentTerms(ref.id);
+            return { ok: true };
+          }
           store.fileTournamentTerms(
             {
               taskRef: ref.id,
@@ -3803,7 +4064,9 @@ export function createDecisionServer(options: ServeOptions): Server {
             },
             now,
           );
-        }
+          return { ok: true };
+        });
+        if (!saved.ok) return taskScreen(response, who, taskId, saved.message, saved.status);
         return redirect(response, taskHref(taskId));
       }
       case "approve": {
@@ -7076,6 +7339,11 @@ function taskBody(data: {
   csrf: string;
   nonce: string;
   problem: string | null;
+  /** The attended road (Phase 2E): mint offer, or the open authorization. */
+  attended?: {
+    canMint: boolean;
+    open: { id: string; state: string; expiresAt: string; turnsUsed: number; cap: number; spentMicrousd: number; budgetMicrousd: number; running: boolean } | null;
+  } | null;
   now: Date;
 }): string {
   const { task, scope } = data;
@@ -7248,6 +7516,38 @@ function taskBody(data: {
           `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : "approve scope and tournament — one yes covers both"}</button></div>`,
           `</form>`,
         ].join("\n");
+
+  // The attended road (Phase 2E): beside the approval, never replacing it.
+  // The mint button leads to the CONFIRM screen where every term renders
+  // and the password signs; an open authorization shows its state, its
+  // revoke, and — through the page script — the liveness beat that IS
+  // "while you watch".
+  const attended = data.attended ?? null;
+  const attendedCard =
+    attended === null
+      ? ""
+      : attended.open !== null
+        ? [
+            `<div class="card" data-attended="${escape(attended.open.id)}">`,
+            `<p><strong>attended session</strong> <span class="meta">${escape(attended.open.state)}</span></p>`,
+            `<p class="meta">${attended.open.running ? "the agent is running while you watch" : "waiting to dispatch to this machine"} · ${attended.open.turnsUsed}/${attended.open.cap} messages · $${(attended.open.spentMicrousd / 1_000_000).toFixed(2)} of $${(attended.open.budgetMicrousd / 1_000_000).toFixed(2)} · everything ends by ${escape(when(attended.open.expiresAt))}</p>`,
+            `<p class="meta">this page being open keeps it alive — close it and the session winds down within a minute</p>`,
+            `<form method="post" action="${taskHref(task.id)}/attend-revoke" class="inline">`,
+            `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+            `<button type="submit">revoke — stop the session</button>`,
+            `</form>`,
+            `</div>`,
+          ].join("\n")
+        : attended.canMint
+          ? [
+              `<form method="post" action="${taskHref(task.id)}/attend-preview" class="card">`,
+              `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+              `<p><strong>or run it once while you watch</strong></p>`,
+              `<p class="meta">no approval filed: one attempt, on this machine, only while this page is open. You will read every term before your password signs it.</p>`,
+              `<button type="submit">read the terms</button>`,
+              `</form>`,
+            ].join("\n")
+          : "";
 
   const scopeForm = [
     `<details${scope === null ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
@@ -7565,6 +7865,7 @@ function taskBody(data: {
     planCard,
     revisionCard,
     approveForm,
+    attendedCard,
     scopeForm,
     waitsForCard,
     holds,
@@ -7573,7 +7874,35 @@ function taskBody(data: {
 }
 
 function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen {
-  return screen(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome });
+  // The beat (Phase 2E): while an authorization is open, THIS page being
+  // visible is what "while you watch" means — a 15-second durable beat
+  // carrying the authorization id, paused exactly when the tab hides.
+  // Nothing else on the page depends on it; a beat that fails simply lets
+  // the session lapse, which is the honest outcome of not watching.
+  const open = data.attended?.open ?? null;
+  const functional =
+    open === null
+      ? undefined
+      : {
+          script: [
+            "(function () {",
+            `  var authorization = ${JSON.stringify(open.id)};`,
+            `  var csrf = ${JSON.stringify(data.csrf)};`,
+            "  var send = function () {",
+            "    if (document.hidden) return;",
+            "    fetch('/session/attended-beat', {",
+            "      method: 'POST',",
+            "      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },",
+            "      body: 'csrf=' + encodeURIComponent(csrf) + '&authorization=' + encodeURIComponent(authorization),",
+            "    }).catch(function () {});",
+            "  };",
+            "  send();",
+            "  setInterval(send, 15000);",
+            "})();",
+          ].join("\n"),
+          fetches: true,
+        };
+  return screen(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome, ...(functional === undefined ? {} : { functional }) });
 }
 
 /**
@@ -8507,4 +8836,14 @@ async function form(request: IncomingMessage): Promise<URLSearchParams> {
     chunks.push(chunk as Buffer);
   }
   return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+}
+
+/** Attended liveness in words for the task card — reads the durable clock. */
+function attendedWatchWords(lastBeatAt: string | null, now: Date, absoluteExpiry: string): string {
+  const state = attendedLivenessState(
+    lastBeatAt === null ? null : Date.parse(lastBeatAt),
+    now.getTime(),
+    Date.parse(absoluteExpiry),
+  );
+  return state === "live" ? "watching" : state === "grace" ? "watching (a beat behind)" : state === "expired" ? "expired" : "not watching — reopen this page to resume";
 }

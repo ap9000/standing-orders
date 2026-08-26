@@ -4821,3 +4821,229 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     expect(routines.some(one => one.name === "nightly-check" && one.repo === realpathSync(home))).toBe(true);
   });
 });
+
+describe("the attended authorization ceremony (Phase 2E)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+  let taskRef: number;
+
+  const url = (path: string) => `${base}${path}`;
+  const T1 = new Date("2026-08-26T02:00:00.000Z");
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const csrfOf = async (cookie: string): Promise<string> => {
+    const html = await (await fetch(url("/t/t-att"), { headers: { cookie } })).text();
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf in the page");
+    return match[1] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T1);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-att-ev-"));
+    const added = addApprover(store, "alex", T1);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    store.createTask({ id: "t-att", title: "watched work" }, T1);
+    const ref = store.refFor("built-in", "t-att");
+    taskRef = ref.id;
+    store.raw().prepare("UPDATE task_ref SET repo = '/repo' WHERE id = ?").run(ref.id);
+    propose(store, { taskId: "t-att", goal: "the watched goal", outOfScope: null, touches: ["src/"], now: T1 });
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => new Date(),
+      attended: { runner: "mac-a", headOf: async () => "a".repeat(40) },
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the whole road: offer on the task page, EVERY term on the confirm screen, password mints, beat keeps it live, revoke closes it", async () => {
+    const cookie = await login();
+    const page = await (await fetch(url("/t/t-att"), { headers: { cookie } })).text();
+    expect(page).toContain("run it once while you watch");
+    const csrf = await csrfOf(cookie);
+
+    const preview = await fetch(url("/t/t-att/attend-preview"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf }),
+    });
+    expect(preview.status).toBe(200);
+    const confirm = await preview.text();
+    // every term, in words
+    expect(confirm).toContain("the watched goal");
+    expect(confirm).toContain("sonnet");
+    expect(confirm).toContain("/repo @ aaaaaaaaaaaa");
+    expect(confirm).toContain("mac-a");
+    expect(confirm).toContain("stops as soon as its total crosses this");
+    expect(confirm).toContain("ends the whole session");
+    expect(confirm).toContain("never converts into unattended work");
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(confirm)?.[1] as string;
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(confirm)?.[1] as string;
+    const expiry = /name="expiry" value="([^"]+)"/.exec(confirm)?.[1]?.replace(/&#58;|&colon;/g, ":") as string;
+    expect(nonce).toBeTruthy();
+    expect(digest).toBeTruthy();
+    expect(expiry).toBeTruthy();
+
+    const minted = await fetch(url("/t/t-att/attend"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({ csrf, nonce, digest, expiry, minutes: "60", turns: "20", budget: "2000000", token: approverToken }),
+    });
+    expect(minted.status).toBe(303);
+    const open = store.openAuthorizationFor(taskRef);
+    expect(open).not.toBeNull();
+    expect(open?.runner).toBe("mac-a");
+    expect(open?.compositeDigest).toBe(digest);
+    // the mint itself is the first beat
+    expect(open?.lastBeatAt).not.toBeNull();
+
+    // the beat endpoint advances the durable clock, id-bound
+    await new Promise(pass => setTimeout(pass, 20));
+    const beat = await fetch(url("/session/attended-beat"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf, authorization: open?.id ?? "" }),
+    });
+    expect(beat.status).toBe(200);
+
+    // the open card renders with the revoke, and revoke closes it
+    const withOpen = await (await fetch(url("/t/t-att"), { headers: { cookie } })).text();
+    expect(withOpen).toContain("attended session");
+    expect(withOpen).toContain("revoke");
+    const revoked = await fetch(url("/t/t-att/attend-revoke"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({ csrf }),
+    });
+    expect(revoked.status).toBe(303);
+    expect(store.openAuthorizationFor(taskRef)).toBeNull();
+    expect(store.readAuthorization(open?.id ?? "")?.endReason).toBe("revoked");
+  });
+
+  test("the world moving between reading and signing refuses: the digest is the proof", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    const preview = await fetch(url("/t/t-att/attend-preview"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ csrf }),
+    });
+    const confirm = await preview.text();
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(confirm)?.[1] as string;
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(confirm)?.[1] as string;
+    const expiry = /name="expiry" value="([^"]+)"/.exec(confirm)?.[1] as string;
+    // the scope moves while the operator reads
+    propose(store, { taskId: "t-att", goal: "a DIFFERENT goal", outOfScope: null, touches: [], now: new Date() });
+    const minted = await fetch(url("/t/t-att/attend"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({ csrf, nonce, digest, expiry, minutes: "60", turns: "20", budget: "2000000", token: approverToken }),
+    });
+    expect(minted.status).toBe(409);
+    expect(store.openAuthorizationFor(taskRef)).toBeNull();
+  });
+
+  test("a wrong password mints nothing; a second open authorization refuses", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    const preview = await (await fetch(url("/t/t-att/attend-preview"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf }) })).text();
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(preview)?.[1] as string;
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(preview)?.[1] as string;
+    const expiry = /name="expiry" value="([^"]+)"/.exec(preview)?.[1] as string;
+    const refused = await fetch(url("/t/t-att/attend"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({ csrf, nonce, digest, expiry, minutes: "60", turns: "20", budget: "2000000", token: "wrong" }),
+    });
+    expect(refused.status).toBe(403);
+    expect(store.openAuthorizationFor(taskRef)).toBeNull();
+  });
+
+  test("a raced task refuses the offer, and filing a race refuses while an authorization is open — both directions, atomically", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    // direction 1: mint, then try to file a race through the scope form
+    const preview = await (await fetch(url("/t/t-att/attend-preview"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf }) })).text();
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(preview)?.[1] as string;
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(preview)?.[1] as string;
+    const expiry = /name="expiry" value="([^"]+)"/.exec(preview)?.[1] as string;
+    await fetch(url("/t/t-att/attend"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({ csrf, nonce, digest, expiry, minutes: "60", turns: "20", budget: "2000000", token: approverToken }),
+    });
+    expect(store.openAuthorizationFor(taskRef)).not.toBeNull();
+    const goalBefore = store.getScope("t-att")?.goal;
+    const raced = await fetch(url("/t/t-att/scope"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({
+        csrf,
+        goal: "raced goal",
+        not: "",
+        touches: "",
+        sawDigest: store.getScope("t-att")?.digest ?? "",
+        "race-count": "2",
+        "race-model": "claude-sonnet-5",
+        "race-per-usd": "5",
+        "race-total-usd": "14",
+      }),
+    });
+    expect(raced.status).toBe(409);
+    // ATOMIC: the refused race left the scope untouched (round-6 finding 5)
+    expect(store.getScope("t-att")?.goal).toBe(goalBefore);
+    // direction 2: with a race filed (after revoke), the offer disappears
+    await fetch(url("/t/t-att/attend-revoke"), { method: "POST", headers: { cookie }, redirect: "manual", body: new URLSearchParams({ csrf }) });
+    const filedRace = await fetch(url("/t/t-att/scope"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({
+        csrf,
+        goal: "raced goal",
+        not: "",
+        touches: "",
+        sawDigest: store.getScope("t-att")?.digest ?? "",
+        "race-count": "2",
+        "race-model": "claude-sonnet-5",
+        "race-per-usd": "5",
+        "race-total-usd": "14",
+      }),
+    });
+    expect(filedRace.status).toBe(303);
+    const withRace = await (await fetch(url("/t/t-att"), { headers: { cookie } })).text();
+    expect(withRace).not.toContain("run it once while you watch");
+    const racedPreview = await fetch(url("/t/t-att/attend-preview"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf }) });
+    expect(racedPreview.status).toBe(409);
+  });
+});

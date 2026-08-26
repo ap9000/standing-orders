@@ -1,5 +1,40 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 2E.1: the attended ceremony reaches the
+console — mint, beat, revoke, and the race exclusion made atomic.**
+The road shipped in 2A–2D gains its human end. A task with a filed,
+unapproved scope on an `up` console now offers "run it once while you
+watch": the button leads to a CONFIRM screen where EVERY term renders
+in words — goal, exclusions, touches, the pinned claude model and its
+permission posture, repository at the EXACT head, the worker, the
+budget as a stop threshold ("stops as soon as its total crosses this;
+the final step may run a little past it"), the message cap and the
+session-fatal per-turn clock ("one that runs past that ends the whole
+session"), the repair-rides-the-same-session term, the
+watching-is-the-page term, and the absolute expiry — and one password
+signs exactly that: the composite digest (new `AttendedTerms` +
+`attendedDigestOf` in scope.ts, domain-separated, expiry FIXED at
+preview so the proof is matchable) is re-derived from LIVE state at
+the yes, and anything that moved between reading and signing refuses
+with 409, proven by test (the scope moves mid-read → nothing mints).
+The mint is the first beat; from then on POST /session/attended-beat
+— cookie-only, CARRYING the authorization id so a page watching task
+A can never keep task B alive — writes the durable clock every 15
+seconds while the task page is visible, paused exactly when the tab
+hides. The open authorization renders as a card (watching state,
+messages used, spend against budget, hard end time) with its revoke,
+and revoke closes it and pokes the coordinator. Round-6 finding 5 is
+closed on BOTH roads: scope proposal, the attended exclusion, and
+race-term filing now share one transaction in the console form and
+the CLI (`task scope --race`) alike — a refused race leaves the scope
+byte-identical, proven by test — and both tournament directions
+refuse (an open authorization blocks race filing; filed race terms
+hide the offer and refuse the preview). Suite 1224 (4 new HTTP
+ceremony tests). Remaining in 2E: the conversation loop (turn box,
+held-park, answer injection, held repair per round-6 finding 3),
+continuation, state dots, badge.
+
+
 **2026-08-26 — Parity II Phase 2, round-6 cross-check fixes.** Codex's
 round-6 review of spec v6 (the cross-check queued behind its rate
 limit, landing after 2A–2D had shipped) returned REDESIGN with eight
