@@ -25,7 +25,7 @@
  * **Nothing ever prompts.** There is no terminal on the other end at 3am.
  */
 
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   openStore,
@@ -44,7 +44,7 @@ import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from 
 import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, updateRepos } from "./repos.js";
 import { pushPass } from "./push.js";
-import { closeSync, constants as fsConstants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
@@ -109,6 +109,8 @@ import {
   SYNC_MAX_AGE_MS,
 } from "./claim.js";
 import { disposeBuildOutcome } from "./dispose.js";
+import { attendedLivenessState } from "./liveness.js";
+import { HeldSessionCoordinator, sweepHeldOrphans } from "./held.js";
 import {
   proposeGrant,
   describeGrant,
@@ -133,7 +135,7 @@ import {
   validRunnerName,
   RUNNER_NAME_MAX,
 } from "./runner.js";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, type ExecutionProfile } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, type ExecutionProfile } from "./scope.js";
 import { WorktreePool } from "./worktree.js";
 import {
   approveRoutine,
@@ -150,7 +152,7 @@ import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, f
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, resolveScopeProfile, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
-import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit } from "./provider.js";
+import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit, type ProviderId } from "./provider.js";
 import {
   build,
   DEFAULT_BUILD_TIMEOUT_MS,
@@ -610,6 +612,16 @@ type Context = {
    * its own bounds (or the grace kill); admission is what stops.
    */
   shouldStop?: () => boolean;
+  /** The held-session coordinator (Phase 2, attended road) — co-located
+   * `up` only; its absence means attended tasks stay attended-only skips. */
+  heldCoordinator?: import("./held.js").HeldSessionCoordinator;
+  /** This up process's incarnation, for held custody rows. */
+  upIncarnation?: string;
+  /** Short directory for held control sockets (sun_path bound). */
+  heldSocketDir?: string;
+  /** Test seams for the held transport. */
+  heldStarter?: typeof import("./exec.js").startClaudeHeldSession;
+  heldGraceMs?: number;
 };
 
 async function dispatch(
@@ -894,6 +906,21 @@ function claimCommand(
       return fail(write, json, "claim", "external", said[result.detail] ?? "external work is not dispatchable right now", EXIT.refused, {
         detail: result.detail,
       });
+    }
+    if (result.reason === "attended-held") {
+      return fail(write, json, "claim", "attended-held", `an attended session holds this task for ${result.runner}`, EXIT.refused, {
+        runner: result.runner,
+      });
+    }
+    if (result.reason === "attended-only") {
+      return fail(
+        write,
+        json,
+        "claim",
+        "attended-only",
+        "this task runs only while its operator watches — it needs a live attended authorization or a real approval",
+        EXIT.refused,
+      );
     }
     return fail(
       write,
@@ -1301,7 +1328,7 @@ async function buildCommand(
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "planned" | "parked" | "skipped" | "failed" | "contest";
+  outcome: "built" | "planned" | "parked" | "skipped" | "failed" | "contest" | "held";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -1653,11 +1680,39 @@ async function tickCommand(
 
     // A plan the operator asked for dispatches a PLANNER — the one
     // legitimate spend on a task with no approved scope. Everything else
-    // unapproved is a person's pending decision: skip, not refuse.
-    const wantsPlan = ref.plan === "requested" && !approvalOf(store.getScope(id)).approved;
-    if (!wantsPlan && !approvalOf(store.getScope(id)).approved) {
-      dispatched.push({ id, outcome: "skipped", reason: "unapproved" });
-      continue;
+    // unapproved is a person's pending decision: skip, not refuse — EXCEPT
+    // the attended road (Phase 2, v6 W1): a live attended authorization
+    // naming THIS runner is authority for one watched attempt, and the
+    // skip for everything short of that is its own typed word, never the
+    // generic `unapproved` the round-5 review caught masking it.
+    const scopeApproved = approvalOf(store.getScope(id)).approved;
+    const wantsPlan = ref.plan === "requested" && !scopeApproved;
+    let attendedDispatch: import("./store.js").AttendedAuthorization | null = null;
+    if (!wantsPlan && !scopeApproved) {
+      const open = store.openAuthorizationFor(ref.id);
+      const watching =
+        open === null
+          ? null
+          : attendedLivenessState(
+              open.lastBeatAt === null ? null : Date.parse(open.lastBeatAt),
+              clock().getTime(),
+              Date.parse(open.absoluteExpiry),
+            );
+      if (
+        open !== null &&
+        open.runner === runner &&
+        (watching === "live" || watching === "grace") &&
+        open.attemptRun === null &&
+        context.heldCoordinator !== undefined
+      ) {
+        attendedDispatch = open;
+      } else if (open !== null) {
+        dispatched.push({ id, outcome: "skipped", reason: "attended-only" });
+        continue;
+      } else {
+        dispatched.push({ id, outcome: "skipped", reason: "unapproved" });
+        continue;
+      }
     }
 
     // TOURNAMENT TERMS FIRST (foundations finding 8's reorder): an approved
@@ -1665,24 +1720,43 @@ async function tickCommand(
     // flags must not be able to shape it — so the terms are discovered
     // before any flag-shaped resolution runs, and a raced task's build
     // resolution ignores the flags outright.
-    const racedAhead = wantsPlan ? null : store.activeTournamentTerms(ref.id);
+    const racedAhead = wantsPlan || attendedDispatch !== null ? null : store.activeTournamentTerms(ref.id);
+    // The attended spec comes from the authorization's PINNED terms — the
+    // courtesy half of the proof; the coordinator's transaction re-proves
+    // byte-for-byte at the actual HEAD (v6 W1).
+    let attendedSpec: { provider: ProviderId; model: string | null } | null = null;
+    if (attendedDispatch !== null) {
+      try {
+        const terms = JSON.parse(attendedDispatch.termsJson) as { profileJson?: unknown };
+        const pinned = profileFromJson(typeof terms.profileJson === "string" ? terms.profileJson : null);
+        if (pinned !== null) attendedSpec = { provider: pinned.provider, model: pinned.model };
+      } catch {
+        attendedSpec = null;
+      }
+      if (attendedSpec === null) {
+        dispatched.push({ id, outcome: "skipped", reason: "attended-only", detail: "the authorization's pinned profile cannot be read" });
+        continue;
+      }
+    }
     // The phase agent, resolved BEFORE anything is claimed and snapshotted
     // into the run: pin > flags > project > installation > default. Planner
     // flags fall back to the pass flags, which is exactly today's behavior
     // when no plan-specific flag is given.
-    const resolution = wantsPlan
-      ? resolvePhaseAgent(store, "plan", repo, {
-          provider: planProvider ?? providerFlag,
-          model: planModel ?? model,
-        })
-      : racedAhead !== null
-        ? resolvePhaseAgent(store, "build", repo, {}, ref)
-        : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
-    if (!resolution.ok) {
+    const resolution = attendedSpec !== null
+      ? null
+      : wantsPlan
+        ? resolvePhaseAgent(store, "plan", repo, {
+            provider: planProvider ?? providerFlag,
+            model: planModel ?? model,
+          })
+        : racedAhead !== null
+          ? resolvePhaseAgent(store, "build", repo, {}, ref)
+          : resolvePhaseAgent(store, "build", repo, { provider: providerFlag, model }, ref);
+    if (resolution !== null && !resolution.ok) {
       dispatched.push({ id, outcome: "skipped", reason: "agent-config", detail: resolution.problem });
       continue;
     }
-    const spec = resolution.spec;
+    const spec = resolution === null ? (attendedSpec as { provider: ProviderId; model: string | null }) : resolution.spec;
 
     const claimed = acquireIfReady(store, ref.id, runner, {
       ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
@@ -2122,7 +2196,29 @@ async function tickCommand(
       // the last gate before the commit, so an operator's stop beats an
       // agent's finish even mid-build.
       ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
+      ...(attendedDispatch === null || context.heldCoordinator === undefined
+        ? {}
+        : {
+            attended: {
+              authorization: attendedDispatch,
+              coordinator: context.heldCoordinator,
+              upIncarnation: context.upIncarnation ?? "unknown",
+              socketDir: context.heldSocketDir ?? tmpdir(),
+              releaseWorktree: async (path: string) => worktrees.release(path, clock()),
+              dispose: { repo, origin: ref.origin, provider: spec.provider, model: spec.model },
+              ...(context.heldStarter === undefined ? {} : { starter: context.heldStarter }),
+              ...(context.heldGraceMs === undefined ? {} : { graceMs: context.heldGraceMs }),
+            },
+          }),
     });
+
+    // THE HELD HANDOFF (Phase 2, v2 S0d): ownership transferred — the
+    // coordinator owns run, lease, and worktree; this pass releases and
+    // settles NOTHING and moves on. Nonblocking is the whole point.
+    if (result.ok && result.parked === undefined && result.held === true) {
+      dispatched.push({ id, outcome: "held", branch, worktree: leased.worktree.path });
+      continue;
+    }
 
     // Handed back either way; a tree with somebody's work in it comes back
     // unverified rather than cleaned, same as `build`.
@@ -5092,6 +5188,7 @@ async function upCommand(
   // 2. Canonical repository roots (finding 10): the git top-level, then the
   // real path, deduplicated — printed before any side effect.
   const inputs = context.repoList !== undefined && context.repoList.length > 0 ? context.repoList : [process.cwd()];
+  let sweptHeldOrphans = false;
   const gitRun = context.gitRunner ?? ((file: string, args: readonly string[], opts?: { cwd?: string }) => run(file, [...args], { ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }), timeoutMs: 10_000 }));
   const repos: string[] = [];
   for (const input of inputs) {
@@ -5154,6 +5251,16 @@ async function upCommand(
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       const suffix = attempt === 1 ? "" : `-${attempt}`;
       const name = attempt === 1 ? base : `${base.slice(0, RUNNER_NAME_MAX - suffix.length)}${suffix}`;
+      // The held orphan fence runs BEFORE any recovery road (v6 W6): a
+      // crashed predecessor's held session is seized, killed through its
+      // supervisor, and settled — or paged — before registration's
+      // recovery may touch its run or worktree.
+      if (!sweptHeldOrphans) {
+        sweptHeldOrphans = true;
+        const swept = await sweepHeldOrphans(store, `up:${hostname()}:${process.pid}`, clock);
+        if (swept.fenced > 0) progress(`fenced ${swept.fenced} orphaned held session(s) from a previous up`);
+        if (swept.paged > 0) progress(`${swept.paged} held session(s) could not be stopped — see the inbox`);
+      }
       const answer = registerRunnerIfIdle(store, { name, host: hostname(), now: clock() });
       if (answer.ok) {
         runnerName = name;
@@ -5192,6 +5299,19 @@ async function upCommand(
   } finally {
     await new Promise<void>(done => probe.close(() => done()));
   }
+
+  // 6b. The held-session coordinator (Phase 2): one per up process, shared
+  // by the console and every watch loop through the context. Its socket
+  // directory is deliberately SHORT and flat — sun_path is unforgiving.
+  const heldDir = join(homedir(), ".standing-orders", "held");
+  try {
+    mkdirSync(heldDir, { recursive: true, mode: 0o700 });
+  } catch {
+    // The launch's own path check refuses with words if this failed.
+  }
+  context.heldCoordinator = new HeldSessionCoordinator();
+  context.upIncarnation = randomUUID();
+  context.heldSocketDir = heldDir;
 
   // 7. The console, on the just-released port. The tiny window between the
   // probe closing and this bind can lose a race; that failure tears down
@@ -5329,6 +5449,9 @@ async function upCommand(
   if (graceTimer !== undefined) clearTimeout(graceTimer);
   process.removeListener("SIGINT", stop);
   process.removeListener("SIGTERM", stop);
+  // Held sessions fence before the runner retires (v2 S0f): bounded, and
+  // every controller settles conservatively or is paged.
+  if (context.heldCoordinator !== undefined) await context.heldCoordinator.close();
   retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
   await new Promise<void>(done => console_.server.close(() => done()));
 

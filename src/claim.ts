@@ -29,6 +29,16 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { attendedLivenessState, type AttendedLiveness } from "./liveness.js";
+
+/** attendedLivenessState over the store's ISO columns. */
+function attendedWatchState(lastBeatAt: string | null, now: Date, absoluteExpiry: string): AttendedLiveness {
+  return attendedLivenessState(
+    lastBeatAt === null ? null : Date.parse(lastBeatAt),
+    now.getTime(),
+    Date.parse(absoluteExpiry),
+  );
+}
 import {
   BUILT_IN,
   parseCapabilityKey,
@@ -57,7 +67,15 @@ export type AcquireResult =
   | { ok: true; claim: Claim; reclaimed: boolean; replayed?: boolean }
   | { ok: false; reason: "held"; by: string; until: string }
   | { ok: false; reason: "reserved"; reservedFor: string }
-  | { ok: false; reason: "external"; detail: "stale-mirror" | "external-closed" | "dispatch-revoked" | "plane-blocked" };
+  | { ok: false; reason: "external"; detail: "stale-mirror" | "external-closed" | "dispatch-revoked" | "plane-blocked" }
+  /** An attended authorization holds this task for its named runner (v25).
+   * Its OWN reason token — never the `reserved` tag, whose reservedFor field
+   * is a documented public contract meaning task_ref.assigned_runner. */
+  | { ok: false; reason: "attended-held"; runner: string }
+  /** The task's only authority is an attended authorization, and the
+   * operator is not watching (or the one attempt is spent). Expiry never
+   * converts attended work into unattended work. */
+  | { ok: false; reason: "attended-only" };
 
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
 export type FenceResult =
@@ -156,6 +174,30 @@ function acquireLocked(
       const mirrorWhy = store.mirrorAdmissionRefusal(taskRef, now, options.syncMaxAgeMs ?? SYNC_MAX_AGE_MS);
       if (mirrorWhy !== null && mirrorWhy !== "not-a-mirror") {
         return { ok: false as const, reason: "external" as const, detail: mirrorWhy };
+      }
+      // The attended gate (Phase 2, v6 W10/Q4), in the one primitive every
+      // acquisition path shares — raw CLI claims included: a task with an
+      // OPEN attended authorization dispatches only to its named runner,
+      // and a task whose ONLY authority is attended dispatches only while
+      // the operator is watching, with the one attempt unspent.
+      const attendedOpen = store.openAuthorizationFor(taskRef);
+      if (attendedOpen !== null) {
+        if (attendedOpen.runner !== runner) {
+          return { ok: false as const, reason: "attended-held" as const, runner: attendedOpen.runner };
+        }
+        const scopeApproved = db
+          .prepare(
+            `SELECT 1 AS hit FROM task_scope
+             JOIN task_ref ON task_ref.id = ? AND task_scope.task_id = task_ref.external_id
+             WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL`,
+          )
+          .get(taskRef);
+        if (scopeApproved === undefined) {
+          const watching = attendedWatchState(attendedOpen.lastBeatAt, now, attendedOpen.absoluteExpiry);
+          if ((watching !== "live" && watching !== "grace") || attendedOpen.attemptRun !== null) {
+            return { ok: false as const, reason: "attended-only" as const };
+          }
+        }
       }
       const existing = latest(db, taskRef);
 
@@ -297,7 +339,23 @@ export function acquireIfReady(
         return { ok: false as const, reason: "not-ready" as const, message: "the scope is already approved — nothing left to plan" };
       }
     } else if (approvedScope === undefined) {
-      return { ok: false as const, reason: "not-ready" as const, message: "the scope is not approved" };
+      // The authority union (v6 W1): an unapproved scope still dispatches
+      // when a LIVE attended authorization names THIS runner and its one
+      // attempt is unspent — the authorization IS the authority. Everything
+      // else about readiness still gates below and in acquireLocked.
+      const authorization = store.openAuthorizationFor(taskRef);
+      const watching =
+        authorization === null
+          ? null
+          : attendedWatchState(authorization.lastBeatAt, options.now, authorization.absoluteExpiry);
+      const attendedAdmits =
+        authorization !== null &&
+        authorization.runner === runner &&
+        (watching === "live" || watching === "grace") &&
+        authorization.attemptRun === null;
+      if (!attendedAdmits) {
+        return { ok: false as const, reason: "not-ready" as const, message: "the scope is not approved" };
+      }
     }
     // Capabilities are re-read inside the same transaction as the CAS, like
     // every other readiness fact: a key that expired between the survey and

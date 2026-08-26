@@ -1,5 +1,46 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 2D: the attended road runs end-to-end —
+coordinator, dispatch splice, claim gates, custody fence.** The
+HeldSessionCoordinator (new src/held.ts) is the one owner of held
+sessions in an `up` process: build() reaches its spawn point and hands
+over — pulse cleared, live-log handle transferred, run/lease/worktree
+ownership moved — and the watch loop keeps dispatching (the round-5
+critical: held claims are also EXCLUDED from the capacity count, so
+the default solo runner never freezes). The coordinator runs the FINAL
+transactional proof at the actual HEAD — live scope digest, pinned
+profile bytes, repo, head, named runner, each divergence refusing
+`stale-authorization` naming the moved term — consumes the one attempt
+and writes the custody intent in the same transaction, records the
+brief as turn one, spawns through the held gateway, stamps pids (a row
+closed underneath the spawn kills the child synchronously), and arms
+the EXACT clocks: absolute expiry, durable-beat lapse, per-turn wall
+deadline, credentialed lease pulse. A settled turn concludes through
+THE SHARED settleProviderOutcome → disposeBuildOutcome pair — the
+held happy path in the tests ends as a real `no-change` run with its
+marginal-delta ledger charge on the run row — and every fence road
+(expired, lapsed, revoked, turn-timeout, lease-lost, telemetry,
+shutdown) settles conservatively to the real word `interrupted`.
+Dispatch: tick's pre-filter learned the attended case (v6 W1) — a
+live authorization naming this runner dispatches with the PINNED
+profile as its spec and typed `attended-only` skips otherwise, never
+the generic `unapproved` that masked the road; acquireLocked gained
+the shared-primitive gates (`attended-held` with its own reason token
+— never the reserved contract — and `attended-only` with the
+expiry-never-converts rule); acquireIfReady's approval test became the
+authority union. Crash custody: sweepHeldOrphans runs BEFORE the
+runner door at up startup (fence-first as a store invariant — generic
+recovery now EXCLUDES open custody rows), seizes via CAS + lease
+fence, kills through the supervisor's cookie socket (the kernel-stable
+road), and an unreachable supervisor PAGES and keeps custody — proven
+by test, including recovery refusing to touch the fenced run. up
+stands the coordinator up beside the console, fences all sessions
+bounded at shutdown before retiring its runner. Phase-2D scope,
+stated in code: the hold concludes at the agent's first settled turn;
+the multi-turn conversation loop (turn box, answer injection, held
+repair) arrives with its console surfaces in 2E. Suite 1217 (6 new).
+
+
 **2026-08-25 — Parity II Phase 2C: the settlement and disposition
 extractions.** The two refactors the held road stands on, each proven
 byte-identical by the untouched suite. builder.ts's post-provider state

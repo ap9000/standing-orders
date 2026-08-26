@@ -10224,7 +10224,10 @@ export class Store {
       const stamp = now.toISOString();
       let recovered = 0;
       const open = this.db
-        .prepare("SELECT id, task_ref FROM run WHERE runner = ? AND outcome IS NULL")
+        .prepare(
+          `SELECT id, task_ref FROM run WHERE runner = ? AND outcome IS NULL
+            AND NOT EXISTS (SELECT 1 FROM held_session WHERE held_session.run = run.id AND held_session.ended_at IS NULL)`,
+        )
         .all(runner);
       for (const row of open) {
         const taskRef = Number(row["task_ref"]);
@@ -10256,7 +10259,10 @@ export class Store {
             WHERE task.state = 'running'
               AND (SELECT claim.runner FROM claim WHERE claim.task_ref = task_ref.id
                     ORDER BY claim.lease_generation DESC LIMIT 1) = ?
-              AND NOT EXISTS (SELECT 1 FROM run WHERE run.task_ref = task_ref.id AND run.outcome IS NULL)`,
+              AND NOT EXISTS (SELECT 1 FROM run WHERE run.task_ref = task_ref.id AND run.outcome IS NULL)
+              AND NOT EXISTS (SELECT 1 FROM held_session
+                              JOIN run AS held_run ON held_run.id = held_session.run
+                              WHERE held_run.task_ref = task_ref.id AND held_session.ended_at IS NULL)`,
         )
         .all(BUILT_IN, runner);
       for (const row of stranded) {

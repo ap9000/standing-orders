@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, SteerNote, Store } from "./store.js";
-import { approvalOf, digestOf, profileDigestOf, type ExecutionProfile, type Scope } from "./scope.js";
+import { approvalOf, digestOf, profileDigestOf, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { execFileSync } from "node:child_process";
 import { currentClaim, heartbeat, missingCapability, SYNC_MAX_AGE_MS } from "./claim.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
@@ -64,7 +64,23 @@ export type Runner = (
   options?: RunOptions,
 ) => Promise<ExecResult>;
 
+/** The attended dispatch (Parity II Phase 2): the authorization is the
+ * authority, the coordinator takes ownership at the spawn point, and the
+ * builder returns `held` without settling. */
+export type AttendedDispatch = {
+  authorization: import("./store.js").AttendedAuthorization;
+  coordinator: import("./held.js").HeldSessionCoordinator;
+  upIncarnation: string;
+  socketDir: string;
+  releaseWorktree: (path: string) => Promise<unknown>;
+  dispose: { repo: string; origin: string; provider: string; model: string | null };
+  starter?: import("./exec.js").HeldSessionStart extends never ? never : typeof import("./exec.js").startClaudeHeldSession;
+  graceMs?: number;
+  onDisposed?: import("./held.js").HeldLaunchArgs["onDisposed"];
+};
+
 export type BuildRequest = {
+  attended?: AttendedDispatch;
   taskId: string;
   taskRef: number;
   runner: string;
@@ -157,6 +173,9 @@ export type BuildResult =
       committed: boolean;
       /** The agent said no-change and the tree proves it: done, nothing to publish. */
       noChange?: boolean;
+      /** The session is HELD (attended road): the coordinator owns run,
+       * lease, and worktree from here — the caller settles NOTHING. */
+      held?: true;
       branch: string;
       summary: string;
     }
@@ -167,6 +186,13 @@ export type BuildRefusal =
   | "unapproved"
   | "scope-changed"
   | "stale-approval"
+  | "stale-authorization"
+  | "attended-only"
+  | "attended-held"
+  | "attended-unsupported"
+  | "runner-holding"
+  | "run-held"
+  | "spawn-failed"
   | "capability"
   | "no-claim"
   | "not-yours"
@@ -377,7 +403,11 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
 
   const scope = store.getScope(taskId);
   const approval = approvalOf(scope);
-  if (!approval.approved) {
+  const attended =
+    request.attended !== undefined && request.attended.authorization.taskRef === taskRef
+      ? request.attended
+      : undefined;
+  if (!approval.approved && attended === undefined) {
     return approval.reason === "changed"
       ? {
           ok: false,
@@ -398,22 +428,48 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // the authority: request fields left unset take its values; request
   // fields that DIVERGE refuse, typed, naming what moved. A contestant
   // proves against its own race-approved profile.
-  const proof = proveApprovedProfile(scope, request.contestProfile ?? null, {
-    provider,
-    model: request.model,
-    maxTurns: request.maxTurns,
-    timeoutMs: request.timeoutMs,
-    skipPermissions,
-  });
-  if (!proof.ok) {
-    return { ok: false, reason: "stale-approval", message: `${taskId}: ${proof.message}` };
+  let effective: { model: string; maxTurns: number | undefined; timeoutMs: number; skipPermissions: boolean; profile: ExecutionProfile };
+  if (attended !== undefined) {
+    // The attended road: the authorization's PINNED profile is the authority
+    // (ruling 12); the final byte-compare against these values happens in
+    // the coordinator's proof transaction, at the actual HEAD.
+    let pinnedJson: string | null = null;
+    try {
+      const terms = JSON.parse(attended.authorization.termsJson) as { profileJson?: unknown };
+      pinnedJson = typeof terms.profileJson === "string" ? terms.profileJson : null;
+    } catch {
+      pinnedJson = null;
+    }
+    const pinned = profileFromJson(pinnedJson);
+    if (pinned === null) {
+      return { ok: false, reason: "stale-authorization", message: `${taskId}: the authorization's pinned profile cannot be rehydrated` };
+    }
+    effective = {
+      model: pinned.model,
+      maxTurns: pinned.provider === "claude" ? pinned.maxTurns : request.maxTurns,
+      timeoutMs: pinned.timeoutSeconds * 1000,
+      skipPermissions: pinned.provider === "claude" && pinned.permissionArgv === "bypassPermissions",
+      profile: pinned,
+    };
+  } else {
+    const proof = proveApprovedProfile(scope, request.contestProfile ?? null, {
+      provider,
+      model: request.model,
+      maxTurns: request.maxTurns,
+      timeoutMs: request.timeoutMs,
+      skipPermissions,
+    });
+    if (!proof.ok) {
+      return { ok: false, reason: "stale-approval", message: `${taskId}: ${proof.message}` };
+    }
+    effective = proof.effective;
   }
-  const effective = proof.effective;
   // The dispatch stamps (finding 21's order): written the moment the proof
   // passes, before anything provider-shaped happens — the run row then says
   // exactly which sealed terms this invocation was held to, and warm
   // resume below can match on them honestly.
-  const provenScopeDigest = request.contestProfile !== undefined ? (scope?.digest ?? "") : (scope?.approvedDigest ?? "");
+  const provenScopeDigest =
+    request.contestProfile !== undefined || attended !== undefined ? (scope?.digest ?? "") : (scope?.approvedDigest ?? "");
   const provenProfileDigest = profileDigestOf(effective.profile);
   store.stampRun(request.runId, {
     scopeDigest: provenScopeDigest,
@@ -793,6 +849,54 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // Claude's streaming transport is the only one that emits events; a file
   // that cannot open is a null, and a null never costs a build.
   const liveLog = provider === "claude" ? openLiveLog(root, request.runId) : null;
+  const briefText = brief(scope as Scope, branch, mailbox, done, answers, planDocument, revisionBrief, previousHandoff, steering);
+
+  // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
+  // coordinator at the spawn point. Everything build() armed that its
+  // finally would have cleared is torn down or handed over HERE — the pulse
+  // interval dies (the coordinator heartbeats from now on; no doubled
+  // writers) and the live-log handle rides the capture (the live window
+  // stays streaming across the whole hold). build() returns WITHOUT
+  // settling: the run, the lease, and the worktree are the coordinator's.
+  if (attended !== undefined) {
+    if (pulseTimer !== undefined) clearInterval(pulseTimer);
+    const captured: CapturedBuild = {
+      store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
+      runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done,
+      clock, fenced: () => fencedMidBuild,
+    };
+    const launched = await attended.coordinator.launch({
+      store,
+      captured,
+      authorization: attended.authorization,
+      runId: request.runId,
+      leaseId: request.leaseId ?? "unclaimed",
+      runner,
+      ...(request.runnerToken === undefined ? {} : { runnerToken: request.runnerToken }),
+      upIncarnation: attended.upIncarnation,
+      brief: briefText,
+      cwd: worktree,
+      socketDir: attended.socketDir,
+      releaseWorktree: attended.releaseWorktree,
+      liveLog,
+      omitEnv: AGENT_ENV_DENYLIST,
+      dispose: attended.dispose,
+      clock,
+      ...(attended.starter === undefined ? {} : { starter: attended.starter }),
+      ...(attended.graceMs === undefined ? {} : { graceMs: attended.graceMs }),
+      ...(attended.onDisposed === undefined ? {} : { onDisposed: attended.onDisposed }),
+    });
+    if (!launched.ok) {
+      liveLog?.close();
+      return {
+        ok: false,
+        reason: (launched.reason as BuildRefusal) ?? "attended-only",
+        message: launched.message,
+      };
+    }
+    return { ok: true, held: true, committed: false, branch, summary: "the session is held — the operator is watching" };
+  }
+
   let result: AgentOutcome;
   try {
     result = await invokeAgent(
@@ -803,7 +907,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       { provider, model: effective.model },
       {
         phase: "build",
-        brief: brief(scope as Scope, branch, mailbox, done, answers, planDocument, revisionBrief, previousHandoff, steering),
+        brief: briefText,
         maxTurns: effective.maxTurns ?? maxTurns,
         permissionMode,
         skipPermissions: effective.skipPermissions,
