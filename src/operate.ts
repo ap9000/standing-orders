@@ -154,9 +154,9 @@ import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, resolveScopeProfile, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit, type ProviderId } from "./provider.js";
+import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
 import {
   build,
-  DEFAULT_BUILD_TIMEOUT_MS,
   type Runner as CommandRunner,
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
@@ -1402,7 +1402,6 @@ async function tickCommand(
   const planModel = text(flags, "plan-model");
   const planProvider = text(flags, "plan-provider");
   const turns = text(flags, "turns");
-  const timeoutMs = DEFAULT_BUILD_TIMEOUT_MS;
   // The ordinary lease is enough: the build's own pulse extends it while the
   // agent runs, which is the correct causality — the lease stays alive
   // because the build is alive. A fat TTL would only mask a dead pulse and
@@ -1669,6 +1668,11 @@ async function tickCommand(
   let parked = 0;
   let broke = 0;
 
+  // One attestation verdict per provider per pass (Phase 3 A3): the
+  // gateway re-checks freshly at spawn; this cache only keeps a skipped
+  // queue from probing once per task.
+  const attestedThisPass = new Map<ProviderId, AttestOutcome | null>();
+
   for (const ref of ready) {
     if (built >= max) break;
     // The stop fence (audit IV-1): checked before every claim. The build
@@ -1762,6 +1766,35 @@ async function tickCommand(
       continue;
     }
     const spec = resolution === null ? (attendedSpec as { provider: ProviderId; model: string | null }) : resolution.spec;
+
+    // THE PRE-CLAIM ATTESTATION SKIP (Phase 3 A3/B4/C2): an attested
+    // provider outside its range never claims — no lease, no run row, no
+    // worktree, no wake churn. The provider source is the AUTHORITATIVE
+    // one per road: the sealed approval snapshot for ordinary builds (the
+    // same snapshot the dispatch proof enforces), the plan resolver for
+    // planner runs. Attended work is claude-only and excluded; tournament
+    // contestants cannot be tier-2 today (the money gate refuses them at
+    // filing). A missing or malformed snapshot is NOT skipped here — the
+    // existing approval refusals own that road, and attestation must
+    // never mask them. The gateway re-checks before spawn; this skip only
+    // keeps the normal road cheap.
+    const skipProvider: ProviderId | null =
+      attendedSpec !== null || racedAhead !== null
+        ? null
+        : wantsPlan
+          ? spec.provider
+          : (store.getScope(id)?.approvedProfile?.provider ?? null);
+    if (skipProvider !== null && attestationOf(skipProvider) !== null) {
+      let verdict = attestedThisPass.get(skipProvider);
+      if (verdict === undefined) {
+        verdict = await attestProvider(skipProvider, inspectionOf(skipProvider).binary);
+        attestedThisPass.set(skipProvider, verdict);
+      }
+      if (verdict !== null && !verdict.ok) {
+        dispatched.push({ id, outcome: "skipped", reason: "provider-unattested", detail: verdict.problem });
+        continue;
+      }
+    }
 
     const claimed = acquireIfReady(store, ref.id, runner, {
       ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
@@ -2189,7 +2222,10 @@ async function tickCommand(
       branch,
       now: clock(),
       clock,
-      timeoutMs,
+      // No timeoutMs here, deliberately (Phase 3): the tick asks for
+      // nothing, so the SEALED profile's clock governs. Passing the old
+      // 30-minute constant read as an operator's ask and stale-approved
+      // every profile whose honest clock is shorter (codex-shaped, gemini).
       ...(capMicrousd === null ? {} : { maxBudgetUsd: capMicrousd / 1_000_000 }),
       provider: spec.provider,
       ...(spec.model === null ? {} : { model: spec.model }),
@@ -3384,16 +3420,23 @@ async function providersCommand(
     }
   }
 
+  // Probed CONCURRENTLY: each --version is a whole CLI start, and a report
+  // that serializes four of them reads as a hang (Phase 3).
+  const probed = await Promise.all(
+    PROVIDER_IDS.map(async id => {
+      const facts = inspectionOf(id);
+      const version = await probe(facts.binary, ["--version"], { timeoutMs: 5_000 });
+      const installed = version.code === 0 && !version.notFound;
+      let identity: string | null = null;
+      if (installed && facts.identityProbe !== null) {
+        const asked = await probe(facts.binary, [...facts.identityProbe], { timeoutMs: 5_000 });
+        identity = asked.code === 0 ? (asked.stdout.trim().split("\n")[0] ?? null) : "not logged in";
+      }
+      return { id, facts, version, installed, identity };
+    }),
+  );
   const report: Record<string, unknown>[] = [];
-  for (const id of PROVIDER_IDS) {
-    const facts = inspectionOf(id);
-    const version = await probe(facts.binary, ["--version"], { timeoutMs: 5_000 });
-    const installed = version.code === 0 && !version.notFound;
-    let identity: string | null = null;
-    if (installed && facts.identityProbe !== null) {
-      const asked = await probe(facts.binary, [...facts.identityProbe], { timeoutMs: 5_000 });
-      identity = asked.code === 0 ? (asked.stdout.trim().split("\n")[0] ?? null) : "not logged in";
-    }
+  for (const { id, facts, version, installed, identity } of probed) {
     const lastSuccess = store.providerLastSuccess(id);
     const keyPresent = facts.requiresEnv === null ? null : (process.env[facts.requiresEnv] ?? "") !== "";
     report.push({
@@ -3411,6 +3454,18 @@ async function providersCommand(
       // which init signal exists, what hermetic flag we deliberately do NOT
       // pass, and which user-global config can reach an unattended run.
       audit: auditOf(id),
+      // Tier-2 attestation (Phase 3): the range this adapter's conformance
+      // fixtures cover, against what is installed right now. Tier-1
+      // providers carry no entry — their runs are not version-gated.
+      ...(attestationOf(id) === null
+        ? {}
+        : {
+            attestation: {
+              ...(attestationOf(id) as object),
+              installedInRange:
+                installed && versionInRange((version.stdout.trim().split("\n")[0] ?? ""), attestationOf(id) as AttestationRange),
+            },
+          }),
     });
   }
 
@@ -3437,6 +3492,16 @@ async function providersCommand(
     const audit = one["audit"] as ProviderAudit;
     write(`  transport      ${audit.transport}${audit.initSignal === "none" ? " — no init signal; a failed run cannot say whether the harness came up" : ` — init signal: ${audit.initSignal}`}`);
     write(`  resume         ${audit.resume}`);
+    const attested = one["attestation"] as (AttestationRange & { installedInRange: boolean }) | undefined;
+    if (attested !== undefined) {
+      write(
+        `  attested       ${attested.floor} up to (not including) ${attested.ceiling}, fixtures at ${attested.fixturesAt} — ${
+          attested.installedInRange
+            ? "the installed version is inside the range"
+            : "the INSTALLED VERSION IS OUTSIDE THE RANGE; dispatch will refuse until re-attestation"
+        }`,
+      );
+    }
     write(
       `  isolation      ${
         audit.isolation.flag === null

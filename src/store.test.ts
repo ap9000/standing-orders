@@ -1805,7 +1805,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
     );
     expect(decisionDdl).toContain("delivered_turn");
     expect(decisionDdl).not.toContain("UNIQUE REFERENCES run(id)");
-    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()!["version"])).toBe(25);
+    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()!["version"])).toBe(26);
     store.close();
     rmSync(dirname(file), { recursive: true, force: true });
   });
@@ -2130,6 +2130,74 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
     expect(store.liveClaimCount("mac-a", later(1))).toBe(0);
     store.endHeldSession(run, "finished", later(2));
     expect(store.liveClaimCount("mac-a", later(3))).toBe(1);
+    store.close();
+  });
+});
+
+
+describe("the v26 attested runtime: phase_config admits gemini", () => {
+  const T0 = new Date("2026-08-26T18:00:00.000Z");
+
+  const V25_PHASE_CONFIG = `CREATE TABLE phase_config (
+  scope      TEXT NOT NULL,
+  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair')),
+  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter')),
+  model      TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  PRIMARY KEY (scope, phase)
+)`;
+
+  /** A database whose phase_config still carries the v25 CHECK. */
+  const v25Db = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v26-migr-"));
+    const file = join(dir, "db.sqlite");
+    const store = openStore(file);
+    const db = store.raw();
+    db.exec("DROP TABLE phase_config");
+    db.exec(V25_PHASE_CONFIG);
+    db.prepare(
+      "INSERT INTO phase_config (scope, phase, provider, model, updated_at, updated_by) VALUES ('installation','build','codex','gpt-5-codex',?, 'alex')",
+    ).run(T0.toISOString());
+    db.prepare("UPDATE schema_version SET version = 25").run();
+    store.close();
+    return file;
+  };
+
+  test("a v25 phase_config is rebuilt: gemini becomes writable, rows survive byte-for-byte", () => {
+    const file = v25Db();
+    const store = openStore(file);
+    // the old row survived the rename-swap untouched
+    expect(store.phaseConfig("installation", "build")).toMatchObject({ provider: "codex", model: "gpt-5-codex" });
+    // the widened CHECK admits the attested provider — this write failed at
+    // SQLite before v26 (round-1 finding 1)
+    store.setPhaseConfig("installation", "plan", "gemini", "gemini-2.5-pro", "alex", T0);
+    expect(store.phaseConfig("installation", "plan")).toMatchObject({ provider: "gemini", model: "gemini-2.5-pro" });
+    // idempotent: a second open sees the v26 shape and touches nothing
+    store.close();
+    const again = openStore(file);
+    expect(again.phaseConfig("installation", "plan")).toMatchObject({ provider: "gemini" });
+    again.close();
+  });
+
+  test("a doctored phase_config refuses — CONTAINING the old CHECK text is not BEING the old shape", () => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v26-doct-"));
+    const file = join(dir, "db.sqlite");
+    const store = openStore(file);
+    const db = store.raw();
+    db.exec("DROP TABLE phase_config");
+    // carries the exact v25 CHECK literal — plus a smuggled column the
+    // substring recognizer would have waved through (round-3 f6)
+    db.exec(V25_PHASE_CONFIG.replace("model      TEXT,", "model      TEXT, smuggled TEXT,"));
+    db.prepare("UPDATE schema_version SET version = 25").run();
+    store.close();
+    expect(() => openStore(file)).toThrow(/not a shape this migration knows/);
+  });
+
+  test("a fresh database files and reads gemini rows outright", () => {
+    const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "gemini", "gemini-2.5-flash", "alex", T0);
+    expect(store.phaseConfig("installation", "build")).toMatchObject({ provider: "gemini", model: "gemini-2.5-flash" });
     store.close();
   });
 });

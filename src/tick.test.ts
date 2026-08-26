@@ -11,7 +11,9 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { realpathSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { delimiter } from "node:path";
+import { resetAttestationCache } from "./attest.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
@@ -128,6 +130,96 @@ describe("tick, against real git", () => {
       ["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json", ...extra],
       runner,
     );
+
+  /** Phase 3: a fake gemini on PATH — the attestation probe runs THIS. */
+  const fakeGeminiOnPath = (version: string): (() => void) => {
+    const bin = join(base, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gemini"), `#!/bin/sh\necho "${version}"\n`);
+    chmodSync(join(bin, "gemini"), 0o755);
+    const saved = process.env["PATH"];
+    process.env["PATH"] = `${bin}${delimiter}${saved ?? ""}`;
+    resetAttestationCache();
+    return () => {
+      process.env["PATH"] = saved ?? "";
+      resetAttestationCache();
+    };
+  };
+
+  const geminiCredentials = async () => {
+    await run(["runner", "register", "builder-1", "--json"]);
+    const runnerToken = payload().token as string;
+    await run(["approver", "add", "alex", "--json"]);
+    const approverToken = payload().token as string;
+    await run(["config", "set", "build", "--provider", "gemini", "--model", "gemini-2.5-pro", "--as", "alex", "--token", approverToken, "--json"]);
+    return { runnerToken, approverToken };
+  };
+
+  /** Speaks the gemini stream dialect and echoes the minted session id. */
+  const geminiAgent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    agentRan.push(cwd);
+    const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+    await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+    await concludeDone(cwd, args);
+    return {
+      ...OK,
+      stdout: [
+        JSON.stringify({ type: "init", session_id: minted, model: "gemini-2.5-pro" }),
+        JSON.stringify({ type: "synthetic_message", content: "guarded the path" }),
+        JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 120, output_tokens: 30 } }),
+      ].join("\n"),
+    };
+  };
+
+  test("an unattested gemini never claims: two passes, zero runs, zero churn (Phase 3 A3)", async () => {
+    const restore = fakeGeminiOnPath("0.58.9");
+    try {
+      const { runnerToken, approverToken } = await geminiCredentials();
+      await queueApproved("t-gem-skip", approverToken);
+
+      // A pass whose only event is the skip reports "waiting on a person" —
+      // the existing nothing-dispatched exit, exactly like attended-only.
+      expect(await tick(runnerToken)).toBe(EXIT.refused);
+      expect(payload().dispatched[0]).toMatchObject({ id: "t-gem-skip", outcome: "skipped", reason: "provider-unattested" });
+
+      expect(await tick(runnerToken)).toBe(EXIT.refused);
+      expect(payload().dispatched[0]).toMatchObject({ outcome: "skipped", reason: "provider-unattested" });
+
+      // The skip is BEFORE the claim: no run rows, no worktree lease, no
+      // strike — the queue idles instead of churning (round-2 finding on
+      // the hot loop).
+      const store = openStore(db);
+      expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run").get()?.["n"]).toBe(0);
+      expect(store.raw().prepare("SELECT COUNT(*) AS n FROM claim").get()?.["n"]).toBe(0);
+      await run(["task", "show", "t-gem-skip", "--json"]);
+      expect(payload().task.state).toBe("queued");
+      store.close();
+    } finally {
+      restore();
+    }
+  });
+
+  test("an attested gemini builds end-to-end: minted identity echoed, tokens recorded, dollars honestly NULL", async () => {
+    const restore = fakeGeminiOnPath("0.57.0");
+    try {
+      const { runnerToken, approverToken } = await geminiCredentials();
+      await queueApproved("t-gem-build", approverToken);
+
+      expect(await tick(runnerToken, [], geminiAgent)).toBe(EXIT.ok);
+      expect(payload().dispatched[0]).toMatchObject({ id: "t-gem-build", outcome: "built" });
+
+      const store = openStore(db);
+      const row = store.raw().prepare("SELECT provider, provider_version, session_id, tokens_in, tokens_out, cost_usd, outcome FROM run LIMIT 1").get();
+      expect(row).toMatchObject({ provider: "gemini", provider_version: "0.57.0", tokens_in: 120, tokens_out: 30, cost_usd: null, outcome: "built" });
+      // The minted identity survived the round trip: the row's session is a
+      // plane-minted uuid the stub read off its own argv.
+      expect(String(row?.["session_id"])).toMatch(/^[0-9a-f-]{36}$/);
+      store.close();
+    } finally {
+      restore();
+    }
+  });
 
   test("`task next` changes what the pass actually takes — the dispatch-order proof", async () => {
     const { runnerToken, approverToken } = await credentials();

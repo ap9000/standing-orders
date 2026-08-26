@@ -319,3 +319,37 @@ describe("execution profiles (foundations, findings 13/14/17/21)", () => {
     expect(profileFromJson(JSON.stringify({ digestVersion: 2, profile: { ...claude, provider: "gemini" } }))).toBeNull();
   });
 });
+
+
+describe("the gemini execution profile (Phase 3)", () => {
+  const profile: import("./scope.js").ExecutionProfile = {
+    provider: "gemini",
+    model: "gemini-2.5-pro",
+    approvalArgv: "auto_edit",
+    maxTurns: "unsupported",
+    repairMaxTurns: "unsupported",
+    timeoutSeconds: 1200,
+    repairTimeoutSeconds: 300,
+    repairModel: "inherit",
+  };
+
+  test("snapshots roundtrip byte-stably through the digest chain", () => {
+    const json = canonicalProfileJson(profile);
+    const back = profileFromJson(json);
+    expect(back).toEqual(profile);
+    expect(profileDigestOf(back as ExecutionProfile)).toBe(profileDigestOf(profile));
+  });
+
+  test("rehydration is strict: a foreign approval dial or missing field is null, never a guess", () => {
+    const loose = JSON.parse(canonicalProfileJson(profile)) as { profile: Record<string, unknown> };
+    loose.profile["approvalArgv"] = "default";
+    expect(profileFromJson(JSON.stringify(loose))).toBeNull();
+    const missing = JSON.parse(canonicalProfileJson(profile)) as { profile: Record<string, unknown> };
+    delete missing.profile["repairModel"];
+    expect(profileFromJson(JSON.stringify(missing))).toBeNull();
+  });
+
+  test("yolo is a distinct signed byte — the digest moves", () => {
+    expect(profileDigestOf({ ...profile, approvalArgv: "yolo" })).not.toBe(profileDigestOf(profile));
+  });
+});

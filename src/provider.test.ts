@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY, PROVIDER_IDS } from "./provider.js";
+import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY, PROVIDER_IDS, MONEY_CAPABILITIES } from "./provider.js";
 import { runStreamJsonl } from "./exec.js";
 
 const ASK = {
@@ -369,5 +369,154 @@ describe("claudeParse — the streaming envelope", () => {
     expect(parsed.tokensIn).toBe(5);
     expect(parsed.initObserved).toBe(null);
     expect(parsed.promptConsumed).toBe(null);
+  });
+});
+
+
+describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
+  const ASK = {
+    phase: "build" as const,
+    brief: "do the thing",
+    model: "gemini-2.5-pro" as string | null,
+    maxTurns: 40,
+    permissionMode: "acceptEdits",
+    skipPermissions: false,
+    resumeSession: null as string | null,
+  };
+
+  test("headless stream-json with the ONE sealed autonomy dial", () => {
+    const argv = adapterFor("gemini").argv({ ...ASK });
+    expect(argv).toEqual([
+      "-p", "do the thing",
+      "--output-format", "stream-json",
+      "--approval-mode", "auto_edit",
+      "-m", "gemini-2.5-pro",
+    ]);
+  });
+
+  test("skipPermissions maps to yolo exactly where claude maps it to bypass", () => {
+    expect(adapterFor("gemini").argv({ ...ASK, skipPermissions: true })).toContain("yolo");
+    expect(adapterFor("gemini").argv({ ...ASK, skipPermissions: true })).not.toContain("auto_edit");
+  });
+
+  test("session identity: minted on start, resumed on repair, never both", () => {
+    const started = adapterFor("gemini").argv({ ...ASK, startSessionId: "aaaa-bbbb" });
+    expect(started).toContain("--session-id");
+    expect(started).toContain("aaaa-bbbb");
+    expect(started).not.toContain("--resume");
+    const resumed = adapterFor("gemini").argv({ ...ASK, resumeSession: "cccc-dddd", startSessionId: "aaaa-bbbb" });
+    expect(resumed).toContain("--resume");
+    expect(resumed).not.toContain("--session-id");
+  });
+
+  test("no turn bound and no dollar cap exist to render", () => {
+    const argv = adapterFor("gemini").argv({ ...ASK, maxBudgetUsd: 3 });
+    expect(argv.join(" ")).not.toContain("--max-turns");
+    expect(argv.join(" ")).not.toContain("--max-budget-usd");
+  });
+
+  test("the wall clock is shortened, never equated (codex posture)", () => {
+    expect(adapterFor("gemini").clampTimeout("build", 30 * 60_000)).toBe(20 * 60_000);
+    expect(adapterFor("gemini").clampTimeout("plan", 15 * 60_000)).toBe(10 * 60_000);
+    expect(adapterFor("gemini").clampTimeout("repair", 9 * 60_000)).toBe(5 * 60_000);
+  });
+
+  test("a full stream parses: init identity, assembled message, tokens, structural success", () => {
+    const stream = [
+      "Loaded cached credentials.", // startup prose: dropped, not fatal
+      JSON.stringify({ type: "init", timestamp: "t", session_id: "s-1", model: "gemini-2.5-pro" }),
+      JSON.stringify({ type: "synthetic_message", content: "all done" }),
+      JSON.stringify({ type: "not-a-real-event", whatever: true }),
+      JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 900, output_tokens: 88, total_tokens: 988 } }),
+    ].join("\n");
+    const envelope = adapterFor("gemini").parse(stream);
+    expect(envelope).toMatchObject({
+      sessionId: "s-1",
+      finalMessage: "all done",
+      tokensIn: 900,
+      tokensOut: 88,
+      costUsd: null,
+      initObserved: true,
+      promptConsumed: true,
+    });
+  });
+
+  test("an error-status result is NOT consumption — and its message is diagnostics", () => {
+    const stream = [
+      JSON.stringify({ type: "init", session_id: "s-1", model: "m" }),
+      JSON.stringify({ type: "result", status: "error", error: { type: "X", message: "the model refused" } }),
+    ].join("\n");
+    const envelope = adapterFor("gemini").parse(stream);
+    expect(envelope.promptConsumed).toBe(false);
+    expect(envelope.diagnostic).toBe("the model refused");
+  });
+
+  test("a dead-at-startup stream: no init, nothing consumed, malformed lines skipped", () => {
+    const envelope = adapterFor("gemini").parse("please set an auth method\n{truncated js");
+    expect(envelope).toMatchObject({ sessionId: null, initObserved: false, promptConsumed: false, tokensIn: null });
+  });
+
+  test("first init and last result win; a severity-error line feeds the bounded diagnostic", () => {
+    const stream = [
+      JSON.stringify({ type: "init", session_id: "first", model: "m" }),
+      JSON.stringify({ type: "init", session_id: "second", model: "m" }),
+      JSON.stringify({ type: "error", severity: "warning", message: "loop detected" }),
+      JSON.stringify({ type: "error", severity: "error", message: "x".repeat(5000) }),
+      JSON.stringify({ type: "result", status: "error", stats: { input_tokens: 1, output_tokens: 1 } }),
+      JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 5, output_tokens: 6 } }),
+    ].join("\n");
+    const envelope = adapterFor("gemini").parse(stream);
+    expect(envelope.sessionId).toBe("first");
+    expect(envelope.tokensIn).toBe(5);
+    expect(envelope.promptConsumed).toBe(true);
+    expect(Buffer.byteLength(envelope.diagnostic ?? "", "utf8")).toBeLessThanOrEqual(2 * 1024 + 4);
+  });
+
+  test("a diagnostic that trips the secret scanner is withheld, and controls collapse", () => {
+    const leaky = [
+      JSON.stringify({ type: "init", session_id: "s-1", model: "m" }),
+      JSON.stringify({ type: "error", severity: "error", message: "auth failed for AKIAABCDEFGHIJKLMNOP" }),
+      JSON.stringify({ type: "result", status: "error" }),
+    ].join("\n");
+    expect(adapterFor("gemini").parse(leaky).diagnostic).toContain("withheld");
+
+    const controlly = [
+      JSON.stringify({ type: "init", session_id: "s-1", model: "m" }),
+      JSON.stringify({ type: "error", severity: "error", message: "line one\u0007\u001b[31mline two" }),
+      JSON.stringify({ type: "result", status: "error" }),
+    ].join("\n");
+    const diagnostic = adapterFor("gemini").parse(controlly).diagnostic ?? "";
+    expect(diagnostic).not.toMatch(/[\u0000-\u001f]/);
+    expect(diagnostic).toContain("line one");
+  });
+
+  test("gemini needs an explicit model — the harness default drifts", () => {
+    expect(validateSpec({ provider: "gemini", model: null }).ok).toBe(false);
+    expect(validateSpec({ provider: "gemini", model: "gemini-2.5-flash" }).ok).toBe(true);
+  });
+
+  test("money honesty: tokens only, no cap to hold, never in a tournament", () => {
+    expect(reportsCost("gemini")).toBe(false);
+    expect(MONEY_CAPABILITIES.gemini).toMatchObject({
+      nativeDollarCapFlag: null,
+      usageSemantics: "per-invocation",
+      tournamentEligible: false,
+    });
+    expect(MONEY_CAPABILITIES.gemini.whyIneligible).toContain("tokens");
+  });
+
+  test("the audit states the posture: init event, unproven resume, required terminal, minted identity", () => {
+    expect(auditOf("gemini")).toMatchObject({
+      transport: "streaming-jsonl",
+      resume: "none",
+      initSignal: "init-event",
+      sessionIdentity: "minted",
+      terminalContract: "required",
+    });
+    // Tier-1 settlement is untouched by construction.
+    expect(auditOf("claude").terminalContract).toBe("none");
+    expect(auditOf("codex").terminalContract).toBe("none");
+    // The hooks surface is NAMED — the config-leak class the audit exists for.
+    expect(auditOf("gemini").configSurface.join(" ")).toContain("HOOKS");
   });
 });

@@ -393,6 +393,61 @@ untouchable — the fence seizes custody transactionally BEFORE any
 kill, an unreachable supervisor pages rather than guess-kills, and
 generic recovery excludes open custody rows entirely.
 
+## 9d. Attested runtimes (Parity II Phase 3)
+
+Two tiers of provider, by what the plane can prove — never by brand.
+
+**Tier 1** (claude, codex, openrouter-on-codex) is the audited core:
+transports read at the source, money contracts stated as data, behavior
+covered by the suite since each shipped. Their spawn road carries no
+version gate — the audit rows say exactly what is and is not proven.
+
+**Tier 2** (gemini, the only funded adapter) is admitted by **versioned
+semantic attestation**: the adapter's conformance fixtures were recorded
+against an exact CLI version, and dispatch runs ONLY inside the attested
+range `[floor, ceiling)`. The check lives in the one spawning gateway,
+immediately before every spawn — build, plan, and repair alike — against
+one PATH-resolved realpath that is both probed and executed, revalidated
+by a fresh stat (`dev/ino/ctime/size`) each time. What that proves,
+exactly: the version of the binary observed at spawn time — not an
+exclusive lock on the path. Only plain `x.y.z` releases attest;
+prereleases and nightlies are out by rule. The probed version is stamped
+durably on every run in the same pre-spawn write as `provider_started_at`,
+and even a refused race stamps what it refused.
+
+Out-of-range never claims: the tick's pre-claim skip reads the SEALED
+approval snapshot's provider (planner runs read their own resolver) and
+skips in words — no claim, no run, no worktree, no wake churn. The
+gateway's own refusal covers only the race where the binary changes
+mid-pass, disposes like any infrastructure failure, and consumes the
+road's existing strike or turn budget.
+
+Capabilities are EARNED by fixture, not asserted: gemini's terminal
+contract (exit 0 believed only with init + a success `result`), its
+minted session identity (`--session-id` chosen by the plane, the init
+echo proven equal), its per-invocation usage scope, and its fresh-session
+repair road (resume is unproven, so the repair brief quotes the malformed
+payload through the standard per-line fence and assumes no session
+memory) each trace to a test. Unproven fields stay null and fail closed.
+Money honesty is unchanged: gemini reports tokens, never dollars — it is
+tournament-ineligible in its own words, and every spend rollup states
+measured coverage ("$X measured across N of M runs") instead of summing
+a lie.
+
+**Re-attestation is a release act**: run the conformance suite against
+the new CLI, move the ceiling in a reviewed commit. **Removal criterion**
+(strategy ruling 13's N): three consecutive minor releases failing
+conformance without a fixable adapter change retire the adapter, typed
+and stated on the providers screen. A second tier-2 adapter requires
+retiring this one or a new strategy decision — there is no quiet
+accretion road.
+
+The audit rows carry the leak surface in words: `~/.gemini/settings.json`
+hooks run inside every invocation on a machine that has them, project
+settings and GEMINI.md ride along, and an API key in env is visible to
+the shells the agent runs — cached login or ADC is the recommended
+unattended auth road.
+
 ## 10. Milestones
 
 | | Scope | Ships when |

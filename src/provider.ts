@@ -20,10 +20,11 @@
  */
 
 import { type ExecResult, type RunOptions } from "./exec.js";
-import { runStreamJsonl, runClaudeStreamJsonl } from "./exec.js";
+import { runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl } from "./exec.js";
+import { scanForSecrets } from "./evidence.js";
 
-export type ProviderId = "claude" | "codex" | "openrouter";
-export const PROVIDER_IDS: readonly ProviderId[] = ["claude", "codex", "openrouter"];
+export type ProviderId = "claude" | "codex" | "openrouter" | "gemini";
+export const PROVIDER_IDS: readonly ProviderId[] = ["claude", "codex", "openrouter", "gemini"];
 
 export function isProviderId(value: string): value is ProviderId {
   return (PROVIDER_IDS as readonly string[]).includes(value);
@@ -60,6 +61,12 @@ export type Invocation = {
   /** Claude's native dollar cap (tournament stage 3b) — the harness stops
    * itself when spend reaches this. Ignored by providers without one. */
   maxBudgetUsd?: number;
+  /** A plane-minted session identity, for providers that can START under a
+   * caller-chosen id (gemini `--session-id`). The gateway stamps it
+   * durably BEFORE spawn and requires the envelope's init id to EQUAL it
+   * (Phase 3 A5) — a mismatch is a provider-protocol failure, never a
+   * silent survivor. */
+  startSessionId?: string;
 };
 
 export type ProviderRunner = (
@@ -94,6 +101,13 @@ export type ParsedEnvelope = {
    * result's diagnostic text must not read as an agent's attempt.
    */
   promptConsumed: boolean | null;
+  /**
+   * The harness's own first error message, bounded (2 KiB UTF-8), kept for
+   * refusal words and evidence — DIAGNOSTICS ONLY, control-normalized and
+   * secret-scanned at render, never classification (Phase 3 B6). null =
+   * the transport carries none or none was seen.
+   */
+  diagnostic: string | null;
 };
 
 type Adapter = {
@@ -217,6 +231,7 @@ function claudeEnvelopeOf(
       initObserved === null
         ? null
         : result !== null && result.is_error !== true && String(result.subtype ?? "") === "success",
+    diagnostic: null,
   };
 }
 
@@ -323,7 +338,7 @@ function codexParse(stdout: string): ParsedEnvelope {
   // every surface downstream already says so instead of summing a lie.
   // promptConsumed stays null: codex carries no structural consumption
   // signal, and the gateway keeps its historical rule for it.
-  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved, promptConsumed: null };
+  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved, promptConsumed: null, diagnostic: null };
 }
 
 /** Codex wall-clock caps, phase by phase — the turn bound it does not have. */
@@ -332,6 +347,138 @@ const CODEX_TIMEOUT_CAP_MS: Record<Phase, number> = {
   plan: 10 * 60_000,
   repair: 5 * 60_000,
 };
+
+/**
+ * Gemini argv (Phase 3, v0.57.0 audit). The brief is `-p` (headless);
+ * `--approval-mode` is the ONE sealed autonomy dial — skipPermissions
+ * maps to yolo exactly where claude maps it to bypass, anything else is
+ * auto_edit (fail-closed: never `default`, whose headless behavior is
+ * tool failure, and never `plan`, which cannot write the mailbox).
+ * Session identity is minted by the plane (`--session-id`) or resumed
+ * (`--resume`) — never both. No turn bound and no dollar cap exist to
+ * render (the audit and money capabilities say so instead).
+ */
+const geminiArgv = (invocation: Invocation): string[] => [
+  "-p",
+  invocation.brief,
+  "--output-format",
+  "stream-json",
+  "--approval-mode",
+  invocation.skipPermissions ? "yolo" : "auto_edit",
+  ...(invocation.resumeSession !== null
+    ? ["--resume", invocation.resumeSession]
+    : invocation.startSessionId !== undefined
+      ? ["--session-id", invocation.startSessionId]
+      : []),
+  ...(invocation.model === null ? [] : ["-m", invocation.model]),
+];
+
+/** Gemini wall-clock caps: the codex posture — no turn bound exists, so
+ * the clock is the spending bound and it is SHORTENED, never equated. */
+const GEMINI_TIMEOUT_CAP_MS: Record<Phase, number> = {
+  build: 20 * 60_000,
+  plan: 10 * 60_000,
+  repair: 5 * 60_000,
+};
+
+const DIAGNOSTIC_CAP = 2 * 1024;
+
+/**
+ * Reads the gemini retention runner's synthetic stdout (Phase 3 D2/A7):
+ * at most one `init` (the init signal + session id — result events carry
+ * no id, so identity is init-or-nothing), one `synthetic_message` (the
+ * runner-assembled assistant text; a type the real CLI cannot emit, so
+ * fixtures and transport share an unambiguous contract), the LAST
+ * `result` (tokens + structural status), and the first error line
+ * (diagnostics only). No legacy branch: the attestation floor is the
+ * only dialect this parser has ever had to honor.
+ */
+function geminiParse(stdout: string): ParsedEnvelope {
+  let initSeen = false;
+  let sessionId: string | null = null;
+  let finalMessage: string | null = null;
+  let tokensIn: number | null = null;
+  let tokensOut: number | null = null;
+  let usageRaw: string | null = null;
+  let resultStatus: string | null = null;
+  let diagnostic: string | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (event === null || typeof event !== "object") continue;
+    const type = String(event["type"] ?? "");
+    if (type === "init") {
+      if (!initSeen) {
+        initSeen = true;
+        const id = event["session_id"];
+        if (typeof id === "string" && id !== "") sessionId = id;
+      }
+    } else if (type === "synthetic_message") {
+      const content = event["content"];
+      if (typeof content === "string") finalMessage = content;
+    } else if (type === "result") {
+      resultStatus = String(event["status"] ?? "");
+      const stats = event["stats"] as Record<string, unknown> | undefined;
+      const input = stats?.["input_tokens"];
+      const output = stats?.["output_tokens"];
+      if (typeof input === "number" && input >= 0) tokensIn = input;
+      if (typeof output === "number" && output >= 0) tokensOut = output;
+      if (stats !== undefined) usageRaw = JSON.stringify(stats).slice(0, USAGE_JSON_CAP);
+      const resultError = event["error"] as Record<string, unknown> | undefined;
+      const message = resultError?.["message"];
+      if (diagnostic === null && typeof message === "string" && message !== "") {
+        diagnostic = safeDiagnostic(message);
+      }
+    } else if (type === "error") {
+      const message = event["message"];
+      if (diagnostic === null && String(event["severity"] ?? "") === "error" && typeof message === "string" && message !== "") {
+        diagnostic = safeDiagnostic(message);
+      }
+    }
+  }
+  return {
+    sessionId,
+    finalMessage,
+    tokensIn,
+    tokensOut,
+    // Gemini reports tokens, never dollars. NULL is the honest cost.
+    costUsd: null,
+    usageRaw,
+    initObserved: initSeen,
+    // Structural, never prose: consumed means the terminal result said
+    // SUCCESS. Missing or error results prove nothing about delivery —
+    // and for this provider the gateway's terminal contract REQUIRES the
+    // proof before exit 0 is believed (Phase 3 A4).
+    promptConsumed: resultStatus === "success",
+    diagnostic,
+  };
+}
+
+/** Truncate to a UTF-8 byte budget without splitting a code point. */
+function capUtf8(text: string, bytes: number): string {
+  if (Buffer.byteLength(text, "utf8") <= bytes) return text;
+  // The ellipsis lives INSIDE the byte budget, not on top of it.
+  const buffer = Buffer.from(text, "utf8").subarray(0, Math.max(0, bytes - 3));
+  return buffer.toString("utf8").replace(/�+$/, "") + "…";
+}
+
+/**
+ * The diagnostic discipline (Phase 3 B6/C6): the harness's own words are
+ * untrusted bytes headed for refusal screens and notifications — controls
+ * and line separators collapse to spaces (the fence's character class),
+ * and a line that trips the secret scanner is REPLACED, never quoted.
+ */
+function safeDiagnostic(text: string): string | null {
+  const normalized = text.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ").trim();
+  if (normalized === "") return null;
+  if (scanForSecrets(normalized).length > 0) return "the harness's error text was withheld — it matched a secret pattern";
+  return capUtf8(normalized, DIAGNOSTIC_CAP);
+}
 
 const ADAPTERS: Record<ProviderId, Adapter> = {
   claude: {
@@ -371,6 +518,14 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
     extraOmitEnv: [],
     clampTimeout: (phase, requested) => Math.min(requested, CODEX_TIMEOUT_CAP_MS[phase]),
   },
+  gemini: {
+    binary: "gemini",
+    argv: geminiArgv,
+    parse: geminiParse,
+    defaultRunner: runGeminiStreamJsonl,
+    extraOmitEnv: [],
+    clampTimeout: (phase, requested) => Math.min(requested, GEMINI_TIMEOUT_CAP_MS[phase]),
+  },
 };
 
 /**
@@ -398,7 +553,20 @@ export type ProviderAudit = {
   /** The event whose absence on a failed run means "never initialized".
    * CAPABILITY metadata, not a per-run observation (arc 1 finding 16):
    * whether a given run actually saw it lives in ParsedEnvelope.initObserved. */
-  initSignal: "thread.started" | "system-init" | "none";
+  initSignal: "thread.started" | "system-init" | "init-event" | "none";
+  /** How session identity is established: "announced" = read back from the
+   * harness's own stream; "minted" = the PLANE chooses the id pre-spawn
+   * (gemini --session-id) and the envelope must echo it (Phase 3 A5). */
+  sessionIdentity: "announced" | "minted";
+  /**
+   * Whether exit 0 is believed on its own (Phase 3 A4). "required" =
+   * the transport carries a structural terminal signal and the gateway
+   * accepts a zero exit ONLY with init observed AND promptConsumed true —
+   * a missing, truncated, or error-status terminal is a provider-protocol
+   * failure BEFORE handoff ingestion. "none" = today's exit-code
+   * discipline, byte-identical for tier-1 providers.
+   */
+  terminalContract: "required" | "none";
   isolation: {
     /** The harness's hermetic flag, if it has one. We do not pass it. */
     flag: string | null;
@@ -415,6 +583,8 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
     transport: "streaming-jsonl",
     resume: "native",
     initSignal: "system-init",
+    sessionIdentity: "announced",
+    terminalContract: "none",
     isolation: { flag: "--bare", resumeSafe: null, enforced: false },
     configSurface: [
       "~/.claude/CLAUDE.md and settings (hooks, MCP servers, plugins)",
@@ -425,6 +595,8 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
     transport: "streaming-jsonl",
     resume: "native",
     initSignal: "thread.started",
+    sessionIdentity: "announced",
+    terminalContract: "none",
     // --ephemeral exists and is deliberately not passed: repair resumes
     // sessions, and ephemeral runs have none to resume.
     isolation: { flag: "--ephemeral", resumeSafe: false, enforced: false },
@@ -434,10 +606,30 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
     transport: "streaming-jsonl",
     resume: "native",
     initSignal: "thread.started",
+    sessionIdentity: "announced",
+    terminalContract: "none",
     isolation: { flag: "--ephemeral", resumeSafe: false, enforced: false },
     // The constant -c overrides pin the model provider per invocation, so
     // user config cannot reroute the spend — but the file still loads.
     configSurface: ["~/.codex/config.toml (model_provider pinned per invocation)", "repository AGENTS.md"],
+  },
+  gemini: {
+    transport: "streaming-jsonl",
+    resume: "none",
+    // "none" until the live S1 probe proves headless persistence AND
+    // resume-by-uuid; the repair road's fresh-session branch keys on this
+    // (Phase 3 A8). Flipping it is a re-attestation commit, not a hope.
+    initSignal: "init-event",
+    sessionIdentity: "minted",
+    terminalContract: "required",
+    isolation: { flag: "--sandbox", resumeSafe: null, enforced: false },
+    configSurface: [
+      "~/.gemini/settings.json (HOOKS — BeforeAgent/AfterTool commands run inside every invocation — plus MCP servers and model settings)",
+      "project .gemini/settings.json",
+      "GEMINI.md (global and repository)",
+      "extensions, skills, and policy files",
+      "GEMINI_API_KEY / GOOGLE_GENAI_USE_* environment (an API key in env is visible to shells the agent runs — prefer cached login or ADC for unattended work)",
+    ],
   },
 };
 
@@ -485,6 +677,15 @@ export const MONEY_CAPABILITIES: Record<ProviderId, ProviderMoneyCapabilities> =
     tournamentEligible: false,
     whyIneligible: "openrouter rides the codex harness here and shares its turn-end-only usage reporting",
   },
+  gemini: {
+    incrementalUsage: false,
+    nativeDollarCapFlag: null,
+    // Stats come from a per-process telemetry service: an invocation's
+    // numbers cover that invocation only (conformance fixture j).
+    usageSemantics: "per-invocation",
+    tournamentEligible: false,
+    whyIneligible: "gemini reports tokens, never dollars — no native cap exists to hold",
+  },
 };
 
 /**
@@ -530,6 +731,9 @@ export function validateSpec(spec: AgentSpec): { ok: true } | { ok: false; probl
   }
   if (spec.provider === "openrouter" && spec.model === null) {
     return { ok: false, problem: "openrouter needs an explicit model — there is no default across its catalog" };
+  }
+  if (spec.provider === "gemini" && spec.model === null) {
+    return { ok: false, problem: "gemini needs an explicit model — the harness default drifts with its releases" };
   }
   return { ok: true };
 }

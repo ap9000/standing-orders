@@ -1,7 +1,7 @@
 import { describe, test, expect } from "vitest";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { run, runStreamJsonl, terminateLiveProviders, NOT_FOUND_CODE } from "./exec.js";
+import { run, runStreamJsonl, runGeminiStreamJsonl, terminateLiveProviders, NOT_FOUND_CODE } from "./exec.js";
 
 /** node itself is the one binary guaranteed to exist wherever these tests run. */
 const NODE = process.execPath;
@@ -117,5 +117,101 @@ describe("the provider process group (M6.12)", () => {
 
     const missing = await run("definitely-not-a-binary-xyz", [], { processGroup: true, timeoutMs: 2_000 });
     expect(missing.notFound).toBe(true);
+  });
+});
+
+
+describe("the gemini retention runner (Phase 3 D1/A7)", () => {
+  const emit = (lines: unknown[]): string =>
+    `const lines=${JSON.stringify(lines.map(one => (typeof one === "string" ? one : JSON.stringify(one))))};for(const l of lines)console.log(l);`;
+
+  const parseOut = (stdout: string): Record<string, unknown>[] =>
+    stdout.split("\n").filter(one => one !== "").map(one => JSON.parse(one) as Record<string, unknown>);
+
+  test("deltas assemble into ONE synthetic line the real CLI cannot emit", async () => {
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", emit([
+      "Loaded cached credentials.",
+      { type: "init", session_id: "s-9", model: "m" },
+      { type: "message", role: "user", content: "the brief" },
+      { type: "message", role: "assistant", content: "part one ", delta: true },
+      { type: "tool_use", tool_name: "write_file", tool_id: "t1", parameters: {} },
+      { type: "tool_result", tool_id: "t1", status: "success" },
+      { type: "message", role: "assistant", content: "part two", delta: true },
+      { type: "result", status: "success", stats: { input_tokens: 10, output_tokens: 2 } },
+    ])], { timeoutMs: 15_000 });
+    const kept = parseOut(result.stdout);
+    expect(kept.map(one => one["type"])).toEqual(["init", "synthetic_message", "result"]);
+    expect(kept[1]).toMatchObject({ content: "part one part two" });
+  });
+
+  test("a non-delta assistant message REPLACES the buffer; non-string content is dropped", async () => {
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", emit([
+      { type: "init", session_id: "s", model: "m" },
+      { type: "message", role: "assistant", content: "draft ", delta: true },
+      { type: "message", role: "assistant", content: "the whole final message" },
+      { type: "message", role: "assistant", content: { not: "a string" } },
+      { type: "result", status: "success" },
+    ])], { timeoutMs: 15_000 });
+    const message = parseOut(result.stdout).find(one => one["type"] === "synthetic_message");
+    expect(message).toMatchObject({ content: "the whole final message" });
+  });
+
+  test("the first error-severity line is retained; warnings and user echoes are not", async () => {
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", emit([
+      { type: "init", session_id: "s", model: "m" },
+      { type: "error", severity: "warning", message: "loop detected" },
+      { type: "error", severity: "error", message: "the real failure" },
+      { type: "error", severity: "error", message: "a later failure" },
+      { type: "result", status: "error" },
+    ])], { timeoutMs: 15_000 });
+    const kept = parseOut(result.stdout);
+    const errors = kept.filter(one => one["type"] === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: "the real failure" });
+  });
+
+  test("a delta flood past the cap truncates with the marker and holds the line discipline", async () => {
+    const script =
+      `console.log(JSON.stringify({type:"init",session_id:"s",model:"m"}));` +
+      `const chunk="ab\u00e9".repeat(1000);` + // multi-byte: the cap is bytes, not chars
+      `for(let i=0;i<40;i++)console.log(JSON.stringify({type:"message",role:"assistant",content:chunk,delta:true}));` +
+      `console.log(JSON.stringify({type:"result",status:"success"}));`;
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 20_000 });
+    const message = result.stdout.split("\n").find(one => one.includes("synthetic_message"));
+    expect(message).toBeDefined();
+    expect(Buffer.byteLength(message as string, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    const parsed = JSON.parse(message as string) as { content: string; truncated?: boolean };
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.content.endsWith("\u2026[truncated]")).toBe(true);
+  });
+
+  test("escaping-hostile content (quotes, backslashes, 4-byte unicode) still yields one parseable capped line", async () => {
+    const script =
+      `console.log(JSON.stringify({type:"init",session_id:"s",model:"m"}));` +
+      `const chunk=('\\"\\\\'+String.fromCodePoint(0x1F680)).repeat(400);` +
+      `for(let i=0;i<80;i++)console.log(JSON.stringify({type:"message",role:"assistant",content:chunk,delta:true}));` +
+      `console.log(JSON.stringify({type:"result",status:"success"}));`;
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", script], { timeoutMs: 20_000 });
+    const message = result.stdout.split("\n").find(one => one.includes("synthetic_message"));
+    expect(Buffer.byteLength(message as string, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(() => JSON.parse(message as string)).not.toThrow();
+  });
+
+  test("zero output stays zero output — exit code intact, nothing synthesized", async () => {
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", "process.exit(41)"], { timeoutMs: 15_000 });
+    expect(result.code).toBe(41);
+    expect(result.stdout).toBe("");
+  });
+
+  test("stderr is captured bounded, exactly like the sibling runners", async () => {
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", "console.error('auth: set GEMINI_API_KEY');process.exit(41)"], { timeoutMs: 15_000 });
+    expect(result.code).toBe(41);
+    expect(result.stderr).toContain("GEMINI_API_KEY");
+  });
+
+  test("a missing binary is NOT_FOUND, never a throw", async () => {
+    const result = await runGeminiStreamJsonl("/no/such/gemini-binary", [], { timeoutMs: 5_000 });
+    expect(result.notFound).toBe(true);
+    expect(result.code).toBe(NOT_FOUND_CODE);
   });
 });

@@ -486,6 +486,182 @@ export function runStreamJsonl(
 }
 
 /**
+ * The streaming transport for gemini's stream-json dialect (Phase 3 D1/A7).
+ *
+ * Retention: the FIRST `init` event (the init signal + the only carrier of
+ * session identity), the FIRST `severity:"error"` error event (diagnostics),
+ * the LAST `result` event (tokens + structural status), and the assistant's
+ * text — which gemini emits only as many `message` delta lines — ASSEMBLED
+ * into one line of a dedicated internal schema the real CLI cannot emit:
+ *
+ *   {"type":"synthetic_message","content":"...","truncated":true?}
+ *
+ * Assembly rules (round-3 f9): only `role:"assistant"` events with
+ * `delta === true` concatenate; a non-delta assistant message REPLACES the
+ * buffer (full-message semantics); non-string content is dropped; the cap
+ * is enforced on the SERIALIZED UTF-8 BYTES of the complete synthetic line
+ * (marker included), so it can never violate the runner's own line
+ * discipline. Everything else — user echoes, tool_use, tool_result,
+ * warnings — is dropped. Timeout, process-group, kill, and spawn
+ * semantics match `runStreamJsonl`.
+ */
+export function runGeminiStreamJsonl(
+  file: string,
+  args: readonly string[],
+  options: RunOptions = {},
+): Promise<ExecResult> {
+  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const childEnv = resolveChildEnv(options);
+
+  return new Promise(resolve => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(file, [...args], {
+        cwd,
+        shell: false,
+        windowsHide: true,
+        detached: options.processGroup === true && process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(childEnv === undefined ? {} : { env: childEnv }),
+      });
+      if (child.pid !== undefined) options.onSpawn?.(child.pid);
+    } catch (error) {
+      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      return;
+    }
+    if (options.processGroup === true) liveProviders.add(child);
+
+    let initLine: string | null = null;
+    let errorLine: string | null = null;
+    let resultLine: string | null = null;
+    let message = "";
+    let messageTruncated = false;
+    let partial = "";
+    let stderr = "";
+    let timedOut = false;
+    let notFound = false;
+
+    const keep = (line: string): void => {
+      if (line.length > JSONL_LINE_CAP) return; // oversized: never truncated JSON
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return; // not JSON: startup prose, dropped
+      }
+      if (event === null || typeof event !== "object") return;
+      const type = String(event["type"] ?? "");
+      if (type === "init") {
+        if (initLine === null) {
+          initLine = line;
+          const id = event["session_id"];
+          if (typeof id === "string" && id !== "" && options.onSessionId !== undefined) {
+            try {
+              options.onSessionId(id);
+            } catch {
+              // A registry that cannot be written must not kill the turn.
+            }
+          }
+        }
+      } else if (type === "result") {
+        resultLine = line; // last one wins
+      } else if (type === "error") {
+        if (errorLine === null && String(event["severity"] ?? "") === "error") errorLine = line;
+      } else if (type === "message" && String(event["role"] ?? "") === "assistant") {
+        const content = event["content"];
+        if (typeof content !== "string") return; // non-string content: dropped
+        if (event["delta"] === true) {
+          if (!messageTruncated) {
+            message += content;
+            if (Buffer.byteLength(message, "utf8") > JSONL_LINE_CAP) messageTruncated = true;
+          }
+        } else {
+          // A full (non-delta) assistant message replaces the buffer.
+          message = content;
+          messageTruncated = Buffer.byteLength(message, "utf8") > JSONL_LINE_CAP;
+        }
+      }
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (options.processGroup === true) killGroup(child);
+      else child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      partial += chunk;
+      let cut = partial.indexOf("\n");
+      while (cut !== -1) {
+        keep(partial.slice(0, cut));
+        partial = partial.slice(cut + 1);
+        cut = partial.indexOf("\n");
+      }
+      if (partial.length > JSONL_LINE_CAP * 2) partial = partial.slice(-JSONL_LINE_CAP);
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (stderr.length < JSONL_STDERR_CAP) stderr += chunk.slice(0, JSONL_STDERR_CAP - stderr.length);
+    });
+
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      liveProviders.delete(child);
+      if (partial.trim() !== "") keep(partial);
+      const lines: string[] = [];
+      if (initLine !== null) lines.push(initLine);
+      if (errorLine !== null) lines.push(errorLine);
+      if (message !== "") lines.push(syntheticMessageLine(message, messageTruncated));
+      if (resultLine !== null) lines.push(resultLine);
+      resolve({
+        code: notFound ? NOT_FOUND_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+        stdout: lines.join("\n"),
+        stderr,
+        timedOut,
+        notFound,
+      });
+    };
+
+    child.on("error", error => {
+      notFound = (error as NodeJS.ErrnoException).code === "ENOENT";
+      if (stderr === "") stderr = String(error);
+      finish(null);
+    });
+    child.on("close", code => finish(code));
+  });
+}
+
+const TRUNCATION_MARKER = "…[truncated]";
+
+/**
+ * One serialized synthetic line, guaranteed ≤ JSONL_LINE_CAP in UTF-8
+ * bytes — the trim loop measures the COMPLETE serialized line (escaping
+ * and marker included), so pathological escaping cannot smuggle it past
+ * the cap (round-3 f9).
+ */
+function syntheticMessageLine(content: string, truncated: boolean): string {
+  let body = content;
+  let marked = truncated;
+  for (;;) {
+    const line = JSON.stringify(
+      marked
+        ? { type: "synthetic_message", content: body + TRUNCATION_MARKER, truncated: true }
+        : { type: "synthetic_message", content: body },
+    );
+    const over = Buffer.byteLength(line, "utf8") - JSONL_LINE_CAP;
+    if (over <= 0) return line;
+    marked = true;
+    // Cut at least the overage in UTF-16 units; the loop re-measures.
+    const cut = Math.max(1, over);
+    body = body.slice(0, Math.max(0, body.length - cut));
+  }
+}
+
+/**
  * The streaming transport for claude's stream-json dialect (arc 1).
  *
  * Same rationale as `runStreamJsonl`: a long agent session writes far more

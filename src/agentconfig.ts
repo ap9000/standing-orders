@@ -21,7 +21,7 @@
 
 import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId } from "./provider.js";
 import type { Store, TaskRef } from "./store.js";
-import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, type ExecutionProfile } from "./scope.js";
+import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile } from "./scope.js";
 
 export const INSTALLATION_SCOPE = "installation";
 
@@ -150,15 +150,28 @@ export function resolveScopeProfile(
           repairTimeoutSeconds: CLAUDE_LIMITS.repairTimeoutSeconds,
           repairModel,
         }
-      : {
-          provider,
-          model,
-          sandboxMode: "workspace-write",
-          maxTurns: "unsupported",
-          repairMaxTurns: "unsupported",
-          timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
-          repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
-          repairModel,
-        };
+      : provider === "gemini"
+        ? {
+            provider,
+            model,
+            // Filing seals auto_edit ONLY — the acceptEdits parallel; yolo
+            // is a ceremony-worded escalation, not a filing default.
+            approvalArgv: "auto_edit",
+            maxTurns: "unsupported",
+            repairMaxTurns: "unsupported",
+            timeoutSeconds: GEMINI_LIMITS.timeoutSeconds,
+            repairTimeoutSeconds: GEMINI_LIMITS.repairTimeoutSeconds,
+            repairModel,
+          }
+        : {
+            provider,
+            model,
+            sandboxMode: "workspace-write",
+            maxTurns: "unsupported",
+            repairMaxTurns: "unsupported",
+            timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
+            repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
+            repairModel,
+          };
   return { ok: true, profile, provenance: { resolvedFrom: build.source, repairFrom } };
 }

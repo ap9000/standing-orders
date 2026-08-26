@@ -88,6 +88,10 @@ export const CODEX_SHAPED_LIMITS = {
   timeoutSeconds: 1200,
   repairTimeoutSeconds: 300,
 } as const;
+export const GEMINI_LIMITS = {
+  timeoutSeconds: 1200,
+  repairTimeoutSeconds: 300,
+} as const;
 
 export type ClaudeProfile = {
   provider: "claude";
@@ -122,7 +126,25 @@ export type CodexShapedProfile = {
   repairModel: string;
 };
 
-export type ExecutionProfile = ClaudeProfile | CodexShapedProfile;
+export type GeminiProfile = {
+  provider: "gemini";
+  model: string;
+  /** Gemini's real dial (`--approval-mode`): auto_edit auto-approves edit
+   * tools only (the acceptEdits parallel); yolo auto-approves everything
+   * and files only where claude files bypassPermissions. `default` and
+   * `plan` are not profile values — headless `default` just fails tools,
+   * and `plan` is read-only while the protocol requires workspace writes. */
+  approvalArgv: "auto_edit" | "yolo";
+  /** No argv turn bound exists (v0.57.0 audit); the wall clock is the
+   * spending bound, exactly the codex posture. */
+  maxTurns: "unsupported";
+  repairMaxTurns: "unsupported";
+  timeoutSeconds: number;
+  repairTimeoutSeconds: number;
+  repairModel: string;
+};
+
+export type ExecutionProfile = ClaudeProfile | CodexShapedProfile | GeminiProfile;
 
 export const PROFILE_DIGEST_VERSION = 2;
 
@@ -203,6 +225,27 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
         provider: p["provider"],
         model: p["model"],
         sandboxMode: "workspace-write",
+        maxTurns: "unsupported",
+        repairMaxTurns: "unsupported",
+        timeoutSeconds: p["timeoutSeconds"],
+        repairTimeoutSeconds: p["repairTimeoutSeconds"],
+        repairModel: p["repairModel"],
+      };
+    }
+    return null;
+  }
+  if (p["provider"] === "gemini") {
+    if (
+      str(p["model"]) &&
+      (p["approvalArgv"] === "auto_edit" || p["approvalArgv"] === "yolo") &&
+      p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
+      num(p["timeoutSeconds"]) && num(p["repairTimeoutSeconds"]) &&
+      str(p["repairModel"])
+    ) {
+      return {
+        provider: "gemini",
+        model: p["model"],
+        approvalArgv: p["approvalArgv"],
         maxTurns: "unsupported",
         repairMaxTurns: "unsupported",
         timeoutSeconds: p["timeoutSeconds"],

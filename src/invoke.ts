@@ -16,7 +16,8 @@
  * (`adapterFor`), and only builder/planner import `invokeAgent`.
  */
 
-import { adapterFor, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
+import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
+import { attestProvider, type VersionProbe } from "./attest.js";
 import { startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
@@ -55,18 +56,41 @@ export type AgentOutcome = {
 };
 
 /**
+ * The value-shaped gateway result (Phase 3 B5): a refusal is a VALUE, so
+ * every caller's try/finally worktree release and disposition run exactly
+ * as they do for any other outcome — nothing here throws for these.
+ *
+ * - `provider-unattested`: the pre-spawn check failed (races past the
+ *   tick's pre-claim skip — an executable swap mid-tick). No process
+ *   started; the refused version is stamped on the run.
+ * - `provider-protocol`: the harness ran and broke its own contract — a
+ *   zero exit without the required terminal proof (A4), or an init
+ *   identity that does not match the minted one (A5). Spend was recorded;
+ *   the handoff must never be ingested.
+ */
+export type InvokeResult =
+  | { kind: "ran"; outcome: AgentOutcome }
+  | {
+      kind: "refused";
+      reason: "provider-unattested" | "provider-protocol";
+      providerVersion: string | null;
+      diagnostic: string | null;
+    };
+
+/**
  * Spend money, on the record. Throws — never refuses quietly — when the run
  * is missing, already finished, or recorded against a different provider:
  * a caller that reaches for a harness without a matching open run is a
- * bug, not a case.
+ * bug, not a case. Attestation and protocol refusals are VALUES (above),
+ * not throws — those are cases, and they must dispose cleanly.
  */
 export async function invokeAgent(
   store: Store,
   runId: number,
   spec: AgentSpec,
   invocation: Omit<Invocation, "model">,
-  options: RunOptions & { runner?: ProviderRunner; clock?: () => Date },
-): Promise<AgentOutcome> {
+  options: RunOptions & { runner?: ProviderRunner; clock?: () => Date; versionProbe?: VersionProbe },
+): Promise<InvokeResult> {
   const clock = options.clock ?? (() => new Date());
   const run = store.getRun(runId);
   if (run === null || run.outcome !== null) {
@@ -87,15 +111,39 @@ export async function invokeAgent(
     options.timeoutMs ?? 30 * 60_000,
   );
 
+  // Tier-2 attestation (A2/B3): the authoritative check, immediately
+  // before the spawn it authorizes. Tier-1 providers return null here and
+  // keep their road byte-identical.
+  const attested = await attestProvider(spec.provider, adapter.binary, options.versionProbe);
+  if (attested !== null && !attested.ok) {
+    if (attested.version !== null) store.stampProviderVersion(runId, attested.version);
+    return {
+      kind: "refused",
+      reason: "provider-unattested",
+      providerVersion: attested.version,
+      diagnostic: attested.problem,
+    };
+  }
+
+  // The minted session identity (A5): stamped durably BEFORE the start
+  // stamp — intent precedes the process, and the envelope must later
+  // MATCH this id or the run fails typed.
+  if (invocation.startSessionId !== undefined) {
+    store.stampRun(runId, { sessionId: invocation.startSessionId });
+  }
+
   // The stamp precedes the spawn, so a crash between the two leaves a run
   // that claims spend which never happened — the honest direction. A spawn
   // before the stamp would leave spend no record claims, which is the lie
-  // the invariant exists to rule out.
-  store.stampProviderStart(runId, clock());
+  // the invariant exists to rule out. For attested providers the probed
+  // version rides the SAME durable write (B2).
+  if (attested !== null) store.stampProviderStart(runId, clock(), attested.version);
+  else store.stampProviderStart(runId, clock());
 
-  const { runner, clock: _clock, ...runOptions } = options;
+  const { runner, clock: _clock, versionProbe: _probe, ...runOptions } = options;
   const spawn = runner ?? adapter.defaultRunner;
-  const result = await spawn(adapter.binary, argv, {
+  // B3: the attested executable IS the spawned executable — one resolution.
+  const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
     timeoutMs,
     omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
@@ -117,33 +165,78 @@ export async function invokeAgent(
     ...(envelope.usageRaw === null ? {} : { usageJson: envelope.usageRaw }),
   });
 
+  // The minted-identity proof (A5): once the harness initialized, the id
+  // it announced must be the id the plane minted — anything else means
+  // the session on disk is not the session on record, and repair must
+  // never resume it. Usage above is already recorded: the spend happened.
+  if (
+    invocation.startSessionId !== undefined &&
+    envelope.initObserved === true &&
+    envelope.sessionId !== invocation.startSessionId
+  ) {
+    return {
+      kind: "refused",
+      reason: "provider-protocol",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic:
+        envelope.sessionId === null
+          ? "the harness initialized without announcing its session id"
+          : "the harness announced a session id different from the one it was started under",
+    };
+  }
+
+  // The terminal contract (A4): when the audit requires it, a zero exit is
+  // believed ONLY with initialization observed and the structural success
+  // terminal present. A missing, truncated, or error-status terminal on
+  // exit 0 is the harness breaking its own protocol — never a completed
+  // build, and the handoff is never ingested.
+  if (
+    auditOf(spec.provider).terminalContract === "required" &&
+    result.code === 0 &&
+    !(envelope.initObserved === true && envelope.promptConsumed === true)
+  ) {
+    return {
+      kind: "refused",
+      reason: "provider-protocol",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic:
+        envelope.diagnostic ??
+        (envelope.initObserved === true
+          ? "the harness exited 0 without its success terminal — the stream ended mid-protocol"
+          : "the harness exited 0 without ever initializing"),
+    };
+  }
+
   return {
-    code: result.code,
-    stderr: result.stderr,
-    timedOut: result.timedOut,
-    notFound: result.notFound,
-    sessionId: envelope.sessionId,
-    finalMessage: envelope.finalMessage,
-    usage: {
-      tokensIn: envelope.tokensIn,
-      tokensOut: envelope.tokensOut,
-      costUsd: envelope.costUsd,
+    kind: "ran",
+    outcome: {
+      code: result.code,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+      notFound: result.notFound,
+      sessionId: envelope.sessionId,
+      finalMessage: envelope.finalMessage,
+      usage: {
+        tokensIn: envelope.tokensIn,
+        tokensOut: envelope.tokensOut,
+        costUsd: envelope.costUsd,
+      },
+      // Gated on the run having NOTHING to show (Codex M5-M8 audit, C-8),
+      // where "nothing to show" is STRUCTURAL when the transport can say so
+      // (arc 1 finding 15): a retained error result carries diagnostic text
+      // in finalMessage, and that prose must not read as an agent's attempt.
+      // Transports without the consumption signal keep the historical
+      // no-final-message rule. A nonzero exit WITH a consumed prompt is a
+      // failed agent turn — the agent ran, spoke, and failed — and must be
+      // classified as that, never as the harness failing to come up.
+      initFailed:
+        envelope.initObserved === false &&
+        (envelope.promptConsumed === null
+          ? envelope.finalMessage === null
+          : envelope.promptConsumed === false) &&
+        !result.timedOut &&
+        !result.notFound,
     },
-    // Gated on the run having NOTHING to show (Codex M5-M8 audit, C-8),
-    // where "nothing to show" is STRUCTURAL when the transport can say so
-    // (arc 1 finding 15): a retained error result carries diagnostic text
-    // in finalMessage, and that prose must not read as an agent's attempt.
-    // Transports without the consumption signal keep the historical
-    // no-final-message rule. A nonzero exit WITH a consumed prompt is a
-    // failed agent turn — the agent ran, spoke, and failed — and must be
-    // classified as that, never as the harness failing to come up.
-    initFailed:
-      envelope.initObserved === false &&
-      (envelope.promptConsumed === null
-        ? envelope.finalMessage === null
-        : envelope.promptConsumed === false) &&
-      !result.timedOut &&
-      !result.notFound,
   };
 }
 

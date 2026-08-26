@@ -1,5 +1,53 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 3, slice A: the attested runtime — a
+third provider, admitted by proof.** Gemini CLI joins as the ONE funded
+tier-2 adapter, through the framework the strategy priced: versioned
+semantic attestation (DESIGN §9d). Spec chain design-gemini-adapter.md
+v1→v4, three Codex rounds (REDESIGN, REDESIGN, APPROVE-WITH-CHANGES; 27
+findings, every one folded), grounded in probes of the real CLI at
+0.57.0 — the captured exit-41 auth envelope is a fixture verbatim — and
+a source audit of the v0.57.0 tag's stream-json formatter. What shipped:
+schema v26 (phase_config's provider CHECK widened by a rebuild whose
+recognizer demands FULL canonical-DDL equality — containing the old
+CHECK text is not being the old shape); the `GeminiProfile` variant
+sealing `--approval-mode` (auto_edit files by default; yolo is the same
+ceremony class as claude's bypass, derived in ONE helper); `attest.ts` +
+the gateway gate: every spawn probes one PATH-resolved realpath it then
+executes, plain-release-only semver inside [0.57.0, 0.58.0), the version
+riding the same pre-spawn durable write as provider_started_at;
+`invokeAgent` returns a VALUE-shaped union — `provider-unattested`
+(race-only; the tick's pre-claim skip reads the sealed approval snapshot
+and never claims out-of-range work: zero runs, zero churn, proven by a
+two-pass test) and `provider-protocol` (exit 0 without init + a success
+`result` terminal, or a minted `--session-id` the init failed to echo —
+refused before the handoff is ever read, spend still recorded); the
+gemini retention runner assembling assistant deltas into one
+`synthetic_message` line capped in serialized UTF-8 bytes; the
+fresh-session repair road (resume unproven ⇒ audit says "none", repair
+briefs quote the malformed payload through the standard per-line fence,
+every turn mints a new identity); money honesty end-to-end (tokens
+only, tournament-ineligible in its own words, "measured across N of M"
+on the console, routines, /done, and /runs). One pre-existing landmine
+fixed on the way: the tick force-fed DEFAULT_BUILD_TIMEOUT_MS into the
+dispatch proof, stale-approving every profile whose sealed clock is
+shorter than claude's — the tick now asks for nothing and the sealed
+profile governs. Implementation review: Codex ran out of
+capacity mid-verdict (its partial pass confirmed the v26 recognizer,
+the pre-spawn stamping, and the timeout fix sound, then died naming
+nothing), so per this project's standing fallback a competing self-
+review ran instead and closed four real findings — warm park-resume was
+provider-blind (a gemini park would have rendered `--resume` against an
+unproven road; now gated on the audit), the diagnostic promised
+control-normalization + secret-scanning and only had a byte cap (now
+`safeDiagnostic`: controls collapse, a secret-tripping line is withheld
+in words), both truncation markers now ride INSIDE their byte budgets,
+and the planner road now mints session identity too. A Codex verify of
+this commit is queued for when capacity returns. Live-auth spike items
+S1–S4 (headless session persistence, trust gating, real happy-path
+bytes, env visibility) wait on an authenticated `gemini` on this
+machine; every default is fail-closed without them. Suite 1230 → 1277.
+
 **2026-08-26 — Parity II Phase 2E.4: continuation — and Phase 2
 closes.** The last A4 piece, to the reviewed rulings (v3 R7, v4 Q7, v5
 P5, round-6 findings 3/5 already closed). A finished attempt's run

@@ -88,6 +88,12 @@ const TICK_FAILURE_REASONS = new Set([
   "setup",
   "revision-brief",
   "stopped",
+  // Phase 3 (C1): the gateway's typed refusals consume the task strike
+  // budget like every other infrastructure failure — the pre-claim skip
+  // keeps the NORMAL road from ever reaching here; these arms bound the
+  // races.
+  "provider-unattested",
+  "provider-protocol",
 ]);
 
 /** The standalone road's historical "broke" list — narrower, deliberately. */
@@ -331,7 +337,7 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
         ? "agent-reported"
         : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
           ? "no-op"
-          : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "stopped"
+          : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "stopped" || result.reason === "provider-unattested" || result.reason === "provider-protocol"
             ? "retryable-infra"
             : result.reason === "commit-failure"
               ? "commit-failure"

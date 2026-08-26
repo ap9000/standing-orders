@@ -12,11 +12,12 @@
  * division of labor as the builder.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { run } from "./exec.js";
+import { auditOf } from "./provider.js";
 import type { Store } from "./store.js";
 import { currentClaim, heartbeat } from "./claim.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
@@ -58,7 +59,7 @@ export type PlanRequest = {
   clock?: () => Date;
   model?: string;
   /** The harness this planning session runs on. */
-  provider?: "claude" | "codex" | "openrouter";
+  provider?: "claude" | "codex" | "openrouter" | "gemini";
   maxTurns?: number;
   timeoutMs?: number;
   pulseMs?: number;
@@ -230,9 +231,9 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
     pulseTimer.unref?.();
   }
 
-  let result;
+  let invoked;
   try {
-    result = await invokeAgent(
+    invoked = await invokeAgent(
       store,
       request.runId,
       { provider: request.provider ?? "claude", model: request.model ?? null },
@@ -245,12 +246,33 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
         permissionMode: request.permissionMode ?? "plan",
         skipPermissions: false,
         resumeSession: null,
+        // Minted identity where the harness supports it (Phase 3 A5) —
+        // the planner's session is provenance too.
+        ...(auditOf(request.provider ?? "claude").sessionIdentity === "minted"
+          ? { startSessionId: randomUUID() }
+          : {}),
       },
       { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
   }
+
+  // The gateway's value-shaped refusals (Phase 3 B5/C1): both consume the
+  // planning strike budget exactly as any planner failure does.
+  if (invoked.kind === "refused") {
+    return {
+      ok: false,
+      kind: "failure",
+      reason: invoked.reason,
+      message:
+        invoked.diagnostic ??
+        (invoked.reason === "provider-unattested"
+          ? "the provider binary is outside its attested range"
+          : "the provider broke its own protocol"),
+    };
+  }
+  const result = invoked.outcome;
 
   if (result.timedOut) {
     quarantineMailboxes(worktree, root, request.runId);

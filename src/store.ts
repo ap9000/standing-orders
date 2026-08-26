@@ -38,7 +38,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 25;
+export const SCHEMA_VERSION = 26;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -408,6 +408,9 @@ export type Run = {
   finishedAt: string | null;
   /** Stamped by the invocation gateway just before the provider spawns. */
   providerStartedAt: string | null;
+  /** The provider binary's probed version — attested authoritatively for
+   * tier-2 providers, best-effort provenance for tier-1 (Phase 3 B2). */
+  providerVersion: string | null;
   tokensIn: number | null;
   tokensOut: number | null;
   costUsd: number | null;
@@ -829,7 +832,7 @@ CREATE TABLE IF NOT EXISTS task_ref (
 CREATE TABLE IF NOT EXISTS phase_config (
   scope      TEXT NOT NULL,
   phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair')),
-  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter')),
+  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter','gemini')),
   model      TEXT,
   updated_at TEXT NOT NULL,
   updated_by TEXT NOT NULL,
@@ -2765,6 +2768,79 @@ function migrate(db: Database): void {
     V25_RUN_COLUMNS,
   );
   rebuildDecisionForV25(db);
+
+  // v26 (attested runtime): phase_config's provider CHECK gains 'gemini'.
+  rebuildPhaseConfigForV26(db);
+}
+
+/** Whitespace-collapsed, IF-NOT-EXISTS-stripped DDL for full-equality
+ * comparison — a doctored constraint that merely CONTAINS the expected
+ * CHECK text must not pass (Phase 3 round-3 finding: the substring
+ * recognizer is not a recognizer). */
+function canonicalDdl(sql: string): string {
+  return sql
+    .replace(/\bIF NOT EXISTS\b/i, "")
+    .replace(/"([A-Za-z_][A-Za-z0-9_]*)"/g, "$1") // RENAME re-quotes the name
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const PHASE_CONFIG_V25_DDL = `CREATE TABLE phase_config (
+  scope      TEXT NOT NULL,
+  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair')),
+  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter')),
+  model      TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  PRIMARY KEY (scope, phase)
+)`;
+
+const PHASE_CONFIG_V26_DDL = `CREATE TABLE phase_config_next (
+  scope      TEXT NOT NULL,
+  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair')),
+  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter','gemini')),
+  model      TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  PRIMARY KEY (scope, phase)
+)`;
+
+/**
+ * The v26 rebuild: phase_config recognized by FULL canonical-DDL equality
+ * (sqlite_master's stored form, whitespace-collapsed), rows copied
+ * verbatim, refused on any unrecognized shape. Idempotent: the v26 form
+ * returns without touching anything.
+ */
+function rebuildPhaseConfigForV26(db: Database): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'phase_config'")
+    .get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  const target = canonicalDdl(PHASE_CONFIG_V26_DDL).replace("phase_config_next", "phase_config");
+  if (stored === target) return;
+  if (stored !== canonicalDdl(PHASE_CONFIG_V25_DDL)) {
+    throw new Error("the phase_config table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(PHASE_CONFIG_V26_DDL);
+      db.exec(
+        `INSERT INTO phase_config_next (scope, phase, provider, model, updated_at, updated_by)
+         SELECT scope, phase, provider, model, updated_at, updated_by FROM phase_config`,
+      );
+      db.exec("DROP TABLE phase_config");
+      db.exec("ALTER TABLE phase_config_next RENAME TO phase_config");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 /**
@@ -6857,7 +6933,7 @@ export class Store {
    * a sum that silently omits them reads as headroom that may not exist
    * (finding 5 — the arithmetic behind failing closed).
    */
-  routineSpend(routineId: number, sinceIso: string): { costUsd: number; unmeasuredRuns: number } {
+  routineSpend(routineId: number, sinceIso: string): { costUsd: number; unmeasuredRuns: number; totalRuns: number } {
     // The window is anchored to provider_started_at — the exact stamp money
     // can move — never to when the run row was opened (Codex Phase C
     // review, M2): a run opened before the cutoff whose provider started
@@ -6865,7 +6941,8 @@ export class Store {
     const row = this.db
       .prepare(
         `SELECT COALESCE(SUM(run.cost_usd), 0) AS cost,
-                SUM(CASE WHEN run.cost_usd IS NULL THEN 1 ELSE 0 END) AS unmeasured
+                SUM(CASE WHEN run.cost_usd IS NULL THEN 1 ELSE 0 END) AS unmeasured,
+                COUNT(*) AS invoked
            FROM run
            JOIN task_ref ON task_ref.id = run.task_ref
           WHERE task_ref.routine_id = ?
@@ -6875,6 +6952,7 @@ export class Store {
     return {
       costUsd: Number(row?.["cost"] ?? 0),
       unmeasuredRuns: Number(row?.["unmeasured"] ?? 0),
+      totalRuns: Number(row?.["invoked"] ?? 0),
     };
   }
 
@@ -7018,7 +7096,7 @@ export class Store {
   ): {
     routine: Routine;
     fires: ReturnType<Store["routineFires"]>;
-    spend: { costUsd: number; unmeasuredRuns: number };
+    spend: { costUsd: number; unmeasuredRuns: number; totalRuns: number };
     blocker: { taskId: string; state: string } | null;
   }[] {
     const since = new Date(now.getTime() - 7 * 24 * 60 * 60_000).toISOString();
@@ -7331,10 +7409,27 @@ export class Store {
    * not, and "provider spawns == runs carrying this stamp" is the
    * zero-token invariant's testable half.
    */
-  stampProviderStart(id: number, now: Date): void {
+  stampProviderStart(id: number, now: Date, providerVersion?: string): void {
+    // The version is the GATEWAY'S authoritative fact (Phase 3 C5): it
+    // OVERWRITES any caller-side best-effort stamp, in the same pre-spawn
+    // statement as the start stamp so a daemon death loses neither.
+    if (providerVersion !== undefined) {
+      this.db
+        .prepare(
+          "UPDATE run SET provider_started_at = COALESCE(provider_started_at, ?), provider_version = ? WHERE id = ?",
+        )
+        .run(now.toISOString(), providerVersion, id);
+      return;
+    }
     this.db
       .prepare("UPDATE run SET provider_started_at = COALESCE(provider_started_at, ?) WHERE id = ?")
       .run(now.toISOString(), id);
+  }
+
+  /** The race-refusal stamp (Phase 3 C5): the version that was REFUSED,
+   * recorded without provider_started_at — no provider process started. */
+  stampProviderVersion(id: number, providerVersion: string): void {
+    this.db.prepare("UPDATE run SET provider_version = ? WHERE id = ?").run(providerVersion, id);
   }
 
   /** What the provider said it cost. NULL columns stay NULL — unmeasured, and said so. */
@@ -9768,6 +9863,7 @@ export class Store {
     outcome: string | null;
     handoff: string | null;
     costUsd: number | null;
+    provider: string | null;
     ranMinutes: number | null;
     prNumber: number | null;
     prUrl: string | null;
@@ -9790,7 +9886,7 @@ export class Store {
              AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
              ${admission}
          )
-         SELECT completed.*, run.outcome, run.handoff, run.cost_usd, run.started_at, run.finished_at,
+         SELECT completed.*, run.outcome, run.handoff, run.cost_usd, run.provider, run.started_at, run.finished_at,
                 publication.state AS pub_state, publication.pr_number, publication.pr_url
          FROM completed
          LEFT JOIN run ON run.id = (
@@ -9810,6 +9906,7 @@ export class Store {
         outcome: row["outcome"] === null ? null : String(row["outcome"]),
         handoff: row["handoff"] === null ? null : String(row["handoff"]),
         costUsd: row["cost_usd"] === null ? null : Number(row["cost_usd"]),
+        provider: row["provider"] === null || row["provider"] === undefined ? null : String(row["provider"]),
         ranMinutes:
           row["started_at"] === null || row["finished_at"] === null || row["started_at"] === undefined
             ? null
@@ -11032,6 +11129,10 @@ function readRun(row: Record<string, unknown>): Run {
     committed: row["committed"] === null ? null : Number(row["committed"]) === 1,
     startedAt: String(row["started_at"]),
     finishedAt: row["finished_at"] === null ? null : String(row["finished_at"]),
+    providerVersion:
+      row["provider_version"] === null || row["provider_version"] === undefined
+        ? null
+        : String(row["provider_version"]),
     providerStartedAt:
       row["provider_started_at"] === null || row["provider_started_at"] === undefined
         ? null

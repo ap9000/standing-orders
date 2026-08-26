@@ -5,10 +5,20 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resetAttestationCache } from "./attest.js";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
-import { invokeAgent } from "./invoke.js";
+import { invokeAgent, type InvokeResult } from "./invoke.js";
+
+/** Most of this suite exercises the RAN arm; the union's refusal arms have
+ * their own describe below. */
+async function invokeRan(...args: Parameters<typeof invokeAgent>) {
+  const result: InvokeResult = await invokeAgent(...args);
+  if (result.kind !== "ran") throw new Error(`expected a ran outcome, got refused: ${result.reason}`);
+  return result.outcome;
+}
 
 const T0 = new Date("2026-08-12T06:00:00.000Z");
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
@@ -44,12 +54,12 @@ describe("the invocation gateway", () => {
 
   test("nothing spends without an open run", async () => {
     await expect(
-      invokeAgent(store, 999, CLAUDE, ASK, { runner: async () => OK }),
+      invokeRan(store, 999, CLAUDE, ASK, { runner: async () => OK }),
     ).rejects.toThrow(/not an open attempt/);
 
     store.finishRun(runId, { outcome: "built", now: T0 });
     await expect(
-      invokeAgent(store, runId, CLAUDE, ASK, { runner: async () => OK }),
+      invokeRan(store, runId, CLAUDE, ASK, { runner: async () => OK }),
     ).rejects.toThrow(/not an open attempt/);
   });
 
@@ -57,7 +67,7 @@ describe("the invocation gateway", () => {
     // The run row says claude (the default); codex about to spawn against
     // it is a session id that means nothing — refused structurally.
     await expect(
-      invokeAgent(store, runId, { provider: "codex", model: null }, ASK, {
+      invokeRan(store, runId, { provider: "codex", model: null }, ASK, {
         runner: async () => OK,
       }),
     ).rejects.toThrow(/about to spawn/);
@@ -67,7 +77,7 @@ describe("the invocation gateway", () => {
 
   test("the stamp precedes the spawn — a crash between the two lies in the honest direction", async () => {
     let stampAtSpawn: string | null = null;
-    await invokeAgent(store, runId, CLAUDE, ASK, {
+    await invokeRan(store, runId, CLAUDE, ASK, {
       clock: () => T0,
       runner: async () => {
         stampAtSpawn = store.getRun(runId)?.providerStartedAt ?? null;
@@ -84,7 +94,7 @@ describe("the invocation gateway", () => {
       usage: { input_tokens: 41_000, output_tokens: 2_500 },
       total_cost_usd: 0.4321,
     });
-    const result = await invokeAgent(store, runId, CLAUDE, ASK, {
+    const result = await invokeRan(store, runId, CLAUDE, ASK, {
       runner: async () => ({ ...OK, code: 1, stdout: envelope, stderr: "boom" }),
     });
 
@@ -95,7 +105,7 @@ describe("the invocation gateway", () => {
   });
 
   test("what was not measured stays NULL — never a fabricated zero", async () => {
-    await invokeAgent(store, runId, CLAUDE, ASK, {
+    await invokeRan(store, runId, CLAUDE, ASK, {
       runner: async () => ({ ...OK, stdout: "not json at all" }),
     });
 
@@ -105,7 +115,7 @@ describe("the invocation gateway", () => {
   });
 
   test("negative or non-numeric usage is a lie, not a measurement", async () => {
-    await invokeAgent(store, runId, CLAUDE, ASK, {
+    await invokeRan(store, runId, CLAUDE, ASK, {
       runner: async () => ({
         ...OK,
         stdout: JSON.stringify({ usage: { input_tokens: -5, output_tokens: "many" }, total_cost_usd: "cheap" }),
@@ -126,7 +136,7 @@ describe("the invocation gateway", () => {
       JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done and dusted" } }),
       JSON.stringify({ type: "turn.completed", usage: { input_tokens: 9_000, output_tokens: 800, cached_input_tokens: 5_000 } }),
     ].join("\n");
-    const result = await invokeAgent(
+    const result = await invokeRan(
       store, codexRun, { provider: "codex", model: "gpt-5-codex" }, ASK,
       { runner: async () => ({ ...OK, stdout: jsonl }) },
     );
@@ -148,7 +158,7 @@ describe("the invocation gateway", () => {
 
   test("a codex turn with no thread.started and nothing to show is an init failure", async () => {
     const id = codexRunFor("t-init-1");
-    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+    const result = await invokeRan(store, id, { provider: "codex", model: null }, ASK, {
       runner: async () => ({ ...OK, code: 1, stdout: "", stderr: "error: bad config.toml" }),
     });
     expect(result.initFailed).toBe(true);
@@ -157,7 +167,7 @@ describe("the invocation gateway", () => {
   test("a completed turn without the init event is NOT an init failure — a renamed event must not read as broken", async () => {
     const id = codexRunFor("t-init-2");
     const jsonl = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "fine" } });
-    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+    const result = await invokeRan(store, id, { provider: "codex", model: null }, ASK, {
       runner: async () => ({ ...OK, stdout: jsonl }),
     });
     expect(result.initFailed).toBe(false);
@@ -166,7 +176,7 @@ describe("the invocation gateway", () => {
   test("a nonzero exit WITH an agent message is a failed turn, never an init failure (audit C-8)", async () => {
     const id = codexRunFor("t-init-4");
     const jsonl = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "I tried and failed" } });
-    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+    const result = await invokeRan(store, id, { provider: "codex", model: null }, ASK, {
       runner: async () => ({ ...OK, code: 1, stdout: jsonl, stderr: "turn failed" }),
     });
     expect(result.initFailed).toBe(false);
@@ -175,7 +185,7 @@ describe("the invocation gateway", () => {
 
   test("a timeout is a timeout, not an init failure — even with no init event seen", async () => {
     const id = codexRunFor("t-init-3");
-    const result = await invokeAgent(store, id, { provider: "codex", model: null }, ASK, {
+    const result = await invokeRan(store, id, { provider: "codex", model: null }, ASK, {
       runner: async () => ({ ...OK, code: 1, stdout: "", timedOut: true }),
     });
     expect(result.initFailed).toBe(false);
@@ -183,7 +193,7 @@ describe("the invocation gateway", () => {
   });
 
   test("claude gained the init signal with the streaming transport — an empty failed stream is an init failure", async () => {
-    const result = await invokeAgent(store, runId, CLAUDE, ASK, {
+    const result = await invokeRan(store, runId, CLAUDE, ASK, {
       runner: async () => ({ ...OK, code: 1, stderr: "exploded before the harness" }),
     });
     expect(result.initFailed).toBe(true);
@@ -201,7 +211,7 @@ describe("the invocation gateway", () => {
       type: "result", subtype: "error_during_execution", is_error: true,
       result: "credential rejected before any turn", session_id: "s-dead",
     });
-    const result = await invokeAgent(store, errRun, CLAUDE, ASK, {
+    const result = await invokeRan(store, errRun, CLAUDE, ASK, {
       runner: async () => ({ ...OK, code: 1, stdout: stream, stderr: "" }),
     });
     expect(result.finalMessage).toBe("credential rejected before any turn");
@@ -215,11 +225,168 @@ describe("the invocation gateway", () => {
       branch: "b", worktree: "/w", provider: "claude", now: T0,
     });
     const stream = JSON.stringify({ type: "system", subtype: "init", session_id: "s-up" });
-    const result = await invokeAgent(store, okRun, CLAUDE, ASK, {
+    const result = await invokeRan(store, okRun, CLAUDE, ASK, {
       runner: async () => ({ ...OK, code: 1, stdout: stream, stderr: "died mid-turn" }),
     });
     expect(result.initFailed).toBe(false);
     expect(result.sessionId).toBe("s-up");
+  });
+});
+
+describe("the attested gateway (Phase 3): gemini refusals are values", () => {
+  let store: Store;
+  let dir: string;
+  let savedPath: string | undefined;
+
+  const fakeGemini = (version: string): void => {
+    const path = join(dir, "gemini");
+    writeFileSync(path, `#!/bin/sh\necho "${version}"\n`);
+    chmodSync(path, 0o755);
+  };
+
+  const geminiRun = (id: string): number => {
+    store.createTask({ id, title: "w" }, T0);
+    return store.startRun({
+      taskRef: store.refFor("built-in", id).id, leaseId: `lease-${id}`, runner: "builder-1",
+      branch: "b", worktree: "/w", provider: "gemini", now: T0,
+    });
+  };
+
+  const GEMINI = { provider: "gemini" as const, model: "gemini-2.5-pro" };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    dir = mkdtempSync(join(tmpdir(), "invoke-attest-"));
+    savedPath = process.env["PATH"];
+    process.env["PATH"] = `${dir}:${savedPath ?? ""}`;
+    resetAttestationCache();
+  });
+
+  afterEach(() => {
+    if (savedPath !== undefined) process.env["PATH"] = savedPath;
+    rmSync(dir, { recursive: true, force: true });
+    resetAttestationCache();
+    store.close();
+  });
+
+  test("out of range: refused as a VALUE, version stamped, provider_started_at honestly NULL", async () => {
+    fakeGemini("0.58.9");
+    const runId = geminiRun("g-1");
+    const result = await invokeAgent(store, runId, GEMINI, ASK, { runner: async () => OK });
+    expect(result).toMatchObject({ kind: "refused", reason: "provider-unattested", providerVersion: "0.58.9" });
+    const run = store.getRun(runId);
+    expect(run?.providerVersion).toBe("0.58.9");
+    expect(run?.providerStartedAt).toBeNull();
+  });
+
+  test("in range: the version rides the SAME pre-spawn durable write as the start stamp", async () => {
+    fakeGemini("0.57.0");
+    const runId = geminiRun("g-2");
+    let stampedAtSpawn: { version: string | null; started: string | null } | null = null;
+    const stream = [
+      JSON.stringify({ type: "init", session_id: "s-1", model: "m" }),
+      JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 5, output_tokens: 5 } }),
+    ].join("\n");
+    const result = await invokeAgent(store, runId, GEMINI, ASK, {
+      runner: async () => {
+        const run = store.getRun(runId);
+        stampedAtSpawn = { version: run?.providerVersion ?? null, started: run?.providerStartedAt ?? null };
+        return { ...OK, stdout: stream };
+      },
+    });
+    expect(result.kind).toBe("ran");
+    expect(stampedAtSpawn).toMatchObject({ version: "0.57.0" });
+    expect((stampedAtSpawn as unknown as { started: string | null }).started).not.toBeNull();
+  });
+
+  test("the terminal contract: exit 0 without the success terminal is provider-protocol, never a build", async () => {
+    fakeGemini("0.57.0");
+    const truncated = geminiRun("g-3");
+    const initOnly = JSON.stringify({ type: "init", session_id: "s-1", model: "m" });
+    const result = await invokeAgent(store, truncated, GEMINI, ASK, {
+      runner: async () => ({ ...OK, stdout: initOnly }),
+    });
+    expect(result).toMatchObject({ kind: "refused", reason: "provider-protocol" });
+    expect((result as { diagnostic: string }).diagnostic).toContain("success terminal");
+
+    const dead = geminiRun("g-4");
+    const noInit = await invokeAgent(store, dead, GEMINI, ASK, { runner: async () => OK });
+    expect(noInit).toMatchObject({ kind: "refused", reason: "provider-protocol" });
+    expect((noInit as { diagnostic: string }).diagnostic).toContain("initializing");
+  });
+
+  test("exit 0 with an error-status terminal: refused, and the spend was still recorded", async () => {
+    fakeGemini("0.57.0");
+    const runId = geminiRun("g-5");
+    const stream = [
+      JSON.stringify({ type: "init", session_id: "s-1", model: "m" }),
+      JSON.stringify({ type: "result", status: "error", error: { type: "X", message: "invalid stream" }, stats: { input_tokens: 7, output_tokens: 3 } }),
+    ].join("\n");
+    const result = await invokeAgent(store, runId, GEMINI, ASK, { runner: async () => ({ ...OK, stdout: stream }) });
+    expect(result).toMatchObject({ kind: "refused", reason: "provider-protocol" });
+    expect(store.getRun(runId)).toMatchObject({ tokensIn: 7, tokensOut: 3 });
+  });
+
+  test("a nonzero exit keeps today's classification road — the contract gates only believed successes", async () => {
+    fakeGemini("0.57.0");
+    const runId = geminiRun("g-6");
+    const result = await invokeAgent(store, runId, GEMINI, ASK, {
+      runner: async () => ({ ...OK, code: 41, stderr: "set an auth method" }),
+    });
+    expect(result.kind).toBe("ran");
+    expect((result as { outcome: { initFailed: boolean } }).outcome.initFailed).toBe(true);
+  });
+
+  test("minted identity: stamped before spawn, and the init echo must MATCH it", async () => {
+    fakeGemini("0.57.0");
+    const runId = geminiRun("g-7");
+    const minted = "11111111-2222-4333-8444-555555555555";
+    let sessionAtSpawn: string | null = null;
+    const wrong = [
+      JSON.stringify({ type: "init", session_id: "not-the-minted-one", model: "m" }),
+      JSON.stringify({ type: "result", status: "success" }),
+    ].join("\n");
+    const result = await invokeAgent(store, runId, GEMINI, { ...ASK, startSessionId: minted }, {
+      runner: async () => {
+        sessionAtSpawn = store.getRun(runId)?.sessionId ?? null;
+        return { ...OK, stdout: wrong };
+      },
+    });
+    expect(sessionAtSpawn).toBe(minted);
+    expect(result).toMatchObject({ kind: "refused", reason: "provider-protocol" });
+    expect((result as { diagnostic: string }).diagnostic).toContain("different");
+
+    const silent = geminiRun("g-8");
+    const noId = [
+      JSON.stringify({ type: "init", model: "m" }),
+      JSON.stringify({ type: "result", status: "success" }),
+    ].join("\n");
+    const absent = await invokeAgent(store, silent, GEMINI, { ...ASK, startSessionId: minted }, {
+      runner: async () => ({ ...OK, stdout: noId }),
+    });
+    expect(absent).toMatchObject({ kind: "refused", reason: "provider-protocol" });
+    expect((absent as { diagnostic: string }).diagnostic).toContain("without announcing");
+
+    const honest = geminiRun("g-9");
+    const echoed = [
+      JSON.stringify({ type: "init", session_id: minted, model: "m" }),
+      JSON.stringify({ type: "result", status: "success" }),
+    ].join("\n");
+    const good = await invokeAgent(store, honest, GEMINI, { ...ASK, startSessionId: minted }, {
+      runner: async () => ({ ...OK, stdout: echoed }),
+    });
+    expect(good.kind).toBe("ran");
+  });
+
+  test("tier-1 spawns never probe: claude runs with NO gemini on PATH at all", async () => {
+    process.env["PATH"] = dir; // gemini absent, everything absent
+    store.createTask({ id: "c-1", title: "w" }, T0);
+    const runId = store.startRun({
+      taskRef: store.refFor("built-in", "c-1").id, leaseId: "lease-c1", runner: "builder-1",
+      branch: "b", worktree: "/w", now: T0,
+    });
+    const result = await invokeAgent(store, runId, CLAUDE, ASK, { runner: async () => OK });
+    expect(result.kind).toBe("ran");
   });
 });
 

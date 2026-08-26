@@ -4,6 +4,7 @@ import { register } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { build, PROTECTED, type Runner } from "./builder.js";
+import { resetAttestationCache } from "./attest.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -1776,5 +1777,151 @@ describe("bounded repair", () => {
     expect(result).toMatchObject({ ok: false, reason: "malformed-decision" });
     expect(calls).toHaveLength(1);
     expect(store.runsFor(taskRef).filter(r => r.role === "repair")).toHaveLength(0);
+  });
+});
+
+
+describe("the gemini repair road: fresh sessions, self-contained briefs (Phase 3 A8/B8/C4)", () => {
+  const { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join, delimiter } = require("node:path") as typeof import("node:path");
+
+  let store: Store;
+  let taskRef: number;
+  let worktree: string;
+  let evidence: string;
+  let runId: number;
+  let restorePath: (() => void) | null = null;
+
+  const git: Runner = async (_file, args) => {
+    if (args.includes("--abbrev-ref")) return { ...OK, stdout: "feat/g\n" };
+    if (args.includes("symbolic-ref")) {
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
+    if (args.includes("rev-parse")) return { ...OK, stdout: "abc123def\n" };
+    if (args.includes("diff")) return { ...OK, stdout: "diff --git a/x b/x\n" };
+    if (args.includes("status")) return { ...OK, stdout: " M x\n" };
+    return { ...OK };
+  };
+
+  const valid = {
+    urgency: "blocking",
+    recap: "The guard needs a policy call.",
+    question: "Fail open or fail closed?",
+    options: [
+      { id: "open", label: "Fail open", consequence: "Bad payouts slip through.", reversible: true },
+      { id: "closed", label: "Fail closed", consequence: "Payouts pause.", reversible: true },
+    ],
+    recommendation: "closed",
+  };
+  const invalid = { ...valid, recommendation: "ghost" };
+
+  const mailboxFrom = (args: readonly string[]): string => {
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    const name = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    if (name === undefined) throw new Error("no mailbox named in the prompt");
+    return name;
+  };
+
+  /** Speaks the gemini stream and echoes whatever session id was minted. */
+  const geminiStaged = (payloads: unknown[]) => {
+    const calls: string[][] = [];
+    let turn = 0;
+    const agent: Runner = async (_file, args, options) => {
+      calls.push([...args]);
+      const cwd = options?.cwd ?? worktree;
+      const payload = payloads[turn];
+      if (payload !== undefined) {
+        writeFileSync(join(cwd, mailboxFrom(args)), typeof payload === "string" ? payload : JSON.stringify(payload));
+      }
+      turn++;
+      const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+      return {
+        ...OK,
+        stdout: [
+          JSON.stringify({ type: "init", session_id: minted, model: "gemini-2.5-pro" }),
+          JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 10, output_tokens: 5 } }),
+        ].join("\n"),
+      };
+    };
+    return { agent, calls };
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "gemini", "gemini-2.5-pro", "test", T0);
+    const approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-g", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-g").id;
+    register(store, { name: "builder-1", host: "h", now: T0 });
+    worktree = mkdtempSync(join(tmpdir(), "so-gem-repair-wt-"));
+    evidence = mkdtempSync(join(tmpdir(), "so-gem-repair-ev-"));
+    store.saveWorktree({
+      path: worktree, repo: "/code/thing", branch: "feat/g", runner: "builder-1",
+      taskRef, createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+    });
+    propose(store, { taskId: "t-g", goal: "add a guard on the payout path", now: T0 });
+    approve(store, "t-g", "alex", T0, store.getScope("t-g")!.digest, approverToken);
+    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    runId = store.startRun({
+      taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1",
+      branch: "feat/g", worktree, provider: "gemini", now: T0,
+    });
+    // A fake in-range gemini on PATH: the gateway's attestation probes it.
+    const bin = join(mkdtempSync(join(tmpdir(), "so-gem-bin-")), "b");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gemini"), "#!/bin/sh\necho \"0.57.0\"\n");
+    chmodSync(join(bin, "gemini"), 0o755);
+    const saved = process.env["PATH"];
+    process.env["PATH"] = `${bin}${delimiter}${saved ?? ""}`;
+    resetAttestationCache();
+    restorePath = () => {
+      process.env["PATH"] = saved ?? "";
+      resetAttestationCache();
+    };
+  });
+
+  afterEach(() => {
+    restorePath?.();
+    store.close();
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(evidence, { recursive: true, force: true });
+  });
+
+  test("a malformed park repairs in a FRESH session: no --resume, fresh minted ids, the payload quoted in the brief", async () => {
+    const { agent, calls } = await Promise.resolve(geminiStaged([invalid, valid]));
+    const result = await build(store, {
+      taskId: "t-g", taskRef, runner: "builder-1",
+      leaseId: currentClaim(store, taskRef, T0)!.leaseId,
+      worktree, branch: "feat/g", now: T0, runId, evidenceRoot: evidence,
+      provider: "gemini", model: "gemini-2.5-pro", git, agent,
+    });
+
+    expect(result.ok).toBe(true);
+    expect("parked" in result && result.parked !== undefined).toBe(true);
+    expect(calls).toHaveLength(2);
+
+    // The repair turn resumed NOTHING — the audit says resume is unproven.
+    const repair = calls[1] ?? [];
+    expect(repair).not.toContain("--resume");
+    // Both turns minted their own identities, and they differ.
+    const buildId = calls[0]?.[calls[0].indexOf("--session-id") + 1];
+    const repairId = repair[repair.indexOf("--session-id") + 1];
+    expect(buildId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(repairId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(repairId).not.toBe(buildId);
+
+    // The brief is self-contained: the malformed payload rides it as
+    // fenced data (the per-line "| " prefix), instructions after.
+    const prompt = repair[repair.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("EARLIER session");
+    expect(prompt).toContain("| ");
+    expect(prompt).toContain("ghost"); // the bad payload's own bytes, quoted
+    expect(prompt.indexOf("Rewrite")).toBeGreaterThan(prompt.indexOf("| "));
+
+    // The mending is its own run, on the same provider, fresh identity.
+    const child = store.runsFor(taskRef).find(r => r.role === "repair");
+    expect(child).toMatchObject({ provider: "gemini", outcome: "built" });
+    expect(child?.sessionId).toBe(repairId);
   });
 });

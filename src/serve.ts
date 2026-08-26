@@ -137,6 +137,7 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { isProviderId, reportsCost } from "./provider.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -4377,8 +4378,12 @@ function taskHref(taskId: string): string {
 function consoleSpend(summary: ReturnType<typeof tally<Run & { taskId: string }>>): string {
   if (summary.invoked.length === 0) return "nothing — no provider was invoked";
   const dollars = `$${summary.spend.toFixed(2)}`;
-  const gap = summary.invoked.length - summary.measured.length;
-  return `${dollars} across ${summary.invoked.length} run(s)${gap > 0 ? ` — ${gap} unmeasured` : ""}`;
+  // The measured count rides the SAME clause as the total (Phase 3 A6):
+  // a bare sum over a mixed fleet reads as complete, and is not.
+  if (summary.measured.length === summary.invoked.length) {
+    return `${dollars} across ${summary.invoked.length} run(s)`;
+  }
+  return `${dollars} measured across ${summary.measured.length} of ${summary.invoked.length} runs — the rest report tokens only`;
 }
 
 /** ISO to the minute — "2026-08-12 17:56" — for anywhere a person reads a time. */
@@ -4505,7 +4510,9 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
   const repair = profile.repairModel === "inherit" ? "same model" : profile.repairModel;
   return profile.provider === "claude"
     ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — edits auto-accepted inside its leased worktree, ${profile.maxTurns} turns / ${Math.round(profile.timeoutSeconds / 60)} min per attempt; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
-    : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
+    : profile.provider === "gemini"
+      ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "EVERY tool auto-approved" : "edits auto-approved, other tools refused"}, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+      : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
 }
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
@@ -6005,7 +6012,7 @@ function donePage(
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
               `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
-              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.costUsd === null ? "" : ` \u00b7 $${row.costUsd.toFixed(2)}`}</p></div>`
+              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.costUsd !== null ? ` \u00b7 $${row.costUsd.toFixed(2)}` : row.provider !== null && isProviderId(row.provider) && !reportsCost(row.provider) ? " \u00b7 tokens only" : ""}</p></div>`
             );
           })
           .join("\n");
@@ -6020,7 +6027,7 @@ function donePage(
 type Track = {
   routine: Routine;
   fires: ReturnType<Store["routineFires"]>;
-  spend: { costUsd: number; unmeasuredRuns: number };
+  spend: { costUsd: number; unmeasuredRuns: number; totalRuns: number };
   blocker: { taskId: string; state: string } | null;
 };
 
@@ -6074,7 +6081,7 @@ function trackRow(track: Track, all: boolean): string {
     `<span class="right meta">${escape(schedule === null ? routine.schedule : describeSchedule(schedule))}</span></p>` +
     `<p class="meta">${escape(routine.goal.length > 110 ? routine.goal.slice(0, 110) + "…" : routine.goal)}</p>` +
     `<p>${trackStrip(fires)}` +
-    `<span class="right meta">${spend.unmeasuredRuns > 0 ? `<strong>spend unmeasured</strong> · ` : ""}$${spend.costUsd.toFixed(2)} this week${routine.costCeilingUsd === null ? "" : ` of $${routine.costCeilingUsd.toFixed(2)}`}</span></p>` +
+    `<span class="right meta">$${spend.costUsd.toFixed(2)} this week${spend.unmeasuredRuns > 0 ? ` — measured on ${spend.totalRuns - spend.unmeasuredRuns} of ${spend.totalRuns} builds` : ""}${routine.costCeilingUsd === null ? "" : ` of $${routine.costCeilingUsd.toFixed(2)}`}</span></p>` +
     (blocker !== null
       ? `<p class="meta">stopped behind <a href="${taskHref(blocker.taskId)}" class="mono">${escape(blocker.taskId)}</a> (${escape(blocker.state)})</p>`
       : latest?.instanceTaskId !== undefined && latest.instanceTaskId !== null
@@ -6398,7 +6405,7 @@ function routineScreenPage(chrome: Chrome, data: {
     `<h1>${escape(routine.name)} <span class="${status.badge}">${escape(status.text)}</span>` +
       `<span class="meta"> · ${escape(projectName(routine.repo))}</span></h1>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
-    `<p>${trackStrip(fires)}<span class="right meta">$${data.spend.costUsd.toFixed(2)} this week${data.spend.unmeasuredRuns > 0 ? " · <strong>some spend unmeasured</strong>" : ""}</span></p>`,
+    `<p>${trackStrip(fires)}<span class="right meta">$${data.spend.costUsd.toFixed(2)} this week${data.spend.unmeasuredRuns > 0 ? ` — measured on ${data.spend.totalRuns - data.spend.unmeasuredRuns} of ${data.spend.totalRuns} builds` : ""}</span></p>`,
     data.blocker !== null
       ? `<div class="problem">stopped behind <a href="${taskHref(data.blocker.taskId)}" class="mono">${escape(data.blocker.taskId)}</a> (${escape(data.blocker.state)}) — the track resumes when it finishes or is cancelled</div>`
       : "",
@@ -8217,8 +8224,10 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: R
                 run.costUsd !== null
                   ? ` \u00b7 $${run.costUsd.toFixed(2)}`
                   : run.tokensIn !== null || run.tokensOut !== null
-                    ? " \u00b7 unmeasured $"
-                    : ""
+                    ? " \u00b7 tokens only"
+                    : run.providerStartedAt !== null
+                      ? " \u00b7 unmeasured"
+                      : ""
               }</span></p>`,
           )
           .join("\n");
