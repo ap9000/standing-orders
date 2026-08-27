@@ -723,10 +723,13 @@ export function computePickPlan(
   const run = chosen.run;
   const grant = repo === null ? null : store.publicationGrantFor(repo);
   const committed = run.outcome === "built" && run.committed === true;
+  // Contest runs are builders — a branchless (reviewer) row can never be
+  // picked, and the null check keeps that a typed fact, not an assumption.
   const publishable =
     committed &&
     grant !== null &&
     run.headRevision !== null &&
+    run.branch !== null &&
     run.branch.startsWith(grant.headPrefix) &&
     (grant.selector === "all" || refOrigin === "ours");
   const digest = pickTupleDigest(
@@ -794,7 +797,7 @@ export function finalizeContestPick(
     // by construction — surface it, never publish over it.
     if (!done.ok) throw new Error(`the picked task could not be marked done (${done.reason})`);
     let intent: number | null = null;
-    if (publishable && grant !== null && chosen.run.headRevision !== null) {
+    if (publishable && grant !== null && chosen.run.headRevision !== null && chosen.run.branch !== null) {
       intent = store.createPublicationIntent(
         {
           run: chosen.run.id,

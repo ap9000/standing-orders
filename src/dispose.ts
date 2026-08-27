@@ -21,6 +21,7 @@ import {
   type FailureClass,
 } from "./claim.js";
 import { bodyHashOf, publicationBody } from "./publish.js";
+import { modeTermsFromJson } from "./modes.js";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
 
@@ -106,6 +107,23 @@ const STANDALONE_BROKE_REASONS = new Set([
   "git",
 ]);
 
+/**
+ * The reviewAuto term (v29, R3): a live mode whose terms say so queues an
+ * agent review for every built-with-changes outcome — queues, never runs,
+ * so the request re-proves the mode again at dispatch (R-REVOKE: a run
+ * finishing after revocation files nothing). Refusals are silently fine
+ * here: no diff, a truncated diff, or an existing review just mean the
+ * automatic road has nothing honest to ask for.
+ */
+export function maybeRequestAutoReview(store: Store, repo: string, runId: number, committed: boolean, noChange: boolean, now: Date): void {
+  if (!committed || noChange) return;
+  const mode = store.activeMode(repo, now);
+  if (mode === null) return;
+  const terms = modeTermsFromJson(mode.termsJson);
+  if (terms === null || !terms.reviewAuto) return;
+  store.requestReview(runId, `mode:${mode.digest}`, now);
+}
+
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
   const { store, policy, leaseId, runId, taskId, taskRef, runner, repo, branch, origin, provider, model, worktreePath, clock } =
     context;
@@ -178,6 +196,7 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
       });
       store.clearQuota(runner, provider, model ?? "");
       if (sealed.disowned) return { kind: "disowned" };
+      maybeRequestAutoReview(store, repo, runId, result.committed, result.noChange === true, clock());
       return { kind: "built", committed: result.committed, noChange: result.noChange === true };
     }
     if (policy === "standalone") {
@@ -259,6 +278,9 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
       // proves the credential, clearing any quota stamp.
       store.resetStrikes(taskRef);
       store.clearQuota(runner, provider, model ?? "");
+      // The standalone road deliberately stays out: its historical shape
+      // touches nothing beyond run records, and `task review` covers it.
+      maybeRequestAutoReview(store, repo, runId, result.committed, result.noChange === true, clock());
       return { kind: "built", committed: result.committed, noChange: result.noChange === true };
     }
     store.transact(() => {

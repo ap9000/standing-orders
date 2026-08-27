@@ -171,6 +171,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     notableReasons: ["unknown-task"] },
   operator("task approve", "the yes — nothing builds without one; binds to the scope digest"),
   operator("task requeue", "exit a stall: incidents resolved, strikes cleared, queued again"),
+  operator("task review", "ask an agent to review a finished run's sealed diff — its comments land for you to prune and seal"),
   operator("task reopen", "resume external work its tracker closed and has been SEEN open again"),
 
   // ---- leases (runner surface) ----

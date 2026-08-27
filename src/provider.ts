@@ -33,7 +33,9 @@ export function isProviderId(value: string): value is ProviderId {
 /** Which harness runs, on which model. model null = the harness's default. */
 export type AgentSpec = { provider: ProviderId; model: string | null };
 
-export type Phase = "plan" | "build" | "repair";
+/** 'review' (v29) is the reviewer's artifact-only pass — plan-shaped in
+ * every clamp: read, comment, never build. */
+export type Phase = "plan" | "build" | "repair" | "review";
 
 /**
  * Model ids cross providers ("anthropic/claude-sonnet-4.5", "gpt-5-codex",
@@ -346,6 +348,7 @@ const CODEX_TIMEOUT_CAP_MS: Record<Phase, number> = {
   build: 20 * 60_000,
   plan: 10 * 60_000,
   repair: 5 * 60_000,
+  review: 10 * 60_000,
 };
 
 /**
@@ -379,6 +382,7 @@ const GEMINI_TIMEOUT_CAP_MS: Record<Phase, number> = {
   build: 20 * 60_000,
   plan: 10 * 60_000,
   repair: 5 * 60_000,
+  review: 10 * 60_000,
 };
 
 const DIAGNOSTIC_CAP = 2 * 1024;

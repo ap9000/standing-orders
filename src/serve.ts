@@ -1257,7 +1257,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           options.localRunner !== undefined &&
           found.runner === options.localRunner &&
           who.via === "cookie" &&
-          who.session.editorLinks === true
+          who.session.editorLinks === true &&
+          // A reviewer run (v29) never had a checkout — no files to open.
+          found.worktree !== null
             ? { worktree: found.worktree }
             : null,
           options.editorLinks !== undefined &&
@@ -2229,6 +2231,9 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   type PeekAdmission = {
     run: Run;
+    /** The run's checkout, PROVEN non-null by the guards: a reviewer run
+     * (v29, artifact-only) is refused before admission ever forms. */
+    worktree: string;
     epoch: string;
     entries: ReturnType<typeof parseBaseTreeSnapshot>;
   };
@@ -2241,6 +2246,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     const run = store.getRun(runId);
     if (run === null || !runVisible(run)) return { ok: false, message: "no such build", final: true };
     if (run.outcome !== null) return { ok: false, message: "this build has finished — the final diff below is the record", final: true };
+    // The reviewer role (v29): artifact-only, honestly — there is no
+    // checkout anywhere to watch, and there never was.
+    if (run.worktree === null) {
+      return { ok: false, message: "this run reviewed the sealed diff — no workspace existed to watch", final: true };
+    }
     if (run.baseRevision === null) return { ok: false, message: "the build has not settled its starting point yet" };
     // The run's lease must be the task's CURRENT live lease — max generation,
     // unreleased, strictly unexpired. liveClaimByLease proves only that the
@@ -2281,13 +2291,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (snapshot === null || snapshot.run !== runId || snapshot.base !== run.baseRevision) {
       return { ok: false, message: "the base snapshot does not match this build" };
     }
-    return { ok: true, admit: { run, epoch: row.leaseEpoch, entries: snapshot } };
+    return { ok: true, admit: { run, worktree: run.worktree, epoch: row.leaseEpoch, entries: snapshot } };
   }
 
   async function peekFragment(runId: number, sessionKey: string, editorMode = false): Promise<{ status: number; body: string; retryAfter?: number }> {
     const guarded = peekGuards(runId);
     if (!guarded.ok) return { status: 200, body: peekSay(guarded.message, guarded.final === true) };
-    const { run, epoch, entries } = guarded.admit;
+    const { run, worktree, epoch, entries } = guarded.admit;
     // The cache and the in-flight coalescer both vary by LINK MODE (arc 6,
     // finding 3): a linked fragment rendered for one session must never be
     // served to a session that has not activated links on its device.
@@ -2310,7 +2320,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     peekBySession.set(sessionKey, (peekBySession.get(sessionKey) ?? 0) + 1);
     const work = (async (): Promise<string> => {
-      const seen = await observeWorktree(run.worktree, entries.entries, PEEK_LIMITS);
+      const seen = await observeWorktree(worktree, entries.entries, PEEK_LIMITS);
       // The fence, proved AGAIN after the walk (findings 16/28): the same
       // run still open, the same claim, the SAME epoch — or the whole
       // observation is discarded, never rendered, never cached.
@@ -2336,7 +2346,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const linkedName = (path: string): string => {
         const shown = peekName(path);
         if (!editorMode || shown !== escape(path)) return shown;
-        const href = editorFileHref(run.worktree, path);
+        const href = editorFileHref(worktree, path);
         return href === null ? shown : `<a href="${escape(href)}">${shown}</a>`;
       };
       const line = (row: { path: string; detail: string }, mark: string): string =>
@@ -3006,7 +3016,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           kind: "pick", contestKind: view.contest.kind, contestId, taskId: data.taskId, taskTitle: data.taskTitle,
           agents: view.agents.length, totalMicrousd: data.totalMicrousd, anyUnknown: data.anyUnknown,
           chosen: plan.chosen,
-          publication: plan.publishable && plan.grant !== null ? { githubRepo: plan.grant.githubRepo, branch: plan.chosen.run.branch, draft: plan.grant.draft } : null,
+          publication: plan.publishable && plan.grant !== null && plan.chosen.run.branch !== null ? { githubRepo: plan.grant.githubRepo, branch: plan.chosen.run.branch, draft: plan.grant.draft } : null,
           nonceValue, csrf: who.via === "cookie" ? who.session.csrf : "",
         }));
       }
@@ -7133,7 +7143,7 @@ function contestCeremonyPage(chrome: Chrome, data: {
     `<p class="row">its result becomes the outcome of <strong>${escape(data.taskTitle)}</strong> — the task is marked done, keyed to <a href="/r/${run.id}">this build</a></p>`,
     run.outcome === "no-change"
       ? `<p class="row">the result is a verified <strong>no change</strong> — the agent concluded nothing needed doing, and its checkout still matches the starting point</p>`
-      : `<p class="row">the changes live on branch <span class="mono">${escape(run.branch)}</span>` +
+      : `<p class="row">the changes live on branch <span class="mono">${escape(run.branch ?? "?")}</span>` +
         `${run.headRevision === null ? "" : `, ending at <span class="mono">${escape(run.headRevision.slice(0, 12))}</span>`}</p>`,
     agent.diff === null
       ? ""

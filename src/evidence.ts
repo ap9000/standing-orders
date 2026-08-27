@@ -41,6 +41,8 @@ export const MAILBOX_PREFIX = "STANDING-ORDERS-PARK-";
 export const HANDOFF_PREFIX = "STANDING-ORDERS-DONE-";
 /** The planner's terminal handoff: the proposed scope and the plan document. */
 export const PLAN_PREFIX = "STANDING-ORDERS-PLAN-";
+/** The reviewer's comment mailbox (v29): its only legitimate output. */
+export const REVIEW_PREFIX = "STANDING-ORDERS-REVIEW-";
 export const MAILBOX_SUFFIX = ".json";
 
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
@@ -87,6 +89,7 @@ export function looksLikeProtocolFile(name: string): boolean {
     (name.startsWith(MAILBOX_PREFIX) ||
       name.startsWith(HANDOFF_PREFIX) ||
       name.startsWith(PLAN_PREFIX) ||
+      name.startsWith(REVIEW_PREFIX) ||
       name.startsWith("NIGHTORDERS-")) &&
     name.endsWith(MAILBOX_SUFFIX)
   );
@@ -98,6 +101,10 @@ export function handoffName(): string {
 
 export function planFileName(): string {
   return `${PLAN_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
+}
+
+export function reviewFileName(): string {
+  return `${REVIEW_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 /**

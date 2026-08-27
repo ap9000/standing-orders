@@ -397,9 +397,9 @@ describe("the architecture rule", () => {
    * legitimately appear in config, schema, and UI — so the boundary is
    * asserted on IMPORTS, not string literals (Codex provider review, Q1):
    * only invoke.ts may import the registry's spawning surface, and only
-   * builder/planner may import the gateway itself.
+   * builder/planner/reviewer may import the gateway itself.
    */
-  test("only the gateway imports the spawning surface; only builder and planner spend", () => {
+  test("only the gateway imports the spawning surface; only builder, planner, and reviewer spend", () => {
     const src = join(process.cwd(), "src");
     const spawners: string[] = [];
     const invokers: string[] = [];
@@ -414,6 +414,6 @@ describe("the architecture rule", () => {
       }
     }
     expect(spawners).toEqual([]);
-    expect(invokers.sort()).toEqual(["builder.ts", "planner.ts"]);
+    expect(invokers.sort()).toEqual(["builder.ts", "planner.ts", "reviewer.ts"]);
   });
 });

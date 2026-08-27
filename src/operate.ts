@@ -161,6 +161,7 @@ import {
   type Runner as CommandRunner,
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
+import { reviewPass } from "./reviewer.js";
 import { run, terminateLiveProviders } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
@@ -353,7 +354,7 @@ Agents — which provider and model each phase runs on
   standing-orders config show [--repo <path>]
   standing-orders config set <phase> --provider claude|codex|openrouter
       [--model <m>] [--repo <path>] --as <you> --token <t>
-                                        phases: plan | build | repair. The
+                                        phases: plan | build | repair | review. The
                                         repo form is a project override;
                                         without it, installation-wide.
                                         Repair's PROVIDER always inherits
@@ -439,6 +440,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
+  "review",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -1335,7 +1337,7 @@ async function buildCommand(
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "planned" | "parked" | "skipped" | "failed" | "contest" | "held";
+  outcome: "built" | "planned" | "parked" | "skipped" | "failed" | "contest" | "held" | "reviewed" | "review-failed";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -2494,6 +2496,11 @@ async function tickCommand(
       const parent = continuation.parentRun === null ? null : store.getRun(continuation.parentRun);
       const parentRef = parent === null ? null : store.refForId(parent.taskRef);
       if (parent === null || parentRef === null) continue;
+      // A continuation continues WORK: a branchless parent (the reviewer
+      // role, v29) has no workspace to lease and can never be continued —
+      // and this guard is what keeps "null" out of `git worktree add`.
+      if (parent.branch === null) continue;
+      const parentBranch = parent.branch;
       if (parentRef.repo !== null && parentRef.repo !== repo) continue;
       const taskId = parentRef.externalId;
 
@@ -2518,7 +2525,7 @@ async function tickCommand(
       const lease = claimed.claim.leaseId;
       // The parent's branch, at the head the terms signed — a moved branch
       // fails the final proof with words naming the head.
-      const leased = await worktrees.lease({ repo, branch: parent.branch, runner, taskRef: parent.taskRef, now: clock() });
+      const leased = await worktrees.lease({ repo, branch: parentBranch, runner, taskRef: parent.taskRef, now: clock() });
       if (!leased.ok) {
         release(store, lease, clock());
         dispatched.push({ id: taskId, outcome: "failed", reason: leased.reason });
@@ -2529,7 +2536,7 @@ async function tickCommand(
         taskRef: parent.taskRef,
         leaseId: lease,
         runner,
-        branch: parent.branch,
+        branch: parentBranch,
         worktree: leased.worktree.path,
         parentRun: parent.id,
         ...(pinned.model === null ? {} : { model: pinned.model }),
@@ -2544,7 +2551,7 @@ async function tickCommand(
         runId,
         evidenceRoot: context.evidenceRoot,
         worktree: leased.worktree.path,
-        branch: parent.branch,
+        branch: parentBranch,
         now: clock(),
         clock,
         provider: pinned.provider,
@@ -2565,7 +2572,7 @@ async function tickCommand(
         },
       });
       if (result.ok && result.parked === undefined && result.held === true) {
-        dispatched.push({ id: taskId, outcome: "held", branch: parent.branch, worktree: leased.worktree.path });
+        dispatched.push({ id: taskId, outcome: "held", branch: parentBranch, worktree: leased.worktree.path });
         continue;
       }
       // A refusal before the hold (stale proof, spawn failure): record it
@@ -2581,7 +2588,7 @@ async function tickCommand(
           taskRef: parent.taskRef,
           runner,
           repo,
-          branch: parent.branch,
+          branch: parentBranch,
           origin: parentRef.origin,
           provider: pinned.provider,
           model: pinned.model,
@@ -2597,6 +2604,26 @@ async function tickCommand(
         worktree: leased.worktree.path,
       });
       if (disposition.kind !== "built") broke++;
+    }
+  }
+
+  // THE REVIEW PASS (v29, R3/R4): open review asks — the operator's and a
+  // reviewAuto mode's — each get their ONE bounded attempt. Additive by
+  // law: a broken review is a visible typed run, never a broken tick.
+  {
+    const reviewed = await reviewPass(store, {
+      runner,
+      now: clock(),
+      clock,
+      ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
+      ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+    });
+    for (const one of reviewed) {
+      dispatched.push({
+        id: `review of run ${one.run}`,
+        outcome: one.outcome === "reviewed" ? "reviewed" : one.outcome === "failed" ? "review-failed" : "skipped",
+        reason: one.detail,
+      });
     }
   }
 
@@ -2952,7 +2979,7 @@ async function briefCommand(
     lines.push(`      ${one.taskId.padEnd(20)} ${one.committed === true ? `committed to ${one.branch}` : "changed nothing, which is a real answer"}`);
   }
   for (const one of failed) {
-    lines.push(`      ${one.taskId.padEnd(20)} failed: ${one.reason ?? "?"} — work kept in ${one.worktree}`);
+    lines.push(`      ${one.taskId.padEnd(20)} failed: ${one.reason ?? "?"}${one.worktree === null ? "" : ` — work kept in ${one.worktree}`}`);
   }
   for (const one of cutDown) {
     lines.push(`      ${one.taskId.padEnd(20)} never finished — the process died with it; \`task show ${one.taskId}\``);
@@ -3357,6 +3384,51 @@ async function planTaskCommand(
 }
 
 /**
+ * `standing-orders task review <run-id>` — ask an agent to review one
+ * finished run's sealed diff (v29, R3). Queued, not run here: the next
+ * pass dispatches the reviewer with the review phase's configured agent,
+ * and its comments land on the run page for YOU to prune and seal —
+ * sealing stays human. One review per run, ever.
+ */
+async function reviewTaskCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [runText] = positional;
+  const runId = Number(runText ?? "");
+  if (runText === undefined || !Number.isInteger(runId) || runId < 1) {
+    return fail(write, json, "task review", "usage", "`standing-orders task review <run-id> --as <you> --token <t>`", EXIT.usage);
+  }
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task review", "usage", "reviewing takes `--as <you> --token <t>` — it dispatches an agent that spends", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task review", authenticated.reason, describeApproveFailure(authenticated.reason, String(runId)), EXIT.refused);
+  }
+  const asked = store.requestReview(runId, acting.name, clock());
+  if (!asked.ok) {
+    const why: Record<string, string> = {
+      "no-run": `no run ${runId}`,
+      "not-reviewable": "that run IS a review — reviews review work, never each other",
+      unfinished: "that run is still going — review reads the sealed diff, which exists once it finishes",
+      "no-diff": "that run left no sealed diff to review",
+      "diff-truncated": "that run's diff was truncated at capture — a partial patch cannot be honestly reviewed",
+      "already-reviewed": "that run already has its review — one per run, ever; the comments are on its page",
+      "already-requested": "a review is already queued for that run",
+    };
+    return fail(write, json, "task review", "refused", why[asked.reason] ?? asked.reason, EXIT.refused);
+  }
+  return succeed(write, json, "task review", { run: runId }, () => [
+    `Run ${runId} will be reviewed: the next pass dispatches an agent over its sealed diff.`,
+    "Its comments land on the run page beside your own, for you to prune and seal into a revision task.",
+  ]);
+}
+
+/**
  * `standing-orders incident list|resolve <id>` — the parks that never became
  * decisions. Resolving is an authenticated human act, the same credential as
  * approving and deciding, and it is the only thing that lifts the
@@ -3756,7 +3828,7 @@ async function configCommand(
   if (action === undefined || action === "show") {
     const installation = store.listPhaseConfig(INSTALLATION_SCOPE);
     const project = scope === INSTALLATION_SCOPE ? [] : store.listPhaseConfig(scope);
-    const resolved = (["plan", "build", "repair"] as const).map(one => {
+    const resolved = (["plan", "build", "repair", "review"] as const).map(one => {
       const answer = resolvePhaseAgent(store, one, scope === INSTALLATION_SCOPE ? null : scope, {});
       return {
         phase: one,
@@ -3901,8 +3973,8 @@ async function configCommand(
     ]);
   }
 
-  if (phase === undefined || !["plan", "build", "repair"].includes(phase)) {
-    return fail(write, json, `config ${action}`, "usage", "which phase? plan, build, repair — or chat", EXIT.usage);
+  if (phase === undefined || !["plan", "build", "repair", "review"].includes(phase)) {
+    return fail(write, json, `config ${action}`, "usage", "which phase? plan, build, repair, review — or chat", EXIT.usage);
   }
 
   const acting = await askCredentials(flags, context);
@@ -6746,6 +6818,8 @@ function taskCommand(
       return requeueTask(rest, flags, context);
     case "plan":
       return planTaskCommand(rest, flags, context);
+    case "review":
+      return reviewTaskCommand(rest, flags, context);
     default:
       return fail(
         context.write,

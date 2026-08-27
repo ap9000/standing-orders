@@ -1,5 +1,44 @@
 # Progress
 
+**2026-08-26 — Modes arc, layer 5 of 7: the reviewer.** The
+artifact-only role (R1–R4 under the D5/D8 rulings): an agent pass over
+one finished run's SEALED terminal diff and nothing else — no worktree,
+no branch, no repository. src/reviewer.ts materializes the VERIFIED
+artifact bytes (hash re-proved on the descriptor read) into an empty
+scratch directory; a truncated diff is refused before any money; after
+the agent, the scratch may hold exactly the patch and the one mailbox
+(`STANDING-ORDERS-REVIEW-…`) or nothing is ingested. The parser is
+strict and wholesale (≤ 40 comments, notes ≤ 500 chars, closed severity
+vocabulary note/question/problem), and PATCH-LOCALITY is proved at the
+seam: every commented path must appear in the reviewed patch — the
+brief admits the reviewer saw only the diff. Ingestion is one proving
+transaction (D8): the authoring run must BE role 'reviewer', parented
+to exactly the commented run, sharing its task, and the artifact must
+be that run's own terminal diff; rows land as ordinary diff_comments
+with `reviewer_run` + `severity`, author `reviewer:<provider>·<model>`,
+in the same prune-and-seal flow as human notes — sealing stays human.
+`startRun` became a discriminated union (the reviewer arm carries NO
+workspace; the v29 exclusive CHECK refuses every mixed shape), Run's
+branch/worktree went honestly nullable, and the compiler enumerated
+every workspace consumer for its guard: live peek says "reviewed the
+sealed diff — no workspace existed", editor links don't form, the
+continuation dispatcher refuses branchless parents (the guard that
+keeps "null" out of `git worktree add`), contest picks and the brief
+print null-safe. Requests ride a durable review_request queue through
+ONE door (`store.requestReview`, typed refusals: unfinished, no diff,
+truncated, already-reviewed, already-requested) with one review per
+source run EVER (partial unique on parent_run). Triggers: `task review
+<run-id>` (credentialed, queued) and the reviewAuto mode term — the
+disposition service queues on built-with-changes under a live mode, and
+the tick's review pass RE-PROVES the mode at dispatch (R-REVOKE: a
+mode-derived request whose mode died is spent unrun, falling back to
+the human ask). Rails count reviewer starts like any admission; the
+review phase joined phase_config routing (`config set review`) with
+plan-shaped timeout clamps; failures are typed `reviewer-<reason>` runs
+— visible, additive, never blocking the task, never retried (R4).
+Sixteen-test suite. Suite 1330.
+
+
 **2026-08-26 — Modes arc, layer 4 of 7: the merge machine.** The
 fourteen-transition table (E1) is now the code, and the five-round
 Codex review chain closed with an APPROVE on exactly this layer's two

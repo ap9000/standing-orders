@@ -390,8 +390,9 @@ export type Run = {
   taskRef: number;
   leaseId: string;
   runner: string;
-  /** 'repair' = a resumed session mending its own park payload. Never 'driver'; see the DDL. */
-  role: "builder" | "repair" | "planner";
+  /** 'repair' = a resumed session mending its own park payload. Never
+   * 'driver'; see the DDL. 'reviewer' (v29) = an artifact-only pass. */
+  role: "builder" | "repair" | "planner" | "reviewer";
   /** Which harness ran it. History is 'claude' truthfully: nothing else ever spawned. */
   provider: string;
   parentRun: number | null;
@@ -400,8 +401,11 @@ export type Run = {
   /** v24 dispatch stamps; null on runs from before them. */
   scopeDigest?: string | null;
   profileDigest?: string | null;
-  branch: string;
-  worktree: string;
+  /** NULL on exactly the reviewer role (v29 exclusive CHECK): an
+   * artifact-only run never had a workspace, and every consumer must say
+   * so rather than dereference one that does not exist. */
+  branch: string | null;
+  worktree: string | null;
   model: string | null;
   /** 'interrupted' (v25) = a held attended session cut down mid-flight. */
   outcome: "built" | "failed" | "refused" | "parked" | "no-change" | "interrupted" | null;
@@ -2048,6 +2052,22 @@ CREATE TABLE IF NOT EXISTS diff_comment (
   source_key    TEXT
 );
 
+-- A standing ask for an agent review of one finished run's sealed diff
+-- (v29, the reviewer role). Manual (task review) and automatic (a mode
+-- whose terms say reviewAuto) requests land here identically; the tick's
+-- review pass consumes them. One OPEN request per run (index after
+-- migration), and the run itself may only ever gain one reviewer child
+-- (one_review_per_source) — review is additive, never a loop.
+CREATE TABLE IF NOT EXISTS review_request (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  run             INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  -- An operator's name, or 'mode:<digest>' when a signed mode asked.
+  requested_by    TEXT NOT NULL,
+  requested_at    TEXT NOT NULL,
+  consumed_at     TEXT,
+  consumed_reason TEXT
+);
+
 -- Operator steering (arc 1, v22): a note that lands at the next safe
 -- boundary — the next brief the builder composes for this task. Attachment
 -- and delivery are SEPARATE facts: attached_at says which build the note
@@ -2329,7 +2349,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_decision_per_run
 -- The coordinator's per-pulse scan: resolved decisions on held runs whose
 -- answer has not yet been injected.
 CREATE INDEX IF NOT EXISTS decision_undelivered
-  ON decision (run, id) WHERE state = 'answered' AND delivered_turn IS NULL;`);
+  ON decision (run, id) WHERE state = 'answered' AND delivered_turn IS NULL;
+-- v29 (the reviewer role) — after migration because run is rebuilt there
+-- and review_request arrives by IF NOT EXISTS on existing files. One
+-- review per source run, ever; one OPEN request per run at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS one_review_per_source
+  ON run (parent_run) WHERE role = 'reviewer';
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_review_request
+  ON review_request (run) WHERE consumed_at IS NULL;`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -5835,6 +5862,152 @@ export class Store {
     return consumed;
   }
 
+  // ---- the reviewer role (v29) --------------------------------------------
+
+  /**
+   * Ask for an agent review of one finished run's sealed diff. Manual
+   * (`task review`, the run page) and automatic (a mode whose terms say
+   * reviewAuto) requests land through this ONE door, and every refusal is
+   * decided transactionally against the same facts the pass will re-prove:
+   * the diff must exist and be complete (a truncated artifact is refused
+   * HERE, before any money), and the run may only ever gain one review.
+   */
+  requestReview(
+    runId: number,
+    by: string,
+    now: Date,
+  ):
+    | { ok: true; id: number }
+    | { ok: false; reason: "no-run" | "not-reviewable" | "unfinished" | "no-diff" | "diff-truncated" | "already-reviewed" | "already-requested" } {
+    return this.transact(() => {
+      const run = this.getRun(runId);
+      if (run === null) return { ok: false as const, reason: "no-run" as const };
+      // A review reviews work — never another review.
+      if (run.role === "reviewer") return { ok: false as const, reason: "not-reviewable" as const };
+      if (run.outcome === null) return { ok: false as const, reason: "unfinished" as const };
+      const diff = this.artifactsFor(runId).find(one => one.kind === "terminal-diff");
+      if (diff === undefined) return { ok: false as const, reason: "no-diff" as const };
+      if (diff.truncated) return { ok: false as const, reason: "diff-truncated" as const };
+      const reviewed = this.db
+        .prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'reviewer' LIMIT 1")
+        .get(runId);
+      if (reviewed !== undefined) return { ok: false as const, reason: "already-reviewed" as const };
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO review_request (run, requested_by, requested_at)
+           SELECT ?, ?, ?
+           WHERE NOT EXISTS (SELECT 1 FROM review_request WHERE run = ? AND consumed_at IS NULL)`,
+        )
+        .run(runId, by, now.toISOString(), runId);
+      if (Number(inserted.changes) === 0) return { ok: false as const, reason: "already-requested" as const };
+      this.bumpWake();
+      return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+    });
+  }
+
+  /** The open review asks, oldest first, with the facts the pass needs. */
+  openReviewRequests(): {
+    id: number;
+    run: number;
+    requestedBy: string;
+    requestedAt: string;
+    taskRef: number;
+    taskId: string;
+    repo: string | null;
+  }[] {
+    return this.db
+      .prepare(
+        `SELECT rr.id, rr.run, rr.requested_by, rr.requested_at,
+                run.task_ref AS taskRef, task_ref.external_id AS taskId, task_ref.repo
+           FROM review_request rr
+           JOIN run ON run.id = rr.run
+           JOIN task_ref ON task_ref.id = run.task_ref
+          WHERE rr.consumed_at IS NULL
+          ORDER BY rr.id`,
+      )
+      .all()
+      .map(row => ({
+        id: Number((row as Record<string, unknown>)["id"]),
+        run: Number((row as Record<string, unknown>)["run"]),
+        requestedBy: String((row as Record<string, unknown>)["requested_by"]),
+        requestedAt: String((row as Record<string, unknown>)["requested_at"]),
+        taskRef: Number((row as Record<string, unknown>)["taskRef"]),
+        taskId: String((row as Record<string, unknown>)["taskId"]),
+        repo:
+          (row as Record<string, unknown>)["repo"] === null
+            ? null
+            : String((row as Record<string, unknown>)["repo"]),
+      }));
+  }
+
+  /** One attempt, whatever it came to (R4): the request is spent, never retried. */
+  consumeReviewRequest(id: number, reason: string, now: Date): void {
+    this.db
+      .prepare("UPDATE review_request SET consumed_at = ?, consumed_reason = ? WHERE id = ? AND consumed_at IS NULL")
+      .run(now.toISOString(), reason, id);
+  }
+
+  /**
+   * The reviewer's comments land through ONE proving transaction (D8):
+   * the authoring run must BE a reviewer, must be parented to exactly the
+   * commented run, must share its task, and the artifact must be the
+   * commented run's own terminal diff. Anything else is an invariant
+   * breach — thrown, nothing inserted — because a comment bound to bytes
+   * the reviewer never saw is worse than no comment.
+   */
+  addReviewerComments(
+    args: {
+      reviewerRunId: number;
+      runId: number;
+      artifactId: number;
+      author: string;
+      comments: readonly { path: string; line: number | null; note: string; severity: "note" | "question" | "problem" }[];
+    },
+    now: Date,
+  ): number[] {
+    return this.transact(() => {
+      const reviewer = this.getRun(args.reviewerRunId);
+      if (reviewer === null || reviewer.role !== "reviewer") {
+        throw new Error(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors reviewer comments`);
+      }
+      if (reviewer.parentRun !== args.runId) {
+        throw new Error(
+          `reviewer ${args.reviewerRunId} reviews run ${String(reviewer.parentRun)}, not ${args.runId} — comments bind to the run the review was minted for`,
+        );
+      }
+      const source = this.getRun(args.runId);
+      if (source === null || source.taskRef !== reviewer.taskRef) {
+        throw new Error(`reviewer ${args.reviewerRunId} and run ${args.runId} do not share a task — nothing is ingested`);
+      }
+      const artifact = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
+      if (artifact === undefined || artifact.kind !== "terminal-diff") {
+        throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — comments bind to the exact bytes reviewed`);
+      }
+      const ids: number[] = [];
+      for (const comment of args.comments) {
+        const inserted = this.db
+          .prepare(
+            `INSERT INTO diff_comment (artifact, artifact_sha, run, path, line, note, author, created_at, reviewer_run, severity)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            args.artifactId,
+            artifact.sha256,
+            args.runId,
+            comment.path,
+            comment.line,
+            comment.note,
+            args.author,
+            now.toISOString(),
+            args.reviewerRunId,
+            comment.severity,
+          );
+        ids.push(Number(inserted.lastInsertRowid));
+      }
+      return ids;
+    });
+  }
+
   /** Stamp a task as the revision it is: source task + immutable brief. */
   markRevision(taskRef: number, revisionOf: string, briefArtifact: number): void {
     this.db
@@ -7963,21 +8136,31 @@ export class Store {
    * agent, the row survives with outcome NULL — an attempt that was cut down
    * mid-flight, visible the next morning instead of vanished.
    */
-  startRun(run: {
-    taskRef: number;
-    leaseId: string;
-    runner: string;
-    branch: string;
-    worktree: string;
-    model?: string;
-    role?: "builder" | "repair" | "planner";
-    provider?: string;
-    parentRun?: number;
-    sessionId?: string;
-    /** Which racing agent this run belongs to (v14); absent = ordinary. */
-    contestant?: number;
-    now: Date;
-  }): number {
+  startRun(
+    run: {
+      taskRef: number;
+      leaseId: string;
+      runner: string;
+      model?: string;
+      provider?: string;
+      sessionId?: string;
+      /** Which racing agent this run belongs to (v14); absent = ordinary. */
+      contestant?: number;
+      now: Date;
+    } & (
+      | {
+          role?: "builder" | "repair" | "planner";
+          branch: string;
+          worktree: string;
+          parentRun?: number;
+        }
+      // The reviewer (v29, D5): an artifact-only pass over a sealed diff.
+      // No branch, no worktree — the CHECK enforces the exclusive shape,
+      // and the discriminated arm makes a workspace unrepresentable rather
+      // than optional. The parent is mandatory: a review reviews a run.
+      | { role: "reviewer"; parentRun: number; branch?: undefined; worktree?: undefined }
+    ),
+  ): number {
     const inserted = this.db
       .prepare(
         `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, started_at)
@@ -7987,8 +8170,8 @@ export class Store {
         run.taskRef,
         run.leaseId,
         run.runner,
-        run.branch,
-        run.worktree,
+        run.branch ?? null,
+        run.worktree ?? null,
         run.model ?? null,
         run.role ?? "builder",
         run.provider ?? "claude",
@@ -12033,8 +12216,8 @@ function readRun(row: Record<string, unknown>): Run {
       row["attended_authorization"] === null || row["attended_authorization"] === undefined
         ? null
         : String(row["attended_authorization"]),
-    branch: String(row["branch"]),
-    worktree: String(row["worktree"]),
+    branch: row["branch"] === null ? null : String(row["branch"]),
+    worktree: row["worktree"] === null ? null : String(row["worktree"]),
     model: row["model"] === null ? null : String(row["model"]),
     outcome: row["outcome"] === null ? null : (String(row["outcome"]) as Run["outcome"]),
     reason: row["reason"] === null ? null : String(row["reason"]),
@@ -12635,6 +12818,11 @@ export type DiffComment = {
   consumedBy: string | null;
   /** `gh:<owner/name>:<id>` for ingested comments; null for the console's own. */
   sourceKey: string | null;
+  /** The reviewer run that authored this comment (v29); null = a human's. */
+  reviewerRun: number | null;
+  /** The reviewer's weighting; null on human comments (a person's note
+   * carries its own weight in its words). */
+  severity: "note" | "question" | "problem" | null;
 };
 
 /** One repo's approved worktree setup — the command text, never secret values. */
@@ -12777,6 +12965,12 @@ function readDiffComment(row: Record<string, unknown>): DiffComment {
     consumedBy: row["consumed_by"] === null ? null : String(row["consumed_by"]),
     sourceKey:
       row["source_key"] === null || row["source_key"] === undefined ? null : String(row["source_key"]),
+    reviewerRun:
+      row["reviewer_run"] === null || row["reviewer_run"] === undefined ? null : Number(row["reviewer_run"]),
+    severity:
+      row["severity"] === null || row["severity"] === undefined
+        ? null
+        : (String(row["severity"]) as DiffComment["severity"]),
   };
 }
 
