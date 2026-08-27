@@ -138,6 +138,7 @@ import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDi
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
+import { authenticateAccount } from "./scope.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -300,6 +301,9 @@ self.addEventListener("notificationclick", function (event) {
 type Session = {
   name: string;
   csrf: string;
+  /** v29: the account's standing at login — the central gate reads it;
+   * the revocation cascade kills the session outright. */
+  role: "approver" | "viewer";
   /** The approver generation at login: credential rotation kills the cookie. */
   generation: number;
   createdAt: number;
@@ -350,7 +354,7 @@ type ApprovalNonce = {
   expiresAt: number;
 };
 
-type Who = { name: string; via: "cookie"; session: Session } | { name: string; via: "bearer" };
+type Who = { name: string; via: "cookie"; session: Session; role: "approver" | "viewer" } | { name: string; via: "bearer"; role: "approver" | "viewer" };
 
 export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
@@ -545,7 +549,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const name = body.get("name");
       const token = body.get("token");
       const authenticated =
-        name !== null && token !== null ? authenticateApprover(store, name, token) : null;
+        name !== null && token !== null ? authenticateAccount(store, name, token) : null;
       if (authenticated === null || !authenticated.ok) {
         return page(response, 403, loginPage("wrong username or password"));
       }
@@ -553,7 +557,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       sessions.set(id, {
         name: name as string,
         csrf: randomBytes(32).toString("hex"),
-        generation: store.approverGeneration(name as string) ?? 1,
+        role: authenticated.role,
+        generation: authenticated.generation,
         createdAt: Date.now(),
         sawBoardAt: null,
         lastSeen: Date.now(),
@@ -2545,6 +2550,9 @@ export function createDecisionServer(options: ServeOptions): Server {
    * touches absolute expiry, never mints. */
   function attendedBeats(who: Who, request: IncomingMessage, response: ServerResponse, now: Date): void {
     if (who.via !== "cookie") return refuse(response, who, 403, "watching is a browser session's act");
+    // Round-2 finding 2's named miss: renewal is an approver's act — a
+    // viewer's open tab keeps nothing alive.
+    if (who.role !== "approver") return refuse(response, who, 403, "your login can watch, not keep sessions alive");
     if (request.headers["sec-fetch-site"] !== "same-origin") {
       return refuse(response, who, 403, "the beat only answers this console's own pages");
     }
@@ -2606,6 +2614,18 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
+
+    // THE CENTRAL VIEWER GATE (modes chain, D2/E2): consequential POSTs
+    // require ACTIVE approver standing — cookie and bearer alike — with
+    // an EXACT allowlist of session-local acts, never a prefix. /login,
+    // /logout and /join answer before this handler; the attended beat
+    // guards itself (approver-only) above.
+    if (who.role === "viewer") {
+      const viewerAllowed = new Set(["/projects/select", "/session/editor-links"]);
+      if (!viewerAllowed.has(url.pathname)) {
+        return refuse(response, who, 403, "your login can watch, not act — ask an approver to upgrade you");
+      }
+    }
     const now = clock();
     // Any accepted mutation may change what the inbox owes; the badge
     // re-counts within five seconds either way, this just makes it exact.
@@ -2633,6 +2653,24 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message));
       }
       return redirect(response, "/settings");
+    }
+
+    if (url.pathname === "/projects/select") {
+      // Session-only project switching (E2): reads the registry, writes
+      // ONLY session.project — the durable upsert lives in /projects/open,
+      // which stays an approver's act. This is the one project verb a
+      // viewer may use.
+      if (who.via !== "cookie") {
+        return refuse(response, who, 403, "selecting a project is a browser session's act");
+      }
+      const askedPath = (body.get("path") ?? "").trim();
+      const canonicalPick = askedPath === "" ? null : canonicalProject(askedPath);
+      if (canonicalPick !== null && !(await authorizedProject(ceiling, canonicalPick))) {
+        return refuse(response, who, 403, "that project is outside this console's reach");
+      }
+      who.session.project = canonicalPick;
+      who.session.projectRevision += 1;
+      return redirect(response, body.get("return") ?? "/");
     }
 
     if (url.pathname === "/projects/open") {
@@ -4334,14 +4372,14 @@ export function createDecisionServer(options: ServeOptions): Server {
   function identify(request: IncomingMessage, touch = true): Who | null {
     const bearer = /^Bearer (.+):(.+)$/.exec(request.headers.authorization ?? "");
     if (bearer !== null) {
-      const authenticated = authenticateApprover(store, bearer[1] as string, bearer[2] as string);
-      return authenticated.ok ? { name: bearer[1] as string, via: "bearer" } : null;
+      const authenticated = authenticateAccount(store, bearer[1] as string, bearer[2] as string);
+      return authenticated.ok ? { name: bearer[1] as string, via: "bearer", role: authenticated.role } : null;
     }
     const cookies = request.headers.cookie ?? "";
     const match = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{64})`).exec(cookies);
     if (match === null) return null;
     const session = lookupSession(match[1] as string, touch);
-    return session === null ? null : { name: session.name, via: "cookie", session };
+    return session === null ? null : { name: session.name, via: "cookie", session, role: session.role };
   }
 
   /**

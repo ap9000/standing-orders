@@ -1,5 +1,23 @@
 # Progress
 
+**2026-08-27 — Modes arc, layer 2 of 7: identity splits from
+authority.** `authenticateAccount` returns who a credential belongs to
+and what standing they hold; `authenticateApprover` becomes that plus
+ACTIVE approver standing — so all ~40 password-ceremony sites now
+enforce the role without one of them changing, and a revoked account
+authenticates nowhere. Viewers log in (the session and bearer identity
+both carry the role), read every screen the ceiling admits, and hit ONE
+central POST gate that refuses everything consequential with the
+viewer words — cookie and bearer alike — behind an EXACT allowlist:
+the new session-only `/projects/select` (the durable-upsert
+`/projects/open` stays an approver's act, the round-2 catch) and the
+editor-link preference. The attended beat gained its role check inside
+its own guard — round 2's predicted enumeration-miss: a viewer's open
+tab now renews nothing. Tests: the viewer matrix (scope/steer/task-add
+refuse and nothing lands; select works with csrf; open refuses; beats
+refuse with their own words; bearer refuses; a revoked credential dies
+at login while the approver road is untouched). Suite 1293.
+
 **2026-08-27 — Modes arc, layer 1 of 7: schema v29.** The substrate for
 operating modes, the reviewer role, and multi-user — shipped first per
 the review's own ordering while round 5 confirms the chain's last two

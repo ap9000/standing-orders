@@ -5256,6 +5256,21 @@ export class Store {
     });
   }
 
+  /** The full account row for identity checks (v29): hash, role,
+   * generation, revocation — one read, no inference. */
+  accountOf(name: string): { credentialHash: string; role: "approver" | "viewer"; generation: number; revokedAt: string | null } | null {
+    const row = this.db
+      .prepare("SELECT credential_hash, role, generation, revoked_at FROM approver WHERE name = ?")
+      .get(name);
+    if (row === undefined) return null;
+    return {
+      credentialHash: String(row["credential_hash"]),
+      role: String(row["role"]) === "viewer" ? "viewer" : "approver",
+      generation: Number(row["generation"]),
+      revokedAt: row["revoked_at"] === null || row["revoked_at"] === undefined ? null : String(row["revoked_at"]),
+    };
+  }
+
   approverHash(name: string): string | null {
     const row = this.db.prepare("SELECT credential_hash FROM approver WHERE name = ?").get(name);
     return row === undefined ? null : String(row["credential_hash"]);

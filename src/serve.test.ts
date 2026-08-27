@@ -5176,3 +5176,118 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
     expect(await preview.text()).toContain("file a follow-up task");
   });
 });
+
+
+describe("the viewer role (v29, L2): reads everything, acts on nothing", () => {
+  let server: Server;
+  let port: number;
+  let store: Store;
+  let approverToken: string;
+
+  const url = (path: string) => `http://127.0.0.1:${port}${path}`;
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    const added = addApprover(store, "alex", new Date());
+    if (!added.ok) throw new Error("bootstrap");
+    approverToken = added.token;
+    // a viewer account, as an invite would mint it
+    const viewer = addApprover(store, "vera", new Date(), { name: "alex", token: approverToken });
+    if (!viewer.ok) throw new Error("viewer add");
+    store.raw().prepare("UPDATE approver SET role = 'viewer' WHERE name = 'vera'").run();
+    (globalThis as { __viewerToken?: string }).__viewerToken = viewer.token;
+    store.createTask({ id: "t-v", title: "watched" }, new Date());
+    server = createDecisionServer({ store, evidenceRoot: mkdtempSync(join(tmpdir(), "so-viewer-ev-")) });
+    await new Promise<void>(pass => server.listen(0, "127.0.0.1", () => pass()));
+    port = (server.address() as { port: number }).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(pass => server.close(() => pass()));
+    store.close();
+  });
+
+  const loginAs = async (name: string, token: string): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name, token }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  test("a viewer logs in and reads; every consequential POST refuses with the viewer words", async () => {
+    const viewerToken = (globalThis as { __viewerToken?: string }).__viewerToken as string;
+    const cookie = await loginAs("vera", viewerToken);
+    const board = await fetch(url("/board"), { headers: { cookie } });
+    expect(board.status).toBe(200);
+
+    const csrfPage = await (await fetch(url("/t/t-v"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(csrfPage)?.[1] ?? "";
+    for (const [path, extra] of [
+      ["/t/t-v/scope", { goal: "sneak a scope in" }],
+      ["/t/t-v/steer", { note: "sneak a note in" }],
+      ["/tasks/add", { title: "sneak a task in" }],
+    ] as const) {
+      const refused = await fetch(url(path), {
+        method: "POST",
+        headers: { cookie },
+        body: new URLSearchParams({ csrf, ...extra }),
+      });
+      expect(refused.status).toBe(403);
+      expect(await refused.text()).toContain("can watch, not act");
+    }
+    // nothing landed
+    expect(store.getScope("t-v")).toBeNull();
+    expect(store.getTask("sneak a task in")).toBeNull();
+  });
+
+  test("a viewer switches projects session-only; the durable open refuses; beats renew nothing", async () => {
+    const viewerToken = (globalThis as { __viewerToken?: string }).__viewerToken as string;
+    const cookie = await loginAs("vera", viewerToken);
+    const csrfPage = await (await fetch(url("/t/t-v"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(csrfPage)?.[1] ?? "";
+    const select = await fetch(url("/projects/select"), {
+      method: "POST",
+      headers: { cookie },
+      redirect: "manual",
+      body: new URLSearchParams({ csrf, path: "" }),
+    });
+    expect(select.status).toBe(303);
+    const open = await fetch(url("/projects/open"), {
+      method: "POST",
+      headers: { cookie },
+      body: new URLSearchParams({ path: "/tmp" }),
+    });
+    expect(open.status).toBe(403);
+    const beat = await fetch(url("/session/attended-beats"), {
+      method: "POST",
+      headers: { cookie, "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    });
+    expect(beat.status).toBe(403);
+    expect(await beat.text()).toContain("not keep sessions alive");
+  });
+
+  test("a viewer's credential cannot act over bearer either; a revoked account cannot authenticate at all", async () => {
+    const viewerToken = (globalThis as { __viewerToken?: string }).__viewerToken as string;
+    const bearer = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { authorization: `Bearer vera:${viewerToken}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ title: "bearer sneak" }).toString(),
+    });
+    expect(bearer.status).toBe(403);
+
+    store.raw().prepare("UPDATE approver SET revoked_at = ? WHERE name = 'vera'").run(new Date().toISOString());
+    const dead = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "vera", token: viewerToken }),
+      redirect: "manual",
+    });
+    expect(dead.status).toBe(403);
+    // and the approver road is untouched
+    const alive = await loginAs("alex", approverToken);
+    expect(alive).toContain("standing-orders_session");
+  });
+});

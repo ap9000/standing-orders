@@ -487,16 +487,39 @@ export type ApproveResult =
  * agree to anything, and treating that as "authority is not required here"
  * would make the gate optional — which is the same as not having one.
  */
+/**
+ * IDENTITY, split from authority (modes chain, D2/E2): who this credential
+ * belongs to and what standing they hold. Viewers authenticate here and
+ * read; every consequential act goes through authenticateApprover below,
+ * which additionally demands ACTIVE approver standing — so the forty
+ * ceremony sites enforce the role without one of them changing.
+ */
+export function authenticateAccount(
+  store: Store,
+  by: string,
+  secret: string,
+): { ok: true; role: "approver" | "viewer"; generation: number } | { ok: false; reason: "no-approvers" | "unknown" | "revoked" } {
+  if (store.listApprovers().length === 0) return { ok: false, reason: "no-approvers" };
+  const account = store.accountOf(by);
+  if (account === null || !verifyCredential(account.credentialHash, secret)) {
+    return { ok: false, reason: "unknown" };
+  }
+  if (account.revokedAt !== null) return { ok: false, reason: "revoked" };
+  return { ok: true, role: account.role, generation: account.generation };
+}
+
 export function authenticateApprover(
   store: Store,
   by: string,
   token: string,
 ): { ok: true } | { ok: false; reason: "no-approvers" | "not-an-approver" } {
-  if (store.listApprovers().length === 0) return { ok: false, reason: "no-approvers" };
-  const known = store.approverHash(by);
-  if (known === null || !verifyCredential(known, token)) {
-    return { ok: false, reason: "not-an-approver" };
+  const account = authenticateAccount(store, by, token);
+  if (!account.ok) {
+    return { ok: false, reason: account.reason === "no-approvers" ? "no-approvers" : "not-an-approver" };
   }
+  // A viewer's credential is real and still cannot agree to anything —
+  // the words every refused ceremony shows are the viewer words.
+  if (account.role !== "approver") return { ok: false, reason: "not-an-approver" };
   return { ok: true };
 }
 
