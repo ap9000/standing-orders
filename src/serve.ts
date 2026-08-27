@@ -1098,8 +1098,16 @@ export function createDecisionServer(options: ServeOptions): Server {
                 (hasGrant ? `<option value="automerge">merge themselves when CI is green on the exact commit</option>` : "") +
                 `</select></label>` +
                 (hasGrant ? "" : `<span class="meta">self-merging needs a merge-capable publication grant first</span>`),
-              `<label><input type="checkbox" name="auto-approve" value="1"> approve my own filings the moment I file them</label>`,
-              `<label><input type="checkbox" name="review-auto" value="1" checked> agent-review every finished build</label>`,
+              `<label>my filings<select name="auto-approve">` +
+                `<option value="">the preset's default (standard: wait for approval; hands-off: auto-approve)</option>` +
+                `<option value="1">approve the moment I file them</option>` +
+                `<option value="0">wait for their own approval</option>` +
+                `</select></label>`,
+              `<label>reviews<select name="review-auto">` +
+                `<option value="">the preset's default (standard: on; hands-off: off)</option>` +
+                `<option value="1">agent-review every finished build</option>` +
+                `<option value="0">only when I ask</option>` +
+                `</select></label>`,
               `<button type="submit">read the full terms</button>`,
               `</form>`,
               `</div>`,
@@ -2120,6 +2128,8 @@ export function createDecisionServer(options: ServeOptions): Server {
               name: liveMode.name,
               words: `${liveMode.name} mode until ${liveMode.absoluteExpiry.slice(0, 16).replace("T", " ")} UTC${
                 liveModeTerms.autoApproveFiling ? ` — every scope ${liveMode.signedBy} files builds without further ceremony` : ""
+              }${liveModeTerms.permissionDefault === "escalated" ? " — FULL permissions by default" : ""}${
+                liveModeTerms.quickMint ? ` — ${liveMode.signedBy} starts watched sessions without a password` : ""
               }${liveModeTerms.publication === "automerge" ? " — merges fire themselves on green" : ""}`,
             },
           }),
@@ -3200,10 +3210,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       const name: ModeName = body.get("name") === "hands-off" ? "hands-off" : "standard";
       const days = Math.max(1, Math.min(MODE_MAX_DAYS, Math.floor(Number(body.get("days") ?? "1")) || 1));
       const expiry = new Date(now.getTime() + days * 24 * 60 * 60_000).toISOString();
+      const preset = presetTerms(name, expiry);
       const terms: ModeTerms = {
-        ...presetTerms(name, expiry),
-        autoApproveFiling: body.get("auto-approve") === "1",
-        reviewAuto: body.get("review-auto") === "1",
+        ...preset,
+        autoApproveFiling: body.get("auto-approve") === "" || body.get("auto-approve") === null ? preset.autoApproveFiling : body.get("auto-approve") === "1",
+        reviewAuto: body.get("review-auto") === "" || body.get("review-auto") === null ? preset.reviewAuto : body.get("review-auto") === "1",
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
       if (terms.publication === "automerge" && !store.hasMergeCapableGrant(project, now)) {
@@ -4108,6 +4119,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       // else about the seal is unchanged; without coverage, the revision
       // keeps its own approval ceremony.
       const sealed = store.transact(() => {
+        // Coverage first (cookie road only): its budget and escalated
+        // posture ride the FILING so the digest binds them (surfaces
+        // round 1, finding 2) — never a stamp after the fact.
+        const coverage = who.via === "cookie" ? modeFilingCoverage(store, repo, who.name, now) : null;
         const result = store.sealRevision(
         {
           task: {
@@ -4118,6 +4133,8 @@ export function createDecisionServer(options: ServeOptions): Server {
               ` — apply the review comments recorded on build #${id}; the revision brief carries the exact batch`,
             outOfScope: sourceScope?.outOfScope ?? null,
             touches: sourceScope?.touches ?? [],
+            ...(coverage?.defaultBudgetMicrousd != null ? { budgetMicrousd: coverage.defaultBudgetMicrousd } : {}),
+            ...(coverage?.escalated === true ? { posture: "escalated" as const } : {}),
           },
           artifact: {
             run: id,
@@ -4135,9 +4152,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         },
         now,
         );
-        if (result.ok) {
-          const coverage = modeFilingCoverage(store, repo, who.name, now);
-          if (coverage !== null) {
+        if (result.ok && coverage !== null) {
+          // A scope whose profile could not resolve is unapprovable by the
+          // human road (approve() refuses) — the mode road refuses too.
+          const filedScope = store.getScope(result.id);
+          if (filedScope?.profileState === "resolved") {
             store.sealScopeApproval(result.id, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
           }
         }
@@ -4415,7 +4434,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       `<div class="sticky-actions"><button type="submit">run it while I watch</button></div>` +
       `</form>` +
       `<p class="meta"><a href="${taskHref(terms.taskId)}">back to the task</a></p>`;
-    return sendScreen(response, 200, screen(`attend \u00b7 ${terms.taskId}`, body, { chrome: chromeFor(null, "tasks") }));
+    // The chrome binds to the AUTHORITY repository (surfaces round 1,
+    // finding 5): the banner on this screen is the mode that would cover
+    // a quick mint here, never the session's open-project filter.
+    return sendScreen(response, 200, screen(`attend \u00b7 ${terms.taskId}`, body, { chrome: chromeFor(terms.repo, "tasks") }));
   }
 
   async function attendMutation(
@@ -4749,8 +4771,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           // default and budget ride the filing, and the seal commits
           // atomically with it. Plain scopes only: a tournament or
           // comparison keeps its own human ceremony.
+          // COOKIE ONLY (C1's channel table; surfaces round 1, finding 1):
+          // bearer credentials are for machines, and a machine road must
+          // never spend the signer's mode.
           const coverage =
-            plannedRace === null && plannedComparison === null
+            who.via === "cookie" && plannedRace === null && plannedComparison === null
               ? modeFilingCoverage(store, ref.repo, who.name, now)
               : null;
           const proposed = proposeGuarded(store, {
@@ -4776,7 +4801,10 @@ export function createDecisionServer(options: ServeOptions): Server {
             };
           }
           if (coverage !== null) {
-            store.sealScopeApproval(taskId, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
+            const filedScope = store.getScope(taskId);
+            if (filedScope?.profileState === "resolved") {
+              store.sealScopeApproval(taskId, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
+            }
           }
           if (plannedComparison !== null && plannedComparison.ok) {
             store.fileTournamentTerms(

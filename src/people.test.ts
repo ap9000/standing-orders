@@ -463,6 +463,28 @@ describe("the join road and the People screen, over HTTP", () => {
     expect(store.openInvites(new Date())[0]?.role).toBe("approver");
   });
 
+  test("a bearer credential never spends the signer's mode: the filing lands unapproved (surfaces round 1, finding 1)", async () => {
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.createTask({ id: "t-bearer", title: "the work" }, T0);
+    store.placeTask(store.refFor("built-in", "t-bearer").id, REPO);
+    const terms = { ...presetTerms("hands-off", later(24).toISOString()) };
+    store.signMode(
+      { repo: REPO, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
+      T0,
+    );
+    const filed = await fetch(url("/t/t-bearer/scope"), {
+      method: "POST",
+      headers: { authorization: `Bearer alex:${approverToken}` },
+      body: new URLSearchParams({ goal: "guard the payout", sawDigest: "" }),
+      redirect: "manual",
+    });
+    expect([200, 303]).toContain(filed.status);
+    const scope = store.getScope("t-bearer");
+    expect(scope?.goal).toBe("guard the payout");
+    // Filed, yes — auto-sealed, never: the machine road cannot spend the mode.
+    expect(scope?.approvedAt ?? null).toBeNull();
+  });
+
   test("removing a person from the People screen is a password ceremony with the last-approver guard", async () => {
     const cookie = await login("alex", approverToken);
     const csrf = await csrfOf(cookie);

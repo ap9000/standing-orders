@@ -5406,6 +5406,12 @@ export class Store {
     now: Date,
   ): number {
     return this.transact(() => {
+      // The automerge prerequisite, proved INSIDE the signature (Codex
+      // surfaces round 1, finding 4): a grant revoked between the screen
+      // and the signature must lose — the pre-checks only shape the words.
+      if (spec.publication === "automerge" && !this.hasMergeCapableGrant(spec.repo, now)) {
+        throw new Error("automerge needs a merge-capable publication grant — grant one, then sign");
+      }
       const previous = this.db
         .prepare("SELECT id FROM operating_mode WHERE repo = ? AND revoked_at IS NULL")
         .get(spec.repo);
@@ -6469,7 +6475,7 @@ export class Store {
    */
   sealRevision(
     args: {
-      task: { id?: string; title: string; repo?: string; goal: string; outOfScope?: string | null; touches?: string[] };
+      task: { id?: string; title: string; repo?: string; goal: string; outOfScope?: string | null; touches?: string[]; budgetMicrousd?: number | null; posture?: "escalated" };
       artifact: { run: number; kind: Artifact["kind"]; key: string; bytesOriginal: number; bytesStored: number; truncated: boolean; sha256: string; capture: string };
       revisionOf: string;
       /** Comments to consume, or null when the brief has no comment batch (CI repair). */
@@ -6768,6 +6774,11 @@ export class Store {
       title: string;
       repo?: string;
       goal?: string;
+      /** Mode filing defaults (C1/C7, people round-1 f2): the budget and
+       * escalated posture ride the FILING, before the digest is computed —
+       * never stamped after the fact. */
+      budgetMicrousd?: number | null;
+      posture?: "escalated";
       /** Revision tasks inherit these from the source scope (Codex M5-M8
        * audit, IV-2): a revision that silently drops the original's
        * exclusions and path limits is an approval screen claiming "no
@@ -6826,16 +6837,20 @@ export class Store {
           outOfScope: spec.outOfScope ?? null,
           touches: spec.touches ?? ([] as string[]),
         };
-        this.saveScope({
-          taskId: id,
-          ...draft,
-          budgetMicrousd: null,
-          proposedAt: now.toISOString(),
-          digest: digestOf(draft),
-          approvedAt: null,
-          approvedBy: null,
-          approvedDigest: null,
-        });
+        const budgeted = { ...draft, budgetMicrousd: spec.budgetMicrousd ?? null };
+        this.saveScope(
+          {
+            taskId: id,
+            ...budgeted,
+            proposedAt: now.toISOString(),
+            digest: digestOf(budgeted),
+            approvedAt: null,
+            approvedBy: null,
+            approvedDigest: null,
+          },
+          {},
+          spec.posture === undefined ? {} : { posture: spec.posture },
+        );
       }
       return { ok: true as const, id };
     });

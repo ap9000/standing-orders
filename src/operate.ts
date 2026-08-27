@@ -7761,9 +7761,13 @@ function scopeTask(
     asGiven !== undefined && tokenGiven !== undefined && authenticateApprover(store, asGiven, tokenGiven).ok
       ? asGiven
       : null;
-  let sealedUnderMode = false;
-  const filed = store.transact(():
-    | { ok: true; scope: ReturnType<typeof propose> }
+  // ONE replayed composite (surfaces round 1, finding 3): the filing, any
+  // race/comparison terms, AND the mode seal record as a single operation —
+  // a replayed key returns the FIRST answer whole instead of re-sealing
+  // whatever scope happens to be current.
+  const filed = store.replay(mutationFrom(flags, now), "task-scope-filed", () =>
+    store.transact(():
+    | { ok: true; scope: ReturnType<typeof propose>; sealedUnderMode: boolean }
     | { ok: false; reason: string; message: string } => {
     if (plannedRace !== null && plannedRace.ok) {
       const raceRef = store.refFor(BUILT_IN, id);
@@ -7792,9 +7796,9 @@ function scopeTask(
       ...(explicitProfile === undefined ? {} : { profile: explicitProfile }),
       ...(coverage?.escalated === true ? { posture: "escalated" as const } : {}),
       now,
-      mutation: mutationFrom(flags, now),
     });
-    if (coverage !== null) {
+    let sealedUnderMode = false;
+    if (coverage !== null && proposed.profileState === "resolved") {
       store.sealScopeApproval(id, actor as string, now, {}, { kind: "mode", modeDigest: coverage.digest });
       sealedUnderMode = true;
     }
@@ -7840,13 +7844,13 @@ function scopeTask(
         now,
       );
     }
-    return { ok: true, scope: proposed };
-  });
+    return { ok: true, scope: proposed, sealedUnderMode };
+  }));
   if (!filed.ok) {
     return fail(write, json, "task scope", filed.reason, filed.message, EXIT.refused);
   }
   const scope = filed.scope;
-  if (sealedUnderMode) {
+  if (filed.sealedUnderMode) {
     return succeed(write, json, "task scope", { scope, approvedUnderMode: true }, () => [
       `Scope written AND approved for ${id} — your operating mode covered it; it dispatches on the next pass.`,
       ...describeScope(scope),

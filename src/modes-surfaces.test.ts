@@ -144,6 +144,53 @@ describe("the C7 escalation matrix, sealed where profiles are sealed", () => {
   });
 });
 
+describe("the round-1 closures: bearer fencing, revision defaults, sign-time grant proof", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    const alex = addApprover(store, "alex", T0);
+    if (!alex.ok) throw new Error("bootstrap");
+  });
+  afterEach(() => store.close());
+
+  test("signing automerge re-proves the grant INSIDE the transaction (finding 4)", () => {
+    const terms = { ...presetTerms("hands-off", later(24).toISOString()), publication: "automerge" as const };
+    expect(() =>
+      store.signMode(
+        { repo: REPO, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: "automerge" },
+        T0,
+      ),
+    ).toThrow(/merge-capable/);
+    expect(store.activeMode(REPO, T0)).toBeNull();
+  });
+
+  test("revision filing defaults ride the digest: escalated posture and the mode budget bind at creation (finding 2)", () => {
+    const sealed = store.sealRevision(
+      {
+        task: { title: "revise t-x: 1 comment", repo: REPO, goal: "apply the batch", budgetMicrousd: 2_500_000, posture: "escalated" },
+        artifact: { run: seedRun(store), kind: "revision-brief", key: "1/brief.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "0".repeat(64), capture: "test" },
+        revisionOf: "t-x",
+        commentIds: null,
+        sourceRun: 1,
+      },
+      T0,
+    );
+    if (!sealed.ok) throw new Error(sealed.reason);
+    const scope = store.getScope(sealed.id);
+    expect(scope?.budgetMicrousd).toBe(2_500_000);
+    expect(scope?.profile).toMatchObject({ provider: "claude", permissionArgv: "bypassPermissions" });
+  });
+});
+
+function seedRun(store: Store): number {
+  store.createTask({ id: "t-x", title: "source" }, T0);
+  const ref = store.refFor("built-in", "t-x").id;
+  store.placeTask(ref, REPO);
+  const run = store.startRun({ taskRef: ref, leaseId: "l-x", runner: "b-1", branch: "b", worktree: "/w", now: T0 });
+  return run;
+}
+
 describe("the credentialed-CLI auto-approve road and the plan pins", () => {
   let dir: string;
   let db: string;
@@ -192,6 +239,20 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
     expect(code).toBe(0);
     const store = openStore(db);
     expect(approvalOf(store.getScope("t-1")).approved).toBe(false);
+    store.close();
+  });
+
+  test("a replayed --key returns the FIRST file-and-seal answer whole (finding 3)", async () => {
+    const first = await run("task", ["scope", "t-1", "--goal", "guard the payout", "--as", "alex", "--token", token, "--key", "file-1"]);
+    expect(first).toBe(0);
+    const firstWords = lines.join("\n");
+    expect(firstWords).toContain("approved");
+    // Replay: same key, DIFFERENT goal — the recorded answer comes back;
+    // the scope is not rewritten and not re-sealed.
+    const second = await run("task", ["scope", "t-1", "--goal", "something else entirely", "--as", "alex", "--token", token, "--key", "file-1"]);
+    expect(second).toBe(0);
+    const store = openStore(db);
+    expect(store.getScope("t-1")?.goal).toBe("guard the payout");
     store.close();
   });
 

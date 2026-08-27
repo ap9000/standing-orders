@@ -1,5 +1,33 @@
 # Progress
 
+**2026-08-27 — Layer 7 hardening: the Codex round-1 findings, closed.**
+APPROVE-WITH-CHANGES with five findings, every one now shut. (1) The
+bearer hole: bearer credentials produce an approver identity, and both
+filing arms would have auto-sealed for them — but bearer is the machine
+channel, and C1's table says console cookie or credentialed CLI only.
+Both coverage calls now gate on the cookie road, with an HTTP
+regression proving a bearer filing lands unapproved. (2) Revision
+auto-approval now applies the mode's filing defaults WHERE THE DIGEST
+IS COMPUTED: the escalated posture and the mode budget thread through
+sealRevision → createConsoleTask → saveScope before anything is
+sealed — and every mode-seal road (console, CLI, revision) refuses when
+the profile could not resolve, exactly as the human approve() does.
+(3) The CLI filing became ONE replayed composite: the file, any race or
+comparison terms, and the mode seal record as a single keyed operation
+— a replayed key returns the first answer whole instead of re-sealing
+whatever scope happens to be current. (4) The automerge prerequisite is
+re-proved INSIDE signMode's transaction — a grant revoked between the
+confirm screen and the signature loses; the pre-checks only shape the
+words. (5) The disclosure fixes: the attended confirm screen's chrome
+binds to the task's AUTHORITY repository (the banner shown is the mode
+that would cover the quick mint, never the session's project filter);
+the banner names FULL permissions and passwordless minting when the
+terms say so; and the /mode form's override controls became honest
+tri-states whose blank value means the preset's own default — choosing
+hands-off no longer promises auto-approval while an unchecked box
+silently removes it. Four regression tests. Suite 1368.
+
+
 **2026-08-27 — Modes arc, layer 7 of 7: the surfaces. THE ARC IS
 COMPLETE.** The signed envelope reaches every screen it governs. THE
 BANNER (M1): every page scoped to a repo with a live mode carries it —
