@@ -9,3 +9,4 @@ dist/
 
 # Protocol files a stray test stub could write into this checkout
 NIGHTORDERS-*.json
+*.tgz

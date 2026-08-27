@@ -19,7 +19,10 @@ block/unblock/next`); per-worker queue columns with drag reservation
 enforced in the claim primitive; and external dispatch (GitHub issues
 mirrored as ordinary local tasks under an explicit dispatch grant —
 titles validated, bodies never imported, closure latched with
-completion-time disowning, done never regressed). Schema v20.
+completion-time disowning, done never regressed); the attended core
+(governed live sessions, crash custody, continuation); the attested
+runtime (four providers, tier-2 by versioned conformance); and labeled
+cross-runtime comparisons. Schema v27.
 
 v0.4 makes the work graph a pluggable backend chosen during onboarding, and adds the supervision rule that makes overnight runs affordable.
 

@@ -1,5 +1,24 @@
 # Progress
 
+**2026-08-26 — Phase 0: the 0.4.0 release, reconciled and proven.** The
+version story was the loudest gap on the comparison page: npm at 0.3.0,
+the lockfile still carrying the project's old name at 0.2.0, the README
+contradicting itself (one line said 0.3.0 pending, another said the
+release was 0.2.0 — while 0.3.0 had shipped on the 21st), DESIGN's
+header frozen at schema v20. Reconciled to the strategy's exit
+criterion (ruling 14): manifest 0.4.0, lockfile regenerated under the
+right name (`npm install --package-lock-only`), README's status section
+rewritten to what 0.4.0 actually carries (the attended core, the
+attested runtime, comparisons — everything since 0.3.0), DESIGN header
+brought to v27. The proof is a fresh `npm pack` inspection: name
+standing-orders, version 0.4.0, 126 files — dist (supervisor.mjs
+riding along), package.json, README, LICENSE, nothing else — and the
+packed CLI cold-runs from the extracted tarball. Suite 1,286 at the
+pack. The publish itself is the operator's act:
+`npm publish` from the repo root (prepublishOnly re-runs typecheck +
+build), then `git tag v0.4.0 && git push origin v0.4.0`, then verify
+cold with `npx standing-orders@0.4.0 --help`.
+
 **2026-08-26 — Slice B cross-check folded: the Codex round lands on
 attempt five, and the resume road grows real bounds.** Codex capacity
 returned mid-evening and the queued review of the comparison chain came

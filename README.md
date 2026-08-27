@@ -240,7 +240,7 @@ anything else.
 
 ## Steering a fleet, not just a task
 
-Everything below ships on `main` today (npm 0.3.0 pending):
+Everything below ships in 0.4.0:
 
 - **The queue screen** — every worker's up-next list as columns, like a
   music queue: drag to reorder, drag into a worker's column to reserve a
@@ -310,11 +310,16 @@ And it costs nothing while idle. **An LLM never polls.** The daemon handles ever
 
 ## Status
 
-**Shipped on `main` through schema v20, suite 1031** — the M4 loop plus
-tournaments, the live peek, chains and queue ordering, per-worker queue
-columns, and external dispatch (each behind five adversarial Codex
-review rounds at its hardest; the ledger records every finding). The
-npm release is 0.2.0; everything above awaits 0.3.0.
+**0.4.0 — schema v27, suite 1,286.** The M4 loop plus tournaments, the
+live peek and live transcript, chains and queue ordering, per-worker
+queue columns, external dispatch, merge grants with observed-green CI,
+the phone PWA with zero-dependency push, the attended core (governed
+live sessions: signed terms, mid-session conversation, crash custody,
+continuation), the attested runtime (four providers — Claude, Codex,
+OpenRouter, Gemini — the last admitted by versioned conformance, never
+a registry row), and labeled cross-runtime comparisons with honest
+per-lane money. Every arc shipped behind its own adversarial review
+rounds; docs/PROGRESS.md records every finding.
 
 **M4 built.** The whole loop runs: `standing-orders watch` (or `daemon
 install` — no crontab) dispatches approved work, spends nothing while idle,
