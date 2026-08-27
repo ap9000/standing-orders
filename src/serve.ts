@@ -138,7 +138,8 @@ import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDi
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
-import { authenticateAccount, hashPassword } from "./scope.js";
+import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
+import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -1057,6 +1058,59 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/mode") {
+      if (project === null) {
+        return refuse(response, who, 409, "open a project first — a mode is signed per repository");
+      }
+      const live = store.activeMode(project, now);
+      const liveTerms = live === null ? null : modeTermsFromJson(live.termsJson);
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const hasGrant = store.hasMergeCapableGrant(project, now);
+      const current =
+        live === null || liveTerms === null
+          ? `<div class="card"><h2 style="margin-top:0">locked</h2><p class="meta">no mode is signed — every act keeps its own ceremony. That is the default, forever.</p></div>`
+          : [
+              `<div class="card">`,
+              `<h2 style="margin-top:0">${escape(live.name)} <span class="meta">signed by ${personChip(live.signedBy)}</span></h2>`,
+              modeWords(liveTerms)
+                .map(words => `<p class="row">${escape(words)}</p>`)
+                .join("\n"),
+              who.role === "approver"
+                ? `<form method="post" action="/mode/revoke" class="row">` +
+                  `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+                  `<button type="submit">end this mode now</button>` +
+                  `<span class="meta">one click — every act it covered falls back to its own ceremony</span></form>`
+                : "",
+              `</div>`,
+            ].join("\n");
+      const signForm =
+        who.role !== "approver"
+          ? ""
+          : [
+              `<div class="card">`,
+              `<h2 style="margin-top:0">${live === null ? "sign a mode" : "replace it — a renewal is a new signature"}</h2>`,
+              `<form method="post" action="/mode/confirm">`,
+              `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+              `<label>preset<select name="name"><option value="standard">standard — safe defaults, reviews on</option><option value="hands-off">hands-off — your filings auto-approve, full permissions</option></select></label>`,
+              `<label>days <span class="meta">(1\u2013${MODE_MAX_DAYS})</span><input type="number" name="days" value="1" min="1" max="${MODE_MAX_DAYS}"></label>`,
+              `<label>merges<select name="publication">` +
+                `<option value="notify">wait for me — even under a merge grant</option>` +
+                (hasGrant ? `<option value="automerge">merge themselves when CI is green on the exact commit</option>` : "") +
+                `</select></label>` +
+                (hasGrant ? "" : `<span class="meta">self-merging needs a merge-capable publication grant first</span>`),
+              `<label><input type="checkbox" name="auto-approve" value="1"> approve my own filings the moment I file them</label>`,
+              `<label><input type="checkbox" name="review-auto" value="1" checked> agent-review every finished build</label>`,
+              `<button type="submit">read the full terms</button>`,
+              `</form>`,
+              `</div>`,
+            ].join("\n");
+      return sendScreen(
+        response,
+        200,
+        screen("mode", [`<h1>operating mode</h1>`, current, signForm].join("\n"), { chrome: chromeFor(project, "menu") }),
+      );
+    }
+
     if (url.pathname === "/people") {
       // Approvers see everyone (D7's ceiling: every fact already passed
       // the process admission); a viewer sees exactly themselves (U3).
@@ -1321,6 +1375,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ["/caps", "requirements", "tools and credentials builds need"],
           ["/projects", "switch project", "open another enrolled repository"],
           ["/people", "people", "who can sign in, and what they have done"],
+          ["/mode", "operating mode", "the signed posture this repository runs under"],
           ["/settings", "settings", "alerts, messaging, credentials"],
         ] as const
       )
@@ -2049,6 +2104,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       badge = { at: Date.now(), count: counted.count, saturated: counted.saturated };
       badgeCache.set(key, badge);
     }
+    const liveMode = project === null ? null : store.activeMode(project, clock());
+    const liveModeTerms = liveMode === null ? null : modeTermsFromJson(liveMode.termsJson);
     return {
       active,
       project,
@@ -2056,6 +2113,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       inboxSaturated: badge.saturated,
       settings: options.telegramTokenFile !== undefined,
       ...(store.isDemo() ? { demo: true } : {}),
+      ...(liveMode === null || liveModeTerms === null
+        ? {}
+        : {
+            modeBanner: {
+              name: liveMode.name,
+              words: `${liveMode.name} mode until ${liveMode.absoluteExpiry.slice(0, 16).replace("T", " ")} UTC${
+                liveModeTerms.autoApproveFiling ? ` — every scope ${liveMode.signedBy} files builds without further ceremony` : ""
+              }${liveModeTerms.publication === "automerge" ? " — merges fire themselves on green" : ""}`,
+            },
+          }),
       ...(!unscopedMode && ceiling.roots.length === 0 && ceiling.repos.length > 0 ? { chat: true } : {}),
       ...(listPane === undefined ? {} : { listPane }),
     };
@@ -2311,7 +2378,25 @@ export function createDecisionServer(options: ServeOptions): Server {
             ref.repo !== null &&
             store.activeTournamentTerms(ref.id) === null &&
             store.getTask(taskId)?.state === "queued";
-          return { canMint, open: null };
+          if (!canMint) return { canMint, open: null };
+          const pinnedModel = scope?.profile?.provider === "claude" ? scope.profile.model : "";
+          const configured = ["plan", "build", "repair", "review"]
+            .map(phase => store.phaseConfig(INSTALLATION_SCOPE, phase))
+            .filter((row): row is NonNullable<typeof row> => row !== null && row.provider === "claude" && row.model !== null)
+            .map(row => row.model as string);
+          const models = [...new Set([pinnedModel, ...configured])].filter(model => model !== "");
+          const liveMode = ref.repo === null ? null : store.activeMode(ref.repo, now);
+          const modeTerms = liveMode === null ? null : modeTermsFromJson(liveMode.termsJson);
+          return {
+            canMint,
+            mint: {
+              models,
+              pinnedModel,
+              posture: modeTerms?.permissionDefault === "escalated" ? ("bypassPermissions" as const) : ("acceptEdits" as const),
+              quick: modeTerms?.quickMint === true && liveMode !== null && liveMode.signedBy === who.name,
+            },
+            open: null,
+          };
         })(),
         now,
       };
@@ -3104,6 +3189,92 @@ export function createDecisionServer(options: ServeOptions): Server {
         { chrome: chromeFor(projectOf(who, request) ?? null, "fleet"), forceSensitive: true },
       );
       return sendScreen(response, 200, tokenScreen);
+    }
+
+    if (url.pathname === "/mode/confirm" || url.pathname === "/mode/sign") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "signing a mode is a browser ceremony");
+      const project = projectOf(who, request);
+      if (project === null || project === undefined) {
+        return refuse(response, who, 409, "open a project first — a mode is signed per repository", "/mode");
+      }
+      const name: ModeName = body.get("name") === "hands-off" ? "hands-off" : "standard";
+      const days = Math.max(1, Math.min(MODE_MAX_DAYS, Math.floor(Number(body.get("days") ?? "1")) || 1));
+      const expiry = new Date(now.getTime() + days * 24 * 60 * 60_000).toISOString();
+      const terms: ModeTerms = {
+        ...presetTerms(name, expiry),
+        autoApproveFiling: body.get("auto-approve") === "1",
+        reviewAuto: body.get("review-auto") === "1",
+        publication: body.get("publication") === "automerge" ? "automerge" : "notify",
+      };
+      if (terms.publication === "automerge" && !store.hasMergeCapableGrant(project, now)) {
+        return refuse(response, who, 409, "self-merging needs a merge-capable publication grant first — grant one, then sign", "/mode");
+      }
+      const digest = modeDigestOf(terms);
+
+      if (url.pathname === "/mode/confirm") {
+        // THE CEREMONY (M1): every resolved term in words, and the password
+        // signs exactly this digest — a drifted form refuses at /mode/sign.
+        const nonce = mintApprovalNonce(who.name, "mode-sign", digest);
+        const bodyHtml =
+          `<h1>sign the ${escape(name)} mode for ${escape(project)}</h1>` +
+          `<form method="post" action="/mode/sign" class="card approve-form">` +
+          `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
+          `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
+          `<input type="hidden" name="digest" value="${escape(digest)}">` +
+          ["name", "days", "publication", "auto-approve", "review-auto"]
+            .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
+            .join("") +
+          `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
+          `<p><strong>your password signs exactly this:</strong></p>` +
+          modeWords(terms)
+            .map(words => `<p class="recap" style="margin-top:.4rem">${escape(words)}</p>`)
+            .join("") +
+          `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>` +
+          `<div class="sticky-actions"><button type="submit">sign it</button></div>` +
+          `</form>` +
+          `<p class="meta"><a href="/mode">back — sign nothing</a></p>`;
+        return sendScreen(response, 200, screen("mode", bodyHtml, { chrome: chromeFor(project, "menu") }));
+      }
+
+      // /mode/sign: the fixed expiry rides the form; the digest is
+      // RE-DERIVED from the posted fields — drift is a 409, never a guess.
+      const fixedExpiry = body.get("expiry") ?? "";
+      const signedTerms: ModeTerms = { ...terms, absoluteExpiry: fixedExpiry };
+      const rederived = modeDigestOf(signedTerms);
+      const nonce = body.get("nonce") ?? "";
+      if (!consumeApprovalNonce(nonce, who.name, "mode-sign", body.get("digest") ?? "")) {
+        return refuse(response, who, 409, "that form is stale — read the terms again", "/mode");
+      }
+      if (rederived !== (body.get("digest") ?? "") || Date.parse(fixedExpiry) <= now.getTime()) {
+        return refuse(response, who, 409, "the terms moved while you were reading — read them again", "/mode");
+      }
+      const token = body.get("token") ?? "";
+      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        return refuse(response, who, 403, "signing a mode takes your password, typed again", "/mode");
+      }
+      store.signMode(
+        {
+          repo: project,
+          name: signedTerms.name,
+          termsJson: modeTermsJson(signedTerms),
+          digest: rederived,
+          signedBy: who.name,
+          absoluteExpiry: signedTerms.absoluteExpiry,
+          publication: signedTerms.publication,
+        },
+        now,
+      );
+      return redirect(response, "/mode");
+    }
+
+    if (url.pathname === "/mode/revoke") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "ending a mode is a browser act");
+      const project = projectOf(who, request);
+      if (project === null || project === undefined) return refuse(response, who, 409, "open a project first", "/mode");
+      // LOWERING authority is ONE CLICK for any approver (the v4 ruling):
+      // csrf only, no password — the fastest possible off-switch.
+      const ended = store.revokeMode(project, who.name, "operator", now);
+      return redirect(response, ended ? "/mode?said=the%20mode%20is%20ended%20—%20every%20act%20falls%20back%20to%20its%20own%20ceremony" : "/mode");
     }
 
     if (url.pathname === "/people/invite") {
@@ -3931,7 +4102,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       // artifact row, the relation, and exactly this comment batch.
       const briefName = `revision-brief-${randomBytes(6).toString("hex")}.json`;
       const key = writeEvidenceFile(evidenceRoot, id, briefName, briefBytes);
-      const sealed = store.sealRevision(
+      // C1's revision arm: when the SEALER is the mode's signer and the
+      // mode auto-approves their filings, the revision task approves
+      // inside the same transaction, with mode provenance. Everything
+      // else about the seal is unchanged; without coverage, the revision
+      // keeps its own approval ceremony.
+      const sealed = store.transact(() => {
+        const result = store.sealRevision(
         {
           task: {
             title: `revise ${sourceTaskId}: ${comments.length} review comment(s) on build #${id}`,
@@ -3957,7 +4134,15 @@ export function createDecisionServer(options: ServeOptions): Server {
           sourceRun: id,
         },
         now,
-      );
+        );
+        if (result.ok) {
+          const coverage = modeFilingCoverage(store, repo, who.name, now);
+          if (coverage !== null) {
+            store.sealScopeApproval(result.id, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
+          }
+        }
+        return result;
+      });
       if (!sealed.ok) return refuse(response, who, 409, `could not seal the revision: ${sealed.reason}`, `/r/${id}`);
       return redirect(response, taskHref(sealed.id));
     }
@@ -4079,7 +4264,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   async function liveAttendedTerms(
     taskId: string,
-    inputs: { minutes: number; turns: number; budgetMicrousd: number; expiry?: string; parent?: number; followup?: string },
+    inputs: { minutes: number; turns: number; budgetMicrousd: number; expiry?: string; parent?: number; followup?: string; model?: string; posture?: string },
     now: Date,
   ): Promise<{ ok: true; terms: AttendedTerms } | { ok: false; problem: string }> {
     if (options.attended === undefined) return { ok: false, problem: "this console cannot hold a session — start it with `standing-orders up`" };
@@ -4111,12 +4296,25 @@ export function createDecisionServer(options: ServeOptions): Server {
     } else if (approvalOf(scope).approved) {
       return { ok: false, problem: "the scope is approved — it already dispatches unattended" };
     }
-    const pinned = scope.profileState === "resolved" ? (scope.profile ?? null) : null;
+    let pinned = scope.profileState === "resolved" ? (scope.profile ?? null) : null;
     if (pinned === null) {
       return { ok: false, problem: "the scope cannot say exactly what runs — name a model (task scope --model, or config set build)" };
     }
     if (pinned.provider !== "claude") {
       return { ok: false, problem: `${pinned.provider} cannot hold a watched session yet — this road is claude-only for now` };
+    }
+    // THE MINT PICKER (P1/C7): a chosen model or posture rebuilds the
+    // WHOLE ClaudeProfile — the digest signs the profile that actually
+    // runs, never a partial edit. Absent choices keep the scope's pin.
+    const chosenModel = (inputs.model ?? "").trim();
+    const chosenPosture =
+      inputs.posture === "bypassPermissions" ? ("bypassPermissions" as const) : inputs.posture === "acceptEdits" ? ("acceptEdits" as const) : null;
+    if (chosenModel !== "" || chosenPosture !== null) {
+      pinned = {
+        ...pinned,
+        ...(chosenModel === "" ? {} : { model: chosenModel }),
+        ...(chosenPosture === null ? {} : { permissionArgv: chosenPosture }),
+      };
     }
     if (store.activeTournamentTerms(ref.id) !== null) {
       return { ok: false, problem: "this task races a tournament — one attempt cannot authorize N racers" };
@@ -4163,12 +4361,19 @@ export function createDecisionServer(options: ServeOptions): Server {
     response: ServerResponse,
     who: Who,
     terms: AttendedTerms,
-    inputs: { minutes: number; turns: number; budgetMicrousd: number },
+    inputs: { minutes: number; turns: number; budgetMicrousd: number; model?: string; posture?: string },
     digest: string,
     nonce: string,
     csrf: string,
   ): void {
     const scope = store.getScope(terms.taskId);
+    // Quick mint (M4): the mode signature substitutes for the password —
+    // the confirm screen still shows EVERY term; only the credential line
+    // changes. The mint transaction re-proves the mode either way.
+    const quickRef = store.lookupRef(terms.taskId);
+    const quickMode = quickRef?.repo == null ? null : store.activeMode(quickRef.repo, clock());
+    const quickTerms = quickMode === null ? null : modeTermsFromJson(quickMode.termsJson);
+    const quick = quickTerms?.quickMint === true && quickMode !== null && quickMode.signedBy === who.name;
     const body =
       `<h1>run ${escape(terms.taskId)} once, while you watch</h1>` +
       `<form method="post" action="${taskHref(terms.taskId)}/attend" class="card approve-form">` +
@@ -4179,13 +4384,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       `<input type="hidden" name="turns" value="${inputs.turns}">` +
       `<input type="hidden" name="budget" value="${inputs.budgetMicrousd}">` +
       `<input type="hidden" name="expiry" value="${escape(terms.absoluteExpiry)}">` +
+      (inputs.model === undefined ? "" : `<input type="hidden" name="model" value="${escape(inputs.model)}">`) +
+      (inputs.posture === undefined ? "" : `<input type="hidden" name="posture" value="${escape(inputs.posture)}">`) +
       (terms.parentRun == null ? "" : `<input type="hidden" name="parent" value="${terms.parentRun}">`) +
       (terms.followup == null ? "" : `<input type="hidden" name="followup" value="${escape(terms.followup)}">`) +
       `<p><strong>your password signs exactly this:</strong></p>` +
       `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? "")}</p>` +
       `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
       `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
-      `<p class="meta">runs on</p><p class="recap" style="margin-top:0">claude · ${escape(String((JSON.parse(terms.profileJson) as { profile?: { model?: string } }).profile?.model ?? ""))} — asks before edits outside the worktree (acceptEdits)</p>` +
+      (() => {
+        const profile = (JSON.parse(terms.profileJson) as { profile?: { model?: string; permissionArgv?: string } }).profile;
+        const posture =
+          profile?.permissionArgv === "bypassPermissions"
+            ? "FULL permissions — claude runs with --dangerously-skip-permissions; nothing asks"
+            : "asks before edits outside the worktree (acceptEdits)";
+        return `<p class="meta">runs on</p><p class="recap" style="margin-top:0">claude · ${escape(String(profile?.model ?? ""))} — ${posture}</p>`;
+      })() +
       (terms.parentRun == null
         ? ""
         : `<p class="meta">continues</p><p class="recap" style="margin-top:0">attempt <a href="/r/${terms.parentRun}" class="mono">#${terms.parentRun}</a>, from exactly where it finished</p>` +
@@ -4195,7 +4409,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       `<p class="meta">spending</p><p class="recap" style="margin-top:0">up to about $${(terms.budgetMicrousd / 1_000_000).toFixed(2)} — the agent stops as soon as its total crosses this; the final step may run a little past it</p>` +
       `<p class="meta">conversation</p><p class="recap" style="margin-top:0">at most ${terms.maxSessionTurns} messages to the agent, this whole session; each may work up to ${Math.round(terms.turnTimeoutSeconds / 60)} minutes — one that runs past that ends the whole session. If it needs a repair, the repair uses the same session, model, and clock.</p>` +
       `<p class="meta">while you watch — a signed term</p><p class="recap" style="margin-top:0">your console being open is what keeps it running — any page of it, this one included; close the console and the session winds down within a minute. Everything ends by ${escape(when(terms.absoluteExpiry))} regardless. One attempt; it never converts into unattended work.</p>` +
-      `<label>your password, typed again — a signed-in session alone cannot authorize work<input type="password" name="token" autocomplete="current-password"></label>` +
+      (quick
+        ? `<p class="meta">your signed mode covers this mint — no password; the mode is re-proved as you confirm, and the session is stamped with its signature</p>`
+        : `<label>your password, typed again — a signed-in session alone cannot authorize work<input type="password" name="token" autocomplete="current-password"></label>`) +
       `<div class="sticky-actions"><button type="submit">run it while I watch</button></div>` +
       `</form>` +
       `<p class="meta"><a href="${taskHref(terms.taskId)}">back to the task</a></p>`;
@@ -4234,6 +4450,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       ...(body.get("expiry") === null ? {} : { expiry: body.get("expiry") as string }),
       ...(parentGiven === null || parentGiven === "" ? {} : { parent: Number(parentGiven) }),
       ...(followupGiven === null ? {} : { followup: followupGiven }),
+      ...(body.get("model") === null ? {} : { model: body.get("model") as string }),
+      ...(body.get("posture") === null ? {} : { posture: body.get("posture") as string }),
     };
     if (store.openAuthorizationFor(ref.id) !== null) {
       return refuse(response, who, 409, "an authorization is already open — revoke it first", taskHref(taskId));
@@ -4257,7 +4475,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       return refuse(response, who, 409, "the world moved while you were reading (scope, model, or head) — read it again", taskHref(taskId));
     }
     const token = body.get("token") ?? "";
-    if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+    let basis: { kind: "mode"; digest: string } | undefined;
+    if (token === "") {
+      // Quick mint (C2/M4): no password typed — valid ONLY when a live
+      // mode with quickMint was signed by THIS session's person. The mint
+      // transaction re-proves it; this pre-check only shapes the refusal.
+      const mode = ref.repo === null ? null : store.activeMode(ref.repo, now);
+      const modeTerms = mode === null ? null : modeTermsFromJson(mode.termsJson);
+      if (mode === null || modeTerms === null || !modeTerms.quickMint || mode.signedBy !== who.name) {
+        return refuse(response, who, 403, "authorizing takes your password, typed again", taskHref(taskId));
+      }
+      basis = { kind: "mode", digest: mode.digest };
+    } else if (!authenticateApprover(store, who.name, token).ok) {
       return refuse(response, who, 403, "authorizing takes your password, typed again", taskHref(taskId));
     }
     const minted = store.mintAttendedAuthorization({
@@ -4273,9 +4502,20 @@ export function createDecisionServer(options: ServeOptions): Server {
       ...(live.terms.parentRun == null ? {} : { parentRun: live.terms.parentRun }),
       ...(live.terms.followup == null ? {} : { followup: live.terms.followup }),
       absoluteExpiry: live.terms.absoluteExpiry,
+      ...(basis === undefined ? {} : { basis }),
       now,
     });
-    if (!minted.ok) return refuse(response, who, 409, "an authorization is already open — revoke it first", taskHref(taskId));
+    if (!minted.ok) {
+      return refuse(
+        response,
+        who,
+        minted.reason === "mode-ended" ? 403 : 409,
+        minted.reason === "mode-ended"
+          ? "the mode that covered quick minting has ended — your password, typed again, still works"
+          : "an authorization is already open — revoke it first",
+        taskHref(taskId),
+      );
+    }
     // The first beat is the mint itself: the person is visibly here.
     store.beatAuthorization(minted.authorization.id, now);
     return redirect(response, taskHref(taskId));
@@ -4504,12 +4744,26 @@ export function createDecisionServer(options: ServeOptions): Server {
           if ((plannedRace !== null || plannedComparison !== null) && store.openAuthorizationFor(ref.id) !== null) {
             return { ok: false, status: 409, message: "an attended authorization is open on this task — revoke it before filing a tournament or comparison" };
           }
+          // C1/M3: the signer's own credentialed filing auto-approves —
+          // coverage is asked INSIDE this transaction, the escalated
+          // default and budget ride the filing, and the seal commits
+          // atomically with it. Plain scopes only: a tournament or
+          // comparison keeps its own human ceremony.
+          const coverage =
+            plannedRace === null && plannedComparison === null
+              ? modeFilingCoverage(store, ref.repo, who.name, now)
+              : null;
           const proposed = proposeGuarded(store, {
             taskId,
             goal: body.get("goal") ?? "",
             outOfScope: body.get("not") ?? null,
             touches: (body.get("touches") ?? "").split(/[\n,]/),
-            ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
+            ...(budgetUsd !== null
+              ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
+              : coverage?.defaultBudgetMicrousd != null
+                ? { budgetMicrousd: coverage.defaultBudgetMicrousd }
+                : {}),
+            ...(coverage?.escalated === true ? { posture: "escalated" as const } : {}),
             sawDigest: sawDigest === null || sawDigest === "" ? null : sawDigest,
             taskRef: ref.id,
             now,
@@ -4520,6 +4774,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               status: proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400,
               message: `scope not saved: ${proposed.reason}`,
             };
+          }
+          if (coverage !== null) {
+            store.sealScopeApproval(taskId, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
           }
           if (plannedComparison !== null && plannedComparison.ok) {
             store.fileTournamentTerms(
@@ -5490,6 +5747,9 @@ type Chrome = {
   settings: boolean;
   /** This database is a demo sandbox: banner every page, spend fenced. */
   demo?: boolean;
+  /** The active operating mode's banner (M1): rides every page scoped to
+   * a repo with a live mode — a signed posture is never invisible. */
+  modeBanner?: { words: string; name: string };
   /** The chat tab renders only where chat could ever be allowed. */
   chat?: boolean;
   /** A rendered list pane makes the page master-detail. */
@@ -5855,9 +6115,12 @@ function shell(
   // must not pass as production (adoption review, finding 8; the FENCE is
   // the refuseDemo gate in operate.ts, this is the honest label).
   const demoBanner =
-    chrome.demo === true
+    (chrome.demo === true
       ? `<div style="background:hsl(45 90% 55% / .18);border-bottom:1px solid hsl(45 60% 45% / .5);padding:.4rem .9rem;font-size:.85rem">sandbox data \u2014 this is a demo database; nothing here spends money or reaches a remote</div>`
-      : "";
+      : "") +
+    (chrome.modeBanner === undefined
+      ? ""
+      : `<div style="background:hsl(265 60% 55% / .14);border-bottom:1px solid hsl(265 40% 50% / .45);padding:.4rem .9rem;font-size:.85rem">${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`);
   const content =
     chrome.listPane === undefined
       ? `<div class="content">${demoBanner}<main>${body}</main></div>`
@@ -7930,6 +8193,9 @@ function taskBody(data: {
   /** The attended road (Phase 2E): mint offer, or the open authorization. */
   attended?: {
     canMint: boolean;
+    /** The mint picker (P1/C7): claude models to choose from, and the
+     * permission posture default (escalated when the active mode says so). */
+    mint?: { models: string[]; pinnedModel: string; posture: "acceptEdits" | "bypassPermissions"; quick: boolean };
     open: { id: string; state: string; expiresAt: string; turnsUsed: number; cap: number; spentMicrousd: number; budgetMicrousd: number; running: boolean } | null;
   } | null;
   now: Date;
@@ -8139,7 +8405,20 @@ function taskBody(data: {
               `<form method="post" action="${taskHref(task.id)}/attend-preview" class="card">`,
               `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
               `<p><strong>or run it once while you watch</strong></p>`,
-              `<p class="meta">no approval filed: one attempt, on this machine, only while this page is open. You will read every term before your password signs it.</p>`,
+              `<p class="meta">no approval filed: one attempt, on this machine, only while this page is open. You will read every term before ${attended.mint?.quick === true ? "you confirm it" : "your password signs it"}.</p>`,
+              attended.mint === undefined || attended.mint.models.length <= 1
+                ? ""
+                : `<label>model <span class="meta">(watched sessions run claude only)</span><select name="model">` +
+                  attended.mint.models
+                    .map(model => `<option value="${escape(model)}"${model === attended.mint?.pinnedModel ? " selected" : ""}>${escape(model)}</option>`)
+                    .join("") +
+                  `</select></label>`,
+              attended.mint === undefined
+                ? ""
+                : `<label>permissions<select name="posture">` +
+                  `<option value="acceptEdits"${attended.mint.posture === "acceptEdits" ? " selected" : ""}>asks before edits outside the worktree</option>` +
+                  `<option value="bypassPermissions"${attended.mint.posture === "bypassPermissions" ? " selected" : ""}>full permissions — nothing asks</option>` +
+                  `</select></label>`,
               `<button type="submit">read the terms</button>`,
               `</form>`,
             ].join("\n")

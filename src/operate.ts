@@ -136,7 +136,7 @@ import {
   validRunnerName,
   RUNNER_NAME_MAX,
 } from "./runner.js";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import {
@@ -1854,8 +1854,10 @@ async function tickCommand(
       ? null
       : wantsPlan
         ? resolvePhaseAgent(store, "plan", repo, {
-            provider: planProvider ?? providerFlag,
-            model: planModel ?? model,
+            // P2/C7 precedence: the task's plan PIN beats every flag and
+            // config row; flags beat config; config beats the default.
+            provider: ref.planProvider ?? planProvider ?? providerFlag,
+            model: ref.planProvider !== null ? (ref.planModel ?? undefined) : (planModel ?? model),
           })
         : racedAhead !== null
           ? resolvePhaseAgent(store, "build", repo, {}, ref)
@@ -3379,12 +3381,27 @@ async function planTaskCommand(
     return fail(write, json, "task plan", "refused", `no task ${id}`, EXIT.refused);
   }
   const ref = store.refFor(BUILT_IN, id);
+  // Plan pins (P2/C7): a named pair binds the PLAN phase only, refused
+  // while a live plan claim is spending on the previous answer.
+  const pinProvider = text(flags, "provider");
+  const pinModel = text(flags, "model");
+  if (pinProvider !== undefined) {
+    if (!isProviderId(pinProvider)) {
+      return fail(write, json, "task plan", "usage", `unknown provider \`${pinProvider}\``, EXIT.usage);
+    }
+    const pinned = store.setPlanPins(ref.id, pinProvider, pinModel ?? null, clock());
+    if (!pinned.ok) {
+      return fail(write, json, "task plan", "refused", "a planner holds this task right now — the pin would reroute a live spend", EXIT.refused);
+    }
+  } else if (pinModel !== undefined) {
+    return fail(write, json, "task plan", "usage", "--model rides --provider for a plan pin", EXIT.usage);
+  }
   const result = store.requestPlan(ref.id, clock());
   if (!result.ok) {
     return fail(write, json, "task plan", "refused", result.reason, EXIT.refused);
   }
-  return succeed(write, json, "task plan", { id }, () => [
-    `${id} will be planned before it is built: the next pass dispatches a planner.`,
+  return succeed(write, json, "task plan", { id, ...(pinProvider === undefined ? {} : { planProvider: pinProvider, planModel: pinModel ?? null }) }, () => [
+    `${id} will be planned before it is built: the next pass dispatches a planner${pinProvider === undefined ? "" : ` on ${pinProvider}${pinModel === undefined ? "" : ` \u00b7 ${pinModel}`}`}.`,
     "Its questions reach you like any decision; its plan lands as a scope for you to edit and approve.",
   ]);
 }
@@ -7733,6 +7750,18 @@ function scopeTask(
   // finding 5): the attended exclusion refuses BEFORE anything writes, and
   // a filing failure rolls the proposal back — a refused race never leaves
   // a rewritten scope behind it.
+  //
+  // C1/M3, the credentialed-CLI road: when --as/--token authenticate the
+  // MODE'S SIGNER and their live mode auto-approves filings, the scope
+  // seals in the same transaction it files — plain scopes only, and the
+  // ledger shows the mode provenance. Anonymous filings never auto-seal.
+  const asGiven = text(flags, "as");
+  const tokenGiven = text(flags, "token");
+  const actor =
+    asGiven !== undefined && tokenGiven !== undefined && authenticateApprover(store, asGiven, tokenGiven).ok
+      ? asGiven
+      : null;
+  let sealedUnderMode = false;
   const filed = store.transact(():
     | { ok: true; scope: ReturnType<typeof propose> }
     | { ok: false; reason: string; message: string } => {
@@ -7746,16 +7775,29 @@ function scopeTask(
         };
       }
     }
+    const coverage =
+      plannedRace === null && plannedComparison === null && actor !== null
+        ? modeFilingCoverage(store, store.refFor(BUILT_IN, id).repo, actor, now)
+        : null;
     const proposed = propose(store, {
       taskId: id,
       goal,
       outOfScope: text(flags, "not") ?? null,
       touches,
-      ...(budgetUsd === null ? {} : { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }),
+      ...(budgetUsd !== null
+        ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
+        : coverage?.defaultBudgetMicrousd != null
+          ? { budgetMicrousd: coverage.defaultBudgetMicrousd }
+          : {}),
       ...(explicitProfile === undefined ? {} : { profile: explicitProfile }),
+      ...(coverage?.escalated === true ? { posture: "escalated" as const } : {}),
       now,
       mutation: mutationFrom(flags, now),
     });
+    if (coverage !== null) {
+      store.sealScopeApproval(id, actor as string, now, {}, { kind: "mode", modeDigest: coverage.digest });
+      sealedUnderMode = true;
+    }
     if (plannedRace !== null && plannedRace.ok) {
       const plan = plannedRace.plan;
       const raceRef = store.refFor(BUILT_IN, id);
@@ -7804,6 +7846,12 @@ function scopeTask(
     return fail(write, json, "task scope", filed.reason, filed.message, EXIT.refused);
   }
   const scope = filed.scope;
+  if (sealedUnderMode) {
+    return succeed(write, json, "task scope", { scope, approvedUnderMode: true }, () => [
+      `Scope written AND approved for ${id} — your operating mode covered it; it dispatches on the next pass.`,
+      ...describeScope(scope),
+    ]);
+  }
 
   if (plannedComparison !== null && plannedComparison.ok) {
     const plan = plannedComparison.plan;

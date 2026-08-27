@@ -94,6 +94,10 @@ export type TaskRef = {
   /** The pinned agent, when a fire transaction stamped one. Authoritative. */
   agentProvider: string | null;
   agentModel: string | null;
+  /** Plan pins (P2/C7): read ONLY by the plan phase; precedence plan pin
+   * > plan flags > plan config > installation > default. */
+  planProvider: string | null;
+  planModel: string | null;
   /** The task whose reviewed run this one revises (M6.8); null ordinarily. */
   revisionOf: string | null;
   /** The immutable brief artifact carrying the exact comment batch. */
@@ -5184,7 +5188,7 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile } = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated" } = {}): void {
     this.once(mutation, "saveScope", () => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -5213,6 +5217,17 @@ export class Store {
         } else {
           unresolvedReason = resolved.problem;
         }
+      }
+      // The C7 escalation matrix, applied where the profile is sealed:
+      // claude bypassPermissions / gemini yolo; codex-shaped lanes have
+      // one posture and escalation changes nothing for them.
+      if (options.posture === "escalated" && profile !== null) {
+        profile =
+          profile.provider === "claude"
+            ? { ...profile, permissionArgv: "bypassPermissions" }
+            : profile.provider === "gemini"
+              ? { ...profile, approvalArgv: "yolo" }
+              : profile;
       }
       const digest = profile === null
         ? scope.digest
@@ -6891,6 +6906,25 @@ export class Store {
       }
       this.db.prepare("UPDATE task_ref SET plan = 'requested' WHERE id = ?").run(taskRef);
       this.bumpWake();
+      return { ok: true as const };
+    });
+  }
+
+  /** Plan pins (P2/C7): separate columns, read ONLY by the plan phase,
+   * with a mutation cutoff — a live plan claim means the pinned pair is
+   * already spending, and rerouting a spend mid-flight is not a pin. */
+  setPlanPins(
+    taskRef: number,
+    provider: string,
+    model: string | null,
+    now: Date,
+  ): { ok: true } | { ok: false; reason: "live-claim" } {
+    return this.transact(() => {
+      const live = this.db
+        .prepare("SELECT 1 AS hit FROM claim WHERE task_ref = ? AND released_at IS NULL AND expires_at > ? LIMIT 1")
+        .get(taskRef, now.toISOString());
+      if (live !== undefined) return { ok: false as const, reason: "live-claim" as const };
+      this.db.prepare("UPDATE task_ref SET plan_provider = ?, plan_model = ? WHERE id = ?").run(provider, model, taskRef);
       return { ok: true as const };
     });
   }
@@ -9159,13 +9193,31 @@ export class Store {
       parentRun?: number | null;
       followup?: string | null;
       absoluteExpiry: string;
+      /** Quick mint (C2/M4): the mode signature substitutes for the
+       * per-mint password — RE-PROVED here, in the mint transaction
+       * itself, never a pre-checked flag: the mode must be live, its
+       * digest exact, and the minting approver must BE the signer. */
+      basis?: { kind: "mode"; digest: string };
       now: Date;
     },
     mutation: Mutation = {},
-  ): { ok: true; authorization: AttendedAuthorization } | { ok: false; reason: "authorization-open" } {
+  ): { ok: true; authorization: AttendedAuthorization } | { ok: false; reason: "authorization-open" | "mode-ended" } {
     return this.once(mutation, "mintAttendedAuthorization", () =>
       this.transact(() => {
         const now = input.now.toISOString();
+        if (input.basis !== undefined) {
+          const ref = this.refForId(input.taskRef);
+          const mode = ref === null || ref.repo === null ? null : this.activeMode(ref.repo, input.now);
+          let quickMint = false;
+          if (mode !== null && mode.digest === input.basis.digest && mode.signedBy === input.approver) {
+            try {
+              quickMint = (JSON.parse(mode.termsJson) as { quickMint?: unknown }).quickMint === true;
+            } catch {
+              quickMint = false;
+            }
+          }
+          if (!quickMint) return { ok: false as const, reason: "mode-ended" as const };
+        }
         this.db
           .prepare(
             `UPDATE attended_authorization SET closed_at = ?, end_reason = 'expired'
@@ -9180,8 +9232,9 @@ export class Store {
           .prepare(
             `INSERT INTO attended_authorization
                (id, task_ref, approver, runner, runner_generation, composite_digest, terms_json,
-                max_session_turns, budget_microusd, parent_run, followup, created_at, absolute_expiry)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                max_session_turns, budget_microusd, parent_run, followup, created_at, absolute_expiry,
+                authority_basis, mode_digest)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             input.id,
@@ -9197,6 +9250,8 @@ export class Store {
             input.followup ?? null,
             now,
             input.absoluteExpiry,
+            input.basis === undefined ? "password" : "mode",
+            input.basis === undefined ? null : input.basis.digest,
           );
         const minted = this.readAuthorization(input.id);
         if (minted === null) throw new Error("attended authorization vanished inside its own mint");
@@ -13035,6 +13090,14 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
       row["agent_model"] === null || row["agent_model"] === undefined
         ? null
         : String(row["agent_model"]),
+    planProvider:
+      row["plan_provider"] === null || row["plan_provider"] === undefined
+        ? null
+        : String(row["plan_provider"]),
+    planModel:
+      row["plan_model"] === null || row["plan_model"] === undefined
+        ? null
+        : String(row["plan_model"]),
     revisionOf:
       row["revision_of"] === null || row["revision_of"] === undefined
         ? null
@@ -13325,6 +13388,11 @@ function readScope(row: Record<string, unknown>): Scope {
     proposedAt: String(row["proposed_at"]),
     digest: String(row["digest"]),
     budgetMicrousd: row["budget_microusd"] === null || row["budget_microusd"] === undefined ? null : Number(row["budget_microusd"]),
+    approvalBasis:
+      row["approval_basis"] === null || row["approval_basis"] === undefined
+        ? null
+        : (String(row["approval_basis"]) as "password" | "mode"),
+    modeDigest: row["mode_digest"] === null || row["mode_digest"] === undefined ? null : String(row["mode_digest"]),
     approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
     approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
     approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),

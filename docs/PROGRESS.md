@@ -1,5 +1,39 @@
 # Progress
 
+**2026-08-27 — Modes arc, layer 7 of 7: the surfaces. THE ARC IS
+COMPLETE.** The signed envelope reaches every screen it governs. THE
+BANNER (M1): every page scoped to a repo with a live mode carries it —
+name, expiry, and what it changes, one link from the full terms; a
+signed posture is never invisible. THE CEREMONY (/mode): choose the
+preset and overrides (automerge offered only where a merge-capable
+grant exists), then the confirm screen renders EVERY resolved term in
+words — the reversal sentence verbatim — and the password signs a
+digest RE-DERIVED from the posted fields, 409 on drift. Ending the mode
+is ONE CLICK for any approver (the v4 doctrine: raising is a ceremony,
+lowering is instant). QUICK MINT (C2/M4): under a quickMint mode, the
+attended confirm screen shows every term as always but accepts on the
+signer's session alone — the mint TRANSACTION re-proves the mode
+(live, exact digest, minter IS the signer) and stamps
+authority_basis='mode' + the digest durably; a dead mode refuses with
+words pointing back to the password. THE MINT PICKER (P1/C7): the
+watched-session form gains a claude model select and a permission
+posture (defaulting escalated when the mode says so); a choice rebuilds
+the WHOLE ClaudeProfile and the digest signs that — nothing partial is
+ever authorized, and the confirm screen says "FULL permissions —
+nothing asks" honestly. AUTO-APPROVE FILING (C1/M3): the signer's own
+credentialed filings — console cookie or CLI --as/--token — file and
+seal in ONE transaction with mode provenance; the escalated matrix
+seals claude bypassPermissions / gemini yolo where profiles are sealed;
+the mode's default budget stamps filings that name none; plain scopes
+only (tournaments and comparisons keep their human ceremony); anonymous
+roads never auto-seal. The revision-seal road auto-approves when the
+sealer is the signer, inside the same transaction. PLAN PINS (P2/C7):
+`task plan --provider --model` binds the PLAN phase only, precedence
+pin > flags > config, refused while a planner's claim is live. Nine
+surface tests. Suite 1364. Layers 1–7 all shipped, each behind its own
+closed Codex loop; the round-1 verify of this layer is queued.
+
+
 **2026-08-27 — Layer 6, round 2 closed: the belt covers every road.**
 Codex round 2 verified all four round-1 closures and found five more,
 now closed. The vouch-then-write race: `approver add` runs detection,

@@ -277,6 +277,10 @@ export type Scope = {
   approvedBy: string | null;
   /** The digest that was actually agreed to, which may now be stale. */
   approvedDigest: string | null;
+  /** How the approval happened (v29): 'password' = the ceremony;
+   * 'mode' = sealed by the signer's live mode (modeDigest names it). */
+  approvalBasis?: "password" | "mode" | null;
+  modeDigest?: string | null;
   /** v24 (optional so hand-built scopes in tests stay valid): the working
    * execution profile, its resolution state, and the immutable snapshot
    * the approval act sealed. */
@@ -301,6 +305,9 @@ export type ScopeInput = {
   profile?: ExecutionProfile;
   /** Integer micro-dollars per build attempt; digest-bound when present. */
   budgetMicrousd?: number | null;
+  /** The mode road's escalated filing default (C7): the resolved profile
+   * seals claude bypassPermissions / gemini yolo; codex-shaped unchanged. */
+  posture?: "escalated";
   now: Date;
   mutation?: Mutation;
 };
@@ -342,7 +349,7 @@ export function digestOf(
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile, posture } = input;
 
   const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd };
   const previous = store.getScope(taskId);
@@ -362,7 +369,10 @@ export function propose(store: Store, input: ScopeInput): Scope {
     approvedDigest: previous?.approvedDigest ?? null,
   };
 
-  store.saveScope(scope, mutation, profile === undefined ? {} : { profile });
+  store.saveScope(scope, mutation, {
+    ...(profile === undefined ? {} : { profile }),
+    ...(posture === undefined ? {} : { posture }),
+  });
   // The store may have RECOMPUTED the digest to bind the resolved profile
   // (v24 filing invariant) — what callers display must be what is stored.
   return store.getScope(taskId) ?? scope;
@@ -542,6 +552,38 @@ export function authenticateApprover(
  * (trivially true here: they are the same transaction). Never
  * sealScopeApproval after a filing — that was the TOCTOU.
  */
+/**
+ * C1's coverage question, answerable from ANY filing road: does a live
+ * mode make THIS actor's credentialed filing auto-approve here, and with
+ * which defaults? Callers re-ask INSIDE their filing transaction — an
+ * answer carried across transactions would be the TOCTOU again.
+ */
+export function modeFilingCoverage(
+  store: Store,
+  repo: string | null,
+  actor: string,
+  now: Date,
+): { digest: string; escalated: boolean; defaultBudgetMicrousd: number | null } | null {
+  const mode = repo === null ? null : store.activeMode(repo, now);
+  if (mode === null || mode.signedBy !== actor) return null;
+  try {
+    const terms = JSON.parse(mode.termsJson) as {
+      autoApproveFiling?: unknown;
+      permissionDefault?: unknown;
+      perAttemptBudgetMicrousd?: unknown;
+    };
+    if (terms.autoApproveFiling !== true) return null;
+    return {
+      digest: mode.digest,
+      escalated: terms.permissionDefault === "escalated",
+      defaultBudgetMicrousd:
+        typeof terms.perAttemptBudgetMicrousd === "number" ? terms.perAttemptBudgetMicrousd : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function fileAndSealUnderMode(
   store: Store,
   input: ScopeInput & { repo: string | null; actor: string },
@@ -552,10 +594,12 @@ export function fileAndSealUnderMode(
     if (mode.signedBy !== input.actor) return { ok: false as const, reason: "not-signer" as const };
     let autoApprove = false;
     let defaultBudget: number | null = null;
+    let escalated = false;
     try {
-      const terms = JSON.parse(mode.termsJson) as { autoApproveFiling?: unknown; perAttemptBudgetMicrousd?: unknown };
+      const terms = JSON.parse(mode.termsJson) as { autoApproveFiling?: unknown; perAttemptBudgetMicrousd?: unknown; permissionDefault?: unknown };
       autoApprove = terms.autoApproveFiling === true;
       defaultBudget = typeof terms.perAttemptBudgetMicrousd === "number" ? terms.perAttemptBudgetMicrousd : null;
+      escalated = terms.permissionDefault === "escalated";
     } catch {
       autoApprove = false;
     }
@@ -563,6 +607,7 @@ export function fileAndSealUnderMode(
     const scope = propose(store, {
       ...input,
       ...(input.budgetMicrousd == null && defaultBudget !== null ? { budgetMicrousd: defaultBudget } : {}),
+      ...(escalated ? { posture: "escalated" as const } : {}),
     });
     store.sealScopeApproval(input.taskId, input.actor, input.now, input.mutation ?? {}, { kind: "mode", modeDigest: mode.digest });
     return { ok: true as const, scope: store.getScope(input.taskId) as Scope, basis: "mode" as const };
