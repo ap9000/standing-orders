@@ -1479,27 +1479,66 @@ async function tickCommand(
       resumed.push({ id: waitingTaskId, outcome: "skipped", reason: "external-race" });
       continue;
     }
+    // THE ANSWERED BATCH IS MARKED ACTIVE FIRST (Codex slice-B finding 2):
+    // resuming lanes one at a time let the FIRST finisher aggregate the
+    // contest while later answered lanes were still 'parked' — excluded
+    // from active, their decisions no longer open — stranding them in a
+    // contest that had already moved on. 'ready' counts as active, so
+    // aggregation waits for the whole batch. Any lane that bails before
+    // its build reverts to 'parked' so the next pass retries it.
+    const batch: { racer: ReturnType<Store["contestants"]>[number] }[] = [];
     for (const racer of store.contestants(waiting.id).filter(one => one.state === "parked")) {
       if (store.answeredDecisionForContestant(racer.id) === null) continue;
+      if (store.casContestantState(racer.id, ["parked"], "ready", racer.generation)) {
+        batch.push({ racer });
+      }
+    }
+    for (const { racer } of batch) {
+      const backToParked = (): void => {
+        const current = store.getContestant(racer.id);
+        if (current !== null) store.casContestantState(racer.id, ["ready"], "parked", current.generation);
+      };
       const custody = racer.custody === null ? null : (JSON.parse(racer.custody) as { branch: string; head: string | null; runner: string });
       const taskId = store.externalIdFor(waiting.taskRef);
-      if (custody === null || custody.runner !== runner || taskId === null) continue;
+      if (custody === null || custody.runner !== runner || taskId === null) {
+        backToParked();
+        continue;
+      }
       // Comparison lanes carry NO dollar terms (Phase 3 slice B, E1): the
       // clock is the bound, and a budget-of-zero must never read as
-      // exhausted — the v1 design would have stopped every parked
-      // comparison lane the moment its answer landed.
+      // exhausted. But the clock must be CUMULATIVE (Codex slice-B
+      // finding 1): every resume re-arms the sealed per-attempt timeout,
+      // so without a lane-total bound a park/answer loop could run
+      // forever. Three sealed clocks bound the lane, stated in the
+      // ceremony words.
       const remaining = waiting.kind === "comparison" ? null : racer.budgetMicrousd - racer.accountedMicrousd;
       if (remaining !== null && remaining <= 0) {
-        store.casContestantState(racer.id, ["parked"], "stopped", racer.generation);
+        const current = store.getContestant(racer.id);
+        if (current !== null) store.casContestantState(racer.id, ["ready"], "stopped", current.generation);
         contestMaybeAggregate(store, waiting.id, clock());
         resumed.push({ id: taskId, outcome: "skipped", reason: "over-ceiling" });
         continue;
       }
+      if (waiting.kind === "comparison") {
+        const laneProfile = racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel);
+        const clockCapMs = 3 * laneProfile.timeoutSeconds * 1000;
+        if (store.contestantCumulativeMs(racer.id) >= clockCapMs) {
+          const current = store.getContestant(racer.id);
+          if (current !== null) store.casContestantState(racer.id, ["ready"], "stopped", current.generation);
+          contestMaybeAggregate(store, waiting.id, clock());
+          resumed.push({ id: taskId, outcome: "skipped", reason: "over-ceiling" });
+          continue;
+        }
+      }
       const reclaimed = acquire(store, waiting.taskRef, runner, { now: clock(), ttlMs: leaseTtlMs });
-      if (!reclaimed.ok) continue;
+      if (!reclaimed.ok) {
+        backToParked();
+        continue;
+      }
       const freshContest = store.getContest(waiting.id);
       if (freshContest === null || !store.casContestState(waiting.id, ["decision-wait", "racing"], "racing", freshContest.generation)) {
         release(store, reclaimed.claim.leaseId, clock());
+        backToParked();
         continue;
       }
       store.stampContestLease(waiting.id, reclaimed.claim.leaseId, runner, text(flags, "incarnation") ?? null);
@@ -1510,7 +1549,7 @@ async function tickCommand(
         // agent rather than cold-starting against a different history.
         if (leased.ok) await worktrees.release(leased.worktree.path, clock());
         const current = store.getContestant(racer.id);
-        if (current !== null) store.casContestantState(racer.id, ["parked"], "stopped", current.generation);
+        if (current !== null) store.casContestantState(racer.id, ["ready"], "stopped", current.generation);
         store.setContestantCleanup(racer.id, "attention");
         contestMaybeAggregate(store, waiting.id, clock());
         release(store, reclaimed.claim.leaseId, clock());
@@ -1536,10 +1575,11 @@ async function tickCommand(
       if (beforeBuild === null || !store.claimContestantRun(racer.id, resumeRun, beforeBuild.generation)) {
         await worktrees.release(leased.worktree.path, clock());
         release(store, reclaimed.claim.leaseId, clock());
+        backToParked();
         continue;
       }
       const afterClaim = store.getContestant(racer.id);
-      if (afterClaim !== null) store.casContestantState(racer.id, ["parked"], "building", afterClaim.generation);
+      if (afterClaim !== null) store.casContestantState(racer.id, ["ready"], "building", afterClaim.generation);
       const resumeResult = await build(store, {
         taskId,
         taskRef: waiting.taskRef,
@@ -1614,11 +1654,32 @@ async function tickCommand(
         resumedOutcome = "stopped";
       }
       if (resumedRunRow !== null && resumedRunRow.outcome === null) {
+        // The reason rides the resumed run too (Codex slice-B finding 7):
+        // both settlement paths, one honesty.
+        const resumeReason = !resumeResult.ok ? resumeResult.reason : undefined;
         store.finishRun(resumeRun, {
           outcome: resumedOutcome === "built" && !resumedCommitted ? "no-change" : resumedOutcome === "stopped" ? "failed" : resumedOutcome === "parked" ? "parked" : resumedOutcome,
           committed: resumedCommitted,
+          ...(resumeReason === undefined ? {} : { reason: resumeReason }),
           now: clock(),
         });
+      }
+      if (resumedOutcome === "parked") {
+        // Custody refreshes on EVERY park (Codex slice-B finding 9): a
+        // re-parked lane whose custody still named the pre-resume head
+        // would falsely stop as contest-custody on its next answer.
+        const headNow = await git("git", ["rev-parse", "HEAD"], { cwd: leased.worktree.path });
+        const dirtyNow = await git("git", ["status", "--porcelain"], { cwd: leased.worktree.path });
+        store.setContestantCustody(
+          racer.id,
+          JSON.stringify({
+            branch: racer.branch,
+            head: headNow.code === 0 ? headNow.stdout.trim() : null,
+            runner,
+            dirty: dirtyNow.stdout.trim() !== "",
+            at: clock().toISOString(),
+          }),
+        );
       }
       await worktrees.release(leased.worktree.path, clock());
       const resumedFinal = finalizeContestant(
@@ -4198,18 +4259,21 @@ function contestCommand(
   }
   if (action === "show") {
     const contest = store.getContest(Number(idGiven));
-    if (contest === null) return fail(write, json, "contest show", "unknown", "no tournament with that id", EXIT.refused);
+    if (contest === null) return fail(write, json, "contest show", "unknown", "no tournament or comparison with that id", EXIT.refused);
     const agents = store.contestants(contest.id);
     if (json) {
       write(envelopeJson({ ok: true, command: "contest show", contest, agents }));
       return EXIT.ok;
     }
-    write(`tournament #${contest.id} — ${contest.state}`);
+    write(`${contestNoun(contest.kind)} #${contest.id} — ${contest.state}`);
     for (const racer of agents) {
-      write(
-        `  agent ${racer.ordinal}: ${racer.provider} · ${racer.model} — ${racer.state}` +
-          ` · charged $${(racer.accountedMicrousd / 1_000_000).toFixed(2)}${racer.unknownSpend ? " (exact figure unknown — charged the reserved worst case)" : ""}`,
-      );
+      const money =
+        contest.kind === "comparison"
+          ? racer.unknownSpend
+            ? "spend unmeasured (tokens only)"
+            : `$${(racer.measuredMicrousd / 1_000_000).toFixed(2)} measured`
+          : `charged $${(racer.accountedMicrousd / 1_000_000).toFixed(2)}${racer.unknownSpend ? " (exact figure unknown — charged the reserved worst case)" : ""}`;
+      write(`  agent ${racer.ordinal}: ${racer.provider} · ${racer.model} — ${racer.state} · ${money}`);
     }
     return EXIT.ok;
   }

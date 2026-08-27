@@ -159,7 +159,7 @@ export function planComparison(input: {
       ok: false,
       reason: "all-lanes-raceable",
       message:
-        "every one of these agents can hold a real dollar budget — race them instead: a tournament binds each lane to enforced spend, which a comparison deliberately does not",
+        "a comparison is not a budget bypass — every one of these agents can hold an enforced dollar cap, so file a tournament for this lineup (it will also need each model's pinned price)",
     };
   }
   const plan: ComparisonPlan = {
@@ -659,6 +659,10 @@ export function pickTupleDigest(
     v: "contest-pick/v1",
     contest: view.contest.id,
     generation: view.contest.generation,
+    // v27 (Codex slice-B finding 10): kind changes the ceremony's money
+    // semantics, so the password binds it. Open nonces at upgrade simply
+    // re-mint — they live fifteen minutes.
+    kind: view.contest.kind,
     taskRef: view.contest.taskRef,
     scope: view.contest.scopeDigest,
     race: view.contest.raceDigest,

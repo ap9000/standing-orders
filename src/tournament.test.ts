@@ -1505,7 +1505,7 @@ describe("labeled comparisons (Phase 3 slice B): planning, filing, admission, mo
       ],
     });
     expect(refused).toMatchObject({ ok: false, reason: "all-lanes-raceable" });
-    expect((refused as { message: string }).message).toContain("race them instead");
+    expect((refused as { message: string }).message).toContain("not a budget bypass");
   });
 
   test("lanes are validated: unknown providers, missing models, and bad counts refuse", () => {

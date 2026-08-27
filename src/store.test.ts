@@ -2271,6 +2271,19 @@ describe("the v27 comparison migration: tournament_terms rebuilt, kind-aware mon
     );
     expect(filed).toBeGreaterThan(0);
     expect(store.activeTournamentTerms(otherRef)).toMatchObject({ kind: "comparison" });
+    // The rebuild recreates the one-active partial unique (Codex slice-B
+    // finding 4): DROP TABLE dropped it, and startup's IF NOT EXISTS ran
+    // BEFORE the migration - the rebuild itself must restore the backstop.
+    const index = store
+      .raw()
+      .prepare("SELECT 1 AS hit FROM sqlite_master WHERE type = 'index' AND name = 'tournament_terms_one_active'")
+      .get();
+    expect(index).not.toBeUndefined();
+    expect(() =>
+      store.raw().prepare(
+        "INSERT INTO tournament_terms (task_ref, generation, active, kind, race_digest, agents, n, per_agent_budget_microusd, overrun_reserve_microusd, total_budget_microusd, price_version, retries, publication_policy, created_at) VALUES (?, 9, 1, 'race', 'dup', '[]', 2, 1, 1, 1, 1, 0, 'none', ?)",
+      ).run(otherRef, T0.toISOString()),
+    ).toThrow(/UNIQUE/);
     store.close();
     rmSync(dir, { recursive: true, force: true });
   });

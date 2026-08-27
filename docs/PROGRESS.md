@@ -1,5 +1,33 @@
 # Progress
 
+**2026-08-26 — Slice B cross-check folded: the Codex round lands on
+attempt five, and the resume road grows real bounds.** Codex capacity
+returned mid-evening and the queued review of the comparison chain came
+back REDESIGN with twelve findings — reviewed against the
+pre-implementation tree, so two (the one-active index recreation, the
+async-attestation placement) were already closed in the shipped code,
+and the rest are dispositioned in design-comparisons-v3.md. Folded
+here: the CUMULATIVE CLOCK (a comparison lane is bound by three sealed
+clocks across its whole lineage — every resume re-armed the per-attempt
+timeout, so a park/answer loop could have run forever); the ANSWERED
+BATCH (the resume pass marks every answered lane active BEFORE running
+any — the first finisher's aggregation was stranding later answered
+lanes as permanently parked, a pre-existing race bug too; every bail
+arm reverts its lane for the next pass); the LINEAGE ROLLUP (comparison
+glance cells sum dollars and tokens over main + resumes + repairs
+instead of reading the newest run); custody refreshes on every re-park
+(the stale-head false-stop is closed); the resume settlement stamps
+failure reasons like the initial one; `contest show`, board chips, and
+the task card all speak kind words; the pick tuple binds kind; the
+discipline gate's refusal no longer promises a race that pricing might
+refuse. Deferred with names (task #90): contest-lane quota/capacity
+atomicity (inherited from the tournament machinery, neither widened nor
+narrowed), failure-message retention beyond reason tokens, and
+decision-wait's deliberate exclusion from contest escalation (the
+parked decision pages through its own deadline machinery). Suite 1286
+(one new index assertion; the flake that showed once mid-sweep was the
+documented tournament-resume 1-in-10, green on rerun).
+
 **2026-08-26 — Parity II Phase 3, slice B: labeled comparisons — all
 four runtimes, side by side, no lies about money.** The contest
 machinery learns ONE discriminator instead of a fork (DESIGN §9d):

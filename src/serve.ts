@@ -2385,6 +2385,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     liveRuns: Set<number>;
     totalMicrousd: number;
     anyUnknown: boolean;
+    rollups: Map<number, { costMicrousd: number; tokensIn: number; tokensOut: number; measuredRuns: number; totalRuns: number }>;
   } | null {
     const view = buildPickView(store, evidenceRoot, contestId);
     if (view === null) return null;
@@ -2404,6 +2405,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (owner !== undefined) questions.set(owner, (questions.get(owner) ?? 0) + 1);
     }
     return {
+      rollups: new Map(view.agents.map(agent => [agent.contestant.id, store.contestantSpendRollup(agent.contestant.id)])),
       view,
       taskId: ref.externalId,
       taskTitle: found.title,
@@ -6815,6 +6817,7 @@ function contestPage(chrome: Chrome, data: {
   questions: Map<number, number>;
   totalMicrousd: number;
   anyUnknown: boolean;
+  rollups: Map<number, { costMicrousd: number; tokensIn: number; tokensOut: number; measuredRuns: number; totalRuns: number }>;
   diffs: Map<number, TerminalDiffView | null>;
   /** Runs whose lease is still the task's current live claim — "still
    * working" is said only of these; an interrupted agent's unfinished run
@@ -6874,14 +6877,20 @@ function contestPage(chrome: Chrome, data: {
       // Money words are KIND words (slice B, E3): a comparison lane never
       // had a reservation, so reservation language would lie in both
       // directions — unmeasured lanes say tokens instead.
-      cost:
-        contest.kind === "comparison"
-          ? contestant.unknownSpend
-            ? `tokens only${run !== null && (run.tokensOut !== null || run.tokensIn !== null) ? ` (${((run.tokensIn ?? 0) + (run.tokensOut ?? 0)).toLocaleString()} tokens)` : ""} — this harness reports no dollars`
-            : `${contestDollars(contestant.measuredMicrousd)} measured`
-          : contestant.unknownSpend
+      cost: (() => {
+        if (contest.kind !== "comparison") {
+          return contestant.unknownSpend
             ? `${contestDollars(contestant.accountedMicrousd)} — the exact figure was unknowable, so the full reservation was charged`
-            : contestDollars(contestant.accountedMicrousd),
+            : contestDollars(contestant.accountedMicrousd);
+        }
+        // The WHOLE lineage speaks (Codex slice-B finding 6): main attempt,
+        // resumes, and repairs — a newest-run read under-reports every
+        // park cycle.
+        const rollup = data.rollups.get(contestant.id) ?? { costMicrousd: 0, tokensIn: 0, tokensOut: 0, measuredRuns: 0, totalRuns: 0 };
+        return contestant.unknownSpend
+          ? `tokens only${rollup.tokensIn + rollup.tokensOut > 0 ? ` (${(rollup.tokensIn + rollup.tokensOut).toLocaleString()} across ${rollup.totalRuns} run${rollup.totalRuns === 1 ? "" : "s"})` : ""} — this harness reports no dollars`
+          : `${contestDollars(rollup.costMicrousd)} measured${rollup.measuredRuns < rollup.totalRuns ? ` on ${rollup.measuredRuns} of ${rollup.totalRuns} runs` : ""}`;
+      })(),
       diff,
       diffWords,
     };
@@ -7551,10 +7560,10 @@ function taskBody(data: {
       ? ""
       : [
           `<div class="card">`,
-          `<p><strong>tournament</strong> <span class="meta">${contest.agents} agents on this task</span></p>`,
+          `<p><strong>${contestNoun(contest.kind)}</strong> <span class="meta">${contest.agents} agents on this task</span></p>`,
           `<p class="row">${escape((CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail").replace(/tournament/g, contestNoun(contest.kind)))}</p>`,
           `<p class="row"><a href="/contest/${contest.id}">${
-            contest.state === "pick-wait" ? "compare the results and pick one" : "see the tournament"
+            contest.state === "pick-wait" ? "compare the results and pick one" : `see the ${contestNoun(contest.kind)}`
           }</a></p>`,
           `</div>`,
         ].join("\n");

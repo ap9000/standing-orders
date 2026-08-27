@@ -2790,7 +2790,7 @@ function migrate(db: Database): void {
   // v27 (labeled comparisons): tournament_terms gains kind + kind-aware
   // money CHECKs (a rebuild — the old positive-budget CHECKs live in the
   // DDL); contest gains the denormalized kind additively.
-  addColumn(db, "contest", "kind", "TEXT NOT NULL DEFAULT 'race'");
+  addColumn(db, "contest", "kind", "TEXT NOT NULL DEFAULT 'race' CHECK (kind IN ('race','comparison'))");
   rebuildTournamentTermsForV27(db);
 }
 
@@ -6191,6 +6191,48 @@ export class Store {
         return Number(inserted.lastInsertRowid);
       }),
     );
+  }
+
+  /** The lane's CUMULATIVE wall clock across its whole lineage — main
+   * attempt, resumes, and repair children (Phase 3 slice B, Codex
+   * finding 1): three sealed clocks bound a comparison lane. */
+  contestantCumulativeMs(contestantId: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(
+           MAX(0, (julianday(COALESCE(finished_at, provider_started_at)) - julianday(provider_started_at)) * 86400000)
+         ), 0) AS total
+           FROM run
+          WHERE provider_started_at IS NOT NULL
+            AND (contestant = ? OR parent_run IN (SELECT id FROM run WHERE contestant = ?))`,
+      )
+      .get(contestantId, contestantId);
+    return Math.round(Number(row?.["total"] ?? 0));
+  }
+
+  /** The lane's money and tokens across its WHOLE lineage — main attempt,
+   * resumes, and repair children (Codex slice-B finding 6): a lane's cell
+   * that reads only the newest run under-reports every park cycle. */
+  contestantSpendRollup(contestantId: number): { costMicrousd: number; tokensIn: number; tokensOut: number; measuredRuns: number; totalRuns: number } {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 0 ELSE CAST(ROUND(cost_usd * 1000000) AS INTEGER) END), 0) AS cost,
+                COALESCE(SUM(COALESCE(tokens_in, 0)), 0) AS tin,
+                COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS tout,
+                SUM(CASE WHEN cost_usd IS NULL THEN 0 ELSE 1 END) AS measured,
+                COUNT(*) AS total
+           FROM run
+          WHERE provider_started_at IS NOT NULL
+            AND (contestant = ? OR parent_run IN (SELECT id FROM run WHERE contestant = ?))`,
+      )
+      .get(contestantId, contestantId);
+    return {
+      costMicrousd: Number(row?.["cost"] ?? 0),
+      tokensIn: Number(row?.["tin"] ?? 0),
+      tokensOut: Number(row?.["tout"] ?? 0),
+      measuredRuns: Number(row?.["measured"] ?? 0),
+      totalRuns: Number(row?.["total"] ?? 0),
+    };
   }
 
   contestants(contest: number): Contestant[] {
@@ -10134,6 +10176,9 @@ export class Store {
              (SELECT contest.state FROM contest WHERE contest.task_ref = task_ref.id
                 AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted')
                ORDER BY contest.id DESC LIMIT 1) AS contest_state,
+             (SELECT contest.kind FROM contest WHERE contest.task_ref = task_ref.id
+                AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted')
+               ORDER BY contest.id DESC LIMIT 1) AS contest_kind,
              (SELECT COUNT(*) FROM contestant WHERE contestant.contest =
                (SELECT contest.id FROM contest WHERE contest.task_ref = task_ref.id
                   AND contest.state IN ('dispatching','racing','pick-wait','decision-wait','exhausted','interrupted')
@@ -10271,7 +10316,7 @@ export class Store {
         contest:
           row["contest_id"] === null || row["contest_id"] === undefined
             ? null
-            : { id: Number(row["contest_id"]), state: String(row["contest_state"]), agents: Number(row["contest_agents"]) },
+            : { id: Number(row["contest_id"]), state: String(row["contest_state"]), agents: Number(row["contest_agents"]), kind: (String(row["contest_kind"] ?? "race") === "comparison" ? "comparison" : "race") as "race" | "comparison" },
         routineId:
           row["routine_id"] === null || row["routine_id"] === undefined
             ? null

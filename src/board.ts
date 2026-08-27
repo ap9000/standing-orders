@@ -60,7 +60,7 @@ export type BoardFacts = {
   hold: { ownerKind: "operator" | "decision" | "incident" | "backoff" | "contest"; until: string | null } | null;
   /** The task's open tournament, when agents raced (v14). Optional so
    * callers that predate tournaments stay valid; absent reads as none. */
-  contest?: { id: number; state: string; agents: number } | null;
+  contest?: { id: number; state: string; agents: number; kind?: "race" | "comparison" } | null;
   /** The first blocker that is not done, when one exists. */
   unmetDependency: string | null;
   /** That blocker's state — pre-redacted by the caller to null when the
@@ -152,7 +152,10 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
         ...base,
         lane: "building",
         attempt: null,
-        reason: `tournament — ${contest.agents} agents racing`,
+        reason:
+          contest.kind === "comparison"
+            ? `comparison — ${contest.agents} agents building side by side`
+            : `tournament — ${contest.agents} agents racing`,
       };
     }
     // A building card lands on the build itself when one exists — the
@@ -188,18 +191,18 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
   if (contest !== null) {
     const link = `/contest/${contest.id}`;
     if (contest.state === "pick-wait") {
-      return { ...base, lane: "attention", href: link, reason: `tournament finished — ${contest.agents} results to compare`, stalledSince: facts.updatedAt };
+      return { ...base, lane: "attention", href: link, reason: `${(contest.kind === "comparison" ? "comparison" : "tournament")} finished — ${contest.agents} results to compare`, stalledSince: facts.updatedAt };
     }
     if (contest.state === "exhausted") {
-      return { ...base, lane: "attention", href: link, reason: "tournament ended with nothing to pick", stalledSince: facts.updatedAt };
+      return { ...base, lane: "attention", href: link, reason: `${(contest.kind === "comparison" ? "comparison" : "tournament")} ended with nothing to pick`, stalledSince: facts.updatedAt };
     }
     if (contest.state === "interrupted") {
-      return { ...base, lane: "attention", href: link, reason: "tournament was interrupted — decide what happens next", stalledSince: facts.updatedAt };
+      return { ...base, lane: "attention", href: link, reason: `${(contest.kind === "comparison" ? "comparison" : "tournament")} was interrupted — decide what happens next`, stalledSince: facts.updatedAt };
     }
     if (contest.state === "decision-wait") {
       // The open question already classified above; reaching here means it
       // was answered and an agent resumes on the next pass.
-      return { ...base, lane: "building", reason: "tournament — an agent is resuming" };
+      return { ...base, lane: "building", reason: `${(contest.kind === "comparison" ? "comparison" : "tournament")} — an agent is resuming` };
     }
   }
   if (facts.state === "failed" || facts.openIncidents > 0) {
