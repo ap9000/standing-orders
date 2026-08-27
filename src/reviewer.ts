@@ -11,9 +11,19 @@
  * the run page, author `reviewer:<provider>`, and the operator prunes
  * and seals them into a revision task exactly as today. One attempt per
  * request, one review per run, ever (R4 + one_review_per_source).
+ *
+ * The confinement boundary, named honestly: READ confinement rests on
+ * the provider's read-only permission stance (the planner's posture and
+ * limits) — a policy, not a proof; OS-level sandboxing is the tracked
+ * follow-up it has always been. What IS proved is ingestion: the patch
+ * is re-verified against the artifact's hash on a no-follow descriptor
+ * AFTER the agent ran, the scratch may hold nothing else, and every
+ * comment binds to those exact bytes through the D8 transaction. An
+ * agent that read the world can still only SAY things about the sealed
+ * patch, into one validated mailbox, signed as the agent it was.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +31,6 @@ import { auditOf, type ProviderId } from "./provider.js";
 import type { Store } from "./store.js";
 import { invokeAgent } from "./invoke.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
-import { modeTermsFromJson } from "./modes.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import { evidenceRoot, readMailbox, readVerifiedArtifact, reviewFileName } from "./evidence.js";
 import type { Runner } from "./builder.js";
@@ -311,15 +320,32 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
 
     // THE PROOF COMES FIRST (R2's clean-tree law, scratch-shaped): the
     // directory may hold exactly the patch we wrote and the mailbox the
-    // agent wrote. Anything else — a file, a directory, a symlink — and
-    // nothing is ingested.
-    const entries = readdirSync(scratch);
-    const foreign = entries.filter(name => name !== REVIEW_PATCH_NAME && name !== mailbox);
+    // agent wrote — as REGULAR FILES, no symlinks, no directories — and
+    // the patch must still hash to the artifact's record (Codex reviewer
+    // round 1, finding 3: an overwritten or replaced patch means the
+    // comments describe bytes nobody sealed). Anything else and nothing
+    // is ingested.
+    const entries = readdirSync(scratch, { withFileTypes: true });
+    const foreign = entries
+      .filter(one => !one.isFile() || (one.name !== REVIEW_PATCH_NAME && one.name !== mailbox))
+      .map(one => one.name);
     if (foreign.length > 0) {
       return {
         ok: false,
         reason: "dirty-scratch",
         message: `the reviewer wrote ${foreign.length} thing(s) beyond its mailbox (${foreign.slice(0, 3).join(", ")}${foreign.length > 3 ? ", …" : ""}) — a reviewer reads; nothing it wrote is ingested`,
+      };
+    }
+    const patchBack = readMailbox(join(scratch, REVIEW_PATCH_NAME), diff.bytesStored);
+    if (
+      !patchBack.ok ||
+      patchBack.raw.length !== diff.bytesStored ||
+      createHash("sha256").update(patchBack.raw).digest("hex") !== diff.sha256
+    ) {
+      return {
+        ok: false,
+        reason: "dirty-scratch",
+        message: "the patch in the scratch no longer matches the sealed artifact — comments bind to the exact bytes reviewed, and these are not them",
       };
     }
 
@@ -364,12 +390,14 @@ export type ReviewPassReport = {
 
 /**
  * The tick's review pass: consume open review requests, one bounded
- * attempt each (R4). A mode-derived request re-proves its authority at
- * dispatch — the mode must still be active and still say reviewAuto, or
- * the request is spent unrun and review falls back to the human ask
- * (R-REVOKE: every mode-derived flow ends at its next gate). Rails are
- * reserved like any agent start; a railed request stays OPEN for a later
- * pass rather than being spent by the rail.
+ * attempt each (R4). Everything consequential happens inside the store's
+ * ONE admission transaction (`admitReview`): the request is claimed, a
+ * mode-derived request re-proves the EXACT digest it was queued under
+ * (R-REVOKE: a renewal is a new signature and inherits nothing), the
+ * daily rail is reserved, and the reviewer run opens — one winner under
+ * concurrent passes. A railed request stays OPEN for a later pass; a
+ * dead mode's request is spent unrun and review falls back to the human
+ * ask.
  */
 export async function reviewPass(
   store: Store,
@@ -387,46 +415,32 @@ export async function reviewPass(
   const clock = options.clock ?? (() => options.now);
   const reports: ReviewPassReport[] = [];
   for (const request of store.openReviewRequests()) {
-    // Authority re-proof for the automatic road (R-REVOKE): the signature
-    // that queued this must still stand at the moment it spends.
-    if (request.requestedBy.startsWith("mode:")) {
-      const mode = request.repo === null ? null : store.activeMode(request.repo, clock());
-      const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
-      if (terms === null || !terms.reviewAuto) {
-        store.consumeReviewRequest(request.id, "mode-ended", clock());
-        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: "mode-ended" });
-        continue;
-      }
-    }
-    // The daily rails count every agent start (D4) — reviewer included.
-    if (request.repo !== null) {
-      const railed = store.reserveModeRail(request.repo, 1, clock());
-      if (!railed.ok) {
-        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: railed.rail });
-        continue;
-      }
-    }
     const resolution = resolvePhaseAgent(store, "review", request.repo, {});
     if (!resolution.ok) {
+      // A configuration problem is the operator's to fix — the request
+      // stays open rather than being spent on a misroute.
       reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: resolution.problem });
       continue;
     }
-    const task = store.getTask(request.taskId);
-    const reviewerRunId = store.startRun({
-      taskRef: request.taskRef,
-      leaseId: `review:${randomUUID()}`,
-      runner: options.runner,
-      role: "reviewer",
-      parentRun: request.run,
-      provider: resolution.spec.provider,
-      ...(resolution.spec.model === null ? {} : { model: resolution.spec.model }),
-      now: clock(),
-    });
+    const admitted = store.admitReview(
+      request.id,
+      { runner: options.runner, provider: resolution.spec.provider, model: resolution.spec.model },
+      clock(),
+    );
+    if (!admitted.ok) {
+      if (admitted.reason === "railed") {
+        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: admitted.rail ?? "railed" });
+      } else if (admitted.reason !== "gone") {
+        reports.push({ requestId: request.id, run: request.run, outcome: "skipped", detail: admitted.reason });
+      }
+      continue;
+    }
+    const task = store.getTask(admitted.taskId);
     const result = await review(store, {
-      sourceRunId: request.run,
-      reviewerRunId,
-      taskId: request.taskId,
-      taskTitle: task?.title ?? request.taskId,
+      sourceRunId: admitted.sourceRun,
+      reviewerRunId: admitted.reviewerRunId,
+      taskId: admitted.taskId,
+      taskTitle: task?.title ?? admitted.taskId,
       provider: resolution.spec.provider,
       model: resolution.spec.model,
       now: clock(),
@@ -438,23 +452,23 @@ export async function reviewPass(
       ...(options.agent === undefined ? {} : { agent: options.agent }),
     });
     if (result.ok) {
-      store.finishRun(reviewerRunId, {
+      store.finishRun(admitted.reviewerRunId, {
         outcome: "no-change",
         reason: `reviewed — ${result.commentCount} comment(s)`,
         now: clock(),
       });
-      store.consumeReviewRequest(request.id, "reviewed", clock());
+      store.stampReviewRequestOutcome(request.id, "reviewed");
       reports.push({ requestId: request.id, run: request.run, outcome: "reviewed", detail: `${result.commentCount} comment(s)` });
     } else {
       // One attempt, spent (R4): review is additive — the task's outcome
       // already stands, so a broken pass is a visible typed run, never a
       // block and never a retry loop.
-      store.finishRun(reviewerRunId, {
+      store.finishRun(admitted.reviewerRunId, {
         outcome: "failed",
         reason: `reviewer-${result.reason}`,
         now: clock(),
       });
-      store.consumeReviewRequest(request.id, `reviewer-${result.reason}`, clock());
+      store.stampReviewRequestOutcome(request.id, `reviewer-${result.reason}`);
       reports.push({ requestId: request.id, run: request.run, outcome: "failed", detail: result.reason });
     }
   }

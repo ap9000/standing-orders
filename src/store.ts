@@ -2061,8 +2061,16 @@ CREATE TABLE IF NOT EXISTS diff_comment (
 CREATE TABLE IF NOT EXISTS review_request (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   run             INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  -- An operator's name, or 'mode:<digest>' when a signed mode asked.
+  -- Who asked, as words for the page. AUTHORITY lives in basis/mode_digest
+  -- below, never in this string (Codex reviewer round 1, finding 4: an
+  -- operator who NAMES themselves 'mode:…' must not be misclassified).
   requested_by    TEXT NOT NULL,
+  -- 'human' = an operator's credentialed ask, always dispatchable.
+  -- 'mode' = a reviewAuto mode queued it; dispatch re-proves the EXACT
+  -- digest below is still the active mode — a renewal is a new signature
+  -- and does not inherit its predecessor's queued asks.
+  basis           TEXT NOT NULL DEFAULT 'human' CHECK (basis IN ('human','mode')),
+  mode_digest     TEXT,
   requested_at    TEXT NOT NULL,
   consumed_at     TEXT,
   consumed_reason TEXT
@@ -2920,6 +2928,10 @@ function migrate(db: Database): void {
   addColumn(db, "task_scope", "approval_basis", "TEXT");
   addColumn(db, "task_scope", "mode_digest", "TEXT");
   addColumn(db, "diff_comment", "reviewer_run", "INTEGER REFERENCES run(id)");
+  // review_request arrives whole by IF NOT EXISTS; these cover a file
+  // that created the table before basis/mode_digest existed.
+  addColumn(db, "review_request", "basis", "TEXT NOT NULL DEFAULT 'human' CHECK (basis IN ('human','mode'))");
+  addColumn(db, "review_request", "mode_digest", "TEXT");
   addColumn(db, "diff_comment", "severity", "TEXT CHECK (severity IN ('note','question','problem'))");
   addColumn(db, "task_ref", "plan_provider", "TEXT");
   addColumn(db, "task_ref", "plan_model", "TEXT");
@@ -5876,9 +5888,21 @@ export class Store {
     runId: number,
     by: string,
     now: Date,
+    basis?: { kind: "mode"; digest: string },
   ):
     | { ok: true; id: number }
-    | { ok: false; reason: "no-run" | "not-reviewable" | "unfinished" | "no-diff" | "diff-truncated" | "already-reviewed" | "already-requested" } {
+    | {
+        ok: false;
+        reason:
+          | "no-run"
+          | "not-reviewable"
+          | "unfinished"
+          | "no-diff"
+          | "diff-capture-failed"
+          | "diff-truncated"
+          | "already-reviewed"
+          | "already-requested";
+      } {
     return this.transact(() => {
       const run = this.getRun(runId);
       if (run === null) return { ok: false as const, reason: "no-run" as const };
@@ -5887,6 +5911,10 @@ export class Store {
       if (run.outcome === null) return { ok: false as const, reason: "unfinished" as const };
       const diff = this.artifactsFor(runId).find(one => one.kind === "terminal-diff");
       if (diff === undefined) return { ok: false as const, reason: "no-diff" as const };
+      // A failed capture stores the failure's words AS the artifact —
+      // reviewing an error message would spend the run's one review on
+      // nothing (Codex reviewer round 1, finding 5a).
+      if (diff.captureStatus !== "ok") return { ok: false as const, reason: "diff-capture-failed" as const };
       if (diff.truncated) return { ok: false as const, reason: "diff-truncated" as const };
       const reviewed = this.db
         .prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'reviewer' LIMIT 1")
@@ -5894,11 +5922,11 @@ export class Store {
       if (reviewed !== undefined) return { ok: false as const, reason: "already-reviewed" as const };
       const inserted = this.db
         .prepare(
-          `INSERT INTO review_request (run, requested_by, requested_at)
-           SELECT ?, ?, ?
+          `INSERT INTO review_request (run, requested_by, basis, mode_digest, requested_at)
+           SELECT ?, ?, ?, ?, ?
            WHERE NOT EXISTS (SELECT 1 FROM review_request WHERE run = ? AND consumed_at IS NULL)`,
         )
-        .run(runId, by, now.toISOString(), runId);
+        .run(runId, by, basis === undefined ? "human" : "mode", basis === undefined ? null : basis.digest, now.toISOString(), runId);
       if (Number(inserted.changes) === 0) return { ok: false as const, reason: "already-requested" as const };
       this.bumpWake();
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
@@ -5910,6 +5938,8 @@ export class Store {
     id: number;
     run: number;
     requestedBy: string;
+    basis: "human" | "mode";
+    modeDigest: string | null;
     requestedAt: string;
     taskRef: number;
     taskId: string;
@@ -5917,7 +5947,7 @@ export class Store {
   }[] {
     return this.db
       .prepare(
-        `SELECT rr.id, rr.run, rr.requested_by, rr.requested_at,
+        `SELECT rr.id, rr.run, rr.requested_by, rr.basis, rr.mode_digest, rr.requested_at,
                 run.task_ref AS taskRef, task_ref.external_id AS taskId, task_ref.repo
            FROM review_request rr
            JOIN run ON run.id = rr.run
@@ -5930,6 +5960,11 @@ export class Store {
         id: Number((row as Record<string, unknown>)["id"]),
         run: Number((row as Record<string, unknown>)["run"]),
         requestedBy: String((row as Record<string, unknown>)["requested_by"]),
+        basis: String((row as Record<string, unknown>)["basis"]) as "human" | "mode",
+        modeDigest:
+          (row as Record<string, unknown>)["mode_digest"] === null
+            ? null
+            : String((row as Record<string, unknown>)["mode_digest"]),
         requestedAt: String((row as Record<string, unknown>)["requested_at"]),
         taskRef: Number((row as Record<string, unknown>)["taskRef"]),
         taskId: String((row as Record<string, unknown>)["taskId"]),
@@ -5945,6 +5980,93 @@ export class Store {
     this.db
       .prepare("UPDATE review_request SET consumed_at = ?, consumed_reason = ? WHERE id = ? AND consumed_at IS NULL")
       .run(now.toISOString(), reason, id);
+  }
+
+  /** How the ledger's spent row learns what the attempt came to. */
+  stampReviewRequestOutcome(id: number, reason: string): void {
+    this.db.prepare("UPDATE review_request SET consumed_reason = ? WHERE id = ?").run(reason, id);
+  }
+
+  /**
+   * The ADMISSION (Codex reviewer round 1, findings 4/5b/6): claim the
+   * request, re-prove its authority, reserve the rail, and open the
+   * reviewer run in ONE transaction — one winner under concurrent passes,
+   * one rail reservation per actual start, and a crash after commit
+   * leaves a spent request plus an outcome-NULL run row (a visible
+   * cut-down attempt, the run table's own honesty) instead of an open
+   * request no pass can ever consume.
+   *
+   * The mode re-proof is EXACT (R-REVOKE): the active mode's digest must
+   * equal the digest the request was queued under — a renewal is a new
+   * signature and inherits nothing; reviewAuto must still be among its
+   * terms. A railed refusal leaves the request OPEN for a later pass.
+   */
+  admitReview(
+    requestId: number,
+    spec: { runner: string; provider: string; model: string | null },
+    now: Date,
+  ):
+    | { ok: true; reviewerRunId: number; sourceRun: number; taskRef: number; taskId: string }
+    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed"; rail?: string; detail?: string } {
+    return this.transact(() => {
+      const row = this.db
+        .prepare(
+          `SELECT rr.run, rr.basis, rr.mode_digest,
+                  run.task_ref AS taskRef, task_ref.external_id AS taskId, task_ref.repo
+             FROM review_request rr
+             JOIN run ON run.id = rr.run
+             JOIN task_ref ON task_ref.id = run.task_ref
+            WHERE rr.id = ? AND rr.consumed_at IS NULL`,
+        )
+        .get(requestId) as Record<string, unknown> | undefined;
+      if (row === undefined) return { ok: false as const, reason: "gone" as const };
+      const sourceRun = Number(row["run"]);
+      const repo = row["repo"] === null ? null : String(row["repo"]);
+      if (String(row["basis"]) === "mode") {
+        const mode = repo === null ? null : this.activeMode(repo, now);
+        let reviewAuto = false;
+        if (mode !== null && mode.digest === String(row["mode_digest"] ?? "")) {
+          try {
+            reviewAuto = (JSON.parse(mode.termsJson) as { reviewAuto?: unknown }).reviewAuto === true;
+          } catch {
+            reviewAuto = false;
+          }
+        }
+        if (!reviewAuto) {
+          this.consumeReviewRequest(requestId, "mode-ended", now);
+          return { ok: false as const, reason: "mode-ended" as const };
+        }
+      }
+      const reviewed = this.db
+        .prepare("SELECT 1 AS hit FROM run WHERE parent_run = ? AND role = 'reviewer' LIMIT 1")
+        .get(sourceRun);
+      if (reviewed !== undefined) {
+        this.consumeReviewRequest(requestId, "already-reviewed", now);
+        return { ok: false as const, reason: "already-reviewed" as const };
+      }
+      if (repo !== null) {
+        const railed = this.reserveModeRail(repo, 1, now);
+        if (!railed.ok) return { ok: false as const, reason: "railed" as const, rail: railed.rail, detail: railed.detail };
+      }
+      const reviewerRunId = this.startRun({
+        taskRef: Number(row["taskRef"]),
+        leaseId: `review:${requestId}:${now.getTime().toString(36)}`,
+        runner: spec.runner,
+        role: "reviewer",
+        parentRun: sourceRun,
+        provider: spec.provider,
+        ...(spec.model === null ? {} : { model: spec.model }),
+        now,
+      });
+      this.consumeReviewRequest(requestId, "dispatched", now);
+      return {
+        ok: true as const,
+        reviewerRunId,
+        sourceRun,
+        taskRef: Number(row["taskRef"]),
+        taskId: String(row["taskId"]),
+      };
+    });
   }
 
   /**

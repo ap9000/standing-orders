@@ -97,7 +97,7 @@ describe("the reviewer role in the store", () => {
   let builtRun: number;
   let diffArtifact: number;
 
-  const seedBuilt = (patch: string = PATCH, opts: { truncated?: boolean } = {}) => {
+  const seedBuilt = (patch: string = PATCH, opts: { truncated?: boolean; captureStatus?: "ok" | "failed" } = {}) => {
     const runId = store.startRun({
       taskRef,
       leaseId: `lease-${Math.random().toString(16).slice(2, 8)}`,
@@ -109,7 +109,7 @@ describe("the reviewer role in the store", () => {
     // Truncation is forced the honest way: content past the kind's cap.
     const content = opts.truncated === true ? Buffer.alloc(300 * 1024, 0x61) : Buffer.from(patch, "utf8");
     const artifactId = storeEvidence(store, evidenceRoot, runId, "terminal-diff", "terminal-diff.patch", content, "git diff (exit 0)", T0, {
-      captureStatus: "ok",
+      captureStatus: opts.captureStatus ?? "ok",
     });
     store.recordOutcomeFacts(runId, { headRevision: "head-aaa", handoff: "guarded the payout" });
     store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
@@ -175,6 +175,12 @@ describe("the reviewer role in the store", () => {
 
     const truncated = seedBuilt(PATCH, { truncated: true });
     expect(store.requestReview(truncated.runId, "alex", T0)).toEqual({ ok: false, reason: "diff-truncated" });
+
+    // A failed capture stored the failure's words AS the artifact —
+    // reviewing an error message is refused, and the run's one review
+    // allowance survives for a recapture (round-1 finding 5a).
+    const broken = seedBuilt(PATCH, { captureStatus: "failed" });
+    expect(store.requestReview(broken.runId, "alex", T0)).toEqual({ ok: false, reason: "diff-capture-failed" });
 
     const first = store.requestReview(builtRun, "alex", T0);
     expect(first.ok).toBe(true);
@@ -329,7 +335,7 @@ describe("the reviewer role in the store", () => {
     test("a mode-derived request re-proves its authority at dispatch (R-REVOKE)", async () => {
       // Queue as a mode would, then let the mode die: the request is spent
       // unrun and review falls back to the human ask.
-      const asked = store.requestReview(builtRun, "mode:deadbeefdeadbeefdeadbeefdeadbeef", T0);
+      const asked = store.requestReview(builtRun, "mode standard", T0, { kind: "mode", digest: "deadbeefdeadbeefdeadbeefdeadbeef" });
       expect(asked.ok).toBe(true);
       let spawned = false;
       const spy: Runner = async () => {
@@ -345,13 +351,91 @@ describe("the reviewer role in the store", () => {
       expect(store.requestReview(builtRun, "alex", T0).ok).toBe(true);
     });
 
+    test("the digest binding is EXACT: a renewal does not inherit its predecessor's queued asks", async () => {
+      const termsA = presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString());
+      store.signMode(
+        { repo: REPO, name: "standard", termsJson: modeTermsJson(termsA), digest: modeDigestOf(termsA), signedBy: "alex", absoluteExpiry: termsA.absoluteExpiry, publication: termsA.publication },
+        T0,
+      );
+      store.requestReview(builtRun, "mode standard", T0, { kind: "mode", digest: modeDigestOf(termsA) });
+      // Renew: same name, different expiry — a NEW signature with a new
+      // digest, reviewAuto still true. The old mode's ask must die.
+      const termsB = presetTerms("standard", new Date(T0.getTime() + 48 * 60 * 60_000).toISOString());
+      store.signMode(
+        { repo: REPO, name: "standard", termsJson: modeTermsJson(termsB), digest: modeDigestOf(termsB), signedBy: "alex", absoluteExpiry: termsB.absoluteExpiry, publication: termsB.publication },
+        T0,
+      );
+      expect(modeDigestOf(termsB)).not.toBe(modeDigestOf(termsA));
+      const reports = await passOnce(reviewingAgent({ version: 1, comments: [] }));
+      expect(reports[0]?.outcome).toBe("skipped");
+      expect(reports[0]?.detail).toBe("mode-ended");
+      expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run WHERE role = 'reviewer'").get()?.["n"]).toBe(0);
+    });
+
+    test("authority is the typed basis, never the display string: a person named 'mode:…' runs as human", async () => {
+      const asked = store.requestReview(builtRun, "mode:evil-imposter", T0);
+      expect(asked.ok).toBe(true);
+      const reports = await passOnce(reviewingAgent({ version: 1, comments: [] }));
+      expect(reports[0]?.outcome).toBe("reviewed");
+    });
+
+    test("admission is one winner: a second admit finds the request gone, and a crash leaves a spent request + open run", async () => {
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("ask");
+      const first = store.admitReview(asked.id, { runner: "builder-1", provider: "claude", model: null }, T0);
+      if (!first.ok) throw new Error("admit");
+      expect(store.admitReview(asked.id, { runner: "builder-2", provider: "claude", model: null }, T0)).toEqual({ ok: false, reason: "gone" });
+      // The crash shape: request spent 'dispatched', run open with outcome
+      // NULL — a visible cut-down attempt, not a stuck queue.
+      const request = store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.id);
+      expect(request).toMatchObject({ consumed_reason: "dispatched" });
+      expect(store.getRun(first.reviewerRunId)?.outcome).toBeNull();
+      expect(store.openReviewRequests()).toHaveLength(0);
+    });
+
+    test("the daily run rail refuses admission atomically and leaves the request OPEN", async () => {
+      const terms = { ...presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString()), dailyRunCap: 1 };
+      store.signMode(
+        { repo: REPO, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
+        T0,
+      );
+      const second = seedBuilt();
+      const askedA = store.requestReview(builtRun, "alex", T0);
+      const askedB = store.requestReview(second.runId, "alex", T0);
+      if (!askedA.ok || !askedB.ok) throw new Error("asks");
+      const admitA = store.admitReview(askedA.id, { runner: "builder-1", provider: "claude", model: null }, T0);
+      expect(admitA.ok).toBe(true);
+      const admitB = store.admitReview(askedB.id, { runner: "builder-1", provider: "claude", model: null }, T0);
+      expect(admitB).toMatchObject({ ok: false, reason: "railed", rail: "daily-runs" });
+      // Open for a later pass — the rail spends no request.
+      expect(store.openReviewRequests()).toHaveLength(1);
+    });
+
+    test("an overwritten patch is dirty scratch: comments must bind to the sealed bytes", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      const tamperingAgent: Runner = async (_file, args, options) => {
+        const cwd = options?.cwd ?? "";
+        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+        const name = REVIEW_FILE.exec(prompt)?.[0];
+        if (name !== undefined && cwd !== "") {
+          writeFileSync(join(cwd, REVIEW_PATCH_NAME), PATCH + "+tampered\n");
+          writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [] }));
+        }
+        return { ...OK, stdout: SAID };
+      };
+      const reports = await passOnce(tamperingAgent);
+      expect(reports[0]?.outcome).toBe("failed");
+      expect(reports[0]?.detail).toBe("dirty-scratch");
+      expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    });
+
     test("a mode-derived request under a live reviewAuto mode runs", async () => {
       const terms = presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString());
       store.signMode(
         { repo: REPO, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
         T0,
       );
-      store.requestReview(builtRun, `mode:${modeDigestOf(terms)}`, T0);
+      store.requestReview(builtRun, "mode standard", T0, { kind: "mode", digest: modeDigestOf(terms) });
       const reports = await passOnce(reviewingAgent({ version: 1, comments: [] }));
       expect(reports[0]?.outcome).toBe("reviewed");
       expect(reports[0]?.detail).toBe("0 comment(s)");
@@ -376,7 +460,8 @@ describe("the reviewer role in the store", () => {
     maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
     const open = store.openReviewRequests();
     expect(open).toHaveLength(1);
-    expect(open[0]?.requestedBy).toBe(`mode:${modeDigestOf(terms)}`);
+    expect(open[0]?.basis).toBe("mode");
+    expect(open[0]?.modeDigest).toBe(modeDigestOf(terms));
 
     // hands-off says reviewAuto: false — a renewal to it queues nothing new.
     store.consumeReviewRequest(open[0]?.id ?? -1, "test", T0);

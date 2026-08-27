@@ -1,5 +1,35 @@
 # Progress
 
+**2026-08-27 — Layer 5 hardening: the Codex round-1 findings, closed.**
+The implementation verify came back REDESIGN with four real holes, each
+now a regression test. (1) Scratch hygiene re-proves the PATCH itself:
+after the agent, `REVIEW-DIFF.patch` is reread on a no-follow
+descriptor and must still hash to the sealed artifact's record — an
+overwritten, replaced, or symlinked patch is dirty scratch, because
+comments would describe bytes nobody sealed; directory entries must be
+regular files. The confinement boundary is now named honestly in the
+module header: read confinement is the provider's read-only stance (the
+planner's posture — policy, not proof; OS sandboxing stays the tracked
+follow-up), while ingestion is the proved half. (2) R-REVOKE binds the
+EXACT digest: review_request gained typed `basis` ('human'|'mode') and
+`mode_digest` columns — authority lives in the columns, never in the
+requested_by display string (an operator literally named "mode:…" is
+human), and dispatch requires the ACTIVE mode's digest to equal the
+queued one — a renewal is a new signature and inherits nothing from its
+predecessor's queue. (3) A failed diff capture (stderr stored as the
+artifact) refuses the request outright (`diff-capture-failed`) instead
+of spending the run's one review on an error message. (4) Admission
+became ONE transaction (`store.admitReview`): claim the request,
+re-prove the mode, reserve the daily rail, open the reviewer run — one
+winner under concurrent passes, one rail reservation per actual start;
+a railed refusal leaves the request OPEN for a later pass; a crash
+after commit leaves a spent request plus an outcome-NULL run (the run
+table's own honesty) instead of a request no pass can ever consume.
+Five new tests: exact-digest renewal kill, basis-vs-display imposter,
+one-winner admission + crash shape, atomic rail refusal, patch
+tampering. Suite 1335.
+
+
 **2026-08-26 — Modes arc, layer 5 of 7: the reviewer.** The
 artifact-only role (R1–R4 under the D5/D8 rulings): an agent pass over
 one finished run's SEALED terminal diff and nothing else — no worktree,

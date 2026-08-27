@@ -121,7 +121,7 @@ export function maybeRequestAutoReview(store: Store, repo: string, runId: number
   if (mode === null) return;
   const terms = modeTermsFromJson(mode.termsJson);
   if (terms === null || !terms.reviewAuto) return;
-  store.requestReview(runId, `mode:${mode.digest}`, now);
+  store.requestReview(runId, `mode ${mode.name}`, now, { kind: "mode", digest: mode.digest });
 }
 
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
