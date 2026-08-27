@@ -1,5 +1,27 @@
 # Progress
 
+**2026-08-27 — Layer 6, round 2 closed: the belt covers every road.**
+Codex round 2 verified all four round-1 closures and found five more,
+now closed. The vouch-then-write race: `approver add` runs detection,
+vouching, and the save in ONE transaction — a voucher revoked
+concurrently loses, there is no between. The belt's missing roads: the
+mode-liveness re-proof became ONE store question (`modeApprovalLive` —
+clock-checked signature, exact digest, active signer, correlated
+through the built-in reference precisely) asked by the raw `acquire`
+primitive every claim road shares (typed `mode-ended` refusal, CLI
+included), by `acquireIfReady`'s predicate, and by the builder's last
+gate before money — a custom driver with a stale claim refuses there
+too. The demotion sweep's correlation now names `backend='built-in'`
+on both subqueries, so a same-id external-tracker reference in another
+repository can neither demote a foreign scope nor mask a live claim.
+The join limiter's source key honors the documented same-host TLS
+proxy: a loopback peer is the proxy, and only then is the forwarded
+chain believed — last hop, the one the trusted proxy itself appended.
+The content-type guard compares the exact media type. Three regression
+tests (raw-road refusal + the one shared question, exact built-in
+correlation, prefix-shaped media type). Suite 1355.
+
+
 **2026-08-27 — Layer 6 hardening: the Codex round-1 findings, closed.**
 APPROVE-WITH-CHANGES with two high findings, both real. (1) The CLI
 escalation: `approver add` vouched on a bare stored-hash match, so a

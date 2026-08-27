@@ -75,7 +75,10 @@ export type AcquireResult =
   /** The task's only authority is an attended authorization, and the
    * operator is not watching (or the one attempt is spent). Expiry never
    * converts attended work into unattended work. */
-  | { ok: false; reason: "attended-only" };
+  | { ok: false; reason: "attended-only" }
+  /** A mode-sealed approval whose signature no longer stands (v29): the
+   * approval falls back to a person; nothing dispatches on a dead mode. */
+  | { ok: false; reason: "mode-ended"; message: string };
 
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
 export type FenceResult =
@@ -184,6 +187,18 @@ function acquireLocked(
       // finding 8): it is a corpse the sweep will close, and letting it
       // keep refusing other runners on an approved task would be a
       // permanent lock nobody signed.
+      // THE MODE BELT on the one primitive every claim road shares (Codex
+      // people round 2, finding 2): a mode-sealed approval whose signature
+      // no longer stands — revoked, expired by clock, or a dead signer —
+      // does not dispatch, CLI claim included. Live claims already taken
+      // are untouched; this fences only NEW takes.
+      if (!store.modeApprovalLive(taskRef, now)) {
+        return {
+          ok: false as const,
+          reason: "mode-ended" as const,
+          message: "the operating mode that approved this has ended — the approval falls back to a person",
+        };
+      }
       const attendedRow = store.openAuthorizationFor(taskRef);
       const attendedOpen =
         attendedRow !== null && Date.parse(attendedRow.absoluteExpiry) > now.getTime() ? attendedRow : null;

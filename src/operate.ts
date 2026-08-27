@@ -934,6 +934,9 @@ function claimCommand(
         EXIT.refused,
       );
     }
+    if (result.reason === "mode-ended") {
+      return fail(write, json, "claim", "mode-ended", result.message, EXIT.refused);
+    }
     return fail(
       write,
       json,

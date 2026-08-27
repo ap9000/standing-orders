@@ -367,6 +367,20 @@ export function createDecisionServer(options: ServeOptions): Server {
   // the shape guards for free. The per-invite attempt counter remains the
   // durable meter; these buckets only price the trying.
   const joinBySource = new Map<string, { tokens: number; refilledAt: number }>();
+  /** The per-source key (round 2, finding 4): the direct peer — except
+   * behind the documented same-host TLS proxy, where every client would
+   * share the proxy's one bucket. A LOOPBACK peer is that proxy, and only
+   * then is the forwarded chain believed, taking the LAST hop (the one
+   * the trusted proxy itself appended; earlier entries are client-typed). */
+  function joinSourceOf(request: IncomingMessage): string {
+    const peer = request.socket.remoteAddress ?? "unknown";
+    const loopback = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
+    if (!loopback) return peer;
+    const forwarded = request.headers["x-forwarded-for"];
+    const chain = Array.isArray(forwarded) ? forwarded.join(",") : forwarded ?? "";
+    const lastHop = chain.split(",").pop()?.trim() ?? "";
+    return lastHop === "" ? peer : `fwd:${lastHop.slice(0, 64)}`;
+  }
   let joinGlobal = { tokens: 30, refilledAt: Date.now() };
   function takeJoinAttempt(source: string): boolean {
     const at = Date.now();
@@ -617,8 +631,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       return page(response, 200, store.inviteIsLive(joinToken, clock()) ? joinFormPage(joinToken, null, "") : joinDeadPage());
     }
     if (joinToken !== undefined && method === "POST") {
-      const type = request.headers["content-type"] ?? "";
-      if (!type.startsWith("application/x-www-form-urlencoded")) {
+      // EXACT media type (Codex people round 2, finding 5): parameters may
+      // follow a semicolon; a merely prefix-shaped type is not a form.
+      const media = String(request.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
+      if (media !== "application/x-www-form-urlencoded") {
         return respond(response, 415, "text/plain; charset=utf-8", "forms only");
       }
       let body: URLSearchParams;
@@ -632,7 +648,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return respond(response, 400, "text/plain; charset=utf-8", `duplicated ${field} field`);
         }
       }
-      if (!takeJoinAttempt(request.socket.remoteAddress ?? "unknown")) {
+      if (!takeJoinAttempt(joinSourceOf(request))) {
         return respond(response, 429, "text/plain; charset=utf-8", "too many sign-up attempts right now — try again in a few minutes");
       }
       const admitted = store.admitInviteAttempt(joinToken, clock());

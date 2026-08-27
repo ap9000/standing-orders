@@ -5284,6 +5284,30 @@ export class Store {
     return row === undefined ? null : readScope(row);
   }
 
+  /**
+   * The mode-approval belt, as ONE question every consumer asks the same
+   * way (Codex people round 2, finding 2): false exactly when this task's
+   * approval was sealed by a mode signature that no longer stands — the
+   * signed row live by CLOCK (durable closure not required), the digest
+   * exact, the signer an active approver. Password-sealed and unapproved
+   * scopes answer true: this belt only ever REMOVES mode authority.
+   */
+  modeApprovalLive(taskRef: number, now: Date): boolean {
+    const dead = this.db
+      .prepare(
+        `SELECT 1 AS dead FROM task_scope
+          JOIN task_ref ON task_ref.id = ? AND task_ref.backend = 'built-in' AND task_scope.task_id = task_ref.external_id
+         WHERE task_scope.approval_basis = 'mode' AND task_scope.approved_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM operating_mode om
+                            JOIN approver signer ON signer.name = om.signed_by
+                           WHERE om.repo = task_ref.repo AND om.revoked_at IS NULL
+                             AND om.absolute_expiry > ? AND om.digest = task_scope.mode_digest
+                             AND signer.revoked_at IS NULL AND signer.role = 'approver')`,
+      )
+      .get(taskRef, now.toISOString());
+    return dead === undefined;
+  }
+
   // ---- approvers ----------------------------------------------------------
 
   saveApprover(name: string, credentialHash: string, now: Date, mutation: Mutation = {}): void {
@@ -5432,10 +5456,12 @@ export class Store {
           WHERE approval_basis = 'mode' AND approved_at IS NOT NULL
             AND (? IS NULL OR mode_digest <> ?)
             AND EXISTS (SELECT 1 FROM task_ref JOIN task ON task.id = task_ref.external_id
-                         WHERE task_ref.external_id = task_scope.task_id AND task_ref.repo = ?
+                         WHERE task_ref.backend = 'built-in'
+                           AND task_ref.external_id = task_scope.task_id AND task_ref.repo = ?
                            AND task.state = 'queued')
             AND NOT EXISTS (SELECT 1 FROM claim JOIN task_ref tr ON tr.id = claim.task_ref
-                             WHERE tr.external_id = task_scope.task_id AND tr.repo = ?
+                             WHERE tr.backend = 'built-in'
+                               AND tr.external_id = task_scope.task_id AND tr.repo = ?
                                AND claim.released_at IS NULL AND claim.expires_at > ?)`,
       )
       .run(

@@ -456,6 +456,11 @@ export function addApprover(
   // approve its own scope with it. The bootstrap window is real and is why
   // this is the first thing an operator should do, before anything else can
   // reach the queue.
+  // ONE transaction around detection, vouching, and the write (Codex
+  // people round 2, finding 1): a voucher revoked between the check and
+  // the save must lose — BEGIN IMMEDIATE serializes against the
+  // revocation cascade, so there is no between.
+  return store.transact(() => {
   const existing = store.listApprovers();
   const bootstrap = existing.length === 0;
 
@@ -477,6 +482,7 @@ export function addApprover(
   const token = newToken();
   store.saveApprover(name, hashToken(token), now, mutation);
   return { ok: true, name, token, bootstrap, chosen: false };
+  });
 }
 
 export type ApproveResult =

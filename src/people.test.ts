@@ -10,7 +10,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { addApprover, authenticateAccount, authenticateApprover, fileAndSealUnderMode, hashPassword } from "./scope.js";
-import { acquireIfReady } from "./claim.js";
+import { acquire, acquireIfReady } from "./claim.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { createDecisionServer } from "./serve.js";
 
@@ -274,6 +274,35 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
     expect(taken.ok).toBe(false);
   });
 
+  test("the belt covers the RAW claim road and the builder gate, not just acquireIfReady (round 2, finding 2)", () => {
+    signStandard("alex", 1);
+    sealUnderMode("t-1");
+    const ref = store.refFor("built-in", "t-1").id;
+    // The expired-by-clock mode: the CLI's raw acquire refuses, typed.
+    const taken = acquire(store, ref, "builder-1", { now: later(2) });
+    expect(taken).toMatchObject({ ok: false, reason: "mode-ended" });
+    // And the one shared question answers the same everywhere.
+    expect(store.modeApprovalLive(ref, T0)).toBe(true);
+    expect(store.modeApprovalLive(ref, later(2))).toBe(false);
+  });
+
+  test("the demotion sweep correlates through the built-in reference exactly (round 2, finding 3)", () => {
+    signStandard("alex");
+    sealUnderMode("t-1");
+    // A same-id EXTERNAL reference in a DIFFERENT repo must not drag t-1's
+    // approval into that repo's reconciliation.
+    store.refFor("github", "t-1", "theirs");
+    store.raw().prepare("UPDATE task_ref SET repo = '/repos/other' WHERE backend = 'github' AND external_id = 't-1'").run();
+    const otherTerms = { ...presetTerms("standard", later(24).toISOString()), autoApproveFiling: true };
+    store.signMode(
+      { repo: "/repos/other", name: "standard", termsJson: modeTermsJson(otherTerms), digest: modeDigestOf(otherTerms), signedBy: "alex", absoluteExpiry: otherTerms.absoluteExpiry, publication: otherTerms.publication },
+      T0,
+    );
+    store.revokeMode("/repos/other", "alex", "operator", T0);
+    // t-1's approval (repo /repos/thing, live mode) is untouched.
+    expect(store.getScope("t-1")?.approvedAt).not.toBeNull();
+  });
+
   test("the concurrent join loser reads as gone, never as a name collision (finding 3)", () => {
     const minted = store.mintInvite("viewer", "alex", T0);
     expect(store.admitInviteAttempt(minted.token, T0)).not.toBeNull();
@@ -354,6 +383,13 @@ describe("the join road and the People screen, over HTTP", () => {
       body: "{}",
     });
     expect(wrongType.status).toBe(415);
+    // Prefix-shaped is not a form either (round 2, finding 5).
+    const prefixed = await fetch(url(`/join/${minted.token}`), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded-malformed" },
+      body: "name=x&password=y",
+    });
+    expect(prefixed.status).toBe(415);
     const doubled = await fetch(url(`/join/${minted.token}`), {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },

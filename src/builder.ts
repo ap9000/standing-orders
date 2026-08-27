@@ -189,6 +189,7 @@ export type BuildRefusal =
   | "unapproved"
   | "scope-changed"
   | "stale-approval"
+  | "mode-ended"
   | "stale-authorization"
   | "attended-only"
   | "session-cap"
@@ -438,6 +439,17 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
           reason: "unapproved",
           message: `${taskId} has no approved scope — \`standing-orders task scope\` then \`task approve\``,
         };
+  }
+  // The mode belt at the LAST gate before money (Codex people round 2,
+  // finding 2): a mode-sealed approval re-proves its signature still
+  // stands here too — the claim roads already refuse, and this covers a
+  // custom driver calling build directly with a stale claim.
+  if (approval.approved && attended === undefined && !store.modeApprovalLive(taskRef, request.now)) {
+    return {
+      ok: false,
+      reason: "mode-ended",
+      message: `${taskId}'s approval was signed by an operating mode that has ended — the approval falls back to a person`,
+    };
   }
 
   // v24 DISPATCH PROOF (foundations rulings 10/12, findings 6/17): what is
