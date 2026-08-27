@@ -9,7 +9,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
-import { addApprover, authenticateAccount, authenticateApprover, hashPassword } from "./scope.js";
+import { addApprover, authenticateAccount, authenticateApprover, fileAndSealUnderMode, hashPassword } from "./scope.js";
+import { acquireIfReady } from "./claim.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { createDecisionServer } from "./serve.js";
 
@@ -171,6 +172,117 @@ describe("the severing revocation (D7)", () => {
     expect(store.mergeBlockerFor(publication)).not.toBeNull();
     // And the person's ledger answers for the lift.
     expect(store.recentActsOf("alex").some(act => act.kind === "merge unblocked")).toBe(true);
+  });
+});
+
+describe("the round-1 closures: escalation, mode-derived approvals, the join race", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    const alex = addApprover(store, "alex", T0);
+    if (!alex.ok) throw new Error("bootstrap");
+  });
+  afterEach(() => store.close());
+
+  const addPerson = (name: string, role: "approver" | "viewer") => {
+    const minted = store.mintInvite(role, "alex", T0);
+    const made = store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name, credentialHash: hashPassword(`${name}-password`) }, T0);
+    if (!made.ok) throw new Error("seed person");
+  };
+
+  test("neither a viewer nor a revoked approver can vouch a new approver into existence (finding 1)", () => {
+    addPerson("vera", "viewer");
+    const viaViewer = addApprover(store, "mallory", T0, { name: "vera", token: "vera-password" });
+    expect(viaViewer).toEqual({ ok: false, reason: "not-an-approver" });
+
+    addPerson("bob", "approver");
+    expect(store.revokeAccount("bob", "alex", T0).ok).toBe(true);
+    const viaRevoked = addApprover(store, "mallory", T0, { name: "bob", token: "bob-password" });
+    expect(viaRevoked).toEqual({ ok: false, reason: "not-an-approver" });
+    expect(store.accountFacts().some(one => one.name === "mallory")).toBe(false);
+  });
+
+  const signStandard = (by: string, hoursValid = 24) => {
+    const terms = { ...presetTerms("standard", later(hoursValid).toISOString()), autoApproveFiling: true };
+    store.signMode(
+      { repo: REPO, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: by, absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
+      T0,
+    );
+    return modeDigestOf(terms);
+  };
+
+  const sealUnderMode = (taskId: string) => {
+    store.createTask({ id: taskId, title: "the work" }, T0);
+    store.placeTask(store.refFor("built-in", taskId).id, REPO);
+    const sealed = fileAndSealUnderMode(store, {
+      taskId,
+      goal: "a guard",
+      outOfScope: null,
+      touches: [],
+      now: T0,
+      repo: REPO,
+      actor: "alex",
+    });
+    if (!sealed.ok) throw new Error(`seal: ${sealed.reason}`);
+  };
+
+  test("revoking the mode demotes its sealed, undispatched approvals — the human ceremony is the next gate (finding 2)", () => {
+    signStandard("alex");
+    sealUnderMode("t-1");
+    expect(store.getScope("t-1")?.approvedAt).not.toBeNull();
+    store.revokeMode(REPO, "alex", "operator", T0);
+    const scope = store.getScope("t-1");
+    expect(scope?.approvedAt ?? null).toBeNull();
+    // And the task no longer dispatches on the dead signature.
+    const taken = acquireIfReady(store, store.refFor("built-in", "t-1").id, "builder-1", { now: later(1) });
+    expect(taken.ok).toBe(false);
+  });
+
+  test("revoking the SIGNER demotes the same approvals through the cascade (finding 2, D7 road)", () => {
+    addPerson("bob", "approver");
+    const terms = { ...presetTerms("standard", later(24).toISOString()), autoApproveFiling: true };
+    store.signMode(
+      { repo: REPO, name: "standard", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "bob", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
+      T0,
+    );
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    store.placeTask(store.refFor("built-in", "t-1").id, REPO);
+    const sealed = fileAndSealUnderMode(store, { taskId: "t-1", goal: "a guard", outOfScope: null, touches: [], now: T0, repo: REPO, actor: "bob" });
+    if (!sealed.ok) throw new Error("seal");
+    expect(store.revokeAccount("bob", "alex", T0).ok).toBe(true);
+    expect(store.getScope("t-1")?.approvedAt ?? null).toBeNull();
+  });
+
+  test("a RUNNING task's mode-sealed approval is never fenced (finding 2's boundary)", () => {
+    signStandard("alex");
+    sealUnderMode("t-1");
+    const ref = store.refFor("built-in", "t-1").id;
+    const taken = acquireIfReady(store, ref, "builder-1", { now: T0 });
+    expect(taken.ok).toBe(true);
+    store.revokeMode(REPO, "alex", "operator", T0);
+    // The claim is live: the sweep leaves the approval standing.
+    expect(store.getScope("t-1")?.approvedAt).not.toBeNull();
+  });
+
+  test("the acquire belt holds in the window before an expired mode is durably closed (finding 2)", () => {
+    signStandard("alex", 1);
+    sealUnderMode("t-1");
+    // NOTHING has read activeMode since expiry — the row is still open,
+    // only the clock has passed. Dispatch must still refuse.
+    const taken = acquireIfReady(store, store.refFor("built-in", "t-1").id, "builder-1", { now: later(2) });
+    expect(taken.ok).toBe(false);
+  });
+
+  test("the concurrent join loser reads as gone, never as a name collision (finding 3)", () => {
+    const minted = store.mintInvite("viewer", "alex", T0);
+    expect(store.admitInviteAttempt(minted.token, T0)).not.toBeNull();
+    expect(store.admitInviteAttempt(minted.token, T0)).not.toBeNull();
+    const winner = store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "casey", credentialHash: hashPassword("casey-password-1") }, T0);
+    expect(winner.ok).toBe(true);
+    // Same name, different name — the loser cannot tell which world it is in.
+    expect(store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "casey", credentialHash: hashPassword("casey-password-2") }, T0)).toEqual({ ok: false, reason: "gone" });
+    expect(store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "dana", credentialHash: hashPassword("dana-password-9") }, T0)).toEqual({ ok: false, reason: "gone" });
   });
 });
 

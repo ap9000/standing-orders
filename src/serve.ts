@@ -360,17 +360,31 @@ export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
   const clock = options.clock ?? (() => new Date());
   const sessions = new Map<string, Session>();
-  // The /join road's per-process limiter (D6): thirty admitted submissions
-  // per ten minutes across ALL invites — brute force pays in time before
-  // any token is even looked up. The per-invite counter is the durable
-  // meter; this bucket just keeps a stranger from spending it for you.
-  let joinBucket = { tokens: 30, refilledAt: Date.now() };
-  function takeJoinAttempt(): boolean {
+  // The /join road's limiter (D6; Codex people round 1, finding 4):
+  // PER-SOURCE buckets so one stranger cannot drain sign-up capacity for
+  // everyone, under a global ceiling that bounds total KDF work. Spent
+  // only by WELL-FORMED submissions — malformed requests are refused by
+  // the shape guards for free. The per-invite attempt counter remains the
+  // durable meter; these buckets only price the trying.
+  const joinBySource = new Map<string, { tokens: number; refilledAt: number }>();
+  let joinGlobal = { tokens: 30, refilledAt: Date.now() };
+  function takeJoinAttempt(source: string): boolean {
     const at = Date.now();
-    const refill = Math.floor((at - joinBucket.refilledAt) / 20_000);
-    if (refill > 0) joinBucket = { tokens: Math.min(30, joinBucket.tokens + refill), refilledAt: at };
-    if (joinBucket.tokens <= 0) return false;
-    joinBucket.tokens -= 1;
+    const globalRefill = Math.floor((at - joinGlobal.refilledAt) / 20_000);
+    if (globalRefill > 0) joinGlobal = { tokens: Math.min(30, joinGlobal.tokens + globalRefill), refilledAt: at };
+    if (joinBySource.size > 1000) {
+      const oldest = joinBySource.keys().next().value;
+      if (oldest !== undefined) joinBySource.delete(oldest);
+    }
+    const bucket = joinBySource.get(source) ?? { tokens: 10, refilledAt: at };
+    const refill = Math.floor((at - bucket.refilledAt) / 60_000);
+    const tokens = refill > 0 ? Math.min(10, bucket.tokens + refill) : bucket.tokens;
+    if (tokens <= 0 || joinGlobal.tokens <= 0) {
+      joinBySource.set(source, { tokens, refilledAt: refill > 0 ? at : bucket.refilledAt });
+      return false;
+    }
+    joinGlobal.tokens -= 1;
+    joinBySource.set(source, { tokens: tokens - 1, refilledAt: refill > 0 ? at : bucket.refilledAt });
     return true;
   }
   const approvalNonces = new Map<string, ApprovalNonce>();
@@ -603,9 +617,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       return page(response, 200, store.inviteIsLive(joinToken, clock()) ? joinFormPage(joinToken, null, "") : joinDeadPage());
     }
     if (joinToken !== undefined && method === "POST") {
-      if (!takeJoinAttempt()) {
-        return respond(response, 429, "text/plain; charset=utf-8", "too many sign-up attempts right now — try again in a few minutes");
-      }
       const type = request.headers["content-type"] ?? "";
       if (!type.startsWith("application/x-www-form-urlencoded")) {
         return respond(response, 415, "text/plain; charset=utf-8", "forms only");
@@ -620,6 +631,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (body.getAll(field).length > 1) {
           return respond(response, 400, "text/plain; charset=utf-8", `duplicated ${field} field`);
         }
+      }
+      if (!takeJoinAttempt(request.socket.remoteAddress ?? "unknown")) {
+        return respond(response, 429, "text/plain; charset=utf-8", "too many sign-up attempts right now — try again in a few minutes");
       }
       const admitted = store.admitInviteAttempt(joinToken, clock());
       if (admitted === null) return page(response, 200, joinDeadPage());

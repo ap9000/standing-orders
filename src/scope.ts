@@ -460,8 +460,12 @@ export function addApprover(
   const bootstrap = existing.length === 0;
 
   if (!bootstrap) {
-    const vouching = by === undefined ? null : store.approverHash(by.name);
-    if (vouching === null || !verifyCredential(vouching, by?.token ?? "")) {
+    // ACTIVE approver standing, not a bare hash match (Codex people round
+    // 1, finding 1): a viewer's or a revoked person's credential is real
+    // and still vouches for nothing — the CLI is a ceremony site like any
+    // other, and this was the one road that forgot.
+    const vouching = by === undefined ? { ok: false as const } : authenticateApprover(store, by.name, by.token);
+    if (!vouching.ok) {
       return { ok: false, reason: "not-an-approver" };
     }
   }

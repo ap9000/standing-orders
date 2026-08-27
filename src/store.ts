@@ -5419,6 +5419,32 @@ export class Store {
    * `firing` is never touched by either arm. */
   private reconcileIntentsForMode(repo: string, newMode: { digest: string; publication: "notify" | "automerge" } | null, now: Date): void {
     void now;
+    // MODE-DERIVED SCOPE APPROVALS demote here too (Codex people round 1,
+    // finding 2 — R-REVOKE's "next gate" made durable): an approval sealed
+    // under a mode signature that no longer stands falls back to the human
+    // ceremony. Only UNDISPATCHED work demotes — the task still queued with
+    // no live claim; running and finished work keeps its history untouched.
+    this.db
+      .prepare(
+        `UPDATE task_scope
+            SET approved_at = NULL, approved_by = NULL, approved_digest = NULL,
+                approved_profile_json = NULL, approval_basis = 'password', mode_digest = NULL
+          WHERE approval_basis = 'mode' AND approved_at IS NOT NULL
+            AND (? IS NULL OR mode_digest <> ?)
+            AND EXISTS (SELECT 1 FROM task_ref JOIN task ON task.id = task_ref.external_id
+                         WHERE task_ref.external_id = task_scope.task_id AND task_ref.repo = ?
+                           AND task.state = 'queued')
+            AND NOT EXISTS (SELECT 1 FROM claim JOIN task_ref tr ON tr.id = claim.task_ref
+                             WHERE tr.external_id = task_scope.task_id AND tr.repo = ?
+                               AND claim.released_at IS NULL AND claim.expires_at > ?)`,
+      )
+      .run(
+        newMode === null ? null : newMode.digest,
+        newMode === null ? null : newMode.digest,
+        repo,
+        repo,
+        now.toISOString(),
+      );
     const repoIntents = `publication IN (
                 SELECT publication.id FROM publication
                   JOIN run ON run.id = publication.run
@@ -5635,6 +5661,14 @@ export class Store {
     now: Date,
   ): { ok: true; role: "approver" | "viewer" } | { ok: false; reason: "gone" | "name-taken" } {
     return this.transact(() => {
+      // Liveness FIRST (Codex people round 1, finding 3): the loser of a
+      // concurrent join must read as 'gone' — the indistinguishable dead
+      // shape — never as a name collision that discloses the winner.
+      const hash = createHash("sha256").update(args.tokenValue, "utf8").digest("hex");
+      const live = this.db
+        .prepare("SELECT 1 AS hit FROM invite WHERE token_hash = ? AND revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ?")
+        .get(hash, now.toISOString());
+      if (live === undefined) return { ok: false as const, reason: "gone" as const };
       const taken = this.db.prepare("SELECT 1 AS hit FROM approver WHERE name = ?").get(args.name);
       if (taken !== undefined) return { ok: false as const, reason: "name-taken" as const };
       const consumed = this.db
@@ -5643,7 +5677,7 @@ export class Store {
             WHERE token_hash = ? AND revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ?
             RETURNING role`,
         )
-        .get(args.name, now.toISOString(), createHash("sha256").update(args.tokenValue, "utf8").digest("hex"), now.toISOString());
+        .get(args.name, now.toISOString(), hash, now.toISOString());
       if (consumed === undefined) return { ok: false as const, reason: "gone" as const };
       const role = String(consumed["role"]) as "approver" | "viewer";
       this.db
@@ -5692,6 +5726,17 @@ export class Store {
    * History is untouched: revocation ends capability, never rewrites the
    * ledger. Removing the LAST active approver is refused — an instance
    * nobody can approve into is a brick, not a posture.
+   *
+   * THE CLAIM, NARROWED (Codex people round 1, finding 2): what dies here
+   * is authority that DERIVES from the person's standing — sessions,
+   * invites, modes and everything mode-derived (their sealed filings
+   * demote through the reconciliation road), Telegram, push. Standing
+   * acts they completed WITH full ceremony — publication/backend/intake
+   * grants, worktree setups, approved routines, approved scopes sealed by
+   * password — deliberately survive: those are the instance's promises,
+   * approved as themselves, and undoing history is not what revocation
+   * means. An operator who distrusts those acts revokes them by their own
+   * roads.
    */
   revokeAccount(
     name: string,

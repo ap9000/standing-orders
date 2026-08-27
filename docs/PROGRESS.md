@@ -1,5 +1,32 @@
 # Progress
 
+**2026-08-27 — Layer 6 hardening: the Codex round-1 findings, closed.**
+APPROVE-WITH-CHANGES with two high findings, both real. (1) The CLI
+escalation: `approver add` vouched on a bare stored-hash match, so a
+VIEWER'S or a REVOKED person's credential could mint a working approver
+— the one ceremony site that forgot the role. Vouching now goes through
+authenticateApprover like everything else. (2) The R-REVOKE hole:
+scope approvals sealed under a mode stayed dispatchable after the mode
+(or its signer) died. Closed on BOTH sides — the reconciliation road
+now also demotes mode-sealed, still-queued, unclaimed approvals back to
+the human ceremony (running and finished work keeps its history), and
+the dispatch gate grew a belt: a mode-basis approval re-proves its
+digest is STILL the live mode's, signer active, expiry checked by
+clock — so even the window before an expired mode is durably closed
+cannot dispatch. The D7 claim is also NARROWED in words: standing acts
+completed with full ceremony (grants, worktree setups, routines,
+password-sealed approvals) deliberately survive their author's
+revocation — revocation ends derived authority, not history. (3) The
+concurrent join loser now reads as 'gone', never as a name collision:
+liveness is proved FIRST inside the join transaction. (4) The sign-up
+limiter became per-source buckets (10 per source, refilling slowly)
+under a global ceiling, and is spent only by WELL-FORMED submissions —
+a stranger's malformed flood no longer drains the door for everyone.
+Six regression tests: both escalation roads, mode-revocation and
+signer-revocation demotion, the running-task boundary, the expiry
+window belt, the indistinguishable join loser. Suite 1353.
+
+
 **2026-08-27 — Modes arc, layer 6 of 7: invites and People.** The
 instance learns to hold more than one person, without a single new
 authority road. THE JOIN DOOR (D6/E3): `people invite` (CLI) and the

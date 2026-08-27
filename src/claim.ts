@@ -195,9 +195,14 @@ function acquireLocked(
           .prepare(
             `SELECT 1 AS hit FROM task_scope
              JOIN task_ref ON task_ref.id = ? AND task_scope.task_id = task_ref.external_id
-             WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL`,
+             WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL AND (COALESCE(task_scope.approval_basis, 'password') <> 'mode'
+                OR EXISTS (SELECT 1 FROM operating_mode om
+                            JOIN approver signer ON signer.name = om.signed_by
+                           WHERE om.repo = task_ref.repo AND om.revoked_at IS NULL
+                             AND om.absolute_expiry > ? AND om.digest = task_scope.mode_digest
+                             AND signer.revoked_at IS NULL AND signer.role = 'approver'))`,
           )
-          .get(taskRef);
+          .get(taskRef, now.toISOString());
         if (scopeApproved === undefined) {
           const watching = attendedWatchState(attendedOpen.lastBeatAt, now, attendedOpen.absoluteExpiry);
           if ((watching !== "live" && watching !== "grace") || attendedOpen.attemptRun !== null) {
@@ -328,14 +333,22 @@ export function acquireIfReady(
     // The role's own precondition, re-read where the write lock has pinned
     // it — never an early return past the shared gates below. A planner
     // dispatches exactly when the operator asked and no promise exists yet;
-    // a builder dispatches exactly when the promise is approved.
+    // a builder dispatches exactly when the promise is approved. A
+    // mode-sealed approval additionally re-proves its signature is STILL
+    // the live mode (belt to the demotion sweep — R-REVOKE's next gate
+    // holds even in the window before an expired mode is durably closed).
     const approvedScope = store.handle
       .prepare(
         `SELECT 1 AS hit FROM task_scope
          JOIN task_ref ON task_ref.id = ? AND task_scope.task_id = task_ref.external_id
-         WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL`,
+         WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL AND (COALESCE(task_scope.approval_basis, 'password') <> 'mode'
+                OR EXISTS (SELECT 1 FROM operating_mode om
+                            JOIN approver signer ON signer.name = om.signed_by
+                           WHERE om.repo = task_ref.repo AND om.revoked_at IS NULL
+                             AND om.absolute_expiry > ? AND om.digest = task_scope.mode_digest
+                             AND signer.revoked_at IS NULL AND signer.role = 'approver'))`,
       )
-      .get(taskRef);
+      .get(taskRef, options.now.toISOString());
     if (role === "planner") {
       const ref = store.refForId(taskRef);
       if (ref?.plan !== "requested") {
