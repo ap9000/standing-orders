@@ -1,5 +1,18 @@
 # Progress
 
+**2026-08-27 — The live console's migration refusal, fixed.** Restarting
+the :4180 console on v29 hit the fail-closed guard: the v29
+merge_blocker rebuild refused the REAL database's DDL. Root cause:
+SQLite stores ALTER-appended columns as "…NOT NULL\n, lifted_at TEXT…"
+— a newline BEFORE the comma — and canonicalDdl's whitespace collapse
+turned that into a space-comma the recognizer's expected variant never
+had. Comma spacing is presentation, never shape: the normalizer now
+strips space-before-comma, and a regression test reproduces the exact
+live shape (v28 stamp, ALTER-appended columns) and proves the reopen
+rebuilds cleanly. The refusal itself worked as designed — nothing was
+touched until the shape was understood. Suite 1369.
+
+
 **2026-08-27 — Layer 7 hardening: the Codex round-1 findings, closed.**
 APPROVE-WITH-CHANGES with five findings, every one now shut. (1) The
 bearer hole: bearer credentials produce an approver identity, and both

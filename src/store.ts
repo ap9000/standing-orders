@@ -3306,6 +3306,10 @@ function canonicalDdl(sql: string): string {
     .replace(/\bIF NOT EXISTS\b/i, "")
     .replace(/"([A-Za-z_][A-Za-z0-9_]*)"/g, "$1") // RENAME re-quotes the name
     .replace(/\s+/g, " ")
+    // ALTER TABLE ADD COLUMN appends "\n, col …" — a newline BEFORE the
+    // comma — so comma spacing is presentation, never shape (found live:
+    // the v29 merge_blocker rebuild refused a real console database).
+    .replace(/ ,/g, ",")
     .trim();
 }
 
