@@ -38,7 +38,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 28;
+export const SCHEMA_VERSION = 29;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -836,7 +836,7 @@ CREATE TABLE IF NOT EXISTS task_ref (
 -- audited verbs — spend routing is authority, not preference.
 CREATE TABLE IF NOT EXISTS phase_config (
   scope      TEXT NOT NULL,
-  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair')),
+  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair','review')),
   provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter','gemini')),
   model      TEXT,
   updated_at TEXT NOT NULL,
@@ -1243,7 +1243,7 @@ CREATE TABLE IF NOT EXISTS run (
   -- Deliberately NOT 'driver': the design's driver is the event-woken gate
   -- role that first exists at M4, and recording repair under that name now
   -- would make the two indistinguishable in every cost report afterwards.
-  role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner')),
+  role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner','reviewer')),
   -- Which provider harness this attempt ran on (v9). The default is a
   -- truthful backfill for history: every run before v9 passed through the
   -- fixed claude gateway. New dispatches always supply it explicitly.
@@ -1257,9 +1257,11 @@ CREATE TABLE IF NOT EXISTS run (
   -- agent that staged or committed before parking would otherwise show a
   -- clean diff over material changes.
   base_revision TEXT,
-  branch        TEXT NOT NULL,
-  worktree      TEXT NOT NULL,
+  branch        TEXT,
+  worktree      TEXT,
   model         TEXT,
+  phase         TEXT,
+  contestant    INTEGER REFERENCES contestant(id),
   -- 'interrupted' (v25) is a held attended session cut down mid-flight —
   -- fence, expiry, crash custody, or shutdown. A real word, never a
   -- synthesized park; the one-shot road keeps writing failed/interrupted
@@ -1290,7 +1292,11 @@ CREATE TABLE IF NOT EXISTS run (
   head_revision TEXT,
   -- The validated terminal handoff's conclusion — bounded, typed at
   -- ingestion, and the only agent prose a PR body may quote.
-  handoff       TEXT
+  handoff       TEXT,
+  -- v29 (the reviewer role): artifact-only runs carry NO workspace,
+  -- honestly — every other role requires both (exclusive, no sentinels).
+  CHECK ((role = 'reviewer' AND branch IS NULL AND worktree IS NULL)
+      OR (role <> 'reviewer' AND branch IS NOT NULL AND worktree IS NOT NULL))
 );
 
 -- The decision record (§7): the judgement call an agent refused to guess at,
@@ -1530,26 +1536,100 @@ CREATE TABLE IF NOT EXISTS merge_intent (
   head_sha      TEXT NOT NULL,
   method        TEXT NOT NULL CHECK (method IN ('squash','merge','rebase')),
   delete_branch INTEGER NOT NULL DEFAULT 0 CHECK (delete_branch IN (0, 1)),
-  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','claimed','merged','refused','superseded')),
+  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','claimed','waiting-human','firing','merged','refused','superseded')),
   claimed_by    TEXT,
   claimed_until TEXT,
+  -- v29 (modes): WHOSE signature this intent fires under, bound at
+  -- creation and re-proved in the firing CAS — 'grant' = the grant
+  -- ceremony's own unattended-merge signature; 'mode' = a live automerge
+  -- mode; 'human' = the per-merge password ceremony.
+  authority_basis TEXT NOT NULL DEFAULT 'grant' CHECK (authority_basis IN ('grant','mode','human')),
+  mode_digest   TEXT,
+  -- v29: the durable one-winner linearization point — the CAS into
+  -- 'firing' stamps both; staleness is firing_deadline passing, never a
+  -- guess.
+  firing_at     TEXT,
+  firing_deadline TEXT,
   generation    INTEGER NOT NULL DEFAULT 0,
   attempts      INTEGER NOT NULL DEFAULT 0,
   last_error    TEXT,
   receipt       TEXT,
   created_at    TEXT NOT NULL,
   settled_at    TEXT,
-  CHECK (state <> 'claimed' OR (claimed_by IS NOT NULL AND claimed_until IS NOT NULL))
+  CHECK (state <> 'claimed' OR (claimed_by IS NOT NULL AND claimed_until IS NOT NULL)),
+  CHECK (state <> 'firing' OR (firing_at IS NOT NULL AND firing_deadline IS NOT NULL))
 );
 
 -- A CI repair in flight durably blocks its source PR's merge (v21).
 -- STICKY by design: no task-lifecycle path touches it — it lifts only
 -- by the authenticated unblock act or the PR itself closing remotely.
 CREATE TABLE IF NOT EXISTS merge_blocker (
-  publication INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+  publication INTEGER NOT NULL REFERENCES publication(id),
   reason      TEXT NOT NULL CHECK (reason IN ('repair-open')),
   task_id     TEXT,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  -- v29: lifting is a stamp, not a DELETE — who unblocked, and when, is
+  -- an audit answer the People screen promises. One LIVE blocker per
+  -- publication (partial unique in the post-migration block); lifted
+  -- rows are history and never block a new block.
+  lifted_at   TEXT,
+  lifted_by   TEXT
+);
+
+-- An OPERATING MODE (v29): a per-repository, password-signed, expiring
+-- envelope that pre-authorizes the SIGNER'S OWN future acts — filing
+-- approvals, quick mints, escalated permission defaults, automerge —
+-- through the exact predicates the design chain binds. The absence of a
+-- row is 'locked': today's ceremony-per-act world, the default forever.
+-- Raising authority is a password ceremony; revoking is one click; every
+-- transition is an event row.
+CREATE TABLE IF NOT EXISTS operating_mode (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo            TEXT NOT NULL,
+  name            TEXT NOT NULL CHECK (name IN ('standard','hands-off')),
+  terms_json      TEXT NOT NULL,
+  digest          TEXT NOT NULL,
+  signed_by       TEXT NOT NULL REFERENCES approver(name) ON DELETE RESTRICT,
+  signed_at       TEXT NOT NULL,
+  absolute_expiry TEXT NOT NULL,
+  revoked_at      TEXT,
+  revoked_by      TEXT,
+  revoke_reason   TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_mode_per_repo
+  ON operating_mode (repo) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS operating_mode_event (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  mode     INTEGER NOT NULL REFERENCES operating_mode(id),
+  kind     TEXT NOT NULL CHECK (kind IN ('signed','renewed','revoked','expired-closed','signer-revoked')),
+  actor    TEXT NOT NULL,
+  at       TEXT NOT NULL
+);
+
+-- A single-use invite (v29): 128-bit token, sha256 stored, role pinned at
+-- mint. attempts meters ADMITTED submissions — the slot is spent
+-- atomically BEFORE the KDF runs, and never refunded.
+CREATE TABLE IF NOT EXISTS invite (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash  TEXT NOT NULL UNIQUE,
+  role        TEXT NOT NULL CHECK (role IN ('approver','viewer')),
+  minted_by   TEXT NOT NULL REFERENCES approver(name) ON DELETE RESTRICT,
+  minted_at   TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  consumed_by TEXT,
+  consumed_at TEXT,
+  revoked_at  TEXT
+);
+
+-- The daily rails' reservation counter (v29): one row per repo per UTC
+-- day, incremented atomically at admission — never a query-then-hope.
+CREATE TABLE IF NOT EXISTS mode_rail (
+  repo            TEXT NOT NULL,
+  utc_day         TEXT NOT NULL,
+  reserved_starts INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (repo, utc_day)
 );
 
 -- What a task is allowed to become, and whether a person agreed to it.
@@ -1595,6 +1675,12 @@ CREATE TABLE IF NOT EXISTS approver (
   name            TEXT PRIMARY KEY,
   credential_hash TEXT NOT NULL,
   added_at        TEXT NOT NULL,
+  -- v29 (multi-user): 'viewer' authenticates and reads; every
+  -- consequential act requires ACTIVE role 'approver'. Revocation is a
+  -- stamp — history stays attributable forever.
+  role            TEXT NOT NULL DEFAULT 'approver' CHECK (role IN ('approver','viewer')),
+  revoked_at      TEXT,
+  revoked_by      TEXT,
   -- Bumped whenever the credential is replaced. Anything that derives
   -- authority from an approver — a paired Telegram chat, an outstanding
   -- pairing code — records the generation it was granted under, and a
@@ -2231,6 +2317,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_authorization_per_task
 -- injection is live or proven. Terminal failures (uncertain never-accepted,
 -- cancelled) release the slot — the delivery-CAS on decision.delivered_turn
 -- is the live gate, this index the backstop (v6 W5).
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_merge_blocker
+  ON merge_blocker (publication) WHERE lifted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS session_turn_answer_once
   ON session_turn (source_kind, source_id)
   WHERE source_kind = 'answer' AND state NOT IN ('uncertain','cancelled');
@@ -2793,6 +2881,268 @@ function migrate(db: Database): void {
   // bound is withdrawn — parallelism is many tasks, each with its own
   // signed envelope; per-task and per-run singulars all stay.
   db.exec("DROP INDEX IF EXISTS one_held_session_per_runner");
+
+  // v29 (operating modes + the reviewer role + multi-user): additive
+  // columns FIRST (round-4 ordering), then the exact-recognizer rebuilds.
+  // The four new tables arrive through the fresh SCHEMA's IF NOT EXISTS.
+  addColumn(db, "approver", "role", "TEXT NOT NULL DEFAULT 'approver' CHECK (role IN ('approver','viewer'))");
+  addColumn(db, "approver", "revoked_at", "TEXT");
+  addColumn(db, "approver", "revoked_by", "TEXT");
+  addColumn(db, "attended_authorization", "authority_basis", "TEXT NOT NULL DEFAULT 'password' CHECK (authority_basis IN ('password','mode'))");
+  addColumn(db, "attended_authorization", "mode_digest", "TEXT");
+  addColumn(db, "task_scope", "approval_basis", "TEXT");
+  addColumn(db, "task_scope", "mode_digest", "TEXT");
+  addColumn(db, "diff_comment", "reviewer_run", "INTEGER REFERENCES run(id)");
+  addColumn(db, "diff_comment", "severity", "TEXT CHECK (severity IN ('note','question','problem'))");
+  addColumn(db, "task_ref", "plan_provider", "TEXT");
+  addColumn(db, "task_ref", "plan_model", "TEXT");
+  addColumn(db, "merge_blocker", "lifted_at", "TEXT");
+  addColumn(db, "merge_blocker", "lifted_by", "TEXT");
+  rebuildRunForV29(db);
+  rebuildPhaseConfigForV29(db);
+  rebuildMergeIntentForV29(db);
+  rebuildMergeBlockerForV29(db);
+}
+
+/** The v28 run shape — V25's columns unchanged since; the recognizer for
+ * the v29 rebuild. rebuildForV4's substring check is deliberately NOT
+ * reused here (round-3 finding 5: substrings are not recognizers). */
+function V28_RUN_DDL(name: string): string {
+  return V25_RUN_DDL(name);
+}
+
+function V29_RUN_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+    lease_id      TEXT NOT NULL,
+    runner        TEXT NOT NULL,
+    scope_digest     TEXT,
+    profile_digest   TEXT,
+    provider_version TEXT,
+    role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner','reviewer')),
+    provider      TEXT NOT NULL DEFAULT 'claude',
+    parent_run    INTEGER REFERENCES run(id),
+    session_id    TEXT,
+    base_revision TEXT,
+    branch        TEXT,
+    worktree      TEXT,
+    model         TEXT,
+    phase         TEXT,
+    contestant    INTEGER REFERENCES contestant(id),
+    outcome       TEXT CHECK (outcome IN ('built','failed','refused','parked','no-change','interrupted')),
+    reason        TEXT,
+    committed     INTEGER,
+    attended_authorization TEXT REFERENCES attended_authorization(id),
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT,
+    provider_started_at TEXT,
+    tokens_in     INTEGER,
+    tokens_out    INTEGER,
+    cost_usd      REAL,
+    usage_json    TEXT,
+    head_revision TEXT,
+    handoff       TEXT,
+    CHECK ((role = 'reviewer' AND branch IS NULL AND worktree IS NULL)
+        OR (role <> 'reviewer' AND branch IS NOT NULL AND worktree IS NOT NULL))
+  )`;
+}
+
+function rebuildRunForV29(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  if (stored === canonicalDdl(V29_RUN_DDL("run"))) return;
+  if (stored !== canonicalDdl(V28_RUN_DDL("run"))) {
+    throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(V29_RUN_DDL("run_next"));
+      const names = V25_RUN_COLUMNS.join(", ");
+      db.exec(`INSERT INTO run_next (${names}) SELECT ${names} FROM run`);
+      db.exec("DROP TABLE run");
+      db.exec("ALTER TABLE run_next RENAME TO run");
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) throw new Error("foreign keys did not survive the run rebuild");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+const PHASE_CONFIG_V29_DDL = `CREATE TABLE phase_config_next (
+  scope      TEXT NOT NULL,
+  phase      TEXT NOT NULL CHECK (phase IN ('plan','build','repair','review')),
+  provider   TEXT NOT NULL CHECK (provider IN ('claude','codex','openrouter','gemini')),
+  model      TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  PRIMARY KEY (scope, phase)
+)`;
+
+/** Rebuild #3 of phase_config: 'review' joins the phases (v29). */
+function rebuildPhaseConfigForV29(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'phase_config'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  if (stored === canonicalDdl(PHASE_CONFIG_V29_DDL).replace("phase_config_next", "phase_config")) return;
+  // PHASE_CONFIG_V26_DDL is the CURRENT shape (the v26 migration's
+  // product, unchanged through v28) — the constant is named for the
+  // migration that made it, not the version reading it.
+  if (stored !== canonicalDdl(PHASE_CONFIG_V26_DDL).replace("phase_config_next", "phase_config")) {
+    throw new Error("the phase_config table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(PHASE_CONFIG_V29_DDL);
+      db.exec(`INSERT INTO phase_config_next (scope, phase, provider, model, updated_at, updated_by)
+               SELECT scope, phase, provider, model, updated_at, updated_by FROM phase_config`);
+      db.exec("DROP TABLE phase_config");
+      db.exec("ALTER TABLE phase_config_next RENAME TO phase_config");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+const MERGE_INTENT_V21_DDL = `CREATE TABLE merge_intent (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  publication   INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+  grant_terms_hash TEXT NOT NULL,
+  head_sha      TEXT NOT NULL,
+  method        TEXT NOT NULL CHECK (method IN ('squash','merge','rebase')),
+  delete_branch INTEGER NOT NULL DEFAULT 0 CHECK (delete_branch IN (0, 1)),
+  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','claimed','merged','refused','superseded')),
+  claimed_by    TEXT,
+  claimed_until TEXT,
+  generation    INTEGER NOT NULL DEFAULT 0,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT,
+  receipt       TEXT,
+  created_at    TEXT NOT NULL,
+  settled_at    TEXT,
+  CHECK (state <> 'claimed' OR (claimed_by IS NOT NULL AND claimed_until IS NOT NULL))
+)`;
+
+const MERGE_INTENT_V29_DDL = `CREATE TABLE merge_intent_next (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  publication   INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+  grant_terms_hash TEXT NOT NULL,
+  head_sha      TEXT NOT NULL,
+  method        TEXT NOT NULL CHECK (method IN ('squash','merge','rebase')),
+  delete_branch INTEGER NOT NULL DEFAULT 0 CHECK (delete_branch IN (0, 1)),
+  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','claimed','waiting-human','firing','merged','refused','superseded')),
+  claimed_by    TEXT,
+  claimed_until TEXT,
+  authority_basis TEXT NOT NULL DEFAULT 'grant' CHECK (authority_basis IN ('grant','mode','human')),
+  mode_digest   TEXT,
+  firing_at     TEXT,
+  firing_deadline TEXT,
+  generation    INTEGER NOT NULL DEFAULT 0,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT,
+  receipt       TEXT,
+  created_at    TEXT NOT NULL,
+  settled_at    TEXT,
+  CHECK (state <> 'claimed' OR (claimed_by IS NOT NULL AND claimed_until IS NOT NULL)),
+  CHECK (state <> 'firing' OR (firing_at IS NOT NULL AND firing_deadline IS NOT NULL))
+)`;
+
+/** v29: the intent machine gains waiting-human + firing and the authority
+ * binding. Existing rows keep basis 'grant' — the truthful backfill: every
+ * pre-v29 intent fired under the grant ceremony's own signature. */
+function rebuildMergeIntentForV29(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_intent'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  if (stored === canonicalDdl(MERGE_INTENT_V29_DDL).replace("merge_intent_next", "merge_intent")) return;
+  if (stored !== canonicalDdl(MERGE_INTENT_V21_DDL)) {
+    throw new Error("the merge_intent table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  const COLS = "id, publication, grant_terms_hash, head_sha, method, delete_branch, state, claimed_by, claimed_until, generation, attempts, last_error, receipt, created_at, settled_at";
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(MERGE_INTENT_V29_DDL);
+      db.exec(`INSERT INTO merge_intent_next (${COLS}) SELECT ${COLS} FROM merge_intent`);
+      db.exec("DROP TABLE merge_intent");
+      db.exec("ALTER TABLE merge_intent_next RENAME TO merge_intent");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+const MERGE_BLOCKER_OLD_DDL = `CREATE TABLE merge_blocker (
+  publication INTEGER NOT NULL UNIQUE REFERENCES publication(id),
+  reason      TEXT NOT NULL CHECK (reason IN ('repair-open')),
+  task_id     TEXT,
+  created_at  TEXT NOT NULL
+)`;
+
+const MERGE_BLOCKER_V29_DDL = `CREATE TABLE merge_blocker_next (
+  publication INTEGER NOT NULL REFERENCES publication(id),
+  reason      TEXT NOT NULL CHECK (reason IN ('repair-open')),
+  task_id     TEXT,
+  created_at  TEXT NOT NULL,
+  lifted_at   TEXT,
+  lifted_by   TEXT
+)`;
+
+/** v29: lifting becomes a stamp; the in-table UNIQUE becomes the
+ * one-live partial unique (post-migration block). The addColumn calls
+ * above already handled a table that predates this rebuild's run, so the
+ * recognizer accepts BOTH the bare old shape and old+added columns. */
+function rebuildMergeBlockerForV29(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'merge_blocker'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  const target = canonicalDdl(MERGE_BLOCKER_V29_DDL).replace("merge_blocker_next", "merge_blocker");
+  if (stored === target) return;
+  const oldBare = canonicalDdl(MERGE_BLOCKER_OLD_DDL);
+  const oldPlusCols = canonicalDdl(MERGE_BLOCKER_OLD_DDL.replace(
+    "  created_at  TEXT NOT NULL\n)",
+    "  created_at  TEXT NOT NULL, lifted_at TEXT, lifted_by TEXT)",
+  ));
+  if (stored !== oldBare && stored !== oldPlusCols) {
+    throw new Error("the merge_blocker table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  const has = new Set(db.prepare("PRAGMA table_info(merge_blocker)").all().map(one => String(one["name"])));
+  const cols = ["publication", "reason", "task_id", "created_at", ...(has.has("lifted_at") ? ["lifted_at", "lifted_by"] : [])].join(", ");
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(MERGE_BLOCKER_V29_DDL);
+      db.exec(`INSERT INTO merge_blocker_next (${cols}) SELECT ${cols} FROM merge_blocker`);
+      db.exec("DROP TABLE merge_blocker");
+      db.exec("ALTER TABLE merge_blocker_next RENAME TO merge_blocker");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 const TOURNAMENT_TERMS_V26_DDL = `CREATE TABLE tournament_terms (
@@ -2898,6 +3248,7 @@ function rebuildTournamentTermsForV27(db: Database): void {
  * recognizer is not a recognizer). */
 function canonicalDdl(sql: string): string {
   return sql
+    .replace(/--[^\n]*/g, "") // comments are prose, not shape (v29)
     .replace(/\bIF NOT EXISTS\b/i, "")
     .replace(/"([A-Za-z_][A-Za-z0-9_]*)"/g, "$1") // RENAME re-quotes the name
     .replace(/\s+/g, " ")
@@ -2938,6 +3289,9 @@ function rebuildPhaseConfigForV26(db: Database): void {
   const stored = canonicalDdl(String(row["sql"]));
   const target = canonicalDdl(PHASE_CONFIG_V26_DDL).replace("phase_config_next", "phase_config");
   if (stored === target) return;
+  // A LATER shape is also done: a fresh database is born at the newest
+  // DDL, and this earlier rebuild waves it through to v29's own pass.
+  if (stored === canonicalDdl(PHASE_CONFIG_V29_DDL).replace("phase_config_next", "phase_config")) return;
   if (stored !== canonicalDdl(PHASE_CONFIG_V25_DDL)) {
     throw new Error("the phase_config table's DDL is not a shape this migration knows — refusing to rebuild it");
   }
@@ -9173,7 +9527,8 @@ export class Store {
         `SELECT telegram_binding.* FROM telegram_binding
          JOIN approver ON approver.name = telegram_binding.approver
           AND approver.generation = telegram_binding.approver_generation
-         WHERE bot_id = ? AND revoked_at IS NULL`,
+          AND approver.revoked_at IS NULL
+         WHERE bot_id = ? AND telegram_binding.revoked_at IS NULL`,
       )
       .get(botId);
     return row === undefined ? null : readTelegramBinding(row);

@@ -1,5 +1,30 @@
 # Progress
 
+**2026-08-27 — Modes arc, layer 1 of 7: schema v29.** The substrate for
+operating modes, the reviewer role, and multi-user — shipped first per
+the review's own ordering while round 5 confirms the chain's last two
+rulings. Additive: operating_mode (+ one-live partial unique) and its
+event table, invite (admitted-attempt metering column), mode_rail
+(per-repo per-UTC-day reservation counters), approver role/revocation,
+authorization and task_scope authority provenance, diff_comment
+reviewer_run + severity, task_ref plan pins, merge_blocker lift stamps
+(the in-table UNIQUE became a one-LIVE partial unique so lifted rows
+never block re-blocking). Rebuilt with exact dual-equality recognizers:
+run (role gains 'reviewer'; branch/worktree conditionally NULL under
+the EXCLUSIVE check — artifact-only reviewers carry no workspace, no
+sentinels), phase_config #3 ('review' joins the phases), merge_intent
+(waiting-human + firing states, authority_basis grant|mode|human,
+firing_at/firing_deadline for the one-winner CAS). Three migration
+traps closed on the way: an earlier rebuild must wave LATER fresh
+shapes through (a fresh v29 database is born at the newest DDL and
+v26's recognizer ran first); canonicalDdl now strips SQL comments
+(prose is not shape — the fresh literal carries comments its
+recognizer constants do not); and the fresh run literal finally folded
+in the historical phase/contestant addColumns whose append-at-end
+order broke canonical equality. Bonus from a newly ambiguous column:
+live Telegram bindings now also require an UNREVOKED approver — a
+piece of the revocation cascade, delivered by the compiler. Suite 1290.
+
 **2026-08-26 — Parallel sessions, round 1 folded: the attention mode is
 a signed term.** Codex returned APPROVE-WITH-CHANGES (9 findings)
 minutes after the implementation landed; everything actionable shipped
