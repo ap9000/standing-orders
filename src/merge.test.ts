@@ -183,7 +183,7 @@ describe("the merge grant", () => {
     expect(held.skipped).toBe(1);
     expect(world.calls).toHaveLength(0);
 
-    expect(store.liftMergeBlocker(publicationId)).toBe(true);
+    expect(store.liftMergeBlocker(publicationId, "alex", T0)).toBe(true);
     const after = await sweepMerges(store, { repo: REPO, clock: () => T0, exec: gh(HEALTHY).exec });
     expect(after.merged).toBe(1);
   });

@@ -138,7 +138,7 @@ import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDi
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
-import { authenticateAccount } from "./scope.js";
+import { authenticateAccount, hashPassword } from "./scope.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -360,6 +360,19 @@ export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
   const clock = options.clock ?? (() => new Date());
   const sessions = new Map<string, Session>();
+  // The /join road's per-process limiter (D6): thirty admitted submissions
+  // per ten minutes across ALL invites — brute force pays in time before
+  // any token is even looked up. The per-invite counter is the durable
+  // meter; this bucket just keeps a stranger from spending it for you.
+  let joinBucket = { tokens: 30, refilledAt: Date.now() };
+  function takeJoinAttempt(): boolean {
+    const at = Date.now();
+    const refill = Math.floor((at - joinBucket.refilledAt) / 20_000);
+    if (refill > 0) joinBucket = { tokens: Math.min(30, joinBucket.tokens + refill), refilledAt: at };
+    if (joinBucket.tokens <= 0) return false;
+    joinBucket.tokens -= 1;
+    return true;
+  }
   const approvalNonces = new Map<string, ApprovalNonce>();
 
   // The ceiling, resolved once at startup. Paths that do not exist are
@@ -580,6 +593,73 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, "/login");
     }
 
+    // THE JOIN ROAD (v29, D6/E3): a single-use invite is the only door
+    // that creates an account from the outside. Cookie-free, script-free,
+    // and every dead token shape — unknown, expired, revoked, consumed,
+    // attempts spent — answers with ONE indistinguishable page. GET spends
+    // nothing; a POST spends one metered attempt BEFORE the KDF runs.
+    const joinToken = /^\/join\/([A-Za-z0-9_-]{16,64})$/.exec(url.pathname)?.[1];
+    if (joinToken !== undefined && method === "GET") {
+      return page(response, 200, store.inviteIsLive(joinToken, clock()) ? joinFormPage(joinToken, null, "") : joinDeadPage());
+    }
+    if (joinToken !== undefined && method === "POST") {
+      if (!takeJoinAttempt()) {
+        return respond(response, 429, "text/plain; charset=utf-8", "too many sign-up attempts right now — try again in a few minutes");
+      }
+      const type = request.headers["content-type"] ?? "";
+      if (!type.startsWith("application/x-www-form-urlencoded")) {
+        return respond(response, 415, "text/plain; charset=utf-8", "forms only");
+      }
+      let body: URLSearchParams;
+      try {
+        body = await form(request);
+      } catch {
+        return respond(response, 413, "text/plain; charset=utf-8", "body too large");
+      }
+      for (const field of ["name", "password"]) {
+        if (body.getAll(field).length > 1) {
+          return respond(response, 400, "text/plain; charset=utf-8", `duplicated ${field} field`);
+        }
+      }
+      const admitted = store.admitInviteAttempt(joinToken, clock());
+      if (admitted === null) return page(response, 200, joinDeadPage());
+      const name = (body.get("name") ?? "").trim();
+      const password = body.get("password") ?? "";
+      // Possession of a LIVE token earns real words (D6's disclosure
+      // ruling) — the attempt is already spent either way (E3).
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(name)) {
+        return page(response, 400, joinFormPage(joinToken, "names are 1\u201340 characters \u2014 letters, digits, dots, dashes, underscores", name));
+      }
+      if (password.length < 8) {
+        return page(response, 400, joinFormPage(joinToken, "the password needs at least 8 characters", name));
+      }
+      const made = store.consumeInviteAndCreateAccount({ tokenValue: joinToken, name, credentialHash: hashPassword(password) }, clock());
+      if (!made.ok) {
+        if (made.reason === "name-taken") {
+          return page(response, 400, joinFormPage(joinToken, "that name is taken \u2014 pick another", name));
+        }
+        return page(response, 200, joinDeadPage());
+      }
+      // The cookie mints only AFTER the commit — same shape as login.
+      const id = randomBytes(32).toString("hex");
+      sessions.set(id, {
+        name,
+        csrf: randomBytes(32).toString("hex"),
+        role: made.role,
+        generation: 1,
+        createdAt: Date.now(),
+        sawBoardAt: null,
+        lastSeen: Date.now(),
+        project: defaultProject,
+        projectRevision: 1,
+      });
+      response.setHeader(
+        "Set-Cookie",
+        `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`,
+      );
+      return redirect(response, "/");
+    }
+
     if (who === null) {
       return method === "GET"
         ? redirect(response, "/login")
@@ -611,7 +691,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
-      url.pathname !== "/settings" && url.pathname !== "/logout" &&
+      url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
 
@@ -947,6 +1027,81 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/people") {
+      // Approvers see everyone (D7's ceiling: every fact already passed
+      // the process admission); a viewer sees exactly themselves (U3).
+      const approverView = who.role === "approver";
+      const accounts = store.accountFacts().filter(one => approverView || one.name === who.name);
+      const lastSeenOf = (name: string): number | null => {
+        let seen: number | null = null;
+        for (const session of sessions.values()) {
+          if (session.name === name && (seen === null || session.lastSeen > seen)) seen = session.lastSeen;
+        }
+        return seen;
+      };
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const cards = accounts.map(one => {
+        const seen = lastSeenOf(one.name);
+        const attended = store.openAttendedOf(one.name);
+        const acts = store.recentActsOf(one.name);
+        const standing =
+          one.revokedAt !== null
+            ? `revoked ${escape(one.revokedAt.slice(0, 16).replace("T", " "))} by ${personChip(one.revokedBy ?? "?")}`
+            : one.role === "approver"
+              ? "approves"
+              : "watches";
+        return [
+          `<div class="card">`,
+          `<h2 style="margin-top:0">${personChip(one.name)} <span class="meta">${standing}</span></h2>`,
+          `<p class="meta">${seen === null ? "not signed in right now" : `signed in \u2014 active ${escape(new Date(seen).toISOString().slice(11, 16))} UTC`} \u00b7 joined ${escape(one.addedAt.slice(0, 10))}</p>`,
+          attended.length === 0
+            ? ""
+            : `<p class="row">watching now: ${attended.map(session => `<a href="/t/${escape(session.taskId)}">${escape(session.taskId)}</a>`).join(", ")}</p>`,
+          acts.length === 0
+            ? `<p class="meta">no recorded acts yet</p>`
+            : acts.map(act => `<p class="row meta">${escape(act.kind)} ${escape(act.subject)} \u00b7 ${escape(act.at.slice(0, 16).replace("T", " "))}</p>`).join("\n"),
+          approverView && one.revokedAt === null && one.name !== who.name
+            ? `<form method="post" action="/people/revoke" class="row">` +
+              `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="name" value="${escape(one.name)}">` +
+              `<label>your password<input type="password" name="token" autocomplete="current-password"></label>` +
+              `<button type="submit">remove ${escape(one.name)}'s sign-in</button>` +
+              `<span class="meta">ends their access and everything it signed \u2014 history stays</span></form>`
+            : "",
+          `</div>`,
+        ].join("\n");
+      });
+      const invites = approverView ? store.openInvites(now) : [];
+      const inviteRows = invites.map(one =>
+        `<p class="row">${escape(one.role)} invite \u00b7 from ${personChip(one.mintedBy)} \u00b7 expires ${escape(one.expiresAt.slice(0, 16).replace("T", " "))}${one.attempts > 0 ? ` \u00b7 ${one.attempts} failed attempt${one.attempts === 1 ? "" : "s"}` : ""}` +
+        ` <form method="post" action="/people/invite-revoke" style="display:inline">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}">` +
+        `<label>password <input type="password" name="token" autocomplete="current-password" style="width:8rem"></label>` +
+        `<button type="submit">cancel it</button></form></p>`,
+      );
+      const inviteCard = !approverView
+        ? ""
+        : [
+            `<div class="card">`,
+            `<h2 style="margin-top:0">invite someone</h2>`,
+            inviteRows.length === 0 ? `<p class="meta">no open invites</p>` : inviteRows.join("\n"),
+            `<form method="post" action="/people/invite" class="row">`,
+            `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+            `<label>they can<select name="role"><option value="viewer">watch everything</option><option value="approver">approve and act</option></select></label>`,
+            `<label>your password<input type="password" name="token" autocomplete="current-password"></label>`,
+            `<button type="submit">make an invite link</button>`,
+            `<span class="meta">single-use, expires in 72 hours</span>`,
+            `</form>`,
+            `</div>`,
+          ].join("\n");
+      return sendScreen(
+        response,
+        200,
+        screen("people", [`<h1>people</h1>`, ...cards, inviteCard].join("\n"), {
+          chrome: chromeFor(project, "people"),
+        }),
+      );
+    }
+
     if (url.pathname === "/system") {
       const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
       void since;
@@ -954,7 +1109,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         200,
         systemPage(chromeFor(project, "system"), {
-          agents: (["plan", "build", "repair"] as const).map(phase => {
+          agents: (["plan", "build", "repair", "review"] as const).map(phase => {
             const answer = resolvePhaseAgent(store, phase, project, {});
             const row =
               (project === null ? null : store.phaseConfig(project, phase)) ??
@@ -1135,6 +1290,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ["/system", "system", "workers, providers, and grants"],
           ["/caps", "requirements", "tools and credentials builds need"],
           ["/projects", "switch project", "open another enrolled repository"],
+          ["/people", "people", "who can sign in, and what they have done"],
           ["/settings", "settings", "alerts, messaging, credentials"],
         ] as const
       )
@@ -2918,6 +3074,68 @@ export function createDecisionServer(options: ServeOptions): Server {
         { chrome: chromeFor(projectOf(who, request) ?? null, "fleet"), forceSensitive: true },
       );
       return sendScreen(response, 200, tokenScreen);
+    }
+
+    if (url.pathname === "/people/invite") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "inviting is a browser surface");
+      const token = body.get("token") ?? "";
+      // RAISING authority is a password ceremony (the doctrine): adding a
+      // person to the instance is exactly that.
+      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        return refuse(response, who, 403, "making an invite takes your password, typed again", "/people");
+      }
+      const role = body.get("role") === "approver" ? ("approver" as const) : ("viewer" as const);
+      const minted = store.mintInvite(role, who.name, now);
+      const origin = options.publicUrl !== undefined ? options.publicUrl.replace(/\/$/, "") : `http://${request.headers.host ?? "this-console"}`;
+      const linkScreen = screen(
+        "people",
+        [
+          `<h1>people</h1>`,
+          `<div class="card">`,
+          `<h2 style="margin-top:0">the invite link \u2014 shown once</h2>`,
+          `<p class="mono" style="overflow-wrap:anywhere">${escape(`${origin}/join/${minted.token}`)}</p>`,
+          `<p class="meta">send it to ONE person. It works once, lets them ${role === "approver" ? "approve and act" : "watch everything"}, and dies ${escape(minted.expiresAt.slice(0, 16).replace("T", " "))} UTC. Cancel it any time from the people screen.</p>`,
+          `</div>`,
+          `<p class="meta"><a href="/people">back to people</a></p>`,
+        ].join("\n"),
+        // A one-time secret on screen: no script of any kind rides along.
+        { chrome: chromeFor(projectOf(who, request) ?? null, "people"), forceSensitive: true },
+      );
+      return sendScreen(response, 200, linkScreen);
+    }
+
+    if (url.pathname === "/people/invite-revoke") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "inviting is a browser surface");
+      const token = body.get("token") ?? "";
+      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        return refuse(response, who, 403, "cancelling an invite takes your password, typed again", "/people");
+      }
+      const id = Number(body.get("id") ?? "");
+      const revoked = Number.isInteger(id) && id > 0 && store.revokeInvite(id, now);
+      return redirect(response, `/people?said=${encodeURIComponent(revoked ? "the invite is cancelled — its link is dead" : "that invite was already gone")}`);
+    }
+
+    if (url.pathname === "/people/revoke") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "removing a person is a browser surface");
+      const token = body.get("token") ?? "";
+      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        return refuse(response, who, 403, "removing a person takes your password, typed again", "/people");
+      }
+      const name = (body.get("name") ?? "").trim();
+      const severed = store.revokeAccount(name, who.name, now);
+      if (!severed.ok) {
+        const words =
+          severed.reason === "last-approver"
+            ? "that is the last account that can approve — add another approver first"
+            : severed.reason === "already-revoked"
+              ? `${name} is already removed`
+              : `no account \u0060${name}\u0060`;
+        return refuse(response, who, severed.reason === "last-approver" ? 409 : 404, words, "/people");
+      }
+      return redirect(
+        response,
+        `/people?said=${encodeURIComponent(`${name} can no longer sign in — their sessions, invites, and signed modes ended with them; history stays`)}`,
+      );
     }
 
     if (url.pathname === "/fleet/runner/retire") {
@@ -5234,7 +5452,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; bo
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "menu" | "none";
+  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "menu" | "none";
   project: string | null;
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
@@ -5648,6 +5866,44 @@ function shell(
 }
 
 
+/** ONE way a person is named on any surface (U3): the same chip everywhere. */
+function personChip(name: string): string {
+  return `<span class="mono">${escape(name)}</span>`;
+}
+
+/** The invite's front door: cookie-free, script-free, sensitive by shape.
+ * Rendered only for a LIVE token — everything dead gets joinDeadPage. */
+function joinFormPage(token: string, problem: string | null, name: string): string {
+  return shell("join", [
+    `<div class="login-viewport"><div class="login-shell">`,
+    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
+    `<p class="meta hint">you were invited \u2014 pick a name and a password to sign in</p>`,
+    `<div class="login-card">`,
+    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
+    `<form method="post" action="/join/${escape(token)}">`,
+    `<label>username<input type="text" name="name" autocomplete="username" value="${escape(name)}" autofocus></label>`,
+    `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
+    `<button type="submit">create my sign-in</button>`,
+    "</form>",
+    `</div>`,
+    `<p class="login-foot">this link works once, for you.</p>`,
+    `</div></div>`,
+  ].join("\n"), { nav: false });
+}
+
+/** Unknown, expired, revoked, consumed, attempts spent: ONE page (D6). */
+function joinDeadPage(): string {
+  return shell("join", [
+    `<div class="login-viewport"><div class="login-shell">`,
+    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
+    `<div class="login-card">`,
+    `<p>this invite link is not usable.</p>`,
+    `<p class="meta">links work once and expire \u2014 ask the person who invited you for a fresh one.</p>`,
+    `</div>`,
+    `</div></div>`,
+  ].join("\n"), { nav: false });
+}
+
 function loginPage(problem: string | null): string {
   return shell("standing-orders", [
     `<div class="login-viewport"><div class="login-shell">`,
@@ -5833,7 +6089,7 @@ function inboxPage(chrome: Chrome, data: {
 /** System: the machinery — workers, background service, workspaces. */
 function systemPage(chrome: Chrome, data: {
   agents: {
-    phase: "plan" | "build" | "repair";
+    phase: "plan" | "build" | "repair" | "review";
     provider?: string;
     model?: string | null;
     source?: "pinned" | "flag" | "project" | "installation" | "default";

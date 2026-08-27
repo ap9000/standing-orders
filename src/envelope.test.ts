@@ -154,6 +154,7 @@ describe("the machine envelope", () => {
       routine: ["list", "--json"],
       config: ["show", "--json"],
       mode: ["show", "--repo", "/nope", "--json"],
+      people: ["list", "--json"],
       setup: ["show", "--json"],
       intake: ["show", "--json"],
       providers: ["--json"],

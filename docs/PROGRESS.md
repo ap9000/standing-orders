@@ -1,5 +1,41 @@
 # Progress
 
+**2026-08-27 — Modes arc, layer 6 of 7: invites and People.** The
+instance learns to hold more than one person, without a single new
+authority road. THE JOIN DOOR (D6/E3): `people invite` (CLI) and the
+People screen's password ceremony mint a single-use link — 128-bit
+token, sha256 stored, role PINNED at mint ('viewer' watches everything
+and can act on nothing; the central gate and authenticateApprover
+already spoke viewer), 72-hour expiry, revocable. `/join/<token>`
+answers before authentication, cookie-free and script-free; every dead
+shape — unknown, expired, revoked, consumed, attempts spent — is ONE
+indistinguishable page, and only a LIVE token earns real words (name
+taken, weak password). Submissions meter ADMITTED attempts: one atomic
+UPDATE spends the slot BEFORE scrypt runs, the door dies at ten, and
+nothing refunds; a per-process bucket (30 per 10 minutes across all
+invites) makes brute force pay in time before any token is looked up.
+The commit is one transaction — invite CAS + unique-name account insert
++ pinned role — and the session cookie mints only after it. THE
+SEVERING REVOCATION (D7): `people revoke` / the People screen's
+password ceremony stamps revoked_at/revoked_by, bumps the credential
+generation (live cookies die at their next lookup — the session table
+already re-proves generation per hit; bearers die at
+authenticateAccount), closes their open attended authorizations,
+revokes their unconsumed invites, revokes every mode THEY signed with
+the typed 'signer-revoked' event — each demoting its derived merge
+authority through the one reconciliation road — and sweeps Telegram +
+push bindings. The last active approver cannot be removed; history is
+never rewritten. THE PEOPLE SCREEN: approvers see everyone — standing,
+live sessions, open watched tasks, recent acts read from the rows that
+were already author-stamped (approvals, decisions, steers, mode events,
+merge unblocks — no new event kinds), open invites with failed-attempt
+counts; a viewer sees exactly themselves. Merge blocker lifts became
+stamps (lifted_at/lifted_by) so "who unblocked which merge" has rows to
+stand on — and a later repair can block the same publication again. The
+review phase joined the /system agents card. Eleven-test suite, store
+and real HTTP. Suite 1347.
+
+
 **2026-08-27 — Layer 5 verify closed: the upgrade fails closed.** Codex
 round 2 on the hardening: APPROVE-WITH-CHANGES, every round-1 closure
 verified (the patch re-proof, the typed authority columns with the

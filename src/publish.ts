@@ -372,7 +372,7 @@ export async function observeChecks(
         report.resolved += store.resolveCiEpisodes(publication.githubRepo, publication.prNumber as number, null, clock());
         // A closed PR moots its merge blocker and supersedes its intent —
         // and its person-needed episode (arc 3 finding 23).
-        store.liftMergeBlocker(publication.id);
+        store.liftMergeBlocker(publication.id, "the-remote", clock());
         store.resolveEpisodes(`merge-attn:${publication.id}`, clock());
         const intent = store.mergeIntentFor(publication.id);
         if (intent !== null && ["pending", "claimed", "waiting-human", "firing"].includes(intent.state)) {

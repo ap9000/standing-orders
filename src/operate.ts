@@ -447,6 +447,7 @@ export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
 export const APPROVER_ACTIONS = ["list", "add"] as const;
 export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "pause", "resume", "run-now"] as const;
 export const CONTEST_ACTIONS = ["show", "exclude"] as const;
+export const PEOPLE_ACTIONS = ["list", "invite", "revoke"] as const;
 
 /**
  * The GLOBAL flag vocabulary (exported for the command guide's drift
@@ -464,7 +465,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "stop-grace", "title", "name",
-  "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
+  "label", "reviewers", "limit", "role", "weekly-usd", "daily-turns", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
@@ -678,6 +679,8 @@ async function dispatch(
       return configCommand(positional, flags, context);
     case "mode":
       return modeCommand(positional, flags, context);
+    case "people":
+      return peopleCommand(positional, flags, context);
     case "setup":
       return setupCommand(positional, flags, context);
     case "intake":
@@ -3734,6 +3737,87 @@ async function providersCommand(
  * anything that can run a shell reroute every future build. Rows are
  * complete pairs; `show` prints what each phase actually resolves to.
  */
+/**
+ * `standing-orders people …` — who can sign in, and the doors in (v29,
+ * U2/U3/D7). `invite` mints the single-use join link (approver-only, no
+ * escalation road exists: the role is pinned at mint); `revoke` is the
+ * severing act — sessions, invites, and the modes they signed all end,
+ * history stays. The last active approver cannot be removed.
+ */
+async function peopleCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [action, ...rest] = positional;
+  if (action === undefined || !(PEOPLE_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "people", "usage", `unknown \`people ${action ?? ""}\` — try ${PEOPLE_ACTIONS.join(", ")}`, EXIT.usage);
+  }
+
+  if (action === "list") {
+    const accounts = store.accountFacts();
+    const invites = store.openInvites(clock());
+    if (json) {
+      write(envelopeJson({ ok: true, command: "people list", accounts, invites }));
+      return EXIT.ok;
+    }
+    if (accounts.length === 0) {
+      write("Nobody yet — `standing-orders approver add <name>` bootstraps the first.");
+      return EXIT.ok;
+    }
+    for (const one of accounts) {
+      const standing = one.revokedAt !== null ? `revoked ${one.revokedAt.slice(0, 10)} by ${one.revokedBy ?? "?"}` : one.role === "approver" ? "approves" : "watches";
+      write(`  ${one.name.padEnd(20)} ${standing.padEnd(28)} joined ${one.addedAt.slice(0, 10)}`);
+    }
+    for (const one of invites) {
+      write(`  (invite)             ${one.role} invite from ${one.mintedBy}, expires ${one.expiresAt.slice(0, 16).replace("T", " ")}`);
+    }
+    return EXIT.ok;
+  }
+
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, `people ${action}`, "usage", `\`standing-orders people ${action} … --as <you> --token <t>\``, EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, `people ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, acting.name), EXIT.refused);
+  }
+
+  if (action === "invite") {
+    const roleFlag = text(flags, "role") ?? "viewer";
+    if (roleFlag !== "viewer" && roleFlag !== "approver") {
+      return fail(write, json, "people invite", "usage", "--role viewer|approver (viewer is the default)", EXIT.usage);
+    }
+    const minted = store.mintInvite(roleFlag, acting.name, clock());
+    return succeed(write, json, "people invite", { role: roleFlag, path: `/join/${minted.token}`, expiresAt: minted.expiresAt }, () => [
+      `The invite link's path — shown once, single-use, ${roleFlag === "approver" ? "they can approve and act" : "they can watch everything"}:`,
+      `  /join/${minted.token}`,
+      `Open it on this console's address. It dies ${minted.expiresAt.slice(0, 16).replace("T", " ")} UTC, or when you cancel it on the people screen.`,
+    ]);
+  }
+
+  const [name] = rest;
+  if (name === undefined || name.trim() === "") {
+    return fail(write, json, "people revoke", "usage", "`standing-orders people revoke <name> --as <you> --token <t>`", EXIT.usage);
+  }
+  const severed = store.revokeAccount(name.trim(), acting.name, clock());
+  if (!severed.ok) {
+    const words =
+      severed.reason === "last-approver"
+        ? "that is the last account that can approve — add another approver first"
+        : severed.reason === "already-revoked"
+          ? `${name} is already removed`
+          : `no account \`${name}\``;
+    return fail(write, json, "people revoke", severed.reason, words, EXIT.refused);
+  }
+  return succeed(write, json, "people revoke", { name: name.trim(), ...severed }, () => [
+    `${name.trim()} can no longer sign in. Their open sessions, invites, and the ${severed.modesRevoked} mode(s) they signed ended with them.`,
+    "Everything they ever approved or decided stays in the ledger, under their name.",
+  ]);
+}
+
 const MODE_ACTIONS = ["set", "show", "revoke"] as const;
 
 async function modeCommand(
@@ -6410,7 +6494,7 @@ async function publishCommand(
       return fail(write, json, `publish ${action}`, "unknown", `no open publication holds PR #${pr}`, EXIT.refused);
     }
     if (action === "unblock") {
-      const lifted = store.liftMergeBlocker(publication.id);
+      const lifted = store.liftMergeBlocker(publication.id, acting.name, context.clock());
       store.resolveEpisodes(`merge-attn:${publication.id}`, context.clock());
       return succeed(write, json, "publish unblock", { pr, lifted }, () => [
         lifted

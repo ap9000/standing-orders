@@ -26,7 +26,7 @@
  * nobody has designed yet is a column that will be wrong when they do.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -5562,6 +5562,229 @@ export class Store {
       .map(row => ({ name: String(row["name"]), addedAt: String(row["added_at"]) }));
   }
 
+  // ---- invites + people (v29, U1-U3/D6/D7) --------------------------------
+
+  /** Every account with its standing — the People screen's spine. History
+   * is immutable: a revoked person's rows stay attributed forever. */
+  accountFacts(): { name: string; role: "approver" | "viewer"; addedAt: string; revokedAt: string | null; revokedBy: string | null }[] {
+    return this.db
+      .prepare("SELECT name, role, added_at, revoked_at, revoked_by FROM approver ORDER BY name")
+      .all()
+      .map(row => ({
+        name: String(row["name"]),
+        role: String(row["role"]) as "approver" | "viewer",
+        addedAt: String(row["added_at"]),
+        revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
+        revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
+      }));
+  }
+
+  /** A single-use door into the instance (U2): 128-bit token, sha256
+   * stored, role pinned at mint, 72 hours. Only the caller's own
+   * authentication gates this — an approver mints; a viewer cannot. */
+  mintInvite(role: "approver" | "viewer", mintedBy: string, now: Date, token: () => string = () => randomBytes(16).toString("base64url")): { token: string; id: number; expiresAt: string } {
+    const value = token();
+    const expiresAt = new Date(now.getTime() + 72 * 60 * 60_000).toISOString();
+    const inserted = this.db
+      .prepare("INSERT INTO invite (token_hash, role, minted_by, minted_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+      .run(createHash("sha256").update(value, "utf8").digest("hex"), role, mintedBy, now.toISOString(), expiresAt);
+    return { token: value, id: Number(inserted.lastInsertRowid), expiresAt };
+  }
+
+  /** Liveness WITHOUT spending an attempt — what the GET page renders on.
+   * Every dead shape (unknown, expired, revoked, consumed) is the same
+   * false: the disclosure boundary is one indistinguishable page (D6). */
+  inviteIsLive(tokenValue: string, now: Date): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 AS hit FROM invite WHERE token_hash = ? AND revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ? AND attempts < 10",
+      )
+      .get(createHash("sha256").update(tokenValue, "utf8").digest("hex"), now.toISOString());
+    return row !== undefined;
+  }
+
+  /**
+   * E3: submissions meter ADMITTED attempts, never refunds. One atomic
+   * UPDATE spends the slot BEFORE the KDF runs — the eleventh concurrent
+   * submission gets the indistinguishable terminal page without ever
+   * reaching scrypt, and neither success nor failure gives it back.
+   */
+  admitInviteAttempt(tokenValue: string, now: Date): { role: "approver" | "viewer"; mintedBy: string } | null {
+    const row = this.db
+      .prepare(
+        `UPDATE invite SET attempts = attempts + 1
+          WHERE token_hash = ? AND revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ? AND attempts < 10
+          RETURNING role, minted_by`,
+      )
+      .get(createHash("sha256").update(tokenValue, "utf8").digest("hex"), now.toISOString());
+    return row === undefined
+      ? null
+      : { role: String(row["role"]) as "approver" | "viewer", mintedBy: String(row["minted_by"]) };
+  }
+
+  /**
+   * The join commit (D6): consume the invite AND create the account in
+   * ONE transaction — the CAS on consumed_at is the single winner under
+   * concurrent submissions, the name's uniqueness is proved in the same
+   * breath, and the role is the PINNED one from mint, never a request
+   * parameter. The caller runs scrypt before calling; the session cookie
+   * mints only after this commits.
+   */
+  consumeInviteAndCreateAccount(
+    args: { tokenValue: string; name: string; credentialHash: string },
+    now: Date,
+  ): { ok: true; role: "approver" | "viewer" } | { ok: false; reason: "gone" | "name-taken" } {
+    return this.transact(() => {
+      const taken = this.db.prepare("SELECT 1 AS hit FROM approver WHERE name = ?").get(args.name);
+      if (taken !== undefined) return { ok: false as const, reason: "name-taken" as const };
+      const consumed = this.db
+        .prepare(
+          `UPDATE invite SET consumed_by = ?, consumed_at = ?
+            WHERE token_hash = ? AND revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ?
+            RETURNING role`,
+        )
+        .get(args.name, now.toISOString(), createHash("sha256").update(args.tokenValue, "utf8").digest("hex"), now.toISOString());
+      if (consumed === undefined) return { ok: false as const, reason: "gone" as const };
+      const role = String(consumed["role"]) as "approver" | "viewer";
+      this.db
+        .prepare("INSERT INTO approver (name, credential_hash, added_at, role, generation) VALUES (?, ?, ?, ?, 1)")
+        .run(args.name, args.credentialHash, now.toISOString(), role);
+      return { ok: true as const, role };
+    });
+  }
+
+  /** The open invites — the People screen's and the CLI's list. Hashes
+   * never leave the store; an invite is named by its row id. */
+  openInvites(now: Date): { id: number; role: "approver" | "viewer"; mintedBy: string; mintedAt: string; expiresAt: string; attempts: number }[] {
+    return this.db
+      .prepare(
+        "SELECT id, role, minted_by, minted_at, expires_at, attempts FROM invite WHERE revoked_at IS NULL AND consumed_at IS NULL AND expires_at > ? ORDER BY id",
+      )
+      .all(now.toISOString())
+      .map(row => ({
+        id: Number(row["id"]),
+        role: String(row["role"]) as "approver" | "viewer",
+        mintedBy: String(row["minted_by"]),
+        mintedAt: String(row["minted_at"]),
+        expiresAt: String(row["expires_at"]),
+        attempts: Number(row["attempts"]),
+      }));
+  }
+
+  revokeInvite(id: number, now: Date): boolean {
+    return (
+      Number(
+        this.db
+          .prepare("UPDATE invite SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL AND consumed_at IS NULL")
+          .run(now.toISOString(), id).changes,
+      ) > 0
+    );
+  }
+
+  /**
+   * The revocation that actually severs (D7), one transaction: the stamp
+   * plus a generation bump (live console sessions die at their next
+   * lookup; bearer credentials die at authenticateAccount), their open
+   * attended authorizations close, their unconsumed invites die, every
+   * mode THEY signed is revoked with the typed 'signer-revoked' event —
+   * demoting its derived merge authority through the one reconciliation
+   * road — and the derived-authority sweep clears Telegram and push.
+   * History is untouched: revocation ends capability, never rewrites the
+   * ledger. Removing the LAST active approver is refused — an instance
+   * nobody can approve into is a brick, not a posture.
+   */
+  revokeAccount(
+    name: string,
+    by: string,
+    now: Date,
+  ):
+    | { ok: true; modesRevoked: number; authorizationsClosed: number; invitesRevoked: number }
+    | { ok: false; reason: "unknown" | "already-revoked" | "last-approver" } {
+    return this.transact(() => {
+      const account = this.db.prepare("SELECT role, revoked_at FROM approver WHERE name = ?").get(name);
+      if (account === undefined) return { ok: false as const, reason: "unknown" as const };
+      if (account["revoked_at"] !== null) return { ok: false as const, reason: "already-revoked" as const };
+      if (String(account["role"]) === "approver") {
+        const others = this.db
+          .prepare("SELECT COUNT(*) AS n FROM approver WHERE role = 'approver' AND revoked_at IS NULL AND name <> ?")
+          .get(name);
+        if (Number(others?.["n"] ?? 0) === 0) return { ok: false as const, reason: "last-approver" as const };
+      }
+      const stamp = now.toISOString();
+      this.db
+        .prepare("UPDATE approver SET revoked_at = ?, revoked_by = ?, generation = generation + 1 WHERE name = ?")
+        .run(stamp, by, name);
+      const closed = this.db
+        .prepare("UPDATE attended_authorization SET closed_at = ?, end_reason = 'approver-revoked' WHERE approver = ? AND closed_at IS NULL")
+        .run(stamp, name);
+      const invites = this.db
+        .prepare("UPDATE invite SET revoked_at = ? WHERE minted_by = ? AND revoked_at IS NULL AND consumed_at IS NULL")
+        .run(stamp, name);
+      // Modes they signed die with them — and every intent that derived
+      // merge authority from those signatures demotes through the ONE
+      // reconciliation road, exactly as an explicit revocation would.
+      const modes = this.db
+        .prepare("SELECT id, repo FROM operating_mode WHERE signed_by = ? AND revoked_at IS NULL")
+        .all(name);
+      for (const mode of modes) {
+        this.db
+          .prepare("UPDATE operating_mode SET revoked_at = ?, revoked_by = ?, revoke_reason = 'signer-revoked' WHERE id = ?")
+          .run(stamp, by, Number(mode["id"]));
+        this.db
+          .prepare("INSERT INTO operating_mode_event (mode, kind, actor, at) VALUES (?, 'signer-revoked', ?, ?)")
+          .run(Number(mode["id"]), by, stamp);
+        this.reconcileIntentsForMode(String(mode["repo"]), null, now);
+      }
+      this.revokeDerivedAuthority(name, by, now);
+      return {
+        ok: true as const,
+        modesRevoked: modes.length,
+        authorizationsClosed: Number(closed.changes),
+        invitesRevoked: Number(invites.changes),
+      };
+    });
+  }
+
+  /** One person's open attended sessions, for their People card. */
+  openAttendedOf(name: string): { taskId: string; createdAt: string; lastBeatAt: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT task_ref.external_id AS taskId, aa.created_at, aa.last_beat_at
+           FROM attended_authorization aa JOIN task_ref ON task_ref.id = aa.task_ref
+          WHERE aa.approver = ? AND aa.closed_at IS NULL ORDER BY aa.created_at DESC`,
+      )
+      .all(name)
+      .map(row => ({
+        taskId: String(row["taskId"]),
+        createdAt: String(row["created_at"]),
+        lastBeatAt: row["last_beat_at"] === null ? null : String(row["last_beat_at"]),
+      }));
+  }
+
+  /**
+   * One person's recent consequential acts (U3), from the rows that were
+   * ALREADY author-stamped — no new event kinds, just the ledger asked a
+   * new question. Bounded and newest-first.
+   */
+  recentActsOf(name: string, limit = 8): { kind: string; subject: string; at: string }[] {
+    return this.db
+      .prepare(
+        `SELECT kind, subject, at FROM (
+           SELECT 'approved' AS kind, task_id AS subject, approved_at AS at FROM task_scope WHERE approved_by = ? AND approved_at IS NOT NULL
+           UNION ALL
+           SELECT 'decided', COALESCE((SELECT external_id FROM task_ref JOIN run ON run.task_ref = task_ref.id WHERE run.id = decision.run), ''), answered_at FROM decision WHERE answered_by = ? AND answered_at IS NOT NULL
+           UNION ALL
+           SELECT 'steered', (SELECT external_id FROM task_ref WHERE task_ref.id = task_steer.task_ref), created_at FROM task_steer WHERE author = ?
+           UNION ALL
+           SELECT 'mode ' || kind, (SELECT repo FROM operating_mode WHERE operating_mode.id = operating_mode_event.mode), at FROM operating_mode_event WHERE actor = ?
+           UNION ALL
+           SELECT 'merge unblocked', COALESCE(task_id, ''), lifted_at FROM merge_blocker WHERE lifted_by = ? AND lifted_at IS NOT NULL
+         ) WHERE at IS NOT NULL ORDER BY at DESC LIMIT ?`,
+      )
+      .all(name, name, name, name, name, limit)
+      .map(row => ({ kind: String(row["kind"]), subject: String(row["subject"] ?? ""), at: String(row["at"]) }));
+  }
+
   // ---- runners ------------------------------------------------------------
 
   saveRunner(runner: Runner, credentialHash: string, mutation: Mutation = {}): void {
@@ -10390,14 +10613,24 @@ export class Store {
   }
 
   mergeBlockerFor(publication: number): { reason: string; taskId: string | null; createdAt: string } | null {
-    const row = this.db.prepare("SELECT reason, task_id, created_at FROM merge_blocker WHERE publication = ?").get(publication);
+    const row = this.db
+      .prepare("SELECT reason, task_id, created_at FROM merge_blocker WHERE publication = ? AND lifted_at IS NULL")
+      .get(publication);
     return row === undefined
       ? null
       : { reason: String(row["reason"]), taskId: row["task_id"] === null ? null : String(row["task_id"]), createdAt: String(row["created_at"]) };
   }
 
-  liftMergeBlocker(publication: number): boolean {
-    return Number(this.db.prepare("DELETE FROM merge_blocker WHERE publication = ?").run(publication).changes) > 0;
+  /** Lifting is a STAMP, never a delete (D7): the People screen's history
+   * claim — who unblocked which merge — has rows to stand on. */
+  liftMergeBlocker(publication: number, by: string, now: Date): boolean {
+    return (
+      Number(
+        this.db
+          .prepare("UPDATE merge_blocker SET lifted_at = ?, lifted_by = ? WHERE publication = ? AND lifted_at IS NULL")
+          .run(now.toISOString(), by, publication).changes,
+      ) > 0
+    );
   }
 
   /** Creation binds the AUTHORITY POSTURE the repo holds right now (E1's
