@@ -523,6 +523,42 @@ export function authenticateApprover(
   return { ok: true };
 }
 
+/**
+ * C1's atomic road: file the scope AND seal its approval in ONE
+ * transaction, under a mode the SAME transaction re-proves. The caller
+ * has already authenticated the actor and matched channel rules; this
+ * function owns the predicate's transactional half — mode active, actor
+ * IS the signer, repo matches, and the sealed digest is the filed one
+ * (trivially true here: they are the same transaction). Never
+ * sealScopeApproval after a filing — that was the TOCTOU.
+ */
+export function fileAndSealUnderMode(
+  store: Store,
+  input: ScopeInput & { repo: string | null; actor: string },
+): { ok: true; scope: Scope; basis: "mode" } | { ok: false; reason: "no-mode" | "not-signer" | "not-covered" } {
+  return store.transact(() => {
+    const mode = input.repo === null ? null : store.activeMode(input.repo, input.now);
+    if (mode === null) return { ok: false as const, reason: "no-mode" as const };
+    if (mode.signedBy !== input.actor) return { ok: false as const, reason: "not-signer" as const };
+    let autoApprove = false;
+    let defaultBudget: number | null = null;
+    try {
+      const terms = JSON.parse(mode.termsJson) as { autoApproveFiling?: unknown; perAttemptBudgetMicrousd?: unknown };
+      autoApprove = terms.autoApproveFiling === true;
+      defaultBudget = typeof terms.perAttemptBudgetMicrousd === "number" ? terms.perAttemptBudgetMicrousd : null;
+    } catch {
+      autoApprove = false;
+    }
+    if (!autoApprove) return { ok: false as const, reason: "not-covered" as const };
+    const scope = propose(store, {
+      ...input,
+      ...(input.budgetMicrousd == null && defaultBudget !== null ? { budgetMicrousd: defaultBudget } : {}),
+    });
+    store.sealScopeApproval(input.taskId, input.actor, input.now, input.mutation ?? {}, { kind: "mode", modeDigest: mode.digest });
+    return { ok: true as const, scope: store.getScope(input.taskId) as Scope, basis: "mode" as const };
+  });
+}
+
 export function approve(
   store: Store,
   taskId: string,

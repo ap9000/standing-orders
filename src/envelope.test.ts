@@ -153,6 +153,7 @@ describe("the machine envelope", () => {
       reconcile: ["--json"],
       routine: ["list", "--json"],
       config: ["show", "--json"],
+      mode: ["show", "--repo", "/nope", "--json"],
       setup: ["show", "--json"],
       intake: ["show", "--json"],
       providers: ["--json"],

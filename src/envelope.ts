@@ -55,6 +55,8 @@ export const DOCUMENTED_REASONS: readonly string[] = [
   "contest-open", //      a tournament is running; a person picks
   "all-lanes-raceable", // every compared agent could hold a real budget — race them instead
   "provider-unattested", // the provider binary is outside its attested range
+  "daily-runs", //        the active mode's daily run cap is spent
+  "daily-dollars", //     the active mode's daily measured-spend rail is reached
   "steering-pending", //  a steering note is waiting; contests refuse
   "not-ready", //         blocked, held, or otherwise not dispatchable
   "not-leased", //        the lease does not exist or already ended

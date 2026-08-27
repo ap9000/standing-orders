@@ -1,5 +1,36 @@
 # Progress
 
+**2026-08-27 — Modes arc, layer 3 of 7: operating modes and the daily
+rails.** The heart of the arc — the signed envelope itself. src/modes.ts
+owns the terms (permission default, auto-approve, quick-mint,
+review-auto, per-attempt budget, the two daily rails, publication
+posture), a domain-separated 32-hex digest, strict rehydration, and
+every term IN WORDS — including the reversal sentence verbatim ("your
+signed-in browser session becomes a spend credential for this
+repository"). Two presets (standard, hands-off) are starting points the
+ceremony renders in full; the signature always covers resolved terms,
+never a label. Store roads: activeMode (unrevoked, unexpired, its
+signer STILL an active approver — D7's belt, so a missed cascade can't
+leave a dead signer's authority alive; expired rows close durably on
+read so the partial unique never wedges a replacement), signMode
+(closes the predecessor + reconciles the repo's nonterminal merge
+intents to the new posture atomically), revokeMode (one click for any
+approver — the v4 doctrine that lowering authority needs no ceremony),
+reconcileIntentsForMode (the ONE F2/R-REVOKE road: automerge rebinds,
+otherwise waiting-human, firing untouched), and reserveModeRail (the
+atomic run-count reservation — two watch loops cannot both slip under
+it — plus the soft measured-dollar rail). scope.ts gains
+fileAndSealUnderMode: file + seal in ONE transaction that re-proves the
+mode, actor==signer, and auto-approve — never sealScopeApproval after a
+filing (the TOCTOU). CLI `mode set/show/revoke` (set is a password
+ceremony refusing automerge without a merge-capable grant; revoke is
+one click). The tick reserves the rail before every ordinary/planner
+start (1) and every tournament admission (terms.n), attended bypassing.
+12-test modes suite; the surface guide, envelope sweep, and CLI router
+all learned the verb. The console filing-route auto-approve wiring and
+the quick-mint/banner/ceremony screens ride layer 7's surfaces. Suite
+1305.
+
 **2026-08-27 — Modes arc, layer 2 of 7: identity splits from
 authority.** `authenticateAccount` returns who a credential belongs to
 and what standing they hold; `authenticateApprover` becomes that plus

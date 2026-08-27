@@ -136,7 +136,8 @@ import {
   validRunnerName,
   RUNNER_NAME_MAX,
 } from "./runner.js";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, type ExecutionProfile } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile } from "./scope.js";
+import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import {
   approveRoutine,
@@ -455,7 +456,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
   "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
   "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
-  "choose", "note", "max-open-decisions", "max-held-sessions", "port", "host", "allow-host",
+  "choose", "note", "max-open-decisions", "max-held-sessions", "name", "days", "publication", "auto-approve", "review-auto", "port", "host", "allow-host",
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
@@ -673,6 +674,8 @@ async function dispatch(
       return routineCommand(positional, flags, context);
     case "config":
       return configCommand(positional, flags, context);
+    case "mode":
+      return modeCommand(positional, flags, context);
     case "setup":
       return setupCommand(positional, flags, context);
     case "intake":
@@ -1896,6 +1899,18 @@ async function tickCommand(
       continue;
     }
 
+    // THE DAILY RAIL (modes chain D4): a live mode's run cap reserves at
+    // admission — atomic, so two watch loops cannot both slip under it.
+    // Attended sessions and raced tasks reserve on their own roads below;
+    // an ordinary/planner start reserves ONE here. No mode = no-op.
+    if (attendedDispatch === null && racedAhead === null && repo !== null) {
+      const railed = store.reserveModeRail(repo, 1, clock());
+      if (!railed.ok) {
+        dispatched.push({ id, outcome: "skipped", reason: railed.rail, detail: railed.detail });
+        continue;
+      }
+    }
+
     const claimed = acquireIfReady(store, ref.id, runner, {
       ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
       now: clock(),
@@ -1949,6 +1964,15 @@ async function tickCommand(
     const raceTerms = racedAhead;
     if (raceTerms !== null && raceTerms.approvedDigest === raceTerms.raceDigest) {
       const admittedKind = raceTerms.kind;
+      // The rail reserves every lane at once (D4) — a tournament is N
+      // starts from one filing. Refused before any skeleton exists.
+      if (repo !== null) {
+        const railedRace = store.reserveModeRail(repo, raceTerms.n, clock());
+        if (!railedRace.ok) {
+          dispatched.push({ id, outcome: "skipped", reason: railedRace.rail, detail: railedRace.detail });
+          continue;
+        }
+      }
       const scopeRow = store.getScope(id);
       const admitted = admitContest(
         store,
@@ -3638,6 +3662,84 @@ async function providersCommand(
  * anything that can run a shell reroute every future build. Rows are
  * complete pairs; `show` prints what each phase actually resolves to.
  */
+const MODE_ACTIONS = ["set", "show", "revoke"] as const;
+
+async function modeCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [action] = positional;
+  if (action === undefined || !(MODE_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "mode", "usage", `unknown \`mode ${action ?? ""}\` — try ${MODE_ACTIONS.join(", ")}`, EXIT.usage);
+  }
+  const repo = text(flags, "repo");
+  if (repo === undefined) {
+    return fail(write, json, "mode", "usage", "`mode` needs --repo <canonical path> — a mode is per-repository", EXIT.usage);
+  }
+  const now = clock();
+
+  if (action === "show") {
+    const mode = store.activeMode(repo, now);
+    if (mode === null) {
+      return succeed(write, json, "mode show", { repo, active: null }, () => [`${repo}: locked — every act keeps its own ceremony (the default).`]);
+    }
+    const terms = modeTermsFromJson(mode.termsJson);
+    return succeed(write, json, "mode show", { repo, active: { name: mode.name, signedBy: mode.signedBy, expiry: mode.absoluteExpiry, digest: mode.digest } }, () => [
+      `${repo}: ${mode.name}, signed by ${mode.signedBy}`,
+      ...(terms === null ? [] : modeWords(terms).map(w => `  ${w}`)),
+      `  → mode revoke --repo ${repo} --as ${mode.signedBy} --token <t>   (or any approver; one click)`,
+    ]);
+  }
+
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "mode", "usage", "signing or revoking a mode takes `--as <you> --token <t>`", EXIT.usage);
+  }
+  const authed = authenticateApprover(store, acting.name, acting.token);
+  if (!authed.ok) {
+    return fail(write, json, "mode", authed.reason, "that is not an active approver, or the token does not match", EXIT.refused);
+  }
+
+  if (action === "revoke") {
+    // Lowering authority is one click for ANY approver (v4 doctrine).
+    const revoked = store.revokeMode(repo, acting.name, "operator", now);
+    if (!revoked) return fail(write, json, "mode revoke", "no-mode", `${repo} has no active mode`, EXIT.refused);
+    return succeed(write, json, "mode revoke", { repo }, () => [`${repo}: mode revoked. Every act it covered falls back to its own ceremony; running work is untouched.`]);
+  }
+
+  // set: RAISING authority — the password ceremony above already ran.
+  const nameGiven = text(flags, "name") ?? "standard";
+  if (nameGiven !== "standard" && nameGiven !== "hands-off") {
+    return fail(write, json, "mode set", "usage", "--name is standard or hands-off", EXIT.usage);
+  }
+  const daysGiven = Number(text(flags, "days") ?? "1");
+  if (!Number.isInteger(daysGiven) || daysGiven < 1 || daysGiven > MODE_MAX_DAYS) {
+    return fail(write, json, "mode set", "usage", `--days is 1 to ${MODE_MAX_DAYS} (a mode always expires)`, EXIT.usage);
+  }
+  const expiry = new Date(now.getTime() + daysGiven * 24 * 60 * 60_000).toISOString();
+  const terms = presetTerms(nameGiven as ModeName, expiry);
+  // Explicit term overrides ride the same flags (all optional):
+  if (text(flags, "publication") === "automerge") terms.publication = "automerge";
+  if (text(flags, "publication") === "notify") terms.publication = "notify";
+  if (flag(flags, "auto-approve")) terms.autoApproveFiling = true;
+  if (flag(flags, "review-auto")) terms.reviewAuto = true;
+  // Automerge requires a live merge-capable grant on the repo (D1).
+  if (terms.publication === "automerge" && !store.hasMergeCapableGrant(repo, now)) {
+    return fail(write, json, "mode set", "no-grant", "automerge needs a merge-capable publication grant on this repo — file one first", EXIT.refused);
+  }
+  const digest = modeDigestOf(terms);
+  const id = store.signMode(
+    { repo, name: nameGiven, termsJson: modeTermsJson(terms), digest, signedBy: acting.name, absoluteExpiry: expiry, publication: terms.publication },
+    now,
+  );
+  return succeed(write, json, "mode set", { repo, id, digest, terms }, () => [
+    `${repo}: ${nameGiven} mode signed by ${acting.name}, until ${expiry.slice(0, 16).replace("T", " ")}.`,
+    ...modeWords(terms).map(w => `  ${w}`),
+  ]);
+}
+
 async function configCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
@@ -7864,6 +7966,10 @@ function fail(
 function text(flags: Map<string, string | true>, name: string): string | undefined {
   const value = flags.get(name);
   return typeof value === "string" ? value : undefined;
+}
+
+function flag(flags: Map<string, string | true>, name: string): boolean {
+  return flags.get(name) === true || flags.get(name) === "true";
 }
 
 /** A running tournament owns its task (round-1 finding 5): the generic

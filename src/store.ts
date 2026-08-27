@@ -5212,17 +5212,18 @@ export class Store {
    * approved profile — one UPDATE, no re-resolution, so what is sealed is
    * exactly what the signed digest was bound to. Returns false when the
    * scope vanished mid-ceremony. */
-  sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}): boolean {
+  sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}, basis?: { kind: "mode"; modeDigest: string }): boolean {
     return (
       this.once(mutation, "sealScopeApproval", () => {
         const changed = this.db
           .prepare(
             `UPDATE task_scope
                 SET approved_at = ?, approved_by = ?, approved_digest = digest,
-                    approved_profile_json = profile_json
+                    approved_profile_json = profile_json,
+                    approval_basis = ?, mode_digest = ?
               WHERE task_id = ?`,
           )
-          .run(now.toISOString(), by, taskId);
+          .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis === undefined ? null : basis.modeDigest, taskId);
         return changed.changes > 0;
       }) === true
     );
@@ -5269,6 +5270,182 @@ export class Store {
       generation: Number(row["generation"]),
       revokedAt: row["revoked_at"] === null || row["revoked_at"] === undefined ? null : String(row["revoked_at"]),
     };
+  }
+
+  // ---- operating modes (v29, the modes chain) ---------------------------
+
+  /** The live mode for a repo: unrevoked, unexpired, its SIGNER still an
+   * active approver (D7's belt — a missed cascade cannot leave a dead
+   * signer's authority alive). Expired-but-unrevoked rows are closed here,
+   * durably, so the partial unique can never wedge a replacement. */
+  activeMode(repo: string, now: Date): { id: number; name: string; termsJson: string; digest: string; signedBy: string; absoluteExpiry: string } | null {
+    const row = this.db
+      .prepare(
+        `SELECT operating_mode.* FROM operating_mode
+          JOIN approver ON approver.name = operating_mode.signed_by AND approver.revoked_at IS NULL AND approver.role = 'approver'
+         WHERE operating_mode.repo = ? AND operating_mode.revoked_at IS NULL`,
+      )
+      .get(repo);
+    if (row === undefined) return null;
+    if (Date.parse(String(row["absolute_expiry"])) <= now.getTime()) {
+      this.transact(() => {
+        this.db
+          .prepare("UPDATE operating_mode SET revoked_at = ?, revoked_by = ?, revoke_reason = 'expired' WHERE id = ? AND revoked_at IS NULL")
+          .run(now.toISOString(), "the-clock", Number(row["id"]));
+        this.db
+          .prepare("INSERT INTO operating_mode_event (mode, kind, actor, at) VALUES (?, 'expired-closed', 'the-clock', ?)")
+          .run(Number(row["id"]), now.toISOString());
+        this.reconcileIntentsForMode(String(row["repo"]), null, now);
+      });
+      return null;
+    }
+    return {
+      id: Number(row["id"]),
+      name: String(row["name"]),
+      termsJson: String(row["terms_json"]),
+      digest: String(row["digest"]),
+      signedBy: String(row["signed_by"]),
+      absoluteExpiry: String(row["absolute_expiry"]),
+    };
+  }
+
+  /** Sign (or renew) a mode: closes any predecessor with a typed event and
+   * ATOMICALLY reconciles the repo's nonterminal merge intents to the new
+   * posture (F2). The caller has already run the password ceremony. */
+  signMode(
+    spec: { repo: string; name: string; termsJson: string; digest: string; signedBy: string; absoluteExpiry: string; publication: "notify" | "automerge" },
+    now: Date,
+  ): number {
+    return this.transact(() => {
+      const previous = this.db
+        .prepare("SELECT id FROM operating_mode WHERE repo = ? AND revoked_at IS NULL")
+        .get(spec.repo);
+      const renewal = previous !== undefined;
+      if (renewal) {
+        this.db
+          .prepare("UPDATE operating_mode SET revoked_at = ?, revoked_by = ?, revoke_reason = 'renewed' WHERE id = ?")
+          .run(now.toISOString(), spec.signedBy, Number(previous["id"]));
+      }
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO operating_mode (repo, name, terms_json, digest, signed_by, signed_at, absolute_expiry)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(spec.repo, spec.name, spec.termsJson, spec.digest, spec.signedBy, now.toISOString(), spec.absoluteExpiry);
+      const id = Number(inserted.lastInsertRowid);
+      this.db
+        .prepare("INSERT INTO operating_mode_event (mode, kind, actor, at) VALUES (?, ?, ?, ?)")
+        .run(id, renewal ? "renewed" : "signed", spec.signedBy, now.toISOString());
+      this.reconcileIntentsForMode(spec.repo, { digest: spec.digest, publication: spec.publication }, now);
+      return id;
+    });
+  }
+
+  /** One click for any approver (v4 doctrine): lowering authority needs no
+   * ceremony. Reconciliation drops mode-basis intents to waiting-human;
+   * `firing` rows are untouched — an issued call is one-shot (E1). */
+  revokeMode(repo: string, by: string, reason: string, now: Date): boolean {
+    return this.transact(() => {
+      const row = this.db
+        .prepare("SELECT id FROM operating_mode WHERE repo = ? AND revoked_at IS NULL")
+        .get(repo);
+      if (row === undefined) return false;
+      this.db
+        .prepare("UPDATE operating_mode SET revoked_at = ?, revoked_by = ?, revoke_reason = ? WHERE id = ?")
+        .run(now.toISOString(), by, reason, Number(row["id"]));
+      this.db
+        .prepare("INSERT INTO operating_mode_event (mode, kind, actor, at) VALUES (?, 'revoked', ?, ?)")
+        .run(Number(row["id"]), by, now.toISOString());
+      this.reconcileIntentsForMode(repo, null, now);
+      return true;
+    });
+  }
+
+  /** F2/R-REVOKE: the ONE reconciliation road. newMode null = no live
+   * automerge authority (revocation, expiry, or a notify posture):
+   * mode-basis pending/claimed intents drop to waiting-human, leases
+   * cleared, generations bumped. newMode with automerge: nonterminal
+   * grant/mode intents REBIND to the new digest and return to pending.
+   * `firing` is never touched by either arm. */
+  private reconcileIntentsForMode(repo: string, newMode: { digest: string; publication: "notify" | "automerge" } | null, now: Date): void {
+    void now;
+    if (newMode !== null && newMode.publication === "automerge") {
+      this.db
+        .prepare(
+          `UPDATE merge_intent SET state = 'pending', authority_basis = 'mode', mode_digest = ?,
+                  claimed_by = NULL, claimed_until = NULL, generation = generation + 1
+            WHERE state IN ('waiting-human','pending','claimed')
+              AND publication IN (
+                SELECT publication.id FROM publication
+                  JOIN run ON run.id = publication.run
+                  JOIN task_ref ON task_ref.id = run.task_ref
+                 WHERE task_ref.repo = ?)`,
+        )
+        .run(newMode.digest, repo);
+      return;
+    }
+    this.db
+      .prepare(
+        `UPDATE merge_intent SET state = 'waiting-human', authority_basis = 'human', mode_digest = NULL,
+                claimed_by = NULL, claimed_until = NULL, generation = generation + 1
+          WHERE state IN ('pending','claimed') AND authority_basis = 'mode'
+            AND publication IN (
+              SELECT publication.id FROM publication
+                JOIN run ON run.id = publication.run
+                JOIN task_ref ON task_ref.id = run.task_ref
+               WHERE task_ref.repo = ?)`,
+      )
+      .run(repo);
+  }
+
+  /** The daily rails' atomic reservation (D4): caps are derived from the
+   * ACTIVE mode inside this transaction — never caller-supplied. Returns
+   * ok, or the typed rail that refused. Bypass roads never call this. */
+  reserveModeRail(repo: string, starts: number, now: Date): { ok: true } | { ok: false; rail: "daily-runs" | "daily-dollars"; detail: string } {
+    return this.transact(() => {
+      const mode = this.activeMode(repo, now);
+      if (mode === null) return { ok: true as const };
+      let terms: { dailyRunCap?: number | null; dailyMeasuredCapMicrousd?: number | null };
+      try {
+        terms = JSON.parse(mode.termsJson) as typeof terms;
+      } catch {
+        return { ok: true as const };
+      }
+      const day = now.toISOString().slice(0, 10);
+      if (typeof terms.dailyMeasuredCapMicrousd === "number") {
+        const spent = this.db
+          .prepare(
+            `SELECT COALESCE(SUM(CAST(ROUND(run.cost_usd * 1000000) AS INTEGER)), 0) AS total
+               FROM run JOIN task_ref ON task_ref.id = run.task_ref
+              WHERE task_ref.repo = ? AND run.cost_usd IS NOT NULL
+                AND run.provider_started_at >= ? AND run.provider_started_at < ?`,
+          )
+          .get(repo, `${day}T00:00:00.000Z`, `${day}T23:59:59.999Z`);
+        if (Number(spent?.["total"] ?? 0) >= terms.dailyMeasuredCapMicrousd) {
+          return {
+            ok: false as const,
+            rail: "daily-dollars" as const,
+            detail: `the day's measured budget ($${(terms.dailyMeasuredCapMicrousd / 1_000_000).toFixed(2)}) is spent — running work may finish; new admissions wait for tomorrow (UTC)`,
+          };
+        }
+      }
+      if (typeof terms.dailyRunCap === "number") {
+        this.db
+          .prepare("INSERT INTO mode_rail (repo, utc_day, reserved_starts) VALUES (?, ?, 0) ON CONFLICT (repo, utc_day) DO NOTHING")
+          .run(repo, day);
+        const updated = this.db
+          .prepare("UPDATE mode_rail SET reserved_starts = reserved_starts + ? WHERE repo = ? AND utc_day = ? AND reserved_starts + ? <= ?")
+          .run(starts, repo, day, starts, terms.dailyRunCap);
+        if (Number(updated.changes) === 0) {
+          return {
+            ok: false as const,
+            rail: "daily-runs" as const,
+            detail: `the day's ${terms.dailyRunCap} agent starts are reserved — new admissions wait for tomorrow (UTC)`,
+          };
+        }
+      }
+      return { ok: true as const };
+    });
   }
 
   approverHash(name: string): string | null {
@@ -10007,6 +10184,14 @@ export class Store {
       .prepare("SELECT * FROM publication_grant WHERE repo = ? AND revoked_at IS NULL")
       .get(repo);
     return row === undefined ? null : readPublicationGrant(row);
+  }
+
+  /** v29: whether the repo has a live grant that authorizes MERGING — the
+   * precondition automerge modes require (D1). */
+  hasMergeCapableGrant(repo: string, now: Date): boolean {
+    void now;
+    const grant = this.publicationGrantFor(repo);
+    return grant !== null && grant.merge === true;
   }
 
   /**
