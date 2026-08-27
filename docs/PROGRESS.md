@@ -1,5 +1,63 @@
 # Progress
 
+**2026-08-26 — Parallel sessions, round 1 folded: the attention mode is
+a signed term.** Codex returned APPROVE-WITH-CHANGES (9 findings)
+minutes after the implementation landed; everything actionable shipped
+the same evening (design-parallel-sessions-v2.md has dispositions). The
+load-bearing ones: `attentionMode: "console-visible"` now lives IN the
+signed AttendedTerms — liveness is an admission predicate, so the beat
+model is something the password agrees to, and beat-all REFUSES a
+legacy page-bound signature rather than silently widening it; the
+final custody proof reordered to custody-then-consume with a
+throw-rollback, because a refusal returned from inside transact()
+COMMITS — the old order left a run-held refusal with the one attempt
+already spent (pre-existing since v25, now tested: run-held and
+session-cap both leave attempt_run null); the session cap moved INSIDE
+that transaction (two up watch loops racing a cap of one cannot both
+insert); a budget-full tick keeps scanning for live authorizations so
+--max never starves the operator's own sessions, and a held-only pass
+reports success; the orphan sweep seizes first and kills concurrently
+(startup pays one socket timeout, not eight seconds per orphan);
+close() clears its deadline timer and returns the unsettled for up to
+page durably; the beat gained its CSP bit (chrome pages carry
+connect-src 'self'), rides sensitive pages EXCEPT the script-free
+one-time-secret pages (the stated liveness exception), and checks the
+origin allowlist beside Sec-Fetch-Site — the parameterless-vs-csrf
+disagreement is documented, not hidden. Deferred with names: the two
+tick-harness e2es (mixed-order --max, held-only pass), the
+legacy-terms beat exclusion test, the workbench sessions rail. Suite
+1289 → 1290.
+
+**2026-08-26 — Parallel attended sessions (v28): the fleet converses.**
+Alex: "we need the unlimited parallel agents/sessions feature now." The
+Phase-2 architecture was per-session all along — the coordinator a
+Map of controllers, one supervisor and socket per session, plural
+sweeps, capacity already excluding held claims — so the singular was
+ONE partial unique and its plumbing. Spec design-parallel-sessions.md
+(+ implementation addendum; Codex round retrying against capacity, the
+competing self-review verified the receipts: close() already fences the
+whole map under one deadline, held launches already bypass --max).
+Shipped: v28 drops `one_held_session_per_runner` (indexes need no
+rebuild), the `runner-holding` refusal and its arms go with it; the
+liveness beat moves from the task page to the CHROME layer as
+`/session/attended-beats` — parameterless, cookie + form content-type +
+`Sec-Fetch-Site: same-origin` as its own complete guard ahead of the
+shared csrf gate, approver-bound (beats every open authorization the
+signed-in approver minted on this runner, nobody else's), renewal-only
+— a KNOWING reversal of v2 S2f's per-page binding, because one
+foregrounded tab per session cannot scale and the signed envelope was
+always the real bound; ceremony and card words now say "your console
+being open keeps this session live". Sessions are unbounded by default;
+`--max-held-sessions <n>` skips further launches in words against the
+DURABLE custody count (a restarted up with orphans pending must count
+them). Fleet and /system runner cards say "N attended sessions". The
+proof: a two-session coordinator e2e — both hold on one runner (the
+exact insert v25 refused), briefs settle independently, an operator
+turn concludes A while B idles untouched, ledgers disjoint, custody
+2→1→0 — plus a v28 migration test (old index recreated, wound back,
+reopened: index gone, two custody rows coexist, run-held still
+refuses). Suite 1286 → 1289.
+
 **2026-08-26 — Phase 0: the 0.4.0 release, reconciled and proven.** The
 version story was the loudest gap on the comparison page: npm at 0.3.0,
 the lockfile still carrying the project's old name at 0.2.0, the README

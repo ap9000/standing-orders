@@ -77,6 +77,8 @@ export type AttendedDispatch = {
   dispose: { repo: string; origin: string; provider: string; model: string | null; policy?: import("./dispose.js").DisposePolicy };
   starter?: import("./exec.js").HeldSessionStart extends never ? never : typeof import("./exec.js").startClaudeHeldSession;
   graceMs?: number;
+  /** v28: the operator's session cap, enforced in the custody transaction. */
+  maxHeldSessions?: number;
   onDisposed?: import("./held.js").HeldLaunchArgs["onDisposed"];
 };
 
@@ -189,9 +191,9 @@ export type BuildRefusal =
   | "stale-approval"
   | "stale-authorization"
   | "attended-only"
+  | "session-cap"
   | "attended-held"
   | "attended-unsupported"
-  | "runner-holding"
   | "run-held"
   | "spawn-failed"
   | "capability"
@@ -909,6 +911,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       clock,
       ...(attended.starter === undefined ? {} : { starter: attended.starter }),
       ...(attended.graceMs === undefined ? {} : { graceMs: attended.graceMs }),
+      ...(attended.maxHeldSessions === undefined ? {} : { maxHeldSessions: attended.maxHeldSessions }),
       ...(attended.onDisposed === undefined ? {} : { onDisposed: attended.onDisposed }),
     });
     if (!launched.ok) {

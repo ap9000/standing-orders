@@ -455,7 +455,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
   "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
   "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
-  "choose", "note", "max-open-decisions", "port", "host", "allow-host",
+  "choose", "note", "max-open-decisions", "max-held-sessions", "port", "host", "allow-host",
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
@@ -624,6 +624,8 @@ type Context = {
   /** Test seams for the held transport. */
   heldStarter?: typeof import("./exec.js").startClaudeHeldSession;
   heldGraceMs?: number;
+  /** v28: optional attended-session cap; absent = unbounded. */
+  maxHeldSessions?: number;
 };
 
 async function dispatch(
@@ -1740,7 +1742,14 @@ async function tickCommand(
   const attestedThisPass = new Map<ProviderId, AttestOutcome | null>();
 
   for (const ref of ready) {
-    if (built >= max) break;
+    // The build budget governs UNATTENDED admissions (round-1 finding 4):
+    // once it is spent, the pass keeps SCANNING for attended
+    // authorizations — operator-invoked sessions launch regardless —
+    // while declining every further ordinary admission.
+    if (built >= max) {
+      const openAuth = store.openAuthorizationFor(ref.id);
+      if (openAuth === null || openAuth.runner !== runner || openAuth.attemptRun !== null) continue;
+    }
     // The stop fence (audit IV-1): checked before every claim. The build
     // already in flight finishes under its own bounds; nothing NEW is
     // admitted once the operator has said stop.
@@ -1780,6 +1789,19 @@ async function tickCommand(
         open.attemptRun === null &&
         context.heldCoordinator !== undefined
       ) {
+        // v28: sessions are unbounded by default; an operator-set cap
+        // skips FURTHER launches in words. The gauge is durable custody
+        // rows, never the in-process map — a restarted up with orphans
+        // pending must count them.
+        if (context.maxHeldSessions !== undefined && store.openHeldSessionCount(runner) >= context.maxHeldSessions) {
+          dispatched.push({
+            id,
+            outcome: "skipped",
+            reason: "session-cap",
+            detail: `this machine holds ${store.openHeldSessionCount(runner)} of ${context.maxHeldSessions} attended sessions — end one, or raise --max-held-sessions`,
+          });
+          continue;
+        }
         attendedDispatch = open;
       } else if (open !== null) {
         dispatched.push({ id, outcome: "skipped", reason: "attended-only" });
@@ -2338,6 +2360,7 @@ async function tickCommand(
               dispose: { repo, origin: ref.origin, provider: spec.provider, model: spec.model },
               ...(context.heldStarter === undefined ? {} : { starter: context.heldStarter }),
               ...(context.heldGraceMs === undefined ? {} : { graceMs: context.heldGraceMs }),
+              ...(context.maxHeldSessions === undefined ? {} : { maxHeldSessions: context.maxHeldSessions }),
             },
           }),
     });
@@ -2514,6 +2537,7 @@ async function tickCommand(
           dispose: { repo, origin: parentRef.origin, provider: pinned.provider, model: pinned.model, policy: "continuation" },
           ...(context.heldStarter === undefined ? {} : { starter: context.heldStarter }),
           ...(context.heldGraceMs === undefined ? {} : { graceMs: context.heldGraceMs }),
+              ...(context.maxHeldSessions === undefined ? {} : { maxHeldSessions: context.maxHeldSessions }),
         },
       });
       if (result.ok && result.parked === undefined && result.held === true) {
@@ -2593,7 +2617,7 @@ async function tickCommand(
   // A pass whose only events were parks or drafted plans exits 0: nothing
   // broke, nothing needs code — the questions and the plan are in the
   // attention surface where they belong, which is the system working.
-  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned")) {
+  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "held")) {
     return succeed(write, json, "tick", { considered, dispatched, routines }, summary);
   }
   if (considered === 0) {
@@ -5599,6 +5623,15 @@ async function upCommand(
   context.heldCoordinator = new HeldSessionCoordinator();
   context.upIncarnation = randomUUID();
   context.heldSocketDir = heldDir;
+  // v28: sessions are unbounded unless the operator caps them.
+  const heldCap = text(flags, "max-held-sessions");
+  if (heldCap !== undefined) {
+    const cap = Number(heldCap);
+    if (!Number.isInteger(cap) || cap < 1) {
+      return fail(write, json, "up", "usage", "--max-held-sessions is a whole number of concurrent attended sessions, at least 1", EXIT.usage);
+    }
+    context.maxHeldSessions = cap;
+  }
 
   // 7. The console, on the just-released port. The tiny window between the
   // probe closing and this bind can lose a race; that failure tears down
@@ -5746,7 +5779,23 @@ async function upCommand(
   process.removeListener("SIGTERM", stop);
   // Held sessions fence before the runner retires (v2 S0f): bounded, and
   // every controller settles conservatively or is paged.
-  if (context.heldCoordinator !== undefined) await context.heldCoordinator.close();
+  if (context.heldCoordinator !== undefined) {
+    const unsettled = await context.heldCoordinator.close();
+    for (const runId of unsettled) {
+      // The shutdown deadline won: say so durably — the orphan sweep of
+      // the NEXT up owns the cleanup, and silence would contradict
+      // "settled conservatively or paged".
+      store.enqueueNotification(
+        {
+          dedupeKey: `held-shutdown-unsettled:${runId}`,
+          kind: "attended-unsettled",
+          subject: `an attended session did not settle before shutdown (run #${runId})`,
+          body: `The shutdown deadline passed before run #${runId}'s session finished fencing. The next \`standing-orders up\` will fence and settle it; its worktree is preserved.`,
+        },
+        clock(),
+      );
+    }
+  }
   retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
   await new Promise<void>(done => console_.server.close(() => done()));
 

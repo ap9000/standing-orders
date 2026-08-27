@@ -396,6 +396,19 @@ untouchable — the fence seizes custody transactionally BEFORE any
 kill, an unreachable supervisor pages rather than guess-kills, and
 generic recovery excludes open custody rows entirely.
 
+**Parallel sessions (v28).** Any number of attended sessions hold
+concurrently on one runner — parallelism is many tasks, each under its
+own signed envelope; every per-task and per-run singular (one open
+authorization per task, one attempt, one custody row per run, the whole
+exactly-once ledger) is untouched. Liveness moved from the page to the
+console: a parameterless, same-origin-proven beat on every chrome page
+renews EVERY open authorization the signed-in approver minted on this
+runner — a knowing reversal of the per-page binding, because one
+foregrounded tab per session cannot scale and attention was always a
+renewal-of-use; the signed envelope (dollars, messages, clocks, expiry)
+is what bounds an unwatched moment. Sessions are unbounded by default;
+`--max-held-sessions` caps them in words when an operator asks.
+
 ## 9d. Attested runtimes (Parity II Phase 3)
 
 Two tiers of provider, by what the plane can prove — never by brand.

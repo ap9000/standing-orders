@@ -38,7 +38,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 27;
+export const SCHEMA_VERSION = 28;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2227,10 +2227,6 @@ CREATE INDEX IF NOT EXISTS task_steer_pending
 -- column predicate, never a time computation).
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_authorization_per_task
   ON attended_authorization (task_ref) WHERE closed_at IS NULL;
--- One open held session per runner: capacity governs unattended work; the
--- attended bound is its own (v6 W2).
-CREATE UNIQUE INDEX IF NOT EXISTS one_held_session_per_runner
-  ON held_session (runner) WHERE ended_at IS NULL;
 -- Answer exactly-once: a retried answer cannot inject twice while a prior
 -- injection is live or proven. Terminal failures (uncertain never-accepted,
 -- cancelled) release the slot — the delivery-CAS on decision.delivered_turn
@@ -2792,6 +2788,11 @@ function migrate(db: Database): void {
   // DDL); contest gains the denormalized kind additively.
   addColumn(db, "contest", "kind", "TEXT NOT NULL DEFAULT 'race' CHECK (kind IN ('race','comparison'))");
   rebuildTournamentTermsForV27(db);
+
+  // v28 (parallel attended sessions): the one-held-session-per-runner
+  // bound is withdrawn — parallelism is many tasks, each with its own
+  // signed envelope; per-task and per-run singulars all stay.
+  db.exec("DROP INDEX IF EXISTS one_held_session_per_runner");
 }
 
 const TOURNAMENT_TERMS_V26_DDL = `CREATE TABLE tournament_terms (
@@ -8478,7 +8479,7 @@ export class Store {
 
   /**
    * Custody intent — INSERTed in the final dispatch-proof transaction,
-   * before spawn. The one-held-session-per-runner partial unique refuses a
+   * before spawn. The run-held partial unique refuses a
    * second hold typed, not by accident.
    */
   openHeldSession(input: {
@@ -8490,7 +8491,7 @@ export class Store {
     cookie: string;
     socketPath: string;
     now: Date;
-  }): { ok: true } | { ok: false; reason: "runner-holding" | "run-held" } {
+  }): { ok: true } | { ok: false; reason: "run-held" } {
     try {
       this.db
         .prepare(
@@ -8512,7 +8513,7 @@ export class Store {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // SQLite names the COLUMN in unique violations, never the index.
-      if (message.includes("held_session.runner")) return { ok: false, reason: "runner-holding" };
+
       if (message.includes("UNIQUE") || message.includes("PRIMARY KEY")) return { ok: false, reason: "run-held" };
       throw error;
     }
@@ -8532,6 +8533,24 @@ export class Store {
   }
 
   /** Every un-ended custody row — the fence sweep's and hard-stop's read. */
+  /** The durable session gauge (v28): open custody rows for this runner —
+   * a restarted `up` with orphans pending must count them, so the
+   * in-process map is never the truth. */
+  openHeldSessionCount(runner: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM held_session WHERE runner = ? AND ended_at IS NULL")
+      .get(runner);
+    return Number(row?.["n"] ?? 0);
+  }
+
+  /** Every open authorization on this runner — the beat-all's worklist. */
+  openAuthorizationsOf(runner: string): AttendedAuthorization[] {
+    return this.db
+      .prepare("SELECT * FROM attended_authorization WHERE runner = ? AND closed_at IS NULL")
+      .all(runner)
+      .map(readAuthorizationRow);
+  }
+
   openHeldSessions(): HeldSession[] {
     return this.db
       .prepare("SELECT * FROM held_session WHERE ended_at IS NULL ORDER BY run")
@@ -10838,8 +10857,8 @@ export class Store {
    * Live claims this runner holds right now — the occupied slots of §8's
    * capacity gate. A claim whose run is a HELD attended session is EXCLUDED
    * (v6 W2): capacity governs unattended work; the attended bound is the
-   * one-held-session-per-runner rule, so a watched conversation never
-   * freezes the runner's whole queue.
+   * session's own signed envelope (v28: any number of them), so watched
+   * conversations never freeze the runner's queue.
    */
   liveClaimCount(runner: string, now: Date): number {
     const row = this.db

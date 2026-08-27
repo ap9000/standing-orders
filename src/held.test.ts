@@ -800,3 +800,335 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
     store.close();
   });
 });
+
+
+describe("parallel attended sessions (v28): two held conversations on one runner", () => {
+  /** Parameterized twin of the fixture above — ids per session. */
+  const sessionFixture = (store: ReturnType<typeof openStore>, tag: string, head: string) => {
+    const taskId = `t-par-${tag}`;
+    store.createTask({ id: taskId, title: `watched ${tag}` }, T0);
+    const ref = store.refFor("built-in", taskId);
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO task_scope (task_id, goal, out_of_scope, touches, proposed_at, digest)
+         VALUES (?, 'the goal', NULL, '[]', ?, 'feedface'||substr('00000000000000000000000000000000',1,24))`,
+      )
+      .run(taskId, T0.toISOString());
+    const scopeDigest = String(store.raw().prepare("SELECT digest FROM task_scope WHERE task_id = ?").get(taskId)!["digest"]);
+    const terms = {
+      scopeDigest,
+      profileDigest: profileDigestOf(PROFILE),
+      profileJson: canonicalProfileJson(PROFILE),
+      repo: "/repo",
+      head,
+    };
+    const minted = store.mintAttendedAuthorization({
+      id: `auth-par-${tag}`,
+      taskRef: ref.id,
+      approver: "alex",
+      runner: "mac-a",
+      runnerGeneration: 1,
+      compositeDigest: "d".repeat(32),
+      termsJson: JSON.stringify(terms),
+      maxSessionTurns: 10,
+      budgetMicrousd: 2_000_000,
+      absoluteExpiry: new Date(Date.now() + 3_600_000).toISOString(),
+      now: T0,
+    });
+    expect(minted.ok).toBe(true);
+    store.beatAuthorization(`auth-par-${tag}`, new Date());
+    store
+      .raw()
+      .prepare(
+        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+         VALUES (?, ?, 1, 'mac-a', ?, ?, ?)`,
+      )
+      .run(`lease-par-${tag}`, ref.id, T0.toISOString(), new Date(Date.now() + 900_000).toISOString(), T0.toISOString());
+    return { taskId, ref };
+  };
+
+  const gitWorktree = async (branch: string): Promise<{ dir: string; head: string }> => {
+    const dir = mkdtempSync(join(tmpdir(), `so-par-wt-`));
+    const git = async (...args: string[]) => {
+      const answer = await runExec("git", args, { cwd: dir, timeoutMs: 15_000 });
+      if (answer.code !== 0) throw new Error(`git ${args[0]}: ${answer.stderr}`);
+      return answer.stdout.trim();
+    };
+    await git("init", "-b", branch);
+    await git("config", "user.email", "t@e.c");
+    await git("config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "hello\n");
+    await git("add", "-A");
+    await git("commit", "-m", "base");
+    return { dir, head: await git("rev-parse", "HEAD") };
+  };
+
+  /** A scripted per-session transport: brief idles; a later turn concludes. */
+  const scriptedStarter = (worktreeDir: string, doneName: string, sessionId: string) => {
+    const state: { events?: { onTurnInit?: (seq: number) => void; onTurnResult?: (seq: number, event: Record<string, unknown>) => void; onExit?: (info: { code: number | null }) => void } } = {};
+    let inits = 0;
+    let results = 0;
+    let writes = 0;
+    let exitResolve: (info: { code: number | null }) => void = () => {};
+    const exited = new Promise<{ code: number | null }>(pass => (exitResolve = pass));
+    const handle: HeldSessionHandle = {
+      supervisorPid: 4242,
+      agentPgid: 4243,
+      writeTurn(): boolean {
+        writes += 1;
+        const concluding = writes >= 2; // the brief idles; the operator turn concludes
+        setTimeout(() => {
+          if (concluding) {
+            writeFileSync(join(worktreeDir, doneName), JSON.stringify({ version: 1, status: "no-change", conclusion: "agreed already" }));
+          }
+          state.events?.onTurnInit?.((inits += 1));
+          state.events?.onTurnResult?.((results += 1), {
+            type: "result",
+            subtype: "success",
+            session_id: sessionId,
+            total_cost_usd: 0.01 * writes,
+            usage: { output_tokens: 3 },
+            result: "ok",
+          });
+          if (concluding) setTimeout(() => { exitResolve({ code: 0 }); state.events?.onExit?.({ code: 0 }); }, 40);
+        }, 15);
+        return true;
+      },
+      endInput(): void { exitResolve({ code: 0 }); },
+      terminate(): void { exitResolve({ code: 143 }); },
+      killHard(): void { exitResolve({ code: null }); },
+      exited,
+    };
+    const starter = ((_file: string, _args: readonly string[], options: { events?: typeof state.events }) => {
+      state.events = options.events;
+      return Promise.resolve({ ok: true, handle } as HeldSessionStart);
+    }) as typeof import("./exec.js").startClaudeHeldSession;
+    return starter;
+  };
+
+  test("both sessions hold at once — the v25 one-per-runner bound is gone; conversations interleave; each settles alone", async () => {
+    const store = openStore(":memory:");
+    const coordinator = new HeldSessionCoordinator();
+    const wtA = await gitWorktree("so/t-par-a");
+    const wtB = await gitWorktree("so/t-par-b");
+    const a = sessionFixture(store, "a", wtA.head);
+    const b = sessionFixture(store, "b", wtB.head);
+    const disposals: string[] = [];
+
+    const argsFor = (tag: string, fx: { ref: { id: number } }, wt: { dir: string; head: string }) => {
+      const runId = store.startRun({
+        taskRef: fx.ref.id,
+        leaseId: `lease-par-${tag}`,
+        runner: "mac-a",
+        branch: `so/t-par-${tag}`,
+        worktree: wt.dir,
+        now: T0,
+      });
+      const captured: CapturedBuild = {
+        store,
+        request: { taskId: `t-par-${tag}`, taskRef: fx.ref.id, runner: "mac-a", runId, worktree: wt.dir, branch: `so/t-par-${tag}`, leaseId: `lease-par-${tag}`, now: T0 } as never,
+        agent: undefined,
+        git: runExec as never,
+        worktree: wt.dir,
+        branch: `so/t-par-${tag}`,
+        baseRevision: wt.head,
+        taskId: `t-par-${tag}`,
+        taskRef: fx.ref.id,
+        runner: "mac-a",
+        provider: "claude",
+        scope: store.getScope(`t-par-${tag}`),
+        effective: { model: "sonnet", maxTurns: 40, timeoutMs: 60_000, skipPermissions: false, profile: PROFILE },
+        answers: [],
+        timeoutMs: 60_000,
+        root: mkdtempSync(join(tmpdir(), "so-par-root-")),
+        mailbox: `SO-MAILBOX-${tag}.json`,
+        done: `SO-DONE-${tag}.json`,
+        clock: () => new Date(),
+        fenced: () => false,
+      };
+      return {
+        store,
+        captured,
+        authorization: store.readAuthorization(`auth-par-${tag}`)!,
+        runId,
+        leaseId: `lease-par-${tag}`,
+        runner: "mac-a",
+        upIncarnation: "inc-test",
+        brief: `the ${tag} brief`,
+        cwd: wt.dir,
+        socketDir: tmpdir(),
+        releaseWorktree: async () => {},
+        liveLog: null,
+        omitEnv: [],
+        dispose: { repo: "/repo", origin: "theirs", provider: "claude", model: "sonnet" },
+        clock: () => new Date(),
+        starter: scriptedStarter(wt.dir, `SO-DONE-${tag}.json`, `sess-${tag}`),
+        onDisposed: () => disposals.push(tag),
+      };
+    };
+
+    const argsA = argsFor("a", a, wtA);
+    const argsB = argsFor("b", b, wtB);
+
+    const launchedA = await coordinator.launch(argsA as never);
+    expect(launchedA).toMatchObject({ ok: true });
+    // THE v28 moment: a second session on the SAME runner holds too.
+    const launchedB = await coordinator.launch(argsB as never);
+    expect(launchedB).toMatchObject({ ok: true });
+    expect(coordinator.count()).toBe(2);
+    expect(store.openHeldSessionCount("mac-a")).toBe(2);
+
+    // wait for both briefs to settle (turn 1 each), then interleave
+    const settled = (run: number, n: number) => store.sessionTurnsOf(run).filter(one => one.state === "settled").length >= n;
+    await new Promise<void>(pass => {
+      const poll = () => (settled(argsA.runId, 1) && settled(argsB.runId, 1) ? pass() : setTimeout(poll, 25));
+      poll();
+    });
+
+    // an operator turn into A concludes A; B stays held and untouched
+    const turnA = coordinator.injectOperatorTurn(argsA.runId, "finish up A", "alex", new Date());
+    expect(turnA).toMatchObject({ ok: true });
+    await new Promise<void>(pass => {
+      const poll = () => (disposals.includes("a") ? pass() : setTimeout(poll, 25));
+      poll();
+    });
+    expect(store.getRun(argsA.runId)?.outcome).toBe("no-change");
+    expect(store.heldSessionOf(argsA.runId)?.endedAt).not.toBeNull();
+    expect(coordinator.count()).toBe(1);
+    expect(store.openHeldSessionCount("mac-a")).toBe(1);
+    expect(store.heldSessionOf(argsB.runId)?.state).toBe("open");
+    // B's ledger never saw A's conversation
+    expect(store.sessionTurnsOf(argsB.runId).every(one => one.text.includes("A") === false)).toBe(true);
+
+    // B concludes on its own operator turn
+    const turnB = coordinator.injectOperatorTurn(argsB.runId, "finish up B", "alex", new Date());
+    expect(turnB).toMatchObject({ ok: true });
+    await new Promise<void>(pass => {
+      const poll = () => (disposals.includes("b") ? pass() : setTimeout(poll, 25));
+      poll();
+    });
+    expect(store.getRun(argsB.runId)?.outcome).toBe("no-change");
+    expect(store.openHeldSessionCount("mac-a")).toBe(0);
+    expect(store.readAuthorization("auth-par-a")?.endReason).toBe("finished");
+    expect(store.readAuthorization("auth-par-b")?.endReason).toBe("finished");
+
+    rmSync(wtA.dir, { recursive: true, force: true });
+    rmSync(wtB.dir, { recursive: true, force: true });
+    store.close();
+  }, 30_000);
+});
+
+
+describe("v28 round-1 folds: refusals consume nothing; the cap lives in the custody transaction", () => {
+  const wt = async (branch: string) => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v28f-wt-"));
+    const git = async (...args: string[]) => {
+      const answer = await runExec("git", args, { cwd: dir, timeoutMs: 15_000 });
+      if (answer.code !== 0) throw new Error(answer.stderr);
+      return answer.stdout.trim();
+    };
+    await git("init", "-b", branch);
+    await git("config", "user.email", "t@e.c");
+    await git("config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "x\n");
+    await git("add", "-A");
+    await git("commit", "-m", "base");
+    return { dir, head: await git("rev-parse", "HEAD") };
+  };
+
+  const fixtureFor = (store: ReturnType<typeof openStore>, tag: string, head: string) => {
+    const taskId = `t-fold-${tag}`;
+    store.createTask({ id: taskId, title: tag }, T0);
+    const ref = store.refFor("built-in", taskId);
+    store.raw().prepare(
+      `INSERT INTO task_scope (task_id, goal, out_of_scope, touches, proposed_at, digest)
+       VALUES (?, 'g', NULL, '[]', ?, 'feedface'||substr('00000000000000000000000000000000',1,24))`,
+    ).run(taskId, T0.toISOString());
+    const scopeDigest = String(store.raw().prepare("SELECT digest FROM task_scope WHERE task_id = ?").get(taskId)!["digest"]);
+    const terms = { scopeDigest, profileDigest: profileDigestOf(PROFILE), profileJson: canonicalProfileJson(PROFILE), repo: "/repo", head };
+    expect(store.mintAttendedAuthorization({
+      id: `auth-fold-${tag}`, taskRef: ref.id, approver: "alex", runner: "mac-a", runnerGeneration: 1,
+      compositeDigest: "d".repeat(32), termsJson: JSON.stringify(terms), maxSessionTurns: 10,
+      budgetMicrousd: 2_000_000, absoluteExpiry: new Date(Date.now() + 3_600_000).toISOString(), now: T0,
+    }).ok).toBe(true);
+    store.beatAuthorization(`auth-fold-${tag}`, new Date());
+    store.raw().prepare(
+      `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
+       VALUES (?, ?, 1, 'mac-a', ?, ?, ?)`,
+    ).run(`lease-fold-${tag}`, ref.id, T0.toISOString(), new Date(Date.now() + 900_000).toISOString(), T0.toISOString());
+    return { taskId, ref };
+  };
+
+  const idleStarter = () => {
+    const handle: HeldSessionHandle = {
+      supervisorPid: 1, agentPgid: 2,
+      writeTurn: () => true,
+      endInput: () => {}, terminate: () => {}, killHard: () => {},
+      exited: new Promise(() => {}),
+    };
+    return ((_f: string, _a: readonly string[]) => Promise.resolve({ ok: true, handle } as HeldSessionStart)) as typeof import("./exec.js").startClaudeHeldSession;
+  };
+
+  const argsFor = (store: ReturnType<typeof openStore>, tag: string, fx: { ref: { id: number } }, tree: { dir: string; head: string }, cap?: number) => {
+    const runId = store.startRun({
+      taskRef: fx.ref.id, leaseId: `lease-fold-${tag}`, runner: "mac-a",
+      branch: `so/t-fold-${tag}`, worktree: tree.dir, now: T0,
+    });
+    const captured: CapturedBuild = {
+      store,
+      request: { taskId: `t-fold-${tag}`, taskRef: fx.ref.id, runner: "mac-a", runId, worktree: tree.dir, branch: `so/t-fold-${tag}`, leaseId: `lease-fold-${tag}`, now: T0 } as never,
+      agent: undefined, git: runExec as never, worktree: tree.dir, branch: `so/t-fold-${tag}`,
+      baseRevision: tree.head, taskId: `t-fold-${tag}`, taskRef: fx.ref.id, runner: "mac-a",
+      provider: "claude", scope: store.getScope(`t-fold-${tag}`),
+      effective: { model: "sonnet", maxTurns: 40, timeoutMs: 60_000, skipPermissions: false, profile: PROFILE },
+      answers: [], timeoutMs: 60_000, root: mkdtempSync(join(tmpdir(), "so-v28f-root-")),
+      mailbox: "SO-M.json", done: "SO-D.json", clock: () => new Date(), fenced: () => false,
+    };
+    return {
+      store, captured, authorization: store.readAuthorization(`auth-fold-${tag}`)!, runId,
+      leaseId: `lease-fold-${tag}`, runner: "mac-a", upIncarnation: "inc", brief: "b",
+      cwd: tree.dir, socketDir: tmpdir(), releaseWorktree: async () => {}, liveLog: null,
+      omitEnv: [], dispose: { repo: "/repo", origin: "theirs", provider: "claude", model: "sonnet" },
+      clock: () => new Date(), starter: idleStarter(), onDisposed: () => {},
+      ...(cap === undefined ? {} : { maxHeldSessions: cap }),
+    };
+  };
+
+  test("run-held refuses with the attempt UNCONSUMED — the proof's writes roll back together", async () => {
+    const store = openStore(":memory:");
+    const coordinator = new HeldSessionCoordinator();
+    const tree = await wt("so/t-fold-rh");
+    const fx = fixtureFor(store, "rh", tree.head);
+    const args = argsFor(store, "rh", fx, tree);
+    // the run ALREADY holds a session — the custody insert must refuse
+    store.raw().prepare(
+      `INSERT INTO held_session (run, authorization_id, runner, lease_id, up_incarnation, cookie, socket_path, state, started_at)
+       VALUES (?, 'auth-fold-rh', 'mac-a', 'lease-x', 'inc', ?, '/tmp/x.sock', 'open', ?)`,
+    ).run(args.runId, "c".repeat(32), T0.toISOString());
+    const launched = await coordinator.launch(args as never);
+    expect(launched).toMatchObject({ ok: false, reason: "run-held" });
+    // the one attempt survives — the OLD order consumed it here
+    expect(store.readAuthorization("auth-fold-rh")?.attemptRun).toBeNull();
+    rmSync(tree.dir, { recursive: true, force: true });
+    store.close();
+  }, 20_000);
+
+  test("the session cap refuses INSIDE the custody transaction, attempt unconsumed; raising it admits", async () => {
+    const store = openStore(":memory:");
+    const coordinator = new HeldSessionCoordinator();
+    const treeA = await wt("so/t-fold-c1");
+    const treeB = await wt("so/t-fold-c2");
+    const a = fixtureFor(store, "c1", treeA.head);
+    const b = fixtureFor(store, "c2", treeB.head);
+    const first = await coordinator.launch(argsFor(store, "c1", a, treeA, 1) as never);
+    expect(first).toMatchObject({ ok: true });
+    const second = await coordinator.launch(argsFor(store, "c2", b, treeB, 1) as never);
+    expect(second).toMatchObject({ ok: false, reason: "session-cap" });
+    expect(store.readAuthorization("auth-fold-c2")?.attemptRun).toBeNull();
+    expect(store.openHeldSessionCount("mac-a")).toBe(1);
+    rmSync(treeA.dir, { recursive: true, force: true });
+    rmSync(treeB.dir, { recursive: true, force: true });
+    store.close();
+  }, 20_000);
+});

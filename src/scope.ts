@@ -599,6 +599,11 @@ function describeApproval(approval: Approval): string {
  */
 export type AttendedTerms = {
   taskId: string;
+  /** v28: HOW liveness is renewed — a SIGNED term, because liveness is an
+   * admission predicate, not decoration. "console-visible" = any open
+   * console page of this server renews use. Legacy terms lack the field
+   * and beat-all refuses them (they were signed as page-bound). */
+  attentionMode: "console-visible";
   scopeDigest: string;
   profileDigest: string;
   profileJson: string;

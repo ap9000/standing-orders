@@ -1551,7 +1551,9 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const inbox = await fetch(url("/"), { headers: { cookie } });
     const inboxCsp = inbox.headers.get("content-security-policy") ?? "";
     expect(inboxCsp).toMatch(/script-src 'nonce-/);
-    expect(inboxCsp).not.toContain("connect-src");
+    // v28: the chrome layer itself fetches (the attended beat), so every
+    // chrome page carries connect-src 'self' — still same-origin only.
+    expect(inboxCsp).toContain("connect-src 'self'");
   });
 
   test("the fragment is the region alone, behind the same auth", async () => {
@@ -4174,7 +4176,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(html).toContain('aria-label="keyboard shortcuts"');
     const csp = response.headers.get("content-security-policy") ?? "";
     expect(csp).toMatch(/script-src 'nonce-/);
-    expect(csp).not.toContain("connect-src");
+    expect(csp).toContain("connect-src 'self'"); // v28: the chrome beat fetches
     // No poller — no noscript auto-refresh to eat what someone was typing.
     expect(html).not.toContain('http-equiv="refresh"');
     // The overlay's index lists the new destinations.
@@ -4481,7 +4483,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       // prefill alone earns no network: script-src yes, connect-src no
       const csp = (await fetch(url(`/r/${runId}`), { headers: { cookie } })).headers.get("content-security-policy") ?? "";
       expect(csp).toMatch(/script-src 'nonce-/);
-      expect(csp).not.toContain("connect-src");
+      expect(csp).toContain("connect-src 'self'"); // v28: the chrome beat fetches
     });
   });
 
@@ -4922,14 +4924,23 @@ describe("the attended authorization ceremony (Phase 2E)", () => {
     // the mint itself is the first beat
     expect(open?.lastBeatAt).not.toBeNull();
 
-    // the beat endpoint advances the durable clock, id-bound
+    // the beat endpoint advances the durable clock (v28: approver-bound
+    // beat-all, parameterless, same-origin proven by header)
     await new Promise(pass => setTimeout(pass, 20));
-    const beat = await fetch(url("/session/attended-beat"), {
+    const beat = await fetch(url("/session/attended-beats"), {
       method: "POST",
-      headers: { cookie },
-      body: new URLSearchParams({ csrf, authorization: open?.id ?? "" }),
+      headers: { cookie, "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
     });
     expect(beat.status).toBe(200);
+    expect(((await beat.json()) as { beaten: number }).beaten).toBe(1);
+    // a cross-site POST (or a tokenless script) refuses
+    const forged = await fetch(url("/session/attended-beats"), {
+      method: "POST",
+      headers: { cookie, "sec-fetch-site": "cross-site", "content-type": "application/x-www-form-urlencoded" },
+      body: "",
+    });
+    expect(forged.status).toBe(403);
 
     // the open card renders with the revoke, and revoke closes it
     const withOpen = await (await fetch(url("/t/t-att"), { headers: { cookie } })).text();

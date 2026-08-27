@@ -72,6 +72,9 @@ export type HeldLaunchArgs = {
   starter?: typeof startClaudeHeldSession;
   graceMs?: number;
   onDisposed?: (disposition: Disposition | { kind: "interrupted"; reason: string }) => void;
+  /** v28: enforced INSIDE the final custody transaction — two watch
+   * loops racing a cap of one cannot both insert. */
+  maxHeldSessions?: number;
 };
 
 type Controller = {
@@ -89,6 +92,9 @@ type Controller = {
 
 const dollarsToMicrousd = (dollars: unknown): number | null =>
   typeof dollars === "number" && Number.isFinite(dollars) ? Math.round(dollars * 1_000_000) : null;
+
+/** Thrown INSIDE the final proof to roll the whole transaction back. */
+class ConsumeRaced extends Error {}
 
 export class HeldSessionCoordinator {
   private readonly sessions = new Map<number, Controller>();
@@ -112,7 +118,9 @@ export class HeldSessionCoordinator {
     // ---- the FINAL transactional proof (v2 S2d, v3 R6): rederived against
     // live state AFTER worktree setup read the actual HEAD, consuming the
     // one attempt and writing the custody intent immediately before spawn.
-    const proof = store.transact((): { ok: true } | { ok: false; reason: string; message: string } => {
+    let proof: { ok: true } | { ok: false; reason: string; message: string };
+    try {
+      proof = store.transact((): { ok: true } | { ok: false; reason: string; message: string } => {
       const live = store.readAuthorization(args.authorization.id);
       if (live === null || live.closedAt !== null) {
         return { ok: false, reason: "attended-only", message: "the authorization closed before dispatch" };
@@ -143,8 +151,17 @@ export class HeldSessionCoordinator {
       if (live.runner !== runner) {
         return { ok: false, reason: "attended-held", message: `the authorization names ${live.runner}` };
       }
-      if (!store.consumeAuthorization(live.id, runId, clock())) {
-        return { ok: false, reason: "attended-only", message: "another dispatch consumed the attempt first" };
+      // Custody FIRST, consumption LAST (parallel-sessions round 1,
+      // finding 4): a refusal returned from inside transact() COMMITS —
+      // only a throw rolls back — so the old consume-then-custody order
+      // left a run-held refusal with the one attempt already spent.
+      // Every refusal below this line must leave attempt_run null.
+      if (args.maxHeldSessions !== undefined && store.openHeldSessionCount(runner) >= args.maxHeldSessions) {
+        return {
+          ok: false,
+          reason: "session-cap",
+          message: `this machine holds ${store.openHeldSessionCount(runner)} of ${args.maxHeldSessions} attended sessions — end one, or raise --max-held-sessions`,
+        };
       }
       const custody = store.openHeldSession({
         run: runId,
@@ -157,17 +174,22 @@ export class HeldSessionCoordinator {
         now: clock(),
       });
       if (!custody.ok) {
-        return {
-          ok: false,
-          reason: custody.reason,
-          message:
-            custody.reason === "runner-holding"
-              ? `${runner} is already holding a session — finish or revoke it first`
-              : "this run already holds a session",
-        };
+        return { ok: false, reason: custody.reason, message: "this run already holds a session" };
+      }
+      if (!store.consumeAuthorization(live.id, runId, clock())) {
+        // Roll the custody insert back with the transaction — a raced
+        // consume must leave NOTHING, not an orphan custody row.
+        throw new ConsumeRaced();
       }
       return { ok: true };
-    });
+      });
+    } catch (error) {
+      if (error instanceof ConsumeRaced) {
+        proof = { ok: false, reason: "attended-only", message: "another dispatch consumed the attempt first" };
+      } else {
+        throw error;
+      }
+    }
     if (!proof.ok) return proof;
 
     // ---- the brief is turn one, recorded before any byte is written.
@@ -261,13 +283,24 @@ export class HeldSessionCoordinator {
     return { ok: true };
   }
 
-  /** Shutdown: fence every controller, bounded (v2 S0f). */
-  async close(): Promise<void> {
+  /** Shutdown: fence every controller under ONE absolute deadline (v2 S0f
+   * + parallel-sessions round 1, finding 7): the deadline timer is cleared
+   * when the fences win so it cannot hold the process open, and the runs
+   * that did NOT settle in time are RETURNED for the caller to page —
+   * silence here contradicted up's "settled or paged" promise. */
+  async close(): Promise<number[]> {
     const all = [...this.sessions.keys()];
-    await Promise.race([
-      Promise.all(all.map(runId => this.fenceByRun(runId, "shutdown"))),
-      new Promise(pass => setTimeout(pass, 30_000)),
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<"deadline">(pass => {
+      deadline = setTimeout(() => pass("deadline"), 30_000);
+      deadline.unref?.();
+    });
+    const winner = await Promise.race([
+      Promise.all(all.map(runId => this.fenceByRun(runId, "shutdown"))).then(() => "fenced" as const),
+      timedOut,
     ]);
+    if (deadline !== undefined) clearTimeout(deadline);
+    return winner === "fenced" ? [] : [...this.sessions.keys()];
   }
 
   /** The beat endpoint, answers, and revocation poke this directly (v2 S1d). */
@@ -734,53 +767,64 @@ export async function sweepHeldOrphans(
   fencer: string,
   now: () => Date,
 ): Promise<{ fenced: number; paged: number }> {
-  let fenced = 0;
-  let paged = 0;
+  // TWO PHASES (parallel-sessions round 1, finding 6): seize everything
+  // first — fast, transactional, per-run CAS — then run the kill orders
+  // CONCURRENTLY. The old serial loop paid up to eight seconds per
+  // unreachable socket BEFORE up could register its runner; thirty
+  // orphans meant four minutes of startup. Now the wall clock is one
+  // socket timeout, not their sum.
+  const owned: { session: ReturnType<Store["openHeldSessions"]>[number]; run: NonNullable<ReturnType<Store["getRun"]>> }[] = [];
   for (const session of store.openHeldSessions()) {
     const run = store.getRun(session.run);
     if (run === null) continue;
     const currentLease = store.currentLiveLease(run.taskRef, now());
     if (currentLease === session.leaseId) continue; // a live owner — leave it be
 
-    let owned = session;
     if (session.state === "open") {
       const seized = store.seizeHeldSession(session.run, fencer, new Date(now().getTime() + 120_000), now());
       if (!seized.ok) continue; // another fencer took it between reads
-      owned = seized.session;
+      owned.push({ session: seized.session, run });
     } else {
       // 'fencing' already: help only when the prior fencer's deadline is gone.
       if (!store.takeoverHeldFencing(session.run, fencer, new Date(now().getTime() + 120_000), now())) continue;
+      owned.push({ session, run });
     }
-
-    const killed = await orderKill(owned.socketPath, owned.cookie);
-    if (!killed.settled) {
-      // Page, keep custody, leave 'fencing' for a later helper (v5 P4).
-      store.enqueueNotification(
-        {
-          dedupeKey: `held:${session.run}:unkillable`,
-          kind: "attention",
-          subject: `run ${session.run}: a held agent process could not be stopped`,
-          body: `The supervisor at ${owned.socketPath} is unreachable. Stop the recorded processes by hand (supervisor pid ${owned.supervisorPid ?? "?"}, agent group ${owned.agentPgid ?? "?"}), then reconcile.`,
-        },
-        now(),
-      );
-      paged += 1;
-      continue;
-    }
-
-    for (const turn of store.sessionTurnsOf(session.run)) {
-      if (turn.state === "recorded") store.settleTurnTerminal(turn.id, "cancelled", now());
-      else if (turn.state === "written" || turn.state === "accepted") {
-        store.settleTurnTerminal(turn.id, "uncertain", now());
-      }
-    }
-    if (run.outcome === null) {
-      store.finishRun(session.run, { outcome: "interrupted", reason: "orphaned", now: now() });
-    }
-    store.closeHeldFencing(session.run, fencer, "orphaned", now());
-    store.closeAuthorization(session.authorizationId, "orphaned", now());
-    fenced += 1;
   }
+
+  let fenced = 0;
+  let paged = 0;
+  await Promise.all(
+    owned.map(async ({ session, run }) => {
+      const killed = await orderKill(session.socketPath, session.cookie);
+      if (!killed.settled) {
+        // Page, keep custody, leave 'fencing' for a later helper (v5 P4).
+        store.enqueueNotification(
+          {
+            dedupeKey: `held:${session.run}:unkillable`,
+            kind: "attention",
+            subject: `run ${session.run}: a held agent process could not be stopped`,
+            body: `The supervisor at ${session.socketPath} is unreachable. Stop the recorded processes by hand (supervisor pid ${session.supervisorPid ?? "?"}, agent group ${session.agentPgid ?? "?"}), then reconcile.`,
+          },
+          now(),
+        );
+        paged += 1;
+        return;
+      }
+
+      for (const turn of store.sessionTurnsOf(session.run)) {
+        if (turn.state === "recorded") store.settleTurnTerminal(turn.id, "cancelled", now());
+        else if (turn.state === "written" || turn.state === "accepted") {
+          store.settleTurnTerminal(turn.id, "uncertain", now());
+        }
+      }
+      if (run.outcome === null) {
+        store.finishRun(session.run, { outcome: "interrupted", reason: "orphaned", now: now() });
+      }
+      store.closeHeldFencing(session.run, fencer, "orphaned", now());
+      store.closeAuthorization(session.authorizationId, "orphaned", now());
+      fenced += 1;
+    }),
+  );
   return { fenced, paged };
 }
 

@@ -304,6 +304,21 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
     return { kind: "recorded", outcome };
   }
 
+  // The attended refusal family (v28 sweep): typed, no strike, release and
+  // move on — the pre-claim gates make every one a rare race, and the
+  // invariant arm they used to fall through is for BUGS, not races.
+  if (
+    result.reason === "attended-only" ||
+    result.reason === "attended-held" ||
+    result.reason === "stale-authorization" ||
+    result.reason === "session-cap" ||
+    result.reason === "run-held"
+  ) {
+    if (leaseId !== undefined) release(store, leaseId, clock());
+    store.finishRun(runId, { outcome: "refused", reason: result.reason, now: clock() });
+    return { kind: "skipped", reason: result.reason as never };
+  }
+
   if (result.reason === "unapproved" || result.reason === "scope-changed") {
     // Approval drifted between the prefilter and the builder's own gate.
     if (leaseId !== undefined) release(store, leaseId, clock());

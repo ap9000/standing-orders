@@ -2077,7 +2077,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
     store.close();
   });
 
-  test("custody: one held session per runner, seize fences the lease inside ONE transaction, takeover waits for the deadline", () => {
+  test("custody: sessions coexist per runner (v28), seize fences the lease inside ONE transaction, takeover waits for the deadline", () => {
     const store = openStore(":memory:");
     const { ref, run } = heldFixture(store);
     // the runner's second hold refuses typed
@@ -2102,7 +2102,9 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
         socketPath: "/tmp/so2.sock",
         now: later(1),
       }),
-    ).toMatchObject({ ok: false, reason: "runner-holding" });
+    ).toMatchObject({ ok: true }); // v28: a second session on the same runner HOLDS — the per-runner bound is withdrawn
+    expect(store.openHeldSessionCount("mac-a")).toBe(2);
+    store.endHeldSession(run2, "finished", later(2));
     // seize: CAS open→fencing AND the lease dies in the same transaction
     const seized = store.seizeHeldSession(run, "fencer-a", later(120), later(10));
     expect(seized.ok).toBe(true);
@@ -2298,6 +2300,62 @@ describe("the v27 comparison migration: tournament_terms rebuilt, kind-aware mon
     db.prepare("UPDATE schema_version SET version = 26").run();
     store.close();
     expect(() => openStore(file)).toThrow(/not a shape this migration knows/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+
+describe("the v28 parallel-sessions migration: the per-runner bound is withdrawn", () => {
+  const T0 = new Date("2026-08-26T22:00:00.000Z");
+
+  test("a migrated database drops one_held_session_per_runner; two custody rows on one runner coexist; run-held still refuses", () => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v28-migr-"));
+    const file = join(dir, "db.sqlite");
+    let store = openStore(file);
+    // simulate the v27 world: recreate the old index, wind the version back
+    store.raw().exec("CREATE UNIQUE INDEX IF NOT EXISTS one_held_session_per_runner ON held_session (runner) WHERE ended_at IS NULL");
+    store.raw().prepare("UPDATE schema_version SET version = 27").run();
+    store.close();
+
+    store = openStore(file);
+    const gone = store
+      .raw()
+      .prepare("SELECT 1 AS hit FROM sqlite_master WHERE type = 'index' AND name = 'one_held_session_per_runner'")
+      .get();
+    expect(gone).toBeUndefined();
+
+    // two open sessions, one runner — the v28 point
+    const openSession = (tag: string, run: number) =>
+      store.openHeldSession({
+        run,
+        authorizationId: `auth-${tag}`,
+        runner: "mac-a",
+        leaseId: `lease-${tag}`,
+        upIncarnation: "inc",
+        cookie: "c".repeat(32),
+        socketPath: `/tmp/so-${tag}.sock`,
+        now: T0,
+      });
+    store.createTask({ id: "t-v28a", title: "a" }, T0);
+    store.createTask({ id: "t-v28b", title: "b" }, T0);
+    const refA = store.refFor("built-in", "t-v28a").id;
+    const refB = store.refFor("built-in", "t-v28b").id;
+    for (const [tag, ref] of [["a", refA], ["b", refB]] as const) {
+      const minted = store.mintAttendedAuthorization({
+        id: `auth-${tag}`, taskRef: ref, approver: "alex", runner: "mac-a", runnerGeneration: 1,
+        compositeDigest: "d".repeat(32), termsJson: "{}", maxSessionTurns: 4, budgetMicrousd: 1,
+        absoluteExpiry: new Date(T0.getTime() + 3_600_000).toISOString(), now: T0,
+      });
+      expect(minted.ok).toBe(true);
+    }
+    const runA = store.startRun({ taskRef: refA, leaseId: "lease-a", runner: "mac-a", branch: "a", worktree: "/w1", now: T0 });
+    const runB = store.startRun({ taskRef: refB, leaseId: "lease-b", runner: "mac-a", branch: "b", worktree: "/w2", now: T0 });
+    expect(openSession("a", runA)).toMatchObject({ ok: true });
+    expect(openSession("b", runB)).toMatchObject({ ok: true });
+    expect(store.openHeldSessionCount("mac-a")).toBe(2);
+    // the per-RUN singular still holds
+    expect(openSession("b2", runB)).toMatchObject({ ok: false, reason: "run-held" });
+    store.close();
     rmSync(dir, { recursive: true, force: true });
   });
 });

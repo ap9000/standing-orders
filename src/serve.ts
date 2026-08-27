@@ -924,6 +924,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           settings: options.telegramTokenFile !== undefined,
           building: store.liveClaims(project, now),
           runners: store.listRunners(),
+          heldSessions: new Map(store.openHeldSessions().reduce((by, one) => by.set(one.runner, (by.get(one.runner) ?? 0) + 1), new Map<string, number>())),
           worktrees: store
             .listWorktrees()
             .filter(one => project === null || sameRepo(one.repo, project)),
@@ -963,6 +964,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           }),
           building: store.liveClaims(project, now),
           runners: store.listRunners(),
+          heldSessions: new Map(store.openHeldSessions().reduce((by, one) => by.set(one.runner, (by.get(one.runner) ?? 0) + 1), new Map<string, number>())),
           worktrees: store.listWorktrees().filter(one => project === null || sameRepo(one.repo, project)),
           episode: project === null ? null : store.latestWatchEpisode(project),
           outboxPending: store.listNotifications("pending").length,
@@ -1811,7 +1813,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       (s.chrome?.listPane !== undefined && SENSITIVE_INPUT.test(s.chrome.listPane));
     const chromeLayer = !sensitive && s.chrome !== undefined;
     const functional = s.functional?.script ?? "";
-    const script = functional + (chromeLayer ? chromeScript() : "");
+    // Sensitive pages strip the palette and keys but keep the MINIMAL beat
+    // (round-1 finding 3): reading a ceremony for a minute must not lapse
+    // every other session. The beat reads no DOM and posts no parameters.
+    // …except the one-time-secret pages (forceSensitive): those stay
+    // script-free absolutely, and simply do not keep sessions alive.
+    const sensitiveBeat = sensitive && s.forceSensitive !== true && s.chrome !== undefined ? beatScript() : "";
+    const script = functional + (chromeLayer ? chromeScript() : sensitiveBeat);
     const nonce = script === "" ? undefined : randomBytes(16).toString("base64");
     const body = chromeLayer
       ? `${s.body}\n${paletteTagCached(s.chrome?.project ?? null)}\n${KBD_HELP}`
@@ -1821,7 +1829,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: s.refreshSeconds }),
       ...(nonce === undefined ? {} : { live: { nonce, script, fallbackRefresh: s.functional?.fetches === true } }),
     });
-    return page(response, status, html, nonce, s.functional?.fetches === true);
+    // v28: the chrome layer itself fetches (the attended beat), so any
+    // page that ships it needs connect-src — not only pages whose own
+    // functional script polls.
+    return page(response, status, html, nonce, s.functional?.fetches === true || chromeLayer);
   }
 
   /** The badge cache: five seconds per project — mutations invalidate it. */
@@ -2526,6 +2537,53 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   // ---- mutations -----------------------------------------------------------
 
+  /** v28: the console-scoped liveness beat — see the route note in
+   * handlePost. Supersedes v2 S2f's per-page id binding, reversed
+   * KNOWINGLY: with parallel sessions one foregrounded tab per session is
+   * impossible, and page-binding was attention theater over what was
+   * always renewal-of-use. Approver-bound; never extends cookies, never
+   * touches absolute expiry, never mints. */
+  function attendedBeats(who: Who, request: IncomingMessage, response: ServerResponse, now: Date): void {
+    if (who.via !== "cookie") return refuse(response, who, 403, "watching is a browser session's act");
+    if (request.headers["sec-fetch-site"] !== "same-origin") {
+      return refuse(response, who, 403, "the beat only answers this console's own pages");
+    }
+    // Belt with the braces: a PRESENT Origin/Referer must also name this
+    // server — the same allowlist the shared guard applies.
+    const namedOrigin =
+      typeof request.headers.origin === "string" && request.headers.origin !== "null"
+        ? request.headers.origin
+        : typeof request.headers.referer === "string"
+          ? request.headers.referer
+          : null;
+    if (namedOrigin !== null && !allowedHost(namedOrigin.replace(/^https?:[/][/]/, "").split("/")[0])) {
+      return refuse(response, who, 403, "origin not allowed");
+    }
+    const attendedRunner = options.attended?.runner;
+    let beaten = 0;
+    if (attendedRunner !== undefined) {
+      for (const open of store.openAuthorizationsOf(attendedRunner)) {
+        if (open.approver !== who.name) continue;
+        if (Date.parse(open.absoluteExpiry) <= now.getTime()) continue;
+        // Only terms SIGNED for console-wide renewal are renewed here
+        // (round-1 finding 2): a legacy page-bound signature never
+        // silently acquires the wider mode — it simply lapses.
+        try {
+          const signedMode = (JSON.parse(open.termsJson) as { attentionMode?: unknown }).attentionMode;
+          if (signedMode !== "console-visible") continue;
+        } catch {
+          continue;
+        }
+        const beatRef = store.refForId(open.taskRef);
+        if (beatRef === null || !visible(beatRef.repo)) continue;
+        store.beatAuthorization(open.id, now);
+        if (open.attemptRun !== null) options.attended?.coordinator?.poke(open.attemptRun);
+        beaten++;
+      }
+    }
+    return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true, beaten }));
+  }
+
   async function handlePost(
     url: URL,
     who: Who,
@@ -2533,6 +2591,19 @@ export function createDecisionServer(options: ServeOptions): Server {
     response: ServerResponse,
   ): Promise<void> {
     const body = await form(request);
+
+    // The attended beat answers BEFORE the shared mutation guard (v28): it
+    // carries no parameters, so there is no csrf token to check — its OWN
+    // guard is complete and STRICTER for the browsers this console
+    // supports: cookie session, form content-type (form() enforced it),
+    // and `Sec-Fetch-Site: same-origin`, which cross-site POSTs cannot
+    // send and same-origin fetch always does. Renewal-only: an attacker
+    // who somehow posted could only keep the operator's OWN sessions from
+    // lapsing — no mint, no spend, no read.
+    if (url.pathname === "/session/attended-beats") {
+      return attendedBeats(who, request, response, clock());
+    }
+
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
     const now = clock();
@@ -3462,28 +3533,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/r/${id}?noted=1#review`);
     }
 
-    if (url.pathname === "/session/attended-beat") {
-      // The liveness beat (Phase 2E, v2 S2f as amended): cookie-only, and
-      // it CARRIES the authorization id — a page watching task A can never
-      // keep task B's authorization alive. The durable column is the
-      // authoritative clock; the store suppresses only duplicate-tab
-      // writes inside 5 seconds. Never extends cookies, never touches
-      // absolute expiry.
-      if (who.via !== "cookie") return refuse(response, who, 403, "watching is a browser session's act");
-      const authorizationId = body.get("authorization") ?? "";
-      const beaten = store.readAuthorization(authorizationId);
-      if (beaten === null || beaten.closedAt !== null) {
-        return respond(response, 410, "application/json; charset=utf-8", JSON.stringify({ ok: false, reason: "closed" }));
-      }
-      const beatRef = store.refForId(beaten.taskRef);
-      if (beatRef === null || !visible(beatRef.repo)) {
-        return refuse(response, who, 404, "no such authorization");
-      }
-      store.beatAuthorization(authorizationId, now);
-      if (beaten.attemptRun !== null) options.attended?.coordinator?.poke(beaten.attemptRun);
-      return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true }));
-    }
-
     if (url.pathname === "/session/editor-links") {
       // The session half of the editor-link activation (arc 6, finding 1):
       // only the person at the browser can say "this device holds the
@@ -3787,6 +3836,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       ok: true,
       terms: {
         taskId,
+        attentionMode: "console-visible",
         scopeDigest: scope.digest,
         profileDigest: profileDigestOf(pinned),
         profileJson: canonicalProfileJson(pinned),
@@ -3848,7 +3898,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       `<p class="meta">worker</p><p class="recap" style="margin-top:0">${escape(terms.runner)} (this machine)</p>` +
       `<p class="meta">spending</p><p class="recap" style="margin-top:0">up to about $${(terms.budgetMicrousd / 1_000_000).toFixed(2)} — the agent stops as soon as its total crosses this; the final step may run a little past it</p>` +
       `<p class="meta">conversation</p><p class="recap" style="margin-top:0">at most ${terms.maxSessionTurns} messages to the agent, this whole session; each may work up to ${Math.round(terms.turnTimeoutSeconds / 60)} minutes — one that runs past that ends the whole session. If it needs a repair, the repair uses the same session, model, and clock.</p>` +
-      `<p class="meta">while you watch</p><p class="recap" style="margin-top:0">this page being open is what keeps it running — close it and the session winds down within a minute. Everything ends by ${escape(when(terms.absoluteExpiry))} regardless. One attempt; it never converts into unattended work.</p>` +
+      `<p class="meta">while you watch — a signed term</p><p class="recap" style="margin-top:0">your console being open is what keeps it running — any page of it, this one included; close the console and the session winds down within a minute. Everything ends by ${escape(when(terms.absoluteExpiry))} regardless. One attempt; it never converts into unattended work.</p>` +
       `<label>your password, typed again — a signed-in session alone cannot authorize work<input type="password" name="token" autocomplete="current-password"></label>` +
       `<div class="sticky-actions"><button type="submit">run it while I watch</button></div>` +
       `</form>` +
@@ -5260,8 +5310,21 @@ function transcriptScript(): string {
  * ceremonies stay POST + password + CSRF, untouched. Reads its index from
  * a non-executable JSON script tag rendered by the same authorized page.
  */
+/** The attended beat (v28): parameterless, cookie + same-origin proven
+ * server-side, renewal-only — any console page keeps the signed-in
+ * approver's own sessions live; a hidden tab pauses honestly. Cheap
+ * no-op when nothing is open. Shipped ALONE on sensitive pages. */
+function beatScript(): string {
+  return (
+    `(function(){var beat=function(){if(document.hidden)return;` +
+    `fetch("/session/attended-beats",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:""}).catch(function(){});};` +
+    `beat();setInterval(beat,15000);})();`
+  );
+}
+
 function chromeScript(): string {
   return (
+    beatScript() +
     `(function(){` +
     // The app-icon badge (Phase 2E): the page's server-rendered waiting
     // count is authoritative over any stale push — synced on every chrome
@@ -5731,6 +5794,8 @@ function systemPage(chrome: Chrome, data: {
   }[];
   building: { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null }[];
   runners: Runner[];
+  /** v28: open attended sessions per runner. */
+  heldSessions?: Map<string, number>;
   worktrees: WorktreeRow[];
   episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
   outboxPending: number;
@@ -5745,9 +5810,10 @@ function systemPage(chrome: Chrome, data: {
       const dot = age < 5 * 60_000 ? "dot-ok" : age < 60 * 60_000 ? "dot-warn" : "dot-off";
       const said = age < 5 * 60_000 ? "alive" : age < 60 * 60_000 ? `quiet ${Math.round(age / 60_000)}m` : "not heard from";
       const busy = data.building.filter(claim => claim.runner === one.name).length;
+      const sessions = data.heldSessions?.get(one.name) ?? 0;
       return (
         `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
-        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building</span></div>`
+        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
       );
     });
   const worktreeCards = data.worktrees.map(tree => {
@@ -6469,6 +6535,8 @@ function homePage(chrome: Chrome, data: {
   repo: string | null;
   building: { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null }[];
   runners: Runner[];
+  /** v28: open attended sessions per runner. */
+  heldSessions?: Map<string, number>;
   worktrees: WorktreeRow[];
   episode: { id: number; startedAt: string; endedAt: string | null; ticks: number; built: number; broke: number } | null;
   summary: ReturnType<typeof tally<Run & { taskId: string }>>;
@@ -6571,9 +6639,10 @@ function homePage(chrome: Chrome, data: {
       const dot = age < 5 * 60_000 ? "dot-ok" : age < 60 * 60_000 ? "dot-warn" : "dot-off";
       const said = age < 5 * 60_000 ? "alive" : age < 60 * 60_000 ? `quiet ${Math.round(age / 60_000)}m` : "not heard from";
       const busy = data.building.filter(claim => claim.runner === one.name).length;
+      const sessions = data.heldSessions?.get(one.name) ?? 0;
       return (
         `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
-        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building</span></div>`
+        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
       );
     });
   const worktreeCards = data.worktrees.map(tree => {
@@ -7723,7 +7792,7 @@ function taskBody(data: {
         ? [
             `<div class="card" data-attended="${escape(attended.open.id)}">`,
             `<p><strong>attended session</strong> <span class="meta">${escape(attended.open.state)}</span></p>`,
-            `<p class="meta">${attended.open.running ? "the agent is running while you watch" : "waiting to dispatch to this machine"} · ${attended.open.turnsUsed}/${attended.open.cap} messages · $${(attended.open.spentMicrousd / 1_000_000).toFixed(2)} of $${(attended.open.budgetMicrousd / 1_000_000).toFixed(2)} · everything ends by ${escape(when(attended.open.expiresAt))}</p>`,
+            `<p class="meta">${attended.open.running ? "the agent is running — your open console keeps it live" : "waiting to dispatch to this machine"} · ${attended.open.turnsUsed}/${attended.open.cap} messages · $${(attended.open.spentMicrousd / 1_000_000).toFixed(2)} of $${(attended.open.budgetMicrousd / 1_000_000).toFixed(2)} · everything ends by ${escape(when(attended.open.expiresAt))}</p>`,
             `<p class="meta">this page being open keeps it alive — close it and the session winds down within a minute</p>`,
             `<form method="post" action="${taskHref(task.id)}/attend-revoke" class="inline">`,
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -8082,32 +8151,9 @@ function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen 
   // The beat (Phase 2E): while an authorization is open, THIS page being
   // visible is what "while you watch" means — a 15-second durable beat
   // carrying the authorization id, paused exactly when the tab hides.
-  // Nothing else on the page depends on it; a beat that fails simply lets
-  // the session lapse, which is the honest outcome of not watching.
-  const open = data.attended?.open ?? null;
-  const functional =
-    open === null
-      ? undefined
-      : {
-          script: [
-            "(function () {",
-            `  var authorization = ${JSON.stringify(open.id)};`,
-            `  var csrf = ${JSON.stringify(data.csrf)};`,
-            "  var send = function () {",
-            "    if (document.hidden) return;",
-            "    fetch('/session/attended-beat', {",
-            "      method: 'POST',",
-            "      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },",
-            "      body: 'csrf=' + encodeURIComponent(csrf) + '&authorization=' + encodeURIComponent(authorization),",
-            "    }).catch(function () {});",
-            "  };",
-            "  send();",
-            "  setInterval(send, 15000);",
-            "})();",
-          ].join("\n"),
-          fetches: true,
-        };
-  return screen(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome, ...(functional === undefined ? {} : { functional }) });
+  // The beat moved to the chrome layer (v28): every console page keeps the
+  // approver's sessions live; this page no longer carries its own.
+  return screen(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome });
 }
 
 /**
