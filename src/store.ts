@@ -31,14 +31,14 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { digestOf, canonicalProfileJson, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, type ExecutionProfile } from "./scope.js";
+import { digestOf, canonicalProfileJson, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile } from "./scope.js";
 import { resolveScopeProfile } from "./agentconfig.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 26;
+export const SCHEMA_VERSION = 27;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -111,6 +111,9 @@ export type TournamentTerms = {
   taskRef: number;
   generation: number;
   active: boolean;
+  /** v27: 'race' = dollar-capped tournament; 'comparison' = labeled
+   * cross-runtime comparison with no dollar terms. */
+  kind: "race" | "comparison";
   raceDigest: string;
   /** Ordered agents: exact model ids, resolved at filing. */
   agents: { provider: string; model: string; repairModel: string }[];
@@ -156,6 +159,8 @@ export type Contest = {
   winnerContestant: number | null;
   /** One escalation page per tournament, ever — set with the page. */
   overduePaged: boolean;
+  /** v27: denormalized from the terms at admission. */
+  kind: "race" | "comparison";
 };
 
 export type ContestantState = "pending" | "ready" | "building" | "parked" | "built" | "failed" | "stopped";
@@ -908,14 +913,19 @@ CREATE TABLE IF NOT EXISTS tournament_terms (
   task_ref                  INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
   generation                INTEGER NOT NULL,
   active                    INTEGER NOT NULL DEFAULT 1,
+  -- v27: 'race' = dollar-capped tournament (money contract required);
+  -- 'comparison' = labeled cross-runtime comparison (no dollar terms
+  -- exist; each lane's sealed clock is its bound). The money CHECK is
+  -- kind-aware: races keep their positive budgets, comparisons pin 0.
+  kind                      TEXT NOT NULL DEFAULT 'race' CHECK (kind IN ('race','comparison')),
   race_digest               TEXT NOT NULL,
   -- The ordered agents, JSON: [{provider, model, repairModel}] — exact
   -- model ids, resolved at filing, priced at price_version.
   agents                    TEXT NOT NULL,
   n                         INTEGER NOT NULL CHECK (n BETWEEN 2 AND 4),
-  per_agent_budget_microusd INTEGER NOT NULL CHECK (per_agent_budget_microusd > 0),
-  overrun_reserve_microusd  INTEGER NOT NULL CHECK (overrun_reserve_microusd > 0),
-  total_budget_microusd     INTEGER NOT NULL CHECK (total_budget_microusd > 0),
+  per_agent_budget_microusd INTEGER NOT NULL,
+  overrun_reserve_microusd  INTEGER NOT NULL,
+  total_budget_microusd     INTEGER NOT NULL,
   price_version             INTEGER NOT NULL,
   retries                   INTEGER NOT NULL CHECK (retries = 0),
   -- 'none', or the JSON of the publication grant constraints in force.
@@ -923,7 +933,9 @@ CREATE TABLE IF NOT EXISTS tournament_terms (
   created_at                TEXT NOT NULL,
   approved_at               TEXT,
   approved_by               TEXT,
-  approved_digest           TEXT
+  approved_digest           TEXT,
+  CHECK ((kind = 'race' AND per_agent_budget_microusd > 0 AND overrun_reserve_microusd > 0 AND total_budget_microusd > 0)
+      OR (kind = 'comparison' AND per_agent_budget_microusd = 0 AND overrun_reserve_microusd = 0 AND total_budget_microusd = 0))
 );
 
 -- One active terms row per task (the whole table is new, so this partial
@@ -957,7 +969,10 @@ CREATE TABLE IF NOT EXISTS contest (
   overdue_paged      INTEGER NOT NULL DEFAULT 0,
   -- v24: 1 = legacy race digest (provider/model/repair only) — admission
   -- keeps byte-comparing the stored fingerprint; 2 = full-profile terms.
-  race_semantics     INTEGER NOT NULL DEFAULT 1
+  race_semantics     INTEGER NOT NULL DEFAULT 1,
+  -- v27: denormalized from the terms at admission, so screens, holds,
+  -- and recovery speak the right words without a join.
+  kind               TEXT NOT NULL DEFAULT 'race'
 );
 
 CREATE INDEX IF NOT EXISTS contest_by_task ON contest (task_ref, id DESC);
@@ -2771,6 +2786,109 @@ function migrate(db: Database): void {
 
   // v26 (attested runtime): phase_config's provider CHECK gains 'gemini'.
   rebuildPhaseConfigForV26(db);
+
+  // v27 (labeled comparisons): tournament_terms gains kind + kind-aware
+  // money CHECKs (a rebuild — the old positive-budget CHECKs live in the
+  // DDL); contest gains the denormalized kind additively.
+  addColumn(db, "contest", "kind", "TEXT NOT NULL DEFAULT 'race'");
+  rebuildTournamentTermsForV27(db);
+}
+
+const TOURNAMENT_TERMS_V26_DDL = `CREATE TABLE tournament_terms (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref                  INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  generation                INTEGER NOT NULL,
+  active                    INTEGER NOT NULL DEFAULT 1,
+  race_digest               TEXT NOT NULL,
+  -- The ordered agents, JSON: [{provider, model, repairModel}] — exact
+  -- model ids, resolved at filing, priced at price_version.
+  agents                    TEXT NOT NULL,
+  n                         INTEGER NOT NULL CHECK (n BETWEEN 2 AND 4),
+  per_agent_budget_microusd INTEGER NOT NULL CHECK (per_agent_budget_microusd > 0),
+  overrun_reserve_microusd  INTEGER NOT NULL CHECK (overrun_reserve_microusd > 0),
+  total_budget_microusd     INTEGER NOT NULL CHECK (total_budget_microusd > 0),
+  price_version             INTEGER NOT NULL,
+  retries                   INTEGER NOT NULL CHECK (retries = 0),
+  -- 'none', or the JSON of the publication grant constraints in force.
+  publication_policy        TEXT NOT NULL,
+  created_at                TEXT NOT NULL,
+  approved_at               TEXT,
+  approved_by               TEXT,
+  approved_digest           TEXT
+)`;
+
+const TOURNAMENT_TERMS_V27_DDL = `CREATE TABLE tournament_terms_next (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref                  INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  generation                INTEGER NOT NULL,
+  active                    INTEGER NOT NULL DEFAULT 1,
+  -- v27: 'race' = dollar-capped tournament (money contract required);
+  -- 'comparison' = labeled cross-runtime comparison (no dollar terms
+  -- exist; each lane's sealed clock is its bound). The money CHECK is
+  -- kind-aware: races keep their positive budgets, comparisons pin 0.
+  kind                      TEXT NOT NULL DEFAULT 'race' CHECK (kind IN ('race','comparison')),
+  race_digest               TEXT NOT NULL,
+  -- The ordered agents, JSON: [{provider, model, repairModel}] — exact
+  -- model ids, resolved at filing, priced at price_version.
+  agents                    TEXT NOT NULL,
+  n                         INTEGER NOT NULL CHECK (n BETWEEN 2 AND 4),
+  per_agent_budget_microusd INTEGER NOT NULL,
+  overrun_reserve_microusd  INTEGER NOT NULL,
+  total_budget_microusd     INTEGER NOT NULL,
+  price_version             INTEGER NOT NULL,
+  retries                   INTEGER NOT NULL CHECK (retries = 0),
+  -- 'none', or the JSON of the publication grant constraints in force.
+  publication_policy        TEXT NOT NULL,
+  created_at                TEXT NOT NULL,
+  approved_at               TEXT,
+  approved_by               TEXT,
+  approved_digest           TEXT,
+  CHECK ((kind = 'race' AND per_agent_budget_microusd > 0 AND overrun_reserve_microusd > 0 AND total_budget_microusd > 0)
+      OR (kind = 'comparison' AND per_agent_budget_microusd = 0 AND overrun_reserve_microusd = 0 AND total_budget_microusd = 0))
+)`;
+
+const TOURNAMENT_TERMS_V27_COLUMNS =
+  "task_ref, generation, active, race_digest, agents, n, per_agent_budget_microusd, " +
+  "overrun_reserve_microusd, total_budget_microusd, price_version, retries, " +
+  "publication_policy, created_at, approved_at, approved_by, approved_digest";
+
+/**
+ * The v27 rebuild: tournament_terms recognized by FULL canonical-DDL
+ * equality in BOTH directions (the v26 lesson — a substring check is not
+ * a recognizer): the v27 form returns untouched, the v26 form rebuilds,
+ * anything else refuses. Rows copy verbatim; kind defaults to 'race'.
+ */
+function rebuildTournamentTermsForV27(db: Database): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tournament_terms'")
+    .get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  if (stored === canonicalDdl(TOURNAMENT_TERMS_V27_DDL).replace("tournament_terms_next", "tournament_terms")) return;
+  if (stored !== canonicalDdl(TOURNAMENT_TERMS_V26_DDL)) {
+    throw new Error("the tournament_terms table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(TOURNAMENT_TERMS_V27_DDL);
+      db.exec(
+        `INSERT INTO tournament_terms_next (id, ${TOURNAMENT_TERMS_V27_COLUMNS})
+         SELECT id, ${TOURNAMENT_TERMS_V27_COLUMNS} FROM tournament_terms`,
+      );
+      db.exec("DROP TABLE tournament_terms");
+      db.exec("ALTER TABLE tournament_terms_next RENAME TO tournament_terms");
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS tournament_terms_one_active
+        ON tournament_terms (task_ref) WHERE active = 1`);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 /** Whitespace-collapsed, IF-NOT-EXISTS-stripped DDL for full-equality
@@ -5896,6 +6014,8 @@ export class Store {
   fileTournamentTerms(
     spec: {
       taskRef: number;
+      /** v27: absent = 'race' (every historical caller). */
+      kind?: "race" | "comparison";
       raceDigest: string;
       agents: { provider: string; model: string; repairModel: string }[];
       perAgentBudgetMicrousd: number;
@@ -5930,14 +6050,15 @@ export class Store {
       const inserted = this.db
         .prepare(
           `INSERT INTO tournament_terms
-             (task_ref, generation, active, race_digest, agents, n, per_agent_budget_microusd,
+             (task_ref, generation, active, kind, race_digest, agents, n, per_agent_budget_microusd,
               overrun_reserve_microusd, total_budget_microusd, price_version, retries,
               publication_policy, created_at)
-           VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+           VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
         )
         .run(
           spec.taskRef,
           generation,
+          spec.kind ?? "race",
           spec.raceDigest,
           JSON.stringify(spec.agents),
           spec.agents.length,
@@ -5968,15 +6089,15 @@ export class Store {
   }
 
   createContest(
-    spec: { taskRef: number; terms: number; scopeDigest: string; raceDigest: string },
+    spec: { taskRef: number; terms: number; scopeDigest: string; raceDigest: string; kind?: "race" | "comparison" },
     now: Date,
   ): number {
     const inserted = this.db
       .prepare(
-        `INSERT INTO contest (task_ref, terms, state, scope_digest, race_digest, created_at, race_semantics)
-         VALUES (?, ?, 'dispatching', ?, ?, ?, 2)`,
+        `INSERT INTO contest (task_ref, terms, state, scope_digest, race_digest, created_at, race_semantics, kind)
+         VALUES (?, ?, 'dispatching', ?, ?, ?, 2, ?)`,
       )
-      .run(spec.taskRef, spec.terms, spec.scopeDigest, spec.raceDigest, now.toISOString());
+      .run(spec.taskRef, spec.terms, spec.scopeDigest, spec.raceDigest, now.toISOString(), spec.kind ?? "race");
     return Number(inserted.lastInsertRowid);
   }
 
@@ -6039,15 +6160,15 @@ export class Store {
 
   createContestants(
     contest: number,
-    agents: { provider: string; model: string; repairModel: string; branch: string; budgetMicrousd: number; reserveMicrousd: number }[],
+    agents: { provider: string; model: string; repairModel: string; branch: string; budgetMicrousd: number; reserveMicrousd: number; unknownSpend?: boolean }[],
   ): number[] {
     return this.transact(() =>
       agents.map((agent, index) => {
         const inserted = this.db
           .prepare(
             `INSERT INTO contestant
-               (contest, ordinal, provider, model, repair_model, branch, budget_microusd, reserve_microusd, profile_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (contest, ordinal, provider, model, repair_model, branch, budget_microusd, reserve_microusd, unknown_spend, profile_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             contest,
@@ -6058,6 +6179,10 @@ export class Store {
             agent.branch,
             agent.budgetMicrousd,
             agent.reserveMicrousd,
+            // v27 (comparisons): a lane whose harness reports no dollars is
+            // PRE-latched — unmeasured is a fact of the lane, not a
+            // wait-and-see. Race lanes stay 0 and measure normally.
+            agent.unknownSpend === true ? 1 : 0,
             // v24: the contestant's OWN sealed profile — race terms carry
             // exact models already; the effective limits join them here so
             // the dispatch proof holds each lane to its lane.
@@ -11554,6 +11679,7 @@ function readTournamentTerms(row: Record<string, unknown>): TournamentTerms {
     taskRef: Number(row["task_ref"]),
     generation: Number(row["generation"]),
     active: Number(row["active"]) === 1,
+    kind: String(row["kind"] ?? "race") === "comparison" ? "comparison" : "race",
     raceDigest: String(row["race_digest"]),
     agents: JSON.parse(String(row["agents"])) as TournamentTerms["agents"],
     n: Number(row["n"]),
@@ -11590,6 +11716,7 @@ function readContest(row: Record<string, unknown>): Contest {
     pickedBy: maybe("picked_by"),
     winnerContestant: row["winner_contestant"] === null ? null : Number(row["winner_contestant"]),
     overduePaged: Number(row["overdue_paged"] ?? 0) === 1,
+    kind: String(row["kind"] ?? "race") === "comparison" ? "comparison" : "race",
   };
 }
 
@@ -11750,16 +11877,31 @@ export function contestantProfileOf(provider: string, model: string, repairModel
         repairTimeoutSeconds: CLAUDE_LIMITS.repairTimeoutSeconds,
         repairModel,
       }
-    : {
-        provider: provider === "openrouter" ? "openrouter" : "codex",
-        model,
-        sandboxMode: "workspace-write",
-        maxTurns: "unsupported",
-        repairMaxTurns: "unsupported",
-        timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
-        repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
-        repairModel,
-      };
+    : provider === "gemini"
+      ? {
+          // v27 (comparisons): gemini's OWN shape — before this branch a
+          // gemini string would have flowed into the codex profile via
+          // the fallthrough, unreachable while tournaments refused it,
+          // reachable the moment comparisons admitted it.
+          provider: "gemini",
+          model,
+          approvalArgv: "auto_edit",
+          maxTurns: "unsupported",
+          repairMaxTurns: "unsupported",
+          timeoutSeconds: GEMINI_LIMITS.timeoutSeconds,
+          repairTimeoutSeconds: GEMINI_LIMITS.repairTimeoutSeconds,
+          repairModel,
+        }
+      : {
+          provider: provider === "openrouter" ? "openrouter" : "codex",
+          model,
+          sandboxMode: "workspace-write",
+          maxTurns: "unsupported",
+          repairMaxTurns: "unsupported",
+          timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
+          repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
+          repairModel,
+        };
 }
 
 function readScope(row: Record<string, unknown>): Scope {

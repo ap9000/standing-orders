@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { openStore, BUILT_IN, type Capability, type Store } from "./store.js";
+import { SCHEMA_VERSION, openStore, BUILT_IN, type Capability, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -1805,7 +1805,7 @@ describe("the v25 attended core: migration, authorizations, the turn ledger, cus
     );
     expect(decisionDdl).toContain("delivered_turn");
     expect(decisionDdl).not.toContain("UNIQUE REFERENCES run(id)");
-    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()!["version"])).toBe(26);
+    expect(Number(store.raw().prepare("SELECT version FROM schema_version").get()!["version"])).toBe(SCHEMA_VERSION);
     store.close();
     rmSync(dirname(file), { recursive: true, force: true });
   });
@@ -2199,5 +2199,92 @@ describe("the v26 attested runtime: phase_config admits gemini", () => {
     store.setPhaseConfig("installation", "build", "gemini", "gemini-2.5-flash", "alex", T0);
     expect(store.phaseConfig("installation", "build")).toMatchObject({ provider: "gemini", model: "gemini-2.5-flash" });
     store.close();
+  });
+});
+
+
+describe("the v27 comparison migration: tournament_terms rebuilt, kind-aware money CHECKs", () => {
+  const T0 = new Date("2026-08-26T20:00:00.000Z");
+
+  const V26_TERMS_DDL = `CREATE TABLE tournament_terms (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref                  INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  generation                INTEGER NOT NULL,
+  active                    INTEGER NOT NULL DEFAULT 1,
+  race_digest               TEXT NOT NULL,
+  -- The ordered agents, JSON: [{provider, model, repairModel}] — exact
+  -- model ids, resolved at filing, priced at price_version.
+  agents                    TEXT NOT NULL,
+  n                         INTEGER NOT NULL CHECK (n BETWEEN 2 AND 4),
+  per_agent_budget_microusd INTEGER NOT NULL CHECK (per_agent_budget_microusd > 0),
+  overrun_reserve_microusd  INTEGER NOT NULL CHECK (overrun_reserve_microusd > 0),
+  total_budget_microusd     INTEGER NOT NULL CHECK (total_budget_microusd > 0),
+  price_version             INTEGER NOT NULL,
+  retries                   INTEGER NOT NULL CHECK (retries = 0),
+  -- 'none', or the JSON of the publication grant constraints in force.
+  publication_policy        TEXT NOT NULL,
+  created_at                TEXT NOT NULL,
+  approved_at               TEXT,
+  approved_by               TEXT,
+  approved_digest           TEXT
+)`;
+
+  test("a v26 terms table is rebuilt: stored races keep kind='race' byte-for-byte, comparisons become filable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v27-migr-"));
+    const file = join(dir, "db.sqlite");
+    let store = openStore(file);
+    store.createTask({ id: "t-v27", title: "raced before v27" }, T0);
+    const taskRef = store.refFor("built-in", "t-v27").id;
+    const db = store.raw();
+    db.exec("DROP TABLE tournament_terms");
+    db.exec(V26_TERMS_DDL);
+    db.prepare(
+      `INSERT INTO tournament_terms (task_ref, generation, active, race_digest, agents, n, per_agent_budget_microusd,
+        overrun_reserve_microusd, total_budget_microusd, price_version, retries, publication_policy, created_at)
+       VALUES (?, 1, 1, 'digest-x', '[{"provider":"claude","model":"m","repairModel":"m"}, {"provider":"claude","model":"n","repairModel":"n"}]', 2, 5000000, 1760000, 20000000, 1, 0, 'none', ?)`,
+    ).run(taskRef, T0.toISOString());
+    db.prepare("UPDATE schema_version SET version = 26").run();
+    store.close();
+
+    store = openStore(file);
+    const terms = store.activeTournamentTerms(taskRef);
+    expect(terms).toMatchObject({ kind: "race", raceDigest: "digest-x", perAgentBudgetMicrousd: 5_000_000 });
+    // the widened shape files comparisons now
+    store.createTask({ id: "t-v27b", title: "compared after v27" }, T0);
+    const otherRef = store.refFor("built-in", "t-v27b").id;
+    const filed = store.fileTournamentTerms(
+      {
+        taskRef: otherRef,
+        kind: "comparison",
+        raceDigest: "f".repeat(64),
+        agents: [
+          { provider: "claude", model: "m", repairModel: "m" },
+          { provider: "gemini", model: "g", repairModel: "g" },
+        ],
+        perAgentBudgetMicrousd: 0,
+        overrunReserveMicrousd: 0,
+        totalBudgetMicrousd: 0,
+        priceVersion: 0,
+        publicationPolicy: "none",
+      },
+      T0,
+    );
+    expect(filed).toBeGreaterThan(0);
+    expect(store.activeTournamentTerms(otherRef)).toMatchObject({ kind: "comparison" });
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a doctored terms table refuses — containing the old CHECK text is not being the old shape", () => {
+    const dir = mkdtempSync(join(tmpdir(), "so-v27-doct-"));
+    const file = join(dir, "db.sqlite");
+    const store = openStore(file);
+    const db = store.raw();
+    db.exec("DROP TABLE tournament_terms");
+    db.exec(V26_TERMS_DDL.replace("price_version             INTEGER NOT NULL,", "price_version             INTEGER NOT NULL, smuggled TEXT,"));
+    db.prepare("UPDATE schema_version SET version = 26").run();
+    store.close();
+    expect(() => openStore(file)).toThrow(/not a shape this migration knows/);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

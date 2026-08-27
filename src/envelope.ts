@@ -53,6 +53,8 @@ export const DOCUMENTED_REASONS: readonly string[] = [
   "reserved", //          the task belongs to another worker's queue
   "external", //          a tracker mirror is not dispatchable (see detail)
   "contest-open", //      a tournament is running; a person picks
+  "all-lanes-raceable", // every compared agent could hold a real budget — race them instead
+  "provider-unattested", // the provider binary is outside its attested range
   "steering-pending", //  a steering note is waiting; contests refuse
   "not-ready", //         blocked, held, or otherwise not dispatchable
   "not-leased", //        the lease does not exist or already ended

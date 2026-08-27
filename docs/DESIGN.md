@@ -448,6 +448,23 @@ settings and GEMINI.md ride along, and an API key in env is visible to
 the shells the agent runs — cached login or ADC is the recommended
 unattended auth road.
 
+**Labeled comparisons (slice B).** Cross-runtime side-by-side is a
+COMPARISON, not a tournament: the same contest machinery — one filing
+ceremony, one joint approval digest, one admission transaction, the
+ready barrier, the pick password — discriminated by a single `kind`. A
+comparison carries NO dollar terms anywhere: each lane's sealed profile
+clock is its bound, unmeasured lanes are pre-latched as a fact at
+admission, and every money surface says "measured on N of M lanes"
+instead of summing a lie. The discipline gate keeps the two ceremonies
+honest in both directions: a comparison must include at least one lane
+no native dollar cap can bound (else the refusal points at the
+tournament road — "race them instead"), and tournaments keep their
+money contract untouched. Attested lanes ride the same rails as
+ordinary work: the tick's pre-claim skip walks every lane, and the
+gateway proves the version before each spawn — a comparison whose
+gemini drifted out of range skips whole, in words, because running a
+subset is a different comparison than the one that was signed.
+
 ## 10. Milestones
 
 | | Scope | Ships when |

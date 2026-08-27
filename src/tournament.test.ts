@@ -6,7 +6,7 @@ import { openStore, type Store } from "./store.js";
 import {
   raceDigestOf,
   jointApprovalDigest,
-  planTournament,
+  planTournament, planComparison, comparisonDigestOf,
   admitContest,
   finalizeContestant,
   recoverContests,
@@ -1476,4 +1476,324 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
       store.close();
     }
   });
+});
+
+
+describe("labeled comparisons (Phase 3 slice B): planning, filing, admission, money honesty", () => {
+  const MIXED = [
+    { provider: "claude", model: "claude-sonnet-5" },
+    { provider: "codex", model: "gpt-5-codex" },
+    { provider: "gemini", model: "gemini-2.5-pro" },
+    { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" },
+  ];
+
+  test("all four providers plan together, each lane worded honestly", () => {
+    const planned = planComparison({ agents: MIXED });
+    if (!planned.ok) throw new Error(planned.message);
+    expect(planned.plan.agents).toHaveLength(4);
+    expect(planned.plan.laneWords[0]).toContain("measured in dollars");
+    expect(planned.plan.laneWords[1]).toContain("tokens only");
+    expect(planned.plan.laneWords[2]).toContain("tokens only");
+    expect(planned.plan.laneWords[3]).toContain("tokens only");
+  });
+
+  test("the discipline gate: every-lane-raceable refuses toward the tournament road", () => {
+    const refused = planComparison({
+      agents: [
+        { provider: "claude", model: "claude-sonnet-5" },
+        { provider: "claude", model: "claude-haiku-4-5" },
+      ],
+    });
+    expect(refused).toMatchObject({ ok: false, reason: "all-lanes-raceable" });
+    expect((refused as { message: string }).message).toContain("race them instead");
+  });
+
+  test("lanes are validated: unknown providers, missing models, and bad counts refuse", () => {
+    expect(planComparison({ agents: [{ provider: "gemini", model: "gemini-2.5-pro" }] })).toMatchObject({ ok: false, reason: "bad-count" });
+    expect(
+      planComparison({ agents: [{ provider: "watson", model: "x" }, { provider: "claude", model: "m" }] }),
+    ).toMatchObject({ ok: false, reason: "unknown-provider" });
+    expect(
+      planComparison({ agents: [{ provider: "codex", model: "" }, { provider: "gemini", model: "gemini-2.5-pro" }] }),
+    ).toMatchObject({ ok: false, reason: "bad-model" });
+  });
+
+  test("the comparison fingerprint is its own domain — it can never collide with a race", () => {
+    const lanes = [
+      { provider: "claude", model: "claude-sonnet-5", repairModel: "claude-sonnet-5" },
+      { provider: "gemini", model: "gemini-2.5-pro", repairModel: "gemini-2.5-pro" },
+    ];
+    const comparison = comparisonDigestOf({ agents: lanes, publicationPolicy: "none" });
+    expect(comparison).toMatch(/^[0-9a-f]{64}$/);
+    // order-sensitive
+    expect(comparisonDigestOf({ agents: [...lanes].reverse(), publicationPolicy: "none" })).not.toBe(comparison);
+  });
+
+  test("filing and admission: kind rides the terms, the contest, and the lanes' money zeros", () => {
+    const store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    store.createTask({ id: "cmp-1", title: "compared" }, T0);
+    const taskRef = store.refFor("built-in", "cmp-1", "ours").id;
+    const planned = planComparison({
+      agents: [
+        { provider: "claude", model: "claude-sonnet-5" },
+        { provider: "gemini", model: "gemini-2.5-pro" },
+        { provider: "codex", model: "gpt-5-codex" },
+      ],
+    });
+    if (!planned.ok) throw new Error(planned.message);
+    const termsId = store.fileTournamentTerms(
+      {
+        taskRef,
+        kind: "comparison",
+        raceDigest: planned.plan.comparisonDigest,
+        agents: planned.plan.agents,
+        perAgentBudgetMicrousd: 0,
+        overrunReserveMicrousd: 0,
+        totalBudgetMicrousd: 0,
+        priceVersion: 0,
+        publicationPolicy: "none",
+      },
+      T0,
+    );
+    const terms = store.activeTournamentTerms(taskRef);
+    expect(terms).toMatchObject({ kind: "comparison", perAgentBudgetMicrousd: 0 });
+    store.approveTournamentTerms(termsId, "alex", planned.plan.comparisonDigest, T0);
+    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("claim");
+    const admitted = admitContest(
+      store,
+      {
+        taskId: "cmp-1",
+        taskRef,
+        runner: "night-shift-1",
+        leaseId: taken.claim.leaseId,
+        incarnation: null,
+        scopeDigest: "scope-d",
+        scopeApproved: true,
+        capacity: 8,
+        quotaBlocked: () => null,
+      },
+      T0,
+    );
+    if (!admitted.ok) throw new Error(admitted.message);
+    const contest = store.getContest(admitted.contestId);
+    expect(contest?.kind).toBe("comparison");
+    const lanes = store.contestants(admitted.contestId);
+    expect(lanes).toHaveLength(3);
+    // Every lane: no dollar terms; unmeasured lanes pre-latched as a FACT.
+    for (const lane of lanes) expect(lane.budgetMicrousd).toBe(0);
+    expect(lanes.map(one => one.unknownSpend)).toEqual([false, true, true]);
+    // The gemini lane's sealed profile is gemini-shaped — before slice B a
+    // gemini string flowed into the codex profile via the fallthrough.
+    expect(lanes[1]?.profile).toMatchObject({ provider: "gemini", approvalArgv: "auto_edit" });
+    store.close();
+  });
+
+  test("a race with zeroed money cannot exist, and a comparison with money cannot either — the CHECK is kind-aware", () => {
+    const store = openStore(":memory:");
+    store.createTask({ id: "cmp-2", title: "shape" }, T0);
+    const taskRef = store.refFor("built-in", "cmp-2", "ours").id;
+    expect(() =>
+      store.fileTournamentTerms(
+        {
+          taskRef,
+          raceDigest: "d".repeat(64),
+          agents: [
+            { provider: "claude", model: "m", repairModel: "m" },
+            { provider: "claude", model: "n", repairModel: "n" },
+          ],
+          perAgentBudgetMicrousd: 0,
+          overrunReserveMicrousd: 0,
+          totalBudgetMicrousd: 0,
+          priceVersion: 1,
+          publicationPolicy: "none",
+        },
+        T0,
+      ),
+    ).toThrow();
+    expect(() =>
+      store.fileTournamentTerms(
+        {
+          taskRef,
+          kind: "comparison",
+          raceDigest: "e".repeat(64),
+          agents: [
+            { provider: "claude", model: "m", repairModel: "m" },
+            { provider: "gemini", model: "g", repairModel: "g" },
+          ],
+          perAgentBudgetMicrousd: 5,
+          overrunReserveMicrousd: 5,
+          totalBudgetMicrousd: 10,
+          priceVersion: 1,
+          publicationPolicy: "none",
+        },
+        T0,
+      ),
+    ).toThrow();
+    store.close();
+  });
+});
+
+
+describe("slice B e2e — a mixed comparison through the real tick: claude, codex, and an attested gemini", () => {
+  test("three lanes build; the gemini lane parks, the answer RESUMES it (no budget exists to exhaust); money lands honest per lane", async () => {
+    const { mkdtemp, rm, mkdir, writeFile } = await import("node:fs/promises");
+    const { writeFileSync, chmodSync, mkdirSync } = await import("node:fs");
+    const { delimiter } = await import("node:path");
+    const { runOperate } = await import("./operate.js");
+    const { run: exec } = await import("./exec.js");
+    const { resetAttestationCache } = await import("./attest.js");
+    const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+
+    const base = await mkdtemp(join(tmpdir(), "standing-orders-compare-e2e-"));
+    const repo = join(base, "repo");
+    const db = join(base, "queue.db");
+    const pool = join(base, "pool");
+    await mkdir(repo, { recursive: true });
+    const git = (args: string[]) => exec("git", args, { cwd: repo });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "t@example.com"]);
+    await git(["config", "user.name", "T"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+
+    // The attested fake: the tick's pre-claim walk and the gateway both
+    // probe THIS binary.
+    const bin = join(base, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gemini"), `#!/bin/sh\necho "0.57.0"\n`);
+    chmodSync(join(bin, "gemini"), 0o755);
+    const savedPath = process.env["PATH"];
+    process.env["PATH"] = `${bin}${delimiter}${savedPath ?? ""}`;
+    resetAttestationCache();
+
+    const DECISION = {
+      urgency: "blocking",
+      recap: "Two shapes are possible and the scope names neither.",
+      question: "CSV or JSON lines?",
+      options: [
+        { id: "csv", label: "CSV", consequence: "spreadsheet-friendly", reversible: true },
+        { id: "jsonl", label: "JSON lines", consequence: "machine-friendly", reversible: true },
+      ],
+      recommendation: "jsonl",
+    };
+
+    let lines: string[] = [];
+    const laneCalls: string[] = [];
+    const parkedOnce = new Set<string>();
+    /** One stub, three dialects — detected off the argv the plane rendered. */
+    const agent = async (_file: string, args: readonly string[], options?: { cwd?: string }) => {
+      const cwd = options?.cwd ?? "";
+      const dialect = args[0] === "exec" ? "codex" : args.includes("--approval-mode") ? "gemini" : "claude";
+      laneCalls.push(dialect);
+      const prompt = dialect === "codex" ? String(args[args.length - 1] ?? "") : (args[args.indexOf("-p") + 1] ?? "");
+      if (dialect === "gemini" && !parkedOnce.has(cwd)) {
+        // The gemini lane parks its question on first sight of the tree.
+        parkedOnce.add(cwd);
+        const mailbox = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+        if (mailbox === undefined) throw new Error("no mailbox named in the gemini brief");
+        await writeFile(join(cwd, mailbox), JSON.stringify(DECISION));
+        const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+        return { ...OK, stdout: [
+          JSON.stringify({ type: "init", session_id: minted, model: "gemini-2.5-pro" }),
+          JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 40, output_tokens: 9 } }),
+        ].join("\n") };
+      }
+      await writeFile(join(cwd, `work-${dialect}.ts`), `export const ${dialect} = true;\n`);
+      const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      if (done !== undefined) {
+        await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: "completed", conclusion: `${dialect} finished` }));
+      }
+      if (dialect === "codex") {
+        return { ...OK, stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: `thread-${laneCalls.length}` }),
+          JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "codex finished" } }),
+          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 900, output_tokens: 80 } }),
+        ].join("\n") };
+      }
+      if (dialect === "gemini") {
+        const minted = args[args.indexOf("--session-id") + 1] ?? "never-minted";
+        return { ...OK, stdout: [
+          JSON.stringify({ type: "init", session_id: minted, model: "gemini-2.5-pro" }),
+          JSON.stringify({ type: "synthetic_message", content: "gemini finished" }),
+          JSON.stringify({ type: "result", status: "success", stats: { input_tokens: 700, output_tokens: 60 } }),
+        ].join("\n") };
+      }
+      return { ...OK, stdout: JSON.stringify({ result: "claude finished", total_cost_usd: 0.42, usage: { input_tokens: 100, output_tokens: 50 } }) };
+    };
+    const run = (argv: string[], now = T0) => {
+      const [command = "", ...rest] = argv;
+      lines = [];
+      return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now, agentRunner: agent as never });
+    };
+    const payload = () => JSON.parse(lines.join("\n"));
+
+    try {
+      await run(["runner", "register", "builder-1", "--json"]);
+      const runnerToken = payload().token as string;
+      await run(["approver", "add", "alex", "--json"]);
+      const approverToken = payload().token as string;
+      await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
+      await run(["task", "add", "the compared work", "--id", "cmp-e2e"]);
+      await run([
+        "task", "scope", "cmp-e2e",
+        "--goal", "export the data three ways and let me pick",
+        "--compare", "claude:claude-sonnet-5,codex:gpt-5-codex,gemini:gemini-2.5-pro",
+        "--json",
+      ]);
+      const filed = payload();
+      expect(filed.comparison.laneWords).toHaveLength(3);
+      const joint = jointApprovalDigest(filed.scope.digest as string, filed.comparison.comparisonDigest as string);
+      await run(["task", "approve", "cmp-e2e", "--yes", "--digest", joint, "--as", "alex", "--token", approverToken, "--json"]);
+
+      // Pass 1: claude and codex finish; gemini parks → decision-wait.
+      await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"]);
+      expect(payload().dispatched[0]).toMatchObject({ id: "cmp-e2e", outcome: "contest", reason: "decision-wait" });
+
+      let store = openStore(db);
+      const contest = store.contestsInStates(["decision-wait"])[0];
+      if (contest === undefined) throw new Error("no waiting comparison");
+      expect(contest.kind).toBe("comparison");
+      const geminiLane = store.contestants(contest.id).find(one => one.provider === "gemini");
+      if (geminiLane === undefined) throw new Error("no gemini lane");
+      expect(geminiLane.state).toBe("parked");
+      const question = store.openDecisionForContestant(geminiLane.id);
+      expect(question).not.toBeNull();
+      store.close();
+
+      // The answer RESUMES the lane (E1): with the v1 design the resume
+      // pass would have stopped it as budget-exhausted — a comparison
+      // lane's budget is 0 BY DESIGN, and zero is not exhaustion.
+      await run(["decide", String(question), "--choose", "jsonl", "--as", "alex", "--token", approverToken, "--json"]);
+      await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"]);
+
+      store = openStore(db);
+      const finished = store.contestsInStates(["pick-wait"])[0];
+      if (finished === undefined) throw new Error("the comparison never reached pick-wait");
+      const lanes = store.contestants(finished.id);
+      expect(lanes.map(one => one.state)).toEqual(["built", "built", "built"]);
+      // Money honesty per lane: claude measured; codex and gemini stay
+      // pre-latched with zero accounted — no reservation ever existed.
+      const byProvider = new Map(lanes.map(one => [one.provider, one]));
+      expect(byProvider.get("claude")).toMatchObject({ unknownSpend: false, measuredMicrousd: 420_000 });
+      expect(byProvider.get("codex")).toMatchObject({ unknownSpend: true, accountedMicrousd: 0 });
+      expect(byProvider.get("gemini")).toMatchObject({ unknownSpend: true, accountedMicrousd: 0 });
+      // The attested version rode every gemini run.
+      const geminiRuns = store
+        .raw()
+        .prepare("SELECT provider_version FROM run WHERE provider = 'gemini'")
+        .all();
+      expect(geminiRuns.length).toBeGreaterThanOrEqual(2); // park + resume
+      for (const one of geminiRuns) expect(one["provider_version"]).toBe("0.57.0");
+      // Every dialect really spoke: the stub saw all three argv shapes.
+      expect(new Set(laneCalls)).toEqual(new Set(["claude", "codex", "gemini"]));
+      store.close();
+    } finally {
+      process.env["PATH"] = savedPath ?? "";
+      resetAttestationCache();
+      await rm(base, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

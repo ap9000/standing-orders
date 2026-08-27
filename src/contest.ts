@@ -33,7 +33,7 @@ import { contestantProfileOf } from "./store.js";
 import { createHash } from "node:crypto";
 import { release } from "./claim.js";
 import { buildPriceOf, oneCallTailMicrousd, BUILD_PRICE_VERSION } from "./pricing.js";
-import { MONEY_CAPABILITIES } from "./provider.js";
+import { MONEY_CAPABILITIES, isProviderId, reportsCost, validateSpec } from "./provider.js";
 import type { Contest, Contestant, ContestState, Store, TournamentTerms } from "./store.js";
 
 export const MIN_AGENTS = 2;
@@ -73,9 +73,110 @@ export function raceDigestOf(terms: {
   return createHash("sha256").update(`race/v2\u0000${canonical}`).digest("hex");
 }
 
-/** tournament-approval/v1 (finding 31): one yes covers both documents. */
+/** tournament-approval/v1 (finding 31): one yes covers both documents.
+ * Comparisons reuse it verbatim — their fingerprint rides the same stored
+ * column, and the domains below keep race and comparison terms from ever
+ * colliding. */
 export function jointApprovalDigest(scopeDigest: string, raceDigest: string): string {
   return createHash("sha256").update(`tournament-approval/v1\u0000${scopeDigest}\u0000${raceDigest}`).digest("hex");
+}
+
+/** comparison/v1 (Phase 3 slice B): order-preserving, each lane's FULL
+ * profile digest included, NO money fields — none exist on a comparison. */
+export function comparisonDigestOf(terms: {
+  agents: readonly RaceAgent[];
+  publicationPolicy: string;
+}): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    agents: terms.agents.map(agent => [
+      agent.provider,
+      agent.model,
+      agent.repairModel,
+      profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel)),
+    ]),
+    publication: terms.publicationPolicy,
+  });
+  return createHash("sha256").update(`comparison/v1\u0000${canonical}`).digest("hex");
+}
+
+export type ComparisonPlan = {
+  kind: "comparison";
+  agents: RaceAgent[];
+  publicationPolicy: string;
+  comparisonDigest: string;
+  /** Per lane, the money words the ceremony renders. */
+  laneWords: string[];
+};
+
+/**
+ * A comparison admits any registered provider — that is its purpose — but
+ * NEVER lets the budget ceremony be bypassed: if every asked lane could
+ * hold a native dollar cap, the refusal points at the tournament road
+ * (spec D3, the discipline gate). No dollar fields exist here at all;
+ * each lane's bound is its sealed profile's wall clock, said in words.
+ */
+export function planComparison(input: {
+  agents: { provider: string; model: string; repairModel?: string }[];
+  publicationPolicy?: string;
+}): { ok: true; plan: ComparisonPlan } | { ok: false; reason: string; message: string } {
+  if (input.agents.length < MIN_AGENTS || input.agents.length > MAX_AGENTS) {
+    return { ok: false, reason: "bad-count", message: `a comparison runs ${MIN_AGENTS} to ${MAX_AGENTS} agents` };
+  }
+  const agents: RaceAgent[] = [];
+  const laneWords: string[] = [];
+  let unmeasuredLanes = 0;
+  for (const asked of input.agents) {
+    if (!isProviderId(asked.provider)) {
+      return { ok: false, reason: "unknown-provider", message: `unknown provider \`${asked.provider}\`` };
+    }
+    const valid = validateSpec({ provider: asked.provider, model: asked.model });
+    if (!valid.ok) {
+      return { ok: false, reason: "bad-model", message: valid.problem };
+    }
+    if (asked.model === "") {
+      return { ok: false, reason: "bad-model", message: "every comparison lane names its exact model — the lanes ARE the terms" };
+    }
+    const capability = MONEY_CAPABILITIES[asked.provider];
+    if (!capability.tournamentEligible) unmeasuredLanes++;
+    const repairModel = asked.repairModel ?? asked.model;
+    agents.push({ provider: asked.provider, model: asked.model, repairModel });
+    laneWords.push(
+      reportsCost(asked.provider)
+        ? `${asked.provider} · ${asked.model} — spend measured in dollars; no cap on a comparison, the clock is the bound`
+        : `${asked.provider} · ${asked.model} — reports tokens only; dollar exposure unmeasured; the clock is the bound`,
+    );
+  }
+  // Comparisons file exact models for EVERY lane (the filing invariant):
+  // claude and codex get the same rule gemini/openrouter already carry.
+  for (const agent of agents) {
+    if (agent.model === "") {
+      return { ok: false, reason: "bad-model", message: "every comparison lane names its exact model" };
+    }
+  }
+  if (unmeasuredLanes === 0) {
+    return {
+      ok: false,
+      reason: "all-lanes-raceable",
+      message:
+        "every one of these agents can hold a real dollar budget — race them instead: a tournament binds each lane to enforced spend, which a comparison deliberately does not",
+    };
+  }
+  const plan: ComparisonPlan = {
+    kind: "comparison",
+    agents,
+    publicationPolicy: input.publicationPolicy ?? "none",
+    comparisonDigest: "",
+    laneWords,
+  };
+  plan.comparisonDigest = comparisonDigestOf(plan);
+  return { ok: true, plan };
+}
+
+/** One words helper for every surface that speaks about a contest —
+ * screens, holds, notifications, decision subjects (spec E6). */
+export function contestNoun(kind: "race" | "comparison"): string {
+  return kind === "comparison" ? "comparison" : "tournament";
 }
 
 // ---------------------------------------------------------------- planning
@@ -237,12 +338,12 @@ export function admitContest(
     // Re-derive, never trust columns (the H1 precedent): the stored digest
     // must equal the digest of the stored terms, and the approval must
     // bind exactly that digest — plus the scope's own approval.
-    const derived = raceDigestOf(terms);
+    const derived = terms.kind === "comparison" ? comparisonDigestOf(terms) : raceDigestOf(terms);
     if (derived !== terms.raceDigest) {
-      return { ok: false as const, reason: "digest-drift" as const, message: "the stored race terms do not match their own fingerprint" };
+      return { ok: false as const, reason: "digest-drift" as const, message: `the stored ${contestNoun(terms.kind)} terms do not match their own fingerprint` };
     }
     if (!args.scopeApproved || terms.approvedDigest !== terms.raceDigest) {
-      return { ok: false as const, reason: "not-approved" as const, message: "the tournament terms await approval" };
+      return { ok: false as const, reason: "not-approved" as const, message: `the ${contestNoun(terms.kind)} terms await approval` };
     }
     // Quota, grouped by distinct key; a half-open key may appear ONCE.
     const seen = new Map<string, number>();
@@ -274,11 +375,11 @@ export function admitContest(
       };
     }
     const contestId = store.createContest(
-      { taskRef: args.taskRef, terms: terms.id, scopeDigest: args.scopeDigest, raceDigest: terms.raceDigest },
+      { taskRef: args.taskRef, terms: terms.id, scopeDigest: args.scopeDigest, raceDigest: terms.raceDigest, kind: terms.kind },
       now,
     );
     store.stampContestLease(contestId, args.leaseId, args.runner, args.incarnation);
-    const reserves = perAgentReserves(terms);
+    const reserves = terms.kind === "comparison" ? [] : perAgentReserves(terms);
     const contestantIds = store.createContestants(
       contestId,
       terms.agents.map((agent, index) => ({
@@ -286,8 +387,13 @@ export function admitContest(
         model: agent.model,
         repairModel: agent.repairModel,
         branch: contestBranch(args.taskId, contestId, index + 1),
-        budgetMicrousd: terms.perAgentBudgetMicrousd,
-        reserveMicrousd: reserves[index] ?? terms.overrunReserveMicrousd,
+        // Comparison lanes carry no dollar terms; unmeasured lanes are
+        // pre-latched as a fact of the lane (spec D6).
+        budgetMicrousd: terms.kind === "comparison" ? 0 : terms.perAgentBudgetMicrousd,
+        reserveMicrousd: terms.kind === "comparison" ? 0 : (reserves[index] ?? terms.overrunReserveMicrousd),
+        ...(terms.kind === "comparison" && !reportsCost(agent.provider as import("./provider.js").ProviderId)
+          ? { unknownSpend: true }
+          : {}),
       })),
     );
     const slotIds = store.reserveExecutionSlots(args.runner, terms.n, now);
@@ -388,10 +494,10 @@ export function maybeAggregate(store: Store, contestId: number, now: Date): Cont
       ownerId: String(contestId),
       reason:
         target === "pick-wait"
-          ? "tournament finished — compare the results and pick one"
+          ? `${contestNoun(contest.kind)} finished — compare the results and pick one`
           : target === "decision-wait"
-            ? "a racing agent is waiting on your answer"
-            : "tournament finished with nothing to pick — decide what happens next",
+            ? "an agent is waiting on your answer"
+            : `${contestNoun(contest.kind)} finished with nothing to pick — decide what happens next`,
       until: null,
     },
     now,
@@ -409,8 +515,8 @@ export function maybeAggregate(store: Store, contestId: number, now: Date): Cont
         ...(target === "pick-wait" ? { pushClass: "pick" as const, link: `/contest/${contestId}` } : {}),
         subject:
           target === "pick-wait"
-            ? `tournament finished: ${taskId} — compare and pick`
-            : `tournament finished with nothing to pick: ${taskId}`,
+            ? `${contestNoun(contest.kind)} finished: ${taskId} — compare and pick`
+            : `${contestNoun(contest.kind)} finished with nothing to pick: ${taskId}`,
         body:
           target === "pick-wait"
             ? `All ${all.length} agents finished. Compare the results and pick one at /contest/${contestId} — nothing continues until you do.`
@@ -454,7 +560,7 @@ export function recoverContests(store: Store, now: Date): number {
           taskRef: contest.taskRef,
           ownerKind: "contest",
           ownerId: String(contest.id),
-          reason: "the tournament was interrupted — review it, then abandon or start it again",
+          reason: `the ${contestNoun(contest.kind)} was interrupted — review it, then abandon or start it again`,
           until: null,
         },
         now,

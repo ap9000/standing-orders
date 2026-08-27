@@ -1,5 +1,44 @@
 # Progress
 
+**2026-08-26 — Parity II Phase 3, slice B: labeled comparisons — all
+four runtimes, side by side, no lies about money.** The contest
+machinery learns ONE discriminator instead of a fork (DESIGN §9d):
+schema v27 rebuilds tournament_terms with `kind` and kind-aware money
+CHECKs (races keep positive budgets; comparisons pin 0/0/0 — the
+recognizer demands full canonical-DDL equality BOTH directions, the v26
+lesson), contest carries the denormalized kind, and `comparison/v1` is
+its own digest domain over ordered lanes with full profile digests —
+race/v2 fingerprints byte-unmoved. `planComparison` admits claude,
+codex, gemini, and openrouter with exact models and NO dollar fields;
+the discipline gate refuses an all-raceable lineup toward the
+tournament road ("race them instead" — `all-lanes-raceable`).
+Spec design-comparisons.md + a COMPETING SELF-REVIEW (Codex capacity
+still out; verdict REDESIGN, 7 findings, receipts in the chain) + v2
+delta. The self-review's critical catch shipped as the load-bearing
+fix: the decision-wait resume road computed remaining = budget −
+accounted and STOPPED any lane at ≤ 0 — every parked comparison lane
+would have died the instant its answer landed; the road now branches on
+kind, and the e2e proves a parked gemini lane resumes. Also from the
+review: contest failures now stamp their reason onto the run
+(kind-agnostic — a wordless "lane 3 failed" when a binary drifts out of
+its attested range was exactly the silence the attested runtime rules
+out), all four money-word sites branch (glance cell "tokens only
+(N tokens)", header "measured on the lanes that report dollars",
+abandon and pick drop reservation language for lanes that never had
+reservations), and contestantProfileOf gained its gemini branch (a
+gemini string used to flow into the codex shape via the fallthrough —
+unreachable until comparisons made it reachable). Surfaces: scope form
+lane rows + `--compare provider:model[,…]` CLI twin, both filing inside
+the shared scope+terms transaction; approve card restates lanes with
+per-lane money words under the same joint digest; contest screens,
+holds, notifications, and decision subjects all speak "comparison"
+through one words helper. The e2e drives a mixed three-lane comparison
+through the real tick with one polyglot stub speaking all three argv
+dialects and a fake attested gemini on PATH: park → answer → RESUME →
+pick-wait, measured/pre-latched flags per lane, the attested version on
+every gemini run. Codex cross-check of the whole chain queued on its
+capacity returning. Suite 1277 → 1286.
+
 **2026-08-26 — Parity II Phase 3, slice A: the attested runtime — a
 third provider, admitted by proof.** Gemini CLI joins as the ONE funded
 tier-2 adapter, through the framework the strategy priced: versioned

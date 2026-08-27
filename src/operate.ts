@@ -149,7 +149,7 @@ import {
 } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { planTournament, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
+import { planTournament, planComparison, contestNoun, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, resolveScopeProfile, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
@@ -261,6 +261,7 @@ External trackers — build what a tracker nominates, under local approvals
       [--not <text>] [--touches a,b] [--budget-usd <n>]
       [--race provider:model[,provider:model…]] [--race-count 2..4]
       [--race-per-usd <n>] [--race-total-usd <n>]
+      [--compare provider:model[,provider:model…]]  (labeled comparison — no dollar caps; needs a lane no budget can bound)
                                         a tournament races 2-4 agents on the
                                         task; you compare and pick one
   standing-orders task approve <id>         the yes — interactive, or
@@ -460,7 +461,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "stop-grace", "title", "name",
-  "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
+  "label", "reviewers", "limit", "weekly-usd", "daily-turns", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
@@ -1483,8 +1484,12 @@ async function tickCommand(
       const custody = racer.custody === null ? null : (JSON.parse(racer.custody) as { branch: string; head: string | null; runner: string });
       const taskId = store.externalIdFor(waiting.taskRef);
       if (custody === null || custody.runner !== runner || taskId === null) continue;
-      const remaining = racer.budgetMicrousd - racer.accountedMicrousd;
-      if (remaining <= 0) {
+      // Comparison lanes carry NO dollar terms (Phase 3 slice B, E1): the
+      // clock is the bound, and a budget-of-zero must never read as
+      // exhausted — the v1 design would have stopped every parked
+      // comparison lane the moment its answer landed.
+      const remaining = waiting.kind === "comparison" ? null : racer.budgetMicrousd - racer.accountedMicrousd;
+      if (remaining !== null && remaining <= 0) {
         store.casContestantState(racer.id, ["parked"], "stopped", racer.generation);
         contestMaybeAggregate(store, waiting.id, clock());
         resumed.push({ id: taskId, outcome: "skipped", reason: "over-ceiling" });
@@ -1547,12 +1552,12 @@ async function tickCommand(
         branch: racer.branch,
         now: clock(),
         clock,
-        provider: racer.provider as "claude" | "codex" | "openrouter",
+        provider: racer.provider as ProviderId,
         // v24: the contestant's OWN sealed profile is the authority — the
         // proof holds the lane to it (model, limits, permissions), so no
         // flag-shaped overrides ride along.
         contestProfile: racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel),
-        maxBudgetUsd: remaining / 1_000_000,
+        ...(remaining === null ? {} : { maxBudgetUsd: remaining / 1_000_000 }),
         ...(resumeSlot === undefined
           ? {}
           : {
@@ -1595,7 +1600,7 @@ async function tickCommand(
           {
             dedupeKey: `decision:${racerDecision}`,
             kind: "decision",
-            subject: `${taskId} parked a decision (tournament agent)`,
+            subject: `${taskId} parked a decision (${contestNoun(waiting.kind)} agent)`,
             body: `\`standing-orders decide ${racerDecision}\``,
             pushClass: "decision",
             link: `/d/${racerDecision}`,
@@ -1778,22 +1783,34 @@ async function tickCommand(
     // existing approval refusals own that road, and attestation must
     // never mask them. The gateway re-checks before spawn; this skip only
     // keeps the normal road cheap.
-    const skipProvider: ProviderId | null =
-      attendedSpec !== null || racedAhead !== null
-        ? null
-        : wantsPlan
-          ? spec.provider
-          : (store.getScope(id)?.approvedProfile?.provider ?? null);
-    if (skipProvider !== null && attestationOf(skipProvider) !== null) {
-      let verdict = attestedThisPass.get(skipProvider);
+    const skipProviders: ProviderId[] =
+      attendedSpec !== null
+        ? []
+        : racedAhead !== null
+          ? // The contest road (slice B): every lane's provider, so an
+            // out-of-range attested lane skips the WHOLE contest before
+            // any claim — running a subset is a different contest than
+            // the one the operator signed.
+            racedAhead.agents.filter(agent => isProviderId(agent.provider)).map(agent => agent.provider as ProviderId)
+          : wantsPlan
+            ? [spec.provider]
+            : ([store.getScope(id)?.approvedProfile?.provider].filter((one): one is ProviderId => one !== null && one !== undefined) as ProviderId[]);
+    let unattestedLane: string | null = null;
+    for (const candidate of new Set(skipProviders)) {
+      if (attestationOf(candidate) === null) continue;
+      let verdict = attestedThisPass.get(candidate);
       if (verdict === undefined) {
-        verdict = await attestProvider(skipProvider, inspectionOf(skipProvider).binary);
-        attestedThisPass.set(skipProvider, verdict);
+        verdict = await attestProvider(candidate, inspectionOf(candidate).binary);
+        attestedThisPass.set(candidate, verdict);
       }
       if (verdict !== null && !verdict.ok) {
-        dispatched.push({ id, outcome: "skipped", reason: "provider-unattested", detail: verdict.problem });
-        continue;
+        unattestedLane = verdict.problem;
+        break;
       }
+    }
+    if (unattestedLane !== null) {
+      dispatched.push({ id, outcome: "skipped", reason: "provider-unattested", detail: unattestedLane });
+      continue;
     }
 
     const claimed = acquireIfReady(store, ref.id, runner, {
@@ -1848,6 +1865,7 @@ async function tickCommand(
     // tournament — a partial race is never dispatched (finding 19).
     const raceTerms = racedAhead;
     if (raceTerms !== null && raceTerms.approvedDigest === raceTerms.raceDigest) {
+      const admittedKind = raceTerms.kind;
       const scopeRow = store.getScope(id);
       const admitted = admitContest(
         store,
@@ -1944,9 +1962,11 @@ async function tickCommand(
             branch: entry.branch,
             now: clock(),
             clock,
-            provider: agent.provider as "claude" | "codex" | "openrouter",
+            provider: agent.provider as ProviderId,
             contestProfile: contestantProfileOf(agent.provider, agent.model, agent.repairModel),
-            maxBudgetUsd: agent.budgetMicrousd / 1_000_000,
+            // A comparison lane has no dollar cap — the sealed clock is the
+            // bound; only race lanes carry the harness stop (E1).
+            ...(agent.budgetMicrousd > 0 ? { maxBudgetUsd: agent.budgetMicrousd / 1_000_000 } : {}),
             onProviderSpawn: pid =>
               store.markSlotRunning(entry.slotId, { run: entry.runId, contestant: entry.contestantId, incarnation: text(flags, "incarnation") ?? null, processGroup: pid }, clock()),
             ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
@@ -1992,7 +2012,7 @@ async function tickCommand(
               {
                 dedupeKey: `decision:${contestantDecision}`,
                 kind: "decision",
-                subject: `${id} parked a decision (tournament agent)`,
+                subject: `${id} parked a decision (${contestNoun(admittedKind)} agent)`,
                 body: `\`standing-orders decide ${contestantDecision}\``,
                 pushClass: "decision",
                 link: `/d/${contestantDecision}`,
@@ -2007,9 +2027,17 @@ async function tickCommand(
           }
         }
         if (run !== null && run.outcome === null) {
+          // The reason rides the run (slice B, E2 — kind-agnostic): "lane 3
+          // failed" with no words when a binary drifted out of its attested
+          // range is exactly the silence the attested runtime rules out.
+          const laneReason =
+            outcome !== undefined && outcome.status === "fulfilled" && !outcome.value.ok
+              ? outcome.value.reason
+              : undefined;
           store.finishRun(entry.runId, {
             outcome: contestantOutcome === "built" && !committed ? "no-change" : contestantOutcome === "stopped" ? "failed" : contestantOutcome === "parked" ? "parked" : contestantOutcome,
             committed,
+            ...(laneReason === undefined ? {} : { reason: laneReason }),
             now: clock(),
           });
         }
@@ -7174,6 +7202,27 @@ function scopeTask(
   }
   const raceGiven = text(flags, "race");
   const raceCountGiven = text(flags, "race-count");
+  // The comparison road (Phase 3 slice B): labeled lanes, no dollar terms,
+  // any registered provider — refused outright when every lane could hold
+  // a real budget (the discipline gate: race those instead).
+  const compareGiven = text(flags, "compare");
+  let plannedComparison: ReturnType<typeof planComparison> | null = null;
+  if (compareGiven !== undefined) {
+    if (raceGiven !== undefined || raceCountGiven !== undefined || text(flags, "race-per-usd") !== undefined || text(flags, "race-total-usd") !== undefined) {
+      return fail(write, json, "task scope", "usage", "--compare and the --race flags are different ceremonies — file one or the other", EXIT.usage);
+    }
+    if (store.mirrorByTask(id) !== null) {
+      return fail(write, json, "task scope", "external-race", "external work compares in a follow-up release — file the comparison on a local task", EXIT.refused);
+    }
+    const lanes = compareGiven.split(",").map(one => {
+      const [provider = "", model = ""] = one.trim().split(":");
+      return { provider, model };
+    });
+    plannedComparison = planComparison({ agents: lanes });
+    if (!plannedComparison.ok) {
+      return fail(write, json, "task scope", plannedComparison.reason, plannedComparison.message, EXIT.refused);
+    }
+  }
   let plannedRace: ReturnType<typeof planTournament> | null = null;
   if (raceCountGiven !== undefined && raceGiven === undefined) {
     return fail(write, json, "task scope", "usage", "--race-count needs --race to name the competing agent, e.g. `--race claude:claude-sonnet-5 --race-count 3`", EXIT.usage);
@@ -7290,12 +7339,51 @@ function scopeTask(
         now,
       );
     }
+    if (plannedComparison !== null && plannedComparison.ok) {
+      const plan = plannedComparison.plan;
+      const compareRef = store.refFor(BUILT_IN, id);
+      if (store.openAuthorizationFor(compareRef.id) !== null) {
+        return {
+          ok: false,
+          reason: "attended-open",
+          message: "an attended authorization is open on this task — revoke it before filing a comparison",
+        };
+      }
+      store.fileTournamentTerms(
+        {
+          taskRef: compareRef.id,
+          kind: "comparison",
+          raceDigest: plan.comparisonDigest,
+          agents: plan.agents,
+          perAgentBudgetMicrousd: 0,
+          overrunReserveMicrousd: 0,
+          totalBudgetMicrousd: 0,
+          priceVersion: 0,
+          publicationPolicy: plan.publicationPolicy,
+        },
+        now,
+      );
+    }
     return { ok: true, scope: proposed };
   });
   if (!filed.ok) {
     return fail(write, json, "task scope", filed.reason, filed.message, EXIT.refused);
   }
   const scope = filed.scope;
+
+  if (plannedComparison !== null && plannedComparison.ok) {
+    const plan = plannedComparison.plan;
+    return succeed(write, json, "task scope", { scope, comparison: plan }, () => [
+      `Scope and comparison written for ${id}. Nothing builds until somebody approves BOTH, with one yes:`,
+      ...describeScope(scope),
+      "",
+      ...plan.laneWords.map(lane => `  ${lane}`),
+      "  no dollar caps exist on a comparison — each agent runs until it finishes or its clock ends it;",
+      "  spend lands measured only where the harness reports dollars",
+      "",
+      `  standing-orders task approve ${id} --yes`,
+    ]);
+  }
 
   if (plannedRace !== null && plannedRace.ok) {
     const plan = plannedRace.plan;

@@ -117,7 +117,7 @@ function oneLineUa(raw: string | string[] | undefined): string {
   if (/windows/i.test(text)) return "a Windows machine";
   return "a device";
 }
-import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, jointApprovalDigest } from "./contest.js";
+import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, planComparison, contestNoun, jointApprovalDigest } from "./contest.js";
 import type { AgentView } from "./contest.js";
 import type { Runner } from "./runner.js";
 import { register as registerRunner, isAlive as runnerAlive } from "./runner.js";
@@ -137,7 +137,7 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import { isProviderId, reportsCost } from "./provider.js";
+import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -2022,7 +2022,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         contest: (() => {
           if (ref === null) return null;
           const open = store.contestNeedingOperator(ref.id);
-          return open === null ? null : { id: open.id, state: open.state, agents: store.contestants(open.id).length };
+          return open === null ? null : { id: open.id, state: open.state, agents: store.contestants(open.id).length, kind: open.kind };
         })(),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
         // The chain, both directions of trust: blockers outside the ceiling
@@ -2874,7 +2874,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           );
           if (!minted.ok) return contestScreen(response, who, contestId, "too many unfinished confirmations are open — finish or let them expire", 429);
           return sendScreen(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
-            kind: "abandon", contestId, taskId: data.taskId, taskTitle: data.taskTitle,
+            kind: "abandon", contestKind: view.contest.kind, contestId, taskId: data.taskId, taskTitle: data.taskTitle,
             agents: view.agents.length, totalMicrousd: data.totalMicrousd, anyUnknown: data.anyUnknown,
             nonceValue, csrf: who.via === "cookie" ? who.session.csrf : "",
           }));
@@ -2892,7 +2892,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         );
         if (!minted.ok) return contestScreen(response, who, contestId, "too many unfinished confirmations are open — finish or let them expire", 429);
         return sendScreen(response, 200, contestCeremonyPage(chromeFor(who.via === "cookie" ? who.session.project : null, "tasks"), {
-          kind: "pick", contestId, taskId: data.taskId, taskTitle: data.taskTitle,
+          kind: "pick", contestKind: view.contest.kind, contestId, taskId: data.taskId, taskTitle: data.taskTitle,
           agents: view.agents.length, totalMicrousd: data.totalMicrousd, anyUnknown: data.anyUnknown,
           chosen: plan.chosen,
           publication: plan.publishable && plan.grant !== null ? { githubRepo: plan.grant.githubRepo, branch: plan.chosen.run.branch, draft: plan.grant.draft } : null,
@@ -4101,6 +4101,28 @@ export function createDecisionServer(options: ServeOptions): Server {
         // race terms BESIDE the scope — validated and priced BEFORE anything
         // saves, so a bad tournament never half-lands on a good scope.
         const raceCountGiven = (body.get("race-count") ?? "").trim();
+        // The comparison lanes (slice B): any filled row files a comparison
+        // INSTEAD of a tournament — planned and refused BEFORE the save,
+        // filed INSIDE the same transaction (round-6 finding 5 discipline).
+        const comparisonLanes = [1, 2, 3, 4]
+          .map(lane => ({
+            provider: (body.get(`compare-provider-${lane}`) ?? "").trim(),
+            model: (body.get(`compare-model-${lane}`) ?? "").trim(),
+          }))
+          .filter(lane => lane.provider !== "" || lane.model !== "");
+        let plannedComparison: ReturnType<typeof planComparison> | null = null;
+        if (comparisonLanes.length > 0) {
+          if (raceCountGiven !== "") {
+            return taskScreen(response, who, taskId, "a tournament and a comparison are different ceremonies — file one or the other", 400);
+          }
+          if (store.mirrorByTask(taskId) !== null) {
+            return taskScreen(response, who, taskId, "external work compares in a follow-up release — file the comparison on a local task", 409);
+          }
+          plannedComparison = planComparison({ agents: comparisonLanes });
+          if (!plannedComparison.ok) {
+            return taskScreen(response, who, taskId, `comparison not filed: ${plannedComparison.message}`, 400);
+          }
+        }
         let plannedRace: { agents: { provider: string; model: string; repairModel: string }[]; perAgentBudgetMicrousd: number; overrunReserveMicrousd: number; totalBudgetMicrousd: number; priceVersion: number; publicationPolicy: string; raceDigest: string } | null = null;
         if (raceCountGiven !== "") {
           const count = Number(raceCountGiven);
@@ -4131,8 +4153,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         const saved = store.transact(():
           | { ok: true }
           | { ok: false; status: number; message: string } => {
-          if (plannedRace !== null && store.openAuthorizationFor(ref.id) !== null) {
-            return { ok: false, status: 409, message: "an attended authorization is open on this task — revoke it before filing a tournament" };
+          if ((plannedRace !== null || plannedComparison !== null) && store.openAuthorizationFor(ref.id) !== null) {
+            return { ok: false, status: 409, message: "an attended authorization is open on this task — revoke it before filing a tournament or comparison" };
           }
           const proposed = proposeGuarded(store, {
             taskId,
@@ -4151,10 +4173,27 @@ export function createDecisionServer(options: ServeOptions): Server {
               message: `scope not saved: ${proposed.reason}`,
             };
           }
+          if (plannedComparison !== null && plannedComparison.ok) {
+            store.fileTournamentTerms(
+              {
+                taskRef: ref.id,
+                kind: "comparison",
+                raceDigest: plannedComparison.plan.comparisonDigest,
+                agents: plannedComparison.plan.agents,
+                perAgentBudgetMicrousd: 0,
+                overrunReserveMicrousd: 0,
+                totalBudgetMicrousd: 0,
+                priceVersion: 0,
+                publicationPolicy: plannedComparison.plan.publicationPolicy,
+              },
+              now,
+            );
+            return { ok: true };
+          }
           if (plannedRace === null) {
-            // Switching back to "one agent" withdraws a standing race — the
-            // deactivated row survives as history, and the approval card
-            // returns to the scope alone.
+            // Switching back to "one agent" withdraws a standing race OR
+            // comparison — the deactivated row survives as history, and
+            // the approval card returns to the scope alone.
             store.retractTournamentTerms(ref.id);
             return { ok: true };
           }
@@ -6832,9 +6871,17 @@ function contestPage(chrome: Chrome, data: {
       outcome,
       minutes,
       asked: data.questions.get(contestant.id) ?? 0,
-      cost: contestant.unknownSpend
-        ? `${contestDollars(contestant.accountedMicrousd)} — the exact figure was unknowable, so the full reservation was charged`
-        : contestDollars(contestant.accountedMicrousd),
+      // Money words are KIND words (slice B, E3): a comparison lane never
+      // had a reservation, so reservation language would lie in both
+      // directions — unmeasured lanes say tokens instead.
+      cost:
+        contest.kind === "comparison"
+          ? contestant.unknownSpend
+            ? `tokens only${run !== null && (run.tokensOut !== null || run.tokensIn !== null) ? ` (${((run.tokensIn ?? 0) + (run.tokensOut ?? 0)).toLocaleString()} tokens)` : ""} — this harness reports no dollars`
+            : `${contestDollars(contestant.measuredMicrousd)} measured`
+          : contestant.unknownSpend
+            ? `${contestDollars(contestant.accountedMicrousd)} — the exact figure was unknowable, so the full reservation was charged`
+            : contestDollars(contestant.accountedMicrousd),
       diff,
       diffWords,
     };
@@ -6890,14 +6937,17 @@ function contestPage(chrome: Chrome, data: {
   };
 
   return screen("tournament", [
-    `<h1>tournament</h1>`,
+    `<h1>${contestNoun(contest.kind)}</h1>`,
     `<p class="meta">${agents.length} agents raced on <a href="${taskHref(data.taskId)}">${escape(data.taskTitle)}</a> — ` +
       `only one result will be kept as the task's outcome; the rest stay archived with their evidence</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
-    `<p class="row"><strong>${escape(CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail")}</strong></p>`,
+    `<p class="row"><strong>${escape((CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail").replace(/tournament/g, contestNoun(contest.kind)))}</strong></p>`,
     contest.pickedBy === null ? "" : `<p class="meta">picked by ${escape(contest.pickedBy)} at ${escape(when(contest.pickedAt ?? ""))}</p>`,
-    `<p class="row"><strong>charged so far</strong> ${escape(contestDollars(data.totalMicrousd))}` +
-      `${data.anyUnknown ? ` <span class="meta">— includes at least one agent charged its full reservation because the exact figure was unknowable</span>` : ""}</p>`,
+    contest.kind === "comparison"
+      ? `<p class="row"><strong>spend</strong> ${escape(contestDollars(data.totalMicrousd))} measured on the lanes that report dollars` +
+        `${data.anyUnknown ? ` <span class="meta">— the rest report tokens only</span>` : ""}</p>`
+      : `<p class="row"><strong>charged so far</strong> ${escape(contestDollars(data.totalMicrousd))}` +
+        `${data.anyUnknown ? ` <span class="meta">— includes at least one agent charged its full reservation because the exact figure was unknowable</span>` : ""}</p>`,
     glance,
     `<div class="contest-compare">${summaries.map(agentCard).join("\n")}</div>`,
     abandonable
@@ -6906,7 +6956,7 @@ function contestPage(chrome: Chrome, data: {
           `<form method="post" action="/contest/${contest.id}/arm" class="inline">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="act" value="abandon">`,
-          `<button type="submit">abandon the tournament…</button>`,
+          `<button type="submit">abandon the ${contestNoun(contest.kind)}…</button>`,
           `</form>`,
           `<p class="meta">abandoning picks nothing: the task is marked failed (it can be re-queued), and every agent's branch and evidence is kept</p>`,
           `</div>`,
@@ -6924,6 +6974,7 @@ function contestPage(chrome: Chrome, data: {
  */
 function contestCeremonyPage(chrome: Chrome, data: {
   kind: "pick" | "abandon";
+  contestKind: "race" | "comparison";
   contestId: number;
   taskId: string;
   taskTitle: string;
@@ -6938,18 +6989,20 @@ function contestCeremonyPage(chrome: Chrome, data: {
   const back = `<p class="meta"><a href="/contest/${data.contestId}">back — decide nothing</a></p>`;
   if (data.kind === "abandon") {
     return screen("tournament", [
-      `<h1>abandon this tournament?</h1>`,
+      `<h1>abandon this ${contestNoun(data.contestKind)}?</h1>`,
       `<div class="card">`,
-      `<p class="row">${data.agents} agents raced on <strong>${escape(data.taskTitle)}</strong>. Abandoning picks nothing:</p>`,
+      `<p class="row">${data.agents} agents ${data.contestKind === "comparison" ? "built independently" : "raced"} on <strong>${escape(data.taskTitle)}</strong>. Abandoning picks nothing:</p>`,
       `<p class="row">— the task is marked <strong>failed</strong> and can be re-queued later</p>`,
       `<p class="row">— every agent's branch and evidence is kept; nothing is deleted and nothing is published</p>`,
-      `<p class="row">— the ${escape(contestDollars(data.totalMicrousd))} already charged stays charged</p>`,
+      data.contestKind === "comparison"
+        ? `<p class="row">— the ${escape(contestDollars(data.totalMicrousd))} measured so far stays on the record</p>`
+        : `<p class="row">— the ${escape(contestDollars(data.totalMicrousd))} already charged stays charged</p>`,
       `</div>`,
       `<form method="post" action="/contest/${data.contestId}/abandon" class="card approve-form">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
       `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
       `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
-      `<button type="submit">yes — abandon the tournament</button>`,
+      `<button type="submit">yes — abandon the ${contestNoun(data.contestKind)}</button>`,
       `</form>`,
       back,
     ].join("\n"), { chrome });
@@ -6973,9 +7026,12 @@ function contestCeremonyPage(chrome: Chrome, data: {
       ? `<p class="row"><strong>nothing is published</strong> — the branch stays local to this machine</p>`
       : `<p class="row"><strong>a ${data.publication.draft ? "draft " : ""}pull request will be opened</strong> on ` +
         `<span class="mono">${escape(data.publication.githubRepo)}</span> from <span class="mono">${escape(data.publication.branch)}</span></p>`,
-    `<p class="row">this agent was charged ${escape(contestDollars(agent.contestant.accountedMicrousd))}` +
-      `${agent.contestant.unknownSpend ? " (its full reservation — the exact figure was unknowable)" : ""}` +
-      `; the tournament charged ${escape(contestDollars(data.totalMicrousd))} in total</p>`,
+    data.contestKind === "comparison"
+      ? `<p class="row">this agent's spend: ${agent.contestant.unknownSpend ? "unmeasured — its harness reports tokens, not dollars" : `${escape(contestDollars(agent.contestant.measuredMicrousd))} measured`}` +
+        `; the comparison measured ${escape(contestDollars(data.totalMicrousd))} across the lanes that report dollars</p>`
+      : `<p class="row">this agent was charged ${escape(contestDollars(agent.contestant.accountedMicrousd))}` +
+        `${agent.contestant.unknownSpend ? " (its full reservation — the exact figure was unknowable)" : ""}` +
+        `; the tournament charged ${escape(contestDollars(data.totalMicrousd))} in total</p>`,
     `<p class="row">the other ${data.agents - 1} agent${data.agents - 1 === 1 ? "'s result is" : "s' results are"} not used — their branches and evidence are kept for reference</p>`,
     `</div>`,
     `<form method="post" action="/contest/${data.contestId}/pick" class="card approve-form">`,
@@ -7429,7 +7485,7 @@ function taskBody(data: {
    * filed this (console, cli, intake, template:<name>) at the yes. */
   filedVia?: string | null;
   holds: Hold[];
-  contest?: { id: number; state: string; agents: number } | null;
+  contest?: { id: number; state: string; agents: number; kind: "race" | "comparison" } | null;
   claimed: boolean;
   /** What this task waits for — blockers outside this console's ceiling
    * are named but carry no state and no link. */
@@ -7496,7 +7552,7 @@ function taskBody(data: {
       : [
           `<div class="card">`,
           `<p><strong>tournament</strong> <span class="meta">${contest.agents} agents on this task</span></p>`,
-          `<p class="row">${escape(CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail")}</p>`,
+          `<p class="row">${escape((CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail").replace(/tournament/g, contestNoun(contest.kind)))}</p>`,
           `<p class="row"><a href="/contest/${contest.id}">${
             contest.state === "pick-wait" ? "compare the results and pick one" : "see the tournament"
           }</a></p>`,
@@ -7626,14 +7682,22 @@ function taskBody(data: {
           // approved at all.
           data.raceTerms === null || data.raceTerms === undefined
             ? ""
-            : `<p><strong>and this tournament:</strong></p>` +
-              `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
-              `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
-              `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
-              `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
-              `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
+            : data.raceTerms.kind === "comparison"
+              ? `<p><strong>and this comparison:</strong></p>` +
+                `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
+                `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
+                `No dollar caps exist on a comparison — each agent runs until it finishes or its clock ends it; ` +
+                `spend lands measured only where the harness reports dollars (` +
+                `${data.raceTerms.agents.filter(agent => agent.provider === "claude").length} of ${data.raceTerms.n} lanes here). ` +
+                `You will compare the results and pick one.</p>`
+              : `<p><strong>and this tournament:</strong></p>` +
+                `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
+                `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
+                `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
+                `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
+                `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
           `<label>your password, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>`,
-          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : "approve scope and tournament — one yes covers both"}</button></div>`,
+          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : data.raceTerms.kind === "comparison" ? "approve scope and comparison — one yes covers both" : "approve scope and tournament — one yes covers both"}</button></div>`,
           `</form>`,
         ].join("\n");
 
@@ -7724,6 +7788,18 @@ function taskBody(data: {
           `</select></label>`,
         `<label>each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(perPrefill)}"></label>`,
         `<label>the whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(totalPrefill)}"></label>`,
+        // The comparison lanes (Phase 3 slice B): 2-4 rows, any registered
+        // provider, exact model required — no dollar fields exist. Blank
+        // rows are unused; filling any row files a comparison INSTEAD of a
+        // tournament, and mixing the two refuses in words.
+        `<p class="meta" style="margin-top:.75rem">or compare different agents side by side — no dollar caps; each agent's clock is its bound, and spend lands measured only where the harness reports dollars:</p>`,
+        ...[1, 2, 3, 4].map(lane =>
+          `<div class="row"><label>agent ${lane} <select name="compare-provider-${lane}">` +
+            `<option value="">—</option>` +
+            PROVIDER_IDS.map(provider => `<option value="${escape(provider)}">${escape(provider)}</option>`).join("") +
+            `</select></label>` +
+            `<label>its exact model<input type="text" name="compare-model-${lane}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
+        ),
       ].join("\n");
     })(),
     `<button type="submit">save scope</button>`,
