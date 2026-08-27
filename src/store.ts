@@ -5369,31 +5369,42 @@ export class Store {
    * `firing` is never touched by either arm. */
   private reconcileIntentsForMode(repo: string, newMode: { digest: string; publication: "notify" | "automerge" } | null, now: Date): void {
     void now;
+    const repoIntents = `publication IN (
+                SELECT publication.id FROM publication
+                  JOIN run ON run.id = publication.run
+                  JOIN task_ref ON task_ref.id = run.task_ref
+                 WHERE task_ref.repo = ?)`;
     if (newMode !== null && newMode.publication === "automerge") {
       this.db
         .prepare(
           `UPDATE merge_intent SET state = 'pending', authority_basis = 'mode', mode_digest = ?,
                   claimed_by = NULL, claimed_until = NULL, generation = generation + 1
-            WHERE state IN ('waiting-human','pending','claimed')
-              AND publication IN (
-                SELECT publication.id FROM publication
-                  JOIN run ON run.id = publication.run
-                  JOIN task_ref ON task_ref.id = run.task_ref
-                 WHERE task_ref.repo = ?)`,
+            WHERE state IN ('waiting-human','pending','claimed') AND ${repoIntents}`,
         )
         .run(newMode.digest, repo);
       return;
     }
+    if (newMode !== null) {
+      // A NOTIFY mode is the operator choosing the stricter posture for
+      // the repo (D1): EVERY nonterminal intent waits for a human while it
+      // is active — grant basis included. `firing` is untouched (E1).
+      this.db
+        .prepare(
+          `UPDATE merge_intent SET state = 'waiting-human', authority_basis = 'human', mode_digest = NULL,
+                  claimed_by = NULL, claimed_until = NULL, generation = generation + 1
+            WHERE state IN ('pending','claimed') AND ${repoIntents}`,
+        )
+        .run(repo);
+      return;
+    }
+    // No live mode (revocation or expiry): only MODE-derived authority
+    // dies — a grant-basis intent reverts to the grant's own signature,
+    // which the mode never restricted retroactively.
     this.db
       .prepare(
         `UPDATE merge_intent SET state = 'waiting-human', authority_basis = 'human', mode_digest = NULL,
                 claimed_by = NULL, claimed_until = NULL, generation = generation + 1
-          WHERE state IN ('pending','claimed') AND authority_basis = 'mode'
-            AND publication IN (
-              SELECT publication.id FROM publication
-                JOIN run ON run.id = publication.run
-                JOIN task_ref ON task_ref.id = run.task_ref
-               WHERE task_ref.repo = ?)`,
+          WHERE state IN ('pending','claimed') AND authority_basis = 'mode' AND ${repoIntents}`,
       )
       .run(repo);
   }
@@ -10073,16 +10084,42 @@ export class Store {
     return Number(this.db.prepare("DELETE FROM merge_blocker WHERE publication = ?").run(publication).changes) > 0;
   }
 
+  /** Creation binds the AUTHORITY POSTURE the repo holds right now (E1's
+   * first two transitions): no mode = the grant's own signature; a notify
+   * mode = waiting-human even under a merge-capable grant; an automerge
+   * mode = basis 'mode' bound to the signing digest. INSERT OR IGNORE —
+   * an existing row's posture is the reconciler's job, never creation's. */
   createMergeIntent(
-    intent: { publication: number; grantTermsHash: string; headSha: string; method: "squash" | "merge" | "rebase"; deleteBranch: boolean },
+    intent: { publication: number; repo: string; grantTermsHash: string; headSha: string; method: "squash" | "merge" | "rebase"; deleteBranch: boolean },
     now: Date,
   ): void {
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO merge_intent (publication, grant_terms_hash, head_sha, method, delete_branch, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(intent.publication, intent.grantTermsHash, intent.headSha, intent.method, intent.deleteBranch ? 1 : 0, now.toISOString());
+    this.transact(() => {
+      const mode = this.activeMode(intent.repo, now);
+      let state = "pending";
+      let basis = "grant";
+      let modeDigest: string | null = null;
+      if (mode !== null) {
+        let publication: unknown;
+        try {
+          publication = (JSON.parse(mode.termsJson) as { publication?: unknown }).publication;
+        } catch {
+          publication = undefined;
+        }
+        if (publication === "automerge") {
+          basis = "mode";
+          modeDigest = mode.digest;
+        } else {
+          state = "waiting-human";
+          basis = "human";
+        }
+      }
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO merge_intent (publication, grant_terms_hash, head_sha, method, delete_branch, state, authority_basis, mode_digest, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(intent.publication, intent.grantTermsHash, intent.headSha, intent.method, intent.deleteBranch ? 1 : 0, state, basis, modeDigest, now.toISOString());
+    });
   }
 
   /**
@@ -10120,22 +10157,152 @@ export class Store {
     return Number(changes) === 1;
   }
 
+  /** STATE-SPECIFIC and TERMINALLY MONOTONIC (E1): the writer names the
+   * state it believes it owns, and a terminal row is never overwritten —
+   * a stale claim owner cannot un-merge what the observer already settled,
+   * even at the same generation. bumpGeneration is the observer's fence:
+   * settling somebody else's live row invalidates their later writes. */
   settleMergeIntent(
     id: number,
     generation: number,
-    state: "merged" | "refused" | "superseded" | "pending",
+    state: "merged" | "refused" | "superseded" | "pending" | "waiting-human",
     now: Date,
-    detail: { error?: string | null; receipt?: string | null; countAttempt?: boolean } = {},
+    detail: { error?: string | null; receipt?: string | null; countAttempt?: boolean; from?: "claimed" | "firing" | "nonterminal"; bumpGeneration?: boolean } = {},
   ): boolean {
+    const from = detail.from ?? "nonterminal";
     const { changes } = this.db
       .prepare(
         `UPDATE merge_intent SET state = ?, claimed_by = NULL, claimed_until = NULL,
+           firing_at = NULL, firing_deadline = NULL,
+           authority_basis = CASE WHEN ? = 'waiting-human' THEN 'human' ELSE authority_basis END,
+           mode_digest = CASE WHEN ? = 'waiting-human' THEN NULL ELSE mode_digest END,
+           generation = generation + ?,
            attempts = attempts + ?, last_error = COALESCE(?, last_error), receipt = COALESCE(?, receipt),
            settled_at = CASE WHEN ? IN ('merged','refused','superseded') THEN ? ELSE settled_at END
-         WHERE id = ? AND generation = ?`,
+         WHERE id = ? AND generation = ?
+           AND state NOT IN ('merged','refused','superseded')
+           AND (? = 'nonterminal' OR state = ?)`,
       )
-      .run(state, detail.countAttempt === true ? 1 : 0, detail.error ?? null, detail.receipt ?? null, state, now.toISOString(), id, generation);
+      .run(
+        state, state, state,
+        detail.bumpGeneration === true ? 1 : 0,
+        detail.countAttempt === true ? 1 : 0,
+        detail.error ?? null, detail.receipt ?? null,
+        state, now.toISOString(),
+        id, generation,
+        from, from,
+      );
     return Number(changes) === 1;
+  }
+
+  /** The per-merge password ceremony's write (E1: waiting-human → pending
+   * by the EXACT-INTENT ceremony): the caller has authenticated and shown
+   * the operator the head they are authorizing. Basis becomes 'human' —
+   * this signature covers this one merge and nothing else. */
+  authorizeMergeIntent(id: number, expectedHeadSha: string, by: string, now: Date): { ok: true } | { ok: false; reason: "not-waiting" | "head-moved" } {
+    void by;
+    void now;
+    return this.transact(() => {
+      const row = this.db.prepare("SELECT state, head_sha FROM merge_intent WHERE id = ?").get(id);
+      if (row === undefined || String(row["state"]) !== "waiting-human") return { ok: false as const, reason: "not-waiting" as const };
+      if (String(row["head_sha"]) !== expectedHeadSha) return { ok: false as const, reason: "head-moved" as const };
+      this.db
+        .prepare(
+          `UPDATE merge_intent SET state = 'pending', authority_basis = 'human', mode_digest = NULL,
+                  generation = generation + 1, last_error = NULL
+            WHERE id = ? AND state = 'waiting-human'`,
+        )
+        .run(id);
+      return { ok: true as const };
+    });
+  }
+
+  /** E1's linearization point: claimed → firing as a DURABLE CAS that
+   * re-proves EVERY piece of the intent's authority inside one
+   * transaction — the live grant's terms against the hash the intent was
+   * written under, the exact head, and the basis-specific signature (a
+   * live automerge mode with the bound digest for 'mode'; the absence of
+   * a stricter notify posture for 'grant'). A revocation that committed
+   * first already moved the row and this CAS fails; once this CAS
+   * commits, no later revocation demotes it — the external call is
+   * acknowledged one-shot. */
+  fireMergeIntent(
+    id: number,
+    generation: number,
+    proof: { repo: string; headSha: string; liveGrantTermsHash: string | null; graceMs: number },
+    now: Date,
+  ): { ok: true } | { ok: false; outcome: "raced" | "superseded" | "waiting-human"; why: string } {
+    return this.transact(() => {
+      const row = this.db
+        .prepare("SELECT state, generation, head_sha, grant_terms_hash, authority_basis, mode_digest FROM merge_intent WHERE id = ?")
+        .get(id);
+      if (row === undefined || String(row["state"]) !== "claimed" || Number(row["generation"]) !== generation) {
+        return { ok: false as const, outcome: "raced" as const, why: "the claim moved" };
+      }
+      const supersede = (why: string): { ok: false; outcome: "superseded"; why: string } => {
+        this.settleMergeIntent(id, generation, "superseded", now, { error: why, from: "claimed" });
+        return { ok: false as const, outcome: "superseded" as const, why };
+      };
+      const fence = (why: string): { ok: false; outcome: "waiting-human"; why: string } => {
+        this.settleMergeIntent(id, generation, "waiting-human", now, { error: why, from: "claimed", bumpGeneration: true });
+        return { ok: false as const, outcome: "waiting-human" as const, why };
+      };
+      if (String(row["head_sha"]) !== proof.headSha) return supersede("the head moved");
+      if (proof.liveGrantTermsHash === null || proof.liveGrantTermsHash !== String(row["grant_terms_hash"])) {
+        return supersede("the grant was revoked or its merge terms changed since this intent was written");
+      }
+      const basis = String(row["authority_basis"]);
+      const mode = this.activeMode(proof.repo, now);
+      if (basis === "mode") {
+        let publication: unknown;
+        try {
+          publication = mode === null ? undefined : (JSON.parse(mode.termsJson) as { publication?: unknown }).publication;
+        } catch {
+          publication = undefined;
+        }
+        if (mode === null || mode.digest !== String(row["mode_digest"]) || publication !== "automerge") {
+          return fence("the mode this merge was signed under is gone — it waits for you");
+        }
+      } else if (basis === "grant" && mode !== null) {
+        let publication: unknown;
+        try {
+          publication = (JSON.parse(mode.termsJson) as { publication?: unknown }).publication;
+        } catch {
+          publication = undefined;
+        }
+        if (publication !== "automerge") return fence("the active mode says merges wait for you");
+      }
+      const { changes } = this.db
+        .prepare(
+          `UPDATE merge_intent SET state = 'firing', firing_at = ?, firing_deadline = ?
+            WHERE id = ? AND state = 'claimed' AND generation = ?`,
+        )
+        .run(now.toISOString(), new Date(now.getTime() + proof.graceMs).toISOString(), id, generation);
+      return Number(changes) === 1
+        ? { ok: true as const }
+        : { ok: false as const, outcome: "raced" as const, why: "the claim moved" };
+    });
+  }
+
+  /** F1: an OPEN same-head PR under a STALE firing row is never
+   * auto-retried — this authenticated recovery ceremony re-arms it
+   * through the full firing CAS, generation bumped so the dead owner's
+   * late writes lose. Refuses while the deadline has not passed. */
+  refireMergeIntent(id: number, by: string, now: Date): { ok: true } | { ok: false; reason: "not-firing" | "not-stale" } {
+    void by;
+    return this.transact(() => {
+      const row = this.db.prepare("SELECT state, firing_deadline FROM merge_intent WHERE id = ?").get(id);
+      if (row === undefined || String(row["state"]) !== "firing") return { ok: false as const, reason: "not-firing" as const };
+      if (String(row["firing_deadline"]) > now.toISOString()) return { ok: false as const, reason: "not-stale" as const };
+      this.db
+        .prepare(
+          `UPDATE merge_intent SET state = 'pending', authority_basis = 'human', mode_digest = NULL,
+                  firing_at = NULL, firing_deadline = NULL, generation = generation + 1, last_error = NULL
+            WHERE id = ? AND state = 'firing'`,
+        )
+        .run(id);
+      return { ok: true as const };
+    });
   }
 
   /** Refused intents rearm to pending after the operator fixed the cause. */
@@ -10146,9 +10313,9 @@ export class Store {
     return Number(changes) > 0;
   }
 
-  mergeIntentFor(publication: number): { id: number; state: string; headSha: string; generation: number; attempts: number; lastError: string | null } | null {
+  mergeIntentFor(publication: number): { id: number; state: string; headSha: string; generation: number; attempts: number; lastError: string | null; firingDeadline: string | null } | null {
     const row = this.db
-      .prepare("SELECT id, state, head_sha, generation, attempts, last_error FROM merge_intent WHERE publication = ?")
+      .prepare("SELECT id, state, head_sha, generation, attempts, last_error, firing_deadline FROM merge_intent WHERE publication = ?")
       .get(publication);
     return row === undefined
       ? null
@@ -10159,6 +10326,7 @@ export class Store {
           generation: Number(row["generation"]),
           attempts: Number(row["attempts"]),
           lastError: row["last_error"] === null ? null : String(row["last_error"]),
+          firingDeadline: row["firing_deadline"] === null ? null : String(row["firing_deadline"]),
         };
   }
 

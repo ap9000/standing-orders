@@ -440,7 +440,7 @@ export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
 ] as const;
-export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm"] as const;
+export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
 export const APPROVER_ACTIONS = ["list", "add"] as const;
 export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "pause", "resume", "run-now"] as const;
@@ -6259,6 +6259,64 @@ async function publishCommand(
     if (grant !== null) for (const line of describePublicationGrant(grant)) write(line);
     write(pending.length === 0 ? "Nothing owed." : `Owed: ${pending.length} publication(s) pending.`);
     return EXIT.ok;
+  }
+
+  if (action === "merge" || action === "refire") {
+    const prGiven = positional[1];
+    const pr = Number(prGiven);
+    if (prGiven === undefined || !Number.isInteger(pr) || pr <= 0) {
+      return fail(write, json, `publish ${action}`, "usage", `\`standing-orders publish ${action} <pr> --as <you> --token <t>\``, EXIT.usage);
+    }
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, `publish ${action}`, "usage", "authorizing a merge takes `--as <you> --token <t>` — who said yes is recorded, not asserted", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, `publish ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, acting.name), EXIT.refused);
+    }
+    const publication = store.openedPublications().find(one => one.prNumber === pr);
+    if (publication === undefined) {
+      return fail(write, json, `publish ${action}`, "unknown", `no open publication holds PR #${pr}`, EXIT.refused);
+    }
+    const intent = store.mergeIntentFor(publication.id);
+    if (intent === null) {
+      return fail(write, json, `publish ${action}`, "no-intent", `PR #${pr} has no merge intent yet — the sweep writes one when a merge-capable grant covers it`, EXIT.refused);
+    }
+    if (action === "merge") {
+      // The EXACT-INTENT ceremony (E1): the yes covers this head and no
+      // other — a moved head refuses rather than authorizing the unseen.
+      const released = store.authorizeMergeIntent(intent.id, intent.headSha, acting.name, clock());
+      if (!released.ok) {
+        return fail(
+          write, json, "publish merge",
+          released.reason,
+          released.reason === "not-waiting"
+            ? `PR #${pr} is not waiting for you (it is ${intent.state}) — only a waiting merge takes this yes`
+            : `PR #${pr}'s commit moved since this intent was written — the sweep will re-prove and re-ask`,
+          EXIT.refused,
+        );
+      }
+      store.resolveEpisodes(`merge-attn:${publication.id}`, context.clock());
+      return succeed(write, json, "publish merge", { pr, headSha: intent.headSha }, () => [
+        `Your yes covers PR #${pr} at ${intent.headSha.slice(0, 12)} — the next sweep merges it once CI is seen green on that exact commit.`,
+      ]);
+    }
+    const refired = store.refireMergeIntent(intent.id, acting.name, clock());
+    if (!refired.ok) {
+      return fail(
+        write, json, "publish refire",
+        refired.reason,
+        refired.reason === "not-firing"
+          ? `PR #${pr} has no half-fired merge (it is ${intent.state})`
+          : `PR #${pr}'s merge claim is still live — its owner may finish; refire only recovers one gone silent past its deadline`,
+        EXIT.refused,
+      );
+    }
+    store.resolveEpisodes(`merge-attn:${publication.id}`, context.clock());
+    return succeed(write, json, "publish refire", { pr }, () => [
+      `PR #${pr} re-enters the full merge road — claim, re-proof, and the firing gate, from the top.`,
+    ]);
   }
 
   if (action === "unblock" || action === "rearm") {

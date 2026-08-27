@@ -211,7 +211,7 @@ describe("the merge grant", () => {
     const grant = store.publicationGrantFor(REPO);
     if (grant === null) throw new Error("grant");
     store.createMergeIntent(
-      { publication: publicationId, grantTermsHash: mergeTermsHash(grant), headSha: HEAD, method: "squash", deleteBranch: false },
+      { publication: publicationId, repo: REPO, grantTermsHash: mergeTermsHash(grant), headSha: HEAD, method: "squash", deleteBranch: false },
       T0,
     );
     const intent = store.mergeIntentFor(publicationId);

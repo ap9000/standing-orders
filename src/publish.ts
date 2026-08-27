@@ -375,9 +375,12 @@ export async function observeChecks(
         store.liftMergeBlocker(publication.id);
         store.resolveEpisodes(`merge-attn:${publication.id}`, clock());
         const intent = store.mergeIntentFor(publication.id);
-        if (intent !== null && (intent.state === "pending" || intent.state === "claimed")) {
+        if (intent !== null && ["pending", "claimed", "waiting-human", "firing"].includes(intent.state)) {
+          // The observer settles ANY nonterminal on an observed remote
+          // terminal (E1/F1) - generation bumped so a live claim or
+          // firing owner's later write loses to the observed truth.
           store.settleMergeIntent(intent.id, intent.generation, remoteState === "MERGED" ? "merged" : "superseded", clock(), {
-            receipt: `observed ${remoteState.toLowerCase()} remotely`,
+            receipt: `observed ${remoteState.toLowerCase()} remotely`, bumpGeneration: true,
           });
         }
       });
@@ -473,6 +476,9 @@ function firstLine(text: string): string {
 // ---- the merge sweep (v21; four review rounds are the spec) ---------------
 
 export const MERGE_LEASE_MS = 5 * 60_000;
+// F1: a firing row is STALE only when this deadline passes - one sweep
+// interval plus grace, stamped at the CAS, never a guess.
+export const FIRING_GRACE_MS = 10 * 60_000;
 export const MERGE_MAX_ATTEMPTS = 3;
 
 /** The exact terms a merge intent binds - drift supersedes, never surprises. */
@@ -616,16 +622,62 @@ export async function sweepMerges(
     }
 
     store.createMergeIntent(
-      { publication: publication.id, grantTermsHash: termsHash, headSha, method, deleteBranch: grant.mergeDeleteBranch === true },
+      { publication: publication.id, repo: options.repo, grantTermsHash: termsHash, headSha, method, deleteBranch: grant.mergeDeleteBranch === true },
       clock(),
     );
     const intent = store.mergeIntentFor(publication.id);
     if (intent === null || intent.state === "merged" || intent.state === "refused" || intent.state === "superseded") continue;
 
+    // WAITING-HUMAN never fires itself (E1): the person is paged once,
+    // episodically, with the exact ceremony that releases it.
+    if (intent.state === "waiting-human") {
+      report.skipped++;
+      pagePerson(
+        publication.id, "waiting-human",
+        "PR #" + prNumber + " waits for your go-ahead",
+        "Merges wait for you while this posture holds. When you want it merged: standing-orders publish merge " + prNumber + " --as <you> --token <t>. It still merges only when CI is seen green on the exact head.",
+      );
+      continue;
+    }
+
+    // FIRING is one-shot (E1): a live firing row belongs to its owner.
+    // A STALE one (deadline passed) recovers by STRUCTURED REMOTE REREAD
+    // (F1): an observed terminal settles it; an OPEN same-head PR is
+    // NEVER auto-retried - the person gets the recovery ceremony.
+    if (intent.state === "firing") {
+      if (intent.firingDeadline !== null && intent.firingDeadline <= clock().toISOString()) {
+        const reread = await observeOne(store, exec, clock, grant.githubRepo, prNumber);
+        if (!reread.ok && reread.why === "pr-merged") {
+          store.settleMergeIntent(intent.id, intent.generation, "merged", clock(), {
+            receipt: "observed merged remotely after a stale firing claim", from: "firing", bumpGeneration: true,
+          });
+          report.merged++;
+        } else if (!reread.ok && reread.why.startsWith("pr-")) {
+          store.settleMergeIntent(intent.id, intent.generation, "superseded", clock(), {
+            error: reread.why, from: "firing", bumpGeneration: true,
+          });
+        } else if (reread.ok && reread.headSha !== intent.headSha) {
+          store.settleMergeIntent(intent.id, intent.generation, "superseded", clock(), {
+            error: "the head moved while the firing claim was stale", from: "firing", bumpGeneration: true,
+          });
+        } else {
+          report.skipped++;
+          pagePerson(
+            publication.id, "half-fired",
+            "PR #" + prNumber + " may have half-merged",
+            "A merge was issued and its owner went silent; the PR is still open on the same commit. Nothing retries by itself. If you want it fired again: standing-orders publish refire " + prNumber + " --as <you> --token <t>.",
+          );
+        }
+      } else {
+        report.skipped++;
+      }
+      continue;
+    }
+
     const claim = store.claimMergeIntent(intent.id, who, MERGE_LEASE_MS, clock());
     if (claim === null) continue; // someone else's live claim
-    const settle = (state: "merged" | "refused" | "superseded" | "pending", detail: { error?: string | null; receipt?: string | null; countAttempt?: boolean } = {}) =>
-      store.settleMergeIntent(intent.id, claim.generation, state, clock(), detail);
+    const settle = (state: "merged" | "refused" | "superseded" | "pending", detail: { error?: string | null; receipt?: string | null; countAttempt?: boolean; from?: "claimed" | "firing" } = {}) =>
+      store.settleMergeIntent(intent.id, claim.generation, state, clock(), { from: "claimed", ...detail });
 
     // The live grant, re-read AFTER the claim (finding 7): revocation,
     // narrowing, or any term drift supersedes rather than merges.
@@ -675,8 +727,26 @@ export async function sweepMerges(
       continue;
     }
 
-    // The last fence before the external call: renew + generation re-proof.
-    if (!store.renewMergeClaim(intent.id, claim.generation, MERGE_LEASE_MS, clock())) continue;
+    // The linearization point (E1): claimed -> firing as a DURABLE CAS
+    // re-proving grant terms, head, and basis-specific authority in one
+    // transaction. Before it commits, a revocation wins; after, the
+    // issued call is one-shot and no revocation demotes it.
+    const fired = store.fireMergeIntent(
+      intent.id, claim.generation,
+      { repo: options.repo, headSha, liveGrantTermsHash: mergeTermsHash(live), graceMs: FIRING_GRACE_MS },
+      clock(),
+    );
+    if (!fired.ok) {
+      if (fired.outcome === "waiting-human") {
+        report.skipped++;
+        pagePerson(
+          publication.id, "waiting-human",
+          "PR #" + prNumber + " waits for your go-ahead",
+          fired.why + " - when you want it merged: standing-orders publish merge " + prNumber + " --as <you> --token <t>.",
+        );
+      }
+      continue;
+    }
 
     const merged = await exec(
       "gh",
@@ -692,7 +762,7 @@ export async function sweepMerges(
 
     if (merged.code === 0) {
       store.transact(() => {
-        settle("merged", { receipt: "merged " + headSha.slice(0, 12) + " at " + clock().toISOString(), countAttempt: true });
+        settle("merged", { receipt: "merged " + headSha.slice(0, 12) + " at " + clock().toISOString(), countAttempt: true, from: "firing" });
         store.recordPublicationRemoteState(publication.id, "MERGED", clock());
         store.resolveCiEpisodes(grant.githubRepo, prNumber, null, clock());
       });
@@ -709,7 +779,7 @@ export async function sweepMerges(
     // NEVER classify from the exit code alone (only auth=4 is distinct):
     // re-read structured state and let the PR say what happened.
     if (merged.code === 4) {
-      settle("refused", { error: "credential", countAttempt: true });
+      settle("refused", { error: "credential", countAttempt: true, from: "firing" });
       report.refused++;
       pagePerson(
         publication.id, "credential",
@@ -720,15 +790,15 @@ export async function sweepMerges(
     }
     const after = await observeOne(store, exec, clock, grant.githubRepo, prNumber);
     if (!after.ok && after.why === "pr-merged") {
-      settle("merged", { receipt: "merged (confirmed by re-read after an ambiguous exit)", countAttempt: true });
+      settle("merged", { receipt: "merged (confirmed by re-read after an ambiguous exit)", countAttempt: true, from: "firing" });
       report.merged++;
     } else if (!after.ok && (after.why === "draft" || after.why.startsWith("pr-"))) {
-      settle(after.why === "draft" ? "refused" : "superseded", { error: after.why, countAttempt: true });
+      settle(after.why === "draft" ? "refused" : "superseded", { error: after.why, countAttempt: true, from: "firing" });
       if (after.why === "draft") report.refused++;
     } else if (after.ok && after.headSha !== headSha) {
-      settle("superseded", { error: "the head moved during the attempt", countAttempt: true });
+      settle("superseded", { error: "the head moved during the attempt", countAttempt: true, from: "firing" });
     } else if (intent.attempts + 1 >= MERGE_MAX_ATTEMPTS) {
-      settle("refused", { error: firstLine(merged.stderr) || "the merge was rejected", countAttempt: true });
+      settle("refused", { error: firstLine(merged.stderr) || "the merge was rejected", countAttempt: true, from: "firing" });
       report.refused++;
       pagePerson(
         publication.id, "rejected",
@@ -736,7 +806,7 @@ export async function sweepMerges(
         (firstLine(merged.stderr) || "GitHub rejected the merge") + " - likely branch protection, required reviews, or a conflict. Fix the cause, then run: standing-orders publish rearm " + prNumber + ".",
       );
     } else {
-      settle("pending", { error: firstLine(merged.stderr) || "transport", countAttempt: true });
+      settle("pending", { error: firstLine(merged.stderr) || "transport", countAttempt: true, from: "firing" });
     }
   }
   return report;

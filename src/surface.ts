@@ -236,6 +236,8 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("routine run-now", "run a standing order immediately"),
   operatorRead("mode show", "the repository's operating mode, in full — or 'locked' when none is signed"),
   operator("mode set", "sign a per-repository operating mode (password ceremony; standard or hands-off, always expiring)"),
+  operator("publish merge", "say yes to ONE waiting merge — it fires only when CI is seen green on the exact commit you authorized"),
+  operator("publish refire", "recover a merge whose issued call went silent — re-enters the full merge road, never auto-retried"),
   operator("mode revoke", "revoke a repository's mode — one click, every act it covered falls back to its own ceremony"),
   operator("config set", "set phase or spend configuration"),
   operator("config clear", "clear phase or spend configuration"),

@@ -1,5 +1,37 @@
 # Progress
 
+**2026-08-26 — Modes arc, layer 4 of 7: the merge machine.** The
+fourteen-transition table (E1) is now the code, and the five-round
+Codex review chain closed with an APPROVE on exactly this layer's two
+rulings. Creation binds the repo's live posture: no mode = the grant's
+own signature (unchanged, as signed); a notify mode = `waiting-human`
+even under a merge-capable grant; an automerge mode = basis 'mode'
+bound to the signing digest. The reconciler grew its missing NOTIFY arm
+— signing the stricter posture demotes even grant-basis pending
+intents, while revocation/expiry demote only mode-basis rows (a grant's
+own authority is never retroactively restricted). `waiting-human`
+releases only through the EXACT-INTENT ceremony (`publish merge <pr>`,
+password, covering one named commit — a moved head refuses).
+`claimed → firing` is a DURABLE CAS inside one transaction that
+re-proves the live grant's terms against the hash the intent was
+written under, the exact head, and the basis-specific authority (live
+automerge mode with the bound digest; the absence of a stricter notify
+posture for grant-basis) — the one-winner linearization point:
+revocation-first moves the row and the CAS races out; firing-first is
+undemotable and the issued `gh pr merge` is one-shot.
+`settleMergeIntent` became state-specific and TERMINALLY MONOTONIC — a
+stale claim owner can no longer overwrite an observer-settled terminal
+(the pre-existing v21 overwrite bug, closed). Stale-firing recovery
+(F1): past its stamped deadline the sweep rereads the remote
+structurally — observed terminals settle with a generation bump; an
+OPEN same-head PR is NEVER auto-retried and pages the person for
+`publish refire <pr>`, which re-enters the full road. The remote-state
+observer now settles every nonterminal (waiting-human and firing
+included) on an observed MERGED/CLOSED, generation bumped so late
+writes lose. Nine-test machine suite covering both race orders, the
+in-CAS re-proofs, monotonic terminals, refire staleness, and expiry
+reconciliation. Suite 1314.
+
 **2026-08-27 — Modes arc, layer 3 of 7: operating modes and the daily
 rails.** The heart of the arc — the signed envelope itself. src/modes.ts
 owns the terms (permission default, auto-approve, quick-mint,
