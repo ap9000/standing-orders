@@ -2929,9 +2929,20 @@ function migrate(db: Database): void {
   addColumn(db, "task_scope", "mode_digest", "TEXT");
   addColumn(db, "diff_comment", "reviewer_run", "INTEGER REFERENCES run(id)");
   // review_request arrives whole by IF NOT EXISTS; these cover a file
-  // that created the table before basis/mode_digest existed.
+  // that created the table before basis/mode_digest existed. FAIL CLOSED
+  // on that upgrade (Codex reviewer round 2, finding 1): a pre-typed open
+  // request queued by a mode would default to basis 'human' and survive
+  // the mode's revocation — and legacy display strings are ambiguous with
+  // human names, so NO open pre-typed request keeps its authority. Spent
+  // as 'legacy-untyped'; a person simply asks again.
+  const preTypedRequests = tableExists(db, "review_request") && !hasColumn(db, "review_request", "basis");
   addColumn(db, "review_request", "basis", "TEXT NOT NULL DEFAULT 'human' CHECK (basis IN ('human','mode'))");
   addColumn(db, "review_request", "mode_digest", "TEXT");
+  if (preTypedRequests) {
+    db.exec(
+      `UPDATE review_request SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), consumed_reason = 'legacy-untyped' WHERE consumed_at IS NULL`,
+    );
+  }
   addColumn(db, "diff_comment", "severity", "TEXT CHECK (severity IN ('note','question','problem'))");
   addColumn(db, "task_ref", "plan_provider", "TEXT");
   addColumn(db, "task_ref", "plan_model", "TEXT");

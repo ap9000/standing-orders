@@ -1,5 +1,25 @@
 # Progress
 
+**2026-08-27 — Layer 5 verify closed: the upgrade fails closed.** Codex
+round 2 on the hardening: APPROVE-WITH-CHANGES, every round-1 closure
+verified (the patch re-proof, the typed authority columns with the
+exact-digest re-proof, the failed-capture refusal, the one-transaction
+admission — and the read-confinement boundary ruled acceptable for this
+slice given the planner's identical posture, with OS sandboxing tracked
+separately). The one blocking finding: an open review request queued by
+the PREVIOUS commit's code as a `mode:…` display string would inherit
+basis 'human' from the column default at migration — surviving the very
+revocation R-REVOKE exists for. Now the migration detects the pre-typed
+shape (table exists, basis column absent) and spends every open
+pre-typed request as `legacy-untyped` before the typed columns land —
+legacy display strings are ambiguous with human names, so NO pre-typed
+request keeps authority; a person simply asks again. History keeps its
+words; the sweep runs exactly once. Migration regression test drops the
+typed columns to recreate the old shape, reopens, and proves the spend,
+the preserved history, and that fresh typed requests survive restarts.
+Suite 1336.
+
+
 **2026-08-27 — Layer 5 hardening: the Codex round-1 findings, closed.**
 The implementation verify came back REDESIGN with four real holes, each
 now a regression test. (1) Scratch hygiene re-proves the PATCH itself:
