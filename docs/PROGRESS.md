@@ -1,5 +1,22 @@
 # Progress
 
+**2026-08-29 — Auth-mode messaging made fully accurate (verify round 5's
+one open finding).** Rounds confirmed everything else closed; the last
+residual was messaging honesty, now fixed. The settings save handler
+VALIDATES before it mutates: an unchanged blank submission claims no
+change (a mode equal to the current one is not a change), an invalid
+key refuses BEFORE any mode is persisted (no hidden switch), and a
+selected-but-inapplicable mode (openrouter subscription) refuses first.
+Copy is mode-aware everywhere: the keys-clear guide synopsis, the CLI
+and settings clear messages (subscription mode strips the ambient key,
+so "environment takes over" was wrong there), and the settings intro
+(a key is handed over ONLY in api-key mode). Four isolated settings
+HTTP tests — HOME sandboxed so provider-key writes never touch the real
+store — cover the unchanged-blank, invalid-key-no-hidden-switch,
+real-change + openrouter-refusal, and subscription-clear paths. Suite
+1394.
+
+
 **2026-08-29 — Auth modes verify round 4 (APPROVE-WITH-CHANGES): the two
 residuals closed.** The three blocking findings (isolation, resume test,
 verify classification) were all confirmed closed. Two small ones: (1)

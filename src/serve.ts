@@ -140,7 +140,7 @@ import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
-import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
+import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -2961,35 +2961,39 @@ export function createDecisionServer(options: ServeOptions): Server {
               : `the ${provider} key is removed — an environment variable, if one exists, takes over`,
         )}`);
       }
-      // The sign-in preference rides the same form — an operator can
-      // switch to subscription without touching the key, or paste a key
-      // and keep using their login. openrouter has no login, so its
-      // form renders no select and a refusal is honored here.
+      // Validate EVERYTHING before mutating anything (Codex round 5,
+      // finding 2): an invalid key must never persist a mode change it
+      // then hides, a mode equal to the current one is not a "change",
+      // and an unchanged blank form does nothing.
       const wantedMode = body.get("auth-mode");
-      let modeChanged = false;
-      if (wantedMode === "subscription" || wantedMode === "api-key") {
-        const set = setAuthMode(provider, wantedMode as AuthMode);
-        if (!set.ok) {
-          return refuse(response, who, 409, `${provider} has no subscription login — it is API-key only`, "/settings");
-        }
-        modeChanged = true;
+      const value = (body.get("value") ?? "").trim();
+      const modeSelected = wantedMode === "subscription" || wantedMode === "api-key";
+      const currentMode = readAuthMode(provider);
+      if (!modeSelected && value === "") {
+        return refuse(response, who, 400, "nothing to change — paste a key or pick a sign-in", "/settings");
       }
-      const value = body.get("value") ?? "";
-      if (value.trim() === "") {
-        if (!modeChanged) {
-          return refuse(response, who, 400, "nothing to change — paste a key or pick a sign-in", "/settings");
-        }
-        return redirect(response, `/settings?said=${encodeURIComponent(`the ${provider} sign-in is set to ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}`)}`);
+      // A selected-but-inapplicable mode (openrouter subscription) refuses
+      // before any write.
+      if (modeSelected && wantedMode === "subscription" && !SUBSCRIPTION_CAPABLE[provider]) {
+        return refuse(response, who, 409, `${provider} has no subscription login — it is API-key only`, "/settings");
       }
-      const saved = saveProviderKey(provider, value);
-      if (!saved.ok) {
+      // A present key must be plausible BEFORE the mode is touched.
+      if (value !== "" && !plausibleKey(value)) {
         return refuse(response, who, 400, "that does not look like an API key — check the paste and try again", "/settings");
       }
+      // Apply the mode only when it actually differs.
+      const modeChanged = modeSelected && wantedMode !== currentMode;
+      if (modeChanged) setAuthMode(provider, wantedMode as AuthMode);
+      const modeNote = modeChanged ? ` \u00b7 ${provider} now uses ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}` : "";
+      if (value === "") {
+        return redirect(response, `/settings?said=${encodeURIComponent(modeChanged ? `${provider} now uses ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}` : `no change — ${provider} already uses ${currentMode === "api-key" ? "the API key" : "its own subscription / login"}`)}`);
+      }
+      saveProviderKey(provider, value); // known plausible
       // Verify right now, so a paste gets an immediate yes/no instead of a
       // failed build later. A stored-but-unreachable key still says so.
       const verdict = await verifyProviderKey(provider, value);
       const stored = `the ${provider} key is stored`;
-      return redirect(response, `/settings?said=${encodeURIComponent(verdict.ok ? `${stored} and verified — it works` : `${stored}. ${verdictWords(provider, verdict)}`)}`);
+      return redirect(response, `/settings?said=${encodeURIComponent((verdict.ok ? `${stored} and verified — it works` : `${stored}. ${verdictWords(provider, verdict)}`) + modeNote)}`);
     }
 
     if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {
@@ -9598,7 +9602,7 @@ function settingsPage(
       ? ""
       : [
           "<h2>provider API keys</h2>",
-          `<p class="meta">stored as private files on this machine, handed to exactly their own provider's process at spawn — never shown back, never in the database, and every other provider's process is stripped of them. Claude and Codex usually sign in with their own apps; keys here are for API billing, OpenRouter, and Gemini.</p>`,
+          `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key is handed to its provider's process ONLY when that provider's sign-in is set to "the API key"; in subscription mode the provider uses its own login and the key is kept but not handed over. Every other provider's process is stripped of it either way.</p>`,
           ...providerKeys.map(one =>
             [
               `<form method="post" action="/settings/provider-key" class="card">`,

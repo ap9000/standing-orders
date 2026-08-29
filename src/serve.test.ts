@@ -500,6 +500,109 @@ describe("the settings card", () => {
   });
 });
 
+describe("provider keys & auth mode, over HTTP", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let dir: string;
+  let approverToken: string;
+  let priorHome: string | undefined;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(`${base}/login`, {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+  const csrfOf = async (cookie: string): Promise<string> => {
+    const page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    return /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
+  };
+
+  beforeEach(async () => {
+    // HOME is isolated so provider-key writes never touch the real store.
+    priorHome = process.env["HOME"];
+    dir = mkdtempSync(join(tmpdir(), "so-serve-keys-"));
+    process.env["HOME"] = dir;
+    store = openStore(":memory:");
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot: join(dir, "ev"), clock: () => new Date(), telegramTokenFile: join(dir, "tok") });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+    if (priorHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = priorHome;
+  });
+
+  const post = async (cookie: string, csrf: string, fields: Record<string, string>) =>
+    fetch(`${base}/settings/provider-key`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, ...fields }),
+      redirect: "manual",
+    });
+
+  test("an unchanged blank submission claims NO change (round 5, finding 2)", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    // claude defaults to subscription; submitting subscription + no key changes nothing.
+    const res = await post(cookie, csrf, { provider: "claude", "auth-mode": "subscription", value: "" });
+    expect(res.status).toBe(303);
+    expect(decodeURIComponent(res.headers.get("location") ?? "")).toContain("no change");
+    const { readAuthMode } = await import("./keys.js");
+    expect(readAuthMode("claude")).toBe("subscription");
+  });
+
+  test("an invalid key does NOT persist a hidden mode change (validate before mutate)", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    const res = await post(cookie, csrf, { provider: "claude", "auth-mode": "api-key", value: "short" });
+    expect(res.status).toBe(400);
+    const { readAuthMode } = await import("./keys.js");
+    // The mode was NOT switched despite the api-key selection — the bad key refused first.
+    expect(readAuthMode("claude")).toBe("subscription");
+  });
+
+  test("a real mode change is claimed; openrouter cannot go subscription", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    const changed = await post(cookie, csrf, { provider: "claude", "auth-mode": "api-key", value: "" });
+    expect(decodeURIComponent(changed.headers.get("location") ?? "")).toContain("now uses the API key");
+    const { readAuthMode } = await import("./keys.js");
+    expect(readAuthMode("claude")).toBe("api-key");
+    // openrouter has no subscription — a forced submit refuses without mutating.
+    const refused = await post(cookie, csrf, { provider: "openrouter", "auth-mode": "subscription", value: "" });
+    expect(refused.status).toBe(409);
+    expect(readAuthMode("openrouter")).toBe("api-key");
+  });
+
+  test("clearing a key in subscription mode says builds are unaffected", async () => {
+    const cookie = await login();
+    const csrf = await csrfOf(cookie);
+    const { saveProviderKey, readAuthMode } = await import("./keys.js");
+    saveProviderKey("claude", "sk-ant-StoredThenCleared99");
+    expect(readAuthMode("claude")).toBe("subscription");
+    const res = await fetch(`${base}/settings/provider-key-clear`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, provider: "claude" }),
+      redirect: "manual",
+    });
+    expect(res.status).toBe(303);
+    expect(decodeURIComponent(res.headers.get("location") ?? "")).toContain("uses its own login");
+  });
+});
+
 describe("the operations console", () => {
   let store: Store;
   let server: Server;
