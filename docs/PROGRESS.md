@@ -1,5 +1,32 @@
 # Progress
 
+**2026-08-29 — Gemini verify round 2 (REDESIGN): the last six findings,
+closed.** Codex confirmed the round-1 fixes and found the residue — all
+real, all shut. Finding 1 (trust proof incomplete): added DISPATCH-level
+tests — an attested gemini sitting on PATH never hijacks a claude-
+configured tick (only explicit selection routes to it), complementing
+the existing comparison-from-explicit-terms e2e. Finding 2 (strip not
+closed): the `providers` command's `codex login status` identity probe
+and probeBudgetCap's version/help probes were still inheriting foreign
+keys — both now strip ALL_CREDENTIAL_ENV, so no provider-binary spawn
+anywhere inherits a foreign credential. Finding 3 (protocol invariant):
+the resume-XOR-mint rule moved from the one repair caller to the
+GATEWAY — invokeAgent drops a minted start id whenever a resume is
+present, before it is ever stamped or validated, so no paid protocol
+refusal can form; a gateway-level test proves it. Finding 5 (managed
+keys): the Claude ambient-fallback claim was FALSE (resolveChildEnv
+strips ambient ANTHROPIC_API_KEY) — the gateway now RE-SUPPLIES the
+selected provider's ambient key when no managed file exists, making
+"environment takes over" true for every provider while the chat-key
+isolation holds elsewhere; keyHome now threads through the held gateway
+too, with managed-wins and both-road injection tests. Finding 6 (verify):
+the gemini key moved from the URL query to the x-goog-api-key HEADER
+(no secret in a URL a diagnostic could surface), and a 400 is a
+rejection ONLY when its body names a key/auth failure — a malformed-
+request 400 reads as unexpected, never a false rejection; re-proven live
+(real key ok, bogus rejected via the body). Suite 1383.
+
+
 **2026-08-29 — Gemini verify came back REDESIGN; every finding closed,
 one by a real correction.** Codex found the trust-containment claim was
 FALSE — gemini 0.57.0 implements `--skip-trust` by setting

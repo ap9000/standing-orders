@@ -3666,7 +3666,7 @@ async function providersCommand(
       const installed = version.code === 0 && !version.notFound;
       let identity: string | null = null;
       if (installed && facts.identityProbe !== null) {
-        const asked = await probe(facts.binary, [...facts.identityProbe], { timeoutMs: 5_000 });
+        const asked = await probe(facts.binary, [...facts.identityProbe], { timeoutMs: 5_000, omitEnv: ALL_CREDENTIAL_ENV });
         identity = asked.code === 0 ? (asked.stdout.trim().split("\n")[0] ?? null) : "not logged in";
       }
       return { id, facts, version, installed, identity };

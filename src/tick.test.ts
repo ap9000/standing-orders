@@ -200,6 +200,26 @@ describe("tick, against real git", () => {
     }
   });
 
+  test("gemini ON THE MACHINE never hijacks dispatch: only explicit selection routes to it (trust-posture invariant)", async () => {
+    // A fake, ATTESTED gemini sits on PATH — present and usable. But the
+    // install is configured for claude, so the tick dispatches CLAUDE.
+    // Gemini's mere availability is not a selection (Codex gemini verify
+    // round 2, finding 1): the trust grant only ever rides an explicit choice.
+    const restore = fakeGeminiOnPath("0.57.0");
+    try {
+      const { runnerToken, approverToken } = await credentials(); // config: claude/sonnet
+      await queueApproved("t-not-gemini", approverToken);
+      expect(await tick(runnerToken)).toBe(EXIT.ok);
+      expect(payload().dispatched[0]).toMatchObject({ id: "t-not-gemini", outcome: "built" });
+      const store = openStore(db);
+      const row = store.raw().prepare("SELECT provider FROM run WHERE task_ref IN (SELECT id FROM task_ref WHERE external_id = 't-not-gemini')").get();
+      expect(row).toMatchObject({ provider: "claude" });
+      store.close();
+    } finally {
+      restore();
+    }
+  });
+
   test("an attested gemini builds end-to-end: minted identity echoed, tokens recorded, dollars honestly NULL", async () => {
     const restore = fakeGeminiOnPath("0.57.0");
     try {

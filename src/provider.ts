@@ -736,17 +736,19 @@ export const MONEY_CAPABILITIES: Record<ProviderId, ProviderMoneyCapabilities> =
  */
 export async function probeBudgetCap(
   provider: ProviderId,
-  runner: (command: string, argv: readonly string[], options: { timeoutMs?: number }) => Promise<ExecResult>,
+  runner: (command: string, argv: readonly string[], options: { timeoutMs?: number; omitEnv?: readonly string[] }) => Promise<ExecResult>,
 ): Promise<{ ok: true; executable: string; version: string } | { ok: false; problem: string }> {
   const flag = MONEY_CAPABILITIES[provider].nativeDollarCapFlag;
   if (flag === null) return { ok: false, problem: `${provider} has no native dollar cap` };
   const binary = provider === "claude" ? "claude" : provider;
-  const where = await runner("which", [binary], { timeoutMs: 5_000 });
+  // A feature probe needs no credential (round 2, finding 2): strip them all.
+  const strip = { omitEnv: ALL_CREDENTIAL_ENV } as const;
+  const where = await runner("which", [binary], { timeoutMs: 5_000, ...strip });
   if (where.code !== 0) return { ok: false, problem: `${binary} is not on PATH` };
   const executable = where.stdout.trim().split("\n")[0] ?? "";
-  const version = await runner(executable, ["--version"], { timeoutMs: 10_000 });
+  const version = await runner(executable, ["--version"], { timeoutMs: 10_000, ...strip });
   if (version.code !== 0) return { ok: false, problem: `${executable} did not answer --version` };
-  const help = await runner(executable, ["--help"], { timeoutMs: 10_000 });
+  const help = await runner(executable, ["--help"], { timeoutMs: 10_000, ...strip });
   if (help.code !== 0 || !help.stdout.includes(flag)) {
     return { ok: false, problem: `${executable} does not advertise ${flag} — the dollar cap cannot be enforced` };
   }

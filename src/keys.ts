@@ -88,10 +88,11 @@ export type KeyVerdict =
 
 const VERIFY_ENDPOINT: Record<ProviderId, { url: string; headers: (key: string) => Record<string, string> }> = {
   gemini: {
-    // The key rides a query param on Google's endpoint — never logged here,
-    // and the request is HTTPS to Google's own host.
+    // The key rides the x-goog-api-key HEADER (round 2, finding 6):
+    // Google's current guidance, and it keeps the secret out of the URL
+    // where a diagnostic or intermediary could surface it.
     url: "https://generativelanguage.googleapis.com/v1beta/models",
-    headers: () => ({}),
+    headers: key => ({ "x-goog-api-key": key }),
   },
   codex: {
     url: "https://api.openai.com/v1/models",
@@ -116,21 +117,36 @@ export async function verifyProviderKey(
   const key = value.trim();
   if (!plausibleKey(key)) return { ok: false, reason: "rejected", status: 0 };
   const endpoint = VERIFY_ENDPOINT[provider];
-  const url = provider === "gemini" ? `${endpoint.url}?key=${encodeURIComponent(key)}` : endpoint.url;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
-    response = await fetcher(url, { headers: endpoint.headers(key), redirect: "error", signal: controller.signal });
+    response = await fetcher(endpoint.url, { headers: endpoint.headers(key), redirect: "error", signal: controller.signal });
   } catch {
     return { ok: false, reason: "unreachable" };
   } finally {
     clearTimeout(timer);
   }
   if (response.status === 200) return { ok: true };
-  // 401/403 (and Google's 400 on a bad key) are the auth boundary saying no.
-  if (response.status === 400 || response.status === 401 || response.status === 403) {
+  // 401/403 are the auth boundary saying no, on every provider (round 2,
+  // finding 6). A 400 is AMBIGUOUS — malformed request vs a bad key — so
+  // it is a rejection ONLY when the body names a key/auth failure; our
+  // request is a trivial GET, so a 400 that is NOT about the key is a
+  // genuine surprise and reads as `unexpected`, not a false rejection.
+  if (response.status === 401 || response.status === 403) {
     return { ok: false, reason: "rejected", status: response.status };
+  }
+  if (response.status === 400) {
+    let body = "";
+    try {
+      body = (await response.text()).slice(0, 2048).toLowerCase();
+    } catch {
+      body = "";
+    }
+    if (/api[_ ]?key|api key not valid|invalid.*key|unauthenticated|authentication/.test(body)) {
+      return { ok: false, reason: "rejected", status: 400 };
+    }
+    return { ok: false, reason: "unexpected", status: 400 };
   }
   return { ok: false, reason: "unexpected", status: response.status };
 }

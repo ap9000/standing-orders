@@ -126,11 +126,18 @@ export async function invokeAgent(
     };
   }
 
+  // Resume XOR mint, enforced at the GATEWAY (Codex gemini verify round 2,
+  // finding 3): a resume and a minted start id are mutually exclusive —
+  // geminiArgv silently prefers --resume, so a minted id that rides
+  // alongside a resume would be stamped and later enforced against an
+  // envelope that never carried it, a paid protocol refusal. When resuming,
+  // the minted id is dropped here, before it is ever stamped.
+  const startSessionId = invocation.resumeSession !== null ? undefined : invocation.startSessionId;
   // The minted session identity (A5): stamped durably BEFORE the start
   // stamp — intent precedes the process, and the envelope must later
   // MATCH this id or the run fails typed.
-  if (invocation.startSessionId !== undefined) {
-    store.stampRun(runId, { sessionId: invocation.startSessionId });
+  if (startSessionId !== undefined) {
+    store.stampRun(runId, { sessionId: startSessionId });
   }
 
   // The stamp precedes the spawn, so a crash between the two leaves a run
@@ -149,7 +156,11 @@ export async function invokeAgent(
   // else's, and the plane's own env never needed to carry it. A key
   // already ambient in the environment keeps working; the managed file,
   // being deliberate, wins.
-  const managedKey = readProviderKey(spec.provider, keyHome);
+  // The managed file WINS; ambient env is the fallback, made REAL by
+  // explicit re-supply (Codex gemini verify round 2, finding 5): passing
+  // the key through `env` survives resolveChildEnv's chat-key strip, so a
+  // provider whose key lives only in the environment still authenticates.
+  const managedKey = readProviderKey(spec.provider, keyHome) ?? (process.env[PROVIDER_KEY_ENV[spec.provider]] || null);
   const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
     timeoutMs,
@@ -180,9 +191,9 @@ export async function invokeAgent(
   // the session on disk is not the session on record, and repair must
   // never resume it. Usage above is already recorded: the spend happened.
   if (
-    invocation.startSessionId !== undefined &&
+    startSessionId !== undefined &&
     envelope.initObserved === true &&
-    envelope.sessionId !== invocation.startSessionId
+    envelope.sessionId !== startSessionId
   ) {
     return {
       kind: "refused",
@@ -272,6 +283,7 @@ export async function invokeHeldAgent(
     readyTimeoutMs?: number;
     clock?: () => Date;
     starter?: typeof startClaudeHeldSession;
+    keyHome?: string;
   },
 ): Promise<import("./exec.js").HeldSessionStart> {
   const clock = options.clock ?? (() => new Date());
@@ -288,12 +300,12 @@ export async function invokeHeldAgent(
   }
 
   const adapter = adapterFor("claude");
-  const { clock: _clock, starter, socketPath, cookie, graceMs, events, readyTimeoutMs, ...runOptions } = options;
+  const { clock: _clock, starter, socketPath, cookie, graceMs, events, readyTimeoutMs, keyHome, ...runOptions } = options;
 
   // The stamp precedes the spawn — same direction as the one-shot gateway.
   store.stampProviderStart(runId, clock());
 
-  const heldKey = readProviderKey("claude");
+  const heldKey = readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null);
   const start = starter ?? startClaudeHeldSession;
   return start(adapter.binary, argv, {
     ...runOptions,
