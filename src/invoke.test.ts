@@ -390,6 +390,74 @@ describe("the attested gateway (Phase 3): gemini refusals are values", () => {
   });
 });
 
+describe("the fallback taxonomy stamp (E2): honest disposal, fail closed", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(":memory:");
+  });
+  afterEach(() => store.close());
+
+  const codexRunFor = (id: string) => {
+    store.createTask({ id, title: "w" }, T0);
+    return store.startRun({
+      taskRef: store.refFor("built-in", id).id, leaseId: `lease-${id}`, runner: "builder-1",
+      branch: "b", worktree: "/w", provider: "codex", now: T0,
+    });
+  };
+
+  test("EVERY ran attempt is stamped with an auth mode and a terminal class", async () => {
+    const id = codexRunFor("e2-ok");
+    const jsonl = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "fine" } });
+    await invokeRan(store, id, { provider: "codex", model: null }, ASK, { runner: async () => ({ ...OK, stdout: jsonl }) });
+    // Codex defaults to the subscription; a clean turn carries NO structural
+    // failure terminal, so it classifies 'unknown' — never eligible.
+    expect(store.getRun(id)).toMatchObject({ authMode: "subscription", terminalClass: "unknown" });
+  });
+
+  test("a codex FAILED turn stamps not-exhausted — a definite failure, but no fixture makes it eligible", async () => {
+    const id = codexRunFor("e2-fail");
+    // A structural failure terminal (turn.failed) shaped exactly like a real
+    // usage-limit message — but with the recognizers empty, it is NOT eligible.
+    const jsonl = [
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "You've hit your usage limit." } }),
+      JSON.stringify({ type: "turn.failed", error: { message: "You've hit your usage limit. Try again later." } }),
+    ].join("\n");
+    await invokeRan(store, id, { provider: "codex", model: null }, ASK, {
+      runner: async () => ({ ...OK, code: 1, stdout: jsonl, stderr: "usage limit" }),
+    });
+    const run = store.getRun(id);
+    expect(run?.terminalClass).toBe("not-exhausted");
+    // The safety property spelled out: a definite failure never authorizes a paid fallback.
+    expect(run?.terminalClass).not.toBe("usage-exhausted");
+    expect(run?.terminalClass).not.toBe("credits-depleted");
+  });
+
+  test("a refused-before-spawn attempt is NEVER classified — no process ran, terminal_class stays NULL", async () => {
+    // A gemini out-of-range attestation refuses before any spawn: no
+    // envelope, so no honest classification is possible.
+    const dir = mkdtempSync(join(tmpdir(), "e2-attest-"));
+    writeFileSync(join(dir, "gemini"), "#!/bin/sh\necho 0.1.0\n");
+    chmodSync(join(dir, "gemini"), 0o755);
+    const savedPath = process.env["PATH"];
+    process.env["PATH"] = dir;
+    resetAttestationCache();
+    try {
+      store.createTask({ id: "e2-refused", title: "w" }, T0);
+      const id = store.startRun({
+        taskRef: store.refFor("built-in", "e2-refused").id, leaseId: "lease-e2r", runner: "builder-1",
+        branch: "b", worktree: "/w", provider: "gemini", now: T0,
+      });
+      const result = await invokeAgent(store, id, { provider: "gemini" as const, model: null }, ASK, { runner: async () => OK });
+      expect(result.kind).toBe("refused");
+      expect(store.getRun(id)?.terminalClass ?? null).toBeNull();
+    } finally {
+      process.env["PATH"] = savedPath;
+      resetAttestationCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the architecture rule", () => {
   /**
    * The zero-token invariant is only enforceable if there is exactly one

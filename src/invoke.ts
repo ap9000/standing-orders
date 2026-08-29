@@ -18,6 +18,7 @@
 
 import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
 import { readProviderKey, readAuthMode, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
+import { classifyTerminal } from "./exhaustion.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
 import { startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
@@ -198,6 +199,26 @@ export async function invokeAgent(
     ...(envelope.costUsd === null ? {} : { costUsd: envelope.costUsd }),
     ...(envelope.usageRaw === null ? {} : { usageJson: envelope.usageRaw }),
   });
+
+  // The fallback taxonomy stamp (E2): classify HERE, where the evidence
+  // still exists — the structural terminal off this exact envelope, the
+  // AUTHORITATIVE version the gateway proved at spawn, and the auth mode
+  // that spawned it. `classifyTerminal` is fail-closed: with no
+  // fixture-backed recognizer for this (provider, version) — the state
+  // every build ships in — it can only ever return a non-eligible class,
+  // so this stamp authorizes nothing. It is the honest disposal record the
+  // dispatch's C8 gate later re-checks against `hasRecognizer` before it
+  // reads the class as anything more than history. Tier-1 providers prove
+  // no version here yet (attested === null), so they classify fail-closed
+  // until their exhaustion fixture — and the version proving it needs — is
+  // captured and reviewed.
+  const terminalClass = classifyTerminal({
+    provider: spec.provider,
+    version: attested === null ? null : attested.version,
+    authMode,
+    terminal: envelope.structuralTerminal,
+  });
+  store.stampTerminalClass(runId, authMode, terminalClass);
 
   // The minted-identity proof (A5): once the harness initialized, the id
   // it announced must be the id the plane minted — anything else means

@@ -33,6 +33,7 @@ import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { digestOf, canonicalProfileJson, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile } from "./scope.js";
 import { resolveScopeProfile } from "./agentconfig.js";
+import type { TerminalClass } from "./exhaustion.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
@@ -439,6 +440,29 @@ export type Run = {
    * Meaningful while the run is open; the last value simply remains after.
    */
   phase: RunPhase | null;
+  /**
+   * The fallback-chain metadata (v30), NULL on every run outside a chain.
+   * `chainCycle`/`chainIndex`/`entryDigest` are stamped at admission (or at
+   * base-cycle open) and bind the run to exactly one entry of an immutable
+   * approved chain — the runtime re-derives authority from the snapshot,
+   * never from these, but reads them to know which entry ran.
+   */
+  chainCycle?: number | null;
+  chainIndex?: number | null;
+  entryDigest?: string | null;
+  /**
+   * How this attempt authenticated (v30) — 'subscription' or 'api-key' —
+   * stamped by the gateway. Decides which exhaustion class a match yields.
+   */
+  authMode?: "subscription" | "api-key" | null;
+  /**
+   * The gateway's honest classification of how this attempt ENDED (v30),
+   * computed at disposal from the structural terminal + the authoritative
+   * version + auth mode (exhaustion.ts). Fail-closed: 'unknown' until a
+   * fixture-backed recognizer exists. NEVER an authority by itself — the
+   * dispatch's C8 gate re-checks hasRecognizer before any advance.
+   */
+  terminalClass?: TerminalClass | null;
 };
 
 /** The bounded activity vocabulary. Machine-authored — a model's prose never becomes one of these. */
@@ -9366,6 +9390,23 @@ export class Store {
       .run(now.toISOString(), id);
   }
 
+  /**
+   * The gateway's honest disposal record for the fallback taxonomy (E2):
+   * how this attempt authenticated, and the class its terminal fell into.
+   * Recorded where the evidence still exists — the gateway holds the
+   * structural terminal, the authoritative version, and the auth mode — and
+   * NEVER re-derived in disposal, by which time the structural signal is
+   * gone. Purely observational: the class is stamped on EVERY finished
+   * attempt (usually 'unknown'/'not-exhausted', since the recognizers ship
+   * empty), and it authorizes NOTHING on its own — the dispatch's C8 gate
+   * re-proves hasRecognizer before any advance ever reads it.
+   */
+  stampTerminalClass(id: number, authMode: "subscription" | "api-key", terminalClass: TerminalClass): void {
+    this.db
+      .prepare("UPDATE run SET auth_mode = ?, terminal_class = ? WHERE id = ?")
+      .run(authMode, terminalClass, id);
+  }
+
   /** The race-refusal stamp (Phase 3 C5): the version that was REFUSED,
    * recorded without provider_started_at — no provider process started. */
   stampProviderVersion(id: number, providerVersion: string): void {
@@ -13339,6 +13380,19 @@ function readRun(row: Record<string, unknown>): Run {
         : (RUN_PHASES as readonly string[]).includes(String(row["phase"]))
           ? (String(row["phase"]) as RunPhase)
           : null,
+    chainCycle: row["chain_cycle"] === null || row["chain_cycle"] === undefined ? null : Number(row["chain_cycle"]),
+    chainIndex: row["chain_index"] === null || row["chain_index"] === undefined ? null : Number(row["chain_index"]),
+    entryDigest: row["entry_digest"] === null || row["entry_digest"] === undefined ? null : String(row["entry_digest"]),
+    authMode:
+      row["auth_mode"] === null || row["auth_mode"] === undefined
+        ? null
+        : String(row["auth_mode"]) === "api-key"
+          ? "api-key"
+          : "subscription",
+    terminalClass:
+      row["terminal_class"] === null || row["terminal_class"] === undefined
+        ? null
+        : (String(row["terminal_class"]) as TerminalClass),
   };
 }
 

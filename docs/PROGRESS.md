@@ -1,5 +1,24 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer E2: the gateway's honest disposal
+stamp.** The invocation gateway now classifies EVERY finished attempt
+where the evidence still exists — the structural terminal off that exact
+envelope, the authoritative version the gateway proved at spawn, and the
+auth mode that spawned it — and stamps `auth_mode` + `terminal_class` on
+the run (new `stampTerminalClass`). It is purely observational and fail
+closed by construction: `classifyTerminal` can only return a non-eligible
+class while the recognizers ship empty (every build), so the stamp
+authorizes nothing — it is the disposal record the dispatch's C8 gate
+later re-checks against `hasRecognizer` before reading it as anything more
+than history. A refused-before-spawn attempt (an out-of-range attestation)
+never runs a process and so is never classified — terminal_class stays
+NULL, honestly. Tier-1 providers prove no version at the gateway yet
+(attested === null), so claude/codex classify fail-closed until their
+exhaustion fixture — and the version proving needed alongside it — is
+captured; the primary subscription providers get a real class only then.
+Run type + readRun now expose the v30 chain fields (chainCycle/chainIndex/
+entryDigest/authMode/terminalClass). Suite 1422 (+3 E2 gateway tests).
+
 **2026-08-29 — Fallback chains E1 review closed (6 fixes) + projects page
 UI.** Codex's E1 state-machine review came back APPROVE-WITH-CHANGES with
 six real CAS-contract issues — all closed before the live-path wiring.
