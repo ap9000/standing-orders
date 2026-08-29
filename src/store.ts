@@ -2432,7 +2432,13 @@ CREATE INDEX IF NOT EXISTS decision_undelivered
 CREATE UNIQUE INDEX IF NOT EXISTS one_review_per_source
   ON run (parent_run) WHERE role = 'reviewer';
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_review_request
-  ON review_request (run) WHERE consumed_at IS NULL;`);
+  ON review_request (run) WHERE consumed_at IS NULL;
+-- v30 (fallback chains): one transition per (cycle, from_index) — the
+-- durable backstop the fenced advance/skip CAS relies on (Codex foundation
+-- review, finding 1). After migration, since fallback_transition arrives by
+-- IF NOT EXISTS on existing files.
+CREATE UNIQUE INDEX IF NOT EXISTS fallback_transition_step
+  ON fallback_transition (cycle, from_index);`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {

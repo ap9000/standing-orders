@@ -97,6 +97,10 @@ const RECOGNIZERS: Record<ProviderId, Record<string, VersionRecognizers>> = {
  * build severs any in-flight fallback authority. */
 export function hasRecognizer(provider: ProviderId, version: string | null): boolean {
   if (version === null) return false;
+  // Object.hasOwn keeps the lookup TOTAL for adversarial version strings
+  // (Codex foundation review, finding 3): "__proto__" / "constructor" /
+  // "toString" must resolve to "no recognizer", never an inherited property.
+  if (!Object.hasOwn(RECOGNIZERS[provider], version)) return false;
   const perVersion = RECOGNIZERS[provider][version];
   if (perVersion === undefined) return false;
   return perVersion.eligibleUsage.length > 0 || perVersion.eligibleCredits.length > 0;
@@ -119,7 +123,12 @@ export function classifyTerminal(args: {
 }): TerminalClass {
   const { provider, version, authMode, terminal } = args;
   if (terminal === null) return "unknown";
-  const perVersion = version === null ? undefined : RECOGNIZERS[provider][version];
+  // The classifier's contract permits failed:false, but a non-failure
+  // terminal is never exhaustion (Codex foundation review, finding 4):
+  // only a structural FAILURE terminal is even eligible for matching.
+  if (terminal.failed !== true) return "unknown";
+  const perVersion =
+    version !== null && Object.hasOwn(RECOGNIZERS[provider], version) ? RECOGNIZERS[provider][version] : undefined;
   const haystack = `${terminal.code ?? ""}\n${terminal.text ?? ""}`;
   if (perVersion !== undefined) {
     // Transient throttle is checked FIRST so a throttle can never be read
@@ -134,7 +143,8 @@ export function classifyTerminal(args: {
       return "credits-depleted";
     }
   }
-  // A structural failure that matched nothing is a definite non-exhaustion
-  // terminal; the absence of any structural failure with no match is unknown.
-  return terminal.failed ? "not-exhausted" : "unknown";
+  // A structural FAILURE terminal that matched nothing is a definite
+  // non-exhaustion terminal (a non-failure terminal already returned
+  // unknown above).
+  return "not-exhausted";
 }

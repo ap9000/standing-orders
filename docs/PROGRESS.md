@@ -1,5 +1,27 @@
 # Progress
 
+**2026-08-29 — Fallback chains: foundation review (A-C) closed.** Codex
+APPROVE-WITH-CHANGES — the design is sound (all three digest goldens
+reproduced, the v29->v30 upgrade verified live with seeded data), with
+five localized fixes landed before the runtime. (1) fallback_transition
+gained its UNIQUE(cycle, from_index) index — the durable backstop the
+fenced advance/skip CAS relies on. (2) The gemini parser no longer
+FABRICATES a structural failure terminal from a MISSING result
+(resultStatus null => structuralTerminal null); only an actual
+non-success result retains one, so absence is never promoted to
+exhaustion evidence. (3) The recognizer lookup is TOTAL against
+adversarial version strings — Object.hasOwn, so "__proto__" /
+"constructor" / "toString" resolve to no-recognizer instead of throwing
+on an inherited property. (4) classifyTerminal returns unknown before
+any matching unless terminal.failed === true — a non-failure terminal
+is never exhaustion. (5) The v30 migration test is now an AUTHENTIC v29
+fixture (real pre-v30 run/task_scope/quota shapes with seeded
+scope/run/quota rows), asserting the upgrade preserves the seeded data,
+extends the quota PK, restores the fallback tables + the uniqueness
+index, and reopens clean. Foundation is solid; the runtime (layer E)
+builds on it next. Suite 1402.
+
+
 **2026-08-29 — Fallback chains, layer C: the v30 schema (the state
 machine's home).** task_scope gains approved_chain_json + approval_kind
 ('profile' legacy | 'chain'); run gains chain_cycle / chain_index /

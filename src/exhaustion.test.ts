@@ -30,6 +30,21 @@ describe("the exhaustion taxonomy is fail-closed by construction", () => {
     expect(isFallbackEligible(cls)).toBe(false);
   });
 
+  test("adversarial version strings and non-failure terminals cannot throw or match (findings 3+4)", () => {
+    // __proto__/constructor/toString must resolve to NO recognizer, never
+    // an inherited property — no throw, always false.
+    for (const v of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      expect(hasRecognizer("claude", v)).toBe(false);
+      expect(
+        classifyTerminal({ provider: "claude", version: v, authMode: "subscription", terminal: { failed: true, text: "x", code: null } }),
+      ).toBe("not-exhausted");
+    }
+    // A NON-failure terminal is never exhaustion — unknown before any match.
+    expect(
+      classifyTerminal({ provider: "codex", version: "1.0.0", authMode: "subscription", terminal: { failed: false, text: "usage limit reached", code: "usage_limit" } }),
+    ).toBe("unknown");
+  });
+
   test("a null terminal is unknown; a failed terminal with no match is not-exhausted", () => {
     expect(classifyTerminal({ provider: "claude", version: "1.0.0", authMode: "subscription", terminal: null })).toBe("unknown");
     expect(

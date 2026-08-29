@@ -502,11 +502,15 @@ function geminiParse(stdout: string): ParsedEnvelope {
     // proof before exit 0 is believed (Phase 3 A4).
     promptConsumed: resultStatus === "success",
     diagnostic,
-    // A gemini terminal that is not a structural success is a failure
-    // terminal; its recognizer set stays EMPTY until a real exhausted
-    // gemini fixture exists, so this never yields an eligible class yet.
+    // A structural failure terminal ONLY when an ACTUAL non-success RESULT
+    // was seen (Codex foundation review, finding 2): a MISSING result
+    // (resultStatus null) is not evidence of anything — never fabricate a
+    // failure terminal from its absence (terminalContract already handles
+    // the exit-0-without-success case as protocol, not exhaustion).
     structuralTerminal:
-      resultStatus === "success" ? null : { failed: true, text: diagnostic, code: resultStatus === null ? null : String(resultStatus).slice(0, 128) },
+      resultStatus === null || resultStatus === "success"
+        ? null
+        : { failed: true, text: diagnostic, code: String(resultStatus).slice(0, 128) },
   };
 }
 
