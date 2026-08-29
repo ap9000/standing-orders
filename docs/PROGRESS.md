@@ -1,5 +1,30 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer A of the approved build: the
+exhaustion taxonomy + evidence retention (fail-closed).** The spec
+reached a clean APPROVE across four Codex rounds; the operator chose to
+build the fail-closed scaffolding now. This first layer is the
+foundation everything else proves against. src/exhaustion.ts owns the
+terminal taxonomy (usage-exhausted / credits-depleted =
+fallback-eligible; transient-throttle = backoff never paid;
+not-exhausted / unknown = the ordinary strike road) and the classifier,
+which is INERT BY CONSTRUCTION: every provider's recognizer set ships
+EMPTY, so no input — not even a usage-limit-shaped terminal — can ever
+return an eligible class until a versioned fixture captured from a
+GENUINELY EXHAUSTED subscription is added and reviewed (the plane cannot
+manufacture that shape). hasRecognizer() is the C8 gate the runtime will
+consult at every authority point. And the evidence-loss Codex named is
+fixed at the source: codexParse now RETAINS the turn.failed structural
+terminal (message + typed code) instead of dropping it, and
+ParsedEnvelope carries a structuralTerminal that a failed-but-exit-0 run
+exposes for the success-ingestion block (C5). Claude and gemini parsers
+expose their non-success terminals too (recognizers still empty). Four
+taxonomy tests pin the fail-closed property. Suite 1398. Layers B–G
+(chain digest, schema, resolution, the fenced runtime, surfaces,
+fault-injection) follow; the feature stays disabled until its own
+step-8 gate and never activates without a real fixture.
+
+
 **2026-08-29 — Auth-mode messaging made fully accurate (verify round 5's
 one open finding).** Rounds confirmed everything else closed; the last
 residual was messaging honesty, now fixed. The settings save handler

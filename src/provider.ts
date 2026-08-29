@@ -110,6 +110,13 @@ export type ParsedEnvelope = {
    * the transport carries none or none was seen.
    */
   diagnostic: string | null;
+  /**
+   * The structural FAILURE terminal, when the harness emitted a typed one
+   * (codex turn.failed, a gemini error terminal) — retained for the
+   * fallback taxonomy AND to block success ingestion on a failed-but-exit-0
+   * run (fallback chains, C5). null = no structural failure terminal seen.
+   */
+  structuralTerminal: import("./exhaustion.js").StructuralTerminal | null;
 };
 
 type Adapter = {
@@ -234,6 +241,13 @@ function claudeEnvelopeOf(
         ? null
         : result !== null && result.is_error !== true && String(result.subtype ?? "") === "success",
     diagnostic: null,
+    // Claude's usage-limit signal, when a fixture exists, is recognized
+    // from the error result's text at classification; the parser records a
+    // structural failure terminal when the result is a non-success error.
+    structuralTerminal:
+      result !== null && (result.is_error === true || String(result.subtype ?? "") !== "success")
+        ? { failed: true, text: typeof result.result === "string" ? result.result.slice(0, 2048) : null, code: typeof result.subtype === "string" ? result.subtype.slice(0, 128) : null }
+        : null,
   };
 }
 
@@ -304,6 +318,7 @@ function codexParse(stdout: string): ParsedEnvelope {
   let tokensOut: number | null = null;
   let usageRaw: string | null = null;
   let initObserved = false;
+  let structuralTerminal: import("./exhaustion.js").StructuralTerminal | null = null;
   for (const line of stdout.split("\n")) {
     if (line.trim() === "") continue;
     let event: Record<string, unknown>;
@@ -334,13 +349,27 @@ function codexParse(stdout: string): ParsedEnvelope {
         const text = item["text"];
         if (typeof text === "string") finalMessage = text;
       }
+    } else if (type === "turn.failed") {
+      // RETAIN the structural failure terminal (Codex fallback verify,
+      // finding 1): a turn.failed carries the usage-limit signal, and
+      // dropping it here is where the evidence used to die. The error
+      // object's message + typed code ride into the taxonomy; its mere
+      // presence blocks success ingestion downstream.
+      const error = event["error"] as Record<string, unknown> | undefined;
+      const message = error?.["message"];
+      const code = error?.["type"] ?? error?.["code"];
+      structuralTerminal = {
+        failed: true,
+        text: typeof message === "string" ? message.slice(0, 2048) : null,
+        code: typeof code === "string" ? code.slice(0, 128) : null,
+      };
     }
   }
   // Codex reports no dollars. NULL is the honest cost — unmeasured — and
   // every surface downstream already says so instead of summing a lie.
   // promptConsumed stays null: codex carries no structural consumption
   // signal, and the gateway keeps its historical rule for it.
-  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved, promptConsumed: null, diagnostic: null };
+  return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved, promptConsumed: null, diagnostic: null, structuralTerminal };
 }
 
 /** Codex wall-clock caps, phase by phase — the turn bound it does not have. */
@@ -473,6 +502,11 @@ function geminiParse(stdout: string): ParsedEnvelope {
     // proof before exit 0 is believed (Phase 3 A4).
     promptConsumed: resultStatus === "success",
     diagnostic,
+    // A gemini terminal that is not a structural success is a failure
+    // terminal; its recognizer set stays EMPTY until a real exhausted
+    // gemini fixture exists, so this never yields an eligible class yet.
+    structuralTerminal:
+      resultStatus === "success" ? null : { failed: true, text: diagnostic, code: resultStatus === null ? null : String(resultStatus).slice(0, 128) },
   };
 }
 
