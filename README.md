@@ -270,6 +270,32 @@ Everything below ships in 0.4.0:
   dependency. Revisions ride review comments: mark up the finished
   diff (or let granted reviewers do it from the PR) and seal the batch
   into one new approval-bound task.
+- **Operating modes** — a per-repository, password-signed, expiring
+  envelope that pre-authorizes the SIGNER'S OWN future acts: your
+  filings approve themselves the moment you file them, watched sessions
+  start without retyping your password, merges fire themselves when CI
+  is seen green on the exact authorized commit (only through a merge
+  grant, never around one), and daily run/dollar rails bound the spend.
+  Every term renders in words at the signing ceremony — including the
+  sentence "your signed-in browser session becomes a spend credential
+  for this repository" — and ending it all is one click, for any
+  approver, at any moment. No mode signed means nothing changes: every
+  act keeps its own ceremony, the default forever.
+- **The reviewer** — an agent pass over a finished build's sealed diff,
+  and nothing else: no worktree, no repository access — the patch is
+  re-verified against its recorded hash, comments are proven
+  patch-local, and they land beside your own for YOU to prune and seal
+  into a revision task. One review per build, ever; a mode can run one
+  on every finished build automatically.
+- **People** — invite someone with a single-use link that pins their
+  powers at mint (watch everything, or approve and act), see who is
+  doing what, and remove access with one ceremony that actually severs:
+  sessions, invites, and every mode they signed end together, while
+  history stays attributed forever.
+- **Watched sessions, plural** — run several attended sessions per
+  worker under one signed ceiling, each with its own model and
+  permission posture chosen at mint, the whole execution profile under
+  the signature.
 
 ## Writing to a tracker you already have
 
@@ -310,16 +336,21 @@ And it costs nothing while idle. **An LLM never polls.** The daemon handles ever
 
 ## Status
 
-**0.4.0 — schema v27, suite 1,286.** The M4 loop plus tournaments, the
+**0.4.0 — schema v29, suite 1,369.** The M4 loop plus tournaments, the
 live peek and live transcript, chains and queue ordering, per-worker
-queue columns, external dispatch, merge grants with observed-green CI,
-the phone PWA with zero-dependency push, the attended core (governed
-live sessions: signed terms, mid-session conversation, crash custody,
-continuation), the attested runtime (four providers — Claude, Codex,
-OpenRouter, Gemini — the last admitted by versioned conformance, never
-a registry row), and labeled cross-runtime comparisons with honest
-per-lane money. Every arc shipped behind its own adversarial review
-rounds; docs/PROGRESS.md records every finding.
+queue columns, external dispatch, merge grants with observed-green CI
+and a fourteen-transition merge machine (per-merge human authorization
+by default; a signed automerge mode may substitute for exactly that
+yes, re-proved at the moment of firing), the phone PWA with
+zero-dependency push, the attended core (governed live sessions:
+signed terms, mid-session conversation, crash custody, continuation,
+N parallel sessions per worker), the attested runtime (four providers
+— Claude, Codex, OpenRouter, Gemini — the last admitted by versioned
+conformance, never a registry row), labeled cross-runtime comparisons
+with honest per-lane money, operating modes with their daily rails,
+the artifact-only reviewer, and multi-user instances with invite
+links, roles, and a People screen. Every arc shipped behind its own
+adversarial review rounds; docs/PROGRESS.md records every finding.
 
 **M4 built.** The whole loop runs: `standing-orders watch` (or `daemon
 install` — no crontab) dispatches approved work, spends nothing while idle,

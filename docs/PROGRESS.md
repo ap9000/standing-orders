@@ -1,5 +1,18 @@
 # Progress
 
+**2026-08-29 — 0.4.0 release prep, refreshed against what actually
+ships.** The earlier prep predated the entire modes arc; the README now
+tells the truth: status v29 / suite 1,369, the merge machine's
+per-merge-yes-by-default posture, operating modes with the reversal
+sentence quoted, the artifact-only reviewer, People with invite links
+and the severing revocation, and N parallel watched sessions with the
+mint picker. Verified: typecheck, build, `dist/cli.js --help` from the
+built artifact, `npm pack --dry-run` (130 files, bin path in the
+npm-safe form). Remaining are the operator's own acts: `npm publish`
+(2FA), the v0.4.0 tag, and the cold `npx standing-orders@0.4.0 --help`
+smoke from the registry.
+
+
 **2026-08-27 — The live console's migration refusal, fixed.** Restarting
 the :4180 console on v29 hit the fail-closed guard: the v29
 merge_blocker rebuild refused the REAL database's DDL. Root cause:
