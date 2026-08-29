@@ -44,6 +44,12 @@ export type ModeTerms = {
    * "automerge" = the mode's signature substitutes for the per-merge
    * human authorization, through the grant machinery only (D1/E1). */
   publication: "notify" | "automerge";
+  /** Whether this mode AUTHORIZES automatic PAID fallback (a
+   * subscription->api-key or api-key->api-key switch that spends). v30,
+   * fallback chains R8: legacy modes default FALSE — a paid substitution
+   * must be an explicit, freshly-signed grant. A subscription->subscription
+   * fallback is not "paid" and needs no grant. */
+  allowPaidFallback: boolean;
   absoluteExpiry: string;
 };
 
@@ -63,6 +69,7 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         dailyMeasuredCapMicrousd: null,
         dailyRunCap: null,
         publication: "notify",
+        allowPaidFallback: false,
         absoluteExpiry,
       }
     : {
@@ -75,6 +82,7 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         dailyMeasuredCapMicrousd: null,
         dailyRunCap: null,
         publication: "notify",
+        allowPaidFallback: false,
         absoluteExpiry,
       };
 }
@@ -130,6 +138,11 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
     measured !== undefined &&
     runs !== undefined &&
     (t["publication"] === "notify" || t["publication"] === "automerge") &&
+    // allowPaidFallback: a legacy mode has NO such field — that MUST read
+    // as false (R8: a paid substitution is only ever an explicit,
+    // freshly-signed grant). A present value must be a strict boolean;
+    // anything else is a bad envelope, null.
+    (t["allowPaidFallback"] === undefined || typeof t["allowPaidFallback"] === "boolean") &&
     typeof t["absoluteExpiry"] === "string" &&
     !Number.isNaN(Date.parse(t["absoluteExpiry"]))
   ) {
@@ -143,6 +156,7 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
       dailyMeasuredCapMicrousd: measured,
       dailyRunCap: runs,
       publication: t["publication"],
+      allowPaidFallback: t["allowPaidFallback"] === true,
       absoluteExpiry: t["absoluteExpiry"],
     };
   }
@@ -177,6 +191,9 @@ export function modeWords(terms: ModeTerms): string[] {
     terms.publication === "automerge"
       ? "pull requests merge THEMSELVES when CI is seen green on the exact commit — you are told afterwards (requires a merge-capable publication grant)"
       : "merges wait for you — even where a grant could merge on its own, while this mode is active",
+    terms.allowPaidFallback
+      ? "when a subscription is exhausted mid-build, an approved fallback that spends (an API key) may run automatically — spend moves to that account"
+      : "automatic fallback never switches to a paid API key on its own; a subscription that runs out stops and waits for you",
     `everything above ends at ${terms.absoluteExpiry.slice(0, 16).replace("T", " ")} — revoking it earlier is one click, and every act it covered falls back to its own ceremony`,
   ];
 }

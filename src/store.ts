@@ -852,6 +852,22 @@ CREATE TABLE IF NOT EXISTS phase_config (
   PRIMARY KEY (scope, phase)
 );
 
+-- The fallback chain configuration (v30): the ORDERED fallback entries
+-- AFTER the base (which the ordinary phase resolution supplies). Stored as
+-- JSON per (scope, phase) — each entry names a provider, model, auth mode,
+-- and optional repair model. Resolution folds base + these into the
+-- ChainEntry[] the approval seals; nothing dispatches on it until an
+-- approval binds it. A new table: it arrives by IF NOT EXISTS on fresh AND
+-- upgraded databases alike.
+CREATE TABLE IF NOT EXISTS fallback_config (
+  scope       TEXT NOT NULL,
+  phase       TEXT NOT NULL CHECK (phase IN ('build')),
+  entries_json TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  updated_by  TEXT NOT NULL,
+  PRIMARY KEY (scope, phase)
+);
+
 -- A standing order (v8): a pre-approved template whose instances build
 -- without asking, because the operator agreed to the TEMPLATE — schedule,
 -- budget, and "each firing builds unattended" restated at the yes. The
@@ -7226,6 +7242,40 @@ export class Store {
            updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
       )
       .run(scope, phase, provider, model, now.toISOString(), by);
+  }
+
+  /** The ordered FALLBACK entries after the base, for a scope's build
+   * phase (v30). Each entry: {provider, model, authMode, repairModel?}.
+   * Returns [] when none configured — a chain-of-one is the base alone. */
+  fallbackConfig(scope: string): { provider: string; model: string; authMode: "subscription" | "api-key"; repairModel?: string }[] {
+    const row = this.db.prepare("SELECT entries_json FROM fallback_config WHERE scope = ? AND phase = 'build'").get(scope);
+    if (row === undefined) return [];
+    try {
+      const parsed = JSON.parse(String(row["entries_json"]));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  setFallbackConfig(
+    scope: string,
+    entries: { provider: string; model: string; authMode: "subscription" | "api-key"; repairModel?: string }[],
+    by: string,
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO fallback_config (scope, phase, entries_json, updated_at, updated_by)
+         VALUES (?, 'build', ?, ?, ?)
+         ON CONFLICT (scope, phase) DO UPDATE SET
+           entries_json = excluded.entries_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      )
+      .run(scope, JSON.stringify(entries), now.toISOString(), by);
+  }
+
+  clearFallbackConfig(scope: string): boolean {
+    return Number(this.db.prepare("DELETE FROM fallback_config WHERE scope = ? AND phase = 'build'").run(scope).changes) > 0;
   }
 
   clearPhaseConfig(scope: string, phase: string): boolean {

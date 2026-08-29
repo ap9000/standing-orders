@@ -1,5 +1,26 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer D (core): the paid-fallback mode
+grant, the config, and chain resolution.** ModeTerms gains
+`allowPaidFallback` (R8): presets default FALSE, a LEGACY signed mode
+(no such field) rehydrates to FALSE — a paid substitution is only ever
+an explicit, freshly-signed grant, never inherited; a non-boolean is a
+bad envelope (null); the ceremony renders the grant either way. A new
+fallback_config table (per scope, build phase) holds the ordered
+fallback entries after the base, arriving by IF NOT EXISTS on fresh and
+upgraded databases alike, with set/get/clear store roads.
+resolveScopeChain folds the ordinary base resolution (entry 0, wearing
+the base provider's auth mode) with the configured fallbacks (each a
+WHOLE ExecutionProfile via contestantProfileOf) into a ChainEntry[]:
+with NO fallbacks it returns kind 'profile' — a legacy single-profile
+approval, byte-identical to today; with fallbacks, kind 'chain', proven
+through the strict rehydrator so a duplicate entry (same profile + auth
+mode) refuses while the subscription->api-key quota switch is allowed.
+Eight tests. Suite 1410. Remaining: the approval-road wiring (seal the
+chain), the runtime state machine (E), surfaces (F), fault-injection
+(G). Still inert — nothing dispatches on a chain yet.
+
+
 **2026-08-29 — Fallback chains: foundation review (A-C) closed.** Codex
 APPROVE-WITH-CHANGES — the design is sound (all three digest goldens
 reproduced, the v29->v30 upgrade verified live with seeded data), with

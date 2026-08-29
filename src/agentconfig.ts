@@ -20,8 +20,8 @@
  */
 
 import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId } from "./provider.js";
-import type { Store, TaskRef } from "./store.js";
-import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile } from "./scope.js";
+import { contestantProfileOf, type Store, type TaskRef } from "./store.js";
+import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile } from "./scope.js";
 
 export const INSTALLATION_SCOPE = "installation";
 
@@ -174,4 +174,53 @@ export function resolveScopeProfile(
             repairModel,
           };
   return { ok: true, profile, provenance: { resolvedFrom: build.source, repairFrom } };
+}
+
+export type ChainResolution =
+  | { ok: true; chain: ChainEntry[]; kind: "profile" | "chain" }
+  | { ok: false; reason: "base-unresolved" | "bad-fallback" | "duplicate"; problem: string };
+
+/**
+ * Resolve the full EXECUTION CHAIN a scope files under (v30): the base
+ * (entry 0) is the ordinary single-profile resolution wearing the base
+ * provider's auth mode; the fallbacks are the scope's configured entries,
+ * each resolved to a WHOLE ExecutionProfile (repair per entry). With no
+ * fallbacks configured, the result is `kind: "profile"` — a single-profile
+ * approval, byte-identical to today (NOT an explicit chain). With
+ * fallbacks, it is `kind: "chain"` and the approval binds the whole thing.
+ * The base auth mode is passed in (the caller reads it from the managed
+ * key store) so resolution stays pure and testable.
+ */
+export function resolveScopeChain(
+  store: Store,
+  repo: string | null,
+  ref: Pick<TaskRef, "agentProvider" | "agentModel"> | undefined,
+  flags: PhaseFlags & { repairModel?: string | undefined },
+  baseAuthMode: "subscription" | "api-key",
+): ChainResolution {
+  const base = resolveScopeProfile(store, repo, ref, flags);
+  if (!base.ok) return { ok: false, reason: "base-unresolved", problem: base.problem };
+  const fallbacks = repo === null ? [] : store.fallbackConfig(repo);
+  if (fallbacks.length === 0) {
+    // No fallbacks: a legacy single-profile approval, unchanged.
+    return { ok: true, chain: [{ profile: base.profile, authMode: baseAuthMode }], kind: "profile" };
+  }
+  const entries: ChainEntry[] = [{ profile: base.profile, authMode: baseAuthMode }];
+  for (const one of fallbacks) {
+    if (!isProviderId(one.provider) || one.model === undefined || one.model === "") {
+      return { ok: false, reason: "bad-fallback", problem: `a fallback entry names an unknown provider or empty model (${one.provider}:${one.model})` };
+    }
+    if (one.authMode !== "subscription" && one.authMode !== "api-key") {
+      return { ok: false, reason: "bad-fallback", problem: `a fallback entry has an unknown auth mode` };
+    }
+    entries.push({ profile: contestantProfileOf(one.provider, one.model, one.repairModel ?? "inherit"), authMode: one.authMode });
+  }
+  // Re-prove the whole chain through the strict rehydrator: it rejects
+  // exact-duplicate entries and any malformed shape, so what the approval
+  // seals is exactly what dispatch will re-derive.
+  const proven = chainFromJson(canonicalChainJson(entries));
+  if (proven === null) {
+    return { ok: false, reason: "duplicate", problem: "the fallback chain has a duplicate entry (same profile and auth mode) or is malformed" };
+  }
+  return { ok: true, chain: proven, kind: "chain" };
 }
