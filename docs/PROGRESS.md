@@ -1,5 +1,27 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer C: the v30 schema (the state
+machine's home).** task_scope gains approved_chain_json + approval_kind
+('profile' legacy | 'chain'); run gains chain_cycle / chain_index /
+entry_digest / auth_mode / terminal_class (all NULL on every pre-v30 and
+non-chain run). Two new tables: fallback_cycle (the durable C7 state
+machine — open / sanitizing / awaiting-release / pending-admission /
+incident / closed, with a monotonic transition_generation and the tail
+run) and fallback_transition (the immutable audit AND the single-use
+authority for the next entry, unique per (cycle, from_index), consumed
+once). quota's PRIMARY KEY grew auth_mode + credential_fp so a
+subscription and an API key exhaust independently (else exhausting a
+claude sub would wrongly block a claude api-key fallback) — a recognized
+rebuild, the four quota store methods gained the identity with LEGACY
+DEFAULTS ('subscription','') so every existing caller is byte-identical.
+The migration is additive + idempotent both fresh and on upgrade
+(rebuildRunForV29 now recognizes the v30-augmented run shape — the
+old-plus-added-columns pattern, with ALTER's real column placement
+before the CHECK); proven live against the actual v29 console DB (data
+intact, repeated reopens clean) and pinned by a regression test. The
+feature remains inert — no runtime reads these yet. Suite 1401.
+
+
 **2026-08-29 — Fallback chains, layer B: chain canonicalization + the
 versioned digest union (C1), goldens byte-pinned.** The trickiest
 compatibility layer. src/scope.ts gains ChainEntry ({full

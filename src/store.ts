@@ -38,7 +38,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 29;
+export const SCHEMA_VERSION = 30;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -1670,7 +1670,14 @@ CREATE TABLE IF NOT EXISTS task_scope (
   unresolved_reason     TEXT,
   approved_profile_json TEXT,
   digest_version        INTEGER NOT NULL DEFAULT 1,
-  profile_provenance    TEXT
+  profile_provenance    TEXT,
+  -- The approved EXPLICIT chain snapshot (v30, fallback chains): the
+  -- immutable ordered [{profile, authMode}] the approval bound, whose
+  -- chainDigest folds through the same outer key the single profile did.
+  -- NULL = a legacy single-profile (or no-profile) approval — untouched.
+  -- approval_kind names which: 'profile' (legacy) or 'chain'.
+  approved_chain_json   TEXT,
+  approval_kind         TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))
 );
 
 -- Whoever is allowed to say yes to a scope.
@@ -1836,11 +1843,68 @@ CREATE TABLE IF NOT EXISTS quota (
   runner      TEXT NOT NULL,
   provider    TEXT NOT NULL,
   scope       TEXT NOT NULL DEFAULT '',
+  -- v30 (fallback chains): quota identity must distinguish a subscription
+  -- from an API key, else exhausting a claude subscription would wrongly
+  -- block a claude api-key fallback. auth_mode + a stable NON-SECRET
+  -- credential fingerprint join the key. Defaults keep every pre-v30 row
+  -- identical (mode 'subscription', empty fp) since that is what they were.
+  auth_mode   TEXT NOT NULL DEFAULT 'subscription' CHECK (auth_mode IN ('subscription','api-key')),
+  credential_fp TEXT NOT NULL DEFAULT '',
   state       TEXT NOT NULL CHECK (state IN ('exhausted','half-open')),
   reason      TEXT NOT NULL,
   observed_at TEXT NOT NULL,
   reset_at    TEXT,
-  PRIMARY KEY (runner, provider, scope)
+  PRIMARY KEY (runner, provider, scope, auth_mode, credential_fp)
+);
+
+-- A fallback CYCLE (v30): one durable attempt to walk an approved chain
+-- for one task. The STATE MACHINE (design C7) lives here; every move is a
+-- fenced CAS proving the exact from-state. transition_generation is
+-- monotonic — a stale writer cannot re-move a state it already left.
+CREATE TABLE IF NOT EXISTS fallback_cycle (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  -- The approved chain this cycle walks; the cycle is void if the approval
+  -- moves (the CAS re-proves it).
+  chain_digest  TEXT NOT NULL,
+  cursor        INTEGER NOT NULL DEFAULT 0,
+  state         TEXT NOT NULL CHECK (state IN ('open','sanitizing','awaiting-release','pending-admission','incident','closed')),
+  transition_generation INTEGER NOT NULL DEFAULT 0,
+  -- The current tail run (the entry running, or the predecessor being
+  -- sanitized). NULL only transiently at pending-admission before the next
+  -- run opens.
+  tail_run      INTEGER REFERENCES run(id),
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  closed_reason TEXT
+);
+
+-- One immutable fallback TRANSITION (v30): the audit + the single-use
+-- authority for the next entry. Inserted inside advanceFallbackFenced /
+-- quota-skip; consumed once at admission. Uniqueness on (cycle, from_index)
+-- makes a transition one-per-step; consumed_by makes the authority one-shot.
+CREATE TABLE IF NOT EXISTS fallback_transition (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  cycle         INTEGER NOT NULL REFERENCES fallback_cycle(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('exhaustion','quota-skip')),
+  from_index    INTEGER NOT NULL,
+  to_index      INTEGER NOT NULL,
+  -- The predecessor run whose exhaustion (or whose skip evidence) earned
+  -- this step; NULL for a fresh cycle's index-0 (there is no transition
+  -- into index 0 — a cycle starts there).
+  predecessor_run INTEGER REFERENCES run(id),
+  -- The gateway-stamped terminal class + proven evidence identity that
+  -- authorized an 'exhaustion' step (NULL for quota-skip, which cites
+  -- durable quota evidence instead).
+  terminal_class  TEXT,
+  evidence_provider TEXT,
+  evidence_version  TEXT,
+  evidence_auth_mode TEXT,
+  evidence_fp     TEXT,
+  created_at    TEXT NOT NULL,
+  -- The run that consumed this transition's authority (single-use). NULL
+  -- until admission; set once, in the same txn that opens the next run.
+  consumed_by   INTEGER REFERENCES run(id)
 );
 
 -- One watch, as an episode with edges (§6): the night is a row, not "the
@@ -2956,7 +3020,78 @@ function migrate(db: Database): void {
   rebuildPhaseConfigForV29(db);
   rebuildMergeIntentForV29(db);
   rebuildMergeBlockerForV29(db);
+
+  // v30 (fallback chains): additive columns on top of the v29 shapes; the
+  // three new tables (fallback_cycle, fallback_transition) + the quota
+  // identity rebuild arrive through the fresh SCHEMA's IF NOT EXISTS on a
+  // fresh DB, and here on an upgrade. Quota needs a RECOGNIZED rebuild (its
+  // PK changes) — additive columns cannot change a primary key.
+  addColumn(db, "task_scope", "approved_chain_json", "TEXT");
+  addColumn(db, "task_scope", "approval_kind", "TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))");
+  addColumn(db, "run", "chain_cycle", "INTEGER REFERENCES fallback_cycle(id)");
+  addColumn(db, "run", "chain_index", "INTEGER");
+  addColumn(db, "run", "entry_digest", "TEXT");
+  addColumn(db, "run", "auth_mode", "TEXT");
+  addColumn(db, "run", "terminal_class", "TEXT");
+  rebuildQuotaForV30(db);
 }
+
+/** v30: quota's PRIMARY KEY grows auth_mode + credential_fp (a subscription
+ * and an API key exhaust independently). A PK change is a rebuild, not an
+ * addColumn; recognized exactly like every other v-rebuild. */
+function rebuildQuotaForV30(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'quota'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  const target = canonicalDdl(QUOTA_V30_DDL).replace("quota_next", "quota");
+  if (stored === target) return;
+  const oldBare = canonicalDdl(QUOTA_OLD_DDL);
+  if (stored !== oldBare) {
+    throw new Error("the quota table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(QUOTA_V30_DDL);
+      // Every pre-v30 row was a subscription-shaped credential with no
+      // fingerprint — that is exactly what the defaults say.
+      db.exec("INSERT INTO quota_next (runner, provider, scope, auth_mode, credential_fp, state, reason, observed_at, reset_at) SELECT runner, provider, scope, 'subscription', '', state, reason, observed_at, reset_at FROM quota");
+      db.exec("DROP TABLE quota");
+      db.exec("ALTER TABLE quota_next RENAME TO quota");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+const QUOTA_OLD_DDL = `CREATE TABLE quota (
+  runner      TEXT NOT NULL,
+  provider    TEXT NOT NULL,
+  scope       TEXT NOT NULL DEFAULT '',
+  state       TEXT NOT NULL CHECK (state IN ('exhausted','half-open')),
+  reason      TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  reset_at    TEXT,
+  PRIMARY KEY (runner, provider, scope)
+)`;
+
+const QUOTA_V30_DDL = `CREATE TABLE quota_next (
+  runner      TEXT NOT NULL,
+  provider    TEXT NOT NULL,
+  scope       TEXT NOT NULL DEFAULT '',
+  auth_mode   TEXT NOT NULL DEFAULT 'subscription' CHECK (auth_mode IN ('subscription','api-key')),
+  credential_fp TEXT NOT NULL DEFAULT '',
+  state       TEXT NOT NULL CHECK (state IN ('exhausted','half-open')),
+  reason      TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  reset_at    TEXT,
+  PRIMARY KEY (runner, provider, scope, auth_mode, credential_fp)
+)`;
 
 /** The v28 run shape — V25's columns unchanged since; the recognizer for
  * the v29 rebuild. rebuildForV4's substring check is deliberately NOT
@@ -3002,11 +3137,26 @@ function V29_RUN_DDL(name: string): string {
   )`;
 }
 
+/** The v29 run shape after the v30 ALTER ADD COLUMNs — SQLite appends each
+ * new column before the closing paren, AFTER the table-level CHECK. The
+ * recognizer accepts this so a v30 database does not re-enter the v29
+ * rebuild on every open. */
+const V29_RUN_PLUS_V30_COLS_DDL = V29_RUN_DDL("run").replace(
+  // ALTER ADD COLUMN inserts each column AFTER the last column definition
+  // and BEFORE the table-level CHECK — never after the final paren.
+  "    handoff       TEXT,\n    CHECK",
+  "    handoff       TEXT, chain_cycle INTEGER REFERENCES fallback_cycle(id), chain_index INTEGER, entry_digest TEXT, auth_mode TEXT, terminal_class TEXT,\n    CHECK",
+);
+
 function rebuildRunForV29(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run'").get();
   if (row === undefined) return;
   const stored = canonicalDdl(String(row["sql"]));
-  if (stored === canonicalDdl(V29_RUN_DDL("run"))) return;
+  // Already the v29 shape — OR the v29 shape PLUS the v30 addColumns
+  // (chain_cycle … terminal_class), which ALTER appends after the CHECK.
+  // Both are done shapes; only a pre-v29 (v28) table rebuilds. This mirrors
+  // rebuildMergeBlockerForV29's old-plus-added-columns recognizer.
+  if (stored === canonicalDdl(V29_RUN_DDL("run")) || stored === canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL)) return;
   if (stored !== canonicalDdl(V28_RUN_DDL("run"))) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
   }
@@ -12195,14 +12345,14 @@ export class Store {
 
   /** Record that a credential ran dry — from a structured signal or an operator, never prose. */
   stampQuota(
-    quota: { runner: string; provider: string; scope?: string; reason: string; resetAt?: Date },
+    quota: { runner: string; provider: string; scope?: string; reason: string; resetAt?: Date; authMode?: "subscription" | "api-key"; credentialFp?: string },
     now: Date,
   ): void {
     this.db
       .prepare(
-        `INSERT INTO quota (runner, provider, scope, state, reason, observed_at, reset_at)
-         VALUES (?, ?, ?, 'exhausted', ?, ?, ?)
-         ON CONFLICT (runner, provider, scope) DO UPDATE SET
+        `INSERT INTO quota (runner, provider, scope, auth_mode, credential_fp, state, reason, observed_at, reset_at)
+         VALUES (?, ?, ?, ?, ?, 'exhausted', ?, ?, ?)
+         ON CONFLICT (runner, provider, scope, auth_mode, credential_fp) DO UPDATE SET
            state = 'exhausted', reason = excluded.reason,
            observed_at = excluded.observed_at, reset_at = excluded.reset_at`,
       )
@@ -12210,6 +12360,8 @@ export class Store {
         quota.runner,
         quota.provider,
         quota.scope ?? "",
+        quota.authMode ?? "subscription",
+        quota.credentialFp ?? "",
         quota.reason,
         now.toISOString(),
         quota.resetAt === undefined ? null : quota.resetAt.toISOString(),
@@ -12225,18 +12377,20 @@ export class Store {
     provider: string,
     scope: string,
     now: Date,
+    authMode: "subscription" | "api-key" = "subscription",
+    credentialFp = "",
   ): { state: "exhausted" | "half-open"; reason: string; resetAt: string | null } | null {
     const stamp = now.toISOString();
     this.db
       .prepare(
         `UPDATE quota SET state = 'half-open'
-          WHERE runner = ? AND provider = ? AND scope = ? AND state = 'exhausted'
+          WHERE runner = ? AND provider = ? AND scope = ? AND auth_mode = ? AND credential_fp = ? AND state = 'exhausted'
             AND reset_at IS NOT NULL AND reset_at <= ?`,
       )
-      .run(runner, provider, scope, stamp);
+      .run(runner, provider, scope, authMode, credentialFp, stamp);
     const row = this.db
-      .prepare("SELECT state, reason, reset_at FROM quota WHERE runner = ? AND provider = ? AND scope = ?")
-      .get(runner, provider, scope);
+      .prepare("SELECT state, reason, reset_at FROM quota WHERE runner = ? AND provider = ? AND scope = ? AND auth_mode = ? AND credential_fp = ?")
+      .get(runner, provider, scope, authMode, credentialFp);
     if (row === undefined) return null;
     return {
       state: String(row["state"]) as "exhausted" | "half-open",
@@ -12252,21 +12406,21 @@ export class Store {
    * while the probe flies. The probe's success clears the row; the same
    * structured signal that stamped it re-stamps on failure.
    */
-  consumeHalfOpen(runner: string, provider: string, scope: string, now: Date): boolean {
+  consumeHalfOpen(runner: string, provider: string, scope: string, now: Date, authMode: "subscription" | "api-key" = "subscription", credentialFp = ""): boolean {
     const { changes } = this.db
       .prepare(
         `UPDATE quota SET state = 'exhausted', reset_at = ?
-          WHERE runner = ? AND provider = ? AND scope = ? AND state = 'half-open'`,
+          WHERE runner = ? AND provider = ? AND scope = ? AND auth_mode = ? AND credential_fp = ? AND state = 'half-open'`,
       )
-      .run(new Date(now.getTime() + 5 * 60_000).toISOString(), runner, provider, scope);
+      .run(new Date(now.getTime() + 5 * 60_000).toISOString(), runner, provider, scope, authMode, credentialFp);
     return Number(changes) > 0;
   }
 
   /** A structured all-clear (or an operator's), by name. */
-  clearQuota(runner: string, provider: string, scope: string): boolean {
+  clearQuota(runner: string, provider: string, scope: string, authMode: "subscription" | "api-key" = "subscription", credentialFp = ""): boolean {
     const { changes } = this.db
-      .prepare("DELETE FROM quota WHERE runner = ? AND provider = ? AND scope = ?")
-      .run(runner, provider, scope);
+      .prepare("DELETE FROM quota WHERE runner = ? AND provider = ? AND scope = ? AND auth_mode = ? AND credential_fp = ?")
+      .run(runner, provider, scope, authMode, credentialFp);
     return Number(changes) > 0;
   }
 
