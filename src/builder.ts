@@ -42,7 +42,7 @@ import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Pr
 import { randomUUID } from "node:crypto";
 import { invokeAgent, type AgentOutcome, type InvokeResult } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
-import { OPENROUTER_ENV_KEY, auditOf } from "./provider.js";
+import { OPENROUTER_ENV_KEY, auditOf, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { openLiveLog } from "./live.js";
 import {
   captureParkEvidence,
@@ -323,7 +323,9 @@ function providerVersionOf(provider: string): string | null {
   let version: string | null = null;
   try {
     const bin = provider === "claude" ? "claude" : provider === "gemini" ? "gemini" : "codex";
-    version = execFileSync(bin, ["--version"], { timeout: 2_000, encoding: "utf8" }).trim().slice(0, 100) || null;
+    const probeEnv: Record<string, string | undefined> = { ...process.env };
+    for (const name of ALL_CREDENTIAL_ENV) delete probeEnv[name];
+    version = execFileSync(bin, ["--version"], { timeout: 2_000, encoding: "utf8", env: probeEnv }).trim().slice(0, 100) || null;
   } catch {
     version = null;
   }
@@ -1477,7 +1479,14 @@ async function ingestPark(args: {
         skipPermissions:
           args.profile !== undefined ? profileWantsSkip(args.profile) : (request.skipPermissions ?? false),
         resumeSession: resumableRepair ? (sessionId ?? null) : null,
-        ...(repairAudit.sessionIdentity === "minted" ? { startSessionId: randomUUID() } : {}),
+        // Mint a start id ONLY when NOT resuming (Codex gemini verify,
+        // finding 3): now that gemini resume is native, a repair that
+        // resumes would otherwise carry BOTH — geminiArgv silently picks
+        // --resume while the gateway still enforces the unused minted id,
+        // a protocol refusal. Resume XOR mint, never both.
+        ...(repairAudit.sessionIdentity === "minted" && !(resumableRepair && sessionId !== null)
+          ? { startSessionId: randomUUID() }
+          : {}),
       },
       {
         cwd: worktree,

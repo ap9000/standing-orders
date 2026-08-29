@@ -154,7 +154,7 @@ import { planTournament, planComparison, contestNoun, jointApprovalDigest, admit
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, resolveScopeProfile, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
-import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit, type ProviderId } from "./provider.js";
+import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
 import {
   build,
@@ -3661,7 +3661,8 @@ async function providersCommand(
   const probed = await Promise.all(
     PROVIDER_IDS.map(async id => {
       const facts = inspectionOf(id);
-      const version = await probe(facts.binary, ["--version"], { timeoutMs: 5_000 });
+      // A version probe carries no key (Codex gemini verify, finding 2).
+      const version = await probe(facts.binary, ["--version"], { timeoutMs: 5_000, omitEnv: ALL_CREDENTIAL_ENV });
       const installed = version.code === 0 && !version.notFound;
       let identity: string | null = null;
       if (installed && facts.identityProbe !== null) {

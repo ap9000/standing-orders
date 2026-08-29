@@ -1781,7 +1781,7 @@ describe("bounded repair", () => {
 });
 
 
-describe("the gemini repair road: fresh sessions, self-contained briefs (Phase 3 A8/B8/C4)", () => {
+describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, updated 2026-08-29)", () => {
   const { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync } = require("node:fs") as typeof import("node:fs");
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const { join, delimiter } = require("node:path") as typeof import("node:path");
@@ -1888,7 +1888,7 @@ describe("the gemini repair road: fresh sessions, self-contained briefs (Phase 3
     rmSync(evidence, { recursive: true, force: true });
   });
 
-  test("a malformed park repairs in a FRESH session: no --resume, fresh minted ids, the payload quoted in the brief", async () => {
+  test("a malformed park RESUMES the build session (S1 proved native resume): --resume, no fresh mint, the shorter brief", async () => {
     const { agent, calls } = await Promise.resolve(geminiStaged([invalid, valid]));
     const result = await build(store, {
       taskId: "t-g", taskRef, runner: "builder-1",
@@ -1901,27 +1901,27 @@ describe("the gemini repair road: fresh sessions, self-contained briefs (Phase 3
     expect("parked" in result && result.parked !== undefined).toBe(true);
     expect(calls).toHaveLength(2);
 
-    // The repair turn resumed NOTHING — the audit says resume is unproven.
-    const repair = calls[1] ?? [];
-    expect(repair).not.toContain("--resume");
-    // Both turns minted their own identities, and they differ.
+    // The build turn minted an identity; the repair RESUMES it — native
+    // resume, proved live at S1. Resume XOR mint: the repair carries
+    // --resume and does NOT mint a fresh --session-id (finding 3).
     const buildId = calls[0]?.[calls[0].indexOf("--session-id") + 1];
-    const repairId = repair[repair.indexOf("--session-id") + 1];
     expect(buildId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(repairId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(repairId).not.toBe(buildId);
+    const repair = calls[1] ?? [];
+    expect(repair).toContain("--resume");
+    expect(repair[repair.indexOf("--resume") + 1]).toBe(buildId);
+    expect(repair).not.toContain("--session-id");
 
-    // The brief is self-contained: the malformed payload rides it as
-    // fenced data (the per-line "| " prefix), instructions after.
+    // The resumable brief is the SHORT one: the session already holds the
+    // context, so the payload is not re-quoted — just the validation
+    // problems and the rewrite instruction.
     const prompt = repair[repair.indexOf("-p") + 1] ?? "";
-    expect(prompt).toContain("EARLIER session");
-    expect(prompt).toContain("| ");
-    expect(prompt).toContain("ghost"); // the bad payload's own bytes, quoted
-    expect(prompt.indexOf("Rewrite")).toBeGreaterThan(prompt.indexOf("| "));
+    expect(prompt).toContain("failed validation");
+    expect(prompt).toContain("Rewrite");
+    expect(prompt).not.toContain("EARLIER session"); // that is the fresh-session brief
 
-    // The mending is its own run, on the same provider, fresh identity.
+    // The mending is its own run, on the same provider, on the RESUMED id.
     const child = store.runsFor(taskRef).find(r => r.role === "repair");
     expect(child).toMatchObject({ provider: "gemini", outcome: "built" });
-    expect(child?.sessionId).toBe(repairId);
+    expect(child?.sessionId).toBe(buildId);
   });
 });

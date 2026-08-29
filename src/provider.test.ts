@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY, PROVIDER_IDS, MONEY_CAPABILITIES } from "./provider.js";
+import { adapterFor, auditOf, validateSpec, reportsCost, inspectionOf, MODEL_ID, OPENROUTER_ENV_KEY, PROVIDER_IDS, MONEY_CAPABILITIES, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { runStreamJsonl } from "./exec.js";
 
 const ASK = {
@@ -397,21 +397,23 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
     ]);
   });
 
-  test("S4: every adapter strips every OTHER provider's credential env — its own it keeps", () => {
-    const omits = (id: "claude" | "codex" | "openrouter" | "gemini") => adapterFor(id).extraOmitEnv;
-    // Gemini keeps its own keys; everyone else sheds them.
-    expect(omits("gemini")).not.toContain("GEMINI_API_KEY");
-    for (const foreign of ["claude", "codex", "openrouter"] as const) {
-      expect(omits(foreign)).toContain("GEMINI_API_KEY");
-      expect(omits(foreign)).toContain("GOOGLE_API_KEY");
+  test("S4: the full matrix — every adapter sheds every OTHER provider's credential env, keeps only its own", () => {
+    const OWN: Record<"claude" | "codex" | "openrouter" | "gemini", string[]> = {
+      claude: ["ANTHROPIC_API_KEY"],
+      codex: ["OPENAI_API_KEY"],
+      openrouter: ["OPENROUTER_API_KEY"],
+      gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    };
+    const all = Object.values(OWN).flat();
+    for (const id of ["claude", "codex", "openrouter", "gemini"] as const) {
+      const omit = adapterFor(id).extraOmitEnv;
+      for (const key of OWN[id]) expect(omit).not.toContain(key); // keeps its own
+      for (const key of all) {
+        if (!OWN[id].includes(key)) expect(omit).toContain(key); // sheds every foreign one
+      }
     }
-    // And symmetrically for the others' credentials.
-    expect(omits("claude")).not.toContain("ANTHROPIC_API_KEY");
-    expect(omits("gemini")).toContain("ANTHROPIC_API_KEY");
-    expect(omits("codex")).not.toContain("OPENAI_API_KEY");
-    expect(omits("gemini")).toContain("OPENAI_API_KEY");
-    expect(omits("openrouter")).not.toContain("OPENROUTER_API_KEY");
-    expect(omits("claude")).toContain("OPENROUTER_API_KEY");
+    // ALL_CREDENTIAL_ENV (the probe strip) is the union — every key, no owner.
+    for (const key of all) expect(ALL_CREDENTIAL_ENV).toContain(key);
   });
 
   test("skipPermissions maps to yolo exactly where claude maps it to bypass", () => {
@@ -525,10 +527,11 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
     expect(MONEY_CAPABILITIES.gemini.whyIneligible).toContain("tokens");
   });
 
-  test("the audit states the posture: init event, unproven resume, required terminal, minted identity", () => {
+  test("the audit states the posture: init event, NATIVE resume (S1 proved), required terminal, minted identity", () => {
     expect(auditOf("gemini")).toMatchObject({
       transport: "streaming-jsonl",
-      resume: "none",
+      // S1 live spike 2026-08-29 proved headless resume-by-uuid.
+      resume: "native",
       initSignal: "init-event",
       sessionIdentity: "minted",
       terminalContract: "required",

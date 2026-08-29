@@ -28,6 +28,27 @@ describe("phase-agent resolution", () => {
     });
   });
 
+  test("gemini is NEVER a default or fallback — it dispatches only on explicit selection (the trust-posture invariant)", () => {
+    // The operator's ruling (2026-08-29): gemini's workspace-trust grant
+    // is acceptable BECAUSE gemini runs only when deliberately chosen. So
+    // no default/fallback road may ever resolve to gemini: an unconfigured
+    // phase is claude, an unconfigured repo is claude, and a broken config
+    // refuses rather than silently landing on gemini.
+    for (const phase of ["plan", "build", "repair", "review"] as const) {
+      expect(resolvePhaseAgent(store, phase, "/repo", {})).toMatchObject({ spec: { provider: "claude" }, source: "default" });
+    }
+    // Gemini appears ONLY when explicitly named — a config row, a flag, or
+    // a pin — each a deliberate operator act.
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "gemini", "gemini-2.5-pro", "alex", T0);
+    expect(resolvePhaseAgent(store, "build", "/repo", {})).toMatchObject({ spec: { provider: "gemini" }, source: "installation" });
+    expect(resolvePhaseAgent(store, "build", "/repo", { provider: "gemini", model: "gemini-2.5-pro" })).toMatchObject({
+      spec: { provider: "gemini" }, source: "flag",
+    });
+    // And a DIFFERENT phase with no gemini row still resolves to claude —
+    // one phase's explicit gemini never leaks onto another.
+    expect(resolvePhaseAgent(store, "plan", "/repo", {})).toMatchObject({ spec: { provider: "claude" }, source: "default" });
+  });
+
   test("installation < project < flags, and rows travel as complete pairs", () => {
     store.setPhaseConfig(INSTALLATION_SCOPE, "build", "claude", "sonnet", "alex", T0);
     expect(resolvePhaseAgent(store, "build", "/repo", {})).toMatchObject({

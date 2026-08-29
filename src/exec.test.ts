@@ -157,6 +157,10 @@ describe("the gemini retention runner (Phase 3 D1/A7)", () => {
     "{\"type\":\"message\",\"timestamp\":\"2026-08-29T17:39:14.299Z\",\"role\":\"assistant\",\"content\":\"done\",\"delta\":true}",
     "{\"type\":\"result\",\"timestamp\":\"2026-08-29T17:39:14.327Z\",\"status\":\"success\",\"stats\":{\"total_tokens\":9887,\"input_tokens\":8257,\"output_tokens\":60,\"cached\":4058,\"input\":4199,\"duration_ms\":16235,\"tool_calls\":0,\"models\":{\"gemini-3.1-flash-lite\":{\"total_tokens\":1640,\"input_tokens\":821,\"output_tokens\":37,\"cached\":0,\"input\":821},\"gemini-3.5-flash\":{\"total_tokens\":8247,\"input_tokens\":7436,\"output_tokens\":23,\"cached\":4058,\"input\":3378}}}}"
     ];
+    // The captured lines are fed to the emitter AS OBJECTS parsed once —
+    // no double round-trip claiming a fidelity the reserialize would break
+    // (Codex gemini verify, finding 4). The bytes that matter are the
+    // stream SHAPE and the assembled content, both asserted below.
     const result = await runGeminiStreamJsonl(process.execPath, ["-e", emit(LIVE.map(one => JSON.parse(one)))], { timeoutMs: 15_000 });
     const kept = parseOut(result.stdout);
     expect(kept.map(one => one["type"])).toEqual(["init", "synthetic_message", "result"]);

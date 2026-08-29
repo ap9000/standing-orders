@@ -364,11 +364,18 @@ const CODEX_TIMEOUT_CAP_MS: Record<Phase, number> = {
 const geminiArgv = (invocation: Invocation): string[] => [
   "-p",
   invocation.brief,
-  // S2 (live spike, v0.57.0): headless refuses untrusted directories,
-  // and a freshly leased worktree is always untrusted. The plane created
-  // the workspace and scoped what runs in it — trusting it is a fact,
-  // granted per-invocation on the argv where it is visible, never as
-  // ambient environment.
+  // S2 (live spike, v0.57.0): headless REFUSES untrusted directories, and
+  // a freshly leased worktree is always untrusted. --skip-trust grants
+  // this run's trust — and honestly (Codex gemini verify, finding 1): the
+  // CLI implements the flag by setting GEMINI_CLI_TRUST_WORKSPACE in its
+  // OWN process, which descendants inherit, and trusted mode is what lets
+  // gemini load a worktree's .gemini/ config (hooks, MCP). We accept that
+  // because gemini is dispatched ONLY on EXPLICIT operator selection (a
+  // phase-config row, a task pin, or a flag — never a default or fallback;
+  // the resolver's default is always claude), so trusting the workspace is
+  // the operator's own deliberate choice, not an ambient grant. A per-run
+  // config-isolation boundary (isolated GEMINI_DIR) is the tracked
+  // follow-up if gemini ever becomes a default.
   "--skip-trust",
   "--output-format",
   "stream-json",
@@ -505,6 +512,11 @@ const foreignCredentialEnv = (own: ProviderId): string[] =>
     .filter(([provider]) => provider !== own)
     .flatMap(([, keys]) => [...keys]);
 
+/** EVERY provider credential — what a version/help/which PROBE strips,
+ * since a feature check needs no key at all (Codex gemini verify,
+ * finding 2). Agent spawns keep their own; probes keep none. */
+export const ALL_CREDENTIAL_ENV: readonly string[] = Object.values(CREDENTIAL_ENV).flat();
+
 const ADAPTERS: Record<ProviderId, Adapter> = {
   claude: {
     binary: "claude",
@@ -640,10 +652,12 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
   },
   gemini: {
     transport: "streaming-jsonl",
-    resume: "none",
-    // "none" until the live S1 probe proves headless persistence AND
-    // resume-by-uuid; the repair road's fresh-session branch keys on this
-    // (Phase 3 A8). Flipping it is a re-attestation commit, not a hope.
+    // S1 (live spike 2026-08-29, v0.57.0) PROVED headless persistence AND
+    // resume-by-uuid in the same cwd — the flip from "none" is the
+    // re-attestation the comment always demanded, now earned. Repair
+    // resumes the session instead of paying for a fresh one; geminiArgv
+    // must mint OR resume, never both (see the repair caller).
+    resume: "native",
     initSignal: "init-event",
     sessionIdentity: "minted",
     terminalContract: "required",

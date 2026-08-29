@@ -1,5 +1,29 @@
 # Progress
 
+**2026-08-29 — Gemini verify came back REDESIGN; every finding closed,
+one by a real correction.** Codex found the trust-containment claim was
+FALSE — gemini 0.57.0 implements `--skip-trust` by setting
+GEMINI_CLI_TRUST_WORKSPACE inside its own process (descendants inherit
+it) and trusted mode is what loads a worktree's .gemini/ config. Alex
+ruled the posture: gemini dispatches ONLY on EXPLICIT selection (a
+phase-config row, a task pin, or a flag — never a default or fallback),
+so trusting the workspace is the operator's own deliberate act, not an
+ambient grant. The comment now states the mechanism honestly, and a new
+invariant test pins that no default/fallback road ever resolves to
+gemini (an unconfigured phase/repo is always claude; a broken config
+refuses). Finding 2: the credential strip is centralized — every
+version/help/which PROBE (authoritative attestation, provenance,
+the providers command) now sheds ALL provider keys via
+ALL_CREDENTIAL_ENV, since a feature check needs none; the full
+four-provider × all-keys matrix is a test. Finding 3: S1 proved native
+resume, so gemini's audit flips resume "none" → "native", and the
+repair caller mints a start id ONLY when not resuming (resume XOR mint,
+never both — the protocol refusal Codex named); the gemini repair test
+now asserts the resume path. Finding 4: the "real bytes" fixture feeds
+the captured lines as parsed objects, not a reserialize claiming false
+verbatim fidelity. Suite 1379.
+
+
 **2026-08-29 — Managed keys get live verification: paste, know
 immediately.** The key card and CLI shape-checked but never asked the
 provider whether the key was good — a typo or an expired key stored

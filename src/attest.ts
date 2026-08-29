@@ -20,7 +20,7 @@
 import { execFile } from "node:child_process";
 import { realpathSync, statSync, accessSync, constants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
-import type { ProviderId } from "./provider.js";
+import { ALL_CREDENTIAL_ENV, type ProviderId } from "./provider.js";
 
 export type AttestationRange = {
   /** Lowest plain release the fixtures cover, inclusive. */
@@ -117,7 +117,12 @@ export function resetAttestationCache(): void {
 
 const defaultProbe: VersionProbe = (file, args, timeoutMs) =>
   new Promise(resolve => {
-    execFile(file, [...args], { timeout: timeoutMs, encoding: "utf8" }, (error, stdout) => {
+    // A version probe needs NO credential (Codex gemini verify, finding
+    // 2): strip every provider key from the child so an authoritative
+    // attestation spawn cannot leak one.
+    const env: Record<string, string | undefined> = { ...process.env };
+    for (const name of ALL_CREDENTIAL_ENV) delete env[name];
+    execFile(file, [...args], { timeout: timeoutMs, encoding: "utf8", env }, (error, stdout) => {
       resolve({ code: error === null ? 0 : 1, stdout: String(stdout ?? "") });
     });
   });
