@@ -586,6 +586,22 @@ describe("provider keys & auth mode, over HTTP", () => {
     expect(readAuthMode("openrouter")).toBe("api-key");
   });
 
+  test("the projects page renders richer cards with a peek and a unified add card", async () => {
+    const cookie = await login();
+    // Seed a project so a card renders (a temp git repo opened via the road).
+    const repoDir = mkdtempSync(join(tmpdir(), "so-proj-"));
+    mkdirSync(join(repoDir, ".git"), { recursive: true });
+    const real = realpathSync(repoDir);
+    store.upsertProject(real, "so-proj", T0);
+    const page = await (await fetch(`${base}/projects`, { headers: { cookie } })).text();
+    // The richer card structure and the unified add affordance render.
+    expect(page).toContain("project-card");
+    expect(page).toContain("add a project");
+    // The path-typing road is still reachable (now behind a details).
+    expect(page).toContain("path on this server");
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
   test("clearing a key in subscription mode says builds are unaffected", async () => {
     const cookie = await login();
     const csrf = await csrfOf(cookie);

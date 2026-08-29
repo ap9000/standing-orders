@@ -1,5 +1,32 @@
 # Progress
 
+**2026-08-29 — Fallback chains E1 review closed (6 fixes) + projects page
+UI.** Codex's E1 state-machine review came back APPROVE-WITH-CHANGES with
+six real CAS-contract issues — all closed before the live-path wiring.
+(1) incident/close now CAS on the exact transition_generation and bump
+it, so a stale success observer cannot terminate a cycle that advanced.
+(2) admitFallback CREATES the next run atomically, bound to the exact
+pending edge (to_index === cursor), with the chain metadata (cycle,
+index, entry digest, auth mode) — proven single-use: a replay opens NO
+second run, and an old unconsumed quota-skip cannot authorize an
+unrelated admission. (3) quota-skip goes open -> pending-admission (tail
+cleared) so admission is the ONE road that installs a tail. (4) a
+SAVEPOINT wraps the multi-statement primitives with INSERT-first
+ordering, so a UNIQUE(cycle, from_index) conflict rolls the cursor move
+back too — even nested inside an outer transaction a caller might catch
+around; 'dup' returns instead of throwing. (5) the
+one_live_fallback_cycle_per_task partial unique index is the real DB
+backstop the comment claimed. (6) sealChainApproval is write-once and
+CAS-bound to approved_digest === digest, and sealScopeApproval resets the
+chain fields so a rewritten-then-reapproved scope keeps no stale chain.
+Ten state-machine tests. Separately, the PROJECTS page got the UI pass
+the operator asked for: each project renders as a vertical CARD with an
+at-a-glance peek (waiting on you / running / queued / built today, one
+cheap COUNT set each) and open action, and the two ways to add — browse
+this machine's folders, or paste a GitHub repo — are one unified card
+with the exact-path road behind a details. Suite 1419.
+
+
 **2026-08-29 — Fallback chains, layer E1: the fenced cycle state machine
 (the crash-safety core).** The durable C7 state machine, as store
 primitives, each a compare-and-swap proving the exact from-state,

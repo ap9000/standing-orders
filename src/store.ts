@@ -2454,7 +2454,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_review_request
 -- review, finding 1). After migration, since fallback_transition arrives by
 -- IF NOT EXISTS on existing files.
 CREATE UNIQUE INDEX IF NOT EXISTS fallback_transition_step
-  ON fallback_transition (cycle, from_index);`);
+  ON fallback_transition (cycle, from_index);
+-- One LIVE cycle per task (Codex E1 review, finding 5): the DB backstop
+-- behind openFallbackCycle's transact guard.
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_fallback_cycle_per_task
+  ON fallback_cycle (task_ref) WHERE state NOT IN ('closed','incident');`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -4675,6 +4679,31 @@ export class Store {
     }
   }
 
+  /**
+   * A named SAVEPOINT for a multi-statement primitive that must roll back
+   * WHOLESALE on a mid-body error, EVEN when nested inside an outer
+   * transaction a caller might catch around (fallback chains, Codex E1
+   * review, finding 4): a plain reentrant transact() only propagates the
+   * throw, so an outer catch could commit a half-done body (a cursor moved
+   * without its transition). A savepoint releases on success and rolls
+   * back to itself on any throw, so the body is all-or-nothing regardless
+   * of the enclosing transaction. Reentrancy is handled by unique names.
+   */
+  private savepointCounter = 0;
+  savepoint<T>(body: () => T): T {
+    const name = `sp_${this.savepointCounter++}`;
+    this.db.exec(`SAVEPOINT ${name}`);
+    try {
+      const result = body();
+      this.db.exec(`RELEASE ${name}`);
+      return result;
+    } catch (error) {
+      this.db.exec(`ROLLBACK TO ${name}`);
+      this.db.exec(`RELEASE ${name}`);
+      throw error;
+    }
+  }
+
   /** Whether `to` is reachable from `from` by following what it waits on. */
   private reaches(from: string, to: string): boolean {
     const row = this.db
@@ -5461,7 +5490,13 @@ export class Store {
             `UPDATE task_scope
                 SET approved_at = ?, approved_by = ?, approved_digest = digest,
                     approved_profile_json = profile_json,
-                    approval_basis = ?, mode_digest = ?
+                    approval_basis = ?, mode_digest = ?,
+                    -- Reset the chain fields to the single-profile default
+                    -- (Codex E1 review, finding 6): a chain approval calls
+                    -- sealChainApproval in the SAME transaction to flip them,
+                    -- so a rewritten-then-reapproved scope can never keep a
+                    -- stale chain snapshot.
+                    approved_chain_json = NULL, approval_kind = 'profile'
               WHERE task_id = ?`,
           )
           .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis === undefined ? null : basis.modeDigest, taskId);
@@ -6385,13 +6420,23 @@ export class Store {
    * the chain digest (digestOf folds it), so this only stores the snapshot
    * the runtime re-derives the active entry from.
    */
-  recordChainApproval(taskId: string, chainJson: string, now: Date): boolean {
+  sealChainApproval(taskId: string, chainJson: string, approvedDigest: string, now: Date): boolean {
     void now;
+    // WRITE-ONCE and digest-bound (Codex E1 review, finding 6): the chain
+    // snapshot seals ONLY onto a fresh, approved, digest-matching scope
+    // whose chain was not already sealed — never overwrites, never binds
+    // to a scope whose approval has moved. Meant to run in the SAME
+    // transaction as the approval seal.
     return (
       Number(
         this.db
-          .prepare("UPDATE task_scope SET approved_chain_json = ?, approval_kind = 'chain' WHERE task_id = ? AND approved_at IS NOT NULL")
-          .run(chainJson, taskId).changes,
+          .prepare(
+            `UPDATE task_scope SET approved_chain_json = ?, approval_kind = 'chain'
+              WHERE task_id = ? AND approved_at IS NOT NULL
+                AND approved_digest = ? AND approved_digest = digest
+                AND approved_chain_json IS NULL`,
+          )
+          .run(chainJson, taskId, approvedDigest).changes,
       ) > 0
     );
   }
@@ -6404,8 +6449,10 @@ export class Store {
     return row === undefined ? null : readFallbackCycle(row as Record<string, unknown>);
   }
 
-  /** Open a fresh cycle at index 0 for a running base attempt. One open
-   * cycle per task (the partial guard below); a second refuses. */
+  /** Open a fresh cycle at index 0 for a running base attempt. One live
+   * cycle per task — the SELECT-then-INSERT under BEGIN IMMEDIATE
+   * serializes writers, and the one_live_fallback_cycle_per_task partial
+   * unique index is the durable backstop (finding 5). A second refuses. */
   openFallbackCycle(taskRef: number, chainDigest: string, tailRun: number, now: Date): { ok: true; id: number } | { ok: false } {
     return this.transact(() => {
       const existing = this.db
@@ -6462,15 +6509,20 @@ export class Store {
     },
     now: Date,
   ): { ok: true; transitionId: number; toIndex: number } | { ok: false; reason: "raced" | "at-end" | "dup" } {
-    return this.transact(() => {
-      if (args.fromIndex + 1 >= args.chainLength) return { ok: false as const, reason: "at-end" as const };
-      const moved = this.db
-        .prepare(
-          `UPDATE fallback_cycle SET state = 'awaiting-release', cursor = cursor + 1, transition_generation = transition_generation + 1, updated_at = ?
-            WHERE id = ? AND state = 'sanitizing' AND transition_generation = ? AND cursor = ? AND tail_run = ?`,
-        )
-        .run(now.toISOString(), args.cycleId, args.expectGeneration, args.fromIndex, args.predecessorRun);
-      if (Number(moved.changes) === 0) return { ok: false as const, reason: "raced" as const };
+    if (args.fromIndex + 1 >= args.chainLength) return { ok: false as const, reason: "at-end" as const };
+    // A SAVEPOINT (finding 4): a UNIQUE(cycle, from_index) conflict rolls
+    // the cursor move back too, even inside an outer transaction a caller
+    // might catch around — never a committed cursor without its transition.
+    return this.savepoint(() => {
+      // Prove the from-state (no move yet); the state cannot change under
+      // us inside the savepoint's serialized transaction.
+      const at = this.db
+        .prepare("SELECT 1 AS hit FROM fallback_cycle WHERE id = ? AND state = 'sanitizing' AND transition_generation = ? AND cursor = ? AND tail_run = ?")
+        .get(args.cycleId, args.expectGeneration, args.fromIndex, args.predecessorRun);
+      if (at === undefined) return { ok: false as const, reason: "raced" as const };
+      // Insert the transition FIRST: its UNIQUE(cycle, from_index) is the
+      // double-advance guard, and on a dup NOTHING has moved yet.
+      let transitionId: number;
       try {
         const inserted = this.db
           .prepare(
@@ -6489,12 +6541,20 @@ export class Store {
             args.evidence.fp,
             now.toISOString(),
           );
-        return { ok: true as const, transitionId: Number(inserted.lastInsertRowid), toIndex: args.fromIndex + 1 };
+        transitionId = Number(inserted.lastInsertRowid);
       } catch {
-        // The unique (cycle, from_index) backstop fired — a duplicate step.
-        // The whole transaction rolls back (the cursor move included).
-        throw new Error("duplicate fallback transition");
+        return { ok: false as const, reason: "dup" as const };
       }
+      // Only now move the cursor. If this CAS somehow fails, throw so the
+      // savepoint rolls the inserted transition back too.
+      const moved = this.db
+        .prepare(
+          `UPDATE fallback_cycle SET state = 'awaiting-release', cursor = cursor + 1, transition_generation = transition_generation + 1, updated_at = ?
+            WHERE id = ? AND state = 'sanitizing' AND transition_generation = ? AND cursor = ? AND tail_run = ?`,
+        )
+        .run(now.toISOString(), args.cycleId, args.expectGeneration, args.fromIndex, args.predecessorRun);
+      if (Number(moved.changes) === 0) throw new Error("fallback advance raced its own from-state");
+      return { ok: true as const, transitionId, toIndex: args.fromIndex + 1 };
     });
   }
 
@@ -6520,70 +6580,144 @@ export class Store {
    * loses), and open the cycle at the new tail. Returns false on a lost
    * CAS or an already-consumed transition.
    */
-  admitFallback(cycleId: number, expectGeneration: number, transitionId: number, newTailRun: number, now: Date): boolean {
-    return this.transact(() => {
+  /**
+   * The SINGLE-USE admission (Codex E1 review, finding 2): CREATES the next
+   * run AND consumes the exact pending edge in ONE savepoint. The consumed
+   * transition must be THIS cycle's, unconsumed, and its to_index must
+   * EQUAL the cycle's current cursor (so an old unconsumed quota-skip
+   * cannot authorize an unrelated admission). The run is opened with the
+   * chain metadata (cycle, index, entry digest, auth mode) so nothing
+   * downstream can substitute a foreign run. Returns the new run id, or
+   * null on a lost CAS / already-consumed edge.
+   */
+  admitFallback(
+    args: {
+      cycleId: number;
+      expectGeneration: number;
+      expectCursor: number;
+      transitionId: number;
+      run: { taskRef: number; leaseId: string; runner: string; branch: string; worktree: string; provider: string; model?: string };
+      entryDigest: string;
+      authMode: "subscription" | "api-key";
+    },
+    now: Date,
+  ): { ok: true; runId: number } | { ok: false } {
+    return this.savepoint(() => {
+      // The pending edge must exist BEFORE anything is created: this cycle,
+      // unconsumed, to_index === current cursor, and the cycle
+      // pending-admission at the expected generation + cursor.
+      const edge = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM fallback_transition t JOIN fallback_cycle c ON c.id = t.cycle
+            WHERE t.id = ? AND t.cycle = ? AND t.consumed_by IS NULL AND t.to_index = c.cursor
+              AND c.state = 'pending-admission' AND c.transition_generation = ? AND c.cursor = ?`,
+        )
+        .get(args.transitionId, args.cycleId, args.expectGeneration, args.expectCursor);
+      if (edge === undefined) return { ok: false as const };
+      // Open the fallback run WITH its chain metadata, in the same body.
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, chain_cycle, chain_index, entry_digest, auth_mode, started_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'builder', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          args.run.taskRef,
+          args.run.leaseId,
+          args.run.runner,
+          args.run.branch,
+          args.run.worktree,
+          args.run.model ?? null,
+          args.run.provider,
+          args.cycleId,
+          args.expectCursor,
+          args.entryDigest,
+          args.authMode,
+          now.toISOString(),
+        );
+      const runId = Number(inserted.lastInsertRowid);
+      // Consume the edge with the real run id — the WHERE re-proves it is
+      // still the unconsumed edge at the current cursor (single-use).
       const consumed = this.db
-        .prepare("UPDATE fallback_transition SET consumed_by = ? WHERE id = ? AND cycle = ? AND consumed_by IS NULL")
-        .run(newTailRun, transitionId, cycleId);
-      if (Number(consumed.changes) === 0) return false;
+        .prepare(
+          `UPDATE fallback_transition SET consumed_by = ?
+            WHERE id = ? AND cycle = ? AND consumed_by IS NULL
+              AND to_index = (SELECT cursor FROM fallback_cycle WHERE id = ?)`,
+        )
+        .run(runId, args.transitionId, args.cycleId, args.cycleId);
+      if (Number(consumed.changes) === 0) throw new Error("the fallback edge was consumed under us");
       const moved = this.db
         .prepare(
           `UPDATE fallback_cycle SET state = 'open', tail_run = ?, transition_generation = transition_generation + 1, updated_at = ?
-            WHERE id = ? AND state = 'pending-admission' AND transition_generation = ?`,
+            WHERE id = ? AND state = 'pending-admission' AND transition_generation = ? AND cursor = ?`,
         )
-        .run(newTailRun, now.toISOString(), cycleId, expectGeneration);
+        .run(runId, now.toISOString(), args.cycleId, args.expectGeneration, args.expectCursor);
       if (Number(moved.changes) === 0) throw new Error("admission raced the cycle state");
-      return true;
+      return { ok: true as const, runId };
     });
   }
 
   /** open -> open at i+1 via a quota-skip (C7): index 0 (or any) already
    * durably exhausted before dispatch is skipped, one step, recorded. */
   quotaSkipFallback(
-    args: { cycleId: number; expectGeneration: number; fromIndex: number; chainLength: number },
+    args: { cycleId: number; expectGeneration: number; fromIndex: number; chainLength: number; tailRun: number },
     now: Date,
-  ): { ok: true; toIndex: number } | { ok: false; reason: "raced" | "at-end" | "dup" } {
-    return this.transact(() => {
-      if (args.fromIndex + 1 >= args.chainLength) return { ok: false as const, reason: "at-end" as const };
+  ): { ok: true; toIndex: number; transitionId: number } | { ok: false; reason: "raced" | "at-end" | "dup" } {
+    if (args.fromIndex + 1 >= args.chainLength) return { ok: false as const, reason: "at-end" as const };
+    return this.savepoint(() => {
+      const at = this.db
+        .prepare("SELECT 1 AS hit FROM fallback_cycle WHERE id = ? AND state = 'open' AND transition_generation = ? AND cursor = ?")
+        .get(args.cycleId, args.expectGeneration, args.fromIndex);
+      if (at === undefined) return { ok: false as const, reason: "raced" as const };
+      // Insert FIRST (the UNIQUE(cycle, from_index) guard); on a dup nothing
+      // moved. Nothing RAN at this index, so we go STRAIGHT to
+      // pending-admission with the tail cleared — admission is the ONE road
+      // that installs the next tail (Codex E1 review, finding 3).
+      let transitionId: number;
+      try {
+        const inserted = this.db
+          .prepare("INSERT INTO fallback_transition (cycle, kind, from_index, to_index, predecessor_run, created_at) VALUES (?, 'quota-skip', ?, ?, ?, ?)")
+          .run(args.cycleId, args.fromIndex, args.fromIndex + 1, args.tailRun, now.toISOString());
+        transitionId = Number(inserted.lastInsertRowid);
+      } catch {
+        return { ok: false as const, reason: "dup" as const };
+      }
       const moved = this.db
         .prepare(
-          `UPDATE fallback_cycle SET cursor = cursor + 1, transition_generation = transition_generation + 1, updated_at = ?
+          `UPDATE fallback_cycle SET state = 'pending-admission', tail_run = NULL, cursor = cursor + 1, transition_generation = transition_generation + 1, updated_at = ?
             WHERE id = ? AND state = 'open' AND transition_generation = ? AND cursor = ?`,
         )
         .run(now.toISOString(), args.cycleId, args.expectGeneration, args.fromIndex);
-      if (Number(moved.changes) === 0) return { ok: false as const, reason: "raced" as const };
-      try {
-        this.db
-          .prepare("INSERT INTO fallback_transition (cycle, kind, from_index, to_index, created_at) VALUES (?, 'quota-skip', ?, ?, ?)")
-          .run(args.cycleId, args.fromIndex, args.fromIndex + 1, now.toISOString());
-      } catch {
-        throw new Error("duplicate quota-skip transition");
-      }
-      return { ok: true as const, toIndex: args.fromIndex + 1 };
+      if (Number(moved.changes) === 0) throw new Error("quota-skip raced its own from-state");
+      return { ok: true as const, toIndex: args.fromIndex + 1, transitionId };
     });
   }
 
   /** Any nonterminal state -> incident (C8): a sanitizer failure, a
    * severed grant, or a policy downgrade pages a human; never silent. */
-  incidentFallback(cycleId: number, reason: string, now: Date): boolean {
+  /** Any nonterminal -> incident (C8): CAS on the exact generation so a
+   * STALE observer cannot terminate a cycle that has since advanced
+   * (Codex E1 review, finding 1). */
+  incidentFallback(cycleId: number, expectGeneration: number, reason: string, now: Date): boolean {
     return (
       Number(
         this.db
           .prepare(
-            "UPDATE fallback_cycle SET state = 'incident', closed_reason = ?, updated_at = ? WHERE id = ? AND state NOT IN ('closed','incident')",
+            "UPDATE fallback_cycle SET state = 'incident', closed_reason = ?, transition_generation = transition_generation + 1, updated_at = ? WHERE id = ? AND state NOT IN ('closed','incident') AND transition_generation = ?",
           )
-          .run(reason, now.toISOString(), cycleId).changes,
+          .run(reason, now.toISOString(), cycleId, expectGeneration).changes,
       ) > 0
     );
   }
 
-  /** A cycle succeeds or exhausts its chain: closed, terminally. */
-  closeFallbackCycle(cycleId: number, reason: string, now: Date): boolean {
+  /** A cycle succeeds or exhausts its chain: closed, terminally — CAS on
+   * the exact generation (finding 1: a stale success observer cannot close
+   * after an advance + admit). */
+  closeFallbackCycle(cycleId: number, expectGeneration: number, reason: string, now: Date): boolean {
     return (
       Number(
         this.db
-          .prepare("UPDATE fallback_cycle SET state = 'closed', closed_reason = ?, updated_at = ? WHERE id = ? AND state NOT IN ('closed','incident')")
-          .run(reason, now.toISOString(), cycleId).changes,
+          .prepare("UPDATE fallback_cycle SET state = 'closed', closed_reason = ?, transition_generation = transition_generation + 1, updated_at = ? WHERE id = ? AND state NOT IN ('closed','incident') AND transition_generation = ?")
+          .run(reason, now.toISOString(), cycleId, expectGeneration).changes,
       ) > 0
     );
   }
@@ -12202,6 +12336,32 @@ export class Store {
    * and the inbox page itself shows them; the badge under-counting a gap
    * is a smaller wrong than a full graph walk on every render.
    */
+  /** A cheap at-a-glance PEEK into one project for the switcher cards
+   * (v30 UI): things waiting on a person, work queued, work running, and
+   * builds that finished in the last day — each a single COUNT, scoped to
+   * this exact repo. Never an unbounded read. */
+  projectPeek(repo: string, now: Date): { waiting: number; queued: number; running: number; doneRecently: number } {
+    const waiting = this.countInboxScoped(repo, now).count;
+    const q = this.db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN task.state = 'queued' THEN 1 ELSE 0 END) AS queued,
+           SUM(CASE WHEN task.state = 'running' THEN 1 ELSE 0 END) AS running
+           FROM task JOIN task_ref ON task_ref.backend = 'built-in' AND task_ref.external_id = task.id
+          WHERE task_ref.repo = ?`,
+      )
+      .get(repo) as { queued: number | null; running: number | null };
+    const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
+    const done = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM run
+           JOIN task_ref ON task_ref.id = run.task_ref
+          WHERE task_ref.repo = ? AND run.outcome = 'built' AND run.finished_at IS NOT NULL AND run.finished_at >= ?`,
+      )
+      .get(repo, since) as { n: number };
+    return { waiting: waiting, queued: Number(q.queued ?? 0), running: Number(q.running ?? 0), doneRecently: Number(done.n) };
+  }
+
   countInboxScoped(
     repo: string | null,
     now: Date,

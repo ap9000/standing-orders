@@ -2211,6 +2211,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     problem: string | null,
     status: number,
   ): Promise<void> {
+    const now = clock();
     const recent = store.listProjects().filter(one => visible(one.path));
     const recentPaths = new Set(recent.map(one => one.path));
     const candidates = new Set<string>();
@@ -2236,10 +2237,22 @@ export function createDecisionServer(options: ServeOptions): Server {
                   why: `naming where repositories live takes --project-root — restart ${options.upConsole === true ? "`standing-orders up --project-root <dir>`" : "serve with --project-root <dir>"} and this card comes alive`,
                 }
               : { enabled: true as const, roots: ceiling.roots, record: [...(who.session.onboard?.entries() ?? [])][0] ?? null };
+    // A cheap peek per project for the switcher cards — one small set of
+    // COUNTs each, scoped to the exact repo.
+    const peekOf = (path: string) => {
+      try {
+        return store.projectPeek(path, now);
+      } catch {
+        return null;
+      }
+    };
+    const peeks: Record<string, { waiting: number; queued: number; running: number; doneRecently: number } | null> = {};
+    for (const one of recent) peeks[one.path] = peekOf(one.path);
+    for (const path of candidates) peeks[path] = peekOf(path);
     return sendScreen(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode, onboardState),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode, onboardState, peeks),
     );
   }
 
@@ -7814,6 +7827,8 @@ type OnboardCardState =
   | { enabled: false; why: string }
   | { enabled: true; roots: readonly string[]; record: [string, { nameWithOwner: string; rootIndex: number; target: string; diskUsageKib: number | null; large: boolean; mintedAt: number }] | null };
 
+type ProjectPeek = { waiting: number; queued: number; running: number; doneRecently: number };
+
 function projectsPage(
   chrome: Chrome,
   recent: { path: string; name: string; lastOpenedAt: string }[],
@@ -7824,6 +7839,7 @@ function projectsPage(
   unscopedMode: boolean,
   browsable = false,
   onboard: OnboardCardState | null = null,
+  peeks: Record<string, ProjectPeek | null> = {},
 ): Screen {
   // The onboarding card (repo onboarding, findings 1-39): preview first,
   // then a password-confirmed clone into a configured root. Disabled
@@ -7873,43 +7889,68 @@ function projectsPage(
       `</form>`,
     ].join("");
 
-  const rows = (paths: { path: string; name: string; note: string }[]): string =>
-    paths
-      .map(
-        one =>
-          `<p class="row"><strong>${escape(one.name)}</strong> <span class="mono meta">${escape(one.path)}</span>` +
-          `${one.note === "" ? "" : ` <span class="meta">${escape(one.note)}</span>`}` +
-          `<span class="right">${
-            open !== null && open === one.path
-              ? `<span class="badge badge-done">open</span>`
-              : openForm(one.path, "open")
-          }</span></p>`,
-      )
-      .join("\n");
+  // A project switcher CARD (v30 UI): the name and path, an at-a-glance
+  // peek — what waits on a person, what is queued or running, what built
+  // in the last day — and the open action. A vertical stack that reads on
+  // a phone, not a dense row.
+  const peekChips = (peek: ProjectPeek | null): string => {
+    if (peek === null) return `<span class="meta">not scanned</span>`;
+    const bits: string[] = [];
+    if (peek.waiting > 0) bits.push(`<span class="badge">${peek.waiting} waiting on you</span>`);
+    if (peek.running > 0) bits.push(`<span class="badge badge-running">${peek.running} running</span>`);
+    if (peek.queued > 0) bits.push(`<span class="badge">${peek.queued} queued</span>`);
+    if (peek.doneRecently > 0) bits.push(`<span class="badge badge-done">${peek.doneRecently} built today</span>`);
+    return bits.length === 0 ? `<span class="meta">quiet — nothing queued or waiting</span>` : bits.join(" ");
+  };
+  const projectCard = (one: { path: string; name: string; note: string; peek: ProjectPeek | null }): string =>
+    [
+      `<div class="card project-card">`,
+      `<div class="row"><strong>${escape(one.name)}</strong>`,
+      `<span class="right">${
+        open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "open \u2192")
+      }</span></div>`,
+      `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(one.path)}</p>`,
+      `<p class="row" style="gap:.35rem;flex-wrap:wrap">${peekChips(one.peek)}</p>`,
+      `<p class="meta">${escape(one.note)}</p>`,
+      `</div>`,
+    ].join("\n");
+  const cards = (items: { path: string; name: string; note: string }[]): string =>
+    items.map(one => projectCard({ ...one, peek: peeks[one.path] ?? null })).join("\n");
 
-  const recentRows = recent.map(one => ({ path: one.path, name: one.name, note: `last opened ${when(one.lastOpenedAt)}` }));
-  const candidateRows = candidates.map(path => ({ path, name: projectName(path), note: "seen in the queue" }));
+  const recentItems = recent.map(one => ({ path: one.path, name: one.name, note: `last opened ${when(one.lastOpenedAt)}` }));
+  const candidateItems = candidates.map(path => ({ path, name: projectName(path), note: "seen in the queue" }));
+
+  // The two ways to ADD a project, side by side and honest about what each
+  // needs: browse this machine's filesystem, or paste a GitHub repo.
+  const addCard = [
+    `<div class="card">`,
+    `<h2 style="margin-top:0">add a project</h2>`,
+    browsable
+      ? `<p class="row"><a class="badge" href="/projects/browse">\ud83d\uddc2 browse this machine's folders \u2192</a></p>`
+      : `<p class="meta">folder browsing needs a scoped serve \u2014 start with <code>--project-root &lt;dir&gt;</code> or <code>--repo</code> and this lights up</p>`,
+    onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
+    `<details style="margin-top:.5rem"><summary class="meta">or type an exact path</summary>`,
+    `<form method="post" action="/projects/open" class="card" style="margin-top:.4rem">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
+    `<button type="submit">open project</button>`,
+    `</form></details>`,
+    `</div>`,
+  ].join("\n");
 
   return screen("projects", [
     `<h1>projects</h1>`,
-    onboardCard,
     `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its board, and its runs</p>`,
     unscopedMode
       ? `<p class="meta">this server was started without a project list, so everything is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`
       : "",
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
-    recentRows.length === 0 && candidateRows.length === 0
-      ? `<div class="card"><p><strong>Nothing to open yet.</strong></p><p class="meta">Type the path of a git repository below \u2014 opening it registers it here for next time.</p></div>`
+    recentItems.length === 0 && candidateItems.length === 0
+      ? `<div class="card"><p><strong>Nothing to open yet.</strong></p><p class="meta">Add one below \u2014 opening it registers it here for next time.</p></div>`
       : "",
-    recentRows.length > 0 ? `<h2>recent</h2>${rows(recentRows)}` : "",
-    candidateRows.length > 0 ? `<h2>available</h2>${rows(candidateRows)}` : "",
-    `<h2>open by path</h2>`,
-    browsable ? `<p class="meta"><a href="/projects/browse">browse the filesystem \u2192</a> or type a path:</p>` : "",
-    `<form method="post" action="/projects/open" class="card">`,
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
-    `<button type="submit">open project</button>`,
-    `</form>`,
+    recentItems.length > 0 ? `<h2>recent</h2>${cards(recentItems)}` : "",
+    candidateItems.length > 0 ? `<h2>available</h2>${cards(candidateItems)}` : "",
+    addCard,
   ].join("\n"), { chrome });
 }
 
