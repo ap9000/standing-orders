@@ -175,6 +175,70 @@ export function profileDigestOf(profile: ExecutionProfile): string {
     .slice(0, 32);
 }
 
+// ---- fallback chains (v30) ------------------------------------------------
+// The version this build stamps into a chain snapshot AND folds into the
+// chain digest. Bumping it is a re-attestation, never a silent change.
+export const CHAIN_DIGEST_VERSION = 1;
+
+/** One entry of an approved fallback chain: the WHOLE execution profile
+ * (so a claude->codex switch cannot inherit one provider's repair config)
+ * and the auth mode it runs under. Order is authority. */
+export type ChainEntry = {
+  profile: ExecutionProfile;
+  authMode: "subscription" | "api-key";
+};
+
+/** The stored snapshot bytes for a chain: the version rides IN the
+ * snapshot, exactly like a single profile's. */
+export function canonicalChainJson(entries: readonly ChainEntry[]): string {
+  return canonicalJson({ digestVersion: CHAIN_DIGEST_VERSION, chain: entries });
+}
+
+/** sha256 over a domain-separated canonical chain encoding — a DIFFERENT
+ * domain from a single profile ("standing-orders:chain:" vs
+ * ":profile:"), so a chain digest can never collide with a profile
+ * digest, truncated to the same 128 bits. */
+export function chainDigestOf(entries: readonly ChainEntry[]): string {
+  return createHash("sha256")
+    .update(`standing-orders:chain:v${CHAIN_DIGEST_VERSION}:${canonicalChainJson(entries)}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/** Strict re-hydration of a stored chain — every entry proved through the
+ * single-profile rehydrator; anything unexpected is null. */
+export function chainFromJson(json: string | null): ChainEntry[] | null {
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const wrapper = parsed as { digestVersion?: unknown; chain?: unknown };
+  if (wrapper.digestVersion !== CHAIN_DIGEST_VERSION) return null;
+  if (!Array.isArray(wrapper.chain) || wrapper.chain.length === 0 || wrapper.chain.length > 4) return null;
+  const entries: ChainEntry[] = [];
+  const seen = new Set<string>();
+  for (const raw of wrapper.chain) {
+    if (raw === null || typeof raw !== "object") return null;
+    const e = raw as { profile?: unknown; authMode?: unknown };
+    if (e.authMode !== "subscription" && e.authMode !== "api-key") return null;
+    // The profile rehydrates through the SAME strict path, wrapped as its
+    // own canonical snapshot so profileFromJson can prove it.
+    const profile = profileFromJson(canonicalProfileJson(e.profile as ExecutionProfile));
+    if (profile === null) return null;
+    // Duplicate exact entries are rejected (open q i): the key is the
+    // profile digest + auth mode.
+    const key = `${profileDigestOf(profile)}:${e.authMode}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    entries.push({ profile, authMode: e.authMode });
+  }
+  return entries;
+}
+
 /** Strict re-hydration of a stored snapshot — every field type-proved;
  * anything unexpected is null, never a guess. */
 export function profileFromJson(json: string | null): ExecutionProfile | null {
@@ -321,8 +385,21 @@ export type ScopeInput = {
  */
 export function digestOf(
   scope: Pick<Scope, "goal" | "outOfScope" | "touches"> & { budgetMicrousd?: number | null },
-  profile?: ExecutionProfile | null,
+  // The execution target: a single profile (legacy v24), OR an explicit
+  // fallback chain (v30). BOTH fold through the SAME outer `profileDigest`
+  // key — the discriminator lives INSIDE the digest value (a chain digest
+  // is domain-separated from a profile digest), NEVER as an outer field
+  // (an outer field would change the legacy bytes; C1). A chain-of-one is
+  // still an EXPLICIT chain and uses the chain digest, distinct from the
+  // single-profile digest by design.
+  target?: ExecutionProfile | null | { chain: readonly ChainEntry[] },
 ): string {
+  const innerDigest =
+    target == null
+      ? null
+      : "chain" in target
+        ? chainDigestOf(target.chain)
+        : profileDigestOf(target);
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -332,11 +409,11 @@ export function digestOf(
         // Absent and null digest identically, so every pre-v15 approval
         // stays exactly as approved.
         ...(scope.budgetMicrousd == null ? {} : { budget: scope.budgetMicrousd }),
-        // Same discipline for the execution profile (v24): absent and null
-        // are byte-identical with history — the legacy golden test pins
-        // this. A profile enters by ITS digest, so the scope digest binds
-        // routing/permissions/limits without re-serializing them here.
-        ...(profile == null ? {} : { profileDigest: profileDigestOf(profile) }),
+        // The single outer key, whichever target produced its inner value:
+        // absent => the golden and every profileless approval are untouched;
+        // a legacy profile => its exact profileDigestOf; an explicit chain
+        // => its chainDigestOf. Same key, discriminated value.
+        ...(innerDigest == null ? {} : { profileDigest: innerDigest }),
       }),
       "utf8",
     )

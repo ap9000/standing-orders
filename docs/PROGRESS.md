@@ -1,5 +1,24 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer B: chain canonicalization + the
+versioned digest union (C1), goldens byte-pinned.** The trickiest
+compatibility layer. src/scope.ts gains ChainEntry ({full
+ExecutionProfile, authMode}), canonicalChainJson (version rides IN the
+snapshot), chainDigestOf (domain "standing-orders:chain:v1:" — a
+DIFFERENT domain from ":profile:", so a chain digest can never collide
+with a profile digest), and chainFromJson (strict rehydration through
+the single-profile path, ≤4 entries, exact-duplicate entries rejected).
+digestOf now takes a DISCRIMINATED target — a legacy single profile OR
+`{chain}` — both folding through the SAME outer `profileDigest` key,
+the discriminator living INSIDE the hashed value, never as an outer
+field. Proven byte-for-byte: the no-profile golden stays EXACTLY
+a24c72e6603f78291e1eea2e162b383e; the profile-bearing fixture stays the
+review's exact 6d7cc772f312c1295df747e243a49717 (profileDigest
+6df214084f95a74ed2694ecc45b2f043); a chain-of-one is a DISTINCT explicit
+target (not a legacy profile); order and auth mode both move the chain
+digest. Two golden/round-trip tests. Suite 1400.
+
+
 **2026-08-29 — Fallback chains, layer A of the approved build: the
 exhaustion taxonomy + evidence retention (fail-closed).** The spec
 reached a clean APPROVE across four Codex rounds; the operator chose to

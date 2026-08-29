@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope, profileDigestOf, profileFromJson, canonicalProfileJson } from "./scope.js";
+import { propose, approve, addApprover, approvalOf, authenticateApprover, digestOf, describeScope, profileDigestOf, profileFromJson, canonicalProfileJson, chainDigestOf, chainFromJson, canonicalChainJson } from "./scope.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -305,6 +305,48 @@ describe("execution profiles (foundations, findings 13/14/17/21)", () => {
     const withProfile = digestOf({ goal: "a guard", outOfScope: null, touches: [] }, claude);
     expect(withProfile).not.toBe("a24c72e6603f78291e1eea2e162b383e");
     expect(withProfile).toBe(digestOf({ goal: "a guard", outOfScope: null, touches: [] }, claude));
+    // The EXACT profile-bearing golden from the fallback design review —
+    // pinned so a chain change can never silently move a legacy approval.
+    expect(profileDigestOf(claude)).toBe("6df214084f95a74ed2694ecc45b2f043");
+    expect(withProfile).toBe("6d7cc772f312c1295df747e243a49717");
+  });
+
+  test("fallback chains (v30): a chain digest is domain-separated and a chain-of-one is a DISTINCT explicit target", () => {
+    const chain = [{ profile: claude, authMode: "subscription" as const }];
+    // A chain digest can never collide with the single-profile digest.
+    expect(chainDigestOf(chain)).not.toBe(profileDigestOf(claude));
+    // Order is authority: reordering entries moves the digest.
+    const two = [{ profile: claude, authMode: "subscription" as const }, { profile: codex, authMode: "api-key" as const }];
+    const reversed = [two[1]!, two[0]!];
+    expect(chainDigestOf(two)).not.toBe(chainDigestOf(reversed));
+    // An explicit chain-of-one is a DIFFERENT scope digest than the same
+    // single profile — it is an explicit chain, not a legacy profile.
+    const asChain = digestOf({ goal: "a guard", outOfScope: null, touches: [] }, { chain });
+    const asProfile = digestOf({ goal: "a guard", outOfScope: null, touches: [] }, claude);
+    expect(asChain).not.toBe(asProfile);
+    // The no-profile golden is STILL untouched by any of this.
+    expect(digestOf({ goal: "a guard", outOfScope: null, touches: [] })).toBe("a24c72e6603f78291e1eea2e162b383e");
+    // auth mode is bound: same profile, different mode => different digest.
+    const subMode = digestOf({ goal: "a guard", outOfScope: null, touches: [] }, { chain: [{ profile: claude, authMode: "subscription" as const }] });
+    const keyMode = digestOf({ goal: "a guard", outOfScope: null, touches: [] }, { chain: [{ profile: claude, authMode: "api-key" as const }] });
+    expect(subMode).not.toBe(keyMode);
+  });
+
+  test("chainFromJson round-trips strictly; duplicates and bad shapes are null", () => {
+    const chain = [{ profile: claude, authMode: "subscription" as const }, { profile: claude, authMode: "api-key" as const }];
+    const json = canonicalChainJson(chain);
+    const back = chainFromJson(json);
+    expect(back).not.toBeNull();
+    expect(back).toHaveLength(2);
+    expect(back?.[0]?.authMode).toBe("subscription");
+    expect(back?.[1]?.authMode).toBe("api-key");
+    // Exact duplicate entry (same profile + same auth mode) => null.
+    expect(chainFromJson(canonicalChainJson([{ profile: claude, authMode: "subscription" as const }, { profile: claude, authMode: "subscription" as const }]))).toBeNull();
+    // Empty, over-length, wrong version, bad auth mode => null.
+    expect(chainFromJson(canonicalChainJson([]))).toBeNull();
+    expect(chainFromJson('{"digestVersion":1,"chain":[{"profile":{},"authMode":"nope"}]}')).toBeNull();
+    expect(chainFromJson('{"digestVersion":99,"chain":[]}')).toBeNull();
+    expect(chainFromJson("not json")).toBeNull();
   });
 
   test("snapshots round-trip strictly; anything malformed is null, never a guess", () => {
