@@ -71,6 +71,78 @@ export function clearProviderKey(provider: ProviderId, home: string = homedir())
   return true;
 }
 
+/**
+ * A live credential check that spends NO tokens: each provider exposes a
+ * cheap authenticated GET (its model list, or a key-info route) whose only
+ * job here is to make the provider's own auth boundary answer yes or no.
+ * Injectable fetcher (the converse.ts precedent) so tests never touch the
+ * network. Distinguishes a REJECTED key (bad/expired/wrong provider) from
+ * an UNREACHABLE provider (offline, blocked) — the operator needs to know
+ * which, because only one of them means "fix the key".
+ */
+export type KeyVerdict =
+  | { ok: true }
+  | { ok: false; reason: "rejected"; status: number }
+  | { ok: false; reason: "unreachable" }
+  | { ok: false; reason: "unexpected"; status: number };
+
+const VERIFY_ENDPOINT: Record<ProviderId, { url: string; headers: (key: string) => Record<string, string> }> = {
+  gemini: {
+    // The key rides a query param on Google's endpoint — never logged here,
+    // and the request is HTTPS to Google's own host.
+    url: "https://generativelanguage.googleapis.com/v1beta/models",
+    headers: () => ({}),
+  },
+  codex: {
+    url: "https://api.openai.com/v1/models",
+    headers: key => ({ authorization: `Bearer ${key}` }),
+  },
+  openrouter: {
+    url: "https://openrouter.ai/api/v1/key",
+    headers: key => ({ authorization: `Bearer ${key}` }),
+  },
+  claude: {
+    url: "https://api.anthropic.com/v1/models",
+    headers: key => ({ "x-api-key": key, "anthropic-version": "2023-06-01" }),
+  },
+};
+
+export async function verifyProviderKey(
+  provider: ProviderId,
+  value: string,
+  fetcher: typeof fetch = fetch,
+  timeoutMs = 10_000,
+): Promise<KeyVerdict> {
+  const key = value.trim();
+  if (!plausibleKey(key)) return { ok: false, reason: "rejected", status: 0 };
+  const endpoint = VERIFY_ENDPOINT[provider];
+  const url = provider === "gemini" ? `${endpoint.url}?key=${encodeURIComponent(key)}` : endpoint.url;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetcher(url, { headers: endpoint.headers(key), redirect: "error", signal: controller.signal });
+  } catch {
+    return { ok: false, reason: "unreachable" };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status === 200) return { ok: true };
+  // 401/403 (and Google's 400 on a bad key) are the auth boundary saying no.
+  if (response.status === 400 || response.status === 401 || response.status === 403) {
+    return { ok: false, reason: "rejected", status: response.status };
+  }
+  return { ok: false, reason: "unexpected", status: response.status };
+}
+
+/** Words for a verdict, safe to render on any surface (never the key). */
+export function verdictWords(provider: ProviderId, verdict: KeyVerdict): string {
+  if (verdict.ok) return `the ${provider} key works`;
+  if (verdict.reason === "rejected") return `${provider} rejected this key — check the paste, or whether it is the right provider`;
+  if (verdict.reason === "unreachable") return `couldn't reach ${provider} to check the key — it is stored; verify later`;
+  return `${provider} gave an unexpected response (${verdict.status}) — the key is stored, but unverified`;
+}
+
 /** What a surface may say about a key: that it exists and when it last
  * changed — NEVER the value, never a prefix, never a length. */
 export function keyStatus(provider: ProviderId, home: string = homedir()): { set: boolean; updatedAt: string | null } {

@@ -140,7 +140,7 @@ import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
-import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, saveProviderKey } from "./keys.js";
+import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, saveProviderKey, verifyProviderKey, verdictWords } from "./keys.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -2957,7 +2957,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!saved.ok) {
         return refuse(response, who, 400, "that does not look like an API key — check the paste and try again", "/settings");
       }
-      return redirect(response, `/settings?said=${encodeURIComponent(`the ${provider} key is stored — new ${provider} work uses it from the next spawn`)}`);
+      // Verify right now, so a paste gets an immediate yes/no instead of a
+      // failed build later. A stored-but-unreachable key still says so.
+      const verdict = await verifyProviderKey(provider, value);
+      const stored = `the ${provider} key is stored`;
+      return redirect(response, `/settings?said=${encodeURIComponent(verdict.ok ? `${stored} and verified — it works` : `${stored}. ${verdictWords(provider, verdict)}`)}`);
     }
 
     if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {

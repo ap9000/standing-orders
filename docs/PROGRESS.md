@@ -1,5 +1,23 @@
 # Progress
 
+**2026-08-29 — Managed keys get live verification: paste, know
+immediately.** The key card and CLI shape-checked but never asked the
+provider whether the key was good — a typo or an expired key stored
+clean and failed a build hours later. Now saving a key runs a
+zero-token credential check against the provider's own auth boundary
+(gemini's models endpoint, OpenAI/OpenRouter/Anthropic likewise — a
+cheap authenticated GET, injectable fetcher on the converse.ts
+precedent so tests never touch the network). The verdict distinguishes
+what the operator must act on: REJECTED (bad, expired, or wrong
+provider — fix the key), UNREACHABLE (offline or blocked — the key is
+stored, verify later), UNEXPECTED (an odd status, stored but
+unverified). The settings card reports it inline on save; `keys set`
+auto-verifies (`--no-verify` to skip on an offline box) and `keys
+verify <provider>` re-checks a stored key on demand. Proven live: the
+real gemini key returns ok, a bogus one returns rejected/400. Seven
+key tests. Suite 1378.
+
+
 **2026-08-29 — Managed provider keys: the environment stops being the
 key store.** The gemini onboarding exposed the gap: every provider key
 was ambient environment, hand-edited into shell profiles, invisible to

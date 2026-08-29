@@ -162,7 +162,7 @@ import {
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
 import { reviewPass } from "./reviewer.js";
-import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, saveProviderKey } from "./keys.js";
+import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, readProviderKey, saveProviderKey, verifyProviderKey, verdictWords } from "./keys.js";
 import { run, terminateLiveProviders } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
@@ -449,7 +449,7 @@ export const APPROVER_ACTIONS = ["list", "add"] as const;
 export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "pause", "resume", "run-now"] as const;
 export const CONTEST_ACTIONS = ["show", "exclude"] as const;
 export const PEOPLE_ACTIONS = ["list", "invite", "revoke"] as const;
-export const KEYS_ACTIONS = ["status", "set", "clear"] as const;
+export const KEYS_ACTIONS = ["status", "set", "clear", "verify"] as const;
 
 /**
  * The GLOBAL flag vocabulary (exported for the command guide's drift
@@ -472,7 +472,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
-  "no-open",
+  "no-open", "no-verify",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -3809,6 +3809,14 @@ async function keysCommand(
       cleared ? `The ${provider} key is removed — an environment variable, if one exists, takes over.` : "No stored key to remove.",
     ]);
   }
+  if (action === "verify") {
+    const stored = readProviderKey(provider);
+    if (stored === null) {
+      return fail(write, json, "keys verify", "refused", `no stored ${provider} key to verify`, EXIT.refused);
+    }
+    const verdict = await verifyProviderKey(provider, stored);
+    return succeed(write, json, "keys verify", { provider, verdict }, () => [verdictWords(provider, verdict)]);
+  }
   const file = text(flags, "key-file");
   let value: string;
   if (file !== undefined) {
@@ -3829,8 +3837,13 @@ async function keysCommand(
   if (!saved.ok) {
     return fail(write, json, "keys set", "implausible", "that does not look like an API key — check the paste", EXIT.refused);
   }
-  return succeed(write, json, "keys set", { provider }, () => [
+  // Save is instant (shape-checked); verification is a live credential
+  // check that spends no tokens — skip it with --no-verify for an offline
+  // machine or a provider you cannot reach right now.
+  const verdict = flag(flags, "no-verify") ? null : await verifyProviderKey(provider, value);
+  return succeed(write, json, "keys set", { provider, ...(verdict === null ? {} : { verdict }) }, () => [
     `The ${provider} key is stored (a private file, handed only to ${provider}'s own process at spawn).`,
+    ...(verdict === null ? [] : [verdictWords(provider, verdict)]),
   ]);
 }
 
