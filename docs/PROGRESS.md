@@ -1,5 +1,24 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer E3a: filing binds the chain, the seal
+copies it.** The scope-filing road now produces a real chain approval when
+a repo has configured fallbacks. saveScope resolves the chain
+(resolveScopeChain) and, when kind:'chain', binds the SIGNED DIGEST to the
+whole ordered chain and stores the working snapshot in a new
+proposed_chain_json column — exactly as profile_json holds the working
+profile. sealScopeApproval then COPIES proposed_chain_json into the
+immutable approved_chain_json (mirroring approved_profile_json =
+profile_json) and sets approval_kind, so what is sealed is byte-for-byte
+what the approver agreed to — never re-resolved, and a config change after
+approval can't move it. This retires the speculative, never-wired E1
+sealChainApproval method (no callers, no tests) for the simpler
+snapshot-mirror. Inert until an operator sets a fallback config (Layer F):
+with none — every repo today — proposed_chain_json stays NULL and the
+digest is the byte-identical single-profile binding, proven by test. Scope
+type + readScope now carry proposedChainJson/approvedChainJson/approvalKind.
+proposed_chain_json added to v30 additively (unreleased); no version bump.
+Suite 1426 (+5 filing-under-chain tests).
+
 **2026-08-29 — Fallback chains, layer E2: the gateway's honest disposal
 stamp.** The invocation gateway now classifies EVERY finished attempt
 where the evidence still exists — the structural terminal off that exact

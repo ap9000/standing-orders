@@ -353,6 +353,16 @@ export type Scope = {
   unresolvedReason?: string | null;
   approvedProfile?: ExecutionProfile | null;
   digestVersion?: number;
+  /** v30 fallback chains. `proposedChainJson` is the WORKING chain snapshot
+   * the digest bound (present only when the repo has configured fallbacks);
+   * `approvedChainJson` is the immutable snapshot the seal COPIED from it;
+   * `approvalKind` names which the approval sealed. All undefined/null on a
+   * legacy single-profile scope — every scope until an operator configures a
+   * fallback chain. The runtime re-derives the active entry from
+   * `approvedChainJson`, never from mutable config. */
+  proposedChainJson?: string | null;
+  approvedChainJson?: string | null;
+  approvalKind?: "profile" | "chain";
 };
 
 export type Approval =

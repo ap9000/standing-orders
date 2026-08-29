@@ -395,3 +395,85 @@ describe("the gemini execution profile (Phase 3)", () => {
     expect(profileDigestOf({ ...profile, approvalArgv: "yolo" })).not.toBe(profileDigestOf(profile));
   });
 });
+
+describe("filing under a fallback chain (E3a): the digest binds it, the seal copies it", () => {
+  let store: Store;
+  const REPO = "/repos/chain";
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+  });
+  afterEach(() => store.close());
+
+  const placeAndPropose = (id: string, goal: string) => {
+    store.createTask({ id, title: goal }, T0);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: id, goal, now: T0 });
+    return store.getScope(id)!;
+  };
+
+  test("no configured fallbacks: BYTE-IDENTICAL legacy filing — profile digest, no chain snapshot", () => {
+    const scope = placeAndPropose("t-plain", "a guard");
+    expect(scope.approvalKind).toBe("profile");
+    expect(scope.proposedChainJson ?? null).toBeNull();
+    // The digest is exactly the single-profile binding.
+    expect(scope.digest).toBe(
+      digestOf({ goal: "a guard", outOfScope: null, touches: [], budgetMicrousd: null }, scope.profile ?? null),
+    );
+  });
+
+  test("with fallbacks: the proposed digest binds the WHOLE chain and stores the working snapshot", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    const scope = placeAndPropose("t-chain", "a guard");
+    expect(scope.proposedChainJson).not.toBeNull();
+    // The stored snapshot re-hydrates strictly, base first.
+    const chain = chainFromJson(scope.proposedChainJson!);
+    expect(chain).not.toBeNull();
+    expect(chain).toHaveLength(2);
+    expect(chain![0]?.profile.provider).toBe("claude");
+    expect(chain![1]?.profile.provider).toBe("gemini");
+    // The digest binds that exact chain — and DIFFERS from the single-profile
+    // binding a plain filing would carry.
+    expect(scope.digest).toBe(
+      digestOf({ goal: "a guard", outOfScope: null, touches: [], budgetMicrousd: null }, { chain: chain! }),
+    );
+    expect(scope.digest).not.toBe(
+      digestOf({ goal: "a guard", outOfScope: null, touches: [], budgetMicrousd: null }, scope.profile ?? null),
+    );
+    // Not yet approved: the approved snapshot stays empty until the seal.
+    expect(scope.approvedChainJson ?? null).toBeNull();
+    expect(scope.approvalKind).toBe("profile");
+  });
+
+  test("the seal COPIES the working chain into the immutable approved snapshot — never re-resolves", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    const scope = placeAndPropose("t-seal", "a guard");
+    const token = bootstrapApprover(store);
+    expect(approve(store, "t-seal", "alex", T0, scope.digest, token).ok).toBe(true);
+    const approved = store.getScope("t-seal")!;
+    expect(approved.approvalKind).toBe("chain");
+    // Byte-for-byte the working snapshot the signed digest bound.
+    expect(approved.approvedChainJson).toBe(scope.proposedChainJson);
+    // Mutating the config AFTER approval never moves the sealed snapshot.
+    store.setFallbackConfig(REPO, [{ provider: "codex", model: "gpt-5-codex", authMode: "subscription" }], "alex", later(1_000));
+    expect(store.getScope("t-seal")!.approvedChainJson).toBe(scope.proposedChainJson);
+  });
+
+  test("a re-approved plain scope re-seals to 'profile' — a stale chain can never survive a rewrite", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    const scope = placeAndPropose("t-rewrite", "a guard");
+    const token = bootstrapApprover(store);
+    expect(approve(store, "t-rewrite", "alex", T0, scope.digest, token).ok).toBe(true);
+    expect(store.getScope("t-rewrite")!.approvalKind).toBe("chain");
+    // The operator clears the fallbacks, then rewrites + re-approves the scope.
+    store.clearFallbackConfig(REPO);
+    propose(store, { taskId: "t-rewrite", goal: "a narrower guard", now: later(2_000) });
+    const rewritten = store.getScope("t-rewrite")!;
+    expect(rewritten.proposedChainJson ?? null).toBeNull();
+    expect(approve(store, "t-rewrite", "alex", later(2_000), rewritten.digest, token).ok).toBe(true);
+    const resealed = store.getScope("t-rewrite")!;
+    expect(resealed.approvalKind).toBe("profile");
+    expect(resealed.approvedChainJson ?? null).toBeNull();
+  });
+});

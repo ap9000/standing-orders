@@ -31,8 +31,9 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { digestOf, canonicalProfileJson, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile } from "./scope.js";
-import { resolveScopeProfile } from "./agentconfig.js";
+import { digestOf, canonicalProfileJson, canonicalChainJson, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile } from "./scope.js";
+import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
+import { readAuthMode } from "./keys.js";
 import type { TerminalClass } from "./exhaustion.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
@@ -1711,11 +1712,15 @@ CREATE TABLE IF NOT EXISTS task_scope (
   approved_profile_json TEXT,
   digest_version        INTEGER NOT NULL DEFAULT 1,
   profile_provenance    TEXT,
-  -- The approved EXPLICIT chain snapshot (v30, fallback chains): the
-  -- immutable ordered [{profile, authMode}] the approval bound, whose
-  -- chainDigest folds through the same outer key the single profile did.
-  -- NULL = a legacy single-profile (or no-profile) approval — untouched.
-  -- approval_kind names which: 'profile' (legacy) or 'chain'.
+  -- The EXPLICIT fallback chain (v30, fallback chains). proposed_chain_json
+  -- is the WORKING snapshot saveScope binds the digest to when the repo has
+  -- configured fallbacks (mirrors profile_json); approved_chain_json is the
+  -- immutable snapshot the approval COPIED from it (mirrors
+  -- approved_profile_json = profile_json), so what is sealed is exactly what
+  -- the signed digest bound — never re-resolved. Both NULL = a legacy
+  -- single-profile (or no-profile) scope, untouched. approval_kind names
+  -- which the approval sealed: 'profile' (legacy) or 'chain'.
+  proposed_chain_json   TEXT,
   approved_chain_json   TEXT,
   approval_kind         TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))
 );
@@ -3076,6 +3081,7 @@ function migrate(db: Database): void {
   // identity rebuild arrive through the fresh SCHEMA's IF NOT EXISTS on a
   // fresh DB, and here on an upgrade. Quota needs a RECOGNIZED rebuild (its
   // PK changes) — additive columns cannot change a primary key.
+  addColumn(db, "task_scope", "proposed_chain_json", "TEXT");
   addColumn(db, "task_scope", "approved_chain_json", "TEXT");
   addColumn(db, "task_scope", "approval_kind", "TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))");
   addColumn(db, "run", "chain_cycle", "INTEGER REFERENCES fallback_cycle(id)");
@@ -5464,12 +5470,45 @@ export class Store {
             { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
             profile,
           );
+      // The fallback-chain binding (v30): when the scope resolved FROM CONFIG
+      // (not an explicit routine/demo profile) and the repo has configured
+      // fallbacks, the scope files as a CHAIN — the digest binds the whole
+      // ordered chain, and the WORKING snapshot is stored so the seal copies
+      // it verbatim (never re-resolves), exactly as approved_profile_json
+      // mirrors profile_json. Inert until an operator configures fallbacks:
+      // with none — every repo today — proposedChainJson stays NULL and the
+      // digest is the byte-identical single-profile binding. A malformed or
+      // duplicate chain config does NOT corrupt the scope: it files honestly
+      // as the single profile, and the config error surfaces at the config
+      // surface, never here.
+      let proposedChainJson: string | null = null;
+      let boundDigest = digest;
+      if (options.profile === undefined && profile !== null) {
+        const chainRef = this.lookupRef(scope.taskId);
+        const chainRepo = chainRef?.repo ?? null;
+        if (chainRepo !== null && this.fallbackConfig(chainRepo).length > 0) {
+          const chain = resolveScopeChain(
+            this,
+            chainRepo,
+            chainRef === null ? undefined : { agentProvider: chainRef.agentProvider, agentModel: chainRef.agentModel },
+            {},
+            readAuthMode(profile.provider),
+          );
+          if (chain.ok && chain.kind === "chain") {
+            proposedChainJson = canonicalChainJson(chain.chain);
+            boundDigest = digestOf(
+              { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+              { chain: chain.chain },
+            );
+          }
+        }
+      }
       this.db
         .prepare(
           `INSERT INTO task_scope
              (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest,
-              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (task_id) DO UPDATE SET
              goal = excluded.goal, out_of_scope = excluded.out_of_scope,
              touches = excluded.touches, budget_microusd = excluded.budget_microusd,
@@ -5478,7 +5517,7 @@ export class Store {
              approved_by = excluded.approved_by, approved_digest = excluded.approved_digest,
              profile_json = excluded.profile_json, profile_state = excluded.profile_state,
              unresolved_reason = excluded.unresolved_reason, digest_version = excluded.digest_version,
-             profile_provenance = excluded.profile_provenance`,
+             profile_provenance = excluded.profile_provenance, proposed_chain_json = excluded.proposed_chain_json`,
         )
         .run(
           scope.taskId,
@@ -5487,7 +5526,7 @@ export class Store {
           JSON.stringify(scope.touches),
           scope.budgetMicrousd ?? null,
           scope.proposedAt,
-          digest,
+          boundDigest,
           scope.approvedAt,
           scope.approvedBy,
           scope.approvedDigest,
@@ -5496,6 +5535,7 @@ export class Store {
           unresolvedReason,
           profile === null ? 1 : 2,
           provenance,
+          proposedChainJson,
         );
       return null;
     });
@@ -5515,12 +5555,16 @@ export class Store {
                 SET approved_at = ?, approved_by = ?, approved_digest = digest,
                     approved_profile_json = profile_json,
                     approval_basis = ?, mode_digest = ?,
-                    -- Reset the chain fields to the single-profile default
-                    -- (Codex E1 review, finding 6): a chain approval calls
-                    -- sealChainApproval in the SAME transaction to flip them,
-                    -- so a rewritten-then-reapproved scope can never keep a
-                    -- stale chain snapshot.
-                    approved_chain_json = NULL, approval_kind = 'profile'
+                    -- The chain snapshot seals exactly as the profile does:
+                    -- COPY the working proposed_chain_json into the immutable
+                    -- approved_chain_json, and set approval_kind from whether
+                    -- one exists. Because saveScope bound the signed digest to
+                    -- that same proposed chain, what is sealed is byte-for-byte
+                    -- what the approver agreed to — never re-resolved. A
+                    -- rewritten-then-reapproved scope re-seals from its CURRENT
+                    -- working snapshot, so a stale chain can never survive.
+                    approved_chain_json = proposed_chain_json,
+                    approval_kind = CASE WHEN proposed_chain_json IS NOT NULL THEN 'chain' ELSE 'profile' END
               WHERE task_id = ?`,
           )
           .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis === undefined ? null : basis.modeDigest, taskId);
@@ -6436,34 +6480,6 @@ export class Store {
   }
 
   // ---- fallback chains: the fenced cycle state machine (v30, C7) --------
-
-  /**
-   * Record that a scope was approved under an explicit CHAIN (v30): the
-   * immutable chain snapshot + kind ride the approval row. Called in the
-   * same act that seals the approval — the approved_digest already binds
-   * the chain digest (digestOf folds it), so this only stores the snapshot
-   * the runtime re-derives the active entry from.
-   */
-  sealChainApproval(taskId: string, chainJson: string, approvedDigest: string, now: Date): boolean {
-    void now;
-    // WRITE-ONCE and digest-bound (Codex E1 review, finding 6): the chain
-    // snapshot seals ONLY onto a fresh, approved, digest-matching scope
-    // whose chain was not already sealed — never overwrites, never binds
-    // to a scope whose approval has moved. Meant to run in the SAME
-    // transaction as the approval seal.
-    return (
-      Number(
-        this.db
-          .prepare(
-            `UPDATE task_scope SET approved_chain_json = ?, approval_kind = 'chain'
-              WHERE task_id = ? AND approved_at IS NOT NULL
-                AND approved_digest = ? AND approved_digest = digest
-                AND approved_chain_json IS NULL`,
-          )
-          .run(chainJson, taskId, approvedDigest).changes,
-      ) > 0
-    );
-  }
 
   /** The open cycle for a task, if one exists (the runtime's read). */
   fallbackCycleFor(taskRef: number): FallbackCycle | null {
@@ -14082,6 +14098,11 @@ function readScope(row: Record<string, unknown>): Scope {
       row["approved_profile_json"] === null || row["approved_profile_json"] === undefined ? null : String(row["approved_profile_json"]),
     ),
     digestVersion: row["digest_version"] === undefined ? 1 : Number(row["digest_version"]),
+    proposedChainJson:
+      row["proposed_chain_json"] === null || row["proposed_chain_json"] === undefined ? null : String(row["proposed_chain_json"]),
+    approvedChainJson:
+      row["approved_chain_json"] === null || row["approved_chain_json"] === undefined ? null : String(row["approved_chain_json"]),
+    approvalKind: String(row["approval_kind"] ?? "profile") === "chain" ? "chain" : "profile",
   };
 }
 
