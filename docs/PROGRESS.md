@@ -1,5 +1,28 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer E1: the fenced cycle state machine
+(the crash-safety core).** The durable C7 state machine, as store
+primitives, each a compare-and-swap proving the exact from-state,
+generation, and (where it matters) cursor + tail run. openFallbackCycle
+(one live cycle per task); beginFallbackSanitize (open -> sanitizing, CAS
+on state+generation+tail); advanceFallbackFenced (sanitizing ->
+awaiting-release in ONE txn: the cursor moves, the immutable transition
+inserts under the UNIQUE(cycle, from_index) backstop, generation bumps —
+the target proven < chainLength by the caller from the approved snapshot);
+releaseFallbackToPending (awaiting-release -> pending-admission, tail
+cleared); admitFallback (the SINGLE-USE admission — consumes the
+transition once and opens the next run in one txn; a replay finds it
+consumed and the state open, both guards refusing); quotaSkipFallback
+(open -> open at i+1, a recorded skip); incidentFallback / closeFallback
+(terminal). Seven exhaustive tests walk the happy path AND every race:
+stale generations lose, the admission cannot be replayed to open a second
+run, the uniqueness index backstops even a forced double transition, and
+at-end refuses. The design's crash-window proof holds: no alternate
+authority exists until a transition commits. Suite 1417. Remaining: E2
+(gateway classification + chain-entry proof), E3 (the sanitizer +
+dispatch integration), then F/G.
+
+
 **2026-08-29 — Fallback chains, layer D (core): the paid-fallback mode
 grant, the config, and chain resolution.** ModeTerms gains
 `allowPaidFallback` (R8): presets default FALSE, a LEGACY signed mode

@@ -6376,6 +6376,218 @@ export class Store {
     return consumed;
   }
 
+  // ---- fallback chains: the fenced cycle state machine (v30, C7) --------
+
+  /**
+   * Record that a scope was approved under an explicit CHAIN (v30): the
+   * immutable chain snapshot + kind ride the approval row. Called in the
+   * same act that seals the approval — the approved_digest already binds
+   * the chain digest (digestOf folds it), so this only stores the snapshot
+   * the runtime re-derives the active entry from.
+   */
+  recordChainApproval(taskId: string, chainJson: string, now: Date): boolean {
+    void now;
+    return (
+      Number(
+        this.db
+          .prepare("UPDATE task_scope SET approved_chain_json = ?, approval_kind = 'chain' WHERE task_id = ? AND approved_at IS NOT NULL")
+          .run(chainJson, taskId).changes,
+      ) > 0
+    );
+  }
+
+  /** The open cycle for a task, if one exists (the runtime's read). */
+  fallbackCycleFor(taskRef: number): FallbackCycle | null {
+    const row = this.db
+      .prepare("SELECT * FROM fallback_cycle WHERE task_ref = ? AND state NOT IN ('closed','incident') ORDER BY id DESC LIMIT 1")
+      .get(taskRef);
+    return row === undefined ? null : readFallbackCycle(row as Record<string, unknown>);
+  }
+
+  /** Open a fresh cycle at index 0 for a running base attempt. One open
+   * cycle per task (the partial guard below); a second refuses. */
+  openFallbackCycle(taskRef: number, chainDigest: string, tailRun: number, now: Date): { ok: true; id: number } | { ok: false } {
+    return this.transact(() => {
+      const existing = this.db
+        .prepare("SELECT 1 AS hit FROM fallback_cycle WHERE task_ref = ? AND state NOT IN ('closed','incident') LIMIT 1")
+        .get(taskRef);
+      if (existing !== undefined) return { ok: false as const };
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO fallback_cycle (task_ref, chain_digest, cursor, state, transition_generation, tail_run, created_at, updated_at)
+           VALUES (?, ?, 0, 'open', 0, ?, ?, ?)`,
+        )
+        .run(taskRef, chainDigest, tailRun, now.toISOString(), now.toISOString());
+      return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+    });
+  }
+
+  /**
+   * open -> sanitizing (C7): a recognized ELIGIBLE exhaustion of the tail
+   * run begins the sanitizer. CAS proves exact state, generation, and tail
+   * run; a stale caller loses. Marks the cycle sanitizing so ordinary
+   * admission is blocked even if the claim later expires.
+   */
+  beginFallbackSanitize(cycleId: number, expectGeneration: number, tailRun: number, now: Date): boolean {
+    return (
+      Number(
+        this.db
+          .prepare(
+            `UPDATE fallback_cycle SET state = 'sanitizing', transition_generation = transition_generation + 1, updated_at = ?
+              WHERE id = ? AND state = 'open' AND transition_generation = ? AND tail_run = ?`,
+          )
+          .run(now.toISOString(), cycleId, expectGeneration, tailRun).changes,
+      ) > 0
+    );
+  }
+
+  /**
+   * sanitizing -> awaiting-release (C2/C7): the durable one-step advance.
+   * ONE transaction: prove the cycle is sanitizing at this generation and
+   * cursor i with this tail run; insert the immutable transition (unique
+   * per (cycle, from_index)); advance the cursor to i+1; bump generation.
+   * The target index MUST be < chainLength (proven by the caller from the
+   * approved snapshot). Returns the new transition id, or null on a lost
+   * CAS or an already-recorded step.
+   */
+  advanceFallbackFenced(
+    args: {
+      cycleId: number;
+      expectGeneration: number;
+      fromIndex: number;
+      chainLength: number;
+      predecessorRun: number;
+      terminalClass: string;
+      evidence: { provider: string; version: string | null; authMode: string; fp: string };
+    },
+    now: Date,
+  ): { ok: true; transitionId: number; toIndex: number } | { ok: false; reason: "raced" | "at-end" | "dup" } {
+    return this.transact(() => {
+      if (args.fromIndex + 1 >= args.chainLength) return { ok: false as const, reason: "at-end" as const };
+      const moved = this.db
+        .prepare(
+          `UPDATE fallback_cycle SET state = 'awaiting-release', cursor = cursor + 1, transition_generation = transition_generation + 1, updated_at = ?
+            WHERE id = ? AND state = 'sanitizing' AND transition_generation = ? AND cursor = ? AND tail_run = ?`,
+        )
+        .run(now.toISOString(), args.cycleId, args.expectGeneration, args.fromIndex, args.predecessorRun);
+      if (Number(moved.changes) === 0) return { ok: false as const, reason: "raced" as const };
+      try {
+        const inserted = this.db
+          .prepare(
+            `INSERT INTO fallback_transition (cycle, kind, from_index, to_index, predecessor_run, terminal_class, evidence_provider, evidence_version, evidence_auth_mode, evidence_fp, created_at)
+             VALUES (?, 'exhaustion', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            args.cycleId,
+            args.fromIndex,
+            args.fromIndex + 1,
+            args.predecessorRun,
+            args.terminalClass,
+            args.evidence.provider,
+            args.evidence.version,
+            args.evidence.authMode,
+            args.evidence.fp,
+            now.toISOString(),
+          );
+        return { ok: true as const, transitionId: Number(inserted.lastInsertRowid), toIndex: args.fromIndex + 1 };
+      } catch {
+        // The unique (cycle, from_index) backstop fired — a duplicate step.
+        // The whole transaction rolls back (the cursor move included).
+        throw new Error("duplicate fallback transition");
+      }
+    });
+  }
+
+  /** awaiting-release -> pending-admission (C7): the epoch-fenced custody
+   * release completed; the next entry is now admittable. */
+  releaseFallbackToPending(cycleId: number, expectGeneration: number, now: Date): boolean {
+    return (
+      Number(
+        this.db
+          .prepare(
+            `UPDATE fallback_cycle SET state = 'pending-admission', tail_run = NULL, transition_generation = transition_generation + 1, updated_at = ?
+              WHERE id = ? AND state = 'awaiting-release' AND transition_generation = ?`,
+          )
+          .run(now.toISOString(), cycleId, expectGeneration).changes,
+      ) > 0
+    );
+  }
+
+  /**
+   * pending-admission -> open at the new index (C3): the SINGLE-USE
+   * admission. ONE transaction: prove pending at this generation, consume
+   * the transition (consumed_by set once — a replay finds it consumed and
+   * loses), and open the cycle at the new tail. Returns false on a lost
+   * CAS or an already-consumed transition.
+   */
+  admitFallback(cycleId: number, expectGeneration: number, transitionId: number, newTailRun: number, now: Date): boolean {
+    return this.transact(() => {
+      const consumed = this.db
+        .prepare("UPDATE fallback_transition SET consumed_by = ? WHERE id = ? AND cycle = ? AND consumed_by IS NULL")
+        .run(newTailRun, transitionId, cycleId);
+      if (Number(consumed.changes) === 0) return false;
+      const moved = this.db
+        .prepare(
+          `UPDATE fallback_cycle SET state = 'open', tail_run = ?, transition_generation = transition_generation + 1, updated_at = ?
+            WHERE id = ? AND state = 'pending-admission' AND transition_generation = ?`,
+        )
+        .run(newTailRun, now.toISOString(), cycleId, expectGeneration);
+      if (Number(moved.changes) === 0) throw new Error("admission raced the cycle state");
+      return true;
+    });
+  }
+
+  /** open -> open at i+1 via a quota-skip (C7): index 0 (or any) already
+   * durably exhausted before dispatch is skipped, one step, recorded. */
+  quotaSkipFallback(
+    args: { cycleId: number; expectGeneration: number; fromIndex: number; chainLength: number },
+    now: Date,
+  ): { ok: true; toIndex: number } | { ok: false; reason: "raced" | "at-end" | "dup" } {
+    return this.transact(() => {
+      if (args.fromIndex + 1 >= args.chainLength) return { ok: false as const, reason: "at-end" as const };
+      const moved = this.db
+        .prepare(
+          `UPDATE fallback_cycle SET cursor = cursor + 1, transition_generation = transition_generation + 1, updated_at = ?
+            WHERE id = ? AND state = 'open' AND transition_generation = ? AND cursor = ?`,
+        )
+        .run(now.toISOString(), args.cycleId, args.expectGeneration, args.fromIndex);
+      if (Number(moved.changes) === 0) return { ok: false as const, reason: "raced" as const };
+      try {
+        this.db
+          .prepare("INSERT INTO fallback_transition (cycle, kind, from_index, to_index, created_at) VALUES (?, 'quota-skip', ?, ?, ?)")
+          .run(args.cycleId, args.fromIndex, args.fromIndex + 1, now.toISOString());
+      } catch {
+        throw new Error("duplicate quota-skip transition");
+      }
+      return { ok: true as const, toIndex: args.fromIndex + 1 };
+    });
+  }
+
+  /** Any nonterminal state -> incident (C8): a sanitizer failure, a
+   * severed grant, or a policy downgrade pages a human; never silent. */
+  incidentFallback(cycleId: number, reason: string, now: Date): boolean {
+    return (
+      Number(
+        this.db
+          .prepare(
+            "UPDATE fallback_cycle SET state = 'incident', closed_reason = ?, updated_at = ? WHERE id = ? AND state NOT IN ('closed','incident')",
+          )
+          .run(reason, now.toISOString(), cycleId).changes,
+      ) > 0
+    );
+  }
+
+  /** A cycle succeeds or exhausts its chain: closed, terminally. */
+  closeFallbackCycle(cycleId: number, reason: string, now: Date): boolean {
+    return (
+      Number(
+        this.db
+          .prepare("UPDATE fallback_cycle SET state = 'closed', closed_reason = ?, updated_at = ? WHERE id = ? AND state NOT IN ('closed','incident')")
+          .run(reason, now.toISOString(), cycleId).changes,
+      ) > 0
+    );
+  }
+
   // ---- the reviewer role (v29) --------------------------------------------
 
   /**
@@ -13533,6 +13745,30 @@ export type IntakeGrant = {
 };
 
 /** A review comment bound to the exact bytes of an immutable terminal diff. */
+export type FallbackCycle = {
+  id: number;
+  taskRef: number;
+  chainDigest: string;
+  cursor: number;
+  state: "open" | "sanitizing" | "awaiting-release" | "pending-admission" | "incident" | "closed";
+  transitionGeneration: number;
+  tailRun: number | null;
+  closedReason: string | null;
+};
+
+function readFallbackCycle(row: Record<string, unknown>): FallbackCycle {
+  return {
+    id: Number(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    chainDigest: String(row["chain_digest"]),
+    cursor: Number(row["cursor"]),
+    state: String(row["state"]) as FallbackCycle["state"],
+    transitionGeneration: Number(row["transition_generation"]),
+    tailRun: row["tail_run"] === null || row["tail_run"] === undefined ? null : Number(row["tail_run"]),
+    closedReason: row["closed_reason"] === null || row["closed_reason"] === undefined ? null : String(row["closed_reason"]),
+  };
+}
+
 export type DiffComment = {
   id: number;
   artifact: number;
