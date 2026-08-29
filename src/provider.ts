@@ -364,6 +364,12 @@ const CODEX_TIMEOUT_CAP_MS: Record<Phase, number> = {
 const geminiArgv = (invocation: Invocation): string[] => [
   "-p",
   invocation.brief,
+  // S2 (live spike, v0.57.0): headless refuses untrusted directories,
+  // and a freshly leased worktree is always untrusted. The plane created
+  // the workspace and scoped what runs in it — trusting it is a fact,
+  // granted per-invocation on the argv where it is visible, never as
+  // ambient environment.
+  "--skip-trust",
   "--output-format",
   "stream-json",
   "--approval-mode",
@@ -484,13 +490,28 @@ function safeDiagnostic(text: string): string | null {
   return capUtf8(normalized, DIAGNOSTIC_CAP);
 }
 
+/** Every provider credential the plane knows about, by owner. A spawned
+ * provider gets its OWN keys and nobody else's: S4 (live spike) confirmed
+ * what inheritance makes true by construction — an agent's shell reads its
+ * process env, so a foreign key in that env is a foreign key disclosed. */
+const CREDENTIAL_ENV: Record<ProviderId, readonly string[]> = {
+  claude: ["ANTHROPIC_API_KEY"],
+  codex: ["OPENAI_API_KEY"],
+  openrouter: [OPENROUTER_ENV_KEY],
+  gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+};
+const foreignCredentialEnv = (own: ProviderId): string[] =>
+  (Object.entries(CREDENTIAL_ENV) as [ProviderId, readonly string[]][])
+    .filter(([provider]) => provider !== own)
+    .flatMap(([, keys]) => [...keys]);
+
 const ADAPTERS: Record<ProviderId, Adapter> = {
   claude: {
     binary: "claude",
     argv: claudeArgv,
     parse: claudeParse,
     defaultRunner: runClaudeStreamJsonl,
-    extraOmitEnv: [],
+    extraOmitEnv: foreignCredentialEnv("claude"),
     clampTimeout: (_phase, requested) => requested,
   },
   codex: {
@@ -498,7 +519,7 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
     argv: codexArgv([]),
     parse: codexParse,
     defaultRunner: runStreamJsonl,
-    extraOmitEnv: [],
+    extraOmitEnv: foreignCredentialEnv("codex"),
     clampTimeout: (phase, requested) => Math.min(requested, CODEX_TIMEOUT_CAP_MS[phase]),
   },
   openrouter: {
@@ -519,7 +540,7 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
     ]),
     parse: codexParse,
     defaultRunner: runStreamJsonl,
-    extraOmitEnv: [],
+    extraOmitEnv: foreignCredentialEnv("openrouter"),
     clampTimeout: (phase, requested) => Math.min(requested, CODEX_TIMEOUT_CAP_MS[phase]),
   },
   gemini: {
@@ -527,7 +548,7 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
     argv: geminiArgv,
     parse: geminiParse,
     defaultRunner: runGeminiStreamJsonl,
-    extraOmitEnv: [],
+    extraOmitEnv: foreignCredentialEnv("gemini"),
     clampTimeout: (phase, requested) => Math.min(requested, GEMINI_TIMEOUT_CAP_MS[phase]),
   },
 };
@@ -632,7 +653,8 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
       "project .gemini/settings.json",
       "GEMINI.md (global and repository)",
       "extensions, skills, and policy files",
-      "GEMINI_API_KEY / GOOGLE_GENAI_USE_* environment (an API key in env is visible to shells the agent runs — prefer cached login or ADC for unattended work)",
+      "GEMINI_API_KEY / GOOGLE_GENAI_USE_* environment (an API key in env is visible to the gemini agent's own shells — S4; every OTHER provider's spawn now sheds it, and cached login remains the tighter posture)",
+      "trusted-folder store (S2, live at 0.57.0: headless REFUSES untrusted directories; the plane grants --skip-trust per-invocation to its own leased worktrees)",
     ],
   },
 };

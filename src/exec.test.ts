@@ -144,6 +144,29 @@ describe("the gemini retention runner (Phase 3 D1/A7)", () => {
     expect(kept[1]).toMatchObject({ content: "part one part two" });
   });
 
+  test("REAL BYTES (S3, live spike 2026-08-29, gemini 0.57.0): the recorded happy-path stream assembles exactly", async () => {
+    // Captured verbatim from a live API-key run — the fixture the spec
+    // demanded once auth existed: real timestamps, real session id, real
+    // delta framing. Note the live CLI emits SEPARATE assistant messages
+    // both flagged delta:true (the haiku, then "done"); the runner's
+    // concatenation rule is what makes the terminal message whole.
+    const LIVE = [
+    "{\"type\":\"init\",\"timestamp\":\"2026-08-29T17:38:58.092Z\",\"session_id\":\"b2e7f647-85e1-4c7e-a65c-0e914255ecbf\",\"model\":\"auto\"}",
+    "{\"type\":\"message\",\"timestamp\":\"2026-08-29T17:38:58.093Z\",\"role\":\"user\",\"content\":\"Write a haiku about worktrees, then reply done\"}",
+    "{\"type\":\"message\",\"timestamp\":\"2026-08-29T17:39:14.292Z\",\"role\":\"assistant\",\"content\":\"Branch in its own space,\\nNo need to stash or commit,\\nWork on both at once.\\n\\n\",\"delta\":true}",
+    "{\"type\":\"message\",\"timestamp\":\"2026-08-29T17:39:14.299Z\",\"role\":\"assistant\",\"content\":\"done\",\"delta\":true}",
+    "{\"type\":\"result\",\"timestamp\":\"2026-08-29T17:39:14.327Z\",\"status\":\"success\",\"stats\":{\"total_tokens\":9887,\"input_tokens\":8257,\"output_tokens\":60,\"cached\":4058,\"input\":4199,\"duration_ms\":16235,\"tool_calls\":0,\"models\":{\"gemini-3.1-flash-lite\":{\"total_tokens\":1640,\"input_tokens\":821,\"output_tokens\":37,\"cached\":0,\"input\":821},\"gemini-3.5-flash\":{\"total_tokens\":8247,\"input_tokens\":7436,\"output_tokens\":23,\"cached\":4058,\"input\":3378}}}}"
+    ];
+    const result = await runGeminiStreamJsonl(process.execPath, ["-e", emit(LIVE.map(one => JSON.parse(one)))], { timeoutMs: 15_000 });
+    const kept = parseOut(result.stdout);
+    expect(kept.map(one => one["type"])).toEqual(["init", "synthetic_message", "result"]);
+    expect(kept[0]).toMatchObject({ session_id: "b2e7f647-85e1-4c7e-a65c-0e914255ecbf" });
+    expect(kept[1]).toMatchObject({
+      content: "Branch in its own space,\nNo need to stash or commit,\nWork on both at once.\n\ndone",
+    });
+    expect(kept[2]).toMatchObject({ status: "success" });
+  });
+
   test("a non-delta assistant message REPLACES the buffer; non-string content is dropped", async () => {
     const result = await runGeminiStreamJsonl(process.execPath, ["-e", emit([
       { type: "init", session_id: "s", model: "m" },

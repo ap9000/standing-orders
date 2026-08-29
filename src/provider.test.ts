@@ -388,10 +388,30 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
     const argv = adapterFor("gemini").argv({ ...ASK });
     expect(argv).toEqual([
       "-p", "do the thing",
+      // S2 (live, v0.57.0): headless is trust-gated; the plane's own
+      // leased worktree is trusted per-invocation, on the argv.
+      "--skip-trust",
       "--output-format", "stream-json",
       "--approval-mode", "auto_edit",
       "-m", "gemini-2.5-pro",
     ]);
+  });
+
+  test("S4: every adapter strips every OTHER provider's credential env — its own it keeps", () => {
+    const omits = (id: "claude" | "codex" | "openrouter" | "gemini") => adapterFor(id).extraOmitEnv;
+    // Gemini keeps its own keys; everyone else sheds them.
+    expect(omits("gemini")).not.toContain("GEMINI_API_KEY");
+    for (const foreign of ["claude", "codex", "openrouter"] as const) {
+      expect(omits(foreign)).toContain("GEMINI_API_KEY");
+      expect(omits(foreign)).toContain("GOOGLE_API_KEY");
+    }
+    // And symmetrically for the others' credentials.
+    expect(omits("claude")).not.toContain("ANTHROPIC_API_KEY");
+    expect(omits("gemini")).toContain("ANTHROPIC_API_KEY");
+    expect(omits("codex")).not.toContain("OPENAI_API_KEY");
+    expect(omits("gemini")).toContain("OPENAI_API_KEY");
+    expect(omits("openrouter")).not.toContain("OPENROUTER_API_KEY");
+    expect(omits("claude")).toContain("OPENROUTER_API_KEY");
   });
 
   test("skipPermissions maps to yolo exactly where claude maps it to bypass", () => {

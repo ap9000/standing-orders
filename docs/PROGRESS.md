@@ -1,5 +1,27 @@
 # Progress
 
+**2026-08-29 — Gemini live-auth spikes S1–S4, run against the real CLI
+(0.57.0, exactly the attested version).** The API key arrived and the
+four questions the adapter shipped with got their live answers. S1
+PASSES: a plane-minted `--session-id` is echoed by the init event, and
+`--resume <uuid>` recalls session state headless in the same cwd — the
+identity contract holds against the real binary. S2 ANSWERED, and it
+bit: headless gemini REFUSES untrusted directories, and a freshly
+leased worktree is always untrusted — the adapter's argv now grants
+`--skip-trust` per-invocation (visible, never ambient environment),
+with the pinned argv test updated deliberately. S3 DONE: a live
+happy-path stream is captured verbatim into the runner's test suite —
+real timestamps, real session id, real delta framing — and it taught us
+the live CLI emits SEPARATE assistant messages each flagged delta:true,
+which the runner's concatenation rule assembles correctly. S4 CONFIRMED
+by construction (child processes inherit env; the CLI claims no
+scrubbing), and the mitigation that matters shipped: a symmetric
+credential matrix — every adapter now sheds every OTHER provider's key
+environment (GEMINI/GOOGLE, ANTHROPIC, OPENAI, OPENROUTER) before its
+process exists, so a Claude build can never read the Gemini key out of
+its env. The audit's configSurface tells both new truths. Suite 1371.
+
+
 **2026-08-29 — 0.4.0 release prep, refreshed against what actually
 ships.** The earlier prep predated the entire modes arc; the README now
 tells the truth: status v29 / suite 1,369, the merge machine's
