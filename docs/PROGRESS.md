@@ -1,5 +1,44 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer E3d: the admission road + the
+chain-entry dispatch proof — the runtime is COMPLETE.** The last two review
+findings (5/6) closed, and the whole loop now runs end-to-end through the
+real tick, proven by fallback-e2e.test.ts. What shipped: (1) entryDigestOf
+(scope.ts) — a per-entry binding digest (profile digest + auth mode,
+domain-separated); resolveScopeChain refuses a subscription entry on a
+provider with no login. (2) openChainCycleForDispatch BINDS the dispatched
+run to its entry (chain_cycle/chain_index/entry_digest/pinned auth_mode,
+first-write). (3) builder.ts gains THE CHAIN-ENTRY DISPATCH PROOF: a
+chain-bound run re-derives everything — approval standing, live cycle at
+the run's exact cursor with the run as tail, chain digest, entry digest,
+pinned auth mode — then proves the given fields against the entry's WHOLE
+profile; an ordinary run on a chain scope with no binding refuses
+(finding 6: the base entry now dispatches, and nothing on a chain scope
+can spend outside its cycle). (4) the gateway spends under the PINNED auth
+mode for chain runs (finding 5) — a mode-file flip between admission and
+spawn cannot move the spend. (5) resolveChainOnRunEnd is now the ONE
+resolver for every concluded tail: built/no-change closes 'succeeded',
+parked stays open for repair, ordinary ends close 'entry-ended' (the retry
+road opens a fresh cycle at the base — a concluded tail can never re-tag),
+eligible exhaustion advances; the disposition hook calls it
+unconditionally, and THE CHAIN RECONCILER feeds stranded open cycles
+(crash between disposition and resolution, finding 3) through the same
+resolver each pass. (6) the tick DEFERS pending-admission tasks off the
+ordinary road and THE CHAIN ADMISSION PASS dispatches the next entry: rail
+reserved, claim + fresh worktree on the task's branch, then
+admitNextChainEntry re-derives ALL authority in one transaction (approved
+chain standing + cycle digest + LIVE paid-fallback grant re-proved at the
+money moment + the single-use pending edge) before build() re-proves the
+entry proof again pre-spawn. E2E: one tick carries base-exhaustion →
+advance → same-pass admission → attested gemini fallback builds under its
+pinned api-key entry → cycle closed 'succeeded' → task done; and WITHOUT
+the grant, gemini provably never runs (one run total, cycle closed
+'grant-withheld'). Still inert in production: no recognizer ships, so no
+real terminal ever classifies eligible. Suite 1446 (73 files; +e2e pair,
+resolver arms reworked). Remaining: F (surfaces: config set fallback CLI,
+approval card shows the chain, exhausted-end page) and G (fault matrix) +
+a Codex review of E3d.
+
 **2026-08-29 — Fallback chains E2–E3c review: 7 findings closed (2 CRITICAL).**
 Codex reviewed the live-path integration and confirmed the core (E3a seal,
 E3b/c immutability, fenced-walk atomicity, E2 placement) but found real

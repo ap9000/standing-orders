@@ -1715,6 +1715,15 @@ async function tickCommand(
     }
   }
 
+  // THE CHAIN RECONCILER (E3d, review finding 3): a crash between a run's
+  // disposition and its cycle resolution leaves an OPEN cycle with a
+  // concluded tail — resolve each through the SAME resolver the disposition
+  // uses, before any admission can re-tag or race it. Advancing here lands
+  // the cycle in pending-admission for THIS pass's chain admission below.
+  for (const stranded of store.strandedChainCycles(repo)) {
+    store.resolveChainOnRunEnd(stranded.taskRef, stranded.taskId, repo, stranded.tailRun, clock());
+  }
+
   // The DISPATCH view of the queue (queue columns, v19): this runner's own
   // reserved work first, then the shared queue; work reserved for other
   // workers is absent. The claim primitive re-proves the reservation.
@@ -1774,6 +1783,15 @@ async function tickCommand(
     // A task placed in another repository is not this pass's to build.
     if (ref.repo !== null && ref.repo !== repo) {
       dispatched.push({ id, outcome: "skipped", reason: "other-repo" });
+      continue;
+    }
+
+    // A task whose fallback cycle awaits its next entry belongs to the
+    // CHAIN ADMISSION pass below, never the ordinary road (E3d): admitting
+    // the base here would spend beside — and outside — the pending cycle.
+    const liveCycle = store.fallbackCycleFor(ref.id);
+    if (liveCycle !== null && liveCycle.state === "pending-admission") {
+      dispatched.push({ id, outcome: "skipped", reason: "fallback-pending" });
       continue;
     }
 
@@ -2444,19 +2462,13 @@ async function tickCommand(
       result,
     );
 
-    // The chain step (E3c): decide an open fallback cycle's fate from this
-    // disposition. Inert unless the task filed under an explicit chain — a
-    // single-profile task has no cycle, so every call is a fast no-op.
-    // A success closes the cycle; a non-parked end offers it to the
-    // exhaustion-advance gate, which is itself fail-closed (it advances only
-    // on an eligible class this build still recognizes for the run's auth
-    // mode, with the LIVE signed paid-fallback grant re-proved in its own
-    // transaction, and a next entry left in the approved chain).
-    if (disposition.kind === "built") {
-      store.closeChainCycleOnTerminal(ref.id, "succeeded", clock());
-    } else if (disposition.kind !== "parked") {
-      store.advanceChainIfExhausted(ref.id, id, repo, runId, clock());
-    }
+    // The chain step (E3c/E3d): EVERY concluded run resolves its cycle
+    // through the one resolver — success closes, an ordinary end closes, a
+    // parked tail stays open for repair, and a recognized eligible
+    // exhaustion advances to pending-admission (fail-closed at every gate,
+    // the live grant re-proved in its own transaction). Inert unless the
+    // task filed under an explicit chain — no cycle, fast no-op.
+    store.resolveChainOnRunEnd(ref.id, id, repo, runId, clock());
 
     switch (disposition.kind) {
       case "parked":
@@ -2506,6 +2518,136 @@ async function tickCommand(
         break;
       case "invariant":
         dispatched.push({ id, outcome: "failed", reason: disposition.reason });
+        broke++;
+        break;
+    }
+  }
+
+  // THE CHAIN ADMISSION PASS (E3d): cycles a recognized exhaustion advanced
+  // to pending-admission dispatch their NEXT approved entry here — the ONLY
+  // road that runs a fallback entry. Every authority is re-derived inside
+  // admitNextChainEntry (approved chain standing + digest match + LIVE
+  // paid-fallback grant + the single-use pending edge); this loop carries
+  // only claim, worktree, and rail, and its run then re-proves the
+  // chain-entry dispatch proof inside build() before any money moves.
+  for (const pending of store.pendingChainAdmissions(repo)) {
+    if (context.shouldStop?.() === true) break;
+    if (built >= max) break;
+    const railed = store.reserveModeRail(repo, 1, clock());
+    if (!railed.ok) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: railed.rail, detail: railed.detail });
+      continue;
+    }
+    // A peek proves the entry EXISTS before any claim is taken; the
+    // admission below re-derives it as authority inside its transaction.
+    const peek = store.approvedChainOf(pending.taskId)?.[pending.cursor];
+    if (peek === undefined) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "fallback-unadmittable" });
+      continue;
+    }
+    const claimed = acquire(store, pending.taskRef, runner, { now: clock(), ttlMs: leaseTtlMs });
+    if (!claimed.ok) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: claimed.reason });
+      continue;
+    }
+    const lease = claimed.claim.leaseId;
+    const branch = `standing-orders/${pending.taskId}`;
+    const exists = await git("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo });
+    const leased = await worktrees.lease({
+      repo,
+      branch,
+      runner,
+      taskRef: pending.taskRef,
+      now: clock(),
+      ...(exists.code === 0 ? {} : { base }),
+    });
+    if (!leased.ok) {
+      release(store, lease, clock());
+      dispatched.push({ id: pending.taskId, outcome: "failed", reason: leased.reason });
+      broke++;
+      continue;
+    }
+    const admitted = store.admitNextChainEntry(
+      pending.cycleId,
+      pending.taskId,
+      repo,
+      { leaseId: lease, runner, branch, worktree: leased.worktree.path },
+      clock(),
+    );
+    if (!admitted.ok) {
+      await worktrees.release(leased.worktree.path, clock());
+      release(store, lease, clock());
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: `fallback-${admitted.reason}` });
+      continue;
+    }
+    // The per-attempt dollar cap, same rule as the ordinary road: enforce
+    // only explicit budgets, and never on a provider that cannot hold one.
+    const scopeBudget = store.getScope(pending.taskId)?.budgetMicrousd ?? null;
+    const backstop = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
+    const capMicrousd =
+      scopeBudget === null ? backstop : backstop === null ? scopeBudget : Math.min(scopeBudget, backstop);
+    if (capMicrousd !== null && MONEY_CAPABILITIES[admitted.provider as ProviderId].nativeDollarCapFlag === null) {
+      release(store, lease, clock());
+      await worktrees.release(leased.worktree.path, clock());
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget-unenforceable" });
+      continue;
+    }
+    const result = await build(store, {
+      taskId: pending.taskId,
+      taskRef: pending.taskRef,
+      runner,
+      leaseId: lease,
+      runnerToken: token,
+      runId: admitted.runId,
+      evidenceRoot: context.evidenceRoot,
+      worktree: leased.worktree.path,
+      branch,
+      now: clock(),
+      clock,
+      ...(capMicrousd === null ? {} : { maxBudgetUsd: capMicrousd / 1_000_000 }),
+      provider: admitted.provider as ProviderId,
+      model: admitted.model,
+      ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+      ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+      ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
+    });
+    await worktrees.release(leased.worktree.path, clock());
+    const disposition = disposeBuildOutcome(
+      {
+        store,
+        policy: "tick",
+        leaseId: lease,
+        runId: admitted.runId,
+        taskId: pending.taskId,
+        taskRef: pending.taskRef,
+        runner,
+        repo,
+        branch,
+        origin: "ours",
+        provider: admitted.provider as ProviderId,
+        model: admitted.model,
+        worktreePath: leased.worktree.path,
+        clock,
+      },
+      result,
+    );
+    // The same one resolver: a fallback entry that itself exhausts advances
+    // again; one that succeeds or ordinarily ends closes its cycle.
+    store.resolveChainOnRunEnd(pending.taskRef, pending.taskId, repo, admitted.runId, clock());
+    switch (disposition.kind) {
+      case "built":
+        dispatched.push({ id: pending.taskId, outcome: "built", committed: disposition.committed, branch, worktree: leased.worktree.path });
+        built++;
+        break;
+      case "parked":
+        dispatched.push({ id: pending.taskId, outcome: "parked", reason: `decision:${disposition.decisionId}`, worktree: leased.worktree.path });
+        parked++;
+        break;
+      case "skipped":
+        dispatched.push({ id: pending.taskId, outcome: "skipped", reason: disposition.reason });
+        break;
+      default:
+        dispatched.push({ id: pending.taskId, outcome: "failed", reason: "fallback-attempt", worktree: leased.worktree.path });
         broke++;
         break;
     }

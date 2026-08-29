@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, SteerNote, Store } from "./store.js";
-import { approvalOf, digestOf, profileDigestOf, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
+import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { execFileSync } from "node:child_process";
 import { currentClaim, heartbeat, missingCapability, SYNC_MAX_AGE_MS } from "./claim.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
@@ -424,6 +424,10 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   } = request;
 
   const scope = store.getScope(taskId);
+  // The run row, for the chain-entry binding (E3d): a run created by the
+  // cycle roads carries chain_cycle/chain_index/entry_digest/auth_mode, and
+  // the dispatch proof below re-derives every one of them.
+  const chainRun = store.getRun(request.runId);
   const approval = approvalOf(scope);
   const attended =
     request.attended !== undefined && request.attended.authorization.taskRef === taskRef
@@ -484,7 +488,55 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       skipPermissions: profileWantsSkip(pinned),
       profile: pinned,
     };
+  } else if (chainRun !== null && chainRun.chainCycle != null) {
+    // THE CHAIN-ENTRY DISPATCH PROOF (E3d, review findings 5/6): a run bound
+    // to a fallback-chain entry proves against the IMMUTABLE approved chain,
+    // never the single-profile snapshot. Everything is RE-DERIVED here, none
+    // of it trusted from the caller: the chain approval must still stand
+    // (approvedChainOf proves digest freshness), the LIVE cycle must be this
+    // run's cycle — same id, open, cursor at this run's index, this run as
+    // its tail, digest matching the approved chain — and the run's pinned
+    // entry digest + auth mode must equal the approved entry at that index.
+    // Only then does the entry's WHOLE profile (and nothing else) run.
+    const chain = store.approvedChainOf(taskId);
+    if (chain === null) {
+      return { ok: false, reason: "stale-approval", message: `${taskId}: the chain approval no longer stands — re-approve (stale-approval)` };
+    }
+    const cycle = store.fallbackCycleFor(taskRef);
+    if (
+      cycle === null ||
+      cycle.id !== chainRun.chainCycle ||
+      cycle.state !== "open" ||
+      cycle.cursor !== chainRun.chainIndex ||
+      cycle.tailRun !== request.runId ||
+      cycle.chainDigest !== chainDigestOf(chain)
+    ) {
+      return { ok: false, reason: "stale-approval", message: `${taskId}: this run is not the live custody of its fallback cycle — nothing spends outside the cycle (stale-approval)` };
+    }
+    const entry = chain[chainRun.chainIndex ?? -1];
+    if (entry === undefined || entryDigestOf(entry) !== chainRun.entryDigest || entry.authMode !== chainRun.authMode) {
+      return { ok: false, reason: "stale-approval", message: `${taskId}: the run's pinned entry does not match the approved chain at its index (stale-approval)` };
+    }
+    const proof = proveApprovedProfile(scope, entry.profile, {
+      provider,
+      model: request.model,
+      maxTurns: request.maxTurns,
+      timeoutMs: request.timeoutMs,
+      skipPermissions,
+    });
+    if (!proof.ok) {
+      return { ok: false, reason: "stale-approval", message: `${taskId}: ${proof.message}` };
+    }
+    effective = proof.effective;
   } else {
+    // A CHAIN approval dispatches ONLY through its cycle (finding 6): an
+    // ordinary (non-contest) run on a chain scope that carries no cycle
+    // binding must never fall through to the single-profile proof — that
+    // proof cannot verify a chain digest, and a run outside the cycle would
+    // spend outside its custody.
+    if (request.contestProfile === undefined && scope?.approvalKind === "chain") {
+      return { ok: false, reason: "stale-approval", message: `${taskId}: a chain approval dispatches only through its fallback cycle — this run carries no cycle binding (stale-approval)` };
+    }
     const proof = proveApprovedProfile(scope, request.contestProfile ?? null, {
       provider,
       model: request.model,

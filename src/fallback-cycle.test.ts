@@ -354,7 +354,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     grant();
     const { ref, run } = setup("t-adv");
     conclude(run, "usage-exhausted", "subscription");
-    const step = store.advanceChainIfExhausted(ref, "t-adv", REPO, run, T0);
+    const step = store.resolveChainOnRunEnd(ref, "t-adv", REPO, run, T0);
     expect(step).toEqual({ kind: "advanced", toIndex: 1 });
     const c = store.fallbackCycleFor(ref)!;
     expect(c).toMatchObject({ state: "pending-admission", cursor: 1, tailRun: null });
@@ -367,7 +367,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // Stamp the eligible class but DON'T finish the run — it still owns custody.
     store.stampProviderStart(run, T0, VERSION);
     store.stampTerminalClass(run, "subscription", "usage-exhausted");
-    expect(store.advanceChainIfExhausted(ref, "t-live", REPO, run, T0)).toEqual({ kind: "no-cycle" });
+    expect(store.resolveChainOnRunEnd(ref, "t-live", REPO, run, T0)).toEqual({ kind: "no-cycle" });
     expect(store.fallbackCycleFor(ref)!.state).toBe("open");
   });
 
@@ -375,28 +375,36 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     grant();
     const { ref, run } = setup("t-c8"); // NO recognizer added
     conclude(run, "usage-exhausted", "subscription");
-    const step = store.advanceChainIfExhausted(ref, "t-c8", REPO, run, T0);
+    const step = store.resolveChainOnRunEnd(ref, "t-c8", REPO, run, T0);
     expect(step).toEqual({ kind: "blocked", reason: "no-recognizer" });
     expect(store.fallbackCycleFor(ref)).toBeNull(); // incident is not "live"
   });
 
-  test("C8 exactness: a version fixtured for USAGE only cannot advance a CREDITS-depleted api-key run (finding 8)", () => {
-    rec.eligible.add(`claude:${VERSION}:subscription`); // usage only
+  test("C8 exactness: a fixture for the WRONG auth mode never advances (finding 8)", () => {
+    // The build knows this version's api-key (credits) shape ONLY — the
+    // subscription (usage) class must still sever, not ride the other set.
+    rec.eligible.add(`claude:${VERSION}:api-key`);
     grant();
     const { ref, run } = setup("t-exact");
-    conclude(run, "credits-depleted", "api-key"); // api-key class, unrecognized for this authMode
-    const step = store.advanceChainIfExhausted(ref, "t-exact", REPO, run, T0);
+    conclude(run, "usage-exhausted", "subscription");
+    const step = store.resolveChainOnRunEnd(ref, "t-exact", REPO, run, T0);
     expect(step).toEqual({ kind: "blocked", reason: "no-recognizer" });
+    expect(store.fallbackCycleFor(ref)).toBeNull(); // severed to incident
   });
 
   test("a class/auth-mode MISMATCH is a corrupt stamp — never eligible (finding 8)", () => {
+    // The stamp road itself can no longer produce the mismatch (the pinned
+    // auth mode wins, first-write) — so corrupt the column DIRECTLY, the way
+    // only a bug or a tamper could, and prove the resolver reads it as an
+    // ordinary end, never an advance.
     rec.eligible.add(`claude:${VERSION}:subscription`);
     rec.eligible.add(`claude:${VERSION}:api-key`);
     grant();
     const { ref, run } = setup("t-mismatch");
-    conclude(run, "usage-exhausted", "api-key"); // usage class but api-key auth — impossible pairing
-    expect(store.advanceChainIfExhausted(ref, "t-mismatch", REPO, run, T0)).toEqual({ kind: "not-eligible" });
-    expect(store.fallbackCycleFor(ref)!.state).toBe("open");
+    conclude(run, "usage-exhausted", "subscription");
+    store.raw().prepare("UPDATE run SET terminal_class = 'credits-depleted' WHERE id = ?").run(run);
+    expect(store.resolveChainOnRunEnd(ref, "t-mismatch", REPO, run, T0)).toEqual({ kind: "closed", reason: "entry-ended" });
+    expect(store.fallbackCycleFor(ref)).toBeNull();
   });
 
   test("grant TOCTOU: the LIVE mode is re-proved in-transaction — a revoked grant denies (finding 4)", () => {
@@ -406,7 +414,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     conclude(run, "usage-exhausted", "subscription");
     // The grant is revoked AFTER conclusion, BEFORE the advance.
     store.revokeMode(REPO, "alex", "test", T0);
-    const step = store.advanceChainIfExhausted(ref, "t-toctou", REPO, run, T0);
+    const step = store.resolveChainOnRunEnd(ref, "t-toctou", REPO, run, T0);
     expect(step).toEqual({ kind: "blocked", reason: "grant-withheld" });
     expect(store.fallbackCycleFor(ref)).toBeNull(); // closed cleanly, not incident
   });
@@ -415,7 +423,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     rec.eligible.add(`claude:${VERSION}:subscription`);
     const { ref, run } = setup("t-nogrant"); // no mode signed
     conclude(run, "usage-exhausted", "subscription");
-    expect(store.advanceChainIfExhausted(ref, "t-nogrant", REPO, run, T0)).toEqual({ kind: "blocked", reason: "grant-withheld" });
+    expect(store.resolveChainOnRunEnd(ref, "t-nogrant", REPO, run, T0)).toEqual({ kind: "blocked", reason: "grant-withheld" });
     expect(store.fallbackCycleFor(ref)).toBeNull();
   });
 
@@ -424,7 +432,7 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     grant();
     const { ref, run } = setup("t-end");
     conclude(run, "usage-exhausted", "subscription");
-    expect(store.advanceChainIfExhausted(ref, "t-end", REPO, run, T0)).toEqual({ kind: "advanced", toIndex: 1 });
+    expect(store.resolveChainOnRunEnd(ref, "t-end", REPO, run, T0)).toEqual({ kind: "advanced", toIndex: 1 });
     // Admit the fallback run (the last entry) at cursor 1.
     const cyc = store.fallbackCycleFor(ref)!;
     const txId = Number((store.raw().prepare("SELECT id FROM fallback_transition WHERE cycle = ? ORDER BY id DESC LIMIT 1").get(cyc.id) as { id: number }).id);
@@ -437,22 +445,32 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     // Exhaust the fallback run (gemini) at the LAST index — no entry left.
     rec.eligible.add(`gemini:${VERSION}:api-key`);
     conclude(admitted.runId, "credits-depleted", "api-key");
-    expect(store.advanceChainIfExhausted(ref, "t-end", REPO, admitted.runId, T0)).toEqual({ kind: "exhausted-end" });
+    expect(store.resolveChainOnRunEnd(ref, "t-end", REPO, admitted.runId, T0)).toEqual({ kind: "exhausted-end" });
     expect(store.fallbackCycleFor(ref)).toBeNull(); // closed: chain-exhausted
   });
 
-  test("an ordinary (non-exhaustion) failure leaves the cycle open — the retry road, untouched", () => {
+  test("an ordinary (non-exhaustion) failure ENDS the cycle — the retry road opens a fresh one at the base", () => {
     rec.eligible.add(`claude:${VERSION}:subscription`);
     grant();
     const { ref, run } = setup("t-plainfail");
     conclude(run, "not-exhausted", "subscription");
-    expect(store.advanceChainIfExhausted(ref, "t-plainfail", REPO, run, T0)).toEqual({ kind: "not-eligible" });
+    expect(store.resolveChainOnRunEnd(ref, "t-plainfail", REPO, run, T0)).toEqual({ kind: "closed", reason: "entry-ended" });
+    expect(store.fallbackCycleFor(ref)).toBeNull();
+  });
+
+  test("a PARKED tail keeps the cycle open — repair resumes the same custody", () => {
+    const { ref, run } = setup("t-park");
+    store.stampProviderStart(run, T0, VERSION);
+    store.finishRun(run, { outcome: "parked", reason: "decision", now: T0 });
+    expect(store.resolveChainOnRunEnd(ref, "t-park", REPO, run, T0)).toEqual({ kind: "parked-tail" });
     expect(store.fallbackCycleFor(ref)!.state).toBe("open");
   });
 
-  test("success closes the cycle", () => {
-    const { ref } = setup("t-win");
-    expect(store.closeChainCycleOnTerminal(ref, "succeeded", T0)).toBe(true);
+  test("success closes the cycle through the SAME resolver", () => {
+    const { ref, run } = setup("t-win");
+    store.stampProviderStart(run, T0, VERSION);
+    store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    expect(store.resolveChainOnRunEnd(ref, "t-win", REPO, run, T0)).toEqual({ kind: "closed", reason: "succeeded" });
     expect(store.fallbackCycleFor(ref)).toBeNull();
   });
 });

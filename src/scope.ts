@@ -205,6 +205,23 @@ export function chainDigestOf(entries: readonly ChainEntry[]): string {
     .slice(0, 32);
 }
 
+/**
+ * One chain entry's BINDING digest (E3d): the profile digest + auth mode
+ * under their own domain. A run row pins this at admission (or base-cycle
+ * open), and the dispatch proof re-derives it from the approved chain at
+ * the run's index — so nothing downstream can swap WHICH entry a run
+ * spends as, in model or in credential.
+ */
+export function entryDigestOf(entry: ChainEntry): string {
+  return createHash("sha256")
+    .update(
+      `standing-orders:chain-entry:v${CHAIN_DIGEST_VERSION}:${profileDigestOf(entry.profile)}:${entry.authMode}`,
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 32);
+}
+
 /** Strict re-hydration of a stored chain — every entry proved through the
  * single-profile rehydrator; anything unexpected is null. */
 export function chainFromJson(json: string | null): ChainEntry[] | null {

@@ -163,7 +163,13 @@ export async function invokeAgent(
   // re-supply survives resolveChildEnv's chat-key strip); in
   // "subscription" mode the key is STRIPPED from the child so the CLI's
   // own login is used — its key is retained, just not handed over.
-  const authMode = readAuthMode(spec.provider, keyHome);
+  // A CHAIN-BOUND run carries a PINNED mode sealed into its approved entry
+  // (E3d, review finding 5): the pin IS the authority — a per-provider
+  // mode-file flip between admission and spawn must never move the spend
+  // onto a credential the operator didn't approve for this entry. Every
+  // other run reads the operator's live setting, as always.
+  const authMode =
+    run.chainCycle != null && run.authMode != null ? run.authMode : readAuthMode(spec.provider, keyHome);
   const ownKeyEnv = OWN_KEY_ENV[spec.provider];
   const managedKey =
     authMode === "api-key"

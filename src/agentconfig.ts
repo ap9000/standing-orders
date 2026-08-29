@@ -22,6 +22,7 @@
 import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId } from "./provider.js";
 import { contestantProfileOf, type Store, type TaskRef } from "./store.js";
 import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile } from "./scope.js";
+import { SUBSCRIPTION_CAPABLE } from "./keys.js";
 
 export const INSTALLATION_SCOPE = "installation";
 
@@ -212,6 +213,12 @@ export function resolveScopeChain(
     }
     if (one.authMode !== "subscription" && one.authMode !== "api-key") {
       return { ok: false, reason: "bad-fallback", problem: `a fallback entry has an unknown auth mode` };
+    }
+    // An entry can only pin an auth mode its provider can actually take:
+    // "subscription" on a provider with no login (openrouter) would seal an
+    // entry that can never authenticate (E3d, gateway pin).
+    if (one.authMode === "subscription" && !SUBSCRIPTION_CAPABLE[one.provider]) {
+      return { ok: false, reason: "bad-fallback", problem: `${one.provider} has no subscription login — this entry must use an API key` };
     }
     entries.push({ profile: contestantProfileOf(one.provider, one.model, one.repairModel ?? "inherit"), authMode: one.authMode });
   }

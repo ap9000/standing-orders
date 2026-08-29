@@ -31,7 +31,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry } from "./scope.js";
+import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
 import { readAuthMode } from "./keys.js";
 import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
@@ -6561,8 +6561,26 @@ export class Store {
     if (chain === null) return null;
     const digest = chainDigestOf(chain);
     return this.transact(() => {
+      // Bind the run to the entry it will spend as (E3d): cycle, index,
+      // entry digest, and the PINNED auth mode, first-write only — the
+      // dispatch proof re-derives all four from the approved chain and
+      // refuses a run whose binding does not match. A run bound to a
+      // cursor whose entry is not the profile it was asked to run fails
+      // that proof — closed, not clever.
+      const bind = (cycleId: number, index: number): void => {
+        const entry = chain[index];
+        if (entry === undefined) return;
+        this.db
+          .prepare(
+            "UPDATE run SET chain_cycle = ?, chain_index = ?, entry_digest = ?, auth_mode = ? WHERE id = ? AND chain_cycle IS NULL",
+          )
+          .run(cycleId, index, entryDigestOf(entry), entry.authMode, runId);
+      };
       const opened = this.openFallbackCycle(taskRef, digest, runId, now);
-      if (opened.ok) return opened.id;
+      if (opened.ok) {
+        bind(opened.id, 0);
+        return opened.id;
+      }
       const existing = this.fallbackCycleFor(taskRef);
       if (existing === null) return null;
       // A cycle bound to a DIFFERENT approved chain than the one now
@@ -6576,52 +6594,44 @@ export class Store {
       // Re-tag the tail to the live run ONLY when the cycle is open AND its
       // current tail is NOT a concluded-but-unsettled run: overwriting a
       // finished predecessor would lose its exhaustion advance (finding 3).
-      // A concluded tail is left as-is for the reconciler (E3d) to resolve.
+      // A concluded tail is left as-is for the reconciler to resolve.
       if (existing.state === "open" && existing.tailRun !== null) {
         const tail = this.getRun(existing.tailRun);
         if (tail !== null && tail.outcome === null) {
-          this.db
+          const moved = this.db
             .prepare("UPDATE fallback_cycle SET tail_run = ?, updated_at = ? WHERE id = ? AND state = 'open'")
             .run(runId, now.toISOString(), existing.id);
+          if (Number(moved.changes) > 0) bind(existing.id, existing.cursor);
         }
       }
       return existing.id;
     });
   }
 
-  /** Close a task's OPEN chain cycle on a terminal disposition of its tail
-   * run — a success, or an ordinary (non-exhaustion) end of the road. A
-   * no-op when there is no open cycle, or when it is mid-advance (a
-   * concurrent advance owns the closure). */
-  closeChainCycleOnTerminal(taskRef: number, reason: string, now: Date): boolean {
-    const cycle = this.fallbackCycleFor(taskRef);
-    if (cycle === null || cycle.state !== "open") return false;
-    return this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, reason, now);
-  }
-
   /**
-   * The exhaustion -> advance decision (E3c), run at the disposition of a
-   * chain run. FAIL CLOSED at every gate — it advances the cycle one step
-   * ONLY when ALL hold:
-   *   - an OPEN cycle exists whose tail is exactly this finished run;
-   *   - the run's gateway-stamped terminal class is fallback-ELIGIBLE;
-   *   - THIS BUILD still carries a fixture-backed recognizer for the run's
-   *     exact (provider, version) — the C8 re-check, so a downgrade since
-   *     the disposal stamp severs any in-flight authority (raises incident);
-   *   - the operator's live mode GRANTS a paid fallback (else the cycle ends
-   *     cleanly and the run disposes as the ordinary exhaustion it is);
-   *   - a next entry exists in the IMMUTABLE approved chain (else the chain
-   *     is spent: the exhausted-no-fallback terminal).
-   * It orchestrates the fenced custody walk — sanitize, advance,
-   * release-to-pending — atomically inside ONE transaction, so a lost inner
-   * CAS rolls the whole walk back rather than half-advancing. It NEVER
-   * dispatches: the next tick's admission creates the fallback run. The
-   * in-custody cleanup is intentionally empty here — the worktree was
-   * already released at disposition and the next entry leases a fresh tree
-   * from base, so the custody guarantee is the atomic transition, not file
-   * work.
+   * The ONE chain-cycle resolver at a run's end (E3c/E3d): every concluded
+   * tail resolves its cycle — success closes it, an ordinary end closes it
+   * (the retry road runs the BASE entry under a FRESH cycle; a concluded
+   * tail can never be re-tagged, so leaving it open would only strand it),
+   * a parked tail is a PAUSED lineage and stays open for repair, and a
+   * recognized eligible exhaustion advances. Both the disposition hook and
+   * the crash reconciler call THIS method, so a crash between disposition
+   * and resolution re-derives the same answer from durable state.
+   *
+   * The advance is FAIL CLOSED at every gate:
+   *   - an OPEN cycle whose tail is exactly this finished run;
+   *   - the run genuinely finished (outcome + finished_at +
+   *     provider_started_at, same task) — never live custody;
+   *   - a fallback-ELIGIBLE class consistent with the run's auth mode;
+   *   - the C8 re-check: THIS build recognizes the exact class/auth for the
+   *     run's (provider, version) — a downgrade severs to incident;
+   *   - the LIVE signed mode's paid-fallback grant, re-read IN-transaction;
+   *   - a next entry in the IMMUTABLE approved chain (else exhausted-end).
+   * The fenced custody walk — sanitize, advance, release-to-pending — runs
+   * atomically inside ONE transaction; a lost inner CAS rolls the whole
+   * walk back. It NEVER dispatches: the admission pass creates the run.
    */
-  advanceChainIfExhausted(
+  resolveChainOnRunEnd(
     taskRef: number,
     taskId: string,
     repo: string | null,
@@ -6630,8 +6640,9 @@ export class Store {
   ):
     | { kind: "advanced"; toIndex: number }
     | { kind: "exhausted-end" }
+    | { kind: "closed"; reason: "succeeded" | "entry-ended" }
     | { kind: "blocked"; reason: "no-recognizer" | "grant-withheld" | "corrupt-chain" | "cycle-mismatch" }
-    | { kind: "not-eligible" }
+    | { kind: "parked-tail" }
     | { kind: "no-cycle" } {
     try {
       return this.transact(() => {
@@ -6645,17 +6656,34 @@ export class Store {
         // finding 7): a run whose outcome is still open — or that never
         // spawned a provider — is live custody, and advancing off it could
         // start the next entry beside a running predecessor. Its task must be
-        // this task, too.
-        if (run.taskRef !== taskRef || run.outcome === null || run.finishedAt === null || run.providerStartedAt === null) {
+        // this task, too. (A success that never spawned — a no-change without
+        // a provider — still closes below; the started-at proof gates only
+        // the ADVANCE road.)
+        if (run.taskRef !== taskRef || run.outcome === null || run.finishedAt === null) {
           return { kind: "no-cycle" as const };
         }
+        // A successful tail: the chain did its job — closed, terminally.
+        if (run.outcome === "built" || run.outcome === "no-change") {
+          this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "succeeded", now);
+          return { kind: "closed" as const, reason: "succeeded" as const };
+        }
+        // A parked tail is a PAUSED lineage, not an ended one: repair resumes
+        // the same custody, and the cycle stays open for it.
+        if (run.outcome === "parked") return { kind: "parked-tail" as const };
         const cls: TerminalClass = run.terminalClass ?? "unknown";
-        if (!isFallbackEligible(cls)) return { kind: "not-eligible" as const };
         const authMode = run.authMode ?? "subscription";
-        // The class/auth pairing must be internally consistent (finding 8): a
-        // usage-exhausted stamp on an api-key run (or the reverse) is a
-        // corrupt record, never an advance.
-        if (!classMatchesAuthMode(cls, authMode)) return { kind: "not-eligible" as const };
+        // An ordinary end (failure, refusal, interruption) — or a corrupt
+        // class/auth pairing, which must READ as ordinary (finding 8) —
+        // ends the cycle. The retry road opens a fresh one at the base.
+        if (!isFallbackEligible(cls) || !classMatchesAuthMode(cls, authMode)) {
+          this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "entry-ended", now);
+          return { kind: "closed" as const, reason: "entry-ended" as const };
+        }
+        // The ADVANCE road requires a proven provider spawn.
+        if (run.providerStartedAt === null) {
+          this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "entry-ended", now);
+          return { kind: "closed" as const, reason: "entry-ended" as const };
+        }
         // C8 re-check at the authority point (findings 1/8): THIS build must
         // recognize the EXACT eligible class for this auth mode — not merely
         // "some eligible recognizer exists." A build with no such fixture
@@ -6730,6 +6758,124 @@ export class Store {
       // generation): another authority raced us. Do nothing — next tick.
       return { kind: "no-cycle" as const };
     }
+  }
+
+  /**
+   * The crash reconciler's read (E3d, review finding 3): OPEN cycles whose
+   * tail run CONCLUDED (non-parked) but whose cycle was never resolved — the
+   * window a crash between disposition and resolveChainOnRunEnd leaves. The
+   * reconciler feeds each through the SAME resolver, so nothing is decided
+   * twice or differently.
+   */
+  strandedChainCycles(repo: string): { cycleId: number; taskRef: number; taskId: string; tailRun: number }[] {
+    return this.db
+      .prepare(
+        `SELECT fc.id AS cycle_id, fc.task_ref AS task_ref, tr.external_id AS task_id, fc.tail_run AS tail_run
+           FROM fallback_cycle fc
+           JOIN run r ON r.id = fc.tail_run
+           JOIN task_ref tr ON tr.id = fc.task_ref AND tr.backend = ? AND tr.repo = ?
+          WHERE fc.state = 'open' AND r.outcome IS NOT NULL AND r.outcome <> 'parked'`,
+      )
+      .all(BUILT_IN, repo)
+      .map(row => ({
+        cycleId: Number((row as Record<string, unknown>)["cycle_id"]),
+        taskRef: Number((row as Record<string, unknown>)["task_ref"]),
+        taskId: String((row as Record<string, unknown>)["task_id"]),
+        tailRun: Number((row as Record<string, unknown>)["tail_run"]),
+      }));
+  }
+
+  /** Cycles awaiting their next entry's admission, for one repo — what the
+   * tick's chain admission pass walks. */
+  pendingChainAdmissions(repo: string): { cycleId: number; taskRef: number; taskId: string; cursor: number }[] {
+    return this.db
+      .prepare(
+        `SELECT fc.id AS cycle_id, fc.task_ref AS task_ref, tr.external_id AS task_id, fc.cursor AS cursor
+           FROM fallback_cycle fc
+           JOIN task_ref tr ON tr.id = fc.task_ref AND tr.backend = ? AND tr.repo = ?
+          WHERE fc.state = 'pending-admission'
+          ORDER BY fc.id`,
+      )
+      .all(BUILT_IN, repo)
+      .map(row => ({
+        cycleId: Number((row as Record<string, unknown>)["cycle_id"]),
+        taskRef: Number((row as Record<string, unknown>)["task_ref"]),
+        taskId: String((row as Record<string, unknown>)["task_id"]),
+        cursor: Number((row as Record<string, unknown>)["cursor"]),
+      }));
+  }
+
+  /**
+   * The PROVING admission (E3d): create the next entry's run from a
+   * pending-admission cycle, with EVERY authority re-derived inside one
+   * transaction — the approved chain must still stand and match the cycle's
+   * digest, the entry at the cursor must exist, the LIVE signed mode must
+   * still grant the paid fallback (revocation between advance and admission
+   * denies), and the exact unconsumed pending edge is consumed by the run
+   * it creates (admitFallback's single-use CAS). The caller carries only
+   * claim, worktree, and rail; nothing it asserts becomes authority.
+   */
+  admitNextChainEntry(
+    cycleId: number,
+    taskId: string,
+    repo: string,
+    run: { leaseId: string; runner: string; branch: string; worktree: string },
+    now: Date,
+  ):
+    | { ok: true; runId: number; provider: string; model: string }
+    | { ok: false; reason: "not-pending" | "stale-approval" | "grant-withheld" | "no-edge" | "raced" } {
+    return this.transact(() => {
+      const cycle = this.db.prepare("SELECT * FROM fallback_cycle WHERE id = ?").get(cycleId);
+      if (cycle === undefined) return { ok: false as const, reason: "not-pending" as const };
+      const c = readFallbackCycle(cycle as Record<string, unknown>);
+      if (c.state !== "pending-admission") return { ok: false as const, reason: "not-pending" as const };
+      const chain = this.approvedChainOf(taskId);
+      if (chain === null || chainDigestOf(chain) !== c.chainDigest) {
+        this.incidentFallback(c.id, c.transitionGeneration, "approved-chain-invalid-at-admission", now);
+        return { ok: false as const, reason: "stale-approval" as const };
+      }
+      const entry = chain[c.cursor];
+      if (entry === undefined) {
+        this.incidentFallback(c.id, c.transitionGeneration, "cursor-beyond-approved-chain", now);
+        return { ok: false as const, reason: "stale-approval" as const };
+      }
+      // The paid-fallback grant, re-proved at the MONEY moment: an advance
+      // was granted, but a mode revoked since must still deny the spend.
+      const liveGrant = modeTermsFromJson(this.activeMode(repo, now)?.termsJson ?? null)?.allowPaidFallback === true;
+      if (!liveGrant) {
+        this.closeFallbackCycle(c.id, c.transitionGeneration, "grant-withheld", now);
+        return { ok: false as const, reason: "grant-withheld" as const };
+      }
+      const edge = this.db
+        .prepare("SELECT id FROM fallback_transition WHERE cycle = ? AND to_index = ? AND consumed_by IS NULL ORDER BY id DESC LIMIT 1")
+        .get(c.id, c.cursor);
+      if (edge === undefined) {
+        this.incidentFallback(c.id, c.transitionGeneration, "no-unconsumed-edge-at-admission", now);
+        return { ok: false as const, reason: "no-edge" as const };
+      }
+      const admitted = this.admitFallback(
+        {
+          cycleId: c.id,
+          expectGeneration: c.transitionGeneration,
+          expectCursor: c.cursor,
+          transitionId: Number((edge as Record<string, unknown>)["id"]),
+          run: {
+            taskRef: c.taskRef,
+            leaseId: run.leaseId,
+            runner: run.runner,
+            branch: run.branch,
+            worktree: run.worktree,
+            provider: entry.profile.provider,
+            model: entry.profile.model,
+          },
+          entryDigest: entryDigestOf(entry),
+          authMode: entry.authMode,
+        },
+        now,
+      );
+      if (!admitted.ok) return { ok: false as const, reason: "raced" as const };
+      return { ok: true as const, runId: admitted.runId, provider: entry.profile.provider, model: entry.profile.model };
+    });
   }
 
   /**
