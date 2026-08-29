@@ -9,6 +9,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
+import { propose, approve, addApprover, chainFromJson, chainDigestOf } from "./scope.js";
 
 const T0 = new Date("2026-08-29T12:00:00.000Z");
 
@@ -194,5 +195,72 @@ describe("the fallback cycle state machine", () => {
     expect(two.ok).toBe(true);
     if (two.ok) expect(store.closeFallbackCycle(two.id, 0, "succeeded", T0)).toBe(true);
     expect(store.fallbackCycleFor(taskRef)).toBeNull();
+  });
+});
+
+describe("opening the base cycle from the approved chain (E3b)", () => {
+  let store: Store;
+  const REPO = "/repos/chain";
+  const bootstrap = () => {
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    return added.token;
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+  });
+  afterEach(() => store.close());
+
+  test("a SINGLE-PROFILE approval opens no cycle — inert by default", () => {
+    store.createTask({ id: "t-plain", title: "w" }, T0);
+    const ref = store.refFor("built-in", "t-plain").id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: "t-plain", goal: "a guard", now: T0 });
+    const token = bootstrap();
+    expect(approve(store, "t-plain", "alex", T0, store.getScope("t-plain")!.digest, token).ok).toBe(true);
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
+    expect(store.openChainCycleForDispatch(ref, "t-plain", run, T0)).toBeNull();
+    expect(store.fallbackCycleFor(ref)).toBeNull();
+  });
+
+  test("a CHAIN approval opens a cycle at cursor 0, bound to the dispatched run, digest from the snapshot", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    store.createTask({ id: "t-chain", title: "w" }, T0);
+    const ref = store.refFor("built-in", "t-chain").id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: "t-chain", goal: "a guard", now: T0 });
+    const token = bootstrap();
+    const scope = store.getScope("t-chain")!;
+    expect(approve(store, "t-chain", "alex", T0, scope.digest, token).ok).toBe(true);
+
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
+    const cycleId = store.openChainCycleForDispatch(ref, "t-chain", run, T0);
+    expect(cycleId).not.toBeNull();
+    const c = store.fallbackCycleFor(ref)!;
+    expect(c).toMatchObject({ state: "open", cursor: 0, tailRun: run });
+    // The cycle's digest is the one the approved snapshot binds — not config.
+    const expected = chainDigestOf(chainFromJson(store.getScope("t-chain")!.approvedChainJson!)!);
+    expect(c.chainDigest).toBe(expected);
+  });
+
+  test("a second dispatch at the open cursor RE-TAGS the tail — never opens a second cycle", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    store.createTask({ id: "t-retry", title: "w" }, T0);
+    const ref = store.refFor("built-in", "t-retry").id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: "t-retry", goal: "a guard", now: T0 });
+    const token = bootstrap();
+    expect(approve(store, "t-retry", "alex", T0, store.getScope("t-retry")!.digest, token).ok).toBe(true);
+
+    const first = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b1", worktree: "/w1", provider: "claude", now: T0 });
+    const c1 = store.openChainCycleForDispatch(ref, "t-retry", first, T0);
+    const second = store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "claude", now: T0 });
+    const c2 = store.openChainCycleForDispatch(ref, "t-retry", second, T0);
+    expect(c2).toBe(c1); // same cycle
+    const c = store.fallbackCycleFor(ref)!;
+    expect(c.tailRun).toBe(second); // re-tagged to the live run
+    expect(c.cursor).toBe(0);
   });
 });

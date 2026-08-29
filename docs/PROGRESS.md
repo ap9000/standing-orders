@@ -1,5 +1,20 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer E3b: the coordinator opens the base
+cycle.** The tick now calls store.openChainCycleForDispatch right after it
+creates a base run: if the task's approval sealed an explicit chain, the
+fallback cycle opens at cursor 0 bound to that run, its digest derived from
+the IMMUTABLE approved snapshot (approvedChainOf → chainDigestOf), never
+mutable config. A single-profile approval — every task until an operator
+configures a fallback chain — opens nothing and returns null, so it is
+inert by default. A second dispatch at the open cursor (a repair/retry)
+RE-TAGS the tail to the live run instead of opening a second cycle, so the
+advance CAS keys off the run that actually exhausts; a cycle mid-advance is
+left untouched (its next run arrives through admitFallback). A digest
+mismatch against an existing open cycle refuses to re-tag. All cycle
+orchestration stays in operate.ts + store.ts; builder.ts is untouched.
+Suite 1429 (+3 E3b tests).
+
 **2026-08-29 — Fallback chains, layer E3a: filing binds the chain, the seal
 copies it.** The scope-filing road now produces a real chain approval when
 a repo has configured fallbacks. saveScope resolves the chain

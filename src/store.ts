@@ -31,7 +31,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { digestOf, canonicalProfileJson, canonicalChainJson, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile } from "./scope.js";
+import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
 import { readAuthMode } from "./keys.js";
 import type { TerminalClass } from "./exhaustion.js";
@@ -6506,6 +6506,54 @@ export class Store {
         )
         .run(taskRef, chainDigest, tailRun, now.toISOString(), now.toISOString());
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+    });
+  }
+
+  /**
+   * The task's IMMUTABLE approved chain — the runtime's single source of
+   * truth for chain length and per-entry authority (never mutable config).
+   * Returns the rehydrated entries when the approval sealed a chain and the
+   * snapshot still rehydrates strictly; null otherwise (a single-profile
+   * approval, or a snapshot that fails the strict rehydrator — fail closed,
+   * so a corrupt chain dispatches nothing).
+   */
+  approvedChainOf(taskId: string): ChainEntry[] | null {
+    const scope = this.getScope(taskId);
+    if (scope === null || scope.approvalKind !== "chain" || scope.approvedChainJson == null) return null;
+    return chainFromJson(scope.approvedChainJson);
+  }
+
+  /**
+   * The coordinator's base-cycle door (E3b): called right after a run is
+   * created for a task, it opens the fallback cycle IF (and only if) the
+   * task's approval sealed an explicit chain. A single-profile approval
+   * opens nothing and returns null — every task until an operator configures
+   * a fallback chain, so this is inert by default. The chain digest is
+   * derived from the IMMUTABLE approved snapshot, never mutable config. When
+   * a cycle already exists and is still `open`, the live run is re-tagged as
+   * its tail so a repair/retry at the current cursor advances on its OWN
+   * exhaustion rather than a vanished predecessor's; a cycle mid-advance is
+   * left untouched (its next run arrives through admitFallback, which sets
+   * the tail itself). Returns the cycle id now governing this run, else null.
+   */
+  openChainCycleForDispatch(taskRef: number, taskId: string, runId: number, now: Date): number | null {
+    const chain = this.approvedChainOf(taskId);
+    if (chain === null) return null;
+    const digest = chainDigestOf(chain);
+    return this.transact(() => {
+      const opened = this.openFallbackCycle(taskRef, digest, runId, now);
+      if (opened.ok) return opened.id;
+      const existing = this.fallbackCycleFor(taskRef);
+      if (existing === null) return null;
+      // A digest mismatch means the open cycle belongs to a DIFFERENT approved
+      // chain than the one now dispatching — never silently re-tag across it.
+      if (existing.chainDigest !== digest) return existing.id;
+      if (existing.state === "open") {
+        this.db
+          .prepare("UPDATE fallback_cycle SET tail_run = ?, updated_at = ? WHERE id = ? AND state = 'open'")
+          .run(runId, now.toISOString(), existing.id);
+      }
+      return existing.id;
     });
   }
 

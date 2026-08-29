@@ -2345,6 +2345,12 @@ async function tickCommand(
       now: clock(),
     });
 
+    // The base fallback cycle (E3b): if this task's approval sealed an
+    // explicit chain, open (or re-tag) its cycle bound to this run. A
+    // single-profile approval — every task until an operator configures a
+    // fallback chain — opens nothing, so this is inert by default.
+    store.openChainCycleForDispatch(ref.id, id, runId, clock());
+
     // The per-attempt dollar cap (v15): the scope's approved term and the
     // installation backstop, the smaller of the two. A provider that
     // cannot hold a cap does not run capped work (ruling 3: enforce only
