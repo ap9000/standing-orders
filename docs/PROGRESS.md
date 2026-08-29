@@ -1,5 +1,22 @@
 # Progress
 
+**2026-08-29 — Auth modes verify round 4 (APPROVE-WITH-CHANGES): the two
+residuals closed.** The three blocking findings (isolation, resume test,
+verify classification) were all confirmed closed. Two small ones: (1)
+`keys auth <provider> <mode>` was UNUSABLE — an off-by-one in the
+positional destructuring (`const [, wanted] = rest` read the second
+element of a one-element array) made it always return usage; fixed to
+`const [wanted]`, with a CLI test that switches the mode and proves the
+stored key survives, plus the openrouter-refuses-subscription case. (2)
+Stale messaging: `keys clear` and the settings clear both claimed "an
+environment variable takes over" regardless of mode — now mode-aware
+(in subscription mode the ambient is stripped, so builds are
+unaffected); and a blank openrouter settings submission no longer
+falsely reports a subscription switch — the save handler honors
+setAuthMode's refusal and only claims a mode change when one happened.
+Suite 1390.
+
+
 **2026-08-29 — Provider auth modes: subscription first, key as fallback,
 switchable — which also closes verify round 3's blocking finding.** The
 operator asked to keep BOTH a subscription and an API key and prefer the

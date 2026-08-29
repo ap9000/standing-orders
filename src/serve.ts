@@ -2952,19 +2952,34 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!isProviderId(provider)) return refuse(response, who, 400, "unknown provider", "/settings");
       if (url.pathname === "/settings/provider-key-clear") {
         const cleared = clearProviderKey(provider);
-        return redirect(response, `/settings?said=${encodeURIComponent(cleared ? `the ${provider} key is removed — an environment variable, if one exists, takes over` : "no stored key to remove")}`);
+        const clearedMode = readAuthMode(provider);
+        return redirect(response, `/settings?said=${encodeURIComponent(
+          !cleared
+            ? "no stored key to remove"
+            : clearedMode === "subscription"
+              ? `the ${provider} key is removed — ${provider} uses its own login, so builds are unaffected`
+              : `the ${provider} key is removed — an environment variable, if one exists, takes over`,
+        )}`);
       }
       // The sign-in preference rides the same form — an operator can
       // switch to subscription without touching the key, or paste a key
-      // and keep using their login.
+      // and keep using their login. openrouter has no login, so its
+      // form renders no select and a refusal is honored here.
       const wantedMode = body.get("auth-mode");
+      let modeChanged = false;
       if (wantedMode === "subscription" || wantedMode === "api-key") {
-        setAuthMode(provider, wantedMode as AuthMode);
+        const set = setAuthMode(provider, wantedMode as AuthMode);
+        if (!set.ok) {
+          return refuse(response, who, 409, `${provider} has no subscription login — it is API-key only`, "/settings");
+        }
+        modeChanged = true;
       }
       const value = body.get("value") ?? "";
       if (value.trim() === "") {
-        // Mode-only change, no new key.
-        return redirect(response, `/settings?said=${encodeURIComponent(`the ${provider} sign-in is set to ${wantedMode === "api-key" ? "the API key" : "your subscription / login"}`)}`);
+        if (!modeChanged) {
+          return refuse(response, who, 400, "nothing to change — paste a key or pick a sign-in", "/settings");
+        }
+        return redirect(response, `/settings?said=${encodeURIComponent(`the ${provider} sign-in is set to ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}`)}`);
       }
       const saved = saveProviderKey(provider, value);
       if (!saved.ok) {

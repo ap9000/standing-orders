@@ -3808,8 +3808,13 @@ async function keysCommand(
   }
   if (action === "clear") {
     const cleared = clearProviderKey(provider);
-    return succeed(write, json, "keys clear", { provider, cleared }, () => [
-      cleared ? `The ${provider} key is removed — an environment variable, if one exists, takes over.` : "No stored key to remove.",
+    const mode = readAuthMode(provider);
+    return succeed(write, json, "keys clear", { provider, cleared, mode }, () => [
+      !cleared
+        ? "No stored key to remove."
+        : mode === "subscription"
+          ? `The ${provider} key is removed. ${provider} uses its own login (subscription mode), so builds are unaffected.`
+          : `The ${provider} key is removed — an environment variable, if one exists, takes over.`,
     ]);
   }
   if (action === "verify") {
@@ -3821,7 +3826,7 @@ async function keysCommand(
     return succeed(write, json, "keys verify", { provider, verdict }, () => [verdictWords(provider, verdict)]);
   }
   if (action === "auth") {
-    const [, wanted] = rest;
+    const [wanted] = rest;
     if (wanted !== "subscription" && wanted !== "api-key") {
       return fail(write, json, "keys auth", "usage", `\`standing-orders keys auth ${provider} subscription|api-key\``, EXIT.usage);
     }
