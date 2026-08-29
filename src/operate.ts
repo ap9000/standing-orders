@@ -162,7 +162,7 @@ import {
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
 import { reviewPass } from "./reviewer.js";
-import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, readProviderKey, saveProviderKey, verifyProviderKey, verdictWords } from "./keys.js";
+import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
@@ -449,7 +449,7 @@ export const APPROVER_ACTIONS = ["list", "add"] as const;
 export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "pause", "resume", "run-now"] as const;
 export const CONTEST_ACTIONS = ["show", "exclude"] as const;
 export const PEOPLE_ACTIONS = ["list", "invite", "revoke"] as const;
-export const KEYS_ACTIONS = ["status", "set", "clear", "verify"] as const;
+export const KEYS_ACTIONS = ["status", "set", "clear", "verify", "auth"] as const;
 
 /**
  * The GLOBAL flag vocabulary (exported for the command guide's drift
@@ -3775,7 +3775,7 @@ async function keysCommand(
   context: Context,
 ): Promise<number> {
   const { write, json } = context;
-  const [action, provider] = positional;
+  const [action, provider, ...rest] = positional;
   if (action === undefined || !(KEYS_ACTIONS as readonly string[]).includes(action)) {
     return fail(write, json, "keys", "usage", `unknown \`keys ${action ?? ""}\` — try ${KEYS_ACTIONS.join(", ")}`, EXIT.usage);
   }
@@ -3791,14 +3791,16 @@ async function keysCommand(
       return EXIT.ok;
     }
     for (const row of rows) {
+      const mode = readAuthMode(row.provider);
       const state = row.set
         ? `stored${row.updatedAt === null ? "" : ` (${row.updatedAt.slice(0, 10)})`}`
         : row.ambient
           ? "environment only"
           : "not set";
-      write(`  ${row.provider.padEnd(12)} ${row.envName.padEnd(22)} ${state}`);
+      write(`  ${row.provider.padEnd(12)} ${row.envName.padEnd(22)} ${mode.padEnd(13)} ${state}`);
     }
-    write("  → stored keys reach exactly their own provider's process; every other spawn is stripped of them");
+    write("  → subscription-mode providers use their own login; api-key mode hands over the stored (or ambient) key");
+    write("  → `keys auth <provider> subscription|api-key` switches; stored keys are kept either way");
     return EXIT.ok;
   }
   if (provider === undefined || !isProviderId(provider)) {
@@ -3817,6 +3819,21 @@ async function keysCommand(
     }
     const verdict = await verifyProviderKey(provider, stored);
     return succeed(write, json, "keys verify", { provider, verdict }, () => [verdictWords(provider, verdict)]);
+  }
+  if (action === "auth") {
+    const [, wanted] = rest;
+    if (wanted !== "subscription" && wanted !== "api-key") {
+      return fail(write, json, "keys auth", "usage", `\`standing-orders keys auth ${provider} subscription|api-key\``, EXIT.usage);
+    }
+    const set = setAuthMode(provider, wanted as AuthMode);
+    if (!set.ok) {
+      return fail(write, json, "keys auth", "refused", `${provider} has no subscription login — it is api-key only`, EXIT.refused);
+    }
+    return succeed(write, json, "keys auth", { provider, mode: wanted }, () => [
+      wanted === "subscription"
+        ? `${provider} now uses its own login; its stored key is kept as the fallback you can switch to.`
+        : `${provider} now uses its API key; switch back with \`keys auth ${provider} subscription\`.`,
+    ]);
   }
   const file = text(flags, "key-file");
   let value: string;

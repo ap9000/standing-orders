@@ -1,5 +1,28 @@
 # Progress
 
+**2026-08-29 — Provider auth modes: subscription first, key as fallback,
+switchable — which also closes verify round 3's blocking finding.** The
+operator asked to keep BOTH a subscription and an API key and prefer the
+subscription; Codex round 3 independently flagged the same thing as
+blocking (the ambient re-supply could pass a chat credential into a
+Claude agent and silently switch subscription billing to API). Both are
+now answered by one mechanism: a per-provider auth mode. "subscription"
+(the default for Claude and Codex) uses the CLI's own login and STRIPS
+that provider's own key from the spawn — its stored key is kept, just
+not handed over, so an ambient key can never override the login.
+"api-key" (the default for gemini/openrouter, and an opt-in for the
+others) hands the managed-or-ambient key over. openrouter is api-key
+only (no login); the mode file refuses subscription for it. Switching
+is one act — `keys auth <provider> subscription|api-key` or the
+settings card's sign-in select — and never touches the stored key.
+Round 3's two smaller residuals closed alongside: the resume-XOR test
+now asserts the run RAN (no protocol refusal from a suppressed id), and
+the verify 400-classification requires an actual NEGATIVE marker near
+the key/auth phrase ("API key not valid" rejects; "API key accepted;
+malformed page size" does not). Held-Claude subscription coverage added.
+Suite 1388.
+
+
 **2026-08-29 — Gemini verify round 2 (REDESIGN): the last six findings,
 closed.** Codex confirmed the round-1 fixes and found the residue — all
 real, all shut. Finding 1 (trust proof incomplete): added DISPATCH-level

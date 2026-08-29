@@ -140,7 +140,7 @@ import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
-import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, saveProviderKey, verifyProviderKey, verdictWords } from "./keys.js";
+import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -1672,6 +1672,8 @@ export function createDecisionServer(options: ServeOptions): Server {
             envName: PROVIDER_KEY_ENV[provider as "claude"],
             ...keyStatus(provider as "claude"),
             ambient: (process.env[PROVIDER_KEY_ENV[provider as "claude"]] ?? "") !== "",
+            mode: readAuthMode(provider as "claude"),
+            subscriptionCapable: SUBSCRIPTION_CAPABLE[provider as "claude"],
           }));
       return sendScreen(
         response,
@@ -2952,7 +2954,18 @@ export function createDecisionServer(options: ServeOptions): Server {
         const cleared = clearProviderKey(provider);
         return redirect(response, `/settings?said=${encodeURIComponent(cleared ? `the ${provider} key is removed — an environment variable, if one exists, takes over` : "no stored key to remove")}`);
       }
+      // The sign-in preference rides the same form — an operator can
+      // switch to subscription without touching the key, or paste a key
+      // and keep using their login.
+      const wantedMode = body.get("auth-mode");
+      if (wantedMode === "subscription" || wantedMode === "api-key") {
+        setAuthMode(provider, wantedMode as AuthMode);
+      }
       const value = body.get("value") ?? "";
+      if (value.trim() === "") {
+        // Mode-only change, no new key.
+        return redirect(response, `/settings?said=${encodeURIComponent(`the ${provider} sign-in is set to ${wantedMode === "api-key" ? "the API key" : "your subscription / login"}`)}`);
+      }
       const saved = saveProviderKey(provider, value);
       if (!saved.ok) {
         return refuse(response, who, 400, "that does not look like an API key — check the paste and try again", "/settings");
@@ -9563,7 +9576,7 @@ function settingsPage(
   problem: string | null,
   messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
   push: { available: boolean; devices: PushSubscription[] } | null = null,
-  providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean }[] | null = null,
+  providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean }[] | null = null,
 ): Screen {
   const keysCard =
     providerKeys === null || csrf === ""
@@ -9578,13 +9591,21 @@ function settingsPage(
               `<input type="hidden" name="provider" value="${escape(one.provider)}">`,
               `<p class="row"><strong>${escape(one.provider)}</strong> <span class="mono meta">${escape(one.envName)}</span> ` +
                 `<span class="meta">${
+                  one.mode === "subscription" ? "uses its own login" : "uses the API key"
+                } \u00b7 ${
                   one.set
-                    ? `set ${one.updatedAt === null ? "" : escape(one.updatedAt.slice(0, 16).replace("T", " "))} — saving replaces it`
+                    ? `key stored${one.updatedAt === null ? "" : ` ${escape(one.updatedAt.slice(0, 10))}`}`
                     : one.ambient
-                      ? "not stored here, but present in this server's environment"
-                      : "not set"
+                      ? "key in this server's environment"
+                      : "no key stored"
                 }</span></p>`,
-              `<label>key <input type="password" name="value" autocomplete="off"></label>`,
+              one.subscriptionCapable
+                ? `<label>sign-in<select name="auth-mode">` +
+                  `<option value="subscription"${one.mode === "subscription" ? " selected" : ""}>use my ${escape(one.provider)} subscription / login</option>` +
+                  `<option value="api-key"${one.mode === "api-key" ? " selected" : ""}>use the API key below</option>` +
+                  `</select></label>`
+                : "",
+              `<label>API key <span class="meta">(kept as your fallback; saving replaces it)</span><input type="password" name="value" autocomplete="off"></label>`,
               `<button type="submit">save</button>`,
               one.set
                 ? ` <button type="submit" formaction="/settings/provider-key-clear">remove the stored key</button>`

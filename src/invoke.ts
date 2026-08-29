@@ -17,7 +17,7 @@
  */
 
 import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
-import { readProviderKey, PROVIDER_KEY_ENV } from "./keys.js";
+import { readProviderKey, readAuthMode, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
 import { startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
@@ -156,18 +156,31 @@ export async function invokeAgent(
   // else's, and the plane's own env never needed to carry it. A key
   // already ambient in the environment keeps working; the managed file,
   // being deliberate, wins.
-  // The managed file WINS; ambient env is the fallback, made REAL by
-  // explicit re-supply (Codex gemini verify round 2, finding 5): passing
-  // the key through `env` survives resolveChildEnv's chat-key strip, so a
-  // provider whose key lives only in the environment still authenticates.
-  const managedKey = readProviderKey(spec.provider, keyHome) ?? (process.env[PROVIDER_KEY_ENV[spec.provider]] || null);
+  // Auth mode decides how the credential reaches the process (the operator
+  // keeps BOTH and prefers the subscription): in "api-key" mode the
+  // managed file wins, the ambient env is a real fallback (explicit
+  // re-supply survives resolveChildEnv's chat-key strip); in
+  // "subscription" mode the key is STRIPPED from the child so the CLI's
+  // own login is used — its key is retained, just not handed over.
+  const authMode = readAuthMode(spec.provider, keyHome);
+  const ownKeyEnv = OWN_KEY_ENV[spec.provider];
+  const managedKey =
+    authMode === "api-key"
+      ? readProviderKey(spec.provider, keyHome) ?? (process.env[PROVIDER_KEY_ENV[spec.provider]] || null)
+      : null;
   const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
     timeoutMs,
     ...(managedKey === null
       ? {}
       : { env: { ...(runOptions.env ?? {}), [PROVIDER_KEY_ENV[spec.provider]]: managedKey } }),
-    omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
+    omitEnv: [
+      ...(runOptions.omitEnv ?? []),
+      ...adapter.extraOmitEnv,
+      // Subscription mode: shed this provider's OWN key too, so an ambient
+      // one cannot force API billing over the login the operator prefers.
+      ...(authMode === "subscription" ? ownKeyEnv : []),
+    ],
     // Providers run in their own process group (M6.12): the harness spawns
     // shells and tools of its own, and both the timeout and the watch's
     // hard stop must end the whole tree, not orphan the grandchildren.
@@ -305,12 +318,18 @@ export async function invokeHeldAgent(
   // The stamp precedes the spawn — same direction as the one-shot gateway.
   store.stampProviderStart(runId, clock());
 
-  const heldKey = readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null);
+  const heldMode = readAuthMode("claude", keyHome);
+  const heldKey =
+    heldMode === "api-key" ? readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null) : null;
   const start = starter ?? startClaudeHeldSession;
   return start(adapter.binary, argv, {
     ...runOptions,
     ...(heldKey === null ? {} : { env: { ...(runOptions.env ?? {}), [PROVIDER_KEY_ENV.claude]: heldKey } }),
-    omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
+    omitEnv: [
+      ...(runOptions.omitEnv ?? []),
+      ...adapter.extraOmitEnv,
+      ...(heldMode === "subscription" ? OWN_KEY_ENV.claude : []),
+    ],
     socketPath,
     cookie,
     ...(graceMs === undefined ? {} : { graceMs }),

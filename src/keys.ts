@@ -19,7 +19,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderId } from "./provider.js";
 
-/** The ONE env name each provider's own harness reads its key from. */
+/** The ONE env name each provider's own harness reads its key from —
+ * where a managed key is INJECTED. */
 export const PROVIDER_KEY_ENV: Record<ProviderId, string> = {
   claude: "ANTHROPIC_API_KEY",
   codex: "OPENAI_API_KEY",
@@ -27,8 +28,77 @@ export const PROVIDER_KEY_ENV: Record<ProviderId, string> = {
   gemini: "GEMINI_API_KEY",
 };
 
+/** EVERY env name a provider reads its OWN key from — what subscription
+ * mode STRIPS so an ambient key cannot override the login. gemini reads
+ * two; the rest read one. */
+export const OWN_KEY_ENV: Record<ProviderId, readonly string[]> = {
+  claude: ["ANTHROPIC_API_KEY"],
+  codex: ["OPENAI_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+};
+
 export function keysDir(home: string = homedir()): string {
   return join(home, ".standing-orders", "keys");
+}
+
+/**
+ * How a provider authenticates (the operator's ruling 2026-08-29: keep
+ * BOTH, prefer the subscription). "subscription" uses the CLI's OWN login
+ * — a Claude/ChatGPT plan, a Google cached login — and the API key is
+ * kept but NOT handed to the process, so its own auth wins. "api-key"
+ * hands the stored (or ambient) key to the process. openrouter has no
+ * login and is always api-key.
+ */
+export type AuthMode = "subscription" | "api-key";
+
+/** Providers that CAN authenticate without an API key (a subscription or
+ * cached login). openrouter cannot — it is api-key only. */
+export const SUBSCRIPTION_CAPABLE: Record<ProviderId, boolean> = {
+  claude: true,
+  codex: true,
+  gemini: true,
+  openrouter: false,
+};
+
+/** The default when nothing is set: subscription where it exists (prefer
+ * the plan the operator already pays for), api-key otherwise. */
+export const DEFAULT_AUTH_MODE: Record<ProviderId, AuthMode> = {
+  // Claude and Codex have first-class subscriptions most operators
+  // already pay for — prefer them. Gemini support here is key-based (a
+  // Google cached login is possible but not our road), and openrouter is
+  // key-only — both default to the key. Every default is switchable.
+  claude: "subscription",
+  codex: "subscription",
+  gemini: "api-key",
+  openrouter: "api-key",
+};
+
+function authModeFileFor(provider: ProviderId, home: string): string {
+  return join(keysDir(home), `${provider}.auth`);
+}
+
+export function readAuthMode(provider: ProviderId, home: string = homedir()): AuthMode {
+  if (!SUBSCRIPTION_CAPABLE[provider]) return "api-key";
+  try {
+    const value = readFileSync(authModeFileFor(provider, home), "utf8").trim();
+    return value === "api-key" ? "api-key" : "subscription";
+  } catch {
+    return DEFAULT_AUTH_MODE[provider];
+  }
+}
+
+export function setAuthMode(
+  provider: ProviderId,
+  mode: AuthMode,
+  home: string = homedir(),
+): { ok: true } | { ok: false; reason: "no-subscription" } {
+  if (mode === "subscription" && !SUBSCRIPTION_CAPABLE[provider]) {
+    return { ok: false, reason: "no-subscription" };
+  }
+  mkdirSync(keysDir(home), { recursive: true, mode: 0o700 });
+  writeFileSync(authModeFileFor(provider, home), mode, { mode: 0o600 });
+  return { ok: true };
 }
 
 export function keyFileFor(provider: ProviderId, home: string = homedir()): string {
@@ -143,7 +213,12 @@ export async function verifyProviderKey(
     } catch {
       body = "";
     }
-    if (/api[_ ]?key|api key not valid|invalid.*key|unauthenticated|authentication/.test(body)) {
+    // A 400 is a rejection ONLY with an actual NEGATIVE marker near the
+    // key/auth phrase (round 3, finding 6) — "API key not valid" rejects,
+    // but "API key accepted; malformed page size" does not.
+    const negativeAuth =
+      /(api[ _]?key[^.]{0,30}(invalid|not valid|expired|missing|revoked))|((invalid|expired|missing|revoked)[^.]{0,20}api[ _]?key)|unauthenticated|permission[ _]denied|invalid authentication|api_key_invalid/;
+    if (negativeAuth.test(body)) {
       return { ok: false, reason: "rejected", status: 400 };
     }
     return { ok: false, reason: "unexpected", status: 400 };

@@ -242,6 +242,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("keys set", "store a provider's API key as a private file — piped or --key-file, never on the command line"),
   operator("keys clear", "remove a stored provider key; an environment variable takes over if one exists"),
   operatorRead("keys verify", "check a stored key against its provider live — spends no tokens"),
+  operator("keys auth", "choose subscription vs API key for a provider (subscription is the default; the key is kept as fallback)"),
   operatorRead("people list", "everyone who can sign in, their standing, and the open invites"),
   operator("people invite", "mint a single-use sign-in link for one person — their powers are pinned when you mint, never after"),
   operator("people revoke", "end a person's access — their sessions, invites, and signed modes end with them; history stays"),
