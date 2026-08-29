@@ -140,6 +140,7 @@ import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
+import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, saveProviderKey } from "./keys.js";
 import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
@@ -1664,10 +1665,18 @@ export function createDecisionServer(options: ServeOptions): Server {
         available: options.publicUrl !== undefined || (request.headers.host ?? "").startsWith("localhost") || (request.headers.host ?? "").startsWith("127.0.0.1"),
         devices: who.via === "cookie" ? store.listPushSubscriptions(who.name) : [],
       };
+      const providerKeys = who.role !== "approver"
+        ? null
+        : (PROVIDER_IDS as readonly string[]).map(provider => ({
+            provider,
+            envName: PROVIDER_KEY_ENV[provider as "claude"],
+            ...keyStatus(provider as "claude"),
+            ambient: (process.env[PROVIDER_KEY_ENV[provider as "claude"]] ?? "") !== "",
+          }));
       return sendScreen(
         response,
         200,
-        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push),
+        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys),
       );
     }
 
@@ -2932,6 +2941,23 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       savePrimary(options.configDir, wanted);
       return redirect(response, "/settings");
+    }
+
+    if (url.pathname === "/settings/provider-key" || url.pathname === "/settings/provider-key-clear") {
+      // The central gate already required an ACTIVE approver; the value is
+      // write-only from here — status pages say set/not-set, never bytes.
+      const provider = body.get("provider") ?? "";
+      if (!isProviderId(provider)) return refuse(response, who, 400, "unknown provider", "/settings");
+      if (url.pathname === "/settings/provider-key-clear") {
+        const cleared = clearProviderKey(provider);
+        return redirect(response, `/settings?said=${encodeURIComponent(cleared ? `the ${provider} key is removed — an environment variable, if one exists, takes over` : "no stored key to remove")}`);
+      }
+      const value = body.get("value") ?? "";
+      const saved = saveProviderKey(provider, value);
+      if (!saved.ok) {
+        return refuse(response, who, 400, "that does not look like an API key — check the paste and try again", "/settings");
+      }
+      return redirect(response, `/settings?said=${encodeURIComponent(`the ${provider} key is stored — new ${provider} work uses it from the next spawn`)}`);
     }
 
     if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {
@@ -9533,7 +9559,36 @@ function settingsPage(
   problem: string | null,
   messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
   push: { available: boolean; devices: PushSubscription[] } | null = null,
+  providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean }[] | null = null,
 ): Screen {
+  const keysCard =
+    providerKeys === null || csrf === ""
+      ? ""
+      : [
+          "<h2>provider API keys</h2>",
+          `<p class="meta">stored as private files on this machine, handed to exactly their own provider's process at spawn — never shown back, never in the database, and every other provider's process is stripped of them. Claude and Codex usually sign in with their own apps; keys here are for API billing, OpenRouter, and Gemini.</p>`,
+          ...providerKeys.map(one =>
+            [
+              `<form method="post" action="/settings/provider-key" class="card">`,
+              `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+              `<input type="hidden" name="provider" value="${escape(one.provider)}">`,
+              `<p class="row"><strong>${escape(one.provider)}</strong> <span class="mono meta">${escape(one.envName)}</span> ` +
+                `<span class="meta">${
+                  one.set
+                    ? `set ${one.updatedAt === null ? "" : escape(one.updatedAt.slice(0, 16).replace("T", " "))} — saving replaces it`
+                    : one.ambient
+                      ? "not stored here, but present in this server's environment"
+                      : "not set"
+                }</span></p>`,
+              `<label>key <input type="password" name="value" autocomplete="off"></label>`,
+              `<button type="submit">save</button>`,
+              one.set
+                ? ` <button type="submit" formaction="/settings/provider-key-clear">remove the stored key</button>`
+                : "",
+              `</form>`,
+            ].join("\n"),
+          ),
+        ].join("\n");
   const pushCard =
     push === null || csrf === ""
       ? ""
@@ -9621,6 +9676,7 @@ function settingsPage(
   return screen("settings", [
     "<h1>settings</h1>",
     pushCard,
+    keysCard,
     messagingCard,
     "<h2>telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,

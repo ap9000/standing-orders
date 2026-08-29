@@ -17,6 +17,7 @@
  */
 
 import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
+import { readProviderKey, PROVIDER_KEY_ENV } from "./keys.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
 import { startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
@@ -89,7 +90,7 @@ export async function invokeAgent(
   runId: number,
   spec: AgentSpec,
   invocation: Omit<Invocation, "model">,
-  options: RunOptions & { runner?: ProviderRunner; clock?: () => Date; versionProbe?: VersionProbe },
+  options: RunOptions & { runner?: ProviderRunner; clock?: () => Date; versionProbe?: VersionProbe; keyHome?: string },
 ): Promise<InvokeResult> {
   const clock = options.clock ?? (() => new Date());
   const run = store.getRun(runId);
@@ -140,12 +141,21 @@ export async function invokeAgent(
   if (attested !== null) store.stampProviderStart(runId, clock(), attested.version);
   else store.stampProviderStart(runId, clock());
 
-  const { runner, clock: _clock, versionProbe: _probe, ...runOptions } = options;
+  const { runner, clock: _clock, versionProbe: _probe, keyHome, ...runOptions } = options;
   const spawn = runner ?? adapter.defaultRunner;
   // B3: the attested executable IS the spawned executable — one resolution.
+  // A MANAGED key reaches exactly its own provider's child environment
+  // (keys.ts): the foreign-credential strip already shed everybody
+  // else's, and the plane's own env never needed to carry it. A key
+  // already ambient in the environment keeps working; the managed file,
+  // being deliberate, wins.
+  const managedKey = readProviderKey(spec.provider, keyHome);
   const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
     timeoutMs,
+    ...(managedKey === null
+      ? {}
+      : { env: { ...(runOptions.env ?? {}), [PROVIDER_KEY_ENV[spec.provider]]: managedKey } }),
     omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
     // Providers run in their own process group (M6.12): the harness spawns
     // shells and tools of its own, and both the timeout and the watch's
@@ -283,9 +293,11 @@ export async function invokeHeldAgent(
   // The stamp precedes the spawn — same direction as the one-shot gateway.
   store.stampProviderStart(runId, clock());
 
+  const heldKey = readProviderKey("claude");
   const start = starter ?? startClaudeHeldSession;
   return start(adapter.binary, argv, {
     ...runOptions,
+    ...(heldKey === null ? {} : { env: { ...(runOptions.env ?? {}), [PROVIDER_KEY_ENV.claude]: heldKey } }),
     omitEnv: [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv],
     socketPath,
     cookie,

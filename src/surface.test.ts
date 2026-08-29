@@ -12,7 +12,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMMAND_GUIDE, SURFACE_NOTES } from "./surface.js";
 import {
-  TASK_ACTIONS, PUBLISH_ACTIONS, CONFIG_ACTIONS, APPROVER_ACTIONS, PEOPLE_ACTIONS,
+  TASK_ACTIONS, PUBLISH_ACTIONS, CONFIG_ACTIONS, APPROVER_ACTIONS, PEOPLE_ACTIONS, KEYS_ACTIONS,
   ROUTINE_ACTIONS, CONTEST_ACTIONS, OPERATE_VALUE_FLAGS, OPERATE_BOOLEAN_FLAGS,
 } from "./operate.js";
 import { OPERATE_COMMANDS, TOP_LEVEL_COMMANDS, SKILLS_ACTIONS, SKILLS_FLAGS, CONTRACT_FLAGS, main } from "./cli.js";
@@ -51,6 +51,7 @@ describe("the declared command guide, held to the code", () => {
     expect([...subs("routine")].sort()).toEqual([...ROUTINE_ACTIONS].sort());
     expect([...subs("contest")].sort()).toEqual([...CONTEST_ACTIONS].sort());
     expect([...subs("people")].sort()).toEqual([...PEOPLE_ACTIONS].sort());
+    expect([...subs("keys")].sort()).toEqual([...KEYS_ACTIONS].sort());
     expect([...subs("skills")].sort()).toEqual([...SKILLS_ACTIONS].sort());
   });
 

@@ -155,6 +155,7 @@ describe("the machine envelope", () => {
       config: ["show", "--json"],
       mode: ["show", "--repo", "/nope", "--json"],
       people: ["list", "--json"],
+      keys: ["status", "--json"],
       setup: ["show", "--json"],
       intake: ["show", "--json"],
       providers: ["--json"],

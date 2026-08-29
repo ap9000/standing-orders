@@ -1,5 +1,26 @@
 # Progress
 
+**2026-08-29 — Managed provider keys: the environment stops being the
+key store.** The gemini onboarding exposed the gap: every provider key
+was ambient environment, hand-edited into shell profiles, invisible to
+the product. Now src/keys.ts owns them — one 0600 file per provider
+under ~/.standing-orders/keys/, written from the settings card or piped
+into `standing-orders keys set <provider>` (stdin or --key-file; a key
+on an argv is visible to every process list, so that road does not
+exist). Surfaces are WRITE-ONLY: status says stored/environment-only/
+not-set with a date — never the value, never a prefix, never a length.
+The invocation gateway injects a stored key into EXACTLY its own
+provider's child environment at spawn (held claude sessions included),
+where the symmetric foreign-credential strip has already shed everybody
+else's — so the plane's own process no longer needs any key in its
+environment, a rotation is a file write that applies at the next spawn
+with no restart, and an ambient variable keeps working as the fallback
+it always was (the managed file, being deliberate, wins). Settings card
++ keys CLI (status/set/clear) + four tests (0600 round trip, implausible
+paste refusal, injection with strips proven, no-key-no-injection).
+Suite 1375.
+
+
 **2026-08-29 — Gemini live-auth spikes S1–S4, run against the real CLI
 (0.57.0, exactly the attested version).** The API key arrived and the
 four questions the adapter shipped with got their live answers. S1

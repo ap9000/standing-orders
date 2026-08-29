@@ -230,7 +230,7 @@ export const OPERATE_COMMANDS = new Set([
   "publish",
   "reconcile",
   "routine",
-  "config", "mode", "people",
+  "config", "mode", "people", "keys",
   "setup",
   "intake",
   "providers",

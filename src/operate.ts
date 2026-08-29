@@ -162,6 +162,7 @@ import {
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
 import { reviewPass } from "./reviewer.js";
+import { PROVIDER_KEY_ENV, clearProviderKey, keyStatus, saveProviderKey } from "./keys.js";
 import { run, terminateLiveProviders } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
@@ -448,6 +449,7 @@ export const APPROVER_ACTIONS = ["list", "add"] as const;
 export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "pause", "resume", "run-now"] as const;
 export const CONTEST_ACTIONS = ["show", "exclude"] as const;
 export const PEOPLE_ACTIONS = ["list", "invite", "revoke"] as const;
+export const KEYS_ACTIONS = ["status", "set", "clear"] as const;
 
 /**
  * The GLOBAL flag vocabulary (exported for the command guide's drift
@@ -465,7 +467,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "stop-grace", "title", "name",
-  "label", "reviewers", "limit", "role", "weekly-usd", "daily-turns", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
+  "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
@@ -681,6 +683,8 @@ async function dispatch(
       return modeCommand(positional, flags, context);
     case "people":
       return peopleCommand(positional, flags, context);
+    case "keys":
+      return keysCommand(positional, flags, context);
     case "setup":
       return setupCommand(positional, flags, context);
     case "intake":
@@ -3757,6 +3761,79 @@ async function providersCommand(
  * anything that can run a shell reroute every future build. Rows are
  * complete pairs; `show` prints what each phase actually resolves to.
  */
+/**
+ * `standing-orders keys …` — provider API keys as managed files, never
+ * ambient environment. The value NEVER rides an argv (visible in ps):
+ * `set` reads it from --key-file or stdin. Authority is the filesystem's
+ * own — these are 0600 files under the operator's home, and whoever can
+ * write them already owns the machine's spend.
+ */
+async function keysCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { write, json } = context;
+  const [action, provider] = positional;
+  if (action === undefined || !(KEYS_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "keys", "usage", `unknown \`keys ${action ?? ""}\` — try ${KEYS_ACTIONS.join(", ")}`, EXIT.usage);
+  }
+  if (action === "status") {
+    const rows = PROVIDER_IDS.map(one => ({
+      provider: one,
+      envName: PROVIDER_KEY_ENV[one],
+      ...keyStatus(one),
+      ambient: (process.env[PROVIDER_KEY_ENV[one]] ?? "") !== "",
+    }));
+    if (json) {
+      write(envelopeJson({ ok: true, command: "keys status", keys: rows }));
+      return EXIT.ok;
+    }
+    for (const row of rows) {
+      const state = row.set
+        ? `stored${row.updatedAt === null ? "" : ` (${row.updatedAt.slice(0, 10)})`}`
+        : row.ambient
+          ? "environment only"
+          : "not set";
+      write(`  ${row.provider.padEnd(12)} ${row.envName.padEnd(22)} ${state}`);
+    }
+    write("  → stored keys reach exactly their own provider's process; every other spawn is stripped of them");
+    return EXIT.ok;
+  }
+  if (provider === undefined || !isProviderId(provider)) {
+    return fail(write, json, `keys ${action}`, "usage", `which provider? ${PROVIDER_IDS.join(", ")}`, EXIT.usage);
+  }
+  if (action === "clear") {
+    const cleared = clearProviderKey(provider);
+    return succeed(write, json, "keys clear", { provider, cleared }, () => [
+      cleared ? `The ${provider} key is removed — an environment variable, if one exists, takes over.` : "No stored key to remove.",
+    ]);
+  }
+  const file = text(flags, "key-file");
+  let value: string;
+  if (file !== undefined) {
+    try {
+      value = readFileSync(file, "utf8");
+    } catch {
+      return fail(write, json, "keys set", "usage", `cannot read \`${file}\``, EXIT.usage);
+    }
+  } else {
+    if (process.stdin.isTTY) {
+      return fail(write, json, "keys set", "usage", "pipe the key in (\`standing-orders keys set gemini < key.txt\` or via --key-file) — a key on an argv is visible to every process list", EXIT.usage);
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+    value = Buffer.concat(chunks).toString("utf8");
+  }
+  const saved = saveProviderKey(provider, value);
+  if (!saved.ok) {
+    return fail(write, json, "keys set", "implausible", "that does not look like an API key — check the paste", EXIT.refused);
+  }
+  return succeed(write, json, "keys set", { provider }, () => [
+    `The ${provider} key is stored (a private file, handed only to ${provider}'s own process at spawn).`,
+  ]);
+}
+
 /**
  * `standing-orders people …` — who can sign in, and the doors in (v29,
  * U2/U3/D7). `invite` mints the single-use join link (approver-only, no
