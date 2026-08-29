@@ -1,5 +1,32 @@
 # Progress
 
+**2026-08-29 — Fallback chains E2–E3c review: 7 findings closed (2 CRITICAL).**
+Codex reviewed the live-path integration and confirmed the core (E3a seal,
+E3b/c immutability, fenced-walk atomicity, E2 placement) but found real
+gaps — all closed here except the two that belong to E3d, now scoped:
+(1 CRITICAL) the test recognizer seam shipped in dist and could disable
+fail-closed — REMOVED entirely; exhaustion.ts now has NO mutation surface,
+the suite proves the eligible path by MOCKING the module, and an
+architecture test forbids any `__`-export/`let recognizerLookup`/NUL byte.
+(2 CRITICAL) a stale/changed approval stayed usable — approvedChainOf now
+proves approved_digest===digest AND re-derives digestOf(fields,{chain})===
+approved_digest, and advanceChainIfExhausted proves cycle.chainDigest===
+chainDigestOf(chain); a rewritten scope loses fallback authority. (4 HIGH)
+grant TOCTOU — advanceChainIfExhausted now re-reads the LIVE signed mode's
+allowPaidFallback INSIDE its transaction (takes repo, not a precomputed
+boolean). (7 HIGH) it now proves the predecessor genuinely finished
+(outcome + finished_at + provider_started_at, matching task_ref) before
+advancing. (8 MED) C8 upgraded to recognizesEligible(provider,version,
+authMode) — exact per class/auth — plus classMatchesAuthMode consistency
+and a first-write terminal_class stamp that never overwrites a pinned
+auth_mode. (3 HIGH, partial) openChainCycleForDispatch refuses to re-tag a
+concluded tail and incidents on a chain-digest mismatch; the crash
+reconciler is E3d. (9 MED) the NUL-key seam is gone. DEFERRED TO E3d (per
+findings 5/6): the whole-entry pin (auth mode included) + gateway
+auth-mode-equals-pin, and the chain-aware dispatch proof that lets even the
+BASE entry of a chain approval run (today proveApprovedProfile would
+stale-approve it). Suite 1443.
+
 **2026-08-29 — Fallback chains, layer E3c: the exhaustion→advance decision
 at disposition.** The tick now, at every base/fallback run's disposition,
 closes the chain cycle on success and offers a non-parked end to

@@ -2449,19 +2449,13 @@ async function tickCommand(
     // single-profile task has no cycle, so every call is a fast no-op.
     // A success closes the cycle; a non-parked end offers it to the
     // exhaustion-advance gate, which is itself fail-closed (it advances only
-    // on an eligible class this build still recognizes, with the operator's
-    // paid-fallback grant, and a next entry left in the approved chain).
-    {
-      const chainNow = clock();
-      const paidGrant =
-        repo === null
-          ? false
-          : modeTermsFromJson(store.activeMode(repo, chainNow)?.termsJson ?? null)?.allowPaidFallback === true;
-      if (disposition.kind === "built") {
-        store.closeChainCycleOnTerminal(ref.id, "succeeded", chainNow);
-      } else if (disposition.kind !== "parked") {
-        store.advanceChainIfExhausted(ref.id, id, runId, paidGrant, chainNow);
-      }
+    // on an eligible class this build still recognizes for the run's auth
+    // mode, with the LIVE signed paid-fallback grant re-proved in its own
+    // transaction, and a next entry left in the approved chain).
+    if (disposition.kind === "built") {
+      store.closeChainCycleOnTerminal(ref.id, "succeeded", clock());
+    } else if (disposition.kind !== "parked") {
+      store.advanceChainIfExhausted(ref.id, id, repo, runId, clock());
     }
 
     switch (disposition.kind) {

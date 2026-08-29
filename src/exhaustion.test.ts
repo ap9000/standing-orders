@@ -6,7 +6,9 @@
  */
 
 import { describe, test, expect } from "vitest";
-import { classifyTerminal, hasRecognizer, isFallbackEligible, FALLBACK_ELIGIBLE } from "./exhaustion.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { classifyTerminal, hasRecognizer, isFallbackEligible, FALLBACK_ELIGIBLE, recognizesEligible, classMatchesAuthMode } from "./exhaustion.js";
 
 describe("the exhaustion taxonomy is fail-closed by construction", () => {
   test("no build ships a recognizer yet — every provider/version is unfixtured", () => {
@@ -72,5 +74,33 @@ describe("the exhaustion taxonomy is fail-closed by construction", () => {
     expect(isFallbackEligible("transient-throttle")).toBe(false);
     expect(isFallbackEligible("not-exhausted")).toBe(false);
     expect(isFallbackEligible("unknown")).toBe(false);
+  });
+
+  test("the module ships NO recognizer-mutation surface — a fixture is a source edit, not a runtime call (finding 1)", () => {
+    // The one place fail-closed could be defeated is a runtime installer. The
+    // source must carry no such export, and no `let`-bound swappable lookup.
+    const source = readFileSync(join(import.meta.dirname, "exhaustion.ts"), "utf8");
+    expect(source).not.toMatch(/export\s+(function|const)\s+__/);
+    expect(source).not.toMatch(/\binstallRecognizer\b/i);
+    expect(source).not.toMatch(/let\s+recognizerLookup/);
+    // And the module is byte-clean: no literal NUL that would hide a diff.
+    expect(source.includes(String.fromCharCode(0))).toBe(false);
+  });
+
+  test("recognizesEligible is exact per (provider, version, auth mode) and fails closed", () => {
+    for (const provider of ["claude", "codex", "openrouter", "gemini"] as const) {
+      expect(recognizesEligible(provider, "0.57.0", "subscription")).toBe(false);
+      expect(recognizesEligible(provider, "0.57.0", "api-key")).toBe(false);
+      expect(recognizesEligible(provider, null, "subscription")).toBe(false);
+    }
+  });
+
+  test("classMatchesAuthMode enforces usage⇔subscription, credits⇔api-key", () => {
+    expect(classMatchesAuthMode("usage-exhausted", "subscription")).toBe(true);
+    expect(classMatchesAuthMode("usage-exhausted", "api-key")).toBe(false);
+    expect(classMatchesAuthMode("credits-depleted", "api-key")).toBe(true);
+    expect(classMatchesAuthMode("credits-depleted", "subscription")).toBe(false);
+    expect(classMatchesAuthMode("not-exhausted", "subscription")).toBe(false);
+    expect(classMatchesAuthMode("unknown", "api-key")).toBe(false);
   });
 });

@@ -34,7 +34,8 @@ import { hasForbiddenControls, validateNote } from "./decision.js";
 import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
 import { readAuthMode } from "./keys.js";
-import { isFallbackEligible, hasRecognizer, type TerminalClass } from "./exhaustion.js";
+import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
+import { modeTermsFromJson } from "./modes.js";
 import type { ProviderId } from "./provider.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
@@ -6521,7 +6522,25 @@ export class Store {
   approvedChainOf(taskId: string): ChainEntry[] | null {
     const scope = this.getScope(taskId);
     if (scope === null || scope.approvalKind !== "chain" || scope.approvedChainJson == null) return null;
-    return chainFromJson(scope.approvedChainJson);
+    // The approval must still STAND (Codex E2/E3 review, finding 2): a scope
+    // rewritten without reapproval has withdrawn its authority — chain
+    // snapshot included — so a stale approved_chain_json can never remain
+    // fallback authority. approvedDigest === digest is the same freshness the
+    // build gate proves.
+    if (scope.approvedAt === null || scope.approvedDigest === null || scope.approvedDigest !== scope.digest) {
+      return null;
+    }
+    const chain = chainFromJson(scope.approvedChainJson);
+    if (chain === null) return null;
+    // The snapshot must be the one the SIGNED digest binds — recompute from
+    // the current scope fields + this chain and require an exact match, so a
+    // snapshot that does not correspond to the approved digest never governs.
+    const rederived = digestOf(
+      { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+      { chain },
+    );
+    if (rederived !== scope.approvedDigest) return null;
+    return chain;
   }
 
   /**
@@ -6546,13 +6565,25 @@ export class Store {
       if (opened.ok) return opened.id;
       const existing = this.fallbackCycleFor(taskRef);
       if (existing === null) return null;
-      // A digest mismatch means the open cycle belongs to a DIFFERENT approved
-      // chain than the one now dispatching — never silently re-tag across it.
-      if (existing.chainDigest !== digest) return existing.id;
-      if (existing.state === "open") {
-        this.db
-          .prepare("UPDATE fallback_cycle SET tail_run = ?, updated_at = ? WHERE id = ? AND state = 'open'")
-          .run(runId, now.toISOString(), existing.id);
+      // A cycle bound to a DIFFERENT approved chain than the one now
+      // dispatching is stale authority (Codex E2/E3 review, finding 2/3):
+      // incident it so a human sees why, and govern NOTHING this dispatch —
+      // the next opens fresh under the new chain.
+      if (existing.chainDigest !== digest) {
+        this.incidentFallback(existing.id, existing.transitionGeneration, "chain-digest-changed-under-open-cycle", now);
+        return null;
+      }
+      // Re-tag the tail to the live run ONLY when the cycle is open AND its
+      // current tail is NOT a concluded-but-unsettled run: overwriting a
+      // finished predecessor would lose its exhaustion advance (finding 3).
+      // A concluded tail is left as-is for the reconciler (E3d) to resolve.
+      if (existing.state === "open" && existing.tailRun !== null) {
+        const tail = this.getRun(existing.tailRun);
+        if (tail !== null && tail.outcome === null) {
+          this.db
+            .prepare("UPDATE fallback_cycle SET tail_run = ?, updated_at = ? WHERE id = ? AND state = 'open'")
+            .run(runId, now.toISOString(), existing.id);
+        }
       }
       return existing.id;
     });
@@ -6593,13 +6624,13 @@ export class Store {
   advanceChainIfExhausted(
     taskRef: number,
     taskId: string,
+    repo: string | null,
     finishedRunId: number,
-    allowPaidFallback: boolean,
     now: Date,
   ):
     | { kind: "advanced"; toIndex: number }
     | { kind: "exhausted-end" }
-    | { kind: "blocked"; reason: "no-recognizer" | "grant-withheld" | "corrupt-chain" }
+    | { kind: "blocked"; reason: "no-recognizer" | "grant-withheld" | "corrupt-chain" | "cycle-mismatch" }
     | { kind: "not-eligible" }
     | { kind: "no-cycle" } {
     try {
@@ -6610,26 +6641,56 @@ export class Store {
         }
         const run = this.getRun(finishedRunId);
         if (run === null) return { kind: "no-cycle" as const };
+        // The predecessor must be genuinely FINISHED (Codex E2/E3 review,
+        // finding 7): a run whose outcome is still open — or that never
+        // spawned a provider — is live custody, and advancing off it could
+        // start the next entry beside a running predecessor. Its task must be
+        // this task, too.
+        if (run.taskRef !== taskRef || run.outcome === null || run.finishedAt === null || run.providerStartedAt === null) {
+          return { kind: "no-cycle" as const };
+        }
         const cls: TerminalClass = run.terminalClass ?? "unknown";
         if (!isFallbackEligible(cls)) return { kind: "not-eligible" as const };
-        // C8 re-check at the authority point: the class was honest at stamp
-        // time, but a build downgraded to one with no fixture for this exact
-        // (provider, version) must NOT advance — sever it, loudly.
-        if (!hasRecognizer(run.provider as ProviderId, run.providerVersion)) {
+        const authMode = run.authMode ?? "subscription";
+        // The class/auth pairing must be internally consistent (finding 8): a
+        // usage-exhausted stamp on an api-key run (or the reverse) is a
+        // corrupt record, never an advance.
+        if (!classMatchesAuthMode(cls, authMode)) return { kind: "not-eligible" as const };
+        // C8 re-check at the authority point (findings 1/8): THIS build must
+        // recognize the EXACT eligible class for this auth mode — not merely
+        // "some eligible recognizer exists." A build with no such fixture
+        // (every real build) severs the cycle to incident, loudly.
+        if (!recognizesEligible(run.provider as ProviderId, run.providerVersion, authMode)) {
           this.incidentFallback(cycle.id, cycle.transitionGeneration, "recognizer-absent-at-advance", now);
           return { kind: "blocked" as const, reason: "no-recognizer" as const };
         }
-        if (!allowPaidFallback) {
-          // The mode never granted a paid fallback: the cycle ends here,
-          // cleanly, and the run disposes as the ordinary exhaustion it is.
+        // The paid-fallback grant is re-proved from the LIVE signed mode
+        // INSIDE this transaction (finding 4): a boolean read before the
+        // transaction is a TOCTOU — a mode revoked or replaced meanwhile must
+        // deny the advance.
+        const liveGrant =
+          repo === null
+            ? false
+            : modeTermsFromJson(this.activeMode(repo, now)?.termsJson ?? null)?.allowPaidFallback === true;
+        if (!liveGrant) {
+          // No live grant: the cycle ends here, cleanly, and the run disposes
+          // as the ordinary exhaustion it is.
           this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "grant-withheld", now);
           return { kind: "blocked" as const, reason: "grant-withheld" as const };
         }
         const chain = this.approvedChainOf(taskId);
         if (chain === null) {
-          // A chain we can no longer re-derive is never advanced on.
+          // A chain we can no longer re-derive (or whose approval was
+          // withdrawn) is never advanced on.
           this.incidentFallback(cycle.id, cycle.transitionGeneration, "approved-chain-unrehydratable", now);
           return { kind: "blocked" as const, reason: "corrupt-chain" as const };
+        }
+        // The open cycle must belong to THIS approved chain (finding 2,
+        // scenario B): a scope reapproved under a different chain must not
+        // let an old cycle admit into the new one.
+        if (cycle.chainDigest !== chainDigestOf(chain)) {
+          this.incidentFallback(cycle.id, cycle.transitionGeneration, "cycle-chain-digest-mismatch", now);
+          return { kind: "blocked" as const, reason: "cycle-mismatch" as const };
         }
         const chainLength = chain.length;
         if (cycle.cursor + 1 >= chainLength) {
@@ -9580,8 +9641,14 @@ export class Store {
    * re-proves hasRecognizer before any advance ever reads it.
    */
   stampTerminalClass(id: number, authMode: "subscription" | "api-key", terminalClass: TerminalClass): void {
+    // FIRST-WRITE only (Codex E2/E3 review, finding 8): the gateway stamps
+    // the disposal class exactly once, before disposition; nothing may
+    // overwrite it into a class/auth pairing the recognizer never produced.
+    // auth_mode is NEVER overwritten if already set — a fallback run's
+    // admitted pin is authority (finding 5), so COALESCE keeps it and only a
+    // never-stamped (base) run takes the gateway's mode.
     this.db
-      .prepare("UPDATE run SET auth_mode = ?, terminal_class = ? WHERE id = ?")
+      .prepare("UPDATE run SET auth_mode = COALESCE(auth_mode, ?), terminal_class = ? WHERE id = ? AND terminal_class IS NULL")
       .run(authMode, terminalClass, id);
   }
 
