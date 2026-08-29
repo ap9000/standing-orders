@@ -34,7 +34,8 @@ import { hasForbiddenControls, validateNote } from "./decision.js";
 import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
 import { readAuthMode } from "./keys.js";
-import type { TerminalClass } from "./exhaustion.js";
+import { isFallbackEligible, hasRecognizer, type TerminalClass } from "./exhaustion.js";
+import type { ProviderId } from "./provider.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
@@ -6555,6 +6556,119 @@ export class Store {
       }
       return existing.id;
     });
+  }
+
+  /** Close a task's OPEN chain cycle on a terminal disposition of its tail
+   * run — a success, or an ordinary (non-exhaustion) end of the road. A
+   * no-op when there is no open cycle, or when it is mid-advance (a
+   * concurrent advance owns the closure). */
+  closeChainCycleOnTerminal(taskRef: number, reason: string, now: Date): boolean {
+    const cycle = this.fallbackCycleFor(taskRef);
+    if (cycle === null || cycle.state !== "open") return false;
+    return this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, reason, now);
+  }
+
+  /**
+   * The exhaustion -> advance decision (E3c), run at the disposition of a
+   * chain run. FAIL CLOSED at every gate — it advances the cycle one step
+   * ONLY when ALL hold:
+   *   - an OPEN cycle exists whose tail is exactly this finished run;
+   *   - the run's gateway-stamped terminal class is fallback-ELIGIBLE;
+   *   - THIS BUILD still carries a fixture-backed recognizer for the run's
+   *     exact (provider, version) — the C8 re-check, so a downgrade since
+   *     the disposal stamp severs any in-flight authority (raises incident);
+   *   - the operator's live mode GRANTS a paid fallback (else the cycle ends
+   *     cleanly and the run disposes as the ordinary exhaustion it is);
+   *   - a next entry exists in the IMMUTABLE approved chain (else the chain
+   *     is spent: the exhausted-no-fallback terminal).
+   * It orchestrates the fenced custody walk — sanitize, advance,
+   * release-to-pending — atomically inside ONE transaction, so a lost inner
+   * CAS rolls the whole walk back rather than half-advancing. It NEVER
+   * dispatches: the next tick's admission creates the fallback run. The
+   * in-custody cleanup is intentionally empty here — the worktree was
+   * already released at disposition and the next entry leases a fresh tree
+   * from base, so the custody guarantee is the atomic transition, not file
+   * work.
+   */
+  advanceChainIfExhausted(
+    taskRef: number,
+    taskId: string,
+    finishedRunId: number,
+    allowPaidFallback: boolean,
+    now: Date,
+  ):
+    | { kind: "advanced"; toIndex: number }
+    | { kind: "exhausted-end" }
+    | { kind: "blocked"; reason: "no-recognizer" | "grant-withheld" | "corrupt-chain" }
+    | { kind: "not-eligible" }
+    | { kind: "no-cycle" } {
+    try {
+      return this.transact(() => {
+        const cycle = this.fallbackCycleFor(taskRef);
+        if (cycle === null || cycle.state !== "open" || cycle.tailRun !== finishedRunId) {
+          return { kind: "no-cycle" as const };
+        }
+        const run = this.getRun(finishedRunId);
+        if (run === null) return { kind: "no-cycle" as const };
+        const cls: TerminalClass = run.terminalClass ?? "unknown";
+        if (!isFallbackEligible(cls)) return { kind: "not-eligible" as const };
+        // C8 re-check at the authority point: the class was honest at stamp
+        // time, but a build downgraded to one with no fixture for this exact
+        // (provider, version) must NOT advance — sever it, loudly.
+        if (!hasRecognizer(run.provider as ProviderId, run.providerVersion)) {
+          this.incidentFallback(cycle.id, cycle.transitionGeneration, "recognizer-absent-at-advance", now);
+          return { kind: "blocked" as const, reason: "no-recognizer" as const };
+        }
+        if (!allowPaidFallback) {
+          // The mode never granted a paid fallback: the cycle ends here,
+          // cleanly, and the run disposes as the ordinary exhaustion it is.
+          this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "grant-withheld", now);
+          return { kind: "blocked" as const, reason: "grant-withheld" as const };
+        }
+        const chain = this.approvedChainOf(taskId);
+        if (chain === null) {
+          // A chain we can no longer re-derive is never advanced on.
+          this.incidentFallback(cycle.id, cycle.transitionGeneration, "approved-chain-unrehydratable", now);
+          return { kind: "blocked" as const, reason: "corrupt-chain" as const };
+        }
+        const chainLength = chain.length;
+        if (cycle.cursor + 1 >= chainLength) {
+          // Eligible, but the whole chain is spent — the exhausted terminal.
+          this.closeFallbackCycle(cycle.id, cycle.transitionGeneration, "chain-exhausted", now);
+          return { kind: "exhausted-end" as const };
+        }
+        const g0 = cycle.transitionGeneration;
+        if (!this.beginFallbackSanitize(cycle.id, g0, finishedRunId, now)) {
+          throw new Error("fallback sanitize lost its CAS");
+        }
+        const adv = this.advanceFallbackFenced(
+          {
+            cycleId: cycle.id,
+            expectGeneration: g0 + 1,
+            fromIndex: cycle.cursor,
+            chainLength,
+            predecessorRun: finishedRunId,
+            terminalClass: cls,
+            evidence: {
+              provider: run.provider,
+              version: run.providerVersion,
+              authMode: run.authMode ?? "subscription",
+              fp: "",
+            },
+          },
+          now,
+        );
+        if (!adv.ok) throw new Error(`fallback advance lost: ${adv.reason}`);
+        if (!this.releaseFallbackToPending(cycle.id, g0 + 2, now)) {
+          throw new Error("fallback release lost its CAS");
+        }
+        return { kind: "advanced" as const, toIndex: adv.toIndex };
+      });
+    } catch {
+      // A lost CAS rolled the whole walk back (the cycle is untouched at its
+      // generation): another authority raced us. Do nothing — next tick.
+      return { kind: "no-cycle" as const };
+    }
   }
 
   /**

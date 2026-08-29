@@ -1,5 +1,23 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layer E3c: the exhaustion→advance decision
+at disposition.** The tick now, at every base/fallback run's disposition,
+closes the chain cycle on success and offers a non-parked end to
+store.advanceChainIfExhausted — which is fail-closed at EVERY gate. It
+advances one fenced step (sanitize→advance→release-to-pending, atomically
+inside one transaction so a lost inner CAS rolls the whole walk back) ONLY
+when: an open cycle's tail is exactly this run; the run's gateway-stamped
+terminal class is fallback-ELIGIBLE; THIS build still carries a
+fixture-backed recognizer for the run's exact (provider, version) — the C8
+re-check, which severs to incident on a downgrade; the operator's live mode
+GRANTS allowPaidFallback (else the cycle ends clean and the run disposes as
+the ordinary exhaustion it is); and a next entry exists in the IMMUTABLE
+approved chain (else exhausted-end, closed). It NEVER dispatches — the next
+tick admits. To prove the ELIGIBLE path a production build (shipping no
+fixtures) can never reach, exhaustion.ts gained a clearly-marked TEST-ONLY
+recognizer-lookup seam (default = the empty registry, so fail-closed is
+untouched); tests install/reset it. Suite 1435 (+6 E3c tests).
+
 **2026-08-29 — Fallback chains, layer E3b: the coordinator opens the base
 cycle.** The tick now calls store.openChainCycleForDispatch right after it
 creates a base run: if the task's approval sealed an explicit chain, the

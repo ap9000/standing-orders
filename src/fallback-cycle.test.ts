@@ -10,6 +10,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { propose, approve, addApprover, chainFromJson, chainDigestOf } from "./scope.js";
+import { __installRecognizerForTest, __resetRecognizersForTest } from "./exhaustion.js";
 
 const T0 = new Date("2026-08-29T12:00:00.000Z");
 
@@ -262,5 +263,114 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     const c = store.fallbackCycleFor(ref)!;
     expect(c.tailRun).toBe(second); // re-tagged to the live run
     expect(c.cursor).toBe(0);
+  });
+});
+
+describe("advancing on exhaustion at disposition (E3c)", () => {
+  let store: Store;
+  const REPO = "/repos/chain";
+  const VERSION = "1.0.0";
+
+  // A recognizer that matches ANY failed terminal — the ELIGIBLE path a real
+  // build (shipping no fixtures) can never take. Installed per test, cleared
+  // in afterEach so the suite stays fail-closed by default.
+  const matchAll = { eligibleUsage: [/./], eligibleCredits: [/./], transient: [] as RegExp[] };
+
+  /** A chain-approved task with its base cycle open, and the base run stamped
+   * as the coordinator's gateway would have: an eligible exhaustion class,
+   * the proven version, the auth mode. */
+  const setup = (id: string) => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    store.createTask({ id, title: "w" }, T0);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: id, goal: "a guard", now: T0 });
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    expect(approve(store, id, "alex", T0, store.getScope(id)!.digest, added.token).ok).toBe(true);
+    const run = store.startRun({ taskRef: ref, leaseId: "l", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
+    store.openChainCycleForDispatch(ref, id, run, T0);
+    return { ref, run };
+  };
+
+  const stampExhausted = (run: number, cls: "usage-exhausted" | "credits-depleted" | "not-exhausted") => {
+    store.stampProviderVersion(run, VERSION);
+    store.stampTerminalClass(run, "subscription", cls);
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+  });
+  afterEach(() => {
+    __resetRecognizersForTest();
+    store.close();
+  });
+
+  test("eligible + recognized + granted + a next entry: sanitize→advance→pending, atomically", () => {
+    __installRecognizerForTest("claude", VERSION, matchAll);
+    const { ref, run } = setup("t-adv");
+    stampExhausted(run, "usage-exhausted");
+    const step = store.advanceChainIfExhausted(ref, "t-adv", run, true, T0);
+    expect(step).toEqual({ kind: "advanced", toIndex: 1 });
+    const c = store.fallbackCycleFor(ref)!;
+    expect(c).toMatchObject({ state: "pending-admission", cursor: 1, tailRun: null });
+  });
+
+  test("C8: an eligible class this build no longer recognizes NEVER advances — it severs to incident", () => {
+    // No recognizer installed: the class was (synthetically) stamped eligible,
+    // but hasRecognizer is false, so the advance is refused and paged.
+    const { ref, run } = setup("t-c8");
+    stampExhausted(run, "usage-exhausted");
+    const step = store.advanceChainIfExhausted(ref, "t-c8", run, true, T0);
+    expect(step).toEqual({ kind: "blocked", reason: "no-recognizer" });
+    expect(store.fallbackCycleFor(ref)).toBeNull(); // incident is not "live"
+  });
+
+  test("no grant: eligible + recognized but the mode never allowed a paid fallback — the cycle ends cleanly", () => {
+    __installRecognizerForTest("claude", VERSION, matchAll);
+    const { ref, run } = setup("t-nogrant");
+    stampExhausted(run, "usage-exhausted");
+    const step = store.advanceChainIfExhausted(ref, "t-nogrant", run, false, T0);
+    expect(step).toEqual({ kind: "blocked", reason: "grant-withheld" });
+    expect(store.fallbackCycleFor(ref)).toBeNull(); // closed, not incident
+  });
+
+  test("exhausted-end: eligible + recognized + granted but the whole chain is spent — the terminal, closed", () => {
+    __installRecognizerForTest("claude", VERSION, matchAll);
+    const { ref, run } = setup("t-end");
+    stampExhausted(run, "usage-exhausted");
+    // Advance off the base (cursor 0 -> pending at cursor 1).
+    expect(store.advanceChainIfExhausted(ref, "t-end", run, true, T0)).toEqual({ kind: "advanced", toIndex: 1 });
+    // Admit the fallback run (the last entry) at cursor 1.
+    const cyc = store.fallbackCycleFor(ref)!;
+    const txId = Number((store.raw().prepare("SELECT id FROM fallback_transition WHERE cycle = ? ORDER BY id DESC LIMIT 1").get(cyc.id) as { id: number }).id);
+    const admitted = store.admitFallback(
+      { cycleId: cyc.id, expectGeneration: cyc.transitionGeneration, expectCursor: 1, transitionId: txId, run: { taskRef: ref, leaseId: "lf", runner: "b-1", branch: "bf", worktree: "/wf", provider: "gemini", model: "gemini-2.5-pro" }, entryDigest: "e1", authMode: "api-key" },
+      T0,
+    );
+    expect(admitted.ok).toBe(true);
+    if (!admitted.ok) return;
+    // Exhaust the fallback run (gemini) at the LAST index — no entry left.
+    __resetRecognizersForTest();
+    __installRecognizerForTest("gemini", VERSION, matchAll);
+    stampExhausted(admitted.runId, "credits-depleted");
+    expect(store.advanceChainIfExhausted(ref, "t-end", admitted.runId, true, T0)).toEqual({ kind: "exhausted-end" });
+    expect(store.fallbackCycleFor(ref)).toBeNull(); // closed: chain-exhausted
+  });
+
+  test("an ordinary (non-exhaustion) failure leaves the cycle open — the retry road, untouched", () => {
+    __installRecognizerForTest("claude", VERSION, matchAll);
+    const { ref, run } = setup("t-plainfail");
+    stampExhausted(run, "not-exhausted");
+    const step = store.advanceChainIfExhausted(ref, "t-plainfail", run, true, T0);
+    expect(step).toEqual({ kind: "not-eligible" });
+    expect(store.fallbackCycleFor(ref)!.state).toBe("open");
+  });
+
+  test("success closes the cycle", () => {
+    const { ref } = setup("t-win");
+    expect(store.closeChainCycleOnTerminal(ref, "succeeded", T0)).toBe(true);
+    expect(store.fallbackCycleFor(ref)).toBeNull();
   });
 });
