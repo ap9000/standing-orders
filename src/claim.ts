@@ -89,7 +89,10 @@ export type AcquireResult =
   | { ok: false; reason: "unplaced" }
   /** The runner's bound repo list does not contain the task's repo.
    * The refusal names the binding road. */
-  | { ok: false; reason: "unauthorized-repo"; repo: string };
+  | { ok: false; reason: "unauthorized-repo"; repo: string }
+  /** A coordinator filed this and no password ceremony has sealed its
+   * scope yet — nothing claims, plans, or runs it until one does. */
+  | { ok: false; reason: "coordinator-filed" };
 
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
 export type FenceResult =
@@ -187,10 +190,20 @@ function acquireLocked(
       // repo never even holds a claim.
       const gate = authenticate(store, runner, options.token);
       if (!gate.ok) return { ok: false as const, reason: "unauthenticated" as const, detail: gate.reason };
-      const placedRepo = store.refForId(taskRef)?.repo ?? null;
+      const placedRef = store.refForId(taskRef);
+      const placedRepo = placedRef?.repo ?? null;
       if (placedRepo === null) return { ok: false as const, reason: "unplaced" as const };
       if (!gate.runner.repos.includes(placedRepo)) {
         return { ok: false as const, reason: "unauthorized-repo" as const, repo: placedRepo };
+      }
+      // THE COORDINATOR QUARANTINE in the one primitive every claim road
+      // shares (MCP spec v6, round-3 f1): a coordinator-filed task whose
+      // scope has not been sealed by the password ceremony claims for
+      // NOBODY — not the pre-approval planner road, not an attended
+      // authorization, not a raw CLI claim. One SQL predicate, so roads
+      // cannot diverge. After the seal it is ordinary in every respect.
+      if (placedRef !== null && placedRef.coordinatorCid !== null && !store.scopeSealed(placedRef.externalId)) {
+        return { ok: false as const, reason: "coordinator-filed" as const };
       }
       // The reservation gate lives HERE, in the one primitive every
       // acquisition path shares (queue-columns review, finding 1): tick's

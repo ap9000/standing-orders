@@ -967,6 +967,16 @@ function claimCommand(
         EXIT.refused,
       );
     }
+    if (result.reason === "coordinator-filed") {
+      return fail(
+        write,
+        json,
+        "claim",
+        "coordinator-filed",
+        "a coordinator filed this — nothing runs until the operator signs its scope",
+        EXIT.refused,
+      );
+    }
     return fail(
       write,
       json,

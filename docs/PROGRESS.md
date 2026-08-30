@@ -1,5 +1,29 @@
 # Progress
 
+**2026-08-30 — MCP 5: the coordinator principal exists.** Schema v31
+(additive): `coordinator_credential` (immutable 12-char cid = the
+identity; names unique only among the living, so revoke-and-remint
+never conflates generations), `coordinator_event` (filed/dismissed/
+revoked, written ATOMICALLY with their state changes — dismissal rides
+the cancellation floor's seam, so even a mirror-latch on a
+coordinator-filed task leaves its typed event), `mcp_idempotency`
+(keyed (cid, key) with the canonical request digest — replay returns
+the original ref with no rate charge, a different digest refuses), and
+the `coordinator_cid` column on task_ref (authoritative linkage,
+written only by the branded door; filed_via stays display-only).
+src/coordinator.ts: `VerifiedCoordinator` with a module-private maker,
+mint/authenticate/revoke/list, and `fileCoordinatorProposal` — ONE
+transaction: in-txn token re-verification → replay → sliding-window
+rate (read from the event ledger, so the window and the audit cannot
+disagree) → outstanding caps (per-cid 10 / global 50; failed-but-
+unsealed COUNTS) → the canonical door under the credential's repo
+ceiling → cid stamp → idempotency + event rows. THE QUARANTINE lives in
+the primitives: `sealScopeApproval` refuses mode-basis seals on
+coordinator-filed tasks (console, CLI, direct callers — one wall), and
+the shared acquisition primitive refuses `coordinator-filed` until a
+password seal lands, one SQL predicate for planner/attended/raw roads
+alike. Nine tests pin all of it. Suite 1485.
+
 **2026-08-30 — MCP hardening 4: the tuple everywhere, and the migration
 epoch.** The runner gate's remaining legs: tick proves its canonical
 repo is in the runner's bound list BEFORE any git access, probe, or

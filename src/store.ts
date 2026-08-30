@@ -42,7 +42,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 30;
+export const SCHEMA_VERSION = 31;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -84,6 +84,9 @@ export type TaskRef = {
   /** The worker this task is reserved for; null = any free worker.
    * Scheduling only — enforced in the claim primitive, never authority. */
   assignedRunner: string | null;
+  /** The coordinator that filed this task (v31) — authoritative linkage,
+   * written only by the branded door; null is every other filer. */
+  coordinatorCid: string | null;
   zones: string[];
   capabilityRequirements: string[];
   parkRate: number;
@@ -861,7 +864,54 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- 'console', 'intake', 'template:<name>', 'revision'. Stamped once at
   -- filing, never updated; NULL is history from before the column existed.
   filed_via               TEXT,
+  -- The coordinator that filed this task (v31, MCP gateway): the
+  -- AUTHORITATIVE linkage — written only by the branded coordinator door,
+  -- joined by exact cid, never parsed out of filed_via (which stays
+  -- display-only). NULL is every other filer.
+  coordinator_cid         TEXT,
   UNIQUE (backend, external_id)
+);
+
+-- v31 (MCP gateway): the coordinator principal (DESIGN.md 9b). Minted by
+-- an operator password ceremony; the token is hashed at rest and shown
+-- once. cid is the IMMUTABLE identity — names are unique only among the
+-- living, so revoke-and-remint never conflates generations in audit or
+-- cap accounting.
+CREATE TABLE IF NOT EXISTS coordinator_credential (
+  cid             TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  credential_hash TEXT NOT NULL,
+  repos           TEXT NOT NULL,
+  per_hour        INTEGER NOT NULL,
+  created_by      TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  revoked_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS coordinator_live_name
+  ON coordinator_credential (name) WHERE revoked_at IS NULL;
+
+-- The coordinator audit (v31): filing, dismissal, and revocation rows,
+-- inserted ATOMICALLY with their state change — never a separate write.
+CREATE TABLE IF NOT EXISTS coordinator_event (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  cid        TEXT NOT NULL REFERENCES coordinator_credential(cid),
+  kind       TEXT NOT NULL CHECK (kind IN ('filed','dismissed','revoked')),
+  task_id    TEXT,
+  detail     TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- MCP-specific idempotency (v31): keyed by immutable credential identity,
+-- carrying the canonical request digest — same key + same digest replays
+-- the original answer without a rate charge; a different digest refuses.
+-- The global Store.replay is digest-blind and is NOT this.
+CREATE TABLE IF NOT EXISTS mcp_idempotency (
+  cid            TEXT NOT NULL REFERENCES coordinator_credential(cid),
+  key            TEXT NOT NULL,
+  request_digest TEXT NOT NULL,
+  task_id        TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (cid, key)
 );
 
 -- Phase configuration (v9): which provider/model each phase runs on.
@@ -3142,6 +3192,9 @@ function migrate(db: Database): void {
   // identity rebuild arrive through the fresh SCHEMA's IF NOT EXISTS on a
   // fresh DB, and here on an upgrade. Quota needs a RECOGNIZED rebuild (its
   // PK changes) — additive columns cannot change a primary key.
+  // v31 (MCP gateway): the coordinator linkage column; the three new
+  // tables arrive through the fresh SCHEMA's IF NOT EXISTS on both roads.
+  addColumn(db, "task_ref", "coordinator_cid", "TEXT");
   addColumn(db, "task_scope", "proposed_chain_json", "TEXT");
   addColumn(db, "task_scope", "approved_chain_json", "TEXT");
   addColumn(db, "task_scope", "approval_kind", "TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))");
@@ -4348,13 +4401,19 @@ export class Store {
     // for a build that can no longer happen is wrong on every road, not
     // just the state verb's.
     const ref = this.db
-      .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+      .prepare("SELECT id, coordinator_cid FROM task_ref WHERE backend = ? AND external_id = ?")
       .get(BUILT_IN, taskId);
     if (ref !== undefined) this.supersedeSteerNotes(Number(ref["id"]), now);
-    // The reason is part of the transition, not decoration: machine codes
-    // are typed here; the coordinator_event row rides this exact seam when
-    // coordinator filings arrive (spec: events atomic with state changes).
-    void reason;
+    // The reason is part of the transition, not decoration: a
+    // coordinator-filed task's dismissal writes its durable event IN THIS
+    // transaction — operator text and typed machine codes alike (MCP spec
+    // v6: events atomic with state changes; the filer deserves words).
+    if (ref !== undefined && ref["coordinator_cid"] !== null && ref["coordinator_cid"] !== undefined) {
+      const detail = reason.kind === "operator" ? (reason.text ?? "dismissed") : reason.code;
+      this.db
+        .prepare("INSERT INTO coordinator_event (cid, kind, task_id, detail, created_at) VALUES (?, 'dismissed', ?, ?, ?)")
+        .run(String(ref["coordinator_cid"]), taskId, detail, now.toISOString());
+    }
     return { changed: true };
   }
 
@@ -5670,6 +5729,17 @@ export class Store {
   sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}, basis?: { kind: "mode"; modeDigest: string }): boolean {
     return (
       this.once(mutation, "sealScopeApproval", () => {
+        // THE COORDINATOR QUARANTINE, enforced in the primitive (MCP spec
+        // v6, round-3 f1): mode coverage never admits a coordinator-filed
+        // task — console, CLI `task scope`, and direct callers alike hit
+        // this wall. The promise to the operator is a fresh password
+        // ceremony that shows WHO asked; only `basis: password` seals it.
+        if (basis !== undefined) {
+          const filedByCoordinator = this.db
+            .prepare("SELECT 1 AS hit FROM task_ref WHERE backend = ? AND external_id = ? AND coordinator_cid IS NOT NULL")
+            .get(BUILT_IN, taskId);
+          if (filedByCoordinator !== undefined) return false;
+        }
         const changed = this.db
           .prepare(
             `UPDATE task_scope
@@ -5692,6 +5762,18 @@ export class Store {
         return changed.changes > 0;
       }) === true
     );
+  }
+
+  /** Whether this task's scope carries a LIVE seal: approved, and the
+   * approved digest is the current one (a rewritten scope unseals). The
+   * coordinator quarantine's one question (MCP spec v6). */
+  scopeSealed(taskId: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 AS hit FROM task_scope WHERE task_id = ? AND approved_at IS NOT NULL AND approved_digest = digest",
+      )
+      .get(taskId);
+    return row !== undefined;
   }
 
   getScope(taskId: string): Scope | null {
@@ -14435,6 +14517,10 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     backend: String(row["backend"]),
     externalId: String(row["external_id"]),
     repo: row["repo"] === null || row["repo"] === undefined ? null : String(row["repo"]),
+    coordinatorCid:
+      row["coordinator_cid"] === null || row["coordinator_cid"] === undefined
+        ? null
+        : String(row["coordinator_cid"]),
     assignedRunner:
       row["assigned_runner"] === null || row["assigned_runner"] === undefined ? null : String(row["assigned_runner"]),
     zones: readJsonArray(row["zones"]),
