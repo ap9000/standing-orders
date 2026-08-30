@@ -2475,7 +2475,9 @@ export type OpenOptions = {
  */
 export function openStore(file: string, options: OpenOptions = {}): Store {
   const connect = options.connect ?? defaultConnect;
-  if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true });
+  // The database's directory is 0700 from birth (round-2 finding 5 — the
+  // DESIGN.md threat boundary is a claim only if the modes are real).
+  if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
 
   const db = connect(file);
   // THE EPOCH, BEFORE ANY DDL (implementation review, finding 3): even
@@ -8049,8 +8051,12 @@ export class Store {
       // — they run after the build, on a task whose lease is settled, under
       // admitReview's own single-winner admission (its synthetic lease id
       // is a marker, not a claim). Identity, liveness, and membership are
-      // proven above; lease currency is the claim-holding roles' leg.
-      if (run.role === "reviewer") return true;
+      // proven above; INCARNATION stands in for lease currency (round-2
+      // finding 3): a rotation re-registers, which stamps a NEWER
+      // registered_at — a runner row younger than the run means the
+      // credential that admitted this review is not the one now answering
+      // to the name, and the stale process never spawns under it.
+      if (run.role === "reviewer") return found.runner.registeredAt <= run.startedAt;
       return this.currentLiveLease(run.taskRef, now) === run.leaseId;
     });
   }

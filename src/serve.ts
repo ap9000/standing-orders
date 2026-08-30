@@ -2438,7 +2438,22 @@ export function createDecisionServer(options: ServeOptions): Server {
         revision,
         repo: ref?.repo ?? null,
         filedVia: store.filedViaOf(taskId),
-        coordinator: store.coordinatorProvenanceOf(taskId),
+        coordinator: (() => {
+          const who = store.coordinatorProvenanceOf(taskId);
+          if (who === null) return null;
+          // RELATIVE age (round-2 finding 5): "12m ago" reads at a glance;
+          // an absolute stamp makes the operator do arithmetic.
+          const ago =
+            who.filedAt === null
+              ? null
+              : (() => {
+                  const minutes = Math.max(0, Math.round((now.getTime() - new Date(who.filedAt).getTime()) / 60_000));
+                  if (minutes < 60) return `${minutes}m ago`;
+                  if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h ago`;
+                  return `${Math.round(minutes / (60 * 24))}d ago`;
+                })();
+          return { label: who.label, filedAgo: ago };
+        })(),
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
         contest: (() => {
           if (ref === null) return null;
@@ -8835,7 +8850,7 @@ function taskBody(data: {
    * filed this (console, cli, intake, template:<name>) at the yes. */
   filedVia?: string | null;
   /** Coordinator provenance when an agent filed this; null otherwise. */
-  coordinator?: { label: string; filedAt: string | null } | null;
+  coordinator?: { label: string; filedAgo: string | null } | null;
   holds: Hold[];
   contest?: { id: number; state: string; agents: number; kind: "race" | "comparison" } | null;
   claimed: boolean;
@@ -9046,7 +9061,7 @@ function taskBody(data: {
           // signature, nothing plans, claims, or runs it.
           data.coordinator === null || data.coordinator === undefined
             ? ""
-            : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAt === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAt.slice(0, 16).replace("T", " "))}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
+            : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAgo)}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
           `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
@@ -9335,11 +9350,11 @@ function taskBody(data: {
       ? `<p class="meta">a worker is building this right now — a hold prevents the <em>next</em> start; cancel and requeue wait for the current build to finish</p>`
       : "",
     `<div class="card">`,
-    data.plan === null && !approval.approved && !data.claimed && task.state === "queued"
+    data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined)
       ? act("plan", "plan first")
       : "",
-    data.plan === null && !approval.approved && !data.claimed && task.state === "queued"
-      ? `<p class="meta">plan first sends an agent to read the repository, ask you questions, and propose a scope \u2014 nothing builds until you approve it</p>`
+    data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined)
+      ? `<p class="meta">plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it</p>`
       : "",
     // Queue rank is scheduling, never authority: moving up changes when
     // the next free worker looks, and approval is still required.
@@ -9373,7 +9388,7 @@ function taskBody(data: {
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
       `${
         data.coordinator !== null && data.coordinator !== undefined
-          ? ` · filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAt === null ? "" : ` ${escape(data.coordinator.filedAt.slice(0, 16).replace("T", " "))}`}`
+          ? ` · filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` ${escape(data.coordinator.filedAgo)}`}`
           : data.filedVia === null || data.filedVia === undefined
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
@@ -9422,10 +9437,16 @@ function taskBody(data: {
     // saying WHY and pointing at the act, not read as a fact sheet
     // (operator finding: clicking a needs-you card landed with no context).
     scope === null && data.plan === null && task.state === "queued"
-      ? `<div class="card"><p><strong>This task is waiting on you: it has no scope.</strong></p>` +
-        `<p class="meta">A scope is the contract an agent builds against — the goal, what is off-limits, which paths it may touch. ` +
-        `Nothing builds until one is written and approved. Write it in the open form below, or use <strong>plan first</strong> ` +
-        `(under acts) to send an agent to read the repository and draft it for you.</p></div>`
+      ? data.coordinator !== null && data.coordinator !== undefined
+        // The quarantine speaks here too (round-2 finding 5): the planner
+        // is as fenced as the builder on a coordinator filing, so "plan
+        // first" would recommend a road that refuses.
+        ? `<div class="card"><p><strong>This task is waiting on you: an agent filed it, and it has no scope.</strong></p>` +
+          `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span> — nothing plans, claims, or runs until you write a scope below and sign it. Your signature runs their request.</p></div>`
+        : `<div class="card"><p><strong>This task is waiting on you: it has no scope.</strong></p>` +
+          `<p class="meta">A scope is the contract an agent builds against — the goal, what is off-limits, which paths it may touch. ` +
+          `Nothing builds until one is written and approved. Write it in the open form below, or use <strong>plan first</strong> ` +
+          `(under acts) to send an agent to read the repository and draft it for you.</p></div>`
       : "",
     scope !== null && !approval.approved && data.plan !== "requested" && task.state === "queued" && data.decisions.length === 0
       ? `<div class="card"><p><strong>This task is waiting on you: its scope needs your approval.</strong></p>` +

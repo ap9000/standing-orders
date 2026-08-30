@@ -29,7 +29,9 @@ function harness(store: Store, token: string): {
     log: () => {},
     exit: code => { exited = code; },
   };
-  const outcome = serveMcp(store, token, io, () => T0);
+  // The registry fail-closed rule means tests declare enrollment: every
+  // repo a fixture files into is enrolled here.
+  const outcome = serveMcp(store, token, io, () => T0, [REPO, "/repo/other"]);
   return {
     send: message => lineHandler(JSON.stringify(message)),
     sendRaw: line => lineHandler(line),
@@ -41,7 +43,7 @@ function harness(store: Store, token: string): {
   };
 }
 
-const modernMeta = { "io.modelcontextprotocol/protocolVersion": MODERN };
+const modernMeta = { "io.modelcontextprotocol/protocolVersion": MODERN, "io.modelcontextprotocol/clientCapabilities": {} };
 
 describe("the MCP stdio server", () => {
   let store: Store;
@@ -74,7 +76,11 @@ describe("the MCP stdio server", () => {
 
   test("modern era: discover and tools/list are schema-complete, metadata is namespaced, versions negotiate by the book", () => {
     const h = harness(store, token);
-    h.send({ jsonrpc: "2.0", id: 1, method: "server/discover", params: {} });
+    // A modern request carries BOTH namespaced keys — a bare discover is
+    // not a modern request (round-2 finding 1).
+    h.send({ jsonrpc: "2.0", id: 0, method: "server/discover", params: {} });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 });
+    h.send({ jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: modernMeta } });
     const discover = h.last()["result"] as Record<string, unknown>;
     expect(discover["protocolVersion"]).toBe(MODERN);
     expect(discover["supportedVersions"]).toEqual([MODERN, LEGACY]);
@@ -86,13 +92,43 @@ describe("the MCP stdio server", () => {
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
     expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(6);
-    expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeDefined();
-    // The revision's OWN code for an unsupported version — and a modern
-    // ping carries the modern result shape.
+    // No outputSchema: it describes structuredContent, which these tools
+    // do not return (round-2 finding 1).
+    expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeUndefined();
+    // The revision's OWN refusal shape for an unsupported version…
     h.send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2030-01-01" } } });
-    expect(h.last()["error"]).toMatchObject({ code: -32022 });
+    expect(h.last()["error"]).toMatchObject({ code: -32022, data: { supported: [MODERN, LEGACY], requested: "2030-01-01" } });
+    // …and ping left the protocol in 2026-07-28.
     h.send({ jsonrpc: "2.0", id: 4, method: "ping", params: { _meta: modernMeta } });
-    expect((h.last()["result"] as Record<string, unknown>)["resultType"]).toBe("complete");
+    expect(h.last()["error"]).toMatchObject({ code: -32601 });
+  });
+
+  test("stdio pins ONE era per connection: after a modern call, handshake-era traffic refuses — and the other way round", () => {
+    const modern = harness(store, token);
+    modern.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: modernMeta } });
+    expect((modern.last()["result"] as Record<string, unknown>)["resultType"]).toBe("complete");
+    modern.send({ jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: LEGACY } });
+    expect(modern.last()["error"]).toMatchObject({ code: -32600 });
+
+    const legacy = harness(store, token);
+    legacy.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: LEGACY } });
+    legacy.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    legacy.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+    expect((legacy.last()["result"] as Record<string, unknown>)["tools"]).toBeDefined();
+    legacy.send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: { _meta: modernMeta } });
+    expect(legacy.last()["error"]).toMatchObject({ code: -32600 });
+  });
+
+  test("initialized without initialize completes nothing, and a bare arguments root refuses", () => {
+    const h = harness(store, token);
+    h.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    expect(h.last()["error"]).toMatchObject({ code: -32002 });
+    // A fresh connection: the refused legacy call above already PINNED
+    // that connection's era, which is itself the contract.
+    const h2 = harness(store, token);
+    h2.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "list_repos", arguments: 42 } });
+    expect(h2.last()["error"]).toMatchObject({ code: -32602 });
   });
 
   test("the engine validates: bad jsonrpc, bad id shapes, unknown arguments, and unknown notifications", () => {
@@ -270,24 +306,11 @@ describe("the MCP stdio server", () => {
     // key, or a drifted description is a silent protocol break — so the
     // whole line is pinned, byte-for-byte, against JSON.stringify of the
     // expected object.
-    const outputSchema = {
-      type: "object",
-      properties: {
-        content: {
-          type: "array",
-          items: { type: "object", properties: { type: { type: "string" }, text: { type: "string" } }, required: ["type", "text"], additionalProperties: false },
-        },
-        isError: { type: "boolean" },
-      },
-      required: ["content"],
-      additionalProperties: true,
-    };
     const tools = [
       {
         name: "status",
         description: "The plane's liveness facts over your repo allowlist: what waits on the operator, what runs, what finished in the last 24h.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
-        outputSchema,
       },
       {
         name: "list_tasks",
@@ -302,7 +325,6 @@ describe("the MCP stdio server", () => {
           },
           additionalProperties: false,
         },
-        outputSchema,
       },
       {
         name: "get_task",
@@ -313,19 +335,16 @@ describe("the MCP stdio server", () => {
           required: ["ref"],
           additionalProperties: false,
         },
-        outputSchema,
       },
       {
         name: "list_repos",
         description: "The repositories your credential may see and file into, with their operating-mode standing.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
-        outputSchema,
       },
       {
         name: "get_contract",
         description: "This surface's contract: what a coordinator may do, the proposal lifecycle, and the admission promise.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
-        outputSchema,
       },
       {
         name: "file_proposal",
@@ -341,11 +360,12 @@ describe("the MCP stdio server", () => {
           required: ["repo", "title", "idempotency_key"],
           additionalProperties: false,
         },
-        outputSchema,
       },
     ];
 
+    // Eras are connection-pinned, so each fixture speaks on its own wire.
     const h = harness(store, token);
+    const modern = harness(store, token);
 
     // Legacy initialize: the exact handshake-era result — no resultType,
     // no ttlMs, a bare serverInfo (never the namespaced _meta key).
@@ -364,8 +384,8 @@ describe("the MCP stdio server", () => {
 
     // Modern tools/list: resultType/ttlMs/cacheScope spelled exactly, the
     // narrowest cacheScope "private", and every descriptor byte-for-byte.
-    h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
-    expect(h.lastRaw()).toBe(
+    modern.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
+    expect(modern.lastRaw()).toBe(
       JSON.stringify({
         jsonrpc: "2.0",
         id: 2,
@@ -375,8 +395,8 @@ describe("the MCP stdio server", () => {
 
     // server/discover: supportedVersions and the NAMESPACED _meta serverInfo
     // key — the modern era's spellings, frozen.
-    h.send({ jsonrpc: "2.0", id: 3, method: "server/discover", params: {} });
-    expect(h.lastRaw()).toBe(
+    modern.send({ jsonrpc: "2.0", id: 3, method: "server/discover", params: { _meta: modernMeta } });
+    expect(modern.lastRaw()).toBe(
       JSON.stringify({
         jsonrpc: "2.0",
         id: 3,

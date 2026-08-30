@@ -174,6 +174,20 @@ export function listCoordinators(store: Store): CoordinatorRow[] {
     }));
 }
 
+/** What each artifact kind IS on the wire — evidence metadata carries a
+ * media type so a client knows what it would be asking for (round-2 f4). */
+const MEDIA_BY_KIND: Record<string, string> = {
+  diff: "text/x-diff",
+  "terminal-diff": "text/x-diff",
+  "diff-stat": "application/json",
+  status: "text/plain",
+  "park-payload": "application/json",
+  plan: "text/markdown",
+  handoff: "application/json",
+  "revision-brief": "text/markdown",
+  "base-tree": "text/plain",
+};
+
 /** Outstanding = filed by this cid, scope UNSEALED (missing seal or a
  * stale digest both count), task not done/cancelled — `failed` COUNTS:
  * dead unsealed filings pressure cleanup, not silence. */
@@ -343,34 +357,34 @@ export function statusFor(store: Store, who: VerifiedCoordinator, now: Date): {
   );
   const questions = one(
     `SELECT COUNT(*) AS n FROM decision JOIN run ON run.id = decision.run
-      JOIN task_ref ON task_ref.id = run.task_ref
+      JOIN task_ref ON task_ref.id = run.task_ref AND task_ref.backend = 'built-in'
       WHERE task_ref.repo IN (${sql}) AND decision.answered_at IS NULL AND decision.state IN ('open','expired')`,
   );
   // "Running" is lease-based liveness, never `outcome IS NULL` (review
   // finding 6): a live, unexpired, newest-generation claim.
   const running = one(
     `SELECT COUNT(DISTINCT claim.task_ref) AS n FROM claim
-      JOIN task_ref ON task_ref.id = claim.task_ref
+      JOIN task_ref ON task_ref.id = claim.task_ref AND task_ref.backend = 'built-in'
       WHERE task_ref.repo IN (${sql}) AND claim.released_at IS NULL AND claim.expires_at > ?
         AND claim.lease_generation = (SELECT MAX(newest.lease_generation) FROM claim AS newest WHERE newest.task_ref = claim.task_ref)`,
     [now.toISOString()],
   );
   const incidents = one(
     `SELECT COUNT(*) AS n FROM incident JOIN run ON run.id = incident.run
-      JOIN task_ref ON task_ref.id = run.task_ref
+      JOIN task_ref ON task_ref.id = run.task_ref AND task_ref.backend = 'built-in'
       WHERE task_ref.repo IN (${sql}) AND incident.resolved_at IS NULL`,
   );
   const picks = one(
-    `SELECT COUNT(*) AS n FROM contest JOIN task_ref ON task_ref.id = contest.task_ref
+    `SELECT COUNT(*) AS n FROM contest JOIN task_ref ON task_ref.id = contest.task_ref AND task_ref.backend = 'built-in'
       WHERE task_ref.repo IN (${sql}) AND contest.state = 'pick-wait'`,
   );
   const builtToday = one(
-    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref
+    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref AND task_ref.backend = 'built-in'
       WHERE task_ref.repo IN (${sql}) AND run.outcome = 'built' AND run.finished_at > ?`,
     [dayAgo],
   );
   const failedToday = one(
-    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref
+    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref AND task_ref.backend = 'built-in'
       WHERE task_ref.repo IN (${sql}) AND run.outcome = 'failed' AND run.finished_at > ?`,
     [dayAgo],
   );
@@ -452,7 +466,7 @@ export function taskDetailFor(
     costMicrousd: number | null;
   }[];
   cost: { totalMicrousd: number; measuredRuns: number; totalRuns: number };
-  evidence: { id: number; kind: string; bytes: number; sha256: string; captureStatus: string | null }[];
+  evidence: { id: number; kind: string; bytes: number; sha256: string; captureStatus: string | null; mediaType: string }[];
 } | null {
   const { sql, args } = inClause(who.repos);
   const row = store.handle
@@ -510,6 +524,7 @@ export function taskDetailFor(
             bytes: Number(one["bytes_original"]),
             sha256: String(one["sha256"]),
             captureStatus: one["capture_status"] === null ? null : String(one["capture_status"]),
+            mediaType: MEDIA_BY_KIND[String(one["kind"])] ?? "text/plain",
           }));
   return {
     ref: String(row["tid"]),

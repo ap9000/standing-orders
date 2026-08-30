@@ -1437,6 +1437,11 @@ async function mcpCommand(
       // Absent (no WAL yet) or not ours — the umask covers what we make.
     }
   }
+  try {
+    chmodSync(dirname(file), 0o700);
+  } catch {
+    // Not ours to repair — the boundary statement covers creation.
+  }
   if (store.isDemo()) {
     store.close();
     return said("demo console — no gateway");

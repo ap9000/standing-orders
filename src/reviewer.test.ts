@@ -139,6 +139,24 @@ describe("the reviewer role in the store", () => {
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
+  test("a rotation AFTER admission fences the reviewer spawn — the runner row is younger than the run", () => {
+    // Round-2 finding 3: admitReview authenticates in its transaction,
+    // but the run keeps only the runner NAME — so custody at spawn must
+    // notice that the name changed hands since. Rotation re-registers,
+    // which stamps a newer registered_at than the run's start.
+    const asked = store.requestReview(builtRun, "alex", T0);
+    if (!asked.ok) throw new Error("request failed");
+    const admitted = store.admitReview(
+      asked.id,
+      { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null },
+      T0,
+    );
+    if (!admitted.ok) throw new Error("admission failed");
+    expect(store.proveRunnerCustodyForSpawn(admitted.reviewerRunId, new Date(T0.getTime() + 5_000))).toBe(true);
+    register(store, { name: "builder-1", host: "elsewhere", repos: [REPO], now: new Date(T0.getTime() + 1_000), newToken: () => "tok-rotated" });
+    expect(store.proveRunnerCustodyForSpawn(admitted.reviewerRunId, new Date(T0.getTime() + 5_000))).toBe(false);
+  });
+
   test("startRun's reviewer arm opens without a workspace; the CHECK refuses every mixed shape", () => {
     const reviewer = store.startRun({ taskRef, leaseId: "review:1", runner: "builder-1", role: "reviewer", parentRun: builtRun, now: T0 });
     const row = store.getRun(reviewer);

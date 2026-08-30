@@ -698,7 +698,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     // Setup is a process spawn like any other (review finding 4): the
     // runner tuple is re-proven against LIVE rows immediately before it —
     // a takeover between the claim and this instant runs nothing here.
-    if (!store.proveRunnerCustodyForSpawn(request.runId, now)) {
+    if (!store.proveRunnerCustodyForSpawn(request.runId, (request.clock ?? (() => now))())) {
       return {
         ok: false,
         reason: "runner-custody",

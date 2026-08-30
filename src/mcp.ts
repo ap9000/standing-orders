@@ -39,6 +39,7 @@ export const LEGACY = "2025-11-25";
 /** The modern revision namespaces its per-request metadata. */
 export const META_VERSION = "io.modelcontextprotocol/protocolVersion";
 export const META_SERVER = "io.modelcontextprotocol/serverInfo";
+export const META_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
 /** The revision's own error code for an unsupported protocol version. */
 export const UNSUPPORTED_VERSION = -32022;
 const MAX_REQUEST = 256 * 1024;
@@ -128,21 +129,6 @@ function invalidArgs(schema: Json, args: Record<string, unknown>): string | null
   return null;
 }
 
-/** Every tool's result is one shape — a content array of one text part
- * carrying the JSON body — declared so clients can rely on it. */
-const OUTPUT_SCHEMA: Json = {
-  type: "object",
-  properties: {
-    content: {
-      type: "array",
-      items: { type: "object", properties: { type: { type: "string" }, text: { type: "string" } }, required: ["type", "text"], additionalProperties: false },
-    },
-    isError: { type: "boolean" },
-  },
-  required: ["content"],
-  additionalProperties: true,
-};
-
 function str(args: Record<string, unknown>, name: string, max: number): string | null {
   const value = args[name];
   if (typeof value !== "string" || value.length === 0 || value.length > max) return null;
@@ -199,17 +185,25 @@ const TOOLS: Tool[] = [
     name: "list_repos",
     description: "The repositories your credential may see and file into, with their operating-mode standing.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handle: ctx => ({
+    handle: ctx => {
+      // FAIL CLOSED when the project registry cannot be read (round-2
+      // finding 4): answering the full allowlist would claim enrollment
+      // nobody proved.
+      if (ctx.enrolled === null) {
+        return { ok: false, message: "the project registry could not be read — the enrolled set is unknown, so nothing lists" };
+      }
+      return {
       ok: true,
       body: {
         repos: ctx.who.repos
-          .filter(repo => ctx.enrolled === null || ctx.enrolled.includes(repo))
+          .filter(repo => ctx.enrolled !== null && ctx.enrolled.includes(repo))
           .map(repo => {
             const mode = ctx.store.activeMode(repo, ctx.now);
             return { repo, mode: mode === null ? "no operating mode — every act is a ceremony" : `mode ${mode.name} signed until ${mode.absoluteExpiry}` };
           }),
       },
-    }),
+      };
+    },
   },
   {
     name: "get_contract",
@@ -293,11 +287,22 @@ export function serveMcp(
           : "no live coordinator credential matches this token",
     };
   }
+  // Cancellation semantics on a SERIAL server (round-2 finding 2, stated
+  // rather than pretended): every request completes before the next line
+  // is read, so no cancellation can arrive while its target is genuinely
+  // in flight — and the revision permits ignoring cancellations for
+  // completed requests. The registry exists so any future asynchronous
+  // tool inherits correct suppression, and so a pre-cancelled FUTURE id
+  // can never be blacklisted (the in-flight check).
   const cancelled = new Set<string>();
   const inFlight = new Set<string>();
   // Legacy lifecycle state (review finding 2): initialize must come first
   // in the handshake era; the modern era is stateless by design.
+  let initializeSeen = false;
   let legacyReady = false;
+  // Stdio pins ONE era per connection (round-2 finding 2): the first
+  // era-classified request decides, and the other era's metadata refuses.
+  let pinnedEra: "modern" | "legacy" | null = null;
 
   const error = (id: Json, code: number, message: string): void =>
     io.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }));
@@ -312,7 +317,9 @@ export function serveMcp(
   };
 
   const toolsPayload = (): Json => ({
-    tools: TOOLS.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, outputSchema: OUTPUT_SCHEMA })),
+    // No outputSchema: MCP output schemas describe structuredContent, and
+    // these tools return text content only (round-2 finding 1).
+    tools: TOOLS.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })),
   });
 
   const callTool = (id: Json, era: "modern" | "legacy", params: Record<string, unknown>): void => {
@@ -341,7 +348,14 @@ export function serveMcp(
       io.exit(0);
       return;
     }
-    const args = (params["arguments"] ?? {}) as Record<string, unknown>;
+    const rawArgs = params["arguments"] ?? {};
+    if (typeof rawArgs !== "object" || rawArgs === null || Array.isArray(rawArgs)) {
+      // The root of `arguments` is an object BEFORE any schema applies
+      // (round-2 finding 2): 42 or false never passes an empty schema.
+      error(id, -32602, "arguments must be an object");
+      return;
+    }
+    const args = rawArgs as Record<string, unknown>;
     const invalid = invalidArgs(tool.inputSchema, args);
     if (invalid !== null) {
       error(id, -32602, invalid);
@@ -384,9 +398,18 @@ export function serveMcp(
       return;
     }
     const rawId = request["id"];
-    if (rawId !== undefined && typeof rawId !== "string" && typeof rawId !== "number" && rawId !== null) {
-      error(null, -32600, "id must be a string, a number, or null");
-      return;
+    const isNotification = typeof request["method"] === "string" && (request["method"] as string).startsWith("notifications/");
+    // MCP RequestId is a string or an INTEGER (round-2 finding 2): floats
+    // and null ids on requests refuse; notifications carry no id at all.
+    if (!isNotification) {
+      if (rawId === undefined || rawId === null) {
+        error(null, -32600, "a request carries an id — a string or an integer");
+        return;
+      }
+      if (typeof rawId !== "string" && !(typeof rawId === "number" && Number.isInteger(rawId))) {
+        error(null, -32600, "id must be a string or an integer");
+        return;
+      }
     }
     const id = (rawId ?? null) as Json;
     const method = typeof request["method"] === "string" ? request["method"] : "";
@@ -414,12 +437,19 @@ export function serveMcp(
       return; // a notification — no reply of any kind
     }
     if (method === "notifications/initialized") {
-      legacyReady = true;
+      // Only a handshake that actually happened completes (round-2 f2).
+      if (initializeSeen) legacyReady = true;
       return;
     }
     if (method.startsWith("notifications/")) return; // unknown notification: silence, never an error
 
     if (method === "initialize") {
+      if (pinnedEra === "modern") {
+        error(id, -32600, "this connection speaks the modern era — initialize belongs to the handshake era");
+        return;
+      }
+      pinnedEra = "legacy";
+      initializeSeen = true;
       // The handshake era can only negotiate ITSELF: an unsupported ask is
       // answered WITH the legacy version, never the modern one.
       respond(id, "legacy", {
@@ -430,6 +460,18 @@ export function serveMcp(
       return;
     }
     if (method === "server/discover") {
+      if (pinnedEra === "legacy") {
+        error(id, -32600, "this connection speaks the handshake era — server/discover belongs to the modern one");
+        return;
+      }
+      const declaredVersion = meta[META_VERSION];
+      if (declaredVersion !== MODERN || typeof meta[META_CAPABILITIES] !== "object" || meta[META_CAPABILITIES] === null) {
+        // The modern era's requests carry BOTH namespaced keys (round-2
+        // finding 1) — a bare discover is not a modern request.
+        error(id, -32600, `server/discover requires _meta["${META_VERSION}"] = "${MODERN}" and _meta["${META_CAPABILITIES}"]`);
+        return;
+      }
+      pinnedEra = "modern";
       respond(id, "modern", {
         protocolVersion: MODERN,
         supportedVersions: [MODERN, LEGACY],
@@ -440,17 +482,42 @@ export function serveMcp(
       return;
     }
 
-    // Era classification PRECEDES every remaining method — a modern ping
-    // must carry the modern result shape (review finding 1).
+    // Era classification precedes every remaining method. A modern request
+    // carries BOTH namespaced keys; the -32022 refusal carries the shape
+    // the revision defines (round-2 finding 1).
     const declared = typeof meta[META_VERSION] === "string" ? (meta[META_VERSION] as string) : null;
-    const era: "modern" | "legacy" = declared === MODERN ? "modern" : "legacy";
     if (declared !== null && declared !== MODERN && declared !== LEGACY) {
-      error(id, UNSUPPORTED_VERSION, `unsupported protocol version \`${declared}\` — this server speaks ${MODERN} and ${LEGACY}`);
+      io.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: UNSUPPORTED_VERSION,
+            message: `unsupported protocol version \`${declared}\``,
+            data: { supported: [MODERN, LEGACY], requested: declared },
+          },
+        }),
+      );
       return;
     }
+    const era: "modern" | "legacy" = declared === MODERN ? "modern" : "legacy";
+    if (era === "modern" && (typeof meta[META_CAPABILITIES] !== "object" || meta[META_CAPABILITIES] === null)) {
+      error(id, -32600, `a ${MODERN} request carries _meta["${META_CAPABILITIES}"]`);
+      return;
+    }
+    if (pinnedEra !== null && era !== pinnedEra && (method === "tools/list" || method === "tools/call" || method === "ping")) {
+      error(id, -32600, `this connection is pinned to the ${pinnedEra} era`);
+      return;
+    }
+    if (method === "tools/list" || method === "tools/call") pinnedEra = era;
 
     if (method === "ping") {
-      respond(id, era, {}, false);
+      // ping left the protocol in 2026-07-28 — only the handshake era has it.
+      if (era === "modern") {
+        error(id, -32601, "ping is not part of the modern revision");
+        return;
+      }
+      respond(id, "legacy", {}, false);
       return;
     }
 
