@@ -311,3 +311,136 @@ export function fileCoordinatorProposal(
     return { ok: true as const, id: made.id, replayed: false };
   });
 }
+
+// ---- credential-scoped reads (MCP spec v6: the allowlist intersected IN
+// SQL, before aggregation, ordering, LIMIT, and counts; repo-null rows
+// excluded from every result; a foreign ref answers not-found) ----------
+
+function inClause(repos: readonly string[]): { sql: string; args: string[] } {
+  return { sql: repos.map(() => "?").join(","), args: [...repos] };
+}
+
+export function statusFor(store: Store, who: VerifiedCoordinator, now: Date): {
+  waitsOnYou: number;
+  running: number;
+  builtToday: number;
+  failedToday: number;
+  repos: { repo: string; queued: number; running: number }[];
+} {
+  const { sql, args } = inClause(who.repos);
+  const dayAgo = new Date(now.getTime() - 24 * 3_600_000).toISOString();
+  const one = (query: string, extra: string[] = []): number =>
+    Number(store.handle.prepare(query).get(...args, ...extra)?.["n"] ?? 0);
+  // "Waits on you" = the board's attention lanes over this allowlist:
+  // unsealed scopes + open decisions on live runs.
+  const unsealed = one(
+    `SELECT COUNT(*) AS n FROM task_ref JOIN task ON task.id = task_ref.external_id
+      LEFT JOIN task_scope ON task_scope.task_id = task_ref.external_id
+      WHERE task_ref.repo IN (${sql}) AND task.state = 'queued'
+        AND (task_scope.task_id IS NULL OR task_scope.approved_at IS NULL OR task_scope.approved_digest IS NOT task_scope.digest)`,
+  );
+  const questions = one(
+    `SELECT COUNT(*) AS n FROM decision JOIN run ON run.id = decision.run
+      JOIN task_ref ON task_ref.id = run.task_ref
+      WHERE task_ref.repo IN (${sql}) AND decision.answered_at IS NULL AND decision.state IN ('open','expired')`,
+  );
+  const running = one(
+    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref
+      WHERE task_ref.repo IN (${sql}) AND run.outcome IS NULL`,
+  );
+  const builtToday = one(
+    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref
+      WHERE task_ref.repo IN (${sql}) AND run.outcome = 'built' AND run.finished_at > ?`,
+    [dayAgo],
+  );
+  const failedToday = one(
+    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref
+      WHERE task_ref.repo IN (${sql}) AND run.outcome = 'failed' AND run.finished_at > ?`,
+    [dayAgo],
+  );
+  const repos = store.handle
+    .prepare(
+      `SELECT task_ref.repo AS repo,
+              SUM(CASE WHEN task.state = 'queued' THEN 1 ELSE 0 END) AS queued,
+              SUM(CASE WHEN task.state = 'running' THEN 1 ELSE 0 END) AS running
+         FROM task_ref JOIN task ON task.id = task_ref.external_id
+        WHERE task_ref.repo IN (${sql}) GROUP BY task_ref.repo ORDER BY task_ref.repo`,
+    )
+    .all(...args)
+    .map(row => ({ repo: String(row["repo"]), queued: Number(row["queued"]), running: Number(row["running"]) }));
+  return { waitsOnYou: unsealed + questions, running, builtToday, failedToday, repos };
+}
+
+export function listTasksFor(
+  store: Store,
+  who: VerifiedCoordinator,
+  filter: { state?: string; repo?: string; cursor?: number; limit?: number },
+): { tasks: { ref: string; title: string; state: string; repo: string; filedVia: string | null }[]; nextCursor: number | null } {
+  const limit = Math.min(Math.max(filter.limit ?? 20, 1), 50);
+  const repos = filter.repo === undefined ? [...who.repos] : who.repos.includes(filter.repo) ? [filter.repo] : [];
+  if (repos.length === 0) return { tasks: [], nextCursor: null };
+  const { sql, args } = inClause(repos);
+  const rows = store.handle
+    .prepare(
+      `SELECT task_ref.id AS rid, task.id AS tid, task.title AS title, task.state AS state, task_ref.repo AS repo, task_ref.filed_via AS via
+         FROM task_ref JOIN task ON task.id = task_ref.external_id
+        WHERE task_ref.repo IN (${sql})
+          AND (? IS NULL OR task.state = ?)
+          AND task_ref.id > ?
+        ORDER BY task_ref.id LIMIT ?`,
+    )
+    .all(...args, filter.state ?? null, filter.state ?? null, filter.cursor ?? 0, limit + 1);
+  const page = rows.slice(0, limit).map(row => ({
+    ref: String(row["tid"]),
+    title: String(row["title"]),
+    state: String(row["state"]),
+    repo: String(row["repo"]),
+    filedVia: row["via"] === null ? null : String(row["via"]),
+  }));
+  const nextCursor = rows.length > limit ? Number(rows[limit - 1]?.["rid"] ?? 0) : null;
+  return { tasks: page, nextCursor };
+}
+
+export function taskDetailFor(
+  store: Store,
+  who: VerifiedCoordinator,
+  taskId: string,
+): {
+  ref: string; title: string; state: string; repo: string;
+  scope: { sealed: boolean; goal: string | null };
+  attempts: { outcome: string | null; provider: string; model: string | null; startedAt: string; finishedAt: string | null }[];
+} | null {
+  const { sql, args } = inClause(who.repos);
+  const row = store.handle
+    .prepare(
+      `SELECT task_ref.id AS rid, task.id AS tid, task.title AS title, task.state AS state, task_ref.repo AS repo
+         FROM task_ref JOIN task ON task.id = task_ref.external_id
+        WHERE task.id = ? AND task_ref.repo IN (${sql})`,
+    )
+    .get(taskId, ...args);
+  // A foreign or absent ref is the SAME answer: not-found — existence
+  // outside the allowlist is not this credential's to learn.
+  if (row === undefined) return null;
+  const scope = store.getScope(taskId);
+  const attempts = store.handle
+    .prepare(
+      `SELECT outcome, provider, model, started_at, finished_at FROM run
+        WHERE task_ref = ? ORDER BY id`,
+    )
+    .all(Number(row["rid"]))
+    .map(one => ({
+      outcome: one["outcome"] === null ? null : String(one["outcome"]),
+      provider: String(one["provider"]),
+      model: one["model"] === null ? null : String(one["model"]),
+      startedAt: String(one["started_at"]),
+      finishedAt: one["finished_at"] === null ? null : String(one["finished_at"]),
+    }));
+  return {
+    ref: String(row["tid"]),
+    title: String(row["title"]),
+    state: String(row["state"]),
+    repo: String(row["repo"]),
+    scope: { sealed: store.scopeSealed(taskId), goal: scope?.goal ?? null },
+    attempts,
+  };
+}

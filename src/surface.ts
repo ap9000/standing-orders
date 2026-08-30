@@ -206,6 +206,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
 
   // ---- reads over shared machinery ----
   { invocation: "runner list", synopsis: "registered workers", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
+  { invocation: "coordinator list", synopsis: "MCP filing credentials and their limits", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "approver list", synopsis: "who can say yes (names only)", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "cap list", synopsis: "recorded capabilities", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },
   { invocation: "outbox list", synopsis: "queued notifications", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
@@ -227,8 +228,12 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
 
   // ---- operator ceremonies and infrastructure (listed, detail-free) ----
   operator("approver add", "mint the credential that lets a person say yes"),
-  operator("runner register", "register a worker; its token is shown once"),
+  operator("runner register", "register a worker bound to its repositories; its token is shown once"),
   operator("runner retire", "retire a worker"),
+  operator("runner bind", "replace which repositories a worker may build in"),
+  operator("coordinator mint", "mint the MCP filing credential — repo-bound, rate-limited, token shown once"),
+  operator("coordinator revoke", "revoke an MCP filing credential"),
+  operator("mcp", "serve the MCP gateway over stdio — the coordinator credential is the only key it accepts"),
   operator("cap add", "record a capability"),
   operator("outbox deliver", "deliver queued notifications"),
   operator("incident resolve", "resolve an incident"),

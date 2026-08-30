@@ -162,6 +162,11 @@ describe("the machine envelope", () => {
       template: ["list", "--json"],
       contest: ["show", "999", "--json"],
       webhook: ["status", "--json"],
+      coordinator: ["list", "--json"],
+      // mcp is the stdio protocol server: its --json story is the protocol
+      // itself; with no credential configured it refuses on stderr before
+      // any store opens, and the exit code is the envelope.
+      mcp: ["--json"],
     };
 
     // The drift guard: the routed set, read from source, must be covered.

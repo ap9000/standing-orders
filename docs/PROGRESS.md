@@ -1,5 +1,29 @@
 # Progress
 
+**2026-08-30 — MCP 7: the gateway serves.** `standing-orders mcp` is a
+zero-dep MCP stdio server: newline-delimited JSON-RPC, stdout carrying
+protocol bytes only, two pinned revisions (modern 2026-07-28 with
+per-request `_meta` validation, `server/discover`, and schema-complete
+results — `resultType`/`ttlMs`/`cacheScope`; legacy 2025-11-25 whose
+initialize NEGOTIATES itself and never counter-offers the modern era),
+no batching in either era, cancellations suppressing their responses
+entirely, 256KiB/depth-32 limits, malformed input answered in-protocol.
+Six tools from typed descriptors (status, list_tasks, get_task,
+list_repos, get_contract — a NEW narrow contract guide, not the agent
+guide — and file_proposal), every call re-authenticated against the
+live credential row (tools/list visibility is presentation, not
+authorization; revocation mid-session refuses and exits), reads
+allowlist-scoped in SQL with foreign refs answering not-found, costs
+and rows built by typed projection (row spreads arch-forbidden). The
+CLI verb goes through the NON-migrating door, takes its token from a
+0600 token file (fd-verified: O_NOFOLLOW|O_NONBLOCK, regular file, own
+uid, exact mode, bounded read) XOR the environment — both set refuses —
+dies at startup on a dead credential, refuses demo databases, and
+re-reads the schema version on every call so a concurrent migration
+ends the server in words. Nine byte-level fixtures + the drift guards
+(surface contract + envelope sweep) now cover coordinator/mcp. Suite
+1495.
+
 **2026-08-30 — MCP 5: the coordinator principal exists.** Schema v31
 (additive): `coordinator_credential` (immutable 12-char cid = the
 identity; names unique only among the living, so revoke-and-remint

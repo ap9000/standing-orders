@@ -216,6 +216,7 @@ export const OPERATE_COMMANDS = new Set([
   "runner",
   "approver",
   "coordinator",
+  "mcp",
   "build",
   "tick",
   "cap",

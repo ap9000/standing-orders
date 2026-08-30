@@ -29,6 +29,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   openStore,
+  openStoreNoMigrate,
   databasePath,
   BUILT_IN,
   DEFAULT_ACTOR,
@@ -44,7 +45,7 @@ import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from 
 import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, updateRepos } from "./repos.js";
 import { pushPass } from "./push.js";
-import { closeSync, constants as fsConstants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync, mkdirSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
@@ -139,6 +140,8 @@ import {
   RUNNER_NAME_MAX,
 } from "./runner.js";
 import { mintCoordinator, revokeCoordinator, listCoordinators } from "./coordinator.js";
+import { serveMcp } from "./mcp.js";
+import { createInterface } from "node:readline";
 import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
@@ -470,7 +473,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "stop-grace", "title", "name",
-  "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
+  "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -553,6 +556,12 @@ export async function runOperate(
 
   const file = text(flags, "db") ?? options.databaseFile ?? databasePath(process.env, homedir());
   const now = options.now ?? new Date();
+
+  // The MCP server never touches the migrating open below — it goes
+  // through the non-migrating door with its own refusal words (spec v6).
+  if (command === "mcp") {
+    return mcpCommand(file, flags, write, json);
+  }
 
   let store: Store;
   try {
@@ -1358,6 +1367,94 @@ async function coordinatorCommand(
   }
 
   return fail(write, json, "coordinator", "usage", `unknown \`coordinator ${action}\` — try list, mint, revoke`, EXIT.usage);
+}
+
+/**
+ * `standing-orders mcp` (MCP gateway spec v6): stdio server, coordinator
+ * credential from a 0600 token file XOR the environment, non-migrating
+ * store open, demo refusal, startup death on a dead credential. stdout
+ * is protocol bytes only; everything human goes to stderr.
+ */
+async function mcpCommand(
+  file: string,
+  flags: Map<string, string | true>,
+  write: Write,
+  json: boolean,
+): Promise<number> {
+  const said = (message: string): number => {
+    // Refusals precede protocol traffic. Machine callers (--json) get the
+    // standard envelope on stdout — no protocol bytes have flowed yet;
+    // humans get stderr, keeping stdout pure for a piped client.
+    if (json) write(envelopeJson({ ok: false, command: "mcp", reason: "refused", message }));
+    else process.stderr.write(`${message}\n`);
+    return EXIT.refused;
+  };
+
+  const fromFile = text(flags, "token-file");
+  const fromEnv = process.env["STANDING_ORDERS_COORDINATOR"];
+  if (fromFile !== undefined && fromEnv !== undefined && fromEnv !== "") {
+    return said("both --token-file and STANDING_ORDERS_COORDINATOR are set — pick one");
+  }
+  let token: string;
+  if (fromFile !== undefined) {
+    // Through the fd (spec v6): no symlink, no FIFO hang, regular file,
+    // our uid, exactly 0600, bounded read. Anything else refuses by name.
+    let fd: number;
+    try {
+      fd = openSync(fromFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    } catch {
+      return said(`${fromFile}: cannot open (missing, or a symlink — the token file must be the real file)`);
+    }
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) return said(`${fromFile}: not a regular file`);
+      if (stat.uid !== process.getuid?.()) return said(`${fromFile}: owned by somebody else`);
+      if ((stat.mode & 0o777) !== 0o600) return said(`${fromFile}: mode must be exactly 0600`);
+      if (stat.size > 4096) return said(`${fromFile}: too large for a token file`);
+      const buffer = Buffer.alloc(4096);
+      const read = readSync(fd, buffer, 0, 4096, 0);
+      token = buffer.subarray(0, read).toString("utf8").trim();
+    } finally {
+      closeSync(fd);
+    }
+  } else if (fromEnv !== undefined && fromEnv !== "") {
+    token = fromEnv.trim();
+  } else {
+    return said("no credential — pass --token-file <path> (0600) or set STANDING_ORDERS_COORDINATOR");
+  }
+
+  const door = openStoreNoMigrate(file);
+  if (!door.ok) return said(door.message);
+  const store = door.store;
+  if (store.isDemo()) {
+    store.close();
+    return said("demo console — no gateway");
+  }
+
+  return await new Promise<number>(resolvePromise => {
+    let lineHandler: (line: string) => void = () => {};
+    let eofHandler: () => void = () => {};
+    const reader = createInterface({ input: process.stdin, terminal: false });
+    reader.on("line", line => lineHandler(line));
+    reader.on("close", () => eofHandler());
+    const outcome = serveMcp(store, token, {
+      onLine: handler => { lineHandler = handler; },
+      onEof: handler => { eofHandler = handler; },
+      write: line => process.stdout.write(`${line}\n`),
+      log: line => process.stderr.write(`${line}\n`),
+      exit: code => {
+        reader.close();
+        store.close();
+        resolvePromise(code);
+      },
+    });
+    if (!outcome.ok) {
+      reader.close();
+      store.close();
+      process.stderr.write(`${outcome.message}\n`);
+      resolvePromise(EXIT.refused);
+    }
+  });
 }
 
 function describeAuth(reason: string, name: string): string {
