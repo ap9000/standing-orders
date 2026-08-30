@@ -1,5 +1,35 @@
 # Progress
 
+**2026-08-30 — MCP review round 1: NO-GO honored, all ten findings
+closed.** Five fix batches: the 2026-07-28 wire made spec-true
+(namespaced `_meta` key, `supportedVersions` + namespaced serverInfo on
+discover, `cacheScope: private`, `-32022`, era-classified ping); the
+engine validates jsonrpc/ids/arguments as InvalidParams, tracks the
+legacy lifecycle, silences unknown notifications, and cancels in-flight
+work only; the migration epoch commits BEFORE the fresh-SCHEMA exec and
+every MCP method checks the schema inside its own snapshot; the
+credential rides a per-server context (the global-variable bug is
+dead); custody is proven AFTER the attestation await, before the setup
+spawn, and admitReview authenticates the runner token in its admission
+transaction; every mode-seal caller surfaces the quarantine; the
+cancellation floor is one transaction with validated reasons; scoped
+SQL pins backend='built-in' (the collision leak is dead) and the tools
+say enough — lease-based running, the board's attention vocabulary,
+chip words, scope words with the fallback chain, integer micro-USD
+costs with coverage, opaque evidence metadata, allowlist ∩ enrolled;
+coordinator_cid carries its FK, the non-migrating door cannot create,
+the MCP process umasks and repairs modes, DESIGN.md §9b describes the
+real credential and the same-UID threat boundary; the console carries
+fingerprint + filing age. Then the regression net: 21 new tests across
+three subagent batches — byte-pinned wire fixtures, the token-file
+matrix, concurrent-server credential isolation, the global cap and
+stale-seal arithmetic, the backend-collision and repo-null exclusions,
+quarantine via the planner/attended/mode roads, machine-road dismissal
+events with a rollback proof, the REAL migrator's epoch-before-DDL
+proof, and takeover races at every seam. One inconsistency the tests
+caught — the startup death bypassing said()'s envelope contract — is
+fixed. Suite 1524.
+
 **2026-08-30 — MCP 8: the console knows who asked.** The approval
 ceremony now carries the filer INSIDE the form when a coordinator filed
 the task — `filed by mcp:planner-bot#a3f2 — an agent asked for this;

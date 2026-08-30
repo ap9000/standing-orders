@@ -405,6 +405,27 @@ describe("the reviewer role in the store", () => {
       expect(store.openReviewRequests()).toHaveLength(0);
     });
 
+    test("a rotated credential cannot admit: the stale token refuses in-txn and the request stays OPEN for the fresh one (review finding 4)", () => {
+      const asked = store.requestReview(builtRun, "alex", T0);
+      if (!asked.ok) throw new Error("ask");
+      // The takeover: the same name re-registers, rotating the credential.
+      // Reviewer runs hold no task claim, so this txn-time identity proof is
+      // the ONLY thing standing between a stale process and an admission.
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-rotated" });
+
+      const stale = store.admitReview(asked.id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null }, T0);
+      expect(stale).toMatchObject({ ok: false, reason: "unauthenticated", detail: "bad-token" });
+
+      // Nothing was spent: the request is unconsumed, no reviewer run exists.
+      expect(store.raw().prepare("SELECT consumed_at FROM review_request WHERE id = ?").get(asked.id)).toMatchObject({ consumed_at: null });
+      expect(store.openReviewRequests()).toHaveLength(1);
+      expect(store.raw().prepare("SELECT COUNT(*) AS n FROM run WHERE role = 'reviewer'").get()?.["n"]).toBe(0);
+
+      // The fresh credential admits the SAME request — the refusal cost nothing.
+      const fresh = store.admitReview(asked.id, { runner: "builder-1", token: "tok-rotated", provider: "claude", model: null }, T0);
+      expect(fresh).toMatchObject({ ok: true, sourceRun: builtRun });
+    });
+
     test("the daily run rail refuses admission atomically and leaves the request OPEN", async () => {
       const terms = { ...presetTerms("standard", new Date(T0.getTime() + 24 * 60 * 60_000).toISOString()), dailyRunCap: 1 };
       store.signMode(

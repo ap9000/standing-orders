@@ -8,6 +8,7 @@ import { describe, test, expect, beforeEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import {
   acquireWatchLeaseAuthed,
+  authenticate,
   DEFAULT_LIVENESS_MS,
   heartbeat,
   heartbeatWatchLeaseAuthed,
@@ -148,6 +149,34 @@ describe("authenticated heartbeats and leases", () => {
     if (took.ok) expect(took.recovered).toBeGreaterThan(0);
     expect(store.getRun(runId)).toMatchObject({ outcome: "failed", reason: "interrupted" });
     expect(store.getTask("t-s")).toMatchObject({ state: "queued" });
+  });
+
+  test("identity is proven INSIDE the claim transaction — an earlier authenticate carries no authority across a rotation", () => {
+    // The runner gate's first leg (MCP spec v6): a stale process checks its
+    // credential, the check passes, and THEN the takeover lands. If acquire
+    // trusted the earlier answer, the stale process would claim under its
+    // successor's authority; instead the row is re-read and the hash
+    // re-compared inside the claim's own transaction.
+    const first = register(store, { name: "w-1", host: "here", repos: [REPO], now: T0, newToken: () => "tok-old" });
+    store.createTask({ id: "t-race", title: "auth/acquire race" }, T0);
+    const ref = store.refFor("built-in", "t-race").id;
+    store.placeTask(ref, REPO);
+
+    // The stale process's own auth check — genuinely good at this instant.
+    expect(authenticate(store, "w-1", first.token)).toMatchObject({ ok: true });
+
+    // The takeover: re-registering the name reclaims and rotates the credential.
+    const successor = register(store, { name: "w-1", host: "elsewhere", repos: [REPO], now: later(1_000), newToken: () => "tok-new" });
+
+    // The stale token rides into acquire anyway — refused in-transaction.
+    const stale = acquire(store, ref, "w-1", { token: first.token, now: later(2_000), ttlMs: 60_000 });
+    expect(stale).toMatchObject({ ok: false, reason: "unauthenticated", detail: "bad-token" });
+    // Nothing was claimed for the stale process.
+    expect(store.hasLiveClaim(ref, later(2_000))).toBe(false);
+
+    // The successor's fresh credential claims the same task fine.
+    const fresh = acquire(store, ref, "w-1", { token: successor.token, now: later(3_000), ttlMs: 60_000 });
+    expect(fresh).toMatchObject({ ok: true });
   });
 
   test("renewal answers false the moment the credential rotates — the caller must stop", () => {

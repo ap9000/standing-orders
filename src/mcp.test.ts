@@ -14,6 +14,8 @@ function harness(store: Store, token: string): {
   sendRaw: (line: string) => void;
   out: () => Record<string, unknown>[];
   last: () => Record<string, unknown>;
+  /** The raw protocol line, byte-for-byte as the server wrote it. */
+  lastRaw: () => string;
   exitCode: () => number | null;
   outcome: ReturnType<typeof serveMcp>;
 } {
@@ -33,6 +35,7 @@ function harness(store: Store, token: string): {
     sendRaw: line => lineHandler(line),
     out: () => lines.map(one => JSON.parse(one) as Record<string, unknown>),
     last: () => JSON.parse(lines[lines.length - 1] ?? "{}") as Record<string, unknown>,
+    lastRaw: () => lines[lines.length - 1] ?? "",
     exitCode: () => exited,
     outcome,
   };
@@ -222,6 +225,173 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { _meta: modernMeta, name: "get_task", arguments: { ref: taskId } } });
     const detail = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
     expect((detail["scope"] as Record<string, unknown>)["sealed"]).toBe(true);
+  });
+
+  test("two concurrent servers on one store never cross credentials: each session's filing stamps ITS OWN cid", () => {
+    // The review found a global-variable bug here once: one process, two
+    // serveMcp instances, and the second server's token clobbered the
+    // first's. The fix threads the token per-server — prove it holds by
+    // interleaving filings across two live sessions.
+    const other = mintCoordinator(store, { name: "other-bot", repos: ["/repo/isolated"], by: "alex", now: T0 });
+    if (!other.ok) throw new Error("mint failed");
+    const mine = store.handle.prepare("SELECT cid FROM coordinator_credential WHERE name = 'planner-bot'").get();
+    const myCid = String(mine?.["cid"]);
+
+    const h1 = harness(store, token);
+    const h2 = harness(store, other.token); // the SECOND server starts before the first files
+    const fileVia = (h: ReturnType<typeof harness>, repo: string, key: string): string => {
+      h.send({
+        jsonrpc: "2.0", id: key, method: "tools/call",
+        params: { _meta: modernMeta, name: "file_proposal", arguments: { repo, title: `work ${key}`, idempotency_key: key } },
+      });
+      const result = h.last()["result"] as Record<string, unknown>;
+      expect(result["isError"]).toBeUndefined();
+      return String(JSON.parse(String((result["content"] as { text: string }[])[0]?.text))["ref"]);
+    };
+
+    const viaSecond = fileVia(h2, "/repo/isolated", "key-iso-0001");
+    const viaFirst = fileVia(h1, REPO, "key-iso-0002"); // filed AFTER h2 exists — the clobber would stamp other-bot's cid
+    const viaSecondAgain = fileVia(h2, "/repo/isolated", "key-iso-0003");
+
+    expect(store.refFor("built-in", viaFirst).coordinatorCid).toBe(myCid);
+    expect(store.refFor("built-in", viaSecond).coordinatorCid).toBe(other.cid);
+    expect(store.refFor("built-in", viaSecondAgain).coordinatorCid).toBe(other.cid);
+    expect(myCid).not.toBe(other.cid);
+
+    // And the provenance labels agree with the stamps.
+    const via = (id: string) =>
+      String(store.handle.prepare("SELECT filed_via FROM task_ref WHERE backend = 'built-in' AND external_id = ?").get(id)?.["filed_via"]);
+    expect(via(viaFirst)).toBe("mcp:planner-bot");
+    expect(via(viaSecond)).toBe("mcp:other-bot");
+  });
+
+  test("pinned byte fixtures: tools/list, initialize, and discover serialize EXACTLY — field spellings are frozen", () => {
+    // These are the wire bytes clients parse. A renamed field, a reordered
+    // key, or a drifted description is a silent protocol break — so the
+    // whole line is pinned, byte-for-byte, against JSON.stringify of the
+    // expected object.
+    const outputSchema = {
+      type: "object",
+      properties: {
+        content: {
+          type: "array",
+          items: { type: "object", properties: { type: { type: "string" }, text: { type: "string" } }, required: ["type", "text"], additionalProperties: false },
+        },
+        isError: { type: "boolean" },
+      },
+      required: ["content"],
+      additionalProperties: true,
+    };
+    const tools = [
+      {
+        name: "status",
+        description: "The plane's liveness facts over your repo allowlist: what waits on the operator, what runs, what finished in the last 24h.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        outputSchema,
+      },
+      {
+        name: "list_tasks",
+        description: "Tasks in your repo allowlist. Filter by state and repo; cursor-paginated, stable order.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            state: { type: "string", enum: ["queued", "running", "done", "failed", "cancelled"] },
+            repo: { type: "string", maxLength: 800 },
+            cursor: { type: "integer", minimum: 0 },
+            limit: { type: "integer", minimum: 1, maximum: 50 },
+          },
+          additionalProperties: false,
+        },
+        outputSchema,
+      },
+      {
+        name: "get_task",
+        description: "One task's scope standing, filer provenance, and attempt ledger. A ref outside your allowlist answers not-found.",
+        inputSchema: {
+          type: "object",
+          properties: { ref: { type: "string", minLength: 1, maxLength: 64 } },
+          required: ["ref"],
+          additionalProperties: false,
+        },
+        outputSchema,
+      },
+      {
+        name: "list_repos",
+        description: "The repositories your credential may see and file into, with their operating-mode standing.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        outputSchema,
+      },
+      {
+        name: "get_contract",
+        description: "This surface's contract: what a coordinator may do, the proposal lifecycle, and the admission promise.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        outputSchema,
+      },
+      {
+        name: "file_proposal",
+        description: "File a task proposal into one of your repositories. It stays quarantined until the operator signs its scope.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            repo: { type: "string", minLength: 1, maxLength: 800 },
+            title: { type: "string", minLength: 1, maxLength: 200 },
+            intent: { type: "string", maxLength: 2000 },
+            idempotency_key: { type: "string", minLength: 8, maxLength: 64 },
+          },
+          required: ["repo", "title", "idempotency_key"],
+          additionalProperties: false,
+        },
+        outputSchema,
+      },
+    ];
+
+    const h = harness(store, token);
+
+    // Legacy initialize: the exact handshake-era result — no resultType,
+    // no ttlMs, a bare serverInfo (never the namespaced _meta key).
+    h.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: LEGACY } });
+    expect(h.lastRaw()).toBe(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          protocolVersion: LEGACY,
+          capabilities: { tools: {} },
+          serverInfo: { name: "standing-orders", version: "0.4.0" },
+        },
+      }),
+    );
+
+    // Modern tools/list: resultType/ttlMs/cacheScope spelled exactly, the
+    // narrowest cacheScope "private", and every descriptor byte-for-byte.
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
+    expect(h.lastRaw()).toBe(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        result: { tools, resultType: "complete", ttlMs: 0, cacheScope: "private" },
+      }),
+    );
+
+    // server/discover: supportedVersions and the NAMESPACED _meta serverInfo
+    // key — the modern era's spellings, frozen.
+    h.send({ jsonrpc: "2.0", id: 3, method: "server/discover", params: {} });
+    expect(h.lastRaw()).toBe(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        result: {
+          protocolVersion: MODERN,
+          supportedVersions: [MODERN, LEGACY],
+          capabilities: { tools: {} },
+          _meta: { "io.modelcontextprotocol/serverInfo": { name: "standing-orders", version: "0.4.0" } },
+          tools,
+          resultType: "complete",
+          ttlMs: 0,
+          cacheScope: "private",
+        },
+      }),
+    );
   });
 
   test("ARCH: no raw row spread leaves this module", () => {

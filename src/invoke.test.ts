@@ -11,7 +11,7 @@ import { resetAttestationCache } from "./attest.js";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { invokeAgent, type InvokeResult } from "./invoke.js";
-import { register } from "./runner.js";
+import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire } from "./claim.js";
 
 /** Most of this suite exercises the RAN arm; the union's refusal arms have
@@ -239,6 +239,43 @@ describe("the invocation gateway", () => {
     });
     expect(result.finalMessage).toBe("credential rejected before any turn");
     expect(result.initFailed).toBe(true);
+  });
+
+  test("the spawn leg refuses after a takeover between acquire and invoke — the lease is no longer current (runner-custody)", async () => {
+    // The takeover: a new process registers the same name. register()
+    // reclaims whatever the old holder had, so lease-1 stops being the
+    // task's live claim — and the custody proof at the spawn stamp, not any
+    // earlier check, is what notices.
+    register(store, { name: RUNNER, host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-rotated" });
+    let spawned = false;
+    const result = await invokeAgent(store, runId, CLAUDE, ASK, {
+      runner: async () => {
+        spawned = true;
+        return OK;
+      },
+    });
+    expect(result).toMatchObject({ kind: "refused", reason: "runner-custody" });
+    // No process, no spend: the start stamp never landed.
+    expect(spawned).toBe(false);
+    expect(store.getRun(runId)?.providerStartedAt).toBeNull();
+  });
+
+  test("the spawn leg refuses a runner retired between acquire and invoke, even with the claim still live (runner-custody)", async () => {
+    // Retirement releases nothing — the claim row stays live — so this pins
+    // the retired-runner arm of the custody proof specifically, not a lease
+    // side effect.
+    const retired = retireRunnerIfCurrent(store, RUNNER, `tok-${RUNNER}`, T0);
+    expect(retired).toMatchObject({ ok: true });
+    let spawned = false;
+    const result = await invokeAgent(store, runId, CLAUDE, ASK, {
+      runner: async () => {
+        spawned = true;
+        return OK;
+      },
+    });
+    expect(result).toMatchObject({ kind: "refused", reason: "runner-custody" });
+    expect(spawned).toBe(false);
+    expect(store.getRun(runId)?.providerStartedAt).toBeNull();
   });
 
   test("an observed init is never an init failure, whatever else went wrong", async () => {

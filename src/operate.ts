@@ -1472,8 +1472,10 @@ async function mcpCommand(
     if (!outcome.ok) {
       reader.close();
       store.close();
-      process.stderr.write(`${outcome.message}\n`);
-      resolvePromise(EXIT.refused);
+      // The startup death honors the same contract as every other
+      // refusal here: an envelope for machine callers, stderr for
+      // humans — no protocol bytes ever flowed.
+      resolvePromise(said(outcome.message));
     }
   });
 }

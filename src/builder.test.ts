@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { register } from "./runner.js";
+import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { build, PROTECTED, type Runner } from "./builder.js";
@@ -279,6 +279,30 @@ describe("the builder's gates", () => {
       }) as Runner,
     }));
     expect(again.ok).toBe(true);
+  });
+
+  test("setup is a spawn like any other: custody is re-proven before it, so a retirement between claim and build runs nothing (review finding 4)", async () => {
+    claimIt();
+    approveScope();
+    store.setWorktreeSetup({ repo: "/code/thing", command: "npm ci", timeoutMs: 60_000, approvedBy: "alex" }, T0);
+    // The runner retires AFTER the claim — the claim row stays live, the
+    // worktree stays leased, the scope stays approved. Only the custody
+    // proof immediately before the setup process knows.
+    const retired = retireRunnerIfCurrent(store, "builder-1", tok("builder-1"), T0);
+    expect(retired).toMatchObject({ ok: true });
+    const setupCalls: string[][] = [];
+
+    const result = await build(store, request({
+      setup: (async (_file: string, args: readonly string[]) => {
+        setupCalls.push([...args]);
+        return { ...OK };
+      }) as Runner,
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: "runner-custody" });
+    // The refusal precedes the process: neither setup nor the agent ever ran.
+    expect(setupCalls).toHaveLength(0);
+    expect(agentCalls).toHaveLength(0);
   });
 
   test("an answered park hands its session to exactly one warm attempt (M6.9)", async () => {
