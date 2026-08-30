@@ -1,5 +1,18 @@
 # Progress
 
+**2026-08-30 — MCP 8: the console knows who asked.** The approval
+ceremony now carries the filer INSIDE the form when a coordinator filed
+the task — `filed by mcp:planner-bot#a3f2 — an agent asked for this;
+nothing runs until you sign, and your signature runs THEIR request` —
+composed from the cid column, never parsed from display text. The
+People screen grows a coordinators card (approver eyes): name +
+immutable fingerprint, rate, filing repos, last filed, revocation
+state, and the revoke road. One e2e fixture closes the road: file
+through the gateway → quarantine refuses the claim → password seal →
+ordinary dispatch claims it → the gateway's own reads reflect the
+sealed, claimed task. Suite 1496. Next: the implementation-wide Codex
+review.
+
 **2026-08-30 — MCP 7: the gateway serves.** `standing-orders mcp` is a
 zero-dep MCP stdio server: newline-delimited JSON-RPC, stdout carrying
 protocol bytes only, two pinned revisions (modern 2026-07-28 with

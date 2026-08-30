@@ -2,6 +2,8 @@ import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { mintCoordinator, fileCoordinatorProposal, revokeCoordinator } from "./coordinator.js";
 import { serveMcp, MODERN, LEGACY, type McpIo } from "./mcp.js";
+import { register } from "./runner.js";
+import { acquire } from "./claim.js";
 
 const T0 = new Date("2026-08-30T12:00:00.000Z");
 const REPO = "/repo/mcp-server";
@@ -157,6 +159,38 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_repos", arguments: {} } });
     expect(h.last()["error"]).toMatchObject({ code: -32000 });
     expect(h.exitCode()).toBe(0);
+  });
+
+  test("e2e: file through the gateway, seal with the password, dispatch ordinarily, status reflects", () => {
+    const h = harness(store, token);
+    h.send({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "file_proposal", arguments: { repo: REPO, title: "e2e work", idempotency_key: "key-e2e-0001" } },
+    });
+    const body = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
+    const taskId = String(body["ref"]);
+    const taskRef = store.refFor("built-in", taskId).id;
+    register(store, { name: "b-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-b-1" });
+
+    // Quarantined until the password seal — then ordinary.
+    expect(acquire(store, taskRef, "b-1", { now: T0, token: "tok-b-1" })).toMatchObject({ ok: false, reason: "coordinator-filed" });
+    store.saveScope({
+      taskId, goal: "e2e work", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: `dg-${taskId}`,
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    expect(store.sealScopeApproval(taskId, "alex", T0)).toBe(true);
+    expect(acquire(store, taskRef, "b-1", { now: T0, token: "tok-b-1" })).toMatchObject({ ok: true });
+
+    // The gateway's own view reflects it: the task is visible in OUR
+    // repo, sealed and claimed (the raw claim primitive leaves the state
+    // transition to its callers, so no state filter here).
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_tasks", arguments: {} } });
+    const listed = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
+    expect((listed["tasks"] as { ref: string }[]).map(one => one.ref)).toEqual([taskId]);
+    h.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_task", arguments: { ref: taskId } } });
+    const detail = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
+    expect((detail["scope"] as Record<string, unknown>)["sealed"]).toBe(true);
   });
 
   test("ARCH: no raw row spread leaves this module", () => {

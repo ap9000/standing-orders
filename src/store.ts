@@ -9536,6 +9536,22 @@ export class Store {
   }
 
   /** Which door filed a task; null for history from before v12. */
+  /** The coordinator provenance label for a task — `mcp:<name>#<cid4>` —
+   * or null for every other filer. Rendered on the task page and INSIDE
+   * the approval ceremony (MCP spec v6: the operator sees WHO asked
+   * before signing). */
+  coordinatorProvenanceOf(taskId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT c.name AS name, c.cid AS cid FROM task_ref
+           JOIN coordinator_credential c ON c.cid = task_ref.coordinator_cid
+          WHERE task_ref.backend = ? AND task_ref.external_id = ?`,
+      )
+      .get(BUILT_IN, taskId);
+    if (row === undefined) return null;
+    return `mcp:${String(row["name"])}#${String(row["cid"]).slice(0, 4)}`;
+  }
+
   filedViaOf(taskId: string): string | null {
     const row = this.db
       .prepare("SELECT filed_via FROM task_ref WHERE backend = ? AND external_id = ?")

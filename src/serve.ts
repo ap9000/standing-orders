@@ -41,6 +41,7 @@
  * repo, only runs whose task belongs to that repo (or to no repo yet).
  */
 
+import { listCoordinators } from "./coordinator.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
@@ -1266,10 +1267,34 @@ export function createDecisionServer(options: ServeOptions): Server {
             `</form>`,
             `</div>`,
           ].join("\n");
+      // Coordinators (MCP spec v6): the machine principals beside the
+      // human ones — name, immutable fingerprint, what they may file
+      // into, their rate, and the revoke road. Approver eyes only.
+      const coordinatorCard = !approverView
+        ? ""
+        : (() => {
+            const rows = listCoordinators(store);
+            if (rows.length === 0) return "";
+            return [
+              `<div class="card">`,
+              `<h2 style="margin-top:0">coordinators</h2>`,
+              `<p class="meta">agents holding the MCP filing credential — they may propose work; only you admit it</p>`,
+              ...rows.map(one =>
+                `<p class="row">` +
+                `<span class="mono">${escape(`${one.name}#${one.cid.slice(0, 4)}`)}</span> ` +
+                (one.revokedAt !== null
+                  ? `<span class="meta">revoked ${escape(one.revokedAt.slice(0, 10))}</span>`
+                  : `<span class="meta">${one.perHour}/hour · files into ${one.repos.map(repo => escape(repo)).join(", ")} · last filed ${one.lastFiledAt === null ? "never" : escape(one.lastFiledAt.slice(0, 16).replace("T", " "))}</span>`) +
+                `</p>`,
+              ),
+              `<p class="meta">revoke: \`standing-orders coordinator revoke &lt;cid&gt; --as you\`</p>`,
+              `</div>`,
+            ].join("\n");
+          })();
       return sendScreen(
         response,
         200,
-        screen("people", [`<h1>people</h1>`, ...cards, inviteCard].join("\n"), {
+        screen("people", [`<h1>people</h1>`, ...cards, coordinatorCard, inviteCard].join("\n"), {
           chrome: chromeFor(project, "people"),
         }),
       );
@@ -2413,6 +2438,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         revision,
         repo: ref?.repo ?? null,
         filedVia: store.filedViaOf(taskId),
+        coordinator: store.coordinatorProvenanceOf(taskId),
         holds: ref === null ? [] : store.activeHolds(ref.id, now),
         contest: (() => {
           if (ref === null) return null;
@@ -8801,6 +8827,8 @@ function taskBody(data: {
   /** Immutable filing provenance (v12) — the approver sees which door
    * filed this (console, cli, intake, template:<name>) at the yes. */
   filedVia?: string | null;
+  /** `mcp:<name>#<cid4>` when a coordinator filed this; null otherwise. */
+  coordinator?: string | null;
   holds: Hold[];
   contest?: { id: number; state: string; agents: number; kind: "race" | "comparison" } | null;
   claimed: boolean;
@@ -9006,6 +9034,12 @@ function taskBody(data: {
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
           `<p><strong>approve exactly this:</strong></p>`,
+          // The filer INSIDE the ceremony (MCP spec v6): a coordinator's
+          // request is signed knowing whose it is — and until this
+          // signature, nothing plans, claims, or runs it.
+          data.coordinator === null || data.coordinator === undefined
+            ? ""
+            : `<p class="meta">filed by <span class="mono">${escape(data.coordinator)}</span> — an agent asked for this; nothing runs until you sign, and your signature runs THEIR request</p>`,
           `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
