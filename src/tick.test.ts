@@ -612,8 +612,10 @@ describe("reconcile, against real git", () => {
   test("forgets a worktree row whose directory is gone", async () => {
     // A real worktree is made, its row recorded — then the machine is
     // "reimaged": the directory vanishes and git is told to forget it too.
-    await run(["runner", "register", "builder-1", "--json"]);
     const store = openStore(db);
+    // CLI runner register is now a password ceremony (MCP spec v6) — this
+    // fixture only needs the runner ROW (reconcile never claims).
+    register(store, { name: "builder-1", host: "test", repos: [repo], now: new Date("2026-08-11T00:00:00.000Z"), newToken: () => "tok-builder-1" });
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z")); // v24: approvals bind exact routing
     const wt = join(pool, "repo", "gone");
     await exec("git", ["worktree", "add", "-b", "standing-orders/gone", wt], { cwd: repo });

@@ -135,6 +135,7 @@ import {
   retireRunnerIfCurrent,
   normalizeRunnerName,
   validRunnerName,
+  canonicalRepos,
   RUNNER_NAME_MAX,
 } from "./runner.js";
 import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage } from "./scope.js";
@@ -1069,11 +1070,11 @@ function reapCommand(context: Context): number {
  * recovers it, because a control plane able to hand back a runner's credential
  * is one whose database is worth stealing.
  */
-function runnerCommand(
+async function runnerCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const { store, write, json, now } = context;
   const [action, name] = positional;
 
@@ -1103,10 +1104,27 @@ function runnerCommand(
       return fail(write, json, "runner register", "usage", "--capacity is a whole number of tasks", EXIT.usage);
     }
 
+    // Minting runner authority is an operator act (MCP gateway spec v6,
+    // Codex round-1 finding 3): the CLI door now matches the console's —
+    // password-signed, and the authority is BOUND to named repositories
+    // at the mint. A caller flag never grants what the mint did not.
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "runner register", "usage", "`runner register <name> --repo <path> --as <you> --token <t>` — minting runner authority is an operator act", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, "runner register", authenticated.reason, describeApproveFailure(authenticated.reason, name), EXIT.refused);
+    }
+    const repos = context.repoList ?? [];
+    if (repos.length === 0) {
+      return fail(write, json, "runner register", "usage", "--repo names at least one repository this runner may build — authority binds at the mint", EXIT.usage);
+    }
     const { runner, token, reclaimed } = register(store, {
       name,
       host: hostname(),
       capacity,
+      repos,
       now,
       mutation: mutationFrom(flags, now),
     });
@@ -1175,6 +1193,15 @@ function runnerCommand(
     if (name === undefined) {
       return fail(write, json, "runner retire", "usage", "which runner?", EXIT.usage);
     }
+    // Retiring is revoking authority — the same operator act as minting it.
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "runner retire", "usage", "`runner retire <name> --as <you> --token <t>` — revoking runner authority is an operator act", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, "runner retire", authenticated.reason, describeApproveFailure(authenticated.reason, name), EXIT.refused);
+    }
     const retired = store.retireRunner(name, now, mutationFrom(flags, now));
     if (!retired) {
       return fail(write, json, "runner retire", "unknown", `no runner \`${name}\``, EXIT.refused);
@@ -1182,12 +1209,42 @@ function runnerCommand(
     return succeed(write, json, "runner retire", { name }, () => [`${name} is retired.`]);
   }
 
+  if (action === "bind") {
+    if (name === undefined) {
+      return fail(write, json, "runner bind", "usage", "which runner?", EXIT.usage);
+    }
+    // The one-time migration ceremony for pre-gate runners (MCP spec v6):
+    // an empty binding is deny-all at the claim gate, and this is the road
+    // the refusal names. Binding REPLACES the list with what is given —
+    // stated authority, never accumulation nobody can read back.
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "runner bind", "usage", "`runner bind <name> --repo <path> --as <you> --token <t>` — binding repositories is an operator act", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, "runner bind", authenticated.reason, describeApproveFailure(authenticated.reason, name), EXIT.refused);
+    }
+    const repos = context.repoList ?? [];
+    if (repos.length === 0) {
+      return fail(write, json, "runner bind", "usage", "--repo names at least one repository", EXIT.usage);
+    }
+    const bound = store.bindRunnerRepos(name, canonicalRepos(repos), now);
+    if (!bound.ok) {
+      return fail(write, json, "runner bind", bound.reason, describeAuth(bound.reason, name), EXIT.refused);
+    }
+    return succeed(write, json, "runner bind", { name, repos: bound.repos }, () => [
+      `${name} may build in:`,
+      ...bound.repos.map(one => `  ${one}`),
+    ]);
+  }
+
   return fail(
     write,
     json,
     "runner",
     "usage",
-    `unknown \`runner ${action}\` — try list, register, heartbeat, reap, retire`,
+    `unknown \`runner ${action}\` — try list, register, bind, heartbeat, reap, retire`,
     EXIT.usage,
   );
 }
@@ -6289,6 +6346,21 @@ async function upCommand(
     approver = approverPlan;
     for (const note of approverPlan.notes) progress(note);
 
+    // The verified gate (MCP spec v6, Codex round-3 finding 2): minting or
+    // recovering runner authority on an UNVERIFIED operator identity was a
+    // registration road around the ceremony. No verified password, no
+    // runner — the login file or another approver restores the road.
+    if (!approverPlan.verified) {
+      return fail(
+        write,
+        json,
+        "up",
+        "login",
+        `${approverPlan.approver}'s password could not be verified — a runner only registers under a proven operator. Type it correctly, restore ${UP_LOGIN_FILE}, or have another approver re-add you.`,
+        EXIT.refused,
+      );
+    }
+
     // 5. The runner, through the atomic door (findings 1/16/26/31), with
     // the suffix budget (finding 24) for generated names only.
     const base = runnerFlag ?? normalizeRunnerName(hostname());
@@ -6306,7 +6378,10 @@ async function upCommand(
         if (swept.fenced > 0) progress(`fenced ${swept.fenced} orphaned held session(s) from a previous up`);
         if (swept.paged > 0) progress(`${swept.paged} held session(s) could not be stopped — see the inbox`);
       }
-      const answer = registerRunnerIfIdle(store, { name, host: hostname(), now: clock() });
+      // The runner's authority is BOUND to the canonical roots this up
+      // serves (MCP spec v6): the claim gate enforces membership, so an
+      // unbound registration would deny-all its own dispatches.
+      const answer = registerRunnerIfIdle(store, { name, host: hostname(), repos, now: clock() });
       if (answer.ok) {
         runnerName = name;
         runnerToken = answer.token;

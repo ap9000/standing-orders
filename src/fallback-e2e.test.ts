@@ -141,8 +141,9 @@ describe("the fallback chain end-to-end (E3d)", () => {
 
   test("base exhausts → cycle advances → the SAME pass admits and builds the approved gemini fallback", async () => {
     // Credentials + the claude base routing.
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    // CLI runner register is now a password ceremony (MCP spec v6) — the
+    // fixture mints at store level below with a fixed token instead.
+    const runnerToken = "tok-builder-1";
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
@@ -216,8 +217,9 @@ describe("the fallback chain end-to-end (E3d)", () => {
   });
 
   test("WITHOUT the paid-fallback grant, the exhausted base never advances — the cycle ends clean, nothing else spends", async () => {
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    // CLI runner register is now a password ceremony (MCP spec v6) — the
+    // fixture mints at store level below with a fixed token instead.
+    const runnerToken = "tok-builder-1";
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);

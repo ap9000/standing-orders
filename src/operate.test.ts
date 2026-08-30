@@ -1279,6 +1279,74 @@ describe("intake pr-comments — named reviewers only, idempotent by comment id 
   });
 });
 
+describe("runner ceremonies (MCP spec v6)", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-runner-cer-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const run = (argv: string[]) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now: T0 });
+  };
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  const approver = async (): Promise<string> => {
+    await run(["approver", "add", "alex", "--json"]);
+    return payload().token as string;
+  };
+
+  test("register is a password ceremony bound to repos — no --as refuses, no --repo refuses, the real thing mints", async () => {
+    const token = await approver();
+    expect(await run(["runner", "register", "w-1", "--json"])).toBe(EXIT.usage);
+    expect(
+      await run(["runner", "register", "w-1", "--repo", "/repo/a", "--as", "alex", "--token", "wrong", "--json"]),
+    ).toBe(EXIT.refused);
+    expect(
+      await run(["runner", "register", "w-1", "--as", "alex", "--token", token, "--json"]),
+    ).toBe(EXIT.usage);
+    expect(
+      await run(["runner", "register", "w-1", "--repo", "/repo/a,/repo/b", "--as", "alex", "--token", token, "--json"]),
+    ).toBe(EXIT.ok);
+    expect(payload().runner.repos).toEqual(["/repo/a", "/repo/b"]);
+  });
+
+  test("retire is the same operator act", async () => {
+    const token = await approver();
+    await run(["runner", "register", "w-1", "--repo", "/repo/a", "--as", "alex", "--token", token, "--json"]);
+    expect(await run(["runner", "retire", "w-1", "--json"])).toBe(EXIT.usage);
+    expect(await run(["runner", "retire", "w-1", "--as", "alex", "--token", "nope", "--json"])).toBe(EXIT.refused);
+    expect(await run(["runner", "retire", "w-1", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+  });
+
+  test("bind REPLACES the repo list, refuses unknown and retired runners, and is itself a ceremony", async () => {
+    const token = await approver();
+    await run(["runner", "register", "w-1", "--repo", "/repo/a", "--as", "alex", "--token", token, "--json"]);
+    expect(await run(["runner", "bind", "w-1", "--repo", "/repo/b", "--json"])).toBe(EXIT.usage);
+    expect(
+      await run(["runner", "bind", "w-1", "--repo", "/repo/b,/repo/c", "--as", "alex", "--token", token, "--json"]),
+    ).toBe(EXIT.ok);
+    expect(payload().repos).toEqual(["/repo/b", "/repo/c"]);
+    expect(await run(["runner", "bind", "ghost", "--repo", "/x", "--as", "alex", "--token", token, "--json"])).toBe(
+      EXIT.refused,
+    );
+    await run(["runner", "retire", "w-1", "--as", "alex", "--token", token, "--json"]);
+    expect(await run(["runner", "bind", "w-1", "--repo", "/x", "--as", "alex", "--token", token, "--json"])).toBe(
+      EXIT.refused,
+    );
+  });
+});
+
 describe("the CLI router", () => {
   test("every verb the operate dispatcher knows is reachable from the binary", async () => {
     // routine/config/providers shipped reachable only through runOperate —

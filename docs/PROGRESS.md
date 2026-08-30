@@ -1,5 +1,18 @@
 # Progress
 
+**2026-08-30 — MCP hardening 3: runner authority is minted, not
+asserted.** `runner register` and `runner retire` are password
+ceremonies (`--as`/`--token`, approver-verified) and registration BINDS
+repos at the mint (`--repo`, comma/repeatable, required). The new
+`runner bind <name> --repo ... --as` ceremony is the one-time migration
+road for pre-gate runners — it REPLACES the list (stated authority,
+never accumulation) and refuses unknown/retired names. `up` now refuses
+to register or recover a runner under an UNVERIFIED operator identity
+(previously it proceeded on verified:false) and passes its canonical
+roots into `registerRunnerIfIdle`, so the claim gate's membership check
+holds for the daemon's own dispatches. Three ceremony tests pin the
+refusal matrix. Suite 1473.
+
 **2026-08-30 — recovered: the workbench overview implementation.** The
 hardening-2 commit also carried ~374 lines of serve.ts (workbench
 overview + mobile rail + project peek) found uncommitted in the working

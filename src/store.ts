@@ -6247,6 +6247,31 @@ export class Store {
     });
   }
 
+  /**
+   * The one-time binding ceremony's write (MCP gateway spec v6): REPLACES
+   * the runner's repo list — stated authority, never accumulation — and
+   * touches nothing else: credential, capacity, heartbeat, and retirement
+   * all stand. The caller has already authenticated the operator; a
+   * retired runner refuses (retire is final; re-register instead).
+   */
+  bindRunnerRepos(
+    name: string,
+    repos: readonly string[],
+    now: Date,
+  ): { ok: true; repos: string[] } | { ok: false; reason: "unknown" | "retired" } {
+    return this.transact(() => {
+      const found = this.getRunner(name);
+      if (found === null) return { ok: false as const, reason: "unknown" as const };
+      if (found.runner.retiredAt !== null) return { ok: false as const, reason: "retired" as const };
+      const bound = [...repos];
+      this.db
+        .prepare("UPDATE runner SET repos = ? WHERE name = ?")
+        .run(JSON.stringify(bound), name);
+      void now;
+      return { ok: true as const, repos: bound };
+    });
+  }
+
   /** The hash comes back with it; the token it was made from does not exist here. */
   getRunner(name: string): { runner: Runner; credentialHash: string } | null {
     const row = this.db.prepare("SELECT * FROM runner WHERE name = ?").get(name);

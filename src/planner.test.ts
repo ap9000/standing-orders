@@ -156,8 +156,9 @@ describe("planning mode, against real git", () => {
   });
 
   const setup = async () => {
-    await run(["runner", "register", "builder-1", "--json"], planningAgent);
-    const runnerToken = payload().token as string;
+    // CLI runner register is now a password ceremony (MCP spec v6) — the
+    // fixture mints at store level below with a fixed token instead.
+    const runnerToken = "tok-builder-1";
     // The runner gate (MCP spec v6): authority derives from the runner's
     // REGISTERED repos, not the --repo flag — bind this repo to the same
     // name and token the CLI just minted.
