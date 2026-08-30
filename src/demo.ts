@@ -32,6 +32,7 @@ import { randomBytes } from "node:crypto";
 import { openStore, type Store } from "./store.js";
 import { addApprover, propose, approve } from "./scope.js";
 import { acquire } from "./claim.js";
+import { register } from "./runner.js";
 import { approveRoutine, fireRoutine } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import { storeEvidence, budgetedStatJson, type DiffStat } from "./evidence.js";
@@ -97,6 +98,17 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   const token = password;
 
   const hoursAgo = (hours: number): Date => new Date(now.getTime() - hours * 3_600_000);
+
+  // The demo's builder goes through the REAL claim machinery, and the claim
+  // primitive proves identity and repo binding in-transaction — so the demo
+  // runner is registered like a real one, bound to both demo repos.
+  const nightShift = register(store, {
+    name: "night-shift-1",
+    host: "demo",
+    capacity: 2,
+    repos: [repos.api, repos.web],
+    now: hoursAgo(30),
+  });
 
   const task = (id: string, title: string, repo: string, goal?: string): string => {
     const made = fileTaskProposal(
@@ -177,6 +189,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   // the real claim machinery so the card wears worker and lease honestly.
   acquire(store, store.refFor("built-in", building).id, "night-shift-1", {
     now: hoursAgo(0.4),
+    token: nightShift.token,
     ttlMs: 4 * 3_600_000,
   });
   const liveRun = store.startRun({

@@ -25,6 +25,11 @@ const T0 = new Date("2026-08-24T05:00:00Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 const DEAD = later(DEFAULT_LIVENESS_MS + 60_000);
 
+/** The runner gate (MCP spec v6): acquisitions authenticate the runner and
+ * bind to the task's placed repo, so acquiring tests register against REPO
+ * and place their tasks there. */
+const REPO = "/repo/takeover";
+
 let store: Store;
 beforeEach(() => {
   store = openStore(":memory:");
@@ -51,10 +56,11 @@ describe("registerRunnerIfIdle — the atomic take-or-refuse door", () => {
   });
 
   test("takes over a dead runner: open runs finish, the task requeues, the token rotates", () => {
-    const first = register(store, { name: "w-1", host: "here", now: T0 });
+    const first = register(store, { name: "w-1", host: "here", repos: [REPO], now: T0 });
     store.createTask({ id: "t-1", title: "left behind" }, T0);
     const ref = store.refFor("built-in", "t-1").id;
-    acquire(store, ref, "w-1", { now: T0, ttlMs: 60_000, newLeaseId: () => "lease-a", incarnation: "inc-a" });
+    store.placeTask(ref, REPO);
+    acquire(store, ref, "w-1", { token: first.token, now: T0, ttlMs: 60_000, newLeaseId: () => "lease-a", incarnation: "inc-a" });
     store.setTaskState("t-1", "running", T0);
     const runId = store.startRun({
       taskRef: ref, leaseId: "lease-a", runner: "w-1", branch: "b", worktree: "/w", now: T0,
@@ -72,10 +78,11 @@ describe("registerRunnerIfIdle — the atomic take-or-refuse door", () => {
   });
 
   test("a reap-released claim's open run still recovers and requeues (finding 31)", () => {
-    register(store, { name: "w-1", host: "here", now: T0 });
+    const reg = register(store, { name: "w-1", host: "here", repos: [REPO], now: T0 });
     store.createTask({ id: "t-r", title: "reaped mid-build" }, T0);
     const ref = store.refFor("built-in", "t-r").id;
-    acquire(store, ref, "w-1", { now: T0, ttlMs: 60_000, newLeaseId: () => "lease-r", incarnation: "inc-r" });
+    store.placeTask(ref, REPO);
+    acquire(store, ref, "w-1", { token: reg.token, now: T0, ttlMs: 60_000, newLeaseId: () => "lease-r", incarnation: "inc-r" });
     store.setTaskState("t-r", "running", T0);
     const runId = store.startRun({
       taskRef: ref, leaseId: "lease-r", runner: "w-1", branch: "b", worktree: "/w", now: T0,
@@ -119,10 +126,11 @@ describe("authenticated heartbeats and leases", () => {
   });
 
   test("taking over an EXPIRED lease recovers the superseded incarnation in the same call", () => {
-    const reg = register(store, { name: "w-1", host: "here", now: T0 });
+    const reg = register(store, { name: "w-1", host: "here", repos: [REPO], now: T0 });
     store.createTask({ id: "t-s", title: "superseded work" }, T0);
     const ref = store.refFor("built-in", "t-s").id;
-    acquire(store, ref, "w-1", { now: T0, ttlMs: 30 * 60_000, newLeaseId: () => "lease-s", incarnation: "inc-a" });
+    store.placeTask(ref, REPO);
+    acquire(store, ref, "w-1", { token: reg.token, now: T0, ttlMs: 30 * 60_000, newLeaseId: () => "lease-s", incarnation: "inc-a" });
     store.setTaskState("t-s", "running", T0);
     const runId = store.startRun({
       taskRef: ref, leaseId: "lease-s", runner: "w-1", branch: "b", worktree: "/w", now: T0,

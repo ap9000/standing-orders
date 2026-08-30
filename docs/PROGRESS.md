@@ -1,5 +1,24 @@
 # Progress
 
+**2026-08-30 — MCP hardening 2: the runner gate, first leg.** The shared
+acquisition primitive now proves, INSIDE the claim transaction: the
+runner's token verifies against its registered credential (a takeover
+rotating the credential between the caller's auth and the CAS can no
+longer let a stale process ride its successor's authority — round-5
+finding 1), the task's placed repo is non-null (`unplaced` refuses:
+repo-null tasks stop dispatching), and that repo is in the runner's
+bound list (`unauthorized-repo` names the coming `runner bind` road).
+AcquireOptions requires `token`; every variant — acquire, acquireIfReady,
+acquireFallback, acquireContinuation — shares the gate. Runner repos
+canonicalize at registration exactly as task repos do at filing, the
+demo registers night-shift-1 through the real machinery, and the CLI
+claim verb speaks the three new refusals. 253 tests across 20 files
+re-fixtured to the new law (runners registered + bound, tasks placed,
+tokens passed); one test's premise was rewritten because the gate
+falsifies it by design ("an unregistered runner cannot claim at all").
+Still to come in this leg: spawn-time re-proof, tick's pre-I/O checks,
+register/retire/bind ceremonies, the migration epoch. Suite 1470.
+
 **2026-08-30 — MCP hardening 1: the cancellation floor + the door's
 empty-repo fix.** One function (`applyCancellation`) is now the only
 writer of `state='cancelled'` — the generic state verb, operator

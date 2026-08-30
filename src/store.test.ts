@@ -4,9 +4,19 @@ import { join, dirname } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { SCHEMA_VERSION, openStore, BUILT_IN, type Capability, type Store } from "./store.js";
 import { acquire } from "./claim.js";
+import { register } from "./runner.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
+
+/** The runner gate (MCP spec v6): every acquisition authenticates the runner
+ * and requires the task's PLACED repo to be in its registered list — tests
+ * that claim enroll their runner here and place tasks at REPO first. */
+const REPO = "/repo/store-tests";
+const tok = (name: string) => `tok-${name}`;
+function enroll(store: Store, name: string): void {
+  register(store, { name, host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => tok(name) });
+}
 
 describe("the built-in task store", () => {
   let store: Store;
@@ -86,18 +96,22 @@ describe("the built-in task store", () => {
     });
 
     test("leaves out anything already claimed", () => {
+      enroll(store, "runner-a");
       store.createTask({ id: "t-1", title: "a" }, T0);
       const ref = store.refFor(BUILT_IN, "t-1").id;
+      store.placeTask(ref, REPO);
 
-      acquire(store, ref, "runner-a", { now: T0 });
+      acquire(store, ref, "runner-a", { token: tok("runner-a"), now: T0 });
 
       expect(ready(store)).toEqual([]);
     });
 
     test("offers a task again once its claim lapses", () => {
+      enroll(store, "runner-a");
       store.createTask({ id: "t-1", title: "a" }, T0);
       const ref = store.refFor(BUILT_IN, "t-1").id;
-      acquire(store, ref, "runner-a", { now: T0, ttlMs: 60_000 });
+      store.placeTask(ref, REPO);
+      acquire(store, ref, "runner-a", { token: tok("runner-a"), now: T0, ttlMs: 60_000 });
 
       expect(ready(store, later(120_000))).toEqual(["t-1"]);
     });
@@ -1066,13 +1080,13 @@ describe("the watch foundations", () => {
     expect(takeover).toMatchObject({ ok: true, generation: 2, superseded: "inc-a" });
   });
 
-  test("recovery is keyed to the incarnation, not to runner liveness", async () => {
-    const { register } = await import("./runner.js");
-    register(store, { name: "builder-1", host: "h", now: T0 });
+  test("recovery is keyed to the incarnation, not to runner liveness", () => {
+    enroll(store, "builder-1");
     store.createTask({ id: "t-1", title: "w" }, T0);
     const ref = store.refFor(BUILT_IN, "t-1").id;
+    store.placeTask(ref, REPO);
     // The dead incarnation's claim, task mid-flight, run open, worktree leased.
-    acquire(store, ref, "builder-1", { now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "lease-a", incarnation: "inc-a" });
+    acquire(store, ref, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "lease-a", incarnation: "inc-a" });
     store.setTaskState("t-1", "running", T0);
     const run = store.startRun({
       taskRef: ref, leaseId: "lease-a", runner: "builder-1", branch: "b", worktree: "/w", now: T0,
@@ -1097,12 +1111,15 @@ describe("the watch foundations", () => {
   });
 
   test("recovery leaves other incarnations' work alone", () => {
+    enroll(store, "builder-1");
     store.createTask({ id: "t-1", title: "w" }, T0);
     store.createTask({ id: "t-2", title: "w" }, T0);
     const one = store.refFor(BUILT_IN, "t-1").id;
     const two = store.refFor(BUILT_IN, "t-2").id;
-    acquire(store, one, "builder-1", { now: T0, newLeaseId: () => "lease-old", incarnation: "inc-a" });
-    acquire(store, two, "builder-1", { now: T0, newLeaseId: () => "lease-live", incarnation: "inc-b" });
+    store.placeTask(one, REPO);
+    store.placeTask(two, REPO);
+    acquire(store, one, "builder-1", { token: tok("builder-1"), now: T0, newLeaseId: () => "lease-old", incarnation: "inc-a" });
+    acquire(store, two, "builder-1", { token: tok("builder-1"), now: T0, newLeaseId: () => "lease-live", incarnation: "inc-b" });
 
     expect(store.recoverIncarnation("builder-1", "inc-a", later(1_000))).toBe(1);
 
@@ -1122,8 +1139,10 @@ describe("console mutation semantics, re-proved server-side", () => {
   afterEach(() => store.close());
 
   test("cancel refuses while a live claim holds the task", () => {
+    enroll(store, "runner-a");
     const ref = store.refFor(BUILT_IN, "t-1").id;
-    acquire(store, ref, "runner-a", { now: T0, ttlMs: 60 * 60_000 });
+    store.placeTask(ref, REPO);
+    acquire(store, ref, "runner-a", { token: tok("runner-a"), now: T0, ttlMs: 60 * 60_000 });
 
     expect(store.cancelTask("t-1", later(1_000))).toMatchObject({ ok: false, reason: "claimed" });
     expect(store.getTask("t-1")?.state).toBe("queued");
@@ -1140,9 +1159,11 @@ describe("console mutation semantics, re-proved server-side", () => {
   test("requeue refuses a healthy task and a claimed one — a stale button erases nothing", () => {
     expect(store.requeueTask("t-1", "alex", T0)).toMatchObject({ ok: false, reason: "not-stalled" });
 
+    enroll(store, "runner-a");
     const ref = store.refFor(BUILT_IN, "t-1").id;
+    store.placeTask(ref, REPO);
     store.setTaskState("t-1", "failed", T0);
-    acquire(store, ref, "runner-a", { now: later(1_000), ttlMs: 60 * 60_000 });
+    acquire(store, ref, "runner-a", { token: tok("runner-a"), now: later(1_000), ttlMs: 60 * 60_000 });
     expect(store.requeueTask("t-1", "alex", later(2_000))).toMatchObject({ ok: false, reason: "claimed" });
   });
 

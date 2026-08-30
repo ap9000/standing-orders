@@ -21,7 +21,16 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { resolve } from "node:path";
+import { canonicalProject } from "./project.js";
 import type { Store, Mutation } from "./store.js";
+
+/** A runner's repo binding, in the same canonical form task filing uses —
+ * the claim gate compares these by equality, so both sides must resolve
+ * through one convention (MCP gateway spec v6, the runner tuple). */
+export function canonicalRepos(repos: readonly string[]): string[] {
+  return repos.map(repo => canonicalProject(repo) ?? resolve(repo));
+}
 
 export type Runner = {
   name: string;
@@ -106,7 +115,7 @@ export function register(store: Store, options: RegisterOptions): Registration {
     name,
     host,
     capacity,
-    repos: [...repos],
+    repos: canonicalRepos(repos),
     agents: [...agents],
     registeredAt: now.toISOString(),
     heartbeatAt: now.toISOString(),

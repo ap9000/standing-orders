@@ -30,6 +30,7 @@
 
 import { randomUUID } from "node:crypto";
 import { attendedLivenessState, type AttendedLiveness } from "./liveness.js";
+import { authenticate } from "./runner.js";
 
 /** attendedLivenessState over the store's ISO columns. */
 function attendedWatchState(lastBeatAt: string | null, now: Date, absoluteExpiry: string): AttendedLiveness {
@@ -78,7 +79,17 @@ export type AcquireResult =
   | { ok: false; reason: "attended-only" }
   /** A mode-sealed approval whose signature no longer stands (v29): the
    * approval falls back to a person; nothing dispatches on a dead mode. */
-  | { ok: false; reason: "mode-ended"; message: string };
+  | { ok: false; reason: "mode-ended"; message: string }
+  /** The credential presented with this acquisition did not verify against
+   * the runner row AT CLAIM TIME (MCP spec v6): stale incarnations never
+   * ride a successor's rotation. */
+  | { ok: false; reason: "unauthenticated"; detail: "unknown" | "bad-token" | "retired" }
+  /** The task is placed nowhere — a repo-scoped runner cannot be
+   * authorized for null. Place it, then dispatch. */
+  | { ok: false; reason: "unplaced" }
+  /** The runner's bound repo list does not contain the task's repo.
+   * The refusal names the binding road. */
+  | { ok: false; reason: "unauthorized-repo"; repo: string };
 
 /** `fenced` means the lease was superseded; `unknown` means it never existed. */
 export type FenceResult =
@@ -102,6 +113,12 @@ export const SYNC_MAX_AGE_MS = 15 * 60_000;
 
 export type AcquireOptions = {
   now: Date;
+  /** The runner's minted credential, re-verified INSIDE the claim
+   * transaction (MCP gateway spec v6, Codex round-5 finding 1): a
+   * takeover that rotates the credential between the caller's own auth
+   * and this CAS must not let the stale process ride its successor's
+   * authority. */
+  token: string;
   ttlMs?: number;
   /** Injected in tests so a lease id can be asserted on. */
   newLeaseId?: () => string;
@@ -160,6 +177,21 @@ function acquireLocked(
   return (
     store.replay(mutation, "acquire", () => {
       const stamp = now.toISOString();
+      // THE RUNNER GATE, first leg (MCP gateway spec v6). Identity is
+      // proven INSIDE this transaction — the row re-read, the hash
+      // re-compared — so a takeover between the caller's own auth and
+      // this CAS never lets a stale process ride its successor's
+      // authority. Then the repo tuple: authority derives from
+      // task_ref.repo ONLY; a task placed nowhere cannot be authorized
+      // by a repo-scoped runner, and a runner not bound to the task's
+      // repo never even holds a claim.
+      const gate = authenticate(store, runner, options.token);
+      if (!gate.ok) return { ok: false as const, reason: "unauthenticated" as const, detail: gate.reason };
+      const placedRepo = store.refForId(taskRef)?.repo ?? null;
+      if (placedRepo === null) return { ok: false as const, reason: "unplaced" as const };
+      if (!gate.runner.repos.includes(placedRepo)) {
+        return { ok: false as const, reason: "unauthorized-repo" as const, repo: placedRepo };
+      }
       // The reservation gate lives HERE, in the one primitive every
       // acquisition path shares (queue-columns review, finding 1): tick's
       // acquireIfReady, the raw CLI claim, and the tournament resume all

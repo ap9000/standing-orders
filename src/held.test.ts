@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore } from "./store.js";
+import { register } from "./runner.js";
 import { acquire, acquireIfReady } from "./claim.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { HeldSessionCoordinator, sweepHeldOrphans } from "./held.js";
@@ -12,6 +13,15 @@ import type { HeldSessionStart, HeldSessionHandle } from "./exec.js";
 
 const T0 = new Date("2026-08-25T22:00:00.000Z");
 const later = (seconds: number): Date => new Date(T0.getTime() + seconds * 1000);
+
+/** The runner gate (MCP spec v6): every claiming runner is registered and
+ * repo-bound, with a deterministic token so call sites can name it inline. */
+const tok = (name: string) => `tok-${name}`;
+const enroll = (store: ReturnType<typeof openStore>, repo: string, ...names: string[]): void => {
+  for (const name of names) {
+    register(store, { name, host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => tok(name) });
+  }
+};
 
 const PROFILE: ExecutionProfile = {
   provider: "claude",
@@ -31,6 +41,9 @@ const attendedFixture = (
 ) => {
   store.createTask({ id: "t-att", title: "watched" }, T0);
   const ref = store.refFor("built-in", "t-att");
+  // the runner gate: placed BEFORE the scope exists, claimants registered
+  store.placeTask(ref.id, options.repo ?? "/repo");
+  enroll(store, options.repo ?? "/repo", "mac-a", "other-machine");
   const filed = store.proposeScope !== undefined ? null : null;
   void filed;
   store
@@ -70,7 +83,7 @@ describe("the attended claim gates (v6 W10/Q4/W1)", () => {
   test("a foreign runner refuses attended-held — its OWN reason, never the reserved contract", () => {
     const store = openStore(":memory:");
     const { ref } = attendedFixture(store, { beat: later(1) });
-    const foreign = acquire(store, ref.id, "other-machine", { now: later(2) });
+    const foreign = acquire(store, ref.id, "other-machine", { token: tok("other-machine"), now: later(2) });
     expect(foreign).toMatchObject({ ok: false, reason: "attended-held", runner: "mac-a" });
     store.close();
   });
@@ -78,11 +91,11 @@ describe("the attended claim gates (v6 W10/Q4/W1)", () => {
   test("attended-only: the named runner without a watching operator refuses; a live beat admits through the authority union", () => {
     const store = openStore(":memory:");
     const { ref } = attendedFixture(store); // no beat — nobody watching
-    const dark = acquire(store, ref.id, "mac-a", { now: later(120) });
+    const dark = acquire(store, ref.id, "mac-a", { token: tok("mac-a"), now: later(120) });
     expect(dark).toMatchObject({ ok: false, reason: "attended-only" });
     // the operator starts watching: the union admits the NAMED runner
     store.beatAuthorization("auth-att", later(130));
-    const admitted = acquireIfReady(store, ref.id, "mac-a", { now: later(131) });
+    const admitted = acquireIfReady(store, ref.id, "mac-a", { token: tok("mac-a"), now: later(131) });
     expect(admitted.ok).toBe(true);
     store.close();
   });
@@ -100,7 +113,7 @@ describe("the attended claim gates (v6 W10/Q4/W1)", () => {
     const run = store.startRun({ taskRef: ref.id, leaseId: "lease-spent", runner: "mac-a", branch: "b", worktree: "/w", now: T0 });
     expect(store.consumeAuthorization("auth-att", run, later(2))).toBe(true);
     store.raw().prepare("UPDATE claim SET released_at = ? WHERE lease_id = 'lease-spent'").run(later(3).toISOString());
-    const again = acquireIfReady(store, ref.id, "mac-a", { now: later(10) });
+    const again = acquireIfReady(store, ref.id, "mac-a", { token: tok("mac-a"), now: later(10) });
     expect(again).toMatchObject({ ok: false, reason: "not-ready" });
     store.close();
   });
@@ -378,9 +391,9 @@ describe("the round-6 cross-check fixes", () => {
       .prepare("UPDATE task_scope SET approved_at = ?, approved_by = 'alex', approved_digest = digest WHERE task_id = 't-att'")
       .run(later(2).toISOString());
     // while live, the foreign runner is refused
-    expect(acquire(store, ref.id, "other-machine", { now: later(10) })).toMatchObject({ ok: false, reason: "attended-held" });
+    expect(acquire(store, ref.id, "other-machine", { token: tok("other-machine"), now: later(10) })).toMatchObject({ ok: false, reason: "attended-held" });
     // past expiry the corpse gates nothing — and the sweep closes it durably
-    const late = acquire(store, ref.id, "other-machine", { now: later(120) });
+    const late = acquire(store, ref.id, "other-machine", { token: tok("other-machine"), now: later(120) });
     expect(late.ok).toBe(true);
     expect(store.sweepExpiredAuthorizations(later(121))).toBe(1);
     expect(store.readAuthorization("auth-att")?.endReason).toBe("expired");
@@ -390,8 +403,8 @@ describe("the round-6 cross-check fixes", () => {
   test("attended admission skips the capacity gate: a full unattended ledger does not refuse the watching operator", async () => {
     const store = openStore(":memory:");
     const { ref } = attendedFixture(store, { beat: later(1) });
-    const { register } = await import("./runner.js");
-    register(store, { name: "mac-a", host: "h", now: later(0) });
+    // capacity 1 — the ONLY slot; repos and token per the runner gate
+    register(store, { name: "mac-a", host: "h", repos: ["/repo"], now: later(0), newToken: () => tok("mac-a") });
     // an unrelated unattended claim occupies the ONLY slot (capacity 1)
     store.createTask({ id: "t-busy", title: "busy" }, T0);
     const busy = store.refFor("built-in", "t-busy");
@@ -402,7 +415,7 @@ describe("the round-6 cross-check fixes", () => {
          VALUES ('lease-busy', ?, 1, 'mac-a', ?, ?, ?)`,
       )
       .run(busy.id, T0.toISOString(), later(900).toISOString(), T0.toISOString());
-    const admitted = acquireIfReady(store, ref.id, "mac-a", { now: later(5) });
+    const admitted = acquireIfReady(store, ref.id, "mac-a", { token: tok("mac-a"), now: later(5) });
     expect(admitted.ok).toBe(true);
     store.close();
   });
@@ -698,6 +711,9 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
   const continuationFixture = (store: ReturnType<typeof openStore>) => {
     store.createTask({ id: "t-done", title: "finished work" }, T0);
     const ref = store.refFor("built-in", "t-done");
+    // the runner gate: placed, and the continuation's runner registered
+    store.placeTask(ref.id, "/repo");
+    enroll(store, "/repo", "mac-a");
     store.raw().prepare("UPDATE task SET state = 'done' WHERE id = 't-done'").run();
     store
       .raw()
@@ -734,11 +750,11 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
     const { acquireContinuation } = await import("./claim.js");
     const authorization = store.readAuthorization("auth-cont")!;
     // nobody watching: refused
-    const dark = acquireContinuation(store, authorization, "mac-a", { now: new Date() });
+    const dark = acquireContinuation(store, authorization, "mac-a", { token: tok("mac-a"), now: new Date() });
     expect(dark).toMatchObject({ ok: false, reason: "attended-only" });
     // watching: admitted — and the task is UNTOUCHED, no queued resurrection
     store.beatAuthorization("auth-cont", new Date());
-    const admitted = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { now: new Date() });
+    const admitted = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { token: tok("mac-a"), now: new Date() });
     expect(admitted.ok).toBe(true);
     expect(store.getTask("t-done")?.state).toBe("done");
     // it is listed for the runner's continuation pass
@@ -759,7 +775,7 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
     expect(store.continuationBlockOf(parent)).toContain("being published");
     const { acquireContinuation } = await import("./claim.js");
     store.beatAuthorization("auth-cont", new Date());
-    const refused = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { now: new Date() });
+    const refused = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { token: tok("mac-a"), now: new Date() });
     expect(refused).toMatchObject({ ok: false, reason: "continuation-blocked" });
     store.close();
   });
@@ -771,7 +787,7 @@ describe("continuation (Phase 2E, A4): the authorization is the claimable unit; 
     const { acquireContinuation } = await import("./claim.js");
     const { disposeBuildOutcome } = await import("./dispose.js");
     store.beatAuthorization("auth-cont", new Date());
-    const claimed = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { now: new Date() });
+    const claimed = acquireContinuation(store, store.readAuthorization("auth-cont")!, "mac-a", { token: tok("mac-a"), now: new Date() });
     expect(claimed.ok).toBe(true);
     if (!claimed.ok) return;
     const runId = store.startRun({

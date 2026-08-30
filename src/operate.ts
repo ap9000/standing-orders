@@ -895,6 +895,7 @@ function claimCommand(
   const ref = store.refFor(backend, id);
   const result = acquire(store, ref.id, runner, {
     now,
+    token,
     ttlMs: ttl,
     mutation: mutationFrom(flags, now),
   });
@@ -941,6 +942,29 @@ function claimCommand(
     }
     if (result.reason === "mode-ended") {
       return fail(write, json, "claim", "mode-ended", result.message, EXIT.refused);
+    }
+    if (result.reason === "unauthenticated") {
+      return fail(write, json, "claim", "unauthenticated", describeAuth(result.detail, runner), EXIT.refused);
+    }
+    if (result.reason === "unplaced") {
+      return fail(
+        write,
+        json,
+        "claim",
+        "unplaced",
+        "this task is placed in no repository — place it first, then claim",
+        EXIT.refused,
+      );
+    }
+    if (result.reason === "unauthorized-repo") {
+      return fail(
+        write,
+        json,
+        "claim",
+        "unauthorized-repo",
+        `this runner is not bound to ${result.repo} — \`runner bind\` adds it`,
+        EXIT.refused,
+      );
     }
     return fail(
       write,
@@ -1548,7 +1572,7 @@ async function tickCommand(
           continue;
         }
       }
-      const reclaimed = acquire(store, waiting.taskRef, runner, { now: clock(), ttlMs: leaseTtlMs });
+      const reclaimed = acquire(store, waiting.taskRef, runner, { now: clock(), token, ttlMs: leaseTtlMs });
       if (!reclaimed.ok) {
         backToParked();
         continue;
@@ -1953,6 +1977,7 @@ async function tickCommand(
     const claimed = acquireIfReady(store, ref.id, runner, {
       ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
       now: clock(),
+      token,
       ttlMs: leaseTtlMs,
       syncMaxAgeMs,
       repo,
@@ -2580,6 +2605,7 @@ async function tickCommand(
     // with only the predecessor's backoff exempted.
     const claimed = acquireFallback(store, pending.taskRef, runner, {
       now: clock(),
+      token,
       ttlMs: leaseTtlMs,
       repo,
       provider: peek.profile.provider,
@@ -2743,7 +2769,7 @@ async function tickCommand(
         continue;
       }
 
-      const claimed = acquireContinuation(store, continuation, runner, { now: clock(), ttlMs: leaseTtlMs });
+      const claimed = acquireContinuation(store, continuation, runner, { now: clock(), token, ttlMs: leaseTtlMs });
       if (!claimed.ok) {
         dispatched.push({ id: taskId, outcome: "skipped", reason: claimed.reason, ...("message" in claimed ? { detail: claimed.message } : {}) });
         continue;

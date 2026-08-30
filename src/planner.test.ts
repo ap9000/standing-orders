@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
+import { register } from "./runner.js";
 import type { Runner } from "./builder.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
@@ -157,6 +158,14 @@ describe("planning mode, against real git", () => {
   const setup = async () => {
     await run(["runner", "register", "builder-1", "--json"], planningAgent);
     const runnerToken = payload().token as string;
+    // The runner gate (MCP spec v6): authority derives from the runner's
+    // REGISTERED repos, not the --repo flag — bind this repo to the same
+    // name and token the CLI just minted.
+    {
+      const store = openStore(db);
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => runnerToken });
+      store.close();
+    }
     await run(["approver", "add", "alex", "--json"], planningAgent);
     const approverToken = payload().token as string;
     await run(["task", "add", "rate limiter", "--id", "limiter", "--repo", repo, "--json"], planningAgent);

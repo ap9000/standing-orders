@@ -35,13 +35,31 @@ const ids = (...names: string[]) => {
   return () => names[index++] ?? `extra-${index}`;
 };
 
+/** The claim gate proves identity and repo binding in-transaction (MCP
+ * spec v6): every test runner is registered, bound to REPO, with a
+ * deterministic token so call sites can name it inline. */
+const REPO = "/repo/claims";
+const tok = (name: string) => `tok-${name}`;
+function enrollRunners(store: Store): void {
+  for (const name of ["runner-a", "runner-b"]) {
+    register(store, { name, host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => tok(name) });
+  }
+}
+/** createTask leaves task_ref.repo null, and null no longer dispatches —
+ * tests place every task they intend to claim. */
+function placeAll(store: Store, ...ids: string[]): void {
+  for (const id of ids) store.placeTask(store.refFor("built-in", id).id, REPO);
+}
+
 describe("claim", () => {
   let store: Store;
   let task: number;
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -51,7 +69,7 @@ describe("claim", () => {
   });
 
   test("takes a free task, at generation 1", () => {
-    const result = acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    const result = acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
     expect(result).toMatchObject({ ok: true, reclaimed: false });
     if (result.ok) {
@@ -64,18 +82,18 @@ describe("claim", () => {
   test("refuses a task somebody else holds, and says who", () => {
     // Losing is ordinary. What is not acceptable is a "no" that reads like a
     // bug, so the refusal carries the holder and the expiry.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
-    const second = acquire(store, task, "runner-b", { now: later(60_000) });
+    const second = acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(60_000) });
 
     expect(second).toMatchObject({ ok: false, reason: "held", by: "runner-a" });
   });
 
   test("lets the next runner in once the lease has run out", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
     const second = acquire(store, task, "runner-b", {
-      now: later(DEFAULT_LEASE_MS + 1),
+      token: tok("runner-b"), now: later(DEFAULT_LEASE_MS + 1),
       newLeaseId: ids("lease-b"),
     });
 
@@ -90,9 +108,9 @@ describe("claim", () => {
     // The failure this module exists for. Runner A stops being reachable, its
     // lease expires, B picks the task up — and then A wakes up and finishes.
     // Nobody detected A's crash; the refusal comes from the world having moved.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     acquire(store, task, "runner-b", {
-      now: later(DEFAULT_LEASE_MS + 1),
+      token: tok("runner-b"), now: later(DEFAULT_LEASE_MS + 1),
       newLeaseId: ids("lease-b"),
     });
 
@@ -102,9 +120,9 @@ describe("claim", () => {
   });
 
   test("still accepts the completion from the runner that actually holds it", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     acquire(store, task, "runner-b", {
-      now: later(DEFAULT_LEASE_MS + 1),
+      token: tok("runner-b"), now: later(DEFAULT_LEASE_MS + 1),
       newLeaseId: ids("lease-b"),
     });
 
@@ -116,9 +134,9 @@ describe("claim", () => {
   test("tells a superseded runner at its next heartbeat, not at the end", () => {
     // The cheapest moment to learn you have been fenced is before you have
     // spent another twenty minutes on work nobody will accept.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     acquire(store, task, "runner-b", {
-      now: later(DEFAULT_LEASE_MS + 1),
+      token: tok("runner-b"), now: later(DEFAULT_LEASE_MS + 1),
       newLeaseId: ids("lease-b"),
     });
 
@@ -129,11 +147,11 @@ describe("claim", () => {
   });
 
   test("a heartbeat keeps the task from being taken away", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
     // Well past the original expiry, but it has been checking in.
     heartbeat(store, "lease-a", later(DEFAULT_LEASE_MS - 1_000));
-    const stolen = acquire(store, task, "runner-b", { now: later(DEFAULT_LEASE_MS + 1) });
+    const stolen = acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(DEFAULT_LEASE_MS + 1) });
 
     expect(stolen).toMatchObject({ ok: false, reason: "held", by: "runner-a" });
   });
@@ -149,9 +167,9 @@ describe("claim", () => {
     // talking to the wrong database, or a lease id got mangled in transit —
     // and an earlier version of this could not distinguish them, because
     // reclaiming overwrote the row and erased the evidence.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     acquire(store, task, "runner-b", {
-      now: later(DEFAULT_LEASE_MS + 1),
+      token: tok("runner-b"), now: later(DEFAULT_LEASE_MS + 1),
       newLeaseId: ids("lease-b"),
     });
 
@@ -174,7 +192,7 @@ describe("claim", () => {
     //
     // With the fence outside the UPDATE this passes; it is why the fence is
     // now a predicate on the write.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     store.handle
       .prepare(
         `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at, released_at)
@@ -189,8 +207,8 @@ describe("claim", () => {
   test("a superseded lease cannot extend its own expiry", () => {
     // If it could, a fenced runner would keep the task off the ready set for
     // as long as it kept heartbeating at a task it no longer holds.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
-    acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(61_000), newLeaseId: ids("lease-b") });
 
     heartbeat(store, "lease-a", later(62_000));
 
@@ -202,16 +220,16 @@ describe("claim", () => {
     // A refusal changes nothing, so it is not a mutation to be replayed. A
     // dispatcher told "busy" and retrying the same key an hour later must not
     // be handed the hour-old no about a task that has since been free.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
 
     const refused = acquire(store, task, "runner-b", {
-      now: later(1_000),
+      token: tok("runner-b"), now: later(1_000),
       mutation: { idempotencyKey: "dispatch-9", at: T0 },
     });
     expect(refused.ok).toBe(false);
 
     const afterwards = acquire(store, task, "runner-b", {
-      now: later(120_000),
+      token: tok("runner-b"), now: later(120_000),
       mutation: { idempotencyKey: "dispatch-9", at: T0 },
     });
 
@@ -222,7 +240,10 @@ describe("claim", () => {
     // The claim log is append-only. Superseded leases are the evidence that
     // makes a fencing decision explicable after the fact.
     for (let round = 0; round < 3; round++) {
-      acquire(store, task, `runner-${round}`, {
+      const name = `runner-${round}`;
+      register(store, { name, host: "test", repos: [REPO], now: T0, newToken: () => tok(name) });
+      acquire(store, task, name, {
+        token: tok(name),
         now: later(round * (DEFAULT_LEASE_MS + 1)),
       });
     }
@@ -240,7 +261,7 @@ describe("claim", () => {
     // anything changed hands. M1 asks for duplicate completion to be
     // reconciled rather than refused — see the `duplicate completion` suite
     // below for the line between this and a genuine fence.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     release(store, "lease-a", later(1_000));
 
     const again = release(store, "lease-a", later(2_000));
@@ -250,10 +271,10 @@ describe("claim", () => {
   });
 
   test("frees the task as soon as it is released, without waiting for expiry", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     release(store, "lease-a", later(1_000));
 
-    const second = acquire(store, task, "runner-b", { now: later(2_000) });
+    const second = acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(2_000) });
 
     expect(second.ok).toBe(true);
     if (second.ok) expect(second.claim.generation).toBe(2);
@@ -265,7 +286,9 @@ describe("claim", () => {
     const seen: number[] = [];
     for (let round = 0; round < 4; round++) {
       const at = later(round * (DEFAULT_LEASE_MS + 1));
-      const result = acquire(store, task, `runner-${round}`, { now: at });
+      const name = `runner-${round}`;
+      register(store, { name, host: "test", repos: [REPO], now: T0, newToken: () => tok(name) });
+      const result = acquire(store, task, name, { token: tok(name), now: at });
       if (result.ok) seen.push(result.claim.generation);
     }
 
@@ -276,12 +299,12 @@ describe("claim", () => {
     // A dropped acknowledgement must not cost a generation, or a runner that
     // never heard "yes" fences out the copy of itself that did.
     const first = acquire(store, task, "runner-a", {
-      now: T0,
+      token: tok("runner-a"), now: T0,
       newLeaseId: ids("lease-a", "lease-b"),
       mutation: { idempotencyKey: "dispatch-1", at: T0 },
     });
     const retry = acquire(store, task, "runner-a", {
-      now: later(1_000),
+      token: tok("runner-a"), now: later(1_000),
       newLeaseId: ids("lease-b"),
       mutation: { idempotencyKey: "dispatch-1", at: T0 },
     });
@@ -294,7 +317,7 @@ describe("claim", () => {
   });
 
   test("reports the live claim, and stops reporting it once it lapses", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
     expect(currentClaim(store, task, later(1_000))?.runner).toBe("runner-a");
     expect(currentClaim(store, task, later(DEFAULT_LEASE_MS + 1))).toBeNull();
@@ -306,6 +329,7 @@ describe("reap", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
   });
 
   afterEach(() => {
@@ -314,14 +338,16 @@ describe("reap", () => {
 
   test("releases what has run out and leaves what has not", () => {
     store.createTask({ id: "a", title: "a" }, T0);
+    placeAll(store, "a");
     approveScopeFor(store, "a");
     store.createTask({ id: "b", title: "b" }, T0);
+    placeAll(store, "b");
     approveScopeFor(store, "b");
     const a = store.refFor("built-in", "a").id;
     const b = store.refFor("built-in", "b").id;
 
-    acquire(store, a, "runner-a", { now: T0, ttlMs: 60_000 });
-    acquire(store, b, "runner-b", { now: T0, ttlMs: 600_000 });
+    acquire(store, a, "runner-a", { token: tok("runner-a"), now: T0, ttlMs: 60_000 });
+    acquire(store, b, "runner-b", { token: tok("runner-b"), now: T0, ttlMs: 600_000 });
 
     const reaped = reap(store, later(120_000));
 
@@ -335,9 +361,10 @@ describe("reap", () => {
 
   test("does not reap the same lease twice", () => {
     store.createTask({ id: "a", title: "a" }, T0);
+    placeAll(store, "a");
     approveScopeFor(store, "a");
     const a = store.refFor("built-in", "a").id;
-    acquire(store, a, "runner-a", { now: T0, ttlMs: 60_000 });
+    acquire(store, a, "runner-a", { token: tok("runner-a"), now: T0, ttlMs: 60_000 });
 
     reap(store, later(120_000));
 
@@ -351,7 +378,9 @@ describe("duplicate completion", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -362,7 +391,7 @@ describe("duplicate completion", () => {
     // Nobody took the task away; the runner said so twice because its first
     // acknowledgement was lost. Telling it "superseded" would send an honest
     // runner off to stop when it should carry on.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
     const first = release(store, "lease-a", later(1_000));
     const again = release(store, "lease-a", later(2_000));
@@ -377,8 +406,8 @@ describe("duplicate completion", () => {
     // idempotent; a lease that was taken away before it ever completed is
     // refused. What separates them is whether it released, not whether the
     // world moved on afterwards — see the suite below.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
-    acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(61_000), newLeaseId: ids("lease-b") });
 
     expect(release(store, "lease-a", later(62_000))).toEqual({ ok: false, reason: "fenced" });
   });
@@ -390,7 +419,9 @@ describe("a completion that happened, retried late", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -401,9 +432,9 @@ describe("a completion that happened, retried late", () => {
     // It completed; its work was accepted at the time. Answering "fenced"
     // would tell an honest runner its work never counted, which is a
     // different and false claim. Fencing is for a lease that never finished.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
     release(store, "lease-a", later(1_000));
-    acquire(store, task, "runner-b", { now: later(2_000), newLeaseId: ids("lease-b") });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(2_000), newLeaseId: ids("lease-b") });
 
     const retry = release(store, "lease-a", later(3_000));
 
@@ -412,8 +443,8 @@ describe("a completion that happened, retried late", () => {
   });
 
   test("but a lease that never finished is still fenced", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
-    acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(61_000), newLeaseId: ids("lease-b") });
 
     expect(release(store, "lease-a", later(62_000))).toEqual({ ok: false, reason: "fenced" });
   });
@@ -425,7 +456,9 @@ describe("acquireIfReady", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -433,7 +466,7 @@ describe("acquireIfReady", () => {
   afterEach(() => store.close());
 
   test("takes a task that is genuinely ready", () => {
-    const result = acquireIfReady(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
     expect(result).toMatchObject({ ok: true, reclaimed: false });
   });
@@ -444,7 +477,7 @@ describe("acquireIfReady", () => {
     // transaction is that it does not.
     store.setTaskState("t-1", "cancelled", later(1_000));
 
-    const result = acquireIfReady(store, task, "runner-a", { now: later(2_000) });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: later(2_000) });
 
     expect(result).toEqual({ ok: false, reason: "not-ready", message: "state is cancelled, not queued" });
   });
@@ -452,7 +485,7 @@ describe("acquireIfReady", () => {
   test("refuses a task under an active hold, with the hold's reason", () => {
     store.hold(task, "waiting on legal", null, later(1_000));
 
-    const result = acquireIfReady(store, task, "runner-a", { now: later(2_000) });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: later(2_000) });
 
     expect(result).toEqual({ ok: false, reason: "not-ready", message: "held: waiting on legal" });
   });
@@ -460,25 +493,26 @@ describe("acquireIfReady", () => {
   test("a hold that has expired is not a hold", () => {
     store.hold(task, "overnight only", later(5_000), later(1_000));
 
-    const result = acquireIfReady(store, task, "runner-a", { now: later(6_000), newLeaseId: ids("lease-a") });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: later(6_000), newLeaseId: ids("lease-a") });
 
     expect(result).toMatchObject({ ok: true });
   });
 
   test("refuses a task whose blocker is not done, and names the blocker", () => {
     store.createTask({ id: "t-0", title: "first" }, T0);
+    placeAll(store, "t-0");
     approveScopeFor(store, "t-0");
     store.addEdge("t-1", "t-0");
 
-    const result = acquireIfReady(store, task, "runner-a", { now: later(1_000) });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: later(1_000) });
 
     expect(result).toEqual({ ok: false, reason: "not-ready", message: "waiting on t-0" });
   });
 
   test("still loses an ordinary race, as a race", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
-    const result = acquireIfReady(store, task, "runner-b", { now: later(1_000) });
+    const result = acquireIfReady(store, task, "runner-b", { token: tok("runner-b"), now: later(1_000) });
 
     expect(result).toMatchObject({ ok: false, reason: "held", by: "runner-a" });
   });
@@ -490,7 +524,9 @@ describe("completeFenced", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -498,7 +534,7 @@ describe("completeFenced", () => {
   afterEach(() => store.close());
 
   test("releases the lease and writes the terminal state together", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
 
     const result = completeFenced(store, "lease-a", "done", later(1_000));
 
@@ -510,8 +546,8 @@ describe("completeFenced", () => {
   test("a fenced lease writes nothing", () => {
     // Runner-a slept through its lease; runner-b holds the task now. Runner-a
     // waking up must not get to say how the task ended.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
-    acquire(store, task, "runner-b", { now: later(61_000), newLeaseId: ids("lease-b") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(61_000), newLeaseId: ids("lease-b") });
 
     const result = completeFenced(store, "lease-a", "failed", later(62_000));
 
@@ -520,7 +556,7 @@ describe("completeFenced", () => {
   });
 
   test("a duplicate completion reports duplicate and does not change the answer", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     completeFenced(store, "lease-a", "done", later(1_000));
 
     const retry = completeFenced(store, "lease-a", "failed", later(2_000));
@@ -534,10 +570,10 @@ describe("completeFenced", () => {
     // pass claims the freed task before the terminal state lands. Here the
     // task is done the same instant the lease lets go, so a later claim finds
     // it not-ready rather than dispatching a second builder.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     completeFenced(store, "lease-a", "done", later(1_000));
 
-    const second = acquireIfReady(store, task, "runner-b", { now: later(2_000) });
+    const second = acquireIfReady(store, task, "runner-b", { token: tok("runner-b"), now: later(2_000) });
 
     expect(second).toEqual({ ok: false, reason: "not-ready", message: "state is done, not queued" });
   });
@@ -549,7 +585,9 @@ describe("release provenance", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -560,7 +598,7 @@ describe("release provenance", () => {
     // The stale-commit case: the machine slept, the lease expired, the reaper
     // released it. The build finishing afterwards was never accepted, and
     // answering "duplicate" here would let its commit pass as success.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
     reap(store, later(61_000));
 
     const late = completeFenced(store, "lease-a", "done", later(120_000));
@@ -570,7 +608,7 @@ describe("release provenance", () => {
   });
 
   test("a completion arriving after dead-runner recovery is fenced", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     store.releaseClaimsOf("runner-a", later(1_000));
 
     const late = completeFenced(store, "lease-a", "done", later(2_000));
@@ -580,14 +618,14 @@ describe("release provenance", () => {
   });
 
   test("a release retried after the reaper took the lease is fenced, not duplicate", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
     reap(store, later(61_000));
 
     expect(release(store, "lease-a", later(62_000))).toEqual({ ok: false, reason: "fenced" });
   });
 
   test("a completion retried after a genuine completion is still a duplicate", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     completeFenced(store, "lease-a", "done", later(1_000));
 
     const retry = completeFenced(store, "lease-a", "done", later(2_000));
@@ -599,7 +637,7 @@ describe("release provenance", () => {
     // Handing a task back and having a completion accepted are different
     // events. A runner that released and then tries to complete is reporting
     // work on a lease it already gave up.
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a") });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a") });
     release(store, "lease-a", later(1_000));
 
     const late = completeFenced(store, "lease-a", "done", later(2_000));
@@ -630,16 +668,21 @@ describe("the capability gate in acquireIfReady", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
+    // These capabilities live at /code/thing — the task is PLACED there,
+    // and the runner gate needs runner-a bound to it (same token).
+    register(store, { name: "runner-a", host: "test", capacity: 9, repos: [REPO, "/code/thing"], now: T0, newToken: () => tok("runner-a") });
     store.createTask({ id: "t-1", title: "the work" }, T0);
-    approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
+    store.placeTask(task, "/code/thing");
+    approveScopeFor(store, "t-1");
     store.setRequirements(task, ["env:SUPABASE_KEY"]);
   });
 
   afterEach(() => store.close());
 
   test("an unrecorded requirement fails closed, and says so", () => {
-    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: T0, repo: "/code/thing" });
 
     expect(result).toEqual({
       ok: false,
@@ -651,7 +694,7 @@ describe("the capability gate in acquireIfReady", () => {
   test("a recorded but unverified requirement does not dispatch", () => {
     store.saveCapability(cap({ status: "failed" }));
 
-    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: T0, repo: "/code/thing" });
 
     expect(result).toMatchObject({ ok: false, reason: "capability" });
   });
@@ -660,7 +703,7 @@ describe("the capability gate in acquireIfReady", () => {
     store.saveCapability(cap({ status: "verified" }));
 
     const result = acquireIfReady(store, task, "runner-a", {
-      now: T0,
+      token: tok("runner-a"), now: T0,
       repo: "/code/thing",
       newLeaseId: ids("lease-a"),
     });
@@ -673,7 +716,7 @@ describe("the capability gate in acquireIfReady", () => {
       cap({ status: "verified", expiresAt: new Date(T0.getTime() - 1_000).toISOString() }),
     );
 
-    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: T0, repo: "/code/thing" });
 
     expect(result).toMatchObject({
       ok: false,
@@ -695,7 +738,7 @@ describe("the capability gate in acquireIfReady", () => {
     approveScopeFor(store, "t-placed");
     const task = placed;
 
-    const result = acquireIfReady(store, task, "runner-a", { now: T0, repo: "/code/thing" });
+    const result = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: T0, repo: "/code/thing" });
 
     expect(result).toEqual({
       ok: false,
@@ -706,10 +749,11 @@ describe("the capability gate in acquireIfReady", () => {
 
   test("a task requiring nothing is untouched by all of this", () => {
     store.createTask({ id: "t-2", title: "free" }, T0);
+    placeAll(store, "t-2");
     approveScopeFor(store, "t-2");
     const free = store.refFor("built-in", "t-2").id;
 
-    const result = acquireIfReady(store, free, "runner-a", { now: T0, newLeaseId: ids("lease-f") });
+    const result = acquireIfReady(store, free, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-f") });
 
     expect(result).toMatchObject({ ok: true });
   });
@@ -734,7 +778,9 @@ describe("sealing a park", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -752,7 +798,7 @@ describe("sealing a park", () => {
     });
 
   test("one transaction: decision, hold, run outcome, outbox — or none of it", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     const runId = openRun("lease-a");
 
     const sealed = finalizeParkFenced(store, {
@@ -783,10 +829,10 @@ describe("sealing a park", () => {
   });
 
   test("a superseded lease seals nothing — no decision, no hold, no page", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
     const runId = openRun("lease-a");
     // The lease expires and the task is retaken: the world moved on.
-    acquire(store, task, "runner-b", { now: later(120_000), newLeaseId: ids("lease-b") });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(120_000), newLeaseId: ids("lease-b") });
 
     const sealed = finalizeParkFenced(store, {
       leaseId: "lease-a",
@@ -808,7 +854,7 @@ describe("sealing a park", () => {
   });
 
   test("a park's late release retry is fenced, never a duplicate", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     const runId = openRun("lease-a");
     finalizeParkFenced(store, {
       leaseId: "lease-a", runId, taskId: "t-1", decision, artifactIds: [], now: later(1_000),
@@ -820,7 +866,7 @@ describe("sealing a park", () => {
   });
 
   test("a run that names another lease cannot be sealed", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     const runId = openRun("some-other-lease");
 
     expect(() =>
@@ -831,7 +877,7 @@ describe("sealing a park", () => {
   });
 
   test("exhausted repair seals an incident the same fenced way", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
     const runId = openRun("lease-a");
 
     const sealed = finalizeMalformedFenced(store, {
@@ -858,9 +904,9 @@ describe("sealing a park", () => {
   });
 
   test("a superseded lease's malformed park also seals nothing", () => {
-    acquire(store, task, "runner-a", { now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
     const runId = openRun("lease-a");
-    acquire(store, task, "runner-b", { now: later(120_000), newLeaseId: ids("lease-b") });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(120_000), newLeaseId: ids("lease-b") });
 
     const sealed = finalizeMalformedFenced(store, {
       leaseId: "lease-a",
@@ -882,7 +928,9 @@ describe("the resume and the attention budget", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -901,7 +949,7 @@ describe("the resume and the attention budget", () => {
 
   const parkAndAnswer = (choice = "closed") => {
     acquire(store, task, "runner-a", {
-      now: T0,
+      token: tok("runner-a"), now: T0,
       ttlMs: 60 * 60_000,
       newLeaseId: ids("lease-park"),
     });
@@ -988,19 +1036,20 @@ describe("the resume and the attention budget", () => {
     store.finishRun(history, { outcome: "parked", reason: "decision:x", now: later(1_000) });
     expect(store.refForId(task)?.parkRate).toBe(1);
 
-    const refused = acquireIfReady(store, task, "runner-a", { now: later(2_000) });
+    const refused = acquireIfReady(store, task, "runner-a", { token: tok("runner-a"), now: later(2_000) });
     expect(refused).toMatchObject({ ok: false, reason: "attention-budget" });
 
     // A task that has never parked is not punished for the backlog.
     store.createTask({ id: "fresh", title: "x" }, T0);
+    placeAll(store, "fresh");
     approveScopeFor(store, "fresh");
     const fresh = store.refFor("built-in", "fresh").id;
-    const taken = acquireIfReady(store, fresh, "runner-a", { now: later(2_000) });
+    const taken = acquireIfReady(store, fresh, "runner-a", { token: tok("runner-a"), now: later(2_000) });
     expect(taken).toMatchObject({ ok: true });
 
     // And under the budget, the parker dispatches again.
     const generous = acquireIfReady(store, task, "runner-a", {
-      now: later(3_000),
+      token: tok("runner-a"), now: later(3_000),
       maxOpenDecisions: 50,
     });
     expect(generous).toMatchObject({ ok: true });
@@ -1028,7 +1077,9 @@ describe("the failure taxonomy, fenced", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
     approveScopeFor(store, "t-1");
     task = store.refFor("built-in", "t-1").id;
   });
@@ -1036,7 +1087,7 @@ describe("the failure taxonomy, fenced", () => {
   afterEach(() => store.close());
 
   const attempt = (leaseId: string, at: Date) => {
-    acquire(store, task, "runner-a", { now: at, ttlMs: 60 * 60_000, newLeaseId: () => leaseId });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: at, ttlMs: 60 * 60_000, newLeaseId: () => leaseId });
     return store.startRun({
       taskRef: task, leaseId, runner: "runner-a", branch: "b", worktree: "/w", now: at,
     });
@@ -1116,11 +1167,11 @@ describe("the failure taxonomy, fenced", () => {
   });
 
   test("a superseded lease's failure seals nothing but the fenced run", () => {
-    acquire(store, task, "runner-a", { now: T0, ttlMs: 60_000, newLeaseId: () => "lease-1" });
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, ttlMs: 60_000, newLeaseId: () => "lease-1" });
     const run = store.startRun({
       taskRef: task, leaseId: "lease-1", runner: "runner-a", branch: "b", worktree: "/w", now: T0,
     });
-    acquire(store, task, "runner-b", { now: later(120_000) });
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(120_000) });
 
     const sealed = failIt("lease-1", run, later(121_000));
     expect(sealed).toMatchObject({ ok: false, reason: "fenced" });
@@ -1131,6 +1182,7 @@ describe("the failure taxonomy, fenced", () => {
 
   test("stranded work is derived, named, and freed by requeueing the blocker", () => {
     store.createTask({ id: "t-2", title: "dependent" }, T0);
+    placeAll(store, "t-2");
     approveScopeFor(store, "t-2");
     store.addEdge("t-2", "t-1");
     store.setTaskState("t-1", "failed", later(1_000));
@@ -1149,9 +1201,12 @@ describe("capacity and quota, at the claim", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    enrollRunners(store);
     store.createTask({ id: "t-a", title: "a" }, T0);
+    placeAll(store, "t-a");
     approveScopeFor(store, "t-a");
     store.createTask({ id: "t-b", title: "b" }, T0);
+    placeAll(store, "t-b");
     approveScopeFor(store, "t-b");
     a = store.refFor("built-in", "t-a").id;
     b = store.refFor("built-in", "t-b").id;
@@ -1160,66 +1215,72 @@ describe("capacity and quota, at the claim", () => {
   afterEach(() => store.close());
 
   test("a full runner is refused its second claim, and freed by releasing", () => {
-    register(store, { name: "small", host: "h", now: T0, capacity: 1 });
+    register(store, { name: "small", host: "h", now: T0, capacity: 1, repos: [REPO], newToken: () => tok("small") });
 
-    const first = acquireIfReady(store, a, "small", { now: T0, newLeaseId: ids("lease-a") });
+    const first = acquireIfReady(store, a, "small", { token: tok("small"), now: T0, newLeaseId: ids("lease-a") });
     expect(first).toMatchObject({ ok: true });
 
-    const second = acquireIfReady(store, b, "small", { now: later(1_000) });
+    const second = acquireIfReady(store, b, "small", { token: tok("small"), now: later(1_000) });
     expect(second).toMatchObject({ ok: false, reason: "capacity" });
 
     release(store, "lease-a", later(2_000));
-    expect(acquireIfReady(store, b, "small", { now: later(3_000) })).toMatchObject({ ok: true });
+    expect(acquireIfReady(store, b, "small", { token: tok("small"), now: later(3_000) })).toMatchObject({ ok: true });
   });
 
-  test("an unregistered runner is not capacity-gated — the CLI always registers", () => {
-    expect(acquireIfReady(store, a, "ghost", { now: T0 })).toMatchObject({ ok: true });
+  test("an unregistered runner cannot claim at all — identity is proven in the claim transaction", () => {
+    // The old law ("unregistered runners are not capacity-gated") is gone
+    // with the runner gate (MCP spec v6): no row, no claim, whoever asks.
+    expect(acquireIfReady(store, a, "ghost", { token: tok("ghost"), now: T0 })).toMatchObject({
+      ok: false,
+      reason: "unauthenticated",
+      detail: "unknown",
+    });
   });
 
   test("an exhausted quota refuses dispatch until its reset, then admits one probe", () => {
-    register(store, { name: "r", host: "h", now: T0, capacity: 4 });
+    register(store, { name: "r", host: "h", now: T0, capacity: 4, repos: [REPO], newToken: () => tok("r") });
     store.stampQuota(
       { runner: "r", provider: "claude", reason: "credit exhausted", resetAt: later(60_000) },
       T0,
     );
 
-    const refused = acquireIfReady(store, a, "r", { now: later(1_000) });
+    const refused = acquireIfReady(store, a, "r", { token: tok("r"), now: later(1_000) });
     expect(refused).toMatchObject({ ok: false, reason: "quota" });
     if (refused.ok === false && refused.reason === "quota") {
       expect(refused.message).toContain("credit exhausted");
     }
 
     // Past the reset: half-open admits exactly one dispatch as the probe…
-    const probe = acquireIfReady(store, a, "r", { now: later(61_000) });
+    const probe = acquireIfReady(store, a, "r", { token: tok("r"), now: later(61_000) });
     expect(probe).toMatchObject({ ok: true });
     // …and re-arms while the probe flies, so a racing pass stays out.
-    const racing = acquireIfReady(store, b, "r", { now: later(61_500) });
+    const racing = acquireIfReady(store, b, "r", { token: tok("r"), now: later(61_500) });
     expect(racing).toMatchObject({ ok: false, reason: "quota" });
 
     // The probe's success clears the stamp; everything flows again.
     store.clearQuota("r", "claude", "");
-    expect(acquireIfReady(store, b, "r", { now: later(62_000) })).toMatchObject({ ok: true });
+    expect(acquireIfReady(store, b, "r", { token: tok("r"), now: later(62_000) })).toMatchObject({ ok: true });
   });
 
   test("quota is scoped: another model's credential is not this one's exhaustion", () => {
-    register(store, { name: "r", host: "h", now: T0, capacity: 4 });
+    register(store, { name: "r", host: "h", now: T0, capacity: 4, repos: [REPO], newToken: () => tok("r") });
     store.stampQuota({ runner: "r", provider: "claude", scope: "opus", reason: "quota" }, T0);
 
-    expect(acquireIfReady(store, a, "r", { now: later(1_000), model: "opus" })).toMatchObject({
+    expect(acquireIfReady(store, a, "r", { token: tok("r"), now: later(1_000), model: "opus" })).toMatchObject({
       ok: false,
       reason: "quota",
     });
-    expect(acquireIfReady(store, a, "r", { now: later(2_000), model: "haiku" })).toMatchObject({
+    expect(acquireIfReady(store, a, "r", { token: tok("r"), now: later(2_000), model: "haiku" })).toMatchObject({
       ok: true,
     });
   });
 
   test("no reset time means exhausted until somebody says otherwise", () => {
-    register(store, { name: "r", host: "h", now: T0, capacity: 4 });
+    register(store, { name: "r", host: "h", now: T0, capacity: 4, repos: [REPO], newToken: () => tok("r") });
     store.stampQuota({ runner: "r", provider: "claude", reason: "auth revoked" }, T0);
 
-    expect(acquireIfReady(store, a, "r", { now: later(9e9) })).toMatchObject({ ok: false, reason: "quota" });
+    expect(acquireIfReady(store, a, "r", { token: tok("r"), now: later(9e9) })).toMatchObject({ ok: false, reason: "quota" });
     store.clearQuota("r", "claude", "");
-    expect(acquireIfReady(store, a, "r", { now: later(9e9 + 1_000) })).toMatchObject({ ok: true });
+    expect(acquireIfReady(store, a, "r", { token: tok("r"), now: later(9e9 + 1_000) })).toMatchObject({ ok: true });
   });
 });

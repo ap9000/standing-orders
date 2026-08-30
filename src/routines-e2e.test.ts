@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
+import { register } from "./runner.js";
 import { approveRoutine, routineDigestOf, type RoutineTerms } from "./routine.js";
 import type { Runner } from "./builder.js";
 
@@ -92,13 +93,15 @@ describe("routines, against real git", () => {
     );
 
   test("approve once; the pass fires, the instance builds, the track repeats on schedule", async () => {
-    await run(["runner", "register", "builder-1", "--json"], buildingAgent);
-    const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"], buildingAgent);
     const approverToken = payload().token as string;
 
     // The standing order, filed and approved directly against the store —
     // the CLI ceremony has its own tests; this one is about the loop.
+    // The runner gate (MCP spec v6): the tick's claims authenticate the
+    // runner and require the instance's placed repo (fireRoutine places at
+    // the routine's repo) in its registered repos list — the CLI register
+    // cannot bind repos, so builder-1 enrolls directly against the store.
     const terms: RoutineTerms = {
       repo,
       goal: "Refresh the notes file and record anything odd",
@@ -110,6 +113,8 @@ describe("routines, against real git", () => {
       costCeilingUsd: null,
     };
     const store = openStore(db);
+    register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+    const runnerToken = "tok-builder-1";
     const created = store.createRoutine(
       { name: "notes", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
       T0,
@@ -161,8 +166,6 @@ describe("routines, against real git", () => {
   });
 
   test("a stuck instance stops the track and pages, instead of stacking twins", async () => {
-    await run(["runner", "register", "builder-1", "--json"], buildingAgent);
-    const runnerToken = payload().token as string;
     await run(["approver", "add", "alex", "--json"], buildingAgent);
     const approverToken = payload().token as string;
 
@@ -177,6 +180,10 @@ describe("routines, against real git", () => {
       costCeilingUsd: null,
     };
     const store = openStore(db);
+    // The runner gate (MCP spec v6): builder-1 enrolls with the repo in its
+    // registered repos list — the --repo flag no longer grants authority.
+    register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+    const runnerToken = "tok-builder-1";
     const created = store.createRoutine(
       { name: "flaky", ...terms, digest: routineDigestOf(terms, V24_PROFILE), profile: V24_PROFILE },
       T0,

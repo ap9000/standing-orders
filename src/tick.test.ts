@@ -20,11 +20,29 @@ import { runOperate, EXIT } from "./operate.js";
 import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
 import { acquire } from "./claim.js";
+import { register } from "./runner.js";
 import type { Runner } from "./builder.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const AGENT_SAID = JSON.stringify({ result: "Added the guard and a test for it." });
+
+/**
+ * The runner gate (MCP spec v6): every claim now authenticates the runner
+ * and requires the task's PLACED repo to be in the runner's registered
+ * `repos`. The CLI's `runner register` binds no repos yet, so these tests
+ * enroll their runners through the store, bound to the repo their tasks
+ * are placed in (`task add --repo`), and use the minted token everywhere
+ * the CLI takes one.
+ */
+const registerRunner = (db: string, name: string, repo: string, now: Date = T0): string => {
+  const store = openStore(db);
+  try {
+    return register(store, { name, host: "test", capacity: 9, repos: [repo], now }).token;
+  } finally {
+    store.close();
+  }
+};
 
 /** The agent's half of the terminal handoff protocol. */
 const concludeDone = async (
@@ -80,7 +98,9 @@ describe("tick, against real git", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "standing-orders-tick-"));
+    // Real path up front: task placement canonicalizes through realpath, and
+    // the tick pass compares its --repo against the placed repo by equality.
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-tick-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -99,10 +119,10 @@ describe("tick, against real git", () => {
     await rm(base, { recursive: true, force: true });
   });
 
-  /** Registers the runner and an approver, and returns their tokens. */
+  /** Registers the runner (repo-bound, per the runner gate) and an approver,
+   * and returns their tokens. */
   const credentials = async () => {
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    const runnerToken = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
@@ -111,7 +131,7 @@ describe("tick, against real git", () => {
   };
 
   const queueApproved = async (id: string, approverToken: string) => {
-    await run(["task", "add", "the work", "--id", id]);
+    await run(["task", "add", "the work", "--id", id, "--repo", repo]);
     await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", id, "--json"]);
     const digest = payload().scope.digest as string;
@@ -147,8 +167,7 @@ describe("tick, against real git", () => {
   };
 
   const geminiCredentials = async () => {
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    const runnerToken = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     await run(["config", "set", "build", "--provider", "gemini", "--model", "gemini-2.5-pro", "--as", "alex", "--token", approverToken, "--json"]);
@@ -258,8 +277,7 @@ describe("tick, against real git", () => {
 
   test("a reserved task is built only by its worker; the shared queue waits behind a private column", async () => {
     const { runnerToken, approverToken } = await credentials();
-    await run(["runner", "register", "builder-2", "--json"]);
-    const otherToken = JSON.parse(lines.join("\n")).token as string;
+    const otherToken = registerRunner(db, "builder-2", repo);
     await queueApproved("t-shared", approverToken);
     await queueApproved("t-private", approverToken);
     await run(["task", "assign", "t-private", "--runner", "builder-1"]);
@@ -504,8 +522,7 @@ describe("tick, against real git", () => {
     // from an empty queue, and both are exit 3.
     const { runnerToken, approverToken } = await credentials();
     await queueApproved("t-1", approverToken);
-    await run(["runner", "register", "builder-2", "--json"]);
-    const otherToken = payload().token as string;
+    const otherToken = registerRunner(db, "builder-2", repo);
     await run(["claim", "t-1", "--runner", "builder-2", "--token", otherToken]);
 
     const code = await tick(runnerToken);
@@ -575,9 +592,8 @@ describe("reconcile, against real git", () => {
     // builder-1 heartbeats at T0, claims t-1, and goes silent. Ten minutes
     // later the claim is unexpired (15-minute lease) but the runner is dead
     // (3-minute liveness) — recovery must requeue the task, not just note it.
-    await run(["runner", "register", "builder-1", "--json"]);
-    const token = payload().token as string;
-    await run(["task", "add", "the work", "--id", "t-1"]);
+    const token = registerRunner(db, "builder-1", repo);
+    await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["claim", "t-1", "--runner", "builder-1", "--token", token]);
 
     const tenLater = new Date(T0.getTime() + 10 * 60_000);
@@ -696,8 +712,7 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
 
   test("three blocked tasks dispatch the moment their one gap is supplied", async () => {
     // -- Setup: a runner, an approver, and one capability the machine lacks.
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    const runnerToken = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
@@ -957,8 +972,7 @@ describe("the outbox", () => {
       });
     };
 
-    await runWith(["runner", "register", "builder-1", "--json"]);
-    const token = payload().token as string;
+    const token = registerRunner(db, "builder-1", repo);
     await runWith(["approver", "add", "alex", "--json"]);
     const approver = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
@@ -1025,8 +1039,7 @@ describe("the morning briefing", () => {
   });
 
   const setup = async () => {
-    await run(["runner", "register", "builder-1", "--json"]);
-    const token = payload().token as string;
+    const token = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approver = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
@@ -1139,7 +1152,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "standing-orders-park-e2e-"));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-park-e2e-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -1157,13 +1170,12 @@ describe("the park, end to end — a judgement call survives the night", () => {
   });
 
   const setup = async () => {
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    const runnerToken = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
-    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
@@ -1337,7 +1349,7 @@ describe("decide, end to end — the morning answers and the machine hears it", 
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "standing-orders-decide-e2e-"));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-decide-e2e-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -1355,13 +1367,12 @@ describe("decide, end to end — the morning answers and the machine hears it", 
   });
 
   const setup = async () => {
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    const runnerToken = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
-    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
@@ -1569,7 +1580,7 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "standing-orders-bridge-e2e-"));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-bridge-e2e-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -1590,13 +1601,12 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
 
   test("token → pair → park → send → tap → the next tick builds", async () => {
     // Credentials and an approved task, exactly as a person would set up.
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    const runnerToken = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
-    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
@@ -1689,13 +1699,12 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
   test("--follow applies a waiting tap without a second invocation", async () => {
     // Credentials, an approved task, a park, and a delivered keyboard —
     // the same road as the E2E above, compressed.
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    const runnerToken = registerRunner(db, "builder-1", repo);
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
-    await run(["task", "add", "the work", "--id", "t-1"]);
+    await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
     await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
@@ -1801,8 +1810,9 @@ describe("watch — the loop, zero tokens idle", () => {
   });
 
   const setup = async () => {
-    await run(["runner", "register", "builder-1", "--json"]);
-    const runnerToken = payload().token as string;
+    // The watch loop runs on the real clock, so the registration heartbeat
+    // does too — a T0 heartbeat would look long dead to the reaper.
+    const runnerToken = registerRunner(db, "builder-1", repo, new Date());
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
@@ -1811,7 +1821,7 @@ describe("watch — the loop, zero tokens idle", () => {
   };
 
   const approved = async (id: string, approverToken: string) => {
-    await run(["task", "add", "the work", "--id", id]);
+    await run(["task", "add", "the work", "--id", id, "--repo", repo]);
     await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
     await run(["task", "approve", id, "--json"]);
     const digest = payload().scope.digest as string;
@@ -1901,7 +1911,7 @@ describe("watch — the loop, zero tokens idle", () => {
     const past = new Date(Date.now() - 10 * 60_000);
     store.acquireWatchLease("builder-1", realpathSync(repo), "inc-dead", 1_000, past);
     acquire(store, ref, "builder-1", {
-      now: past, ttlMs: 60 * 60_000, newLeaseId: () => "lease-dead", incarnation: "inc-dead",
+      token: runnerToken, now: past, ttlMs: 60 * 60_000, newLeaseId: () => "lease-dead", incarnation: "inc-dead",
     });
     store.setTaskState("t-1", "running", past);
     store.startRun({

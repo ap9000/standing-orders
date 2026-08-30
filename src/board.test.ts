@@ -10,9 +10,15 @@
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import { classify, type BoardFacts } from "./board.js";
 import { openStore, type Store } from "./store.js";
+import { register } from "./runner.js";
 import { acquire, release } from "./claim.js";
 
 const T0 = new Date("2026-08-01T12:00:00Z");
+
+/** The runner gate (MCP spec v6): every claiming runner is registered and
+ * bound to the repo its task is placed in, with a deterministic token. */
+const REPO = "/repo/board-test";
+const tok = (name: string) => `tok-${name}`;
 
 function facts(overrides: Partial<BoardFacts> = {}): BoardFacts {
   return {
@@ -221,6 +227,9 @@ describe("boardScoped — one snapshot, all the facts", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    for (const name of ["builder-1", "builder-2"]) {
+      register(store, { name, host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => tok(name) });
+    }
   });
   afterEach(() => store.close());
 
@@ -230,10 +239,13 @@ describe("boardScoped — one snapshot, all the facts", () => {
     store.createTask({ id: "t-bare", title: "claim only" }, T0);
     const withRun = store.refFor("built-in", "t-run").id;
     const bare = store.refFor("built-in", "t-bare").id;
+    // placed BEFORE the scope is approved — placement is what admits a claim
+    store.placeTask(withRun, REPO);
+    store.placeTask(bare, REPO);
     approvedScope("t-run");
     approvedScope("t-bare");
 
-    const taken = acquire(store, withRun, "builder-1", { now, ttlMs: 60 * 60_000 });
+    const taken = acquire(store, withRun, "builder-1", { token: tok("builder-1"), now, ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim refused");
     store.startRun({
       taskRef: withRun,
@@ -244,7 +256,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
       model: "claude",
       now,
     });
-    const bareTaken = acquire(store, bare, "builder-2", { now, ttlMs: 60 * 60_000 });
+    const bareTaken = acquire(store, bare, "builder-2", { token: tok("builder-2"), now, ttlMs: 60 * 60_000 });
     if (!bareTaken.ok) throw new Error("claim refused");
 
     const board = store.boardScoped(null, new Date(now.getTime() + 5 * 60_000));
@@ -263,8 +275,9 @@ describe("boardScoped — one snapshot, all the facts", () => {
     const now = new Date(T0.getTime() + 60_000);
     store.createTask({ id: "t-parked", title: "asked a question" }, T0);
     const ref = store.refFor("built-in", "t-parked").id;
+    store.placeTask(ref, REPO);
     approvedScope("t-parked");
-    const taken = acquire(store, ref, "builder-1", { now, ttlMs: 60_000 });
+    const taken = acquire(store, ref, "builder-1", { token: tok("builder-1"), now, ttlMs: 60_000 });
     if (!taken.ok) throw new Error("claim refused");
     const run = store.startRun({
       taskRef: ref,

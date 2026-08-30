@@ -1,14 +1,33 @@
 import { mkdtempSync } from "node:fs";
 import { openStore } from "./store.js";
+import { register } from "./runner.js";
+import { canonicalProject } from "./project.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
+
+/** The runner gate (MCP spec v6): a claim now authenticates the runner and
+ * proves the task's PLACED repo is in the runner's registered `repos`. The
+ * CLI's `runner register` binds no repos yet, so acquiring tests enroll
+ * their runners straight through the store, bound to the repo their tasks
+ * are placed in. */
+const registerRunner = (db: string, name: string, repo: string): string => {
+  const store = openStore(db);
+  try {
+    return register(store, { name, host: "test", capacity: 9, repos: [repo], now: T0 }).token;
+  } finally {
+    store.close();
+  }
+};
+
+/** Where group-one tasks are placed — canonicalization resolves it as-is. */
+const REPO = "/repo/operate";
 
 describe("operating the queue from the command line", () => {
   let dir: string;
@@ -39,13 +58,13 @@ describe("operating the queue from the command line", () => {
   const out = () => lines.join("\n");
   const payload = () => JSON.parse(out());
 
-  /** Tokens are minted per registration, so they are fetched on demand. */
+  /** Tokens are minted per registration, so they are fetched on demand —
+   * registered through the store so the runner is bound to REPO. */
   const tokens = new Map<string, string>();
   const tokenFor = async (name: string) => {
     const cached = tokens.get(name);
     if (cached !== undefined) return cached;
-    await run(["runner", "register", name, "--json"]);
-    const minted = payload().token as string;
+    const minted = registerRunner(db, name, REPO);
     tokens.set(name, minted);
     return minted;
   };
@@ -88,7 +107,7 @@ describe("operating the queue from the command line", () => {
 
     test("gives a stable reason token, not just prose", async () => {
       // Messages get reworded; an agent branching on them would break silently.
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "first"]);
       await claim(["claim", "t-1", "--runner", "second", "--json"], later(1_000));
 
@@ -96,7 +115,7 @@ describe("operating the queue from the command line", () => {
     });
 
     test("tells a fenced runner to stop rather than retry", async () => {
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "first", "--ttl", "60", "--json"]);
       const stale = payload().lease.leaseId;
       await claim(["claim", "t-1", "--runner", "second"], later(61_000));
@@ -177,7 +196,7 @@ describe("operating the queue from the command line", () => {
     });
 
     test("a repeated claim with the same key holds one lease, not two", async () => {
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "r", "--key", "d-1", "--json"]);
       const first = payload().lease.leaseId;
 
@@ -190,7 +209,7 @@ describe("operating the queue from the command line", () => {
     test("does not make a refusal permanent", async () => {
       // A refusal mutated nothing, so replaying it would answer for a task
       // that has since become free.
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "first", "--ttl", "60"]);
 
       expect(await claim(["claim", "t-1", "--runner", "second", "--key", "d-9"], later(1_000))).toBe(
@@ -224,7 +243,7 @@ describe("operating the queue from the command line", () => {
     });
 
     test("takes a claimed task out of the ready set and marks it running", async () => {
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "r"]);
 
       expect(await run(["ready"], later(1_000))).toBe(EXIT.refused);
@@ -235,7 +254,7 @@ describe("operating the queue from the command line", () => {
     test("puts unfinished work back rather than assuming it succeeded", async () => {
       // Releasing means "I am done holding this", not "it worked". Marking it
       // done here would quietly close work nobody finished.
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "r", "--json"]);
       const lease = payload().lease.leaseId;
 
@@ -247,7 +266,7 @@ describe("operating the queue from the command line", () => {
     });
 
     test("keeps a heartbeating runner's task away from everyone else", async () => {
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "first", "--ttl", "60", "--json"]);
       const lease = payload().lease.leaseId;
 
@@ -257,7 +276,7 @@ describe("operating the queue from the command line", () => {
     });
 
     test("reaps what ran out, and reports what it released", async () => {
-      await run(["task", "add", "a thing", "--id", "t-1"]);
+      await run(["task", "add", "a thing", "--id", "t-1", "--repo", REPO]);
       await claim(["claim", "t-1", "--runner", "r", "--ttl", "60"]);
 
       const code = await run(["reap", "--json"], later(120_000));
@@ -311,7 +330,7 @@ describe("operating the queue from the command line", () => {
     });
 
     test("shows what a task waits for and who holds it", async () => {
-      await run(["task", "add", "a", "--id", "a"]);
+      await run(["task", "add", "a", "--id", "a", "--repo", REPO]);
       await run(["task", "add", "b", "--id", "b"]);
       await run(["task", "block", "b", "--on", "a"]);
       await claim(["claim", "a", "--runner", "r"]);
@@ -374,7 +393,7 @@ describe("operating the queue from the command line", () => {
     });
 
     test("a reserved task is taken only by its worker — the claim primitive is the gate", async () => {
-      await run(["task", "add", "pinned", "--id", "pinned"]);
+      await run(["task", "add", "pinned", "--id", "pinned", "--repo", REPO]);
       await tokenFor("mine");
       await tokenFor("other");
       expect(await run(["task", "assign", "pinned", "--runner", "mine", "--json"])).toBe(EXIT.ok);
@@ -410,7 +429,7 @@ describe("operating the queue from the command line", () => {
       expect(await run(["task", "next", "ghost", "--json"])).toBe(EXIT.refused);
       expect(payload()).toMatchObject({ reason: "unknown-task" });
 
-      await run(["task", "add", "busy", "--id", "busy"]);
+      await run(["task", "add", "busy", "--id", "busy", "--repo", REPO]);
       await claim(["claim", "busy", "--runner", "r"]);
       const claimed = await run(["task", "next", "busy", "--json"], later(1_000));
       expect(claimed).toBe(EXIT.refused);
@@ -612,8 +631,9 @@ describe("the grant is actually enforced", () => {
   const tokenFor = async (name: string) => {
     const cached = tokens.get(name);
     if (cached !== undefined) return cached;
-    await run(["runner", "register", name, "--json"]);
-    const minted = payload().token as string;
+    // The runner gate (MCP spec v6): the runner is bound to this test's
+    // repo directory, the same place its tasks are placed.
+    const minted = registerRunner(db, name, dir);
     tokens.set(name, minted);
     return minted;
   };
@@ -624,6 +644,17 @@ describe("the grant is actually enforced", () => {
     if (at < 0) return run(argv, now);
     const token = await tokenFor(argv[at + 1] as string);
     return run([...argv, "--token", token], now);
+  };
+
+  /** The runner gate refuses an unplaced task, so tasks a test expects to
+   * claim are placed in the test's repo directory first. */
+  const placeIn = (backend: string, id: string) => {
+    const store = openStore(db);
+    try {
+      store.placeTask(store.refFor(backend, id).id, canonicalProject(dir) ?? resolve(dir));
+    } finally {
+      store.close();
+    }
   };
 
   test("refuses to claim a task in an unenrolled tracker", async () => {
@@ -658,6 +689,7 @@ describe("the grant is actually enforced", () => {
       "enroll", dir, "--backend", "github-issues", "--paths", "owner/name",
       "--selector", "all", "--yes",
     ]);
+    placeIn("github-issues", "17");
 
     expect(
       await claim(["claim", "17", "--backend", "github-issues", "--repo", dir, "--runner", "r"]),
@@ -701,6 +733,7 @@ describe("the grant is actually enforced", () => {
       "enroll", dir, "--backend", "github-issues", "--paths", "owner/name",
       "--selector", "all", "--yes",
     ]);
+    placeIn("github-issues", "17");
 
     const code = await claim([
       "claim", "17", "--backend", "github-issues", "--repo", join(dir, "sub", ".."),
@@ -711,7 +744,7 @@ describe("the grant is actually enforced", () => {
   });
 
   test("leaves the built-in queue alone, since it is ours by construction", async () => {
-    await run(["task", "add", "a thing", "--id", "t-1"]);
+    await run(["task", "add", "a thing", "--id", "t-1", "--repo", dir]);
 
     expect(await claim(["claim", "t-1", "--runner", "r"])).toBe(EXIT.ok);
   });

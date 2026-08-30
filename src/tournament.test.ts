@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -21,9 +21,19 @@ import {
 import { storeEvidence } from "./evidence.js";
 import { classify } from "./board.js";
 import { acquire, release } from "./claim.js";
+import { register } from "./runner.js";
 import { writeFileSync } from "node:fs";
 
 const T0 = new Date("2026-08-17T12:00:00.000Z");
+
+/** The runner gate (MCP spec v6): every acquisition authenticates the runner
+ * and requires the task's PLACED repo to be in its registered list — racing
+ * tests enroll their runner and place the raced task before claiming. */
+const RACE_REPO = "/repo/race";
+const tok = (name: string) => `tok-${name}`;
+function enroll(store: Store, name: string, repos: string[] = [RACE_REPO]): void {
+  register(store, { name, host: "test", capacity: 9, repos, now: T0, newToken: () => tok(name) });
+}
 
 describe("the v14 migration", () => {
   test("a pre-v14 database is really upgraded: old hold shape rebuilt, new columns added, rows kept", async () => {
@@ -292,8 +302,10 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
   });
 
   const setUpApproved = (store: Store) => {
+    enroll(store, "night-shift-1");
     store.createTask({ id: "race-3a", title: "raced" }, T0);
     const taskRef = store.refFor("built-in", "race-3a", "ours").id;
+    store.placeTask(taskRef, RACE_REPO);
     const planned = planTournament({
       agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-haiku-4-5" }],
       perAgentBudgetUsd: 5,
@@ -314,7 +326,7 @@ describe("stage 3a — digests, planning, admission, children, recovery", () => 
       T0,
     );
     store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
-    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    const taken = acquire(store, taskRef, "night-shift-1", { token: tok("night-shift-1"), now: T0, ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error("claim");
     return { taskRef, leaseId: taken.claim.leaseId };
   };
@@ -559,7 +571,7 @@ describe("stage 3b — a whole tournament through the real tick, against real gi
     const { run: exec } = await import("./exec.js");
     const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 
-    const base = await mkdtemp(join(tmpdir(), "standing-orders-race-e2e-"));
+    const base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-race-e2e-")));
     const repo = join(base, "repo");
     const db = join(base, "queue.db");
     const pool = join(base, "pool");
@@ -593,14 +605,20 @@ describe("stage 3b — a whole tournament through the real tick, against real gi
     const payload = () => JSON.parse(lines.join("\n"));
 
     try {
-      await run(["runner", "register", "builder-1", "--json"]);
-      const runnerToken = payload().token as string;
+      // The runner gate (MCP spec v6): the tick's claims authenticate the
+      // runner and require the task's placed repo in its registered repos
+      // list — the CLI register cannot bind repos, so builder-1 enrolls
+      // against the store, and the task is placed at filing time.
+      const boot = openStore(db);
+      register(boot, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => tok("builder-1") });
+      boot.close();
+      const runnerToken = tok("builder-1");
       await run(["approver", "add", "alex", "--json"]);
       const approverToken = payload().token as string;
       // v24: approvals bind exact routing — the install names its model once.
       await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
 
-      await run(["task", "add", "the raced work", "--id", "race-e2e"]);
+      await run(["task", "add", "the raced work", "--id", "race-e2e", "--repo", repo]);
       await run([
         "task", "scope", "race-e2e",
         "--goal", "add the guard twice and let me pick",
@@ -676,7 +694,7 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
     const { run: exec } = await import("./exec.js");
     const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 
-    const base = await mkdtemp(join(tmpdir(), "standing-orders-race-park-"));
+    const base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-race-park-")));
     const repo = join(base, "repo");
     const db = join(base, "queue.db");
     const pool = join(base, "pool");
@@ -731,13 +749,17 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
     const payload = () => JSON.parse(lines.join("\n"));
 
     try {
-      await run(["runner", "register", "builder-1", "--json"]);
-      const runnerToken = payload().token as string;
+      // The runner gate (MCP spec v6): builder-1 enrolls against the store
+      // with the repo in its registered list; the task is placed at filing.
+      const boot = openStore(db);
+      register(boot, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => tok("builder-1") });
+      boot.close();
+      const runnerToken = tok("builder-1");
       await run(["approver", "add", "alex", "--json"]);
       const approverToken = payload().token as string;
       // v24: approvals bind exact routing — the install names its model once.
       await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
-      await run(["task", "add", "the parked race", "--id", "race-park"]);
+      await run(["task", "add", "the parked race", "--id", "race-park", "--repo", repo]);
       await run([
         "task", "scope", "race-park",
         "--goal", "export the data",
@@ -925,8 +947,10 @@ describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremo
 
   /** Drive a two-agent tournament to 'racing' with real terms and a claim. */
   const toRacing = (taskId = "race-5") => {
+    enroll(store, "night-shift-1");
     store.createTask({ id: taskId, title: "raced work" }, T0);
     const taskRef = store.refFor("built-in", taskId, "ours").id;
+    store.placeTask(taskRef, RACE_REPO);
     const planned = planTournament({
       agents: [{ provider: "claude", model: "claude-sonnet-5" }, { provider: "claude", model: "claude-haiku-4-5" }],
       perAgentBudgetUsd: 5,
@@ -947,7 +971,7 @@ describe("stage 5 — pickability, the tuple digest, and the pick/abandon ceremo
       T0,
     );
     store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
-    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    const taken = acquire(store, taskRef, "night-shift-1", { token: tok("night-shift-1"), now: T0, ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error("claim");
     const admitted = admitContest(
       store,
@@ -1532,8 +1556,10 @@ describe("labeled comparisons (Phase 3 slice B): planning, filing, admission, mo
   test("filing and admission: kind rides the terms, the contest, and the lanes' money zeros", () => {
     const store = openStore(":memory:");
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    enroll(store, "night-shift-1");
     store.createTask({ id: "cmp-1", title: "compared" }, T0);
     const taskRef = store.refFor("built-in", "cmp-1", "ours").id;
+    store.placeTask(taskRef, RACE_REPO);
     const planned = planComparison({
       agents: [
         { provider: "claude", model: "claude-sonnet-5" },
@@ -1559,7 +1585,7 @@ describe("labeled comparisons (Phase 3 slice B): planning, filing, admission, mo
     const terms = store.activeTournamentTerms(taskRef);
     expect(terms).toMatchObject({ kind: "comparison", perAgentBudgetMicrousd: 0 });
     store.approveTournamentTerms(termsId, "alex", planned.plan.comparisonDigest, T0);
-    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    const taken = acquire(store, taskRef, "night-shift-1", { token: tok("night-shift-1"), now: T0, ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error("claim");
     const admitted = admitContest(
       store,
@@ -1646,7 +1672,7 @@ describe("slice B e2e — a mixed comparison through the real tick: claude, code
     const { resetAttestationCache } = await import("./attest.js");
     const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 
-    const base = await mkdtemp(join(tmpdir(), "standing-orders-compare-e2e-"));
+    const base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-compare-e2e-")));
     const repo = join(base, "repo");
     const db = join(base, "queue.db");
     const pool = join(base, "pool");
@@ -1731,12 +1757,16 @@ describe("slice B e2e — a mixed comparison through the real tick: claude, code
     const payload = () => JSON.parse(lines.join("\n"));
 
     try {
-      await run(["runner", "register", "builder-1", "--json"]);
-      const runnerToken = payload().token as string;
+      // The runner gate (MCP spec v6): builder-1 enrolls against the store
+      // with the repo in its registered list; the task is placed at filing.
+      const boot = openStore(db);
+      register(boot, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => tok("builder-1") });
+      boot.close();
+      const runnerToken = tok("builder-1");
       await run(["approver", "add", "alex", "--json"]);
       const approverToken = payload().token as string;
       await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
-      await run(["task", "add", "the compared work", "--id", "cmp-e2e"]);
+      await run(["task", "add", "the compared work", "--id", "cmp-e2e", "--repo", repo]);
       await run([
         "task", "scope", "cmp-e2e",
         "--goal", "export the data three ways and let me pick",

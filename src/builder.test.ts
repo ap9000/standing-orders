@@ -9,6 +9,12 @@ import { resetAttestationCache } from "./attest.js";
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
+/** The runner gate (MCP spec v6): every claim proves identity and the repo
+ * tuple, so each fixture registers its runner against the worktree's repo
+ * and places the task there BEFORE any scope is proposed. */
+const REPO = "/code/thing";
+const tok = (name: string) => `tok-${name}`;
+
 /** The first approver bootstraps; every later one needs an existing one. */
 function bootstrapApprover(store: Store): string {
   const added = addApprover(store, "alex", T0);
@@ -110,7 +116,8 @@ describe("the builder's gates", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
       path: wt,
@@ -133,7 +140,7 @@ describe("the builder's gates", () => {
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
   };
 
-  const claimIt = () => acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+  const claimIt = () => acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
 
   test("will not build a task nobody approved", async () => {
     // The gap this closes: "fix the payouts flow" is a sentence, and an agent
@@ -169,8 +176,8 @@ describe("the builder's gates", () => {
 
   test("will not build a task claimed by somebody else", async () => {
     approveScope();
-    register(store, { name: "builder-2", host: "h", now: T0 });
-    acquire(store, taskRef, "builder-2", { now: T0, ttlMs: 60 * 60_000 });
+    register(store, { name: "builder-2", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-2") });
+    acquire(store, taskRef, "builder-2", { token: tok("builder-2"), now: T0, ttlMs: 60 * 60_000 });
 
     expect(await build(store, request())).toMatchObject({ ok: false, reason: "not-yours" });
     expect(agentCalls).toHaveLength(0);
@@ -181,10 +188,11 @@ describe("the builder's gates", () => {
     // task came back to builder-1 under a fresh grant. The runner-name check
     // says "yours"; only the lease id knows this attempt is the stale one.
     approveScope();
-    const first = acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 1_000 });
+    const first = acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 1_000 });
     if (!first.ok) throw new Error("setup");
     reap(store, new Date(T0.getTime() + 2_000));
     acquire(store, taskRef, "builder-1", {
+      token: tok("builder-1"),
       now: new Date(T0.getTime() + 3_000),
       ttlMs: 60 * 60_000,
     });
@@ -503,8 +511,9 @@ describe("what the builder tells the agent", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
       path: wt,
@@ -657,8 +666,9 @@ describe("what the builder does afterwards", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
       path: wt,
@@ -852,8 +862,9 @@ describe("the gates cannot be talked around", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     propose(store, { taskId: "t-1", goal: "a guard", now: T0 });
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
     agentCalls.length = 0;
@@ -906,7 +917,7 @@ describe("the gates cannot be talked around", () => {
   });
 
   test("will not build in a worktree leased to somebody else", async () => {
-    register(store, { name: "builder-2", host: "h", now: T0 });
+    register(store, { name: "builder-2", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-2") });
     lease({ runner: "builder-2" });
 
     expect(await attempt()).toMatchObject({ ok: false, reason: "not-leased" });
@@ -951,8 +962,9 @@ describe("scope text is data, not instructions", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     store.saveWorktree({
       path: wt,
       repo: "/code/thing",
@@ -1020,8 +1032,9 @@ describe("the lease marker never reaches a commit", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     store.saveWorktree({
       path: wt,
       repo: "/code/thing",
@@ -1095,8 +1108,9 @@ describe("the commit message", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     store.saveWorktree({
       path: wt,
       repo: "/code/thing",
@@ -1208,8 +1222,9 @@ describe("the pulse", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    register(store, { name: "builder-2", host: "h", now: T0 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    register(store, { name: "builder-2", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-2") });
     store.saveWorktree({
       path: wt,
       repo: "/code/thing",
@@ -1249,12 +1264,13 @@ describe("the pulse", () => {
   /** Expires builder-1's lease and grants the task to builder-2. */
   const supersede = () =>
     acquire(store, taskRef, "builder-2", {
+      token: tok("builder-2"),
       now: new Date(T0.getTime() + 24 * 60 * 60_000),
       newLeaseId: ids("lease-b"),
     });
 
   test("a build fenced while the agent runs commits nothing", async () => {
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
     const agent: Runner = async () => {
       supersede();
       await sleep(40); // several beats — the pulse must notice and latch
@@ -1271,7 +1287,7 @@ describe("the pulse", () => {
     // pulseMs 0: nothing beats during the run, so only the mandatory
     // synchronous re-proof after the agent stands between a superseded lease
     // and a stale commit.
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
     const agent: Runner = async () => {
       supersede();
       return { ...OK, stdout: AGENT_SAID };
@@ -1284,7 +1300,7 @@ describe("the pulse", () => {
   });
 
   test("a pulse that throws latches to fenced rather than vanishing", async () => {
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
     // The database refusing mid-flight proves nothing about the lease — and a
     // build that cannot prove its lease must not commit.
     const broken = Object.create(store) as Store;
@@ -1305,7 +1321,7 @@ describe("the pulse", () => {
   });
 
   test("the pulse stops when the build does", async () => {
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
     let beats = 0;
     const counting = Object.create(store) as Store;
     Object.defineProperty(counting, "touchRunner", {
@@ -1331,7 +1347,7 @@ describe("the pulse", () => {
   test("a healthy pulse keeps the lease alive past its original expiry", async () => {
     // The point of the whole mechanism: a lease shorter than the build, kept
     // alive by the build being alive.
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
     const agent: Runner = async (_file, args, options) => {
       await sleep(25);
       conclude(args, options);
@@ -1420,7 +1436,8 @@ describe("the park", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
     worktree = mkdtempSync(join(tmpdir(), "standing-orders-park-wt-"));
     evidence = mkdtempSync(join(tmpdir(), "standing-orders-park-ev-"));
     store.saveWorktree({
@@ -1436,7 +1453,7 @@ describe("the park", () => {
     });
     propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     runId = store.startRun({
       taskRef,
       leaseId: currentClaim(store, taskRef, T0)!.leaseId,
@@ -1636,7 +1653,8 @@ describe("bounded repair", () => {
     approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
     worktree = mkdtempSync(join(tmpdir(), "standing-orders-repair-wt-"));
     evidence = mkdtempSync(join(tmpdir(), "standing-orders-repair-ev-"));
     store.saveWorktree({
@@ -1652,7 +1670,7 @@ describe("bounded repair", () => {
     });
     propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     runId = store.startRun({
       taskRef,
       leaseId: currentClaim(store, taskRef, T0)!.leaseId,
@@ -1853,7 +1871,8 @@ describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, upda
     const approverToken = bootstrapApprover(store);
     store.createTask({ id: "t-g", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-g").id;
-    register(store, { name: "builder-1", host: "h", now: T0 });
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
     worktree = mkdtempSync(join(tmpdir(), "so-gem-repair-wt-"));
     evidence = mkdtempSync(join(tmpdir(), "so-gem-repair-ev-"));
     store.saveWorktree({
@@ -1862,7 +1881,7 @@ describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, upda
     });
     propose(store, { taskId: "t-g", goal: "add a guard on the payout path", now: T0 });
     approve(store, "t-g", "alex", T0, store.getScope("t-g")!.digest, approverToken);
-    acquire(store, taskRef, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
     runId = store.startRun({
       taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1",
       branch: "feat/g", worktree, provider: "gemini", now: T0,

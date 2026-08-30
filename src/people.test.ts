@@ -14,6 +14,7 @@ import { join as joinPath } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { addApprover, authenticateAccount, authenticateApprover, fileAndSealUnderMode, hashPassword } from "./scope.js";
 import { acquire, acquireIfReady } from "./claim.js";
+import { register } from "./runner.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { createDecisionServer } from "./serve.js";
 
@@ -224,6 +225,8 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
     const alex = addApprover(store, "alex", T0);
     if (!alex.ok) throw new Error("bootstrap");
+    // The runner gate (MCP spec v6): claims authenticate and bind to a repo.
+    register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-1" });
   });
   afterEach(() => store.close());
 
@@ -277,7 +280,7 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
     const scope = store.getScope("t-1");
     expect(scope?.approvedAt ?? null).toBeNull();
     // And the task no longer dispatches on the dead signature.
-    const taken = acquireIfReady(store, store.refFor("built-in", "t-1").id, "builder-1", { now: later(1) });
+    const taken = acquireIfReady(store, store.refFor("built-in", "t-1").id, "builder-1", { token: "tok-builder-1", now: later(1) });
     expect(taken.ok).toBe(false);
   });
 
@@ -300,7 +303,7 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
     signStandard("alex");
     sealUnderMode("t-1");
     const ref = store.refFor("built-in", "t-1").id;
-    const taken = acquireIfReady(store, ref, "builder-1", { now: T0 });
+    const taken = acquireIfReady(store, ref, "builder-1", { token: "tok-builder-1", now: T0 });
     expect(taken.ok).toBe(true);
     store.revokeMode(REPO, "alex", "operator", T0);
     // The claim is live: the sweep leaves the approval standing.
@@ -312,7 +315,7 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
     sealUnderMode("t-1");
     // NOTHING has read activeMode since expiry — the row is still open,
     // only the clock has passed. Dispatch must still refuse.
-    const taken = acquireIfReady(store, store.refFor("built-in", "t-1").id, "builder-1", { now: later(2) });
+    const taken = acquireIfReady(store, store.refFor("built-in", "t-1").id, "builder-1", { token: "tok-builder-1", now: later(2) });
     expect(taken.ok).toBe(false);
   });
 
@@ -321,7 +324,7 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
     sealUnderMode("t-1");
     const ref = store.refFor("built-in", "t-1").id;
     // The expired-by-clock mode: the CLI's raw acquire refuses, typed.
-    const taken = acquire(store, ref, "builder-1", { now: later(2) });
+    const taken = acquire(store, ref, "builder-1", { token: "tok-builder-1", now: later(2) });
     expect(taken).toMatchObject({ ok: false, reason: "mode-ended" });
     // And the one shared question answers the same everywhere.
     expect(store.modeApprovalLive(ref, T0)).toBe(true);

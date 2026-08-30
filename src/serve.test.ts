@@ -11,6 +11,7 @@ import { join } from "node:path";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire, release } from "./claim.js";
+import { register, hashToken } from "./runner.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
@@ -967,9 +968,10 @@ describe("the operations console", () => {
   test("the overview is live: refresh meta, building-now card, system status", async () => {
     store.createTask({ id: "t-live", title: "being built right now" }, T0);
     const ref = store.refFor("built-in", "t-live").id;
-    const { register } = await import("./runner.js");
-    register(store, { name: "builder-1", host: "host", capacity: 2, now: new Date() });
-    acquire(store, ref, "builder-1", { now: new Date(), ttlMs: 60 * 60_000 });
+    // The runner gate (MCP spec v6): registered, repo-bound, token-proved.
+    store.placeTask(ref, "/repo/main");
+    register(store, { name: "builder-1", host: "host", capacity: 2, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-builder-1" });
+    acquire(store, ref, "builder-1", { token: "tok-builder-1", now: new Date(), ttlMs: 60 * 60_000 });
     store.saveWorktree({
       path: "/pool/repo/standing-orders-t-live-abc123", repo: "/repo/main", branch: "standing-orders/t-live",
       runner: "builder-1", taskRef: ref, createdAt: new Date().toISOString(),
@@ -1124,8 +1126,11 @@ describe("the operations console", () => {
     expect(again.status).toBe(409);
 
     // A live claim refuses cancellation rather than being overwritten later.
+    // The claim rides the runner gate (MCP spec v6): registered + placed + token.
     const ref = store.refFor("built-in", "t-r").id;
-    acquire(store, ref, "builder-1", { now: new Date(), ttlMs: 60 * 60_000 });
+    store.placeTask(ref, "/repo/main");
+    register(store, { name: "builder-1", host: "host", capacity: 2, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-builder-1" });
+    acquire(store, ref, "builder-1", { token: "tok-builder-1", now: new Date(), ttlMs: 60 * 60_000 });
     const blocked = await post("/t/t-r/cancel", cookie, { csrf });
     expect(blocked.status).toBe(409);
     expect(store.getTask("t-r")?.state).not.toBe("cancelled");
@@ -1612,12 +1617,16 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const now = new Date();
     store.createTask({ id: "t-live", title: "being built" }, T0);
     const ref = store.refFor("built-in", "t-live").id;
+    // Placed BEFORE the scope seals it in place; the claiming runner is
+    // registered and repo-bound (the runner gate, MCP spec v6).
+    store.placeTask(ref, "/repo/main");
+    register(store, { name: "builder-1", host: "here", capacity: 2, repos: ["/repo/main"], now: T0, newToken: () => "tok-builder-1" });
     store.saveScope({
       taskId: "t-live", goal: "build it", outOfScope: null, touches: [],
       proposedAt: T0.toISOString(), digest: "d1",
       approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d1",
     });
-    const taken = acquire(store, ref, "builder-1", { now: new Date(now.getTime() - 12 * 60_000), ttlMs: 60 * 60_000 });
+    const taken = acquire(store, ref, "builder-1", { token: "tok-builder-1", now: new Date(now.getTime() - 12 * 60_000), ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim refused");
     store.startRun({
       taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
@@ -3155,9 +3164,11 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
 
   test("one lane per runner; a building card pins to the top wearing its project; the grid is auto-fit, not five tracks", async () => {
     const now = new Date();
+    // builder-1 carries a real credential and the repo binding the runner
+    // gate proves (MCP spec v6); builder-2 only ever holds a reservation.
     store.saveRunner(
-      { name: "builder-1", host: "here", capacity: 2, repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: now.toISOString(), retiredAt: null },
-      "hash",
+      { name: "builder-1", host: "here", capacity: 2, repos: ["/repo/main"], agents: [], registeredAt: T0.toISOString(), heartbeatAt: now.toISOString(), retiredAt: null },
+      hashToken("tok-builder-1"),
     );
     store.saveRunner(
       { name: "builder-2", host: "here", capacity: 1, repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: now.toISOString(), retiredAt: null },
@@ -3166,7 +3177,8 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
     // A live claim on builder-1.
     store.createTask({ id: "t-live", title: "being built" }, T0);
     const ref = store.refFor("built-in", "t-live").id;
-    const taken = acquire(store, ref, "builder-1", { now: new Date(now.getTime() - 5 * 60_000), ttlMs: 3_600_000 });
+    store.placeTask(ref, "/repo/main");
+    const taken = acquire(store, ref, "builder-1", { token: "tok-builder-1", now: new Date(now.getTime() - 5 * 60_000), ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error("claim refused");
     store.startRun({
       taskRef: ref, leaseId: taken.claim.leaseId, runner: "builder-1",
@@ -3332,7 +3344,10 @@ describe("the workbench (attended A1) and the live substrate", () => {
     store.refFor("built-in", "needs-scope", "ours");
     store.createTask({ id: "building-now", title: "Being built right now" }, T0);
     const ref = store.refFor("built-in", "building-now", "ours").id;
-    const taken = acquire(store, ref, "night-shift-1", { now: new Date(), ttlMs: 60 * 60_000 });
+    // The runner gate (MCP spec v6): registered, repo-bound, token-proved.
+    store.placeTask(ref, "/repo/main");
+    register(store, { name: "night-shift-1", host: "here", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok-night-shift-1" });
+    const taken = acquire(store, ref, "night-shift-1", { token: "tok-night-shift-1", now: new Date(), ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim failed in setup");
     const run = store.startRun({
       taskRef: ref,
@@ -3448,10 +3463,16 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
 
+    // The runner gate (MCP spec v6): both night-shift runners registered
+    // and repo-bound; every claimed task placed.
+    register(store, { name: "night-shift-1", host: "here", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok-night-shift-1" });
+    register(store, { name: "night-shift-2", host: "here", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok-night-shift-2" });
+
     // One genuinely live build: the claim's lease is current and unexpired.
     store.createTask({ id: "alive", title: "being built right now" }, T0);
     const aliveRef = store.refFor("built-in", "alive", "ours").id;
-    const aliveTaken = acquire(store, aliveRef, "night-shift-1", { now: new Date(), ttlMs: 3_600_000 });
+    store.placeTask(aliveRef, "/repo/main");
+    const aliveTaken = acquire(store, aliveRef, "night-shift-1", { token: "tok-night-shift-1", now: new Date(), ttlMs: 3_600_000 });
     if (!aliveTaken.ok) throw new Error("claim failed");
     liveRun = store.startRun({
       taskRef: aliveRef, leaseId: aliveTaken.claim.leaseId, runner: "night-shift-1",
@@ -3464,8 +3485,9 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     // Every "running" label must refuse this one.
     store.createTask({ id: "orphan", title: "left behind by a dead worker" }, T0);
     const orphanRef = store.refFor("built-in", "orphan", "ours").id;
+    store.placeTask(orphanRef, "/repo/main");
     const orphanTaken = acquire(store, orphanRef, "night-shift-2", {
-      now: new Date(Date.now() - 7_200_000), ttlMs: 3_600_000,
+      token: "tok-night-shift-2", now: new Date(Date.now() - 7_200_000), ttlMs: 3_600_000,
     });
     if (!orphanTaken.ok) throw new Error("orphan claim failed");
     orphanRun = store.startRun({
@@ -3713,8 +3735,11 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
       T0,
     );
     store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
+    // The runner gate (MCP spec v6): registered, repo-bound, token-proved.
+    store.placeTask(taskRef, "/repo/main");
+    register(store, { name: "night-shift-3", host: "here", capacity: 8, repos: ["/repo/main"], now: T0, newToken: () => "tok-night-shift-3" });
     // The lease died with the machine: acquired two hours ago, one-hour TTL.
-    const taken = acquire(store, taskRef, "night-shift-3", { now: new Date(Date.now() - 7_200_000), ttlMs: 3_600_000 });
+    const taken = acquire(store, taskRef, "night-shift-3", { token: "tok-night-shift-3", now: new Date(Date.now() - 7_200_000), ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error("claim");
     const admitted = admitContest(
       store,
@@ -3803,7 +3828,10 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
       T0,
     );
     store.approveTournamentTerms(termsId, "alex", planned.plan.raceDigest, T0);
-    const taken = acquire(store, taskRef, "night-shift-1", { now: T0, ttlMs: 3_600_000 });
+    // The runner gate (MCP spec v6): registered, repo-bound, token-proved.
+    store.placeTask(taskRef, "/repo/main");
+    register(store, { name: "night-shift-1", host: "here", capacity: 8, repos: ["/repo/main"], now: T0, newToken: () => "tok-night-shift-1" });
+    const taken = acquire(store, taskRef, "night-shift-1", { token: "tok-night-shift-1", now: T0, ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error("claim");
     const admitted = admitContest(
       store,
@@ -3998,9 +4026,11 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     if (!added.ok) throw new Error("bootstrap");
     approverToken = added.token;
 
+    // The claiming runner carries a real credential and the repo binding the
+    // runner gate proves (MCP spec v6).
     store.saveRunner(
-      { name: "night-shift-1", host: "here", capacity: 4, capacityMode: "tasks", repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
-      "hash",
+      { name: "night-shift-1", host: "here", capacity: 4, capacityMode: "tasks", repos: ["/repos/thing"], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
+      hashToken("tok-night-shift-1"),
     );
     store.saveRunner(
       { name: "other-machine", host: "there", capacity: 4, capacityMode: "tasks", repos: [], agents: [], registeredAt: T0.toISOString(), heartbeatAt: T0.toISOString(), retiredAt: null },
@@ -4008,7 +4038,8 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     );
     store.createTask({ id: "peek-1", title: "watched work" }, T0);
     const taskRef = store.refFor("built-in", "peek-1", "ours").id;
-    const taken = acquire(store, taskRef, "night-shift-1", { now: new Date(), ttlMs: 3_600_000 });
+    store.placeTask(taskRef, "/repos/thing");
+    const taken = acquire(store, taskRef, "night-shift-1", { token: "tok-night-shift-1", now: new Date(), ttlMs: 3_600_000 });
     if (!taken.ok) throw new Error("claim");
     runId = store.startRun({
       taskRef,

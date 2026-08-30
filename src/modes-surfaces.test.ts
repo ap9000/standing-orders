@@ -15,6 +15,7 @@ import { openStore, type Store } from "./store.js";
 import { addApprover, approvalOf, fileAndSealUnderMode, modeFilingCoverage } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 import { acquire } from "./claim.js";
+import { register } from "./runner.js";
 import { runOperate } from "./operate.js";
 
 const T0 = new Date("2026-08-27T12:00:00.000Z");
@@ -263,8 +264,10 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
     const ref = store.refFor("built-in", "t-1");
     expect(ref.planProvider).toBe("codex");
     expect(ref.planModel).toBe("gpt-5-codex");
-    // A live claim cuts off pin edits.
-    const taken = acquire(store, ref.id, "builder-1", { now: T0 });
+    // A live claim cuts off pin edits — the claim rides the runner gate
+    // (MCP spec v6): registered runner, token, repo binding.
+    register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-1" });
+    const taken = acquire(store, ref.id, "builder-1", { token: "tok-builder-1", now: T0 });
     expect(taken.ok).toBe(true);
     expect(store.setPlanPins(ref.id, "claude", null, T0)).toEqual({ ok: false, reason: "live-claim" });
     store.close();

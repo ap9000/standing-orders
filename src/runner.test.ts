@@ -15,6 +15,11 @@ import { acquire, currentClaim } from "./claim.js";
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 
+/** The runner gate (MCP spec v6): every acquisition authenticates the runner
+ * and proves the task's placed repo is in its registered `repos` — so tests
+ * that acquire register against REPO and place their tasks there. */
+const REPO = "/repo/runners";
+
 describe("registering a runner", () => {
   let store: Store;
 
@@ -136,13 +141,14 @@ describe("recovering a dead runner", () => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
     task = store.refFor("built-in", "t-1").id;
+    store.placeTask(task, REPO);
   });
 
   afterEach(() => store.close());
 
   test("takes back the claims it was holding", () => {
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, task, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
 
     const recovered = recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
 
@@ -153,8 +159,8 @@ describe("recovering a dead runner", () => {
   test("frees a task whose lease had not expired yet", () => {
     // This is the point of tracking liveness separately: the lease was good
     // for another hour, but the machine holding it is gone.
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, task, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
 
     expect(store.listReady(later(1_000))).toHaveLength(0);
     recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
@@ -164,11 +170,12 @@ describe("recovering a dead runner", () => {
   test("still fences the dead runner's completion if it wakes up", () => {
     // Recovery does not touch the generation, so the fence that was already
     // there keeps doing its job.
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    const first = acquire(store, task, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    const first = acquire(store, task, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
     recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
 
-    const second = acquire(store, task, "builder-2", { now: later(DEFAULT_LIVENESS_MS + 2_000) });
+    const other = register(store, { name: "builder-2", host: "h", repos: [REPO], now: later(DEFAULT_LIVENESS_MS + 2_000) });
+    const second = acquire(store, task, "builder-2", { token: other.token, now: later(DEFAULT_LIVENESS_MS + 2_000) });
 
     expect(second.ok).toBe(true);
     if (second.ok && first.ok) {
@@ -199,8 +206,8 @@ describe("recovering a dead runner", () => {
   });
 
   test("leaves a live runner's work alone", () => {
-    const { token } = register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, task, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
     heartbeat(store, "builder-1", token, later(DEFAULT_LIVENESS_MS));
 
     const recovered = recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
@@ -226,6 +233,7 @@ describe("the regressions these fixes were for", () => {
     store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "the work" }, T0);
     task = store.refFor("built-in", "t-1").id;
+    store.placeTask(task, REPO);
   });
 
   afterEach(() => store.close());
@@ -234,8 +242,8 @@ describe("the regressions these fixes were for", () => {
     // The stranding this prevents: claiming moves a task to `running`, the
     // ready query asks for `queued`, and a lease taken back without this
     // leaves the task held by nobody and offered to nobody, forever.
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, task, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
     store.setTaskState("t-1", "running", T0);
 
     recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
@@ -247,8 +255,8 @@ describe("the regressions these fixes were for", () => {
   test("does not drag a finished task back to the queue", () => {
     // Only work that was in flight comes back. A task the runner completed
     // before dying is done, and requeuing it would repeat it.
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, task, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
     store.setTaskState("t-1", "done", T0);
 
     recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
@@ -260,8 +268,8 @@ describe("the regressions these fixes were for", () => {
     // Re-registering resets the heartbeat, so without this the old identity
     // looks alive again and the reaper walks straight past its abandoned
     // work — stranded for good, with nothing anywhere reporting it.
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, task, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    acquire(store, task, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
     store.setTaskState("t-1", "running", T0);
 
     const again = register(store, { name: "builder-1", host: "h", now: later(1_000) });
@@ -294,9 +302,10 @@ describe("recovery stays inside its own backend", () => {
     store.createTask({ id: "17", title: "ours, and running" }, T0);
     store.setTaskState("17", "running", T0);
 
-    register(store, { name: "builder-1", host: "h", now: T0 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
     const theirs = store.refFor("github-issues", "17");
-    acquire(store, theirs.id, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    store.placeTask(theirs.id, REPO);
+    acquire(store, theirs.id, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
 
     recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
 
@@ -307,8 +316,10 @@ describe("recovery stays inside its own backend", () => {
   test("still requeues the built-in task when that is what was held", () => {
     store.createTask({ id: "17", title: "ours" }, T0);
     store.setTaskState("17", "running", T0);
-    register(store, { name: "builder-1", host: "h", now: T0 });
-    acquire(store, store.refFor("built-in", "17").id, "builder-1", { now: T0, ttlMs: 60 * 60_000 });
+    const { token } = register(store, { name: "builder-1", host: "h", repos: [REPO], now: T0 });
+    const ours = store.refFor("built-in", "17").id;
+    store.placeTask(ours, REPO);
+    acquire(store, ours, "builder-1", { token, now: T0, ttlMs: 60 * 60_000 });
 
     recoverDead(store, later(DEFAULT_LIVENESS_MS + 1_000));
 

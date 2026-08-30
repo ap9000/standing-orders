@@ -18,11 +18,13 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 import { run as exec, type ExecResult, type RunOptions } from "./exec.js";
 import { openStore } from "./store.js";
+import { register } from "./runner.js";
 
 type Runner = (file: string, args: readonly string[], options?: RunOptions) => Promise<ExecResult>;
 
@@ -115,7 +117,7 @@ describe("the night: twelve tasks, one fake clock", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "standing-orders-night-"));
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-night-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -137,15 +139,21 @@ describe("the night: twelve tasks, one fake clock", () => {
   test("queue twelve, sleep, wake to PRs", async () => {
     // -- Evening: credentials, twelve tasks, eleven approved scopes, one
     // dependency, one publication grant with its terms agreed to.
-    await run(["runner", "register", "builder-1", "--json"], T0);
-    const runnerToken = payload().token as string;
+    // The runner gate (MCP spec v6): the tick's claims authenticate the
+    // runner and require each task's placed repo in its registered repos
+    // list — the CLI register cannot bind repos, so builder-1 enrolls
+    // directly against the store, and every task is placed when filed.
+    const boot = openStore(db);
+    register(boot, { name: "builder-1", host: "test", capacity: 12, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+    boot.close();
+    const runnerToken = "tok-builder-1";
     await run(["approver", "add", "alex", "--json"], T0);
     const approverToken = payload().token as string;
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0);
 
     for (const id of TASKS) {
-      await run(["task", "add", `night work ${id}`, "--id", id], T0);
+      await run(["task", "add", `night work ${id}`, "--id", id, "--repo", repo], T0);
       await run(["task", "scope", id, "--goal", `do exactly ${id}`], T0);
     }
     // t-10's approval deliberately waits until the night is underway.

@@ -13,6 +13,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
+import { register } from "./runner.js";
 import { propose, approve, addApprover } from "./scope.js";
 import { acquireFallback, release } from "./claim.js";
 import { runOperate, EXIT } from "./operate.js";
@@ -30,6 +31,9 @@ vi.mock("./exhaustion.js", async importOriginal => {
 
 const T0 = new Date("2026-08-29T12:00:00.000Z");
 const REPO = "/repos/chain";
+/** The runner gate (MCP spec v6): every acquisition authenticates and
+ * proves repo authority — the fault matrix's runner is enrolled for REPO. */
+const TOKEN = "tok-b-1";
 const VERSION = "1.0.0";
 const EXPIRY = new Date(T0.getTime() + 24 * 60 * 60_000).toISOString();
 
@@ -66,6 +70,7 @@ describe("the fault matrix (G)", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    register(store, { name: "b-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => TOKEN });
     store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
@@ -162,6 +167,7 @@ describe("the fault matrix (G)", () => {
     // The third strike marked the task failed (terminal) before admission.
     store.raw().prepare("UPDATE task SET state = 'failed' WHERE id = 't-struck'").run();
     const claim = acquireFallback(store, ref, "b-1", {
+      token: TOKEN,
       now: T0,
       provider: "gemini",
       model: "gemini-2.5-pro",
@@ -182,7 +188,7 @@ describe("the fault matrix (G)", () => {
       { runner: "b-1", provider: "gemini", scope: "gemini-2.5-pro", reason: "plan spent", authMode: "subscription" },
       T0,
     );
-    const other = acquireFallback(store, ref, "b-1", { now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" });
+    const other = acquireFallback(store, ref, "b-1", { token: TOKEN, now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" });
     expect(other.ok).toBe(true);
     if (other.ok) release(store, other.claim.leaseId, T0);
     // The PINNED credential's own exhaustion refuses — and creates nothing.
@@ -191,7 +197,7 @@ describe("the fault matrix (G)", () => {
       T0,
     );
     const before = Number((store.raw().prepare("SELECT COUNT(*) AS n FROM claim WHERE released_at IS NULL").get() as { n: number }).n);
-    const claim = acquireFallback(store, ref, "b-1", { now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" });
+    const claim = acquireFallback(store, ref, "b-1", { token: TOKEN, now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" });
     expect(claim.ok).toBe(false);
     if (!claim.ok) expect(claim.reason).toBe("quota");
     const after = Number((store.raw().prepare("SELECT COUNT(*) AS n FROM claim WHERE released_at IS NULL").get() as { n: number }).n);
@@ -205,7 +211,7 @@ describe("the fault matrix (G)", () => {
     expect(store.resolveChainOnRunEnd(ref, "t-incarnation", REPO, run, T0).kind).toBe("advanced");
     // The doomed watch claims WITH its incarnation and admits the fallback.
     const claim = acquireFallback(store, ref, "b-1", {
-      now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key", incarnation: "watch-1",
+      token: TOKEN, now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key", incarnation: "watch-1",
     });
     expect(claim.ok).toBe(true);
     if (!claim.ok) return;

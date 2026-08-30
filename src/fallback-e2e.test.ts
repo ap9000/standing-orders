@@ -12,13 +12,14 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { writeFileSync, chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { resetAttestationCache } from "./attest.js";
 import { runOperate } from "./operate.js";
 import { run as exec } from "./exec.js";
 import { openStore } from "./store.js";
+import { register } from "./runner.js";
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 import type { Runner } from "./builder.js";
 
@@ -105,7 +106,10 @@ describe("the fallback chain end-to-end (E3d)", () => {
   const payload = () => JSON.parse(lines.join("\n"));
 
   beforeEach(async () => {
-    base = await mkdtemp(join(tmpdir(), "standing-orders-fb-"));
+    // realpath: the runner gate compares the task's PLACED repo against the
+    // runner's CANONICALIZED registered repos — macOS tmpdir symlinks
+    // (/var/folders → /private/var) must not split the two identities.
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-fb-")));
     repo = join(base, "repo");
     db = join(base, "queue.db");
     pool = join(base, "pool");
@@ -149,6 +153,9 @@ describe("the fallback chain end-to-end (E3d)", () => {
     await run(["task", "add", "the work", "--id", "t-fb"]);
     {
       const store = openStore(db);
+      // The runner gate (MCP spec v6): dispatch authority is the runner's
+      // REGISTERED repo list — bind this repo to the CLI-minted credential.
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => runnerToken });
       const ref = store.refFor("built-in", "t-fb").id;
       expect(store.placeTask(ref, repo)).toBe(true);
       store.setFallbackConfig(repo, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
@@ -217,6 +224,8 @@ describe("the fallback chain end-to-end (E3d)", () => {
     await run(["task", "add", "the work", "--id", "t-nogrant"]);
     {
       const store = openStore(db);
+      // The runner gate (MCP spec v6): bind the repo to the registered runner.
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: T0, newToken: () => runnerToken });
       const ref = store.refFor("built-in", "t-nogrant").id;
       expect(store.placeTask(ref, repo)).toBe(true);
       // A chain is configured and approved — but NO mode grants the spend.

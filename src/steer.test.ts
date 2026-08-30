@@ -8,16 +8,24 @@
 
 import { describe, test, expect, beforeEach } from "vitest";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
+import { register } from "./runner.js";
 import { acquire, release } from "./claim.js";
 
 const T0 = new Date("2026-08-23T05:00:00Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
 const BUILT_IN = "built-in";
 
+/** The runner gate (MCP spec v6): every claim authenticates its runner and
+ * proves the task's PLACED repo is in the runner's registered list. */
+const REPO = "/repo/steer";
+const TOKEN = "tok-builder-1";
+
 let store: Store;
 beforeEach(() => {
   store = openStore(":memory:");
+  register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => TOKEN });
   store.createTask({ id: "t-1", title: "steerable work" }, T0);
+  store.placeTask(store.refFor(BUILT_IN, "t-1").id, REPO);
 });
 
 const refOf = (id: string) => store.refFor(BUILT_IN, id).id;
@@ -34,7 +42,7 @@ const openRun = (leaseId: string, at: Date = T0): number =>
   });
 
 const claimIt = (at: Date, lease: string, ttlMs = 60 * 60_000) => {
-  const got = acquire(store, refOf("t-1"), "builder-1", { now: at, ttlMs, newLeaseId: () => lease });
+  const got = acquire(store, refOf("t-1"), "builder-1", { token: TOKEN, now: at, ttlMs, newLeaseId: () => lease });
   if (!got.ok) throw new Error("claim failed in setup");
   return got.claim.leaseId;
 };

@@ -382,6 +382,10 @@ describe("the review's regressions (Codex Phase C findings)", () => {
 
   test("H2: a live claim blocks single-flight whatever the task's state string says", async () => {
     const { acquire } = await import("./claim.js");
+    const { register } = await import("./runner.js");
+    // The runner gate (MCP spec v6): the claiming runner is registered and
+    // bound to the routine's repo, and the claim carries its token.
+    register(store, { name: "builder-1", host: "test", capacity: 9, repos: [TERMS.repo], now: T0, newToken: () => "tok-builder-1" });
     approve(routineId);
     const fired = fireRoutine(store, routineId, later(HOUR));
     expect(fired.ok).toBe(true);
@@ -389,7 +393,7 @@ describe("the review's regressions (Codex Phase C findings)", () => {
 
     // A runner takes the instance; the provider is live.
     const ref = store.refFor(BUILT_IN, fired.taskId);
-    const taken = acquire(store, ref.id, "builder-1", { now: later(HOUR + MINUTE), ttlMs: 60 * MINUTE });
+    const taken = acquire(store, ref.id, "builder-1", { token: "tok-builder-1", now: later(HOUR + MINUTE), ttlMs: 60 * MINUTE });
     expect(taken.ok).toBe(true);
 
     // Somebody writes 'done' over it with the generic state command,

@@ -958,21 +958,25 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
       const attention = cards.filter(card => card.lane === "attention").slice(0, 100);
       const building = cards.filter(card => card.lane === "building");
+      const waiting = cards.filter(card => card.lane === "waiting");
+      const queued = cards.filter(card => card.lane === "queued");
       const done = snapshot.done
         .filter(one => one.repo === null || visible(one.repo))
         .slice(0, 5)
-        .map(one => ({ taskId: one.taskId, title: one.title, outcome: one.outcome }));
+        .map(one => ({ taskId: one.taskId, title: one.title, outcome: one.outcome, repo: one.repo }));
       const selected = url.searchParams.get("t");
-      const rail = workbenchRail({ attention, building, done, selected, saturated: snapshot.saturated });
+      const rail = workbenchRail({ attention, building, waiting, queued, done, selected, saturated: snapshot.saturated });
       if (url.searchParams.get("fragment") === "rail") {
         // The rail alone: same auth, same ceiling, no shell, no scripts.
         return respond(response, 200, "text/html; charset=utf-8", rail);
       }
-      let detail = `<div class="card"><p><strong>Pick something on the left.</strong></p>` +
-        `<p class="meta">the rail updates itself; whatever you select renders here in full — approvals, evidence, acts</p></div>`;
+      let detail = workbenchOverview({ attention, building, waiting, queued, done, saturated: snapshot.saturated }) +
+        `<div class="workbench-mobile-rail">${rail}</div>`;
       if (selected !== null) {
         const view = taskViewData(selected, who, null);
-        detail = view === null ? `<div class="card"><p class="meta">no such task — it may have been outside this console's view</p></div>` : taskBody(view);
+        detail = view === null
+          ? `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p><div class="card"><p class="meta">no such task — it may have been outside this console's view</p></div>`
+          : `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p>${taskBody(view)}`;
       }
       return sendScreen(
         response,
@@ -2201,9 +2205,19 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const liveMode = project === null ? null : store.activeMode(project, clock());
     const liveModeTerms = liveMode === null ? null : modeTermsFromJson(liveMode.termsJson);
+    let projectPeek: ProjectPeek | null | undefined = project === null ? null : undefined;
+    if (project !== null) {
+      try {
+        projectPeek = store.projectPeek(project, clock());
+      } catch {
+        // Chrome is orientation, never a reason to fail the actual screen.
+        projectPeek = undefined;
+      }
+    }
     return {
       active,
       project,
+      ...(projectPeek === undefined ? {} : { projectPeek }),
       inboxCount: badge.count,
       inboxSaturated: badge.saturated,
       settings: options.telegramTokenFile !== undefined,
@@ -5404,6 +5418,36 @@ const STYLE = `
     --brand-soft: hsl(250 80% 96%);
     --radius: 0.625rem;
     --shadow: 0 1px 2px 0 hsl(240 10% 3.9% / 0.05);
+    --material-satin-surface:
+      linear-gradient(180deg, rgb(255 255 255 / .72) 0%, rgb(255 255 255 / .22) 16%, transparent 48%, rgb(17 24 39 / .025) 100%),
+      linear-gradient(135deg, #fff 0%, #f5f6f8 32%, #e9ecf1 70%, #f8fafc 100%);
+    /* Selected surfaces are configurable at one semantic switch point.
+       Neutral is the operational default; brand is an intentional emphasis;
+       flat removes optical texture while preserving the state outline. */
+    --material-card-selected-neutral:
+      linear-gradient(180deg, rgb(255 255 255 / .76) 0%, rgb(255 255 255 / .16) 18%, transparent 52%, rgb(17 24 39 / .025) 100%),
+      linear-gradient(135deg, #fff 0%, #f6f7f9 30%, #eceff3 72%, #fafbfc 100%);
+    --material-card-selected-brand:
+      linear-gradient(180deg, rgb(255 255 255 / .8) 0%, rgb(255 255 255 / .18) 18%, transparent 52%, rgb(75 44 201 / .035) 100%),
+      linear-gradient(135deg, #fff 0%, #f2f0ff 30%, #e3dffc 72%, #f8f7ff 100%);
+    --material-card-selected-flat: var(--card);
+    --material-card-selected: var(--material-card-selected-neutral);
+    --material-satin-selected: var(--material-card-selected);
+    --material-satin-control: linear-gradient(180deg, #fff 0%, #f1f3f6 38%, #e4e7ec 72%, #fafbfc 100%);
+    --material-graphite-chrome:
+      linear-gradient(180deg, rgb(255 255 255 / .11) 0%, rgb(255 255 255 / .035) 8%, transparent 42%, rgb(0 0 0 / .14) 100%),
+      linear-gradient(135deg, #242831 0%, #171a21 24%, #0e1015 70%, #1c2028 100%);
+    --material-resting-shadow:
+      inset 0 1px 1px rgb(255 255 255 / .72),
+      inset 0 -1px 1px rgb(17 19 24 / .035),
+      0 1px 3px rgb(17 19 24 / .07);
+    --material-raised-shadow:
+      inset 0 1px 1px rgb(255 255 255 / .78),
+      0 2px 7px -2px rgb(17 19 24 / .08),
+      0 18px 34px -16px rgb(17 19 24 / .13);
+    --material-selected-shadow:
+      inset 0 1px 1px rgb(255 255 255 / .82),
+      0 2px 7px -3px rgb(17 19 24 / .09);
     --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
@@ -5431,6 +5475,30 @@ const STYLE = `
       --brand: hsl(250 80% 72%);
       --brand-soft: hsl(250 40% 16%);
       --shadow: none;
+      --material-satin-surface:
+        linear-gradient(180deg, rgb(255 255 255 / .08) 0%, rgb(255 255 255 / .02) 18%, transparent 54%, rgb(0 0 0 / .18) 100%),
+        linear-gradient(135deg, #20242c 0%, #191c23 32%, #111319 70%, #1b1f27 100%);
+      --material-card-selected-neutral:
+        linear-gradient(180deg, rgb(255 255 255 / .1) 0%, rgb(255 255 255 / .025) 20%, transparent 52%, rgb(0 0 0 / .16) 100%),
+        linear-gradient(135deg, #242832 0%, #20242a 32%, #16191f 72%, #21252d 100%);
+      --material-card-selected-brand:
+        linear-gradient(180deg, rgb(255 255 255 / .11) 0%, rgb(255 255 255 / .025) 20%, transparent 52%, rgb(99 74 214 / .08) 100%),
+        linear-gradient(135deg, #2b2743 0%, #24203b 32%, #191724 72%, #27233e 100%);
+      --material-card-selected-flat: var(--card);
+      --material-card-selected: var(--material-card-selected-neutral);
+      --material-satin-selected: var(--material-card-selected);
+      --material-satin-control: linear-gradient(180deg, #282c35 0%, #20242c 38%, #161920 72%, #242832 100%);
+      --material-resting-shadow:
+        inset 0 1px 1px rgb(255 255 255 / .09),
+        inset 0 -1px 1px rgb(0 0 0 / .34),
+        0 1px 3px rgb(0 0 0 / .42);
+      --material-raised-shadow:
+        inset 0 1px 1px rgb(255 255 255 / .11),
+        0 2px 8px -2px rgb(0 0 0 / .38),
+        0 18px 36px -16px rgb(0 0 0 / .58);
+      --material-selected-shadow:
+        inset 0 1px 1px rgb(255 255 255 / .13),
+        0 2px 8px -3px rgb(0 0 0 / .42);
     }
   }
   * { box-sizing: border-box; }
@@ -5444,8 +5512,8 @@ const STYLE = `
   .topbar {
     position: sticky; top: 0; z-index: 10;
     border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--background) 86%, transparent);
-    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    background: var(--material-satin-surface);
+    box-shadow: var(--material-resting-shadow);
   }
   .topbar-inner {
     max-width: 44rem; margin-inline: auto; padding: 0 1.25rem; height: 3.25rem;
@@ -5480,18 +5548,25 @@ const STYLE = `
   .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
   .meta a { color: var(--muted-foreground); }
   .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: -.375rem 0 .625rem; opacity: .8; }
+  .eyebrow {
+    display: block; color: var(--muted-foreground); font-size: .6875rem;
+    font-weight: 650; letter-spacing: .08em; line-height: 1.3; text-transform: uppercase;
+  }
   .num { font-variant-numeric: tabular-nums; }
-  .wb-selected { background: var(--accent); border-radius: calc(var(--radius) - 4px); }
   .palette {
     position: fixed; top: 18vh; left: 50%; transform: translateX(-50%); width: min(32rem, 90vw);
-    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    box-shadow: 0 1px 2px hsl(240 10% 3.9% / .08), 0 16px 40px -16px hsl(240 10% 3.9% / .3);
+    background: var(--material-satin-surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--material-raised-shadow);
     padding: .625rem; z-index: 50;
   }
   .palette input { width: 100%; margin: 0; }
   .palette ul { list-style: none; margin: .5rem 0 0; padding: 0; max-height: 40vh; overflow-y: auto; }
   .palette li { padding: .4375rem .625rem; border-radius: calc(var(--radius) - 4px); cursor: pointer; font-size: .875rem; }
-  .palette li[aria-selected="true"] { background: var(--accent); box-shadow: inset 2px 0 0 var(--brand); }
+  .palette li[aria-selected="true"] {
+    background: var(--material-card-selected); color: var(--foreground);
+    outline: 1px solid color-mix(in srgb, var(--brand) 28%, var(--border)); outline-offset: -1px;
+    box-shadow: var(--material-selected-shadow);
+  }
 
   /* The ledger: the window's harvest as strong figures in a sentence,
      not a metric-card grid. */
@@ -5510,8 +5585,8 @@ const STYLE = `
   .badge-running, .badge-open, .badge-parked, .badge-cut { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
 
   .card {
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
-    padding: 1rem 1.125rem; margin: .75rem 0; box-shadow: var(--shadow);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--material-satin-surface);
+    padding: 1rem 1.125rem; margin: .75rem 0; box-shadow: var(--material-resting-shadow);
   }
   .problem {
     border: 1px solid color-mix(in srgb, var(--destructive) 35%, transparent);
@@ -5532,23 +5607,23 @@ const STYLE = `
      question in full weight, and the whole card is the tap target. */
   .decide-card {
     display: block; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--card); padding: .875rem 1.125rem; margin: .625rem 0;
-    text-decoration: none; box-shadow: var(--shadow); transition: border-color .15s;
+    background: var(--material-satin-surface); padding: .875rem 1.125rem; margin: .625rem 0;
+    text-decoration: none; box-shadow: var(--material-raised-shadow); transition: border-color .15s;
   }
   .decide-card:hover { border-color: var(--ring); }
   .decide-card .q { font-weight: 600; margin: 0 0 .25rem; }
 
   button {
     font: 500 0.9375rem/1.4 inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
-    border: 1px solid var(--border); background: var(--background); color: var(--foreground);
-    padding: .5rem .875rem; min-height: 2.5rem; box-shadow: var(--shadow);
-    transition: background .15s, border-color .15s;
+    border: 1px solid var(--border); background: var(--material-satin-control); color: var(--foreground);
+    padding: .5rem .875rem; min-height: 2.5rem; box-shadow: var(--material-resting-shadow);
+    transition: filter .15s, border-color .15s;
   }
-  button:hover { background: var(--accent); }
+  button:hover { filter: brightness(1.035); border-color: var(--ring); }
   .approve-form button[type=submit] {
-    background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
+    background: var(--material-graphite-chrome); color: hsl(0 0% 98%); border-color: hsl(240 5.9% 18%);
   }
-  .approve-form button[type=submit]:hover { background: color-mix(in srgb, var(--primary) 88%, var(--background)); }
+  .approve-form button[type=submit]:hover { filter: brightness(1.08); }
   button.danger { color: var(--destructive-strong); border-color: color-mix(in srgb, var(--destructive-strong) 40%, transparent); }
   button.danger:hover { background: var(--destructive-soft); }
 
@@ -5570,13 +5645,16 @@ const STYLE = `
   /* One option = one container: consequence first, then the act. */
   form.option {
     margin: .75rem 0; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--card); padding: .875rem 1rem; box-shadow: var(--shadow);
+    background: var(--material-satin-surface); padding: .875rem 1rem; box-shadow: var(--material-resting-shadow);
   }
   form.option button {
     display: block; width: 100%; text-align: left; font-size: 0.9375rem; font-weight: 600;
     min-height: 2.75rem;
   }
-  form.option.recommended { border-color: var(--foreground); box-shadow: 0 0 0 1px var(--foreground); }
+  form.option.recommended {
+    background: var(--material-card-selected); border-color: var(--brand);
+    box-shadow: var(--material-selected-shadow), 0 0 0 1px var(--brand);
+  }
   .consequence { font-size: 0.8125rem; color: var(--muted-foreground); margin: 0 0 .625rem; white-space: pre-wrap; }
   form.option input[type=text] { font-size: 0.8125rem; margin-top: .5rem; min-height: 2.25rem; }
 
@@ -5588,7 +5666,7 @@ const STYLE = `
   }
   details {
     margin: .75rem 0; border: 1px solid var(--border); border-radius: var(--radius);
-    padding: .25rem .875rem; background: var(--card);
+    padding: .25rem .875rem; background: var(--material-satin-surface); box-shadow: var(--material-resting-shadow);
   }
   details[open] { padding-bottom: .875rem; }
   details.arm-danger { border-color: color-mix(in srgb, var(--destructive-strong) 30%, transparent); }
@@ -5611,33 +5689,47 @@ const STYLE = `
   /* The workspace shell: sidebar + content, an optional list pane between.
      One grid, collapsing to the phone column below 760px — the answering
      flow keeps its single-column ritual. */
-  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+  .app { display: grid; grid-template-columns: 252px minmax(0, 1fr); min-height: 100vh; }
   .side {
-    border-right: 1px solid var(--border); background: var(--card);
+    border-right: 1px solid var(--border);
+    background: var(--material-graphite-chrome); color: hsl(0 0% 98%);
     padding: 1rem .875rem; display: flex; flex-direction: column; gap: .25rem;
     position: sticky; top: 0; height: 100vh; overflow-y: auto;
   }
-  .side .brand { padding: .25rem .5rem .75rem; font-size: 1rem; height: auto; }
+  .side .brand { padding: .25rem .5rem .75rem; font-size: 1rem; height: auto; color: hsl(0 0% 98%); }
   .side-project {
-    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
-    padding: .5rem .625rem; margin: 0 0 .75rem; background: var(--background);
+    border: 1px solid rgb(255 255 255 / .18); border-radius: calc(var(--radius) - 2px);
+    padding: .7rem .75rem; margin: 0 0 .75rem; background: rgb(255 255 255 / .035);
+    box-shadow: inset 0 1px 1px rgb(255 255 255 / .08), 0 1px 3px rgb(0 0 0 / .34);
   }
-  .side-project .name { font-weight: 600; font-size: .875rem; display: block; }
-  .side-project a { font-size: .75rem; }
+  .side-project .name { font-weight: 650; font-size: .9375rem; display: block; margin-top: .1rem; }
+  .side-project a { font-size: .75rem; color: hsl(0 0% 98%); }
+  .side-project .eyebrow, .side-project .switch, .side-project-status { color: hsl(240 5% 70%); }
+  .side-project .switch { display: inline-block; margin-top: .35rem; }
+  .side-project-status {
+    display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .45rem;
+    color: var(--muted-foreground); font-size: .6875rem; font-variant-numeric: tabular-nums;
+  }
+  .side-project-status .hot { color: var(--warning); font-weight: 600; }
   .side nav { display: flex; flex-direction: column; gap: .125rem; }
   .side nav a {
     display: flex; align-items: center; gap: .5rem; padding: .5rem .625rem; min-height: 2.25rem;
     border-radius: calc(var(--radius) - 2px); text-decoration: none;
-    color: var(--muted-foreground); font-size: .875rem; font-weight: 500;
+    color: hsl(240 5% 70%); font-size: .875rem; font-weight: 500;
   }
   .side nav a:hover { background: var(--accent); color: var(--foreground); }
-  .side nav a.active { background: var(--accent); color: var(--foreground); box-shadow: inset 2px 0 0 var(--brand); }
+  .side nav a.active {
+    background: var(--material-card-selected); color: hsl(240 10% 3.9%);
+    outline: 1px solid color-mix(in srgb, var(--brand) 28%, var(--border)); outline-offset: -1px;
+    box-shadow: var(--material-selected-shadow);
+  }
   .side nav a .count { margin-left: auto; }
   .side .grow { flex: 1; }
   .side .new-task {
     display: block; text-align: center; text-decoration: none; font-weight: 600; font-size: .875rem;
-    background: var(--primary); color: var(--primary-foreground);
+    background: var(--material-satin-control); color: hsl(240 10% 3.9%);
     border-radius: calc(var(--radius) - 2px); padding: .625rem; margin: .75rem 0 .25rem;
+    box-shadow: var(--material-resting-shadow);
   }
   .side .new-task:hover { opacity: .9; }
   .content { min-width: 0; }
@@ -5653,14 +5745,25 @@ const STYLE = `
     text-decoration: none; font-size: .8125rem; margin-bottom: .125rem;
   }
   .list-pane a.item:hover { background: var(--accent); }
-  .list-pane a.item.current { background: var(--accent); }
+  .list-pane a.item.current { background: var(--material-card-selected); box-shadow: var(--material-selected-shadow); }
   .list-pane a.item .t { display: block; font-weight: 550; color: var(--foreground);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .list-pane a.item .m { display: flex; gap: .375rem; align-items: center; color: var(--muted-foreground);
     font-size: .75rem; margin-top: .125rem; }
   .split > .detail { min-width: 0; }
   .split > .detail > main { max-width: 52rem; padding: 1.75rem 2rem 4rem; }
-  @media (max-width: 980px) { .split { grid-template-columns: 1fr; } .list-pane { display: none; } }
+  .split:has(#wb-rail) { grid-template-columns: minmax(320px, 360px) minmax(0, 1fr); }
+  .list-pane:has(#wb-rail) { padding: 0; background: color-mix(in srgb, var(--muted) 35%, var(--background)); }
+  #wb-rail { padding: 1rem .75rem 1.5rem; }
+  #wb-rail-stamp { padding: 0 .75rem; }
+  .workbench-mobile-rail, .workbench-mobile-back { display: none; }
+  @media (max-width: 980px) {
+    .split { grid-template-columns: 1fr; }
+    .list-pane { display: none; }
+    .workbench-mobile-rail, .workbench-mobile-back { display: block; }
+    .workbench-mobile-rail { margin-top: 1.75rem; border-top: 1px solid var(--border); padding-top: .75rem; }
+    .workbench-mobile-back { margin: 0 0 1rem; }
+  }
   /* The phone shell (arc 4): the sidebar disappears; a top bar carries the
      project (one tap to switch) and quick capture; a bottom tab bar carries
      the four destinations a thumb actually visits, and everything else
@@ -5671,13 +5774,14 @@ const STYLE = `
     .side { display: none; }
     .mobile-top {
       display: flex; align-items: center; gap: .5rem; position: sticky; top: 0; z-index: 30;
-      background: var(--card); border-bottom: 1px solid var(--border);
+      background: var(--material-satin-surface); border-bottom: 1px solid var(--border);
+      box-shadow: var(--material-resting-shadow);
       padding: .5rem .75rem calc(.5rem + env(safe-area-inset-top, 0rem) * 0);
     }
     .mobile-top .brand-mini { font-weight: 700; font-size: .9375rem; text-decoration: none; color: var(--foreground); }
     .mobile-top .project-pill {
       flex: 1; min-width: 0; display: flex; align-items: center; gap: .375rem;
-      border: 1px solid var(--border); border-radius: 999px; background: var(--background);
+      border: 1px solid var(--border); border-radius: 999px; background: var(--material-satin-control);
       padding: .375rem .75rem; text-decoration: none; color: var(--foreground);
       font-size: .875rem; font-weight: 600;
     }
@@ -5686,12 +5790,14 @@ const STYLE = `
     .mobile-top .mobile-new {
       flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
       min-height: 2.5rem; padding: 0 .875rem; border-radius: 999px;
-      background: var(--primary); color: var(--primary-foreground);
+      background: var(--material-graphite-chrome); color: hsl(0 0% 98%);
       font-weight: 600; font-size: .875rem; text-decoration: none;
+      box-shadow: var(--material-resting-shadow);
     }
     .tabbar {
       display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-      background: var(--card); border-top: 1px solid var(--border);
+      background: var(--material-satin-surface); border-top: 1px solid var(--border);
+      box-shadow: var(--material-resting-shadow);
       padding: .25rem .25rem calc(.25rem + env(safe-area-inset-bottom, 0rem));
     }
     .tabbar a {
@@ -5700,7 +5806,7 @@ const STYLE = `
       color: var(--muted-foreground); font-size: .6875rem; font-weight: 600;
     }
     .tabbar a .glyph { font-size: 1.125rem; line-height: 1; }
-    .tabbar a.active { color: var(--foreground); box-shadow: inset 0 2px 0 var(--brand); }
+    .tabbar a.active { color: var(--foreground); background: var(--material-card-selected); box-shadow: var(--material-selected-shadow); }
     .tabbar a.active .glyph { color: var(--brand); }
     .tabbar a .count { position: absolute; transform: translate(0.9rem, -0.35rem); }
     .tabbar a { position: relative; }
@@ -5710,14 +5816,15 @@ const STYLE = `
   .menu-list { display: flex; flex-direction: column; gap: .375rem; margin-top: .75rem; }
   .menu-row {
     display: flex; flex-direction: column; gap: .125rem; text-decoration: none;
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--material-satin-surface);
     padding: .75rem .875rem; color: var(--foreground); min-height: 44px; justify-content: center;
+    box-shadow: var(--material-resting-shadow);
   }
 
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .625rem; margin: .5rem 0; }
   .stat-card {
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
-    padding: .75rem .875rem; box-shadow: var(--shadow); min-width: 0;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--material-satin-surface);
+    padding: .75rem .875rem; box-shadow: var(--material-resting-shadow); min-width: 0;
   }
   .stat-card .k { font-weight: 600; font-size: .875rem; display: flex; align-items: center; gap: .4rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -5737,17 +5844,17 @@ const STYLE = `
   .login-shell h1 { text-align: center; margin: 0 0 .375rem; font-size: 1.75rem; letter-spacing: -0.02em; }
   .login-shell > .hint { text-align: center; margin: 0 0 2rem; font-size: 0.875rem; opacity: 1; }
   .login-card {
-    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--material-satin-surface); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1.5rem 1.5rem 1.625rem;
-    box-shadow: 0 1px 2px hsl(240 10% 3.9% / .06), 0 8px 24px -12px hsl(240 10% 3.9% / .18);
+    box-shadow: var(--material-raised-shadow);
   }
   .login-card label:first-child { margin-top: 0; }
   .login-card .problem { margin: 0 0 1rem; }
   .login-shell button {
     width: 100%; margin-top: 1.25rem;
-    background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
+    background: var(--material-graphite-chrome); color: hsl(0 0% 98%); border-color: hsl(240 5.9% 18%);
   }
-  .login-shell button:hover { background: color-mix(in srgb, var(--primary) 88%, var(--background)); }
+  .login-shell button:hover { filter: brightness(1.08); }
   .login-foot { text-align: center; margin: 1.5rem 0 0; font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.9; }
   .login-foot code { background: none; padding: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
 
@@ -5793,16 +5900,20 @@ const STYLE = `
     background: var(--muted); border: 1px solid var(--border);
     border-radius: .625rem; padding: .625rem; min-height: 12rem;
   }
-  .lane h2 { margin: 0 0 .125rem; font-size: .8125rem; }
+  .lane h2 { display: flex; align-items: center; gap: .4rem; margin: 0 0 .125rem; font-size: .8125rem; }
   .lane h2 a { color: inherit; text-decoration: none; }
   .lane .hint { margin-top: 0; }
   .lane-count { color: var(--muted-foreground); font-weight: 400; font-variant-numeric: tabular-nums; }
-  .lane-attention { border-top: 2px solid var(--warning); }
-  .lane-building { border-top: 2px solid var(--success); }
+  .lane-attention h2::before, .lane-building h2::before {
+    content: ""; width: .375rem; height: .375rem; border-radius: 9999px; flex: none;
+  }
+  .lane-attention h2::before { background: var(--warning); }
+  .lane-building h2::before { background: var(--success); }
   .lane-card {
     display: block; text-decoration: none; color: inherit;
-    background: var(--card); border: 1px solid var(--border);
+    background: var(--material-satin-surface); border: 1px solid var(--border);
     border-radius: .5rem; padding: .5rem .625rem; margin-top: .5rem;
+    box-shadow: var(--material-resting-shadow);
   }
   .lane-card:hover { border-color: var(--ring); }
   .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; }
@@ -5810,6 +5921,82 @@ const STYLE = `
   .lane-empty { margin: .75rem 0 .25rem; }
   .plan-doc { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; max-height: 24rem; overflow-y: auto; }
   .lane-more { display: block; margin-top: .5rem; font-size: .75rem; }
+
+  /* The attended control room: one cross-workspace pulse, then a dense
+     master rail. It borrows the competitor pattern that makes the unit of
+     work stable, but keeps this product's truth: task, workspace, current
+     phase, and the exact reason a person is needed are separate facts. */
+  .control-room-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 1rem; margin-bottom: 1.1rem;
+  }
+  .control-room-head h1 { font-size: 1.65rem; margin-top: .08rem; }
+  .control-room-head .actions { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: flex-end; }
+  .control-room-head .actions a { text-decoration: none; }
+  .command-metrics {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .625rem; margin: .85rem 0 1.5rem;
+  }
+  .command-metric {
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); background: var(--material-satin-surface);
+    padding: .8rem .9rem; min-width: 0; box-shadow: var(--material-resting-shadow);
+  }
+  .command-metric .value { display: block; margin-top: .25rem; font-size: 1.55rem; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .command-metric .label { display: flex; align-items: center; gap: .4rem; font-weight: 600; font-size: .8125rem; }
+  .command-metric .label::before {
+    content: ""; width: .375rem; height: .375rem; border-radius: 9999px;
+    background: var(--muted-foreground); flex: none;
+  }
+  .command-metric .detail { display: block; color: var(--muted-foreground); font-size: .6875rem; margin-top: .18rem; }
+  .command-metric.attention .label::before { background: var(--warning); }
+  .command-metric.live .label::before { background: var(--brand); }
+  .workspace-pulse { margin: .4rem 0 1.5rem; }
+  .workspace-row {
+    display: grid; grid-template-columns: minmax(9rem, 1.35fr) repeat(4, minmax(4rem, .65fr));
+    gap: .55rem; align-items: center; padding: .8rem .9rem; border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 2px); background: var(--material-satin-surface);
+    box-shadow: var(--material-resting-shadow); font-size: .8125rem; margin-top: .5rem;
+  }
+  .workspace-row .workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .workspace-row .pulse-stat { color: var(--muted-foreground); font-size: .75rem; white-space: nowrap; }
+  .workspace-row .pulse-stat b { color: var(--foreground); font-weight: 650; }
+  .workspace-row .pulse-stat.hot b { color: var(--warning); }
+  .attention-stack { display: grid; gap: .55rem; }
+  .attention-stack .decide-card { margin: 0; }
+  .attention-stack .q { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
+  .wb-rail-head {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: .75rem;
+    padding: 0 .15rem .6rem; border-bottom: 1px solid var(--border);
+  }
+  .wb-rail-head h2 { margin: .1rem 0 0; color: var(--foreground); font-size: .875rem; letter-spacing: -.01em; text-transform: none; }
+  .wb-rail-head a { font-size: .75rem; color: var(--muted-foreground); }
+  .wb-group { margin-top: 1.05rem; }
+  .wb-group > h2 {
+    display: flex; align-items: center; justify-content: space-between; margin: 0 .2rem .35rem;
+    font-size: .7rem;
+  }
+  .wb-group > h2 .lane-count { border: 1px solid var(--border); border-radius: 999px; padding: .04rem .42rem; }
+  .wb-row {
+    display: block; padding: .58rem .65rem; margin: .16rem 0; border: 1px solid transparent;
+    border-radius: calc(var(--radius) - 2px); color: inherit; text-decoration: none;
+  }
+  .wb-row:hover { background: var(--card); border-color: var(--border); }
+  .wb-row.wb-selected {
+    background: var(--material-card-selected);
+    border-color: color-mix(in srgb, var(--brand) 42%, var(--border));
+    box-shadow: var(--material-selected-shadow);
+  }
+  .wb-row .wb-title { display: block; font-size: .8125rem; font-weight: 600; line-height: 1.35; }
+  .wb-row .wb-meta { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; margin-top: .22rem; }
+  .wb-row .badge { padding: .04rem .42rem; font-size: .65rem; }
+  .wb-row .wb-reason { display: block; color: var(--muted-foreground); font-size: .72rem; margin-top: .22rem; line-height: 1.35; }
+  @media (max-width: 720px) {
+    .control-room-head { display: block; }
+    .control-room-head .actions { justify-content: flex-start; margin-top: .75rem; }
+    .command-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .workspace-row { grid-template-columns: minmax(8rem, 1.4fr) repeat(2, minmax(4rem, .6fr)); }
+    .workspace-row .pulse-stat:nth-last-child(-n+2) { display: none; }
+  }
 
   /* Runner lanes (queue + fleet): one column per worker, so the grid is
      computed from how many workers there are — never the board's fixed
@@ -5824,7 +6011,6 @@ const STYLE = `
     .lanes { display: flex; flex-direction: column; }
     .lanes .lane { min-height: 0; }
   }
-  .lane .lane-live { border-top: 2px solid var(--success); }
   .runner-note { width: 100%; }
   /* Fleet/queue cards: a compact two-line block — title row, then the
      metadata row — so a card reads at a glance instead of stacking. */
@@ -5886,8 +6072,8 @@ button { min-height: 44px; }
    bottom sheet above the tab bar on phones. */
 .kbd-help {
   position: fixed; top: 18vh; left: 50%; transform: translateX(-50%); width: min(26rem, 92vw);
-  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-  box-shadow: 0 1px 2px hsl(240 10% 3.9% / .08), 0 16px 40px -16px hsl(240 10% 3.9% / .3);
+  background: var(--material-satin-surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--material-raised-shadow);
   padding: 1rem 1.25rem; z-index: 50;
 }
 .kbd-help h2 { margin: 0 0 .5rem; font-size: .9375rem; }
@@ -5930,7 +6116,8 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; bo
 @media (max-width: 760px) {
   .sticky-actions {
     position: sticky; bottom: calc(3.5rem + env(safe-area-inset-bottom, 0rem)); z-index: 20;
-    background: var(--background); border-top: 1px solid var(--border);
+    background: var(--material-satin-surface); border-top: 1px solid var(--border);
+    box-shadow: var(--material-resting-shadow);
     padding: .625rem 0; margin-top: .75rem;
   }
   .sticky-actions button { margin: 0; }
@@ -5954,6 +6141,9 @@ type Chrome = {
   chat?: boolean;
   /** A rendered list pane makes the page master-detail. */
   listPane?: string;
+  /** A compact pulse for the currently open workspace. Null in the
+   * cross-workspace view; absent only when the store could not answer. */
+  projectPeek?: ProjectPeek | null;
 };
 
 /**
@@ -6279,20 +6469,26 @@ function shell(
     `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
+  const projectStatus = chrome.projectPeek === null || chrome.projectPeek === undefined
+    ? ""
+    : `<span class="side-project-status">` +
+      (chrome.projectPeek.waiting > 0 ? `<span class="hot">${chrome.projectPeek.waiting} needs you</span>` : `<span>0 needs you</span>`) +
+      `<span>${chrome.projectPeek.running} live</span><span>${chrome.projectPeek.queued} queued</span></span>`;
   const side = [
     `<aside class="side">`,
     `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
-    `<div class="side-project">` +
+    `<div class="side-project"><span class="eyebrow">workspace</span>` +
       (chrome.project === null
-        ? `<span class="name meta">no project open</span>`
+        ? `<span class="name">All workspaces</span>`
         : `<span class="name">${escape(projectName(chrome.project))}</span>`) +
-      `<a href="/projects">switch project</a></div>`,
+      projectStatus +
+      `<a class="switch" href="/projects">switch project →</a></div>`,
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
+    item("workbench", "/workbench", "control room"),
     item("board", "/board", "board"),
     item("queue", "/queue", "queue"),
     item("fleet", "/fleet", "fleet"),
-    item("workbench", "/workbench", "workbench"),
     item("routines", "/routines", "routines"),
     item("done", "/done", "done"),
     `</nav>`,
@@ -6337,7 +6533,7 @@ function shell(
     `<header class="mobile-top">`,
     `<a class="brand-mini" href="/">s·o</a>`,
     `<a class="project-pill" href="/projects"><span class="name">${
-      chrome.project === null ? "no project open" : escape(projectName(chrome.project))
+      chrome.project === null ? "All workspaces" : escape(projectName(chrome.project))
     }</span><span class="chev">▾</span></a>`,
     `<a class="mobile-new" href="/tasks/new">+ task</a>`,
     `</header>`,
@@ -7597,60 +7793,146 @@ function browsePage(chrome: Chrome, data: {
 }
 
 
+/** The compact completed row shared by both halves of the control room. */
+type WorkbenchDone = { taskId: string; title: string; outcome: string | null; repo: string | null };
+
 /**
- * The workbench rail (attended A1): needs-you first, then what is building
- * right now, then a short just-finished tail — the sit-and-watch complement
- * to the board's lanes. Links only; every act happens in the detail pane
- * or on the task's own screen. Selection is the URL, nothing else.
+ * The control-room rail (attended A1): every state that matters while a
+ * person supervises, ordered by intervention cost. The project chip is
+ * deliberately repeated on every row — a title is not a workspace, and
+ * switching context must never depend on remembering which repo is open.
  */
 function workbenchRail(data: {
   attention: BoardCard[];
   building: BoardCard[];
-  done: { taskId: string; title: string; outcome: string | null }[];
+  waiting: BoardCard[];
+  queued: BoardCard[];
+  done: WorkbenchDone[];
   selected: string | null;
   saturated: boolean;
 }): string {
-  const row = (card: BoardCard, extra: string): string =>
-    `<a class="row${card.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(card.taskId)}"` +
+  const workspace = (repo: string | null): string =>
+    `<span class="badge">${repo === null ? "unplaced" : escape(projectName(repo))}</span>`;
+  const row = (card: BoardCard, reason: string): string =>
+    `<a class="wb-row${card.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(card.taskId)}"` +
     `${card.taskId === data.selected ? ` aria-current="true"` : ""}>` +
-    `<strong>${escape(card.title)}</strong><br><span class="mono meta">${escape(card.taskId)}</span> ${extra}</a>`;
+    `<span class="wb-title">${escape(card.title)}</span>` +
+    `<span class="wb-meta"><span class="mono meta">${escape(card.taskId)}</span>${workspace(card.repo)}</span>` +
+    `<span class="wb-reason">${reason}</span></a>`;
+  const group = (title: string, cards: BoardCard[], empty: string, render: (card: BoardCard) => string): string =>
+    `<section class="wb-group"><h2>${title} <span class="lane-count">${cards.length}</span></h2>` +
+    (cards.length === 0 ? `<p class="meta">${empty}</p>` : cards.slice(0, 100).map(render).join("\n")) +
+    `</section>`;
   const parts: string[] = [];
-  parts.push(`<h2>needs you ${data.attention.length > 0 ? data.attention.length : ""}</h2>`);
   parts.push(
-    data.attention.length === 0
-      ? `<p class="meta">nothing — the fleet is running on its own</p>`
-      : data.attention.slice(0, 100).map(card => row(card, `<span class="meta">${escape(card.reason)}</span>`)).join("\n"),
+    `<div class="wb-rail-head"><div><span class="eyebrow">portfolio</span><h2>all workspaces</h2></div>` +
+    `<a href="/projects">manage →</a></div>`,
   );
-  parts.push(`<h2>building ${data.building.length > 0 ? data.building.length : ""}</h2>`);
-  parts.push(
-    data.building.length === 0
-      ? `<p class="meta">no builds running</p>`
-      : data.building
-          .map(card =>
-            row(
-              card,
-              `<span class="meta">${escape(card.claim?.phase == null ? "working" : phaseWords(card.claim.phase))}` +
-                `${card.claim?.provider ? ` · ${escape(card.claim.provider)}` : ""}` +
-                `${card.claim?.claimedAt ? ` · <time data-elapsed-since="${escape(card.claim.claimedAt)}"></time>` : ""}</span>`,
-            ),
-          )
-          .join("\n"),
-  );
+  parts.push(group("needs you", data.attention, "Nothing needs your input.", card => row(card, escape(card.reason))));
+  parts.push(group("in progress", data.building, "No agent is working right now.", card => {
+    const claim = card.claim;
+    const phase = claim?.phase == null ? "working" : phaseWords(claim.phase);
+    return row(
+      card,
+      `${escape(phase)}${claim?.provider ? ` · ${escape(claim.provider)}` : ""}` +
+        `${claim?.claimedAt ? ` · <time data-elapsed-since="${escape(claim.claimedAt)}"></time>` : ""}`,
+    );
+  }));
+  parts.push(group("blocked & waiting", data.waiting, "Nothing is blocked or paused.", card => row(card, escape(card.reason))));
+  parts.push(group("up next", data.queued, "The ready queue is empty.", card => row(
+    card,
+    `${escape(card.reason)}${card.assignedRunner === null ? "" : ` · reserved for ${escape(card.assignedRunner)}`}`,
+  )));
   if (data.done.length > 0) {
-    parts.push(`<h2>just finished</h2>`);
+    parts.push(`<section class="wb-group"><h2>just finished <span class="lane-count">${data.done.length}</span></h2>`);
     parts.push(
       data.done
         .map(
           one =>
-            `<a class="row${one.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(one.taskId)}">` +
-            `<strong>${escape(one.title)}</strong><br><span class="mono meta">${escape(one.taskId)}</span> ` +
-            `<span class="badge badge-${one.outcome === "built" || one.outcome === "no-change" ? "done" : "failed"}">${escape(one.outcome ?? "?")}</span></a>`,
+            `<a class="wb-row${one.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(one.taskId)}">` +
+            `<span class="wb-title">${escape(one.title)}</span>` +
+            `<span class="wb-meta"><span class="mono meta">${escape(one.taskId)}</span>${workspace(one.repo)} ` +
+            `<span class="badge badge-${one.outcome === "built" || one.outcome === "no-change" ? "done" : "failed"}">${escape(one.outcome ?? "?")}</span></span></a>`,
         )
         .join("\n"),
     );
+    parts.push(`</section>`);
   }
   if (data.saturated) parts.push(`<p class="meta">more exists — this rail is capped; the <a href="/board?scope=all">board</a> holds the rest</p>`);
   return parts.join("\n");
+}
+
+/**
+ * The unselected half of the attended control room. The first glance answers
+ * four operator questions: what needs me, what is moving, what is blocked,
+ * and what will start next. Workspace pulse keeps those answers attributable
+ * when several repositories are in flight at once.
+ */
+function workbenchOverview(data: {
+  attention: BoardCard[];
+  building: BoardCard[];
+  waiting: BoardCard[];
+  queued: BoardCard[];
+  done: WorkbenchDone[];
+  saturated: boolean;
+}): string {
+  type Pulse = { repo: string | null; attention: number; building: number; waiting: number; queued: number; done: number };
+  const pulses = new Map<string, Pulse>();
+  const pulseFor = (repo: string | null): Pulse => {
+    const key = repo ?? "";
+    const existing = pulses.get(key);
+    if (existing !== undefined) return existing;
+    const made = { repo, attention: 0, building: 0, waiting: 0, queued: 0, done: 0 };
+    pulses.set(key, made);
+    return made;
+  };
+  for (const card of [...data.attention, ...data.building, ...data.waiting, ...data.queued]) {
+    pulseFor(card.repo)[card.lane] += 1;
+  }
+  for (const one of data.done) pulseFor(one.repo).done += 1;
+  const pulseRows = [...pulses.values()].sort((a, b) =>
+    b.attention - a.attention || b.building - a.building || b.waiting - a.waiting ||
+    (a.repo === null ? 1 : b.repo === null ? -1 : projectName(a.repo).localeCompare(projectName(b.repo))),
+  );
+  const metric = (kind: string, value: number, label: string, detail: string): string =>
+    `<div class="command-metric ${kind}"><span class="label">${label}</span>` +
+    `<span class="value">${value}${data.saturated ? "+" : ""}</span><span class="detail">${detail}</span></div>`;
+  const workspace = (repo: string | null): string => repo === null ? "Unplaced work" : projectName(repo);
+  const attention = data.attention.slice(0, 3).map(card =>
+    `<a class="decide-card" href="${card.href}"><p class="q"><span>${escape(card.title)}</span>` +
+    `<span class="badge">${escape(workspace(card.repo))}</span></p>` +
+    `<p class="meta">${escape(card.reason)} · <span class="mono">${escape(card.taskId)}</span></p></a>`,
+  ).join("\n");
+  const workspaceRows = pulseRows.map(one =>
+    `<div class="workspace-row"><span class="workspace-name">${escape(workspace(one.repo))}</span>` +
+    `<span class="pulse-stat${one.attention > 0 ? " hot" : ""}"><b>${one.attention}</b> need you</span>` +
+    `<span class="pulse-stat"><b>${one.building}</b> live</span>` +
+    `<span class="pulse-stat"><b>${one.waiting}</b> waiting</span>` +
+    `<span class="pulse-stat"><b>${one.queued}</b> next</span></div>`,
+  ).join("\n");
+
+  return [
+    `<div class="control-room-head"><div><span class="eyebrow">attended overview</span><h1>control room</h1>` +
+      `<p class="meta">every workspace, plan, task, blocker, and live build — one place to supervise the fleet</p></div>` +
+      `<div class="actions"><a class="badge" href="/tasks/new">+ new task</a><a class="badge" href="/board?scope=all">full board →</a></div></div>`,
+    `<div class="command-metrics">`,
+    metric("attention", data.attention.length, "Need you", "questions, plans, approvals, repairs"),
+    metric("live", data.building.length, "In progress", "agents working now"),
+    metric("", data.waiting.length, "Blocked / waiting", "dependencies, requirements, timers"),
+    metric("", data.queued.length, "Up next", "ready when capacity opens"),
+    `</div>`,
+    data.saturated ? `<div class="problem">This overview reached its 200-task display cap. Counts ending in + are lower bounds; the task list holds the rest.</div>` : "",
+    `<h2>workspace pulse</h2>`,
+    `<p class="hint">one row per repository — the recent-done tail is kept in the rail, while these counts show active flow</p>`,
+    pulseRows.length === 0
+      ? `<div class="card"><p><strong>No active work yet.</strong></p><p class="meta">Queue a task and its progress will show here across every workspace.</p></div>`
+      : `<div class="workspace-pulse">${workspaceRows}</div>`,
+    `<h2>start with what needs you</h2>`,
+    `<p class="hint">the oldest human-blocked work leads — open one to answer, approve, or repair it in place</p>`,
+    data.attention.length === 0
+      ? `<div class="answered"><strong>Nothing needs you.</strong> <span class="meta">You can leave this open; live state updates in the rail.</span></div>`
+      : `<div class="attention-stack">${attention}</div>${data.attention.length > 3 ? `<p class="meta"><a href="/next">clear all ${data.attention.length} one at a time →</a></p>` : ""}`,
+  ].join("\n");
 }
 
 /** Dollars for a screen: micro-USD stated as money, unknowables in words. */
