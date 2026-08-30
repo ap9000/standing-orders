@@ -215,17 +215,25 @@ describe("the held invocation gateway", () => {
   test("verifies the open run, refuses non-claude, stamps provider start BEFORE the spawn, and threads the session id", async () => {
     const { openStore } = await import("./store.js");
     const { invokeHeldAgent } = await import("./invoke.js");
+    const { register } = await import("./runner.js");
+    const { acquire } = await import("./claim.js");
     const T0 = new Date("2026-08-25T22:00:00.000Z");
     const store = openStore(":memory:");
     store.createTask({ id: "t-gw", title: "gateway" }, T0);
     const ref = store.refFor("built-in", "t-gw");
-    store
-      .raw()
-      .prepare(
-        `INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at)
-         VALUES ('lease-gw', ?, 1, 'w', ?, ?, ?)`,
-      )
-      .run(ref.id, T0.toISOString(), new Date(T0.getTime() + 900_000).toISOString(), T0.toISOString());
+    // The runner gate's spawn leg (MCP spec v6): the run's lease is REAL —
+    // registered runner, placed task, acquired claim. The TTL outlives the
+    // gateway's wall clock.
+    const REPO = "/repo/held-gw";
+    store.placeTask(ref.id, REPO);
+    register(store, { name: "w", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-w" });
+    const claimed = acquire(store, ref.id, "w", {
+      now: T0,
+      token: "tok-w",
+      ttlMs: 10 * 365 * 24 * 3_600_000,
+      newLeaseId: () => "lease-gw",
+    });
+    expect(claimed.ok).toBe(true);
     const run = store.startRun({ taskRef: ref.id, leaseId: "lease-gw", runner: "w", branch: "b", worktree: "/w", now: T0 });
 
     const calls: Array<{ file: string; args: readonly string[] }> = [];

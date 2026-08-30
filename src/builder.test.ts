@@ -140,7 +140,10 @@ describe("the builder's gates", () => {
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
   };
 
-  const claimIt = () => acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+  // The spawn's custody proof compares the run's lease to the LIVE one, so
+  // the claim must carry the exact lease id the fixtures start runs under.
+  const claimIt = () =>
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
 
   test("will not build a task nobody approved", async () => {
     // The gap this closes: "fix the payouts flow" is a sentence, and an agent
@@ -513,7 +516,9 @@ describe("what the builder tells the agent", () => {
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
     store.placeTask(taskRef, REPO);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
       path: wt,
@@ -593,10 +598,17 @@ describe("what the builder tells the agent", () => {
 
   test("a note whose stream never proved delivery re-attaches to the next attempt (arc 1)", async () => {
     store.fileSteerNote("t-1", "alex", "the note that must not vanish", T0);
-    await build1(); // the default agent fires no receipt
+    const firstRun = store.startRun({
+      taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+    });
+    await build1({ runId: firstRun }); // the default agent fires no receipt
     const after = store.listSteerNotes(taskRef)[0];
     expect(after?.attachedRun).not.toBeNull();
     expect(after?.deliveredAt).toBeNull();
+
+    // The first attempt ends — the coordinator's disposition, which build()
+    // leaves to its caller. The note is still undelivered, so it must ride.
+    store.finishRun(firstRun, { outcome: "failed", reason: "agent", now: T0 });
 
     asked = [];
     await build1(); // next attempt: the note rides again
@@ -668,7 +680,9 @@ describe("what the builder does afterwards", () => {
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
     store.placeTask(taskRef, REPO);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     // The builder only works in a worktree it was actually given.
     store.saveWorktree({
       path: wt,
@@ -864,7 +878,9 @@ describe("the gates cannot be talked around", () => {
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
     store.placeTask(taskRef, REPO);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     propose(store, { taskId: "t-1", goal: "a guard", now: T0 });
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
     agentCalls.length = 0;
@@ -964,7 +980,9 @@ describe("scope text is data, not instructions", () => {
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
     store.placeTask(taskRef, REPO);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     store.saveWorktree({
       path: wt,
       repo: "/code/thing",
@@ -1034,7 +1052,9 @@ describe("the lease marker never reaches a commit", () => {
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
     store.placeTask(taskRef, REPO);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     store.saveWorktree({
       path: wt,
       repo: "/code/thing",
@@ -1110,7 +1130,9 @@ describe("the commit message", () => {
     taskRef = store.refFor("built-in", "t-1").id;
     register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
     store.placeTask(taskRef, REPO);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     store.saveWorktree({
       path: wt,
       repo: "/code/thing",
@@ -1204,6 +1226,12 @@ describe("the pulse", () => {
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+  /** This describe runs on the REAL clock (`clock: () => new Date()`), and
+   * the spawn's custody proof requires the lease live at that clock — so a
+   * fixture lease acquired at T0 needs a ttl that outlives the distance
+   * between T0 and whatever day the suite actually runs on. */
+  const OUTLIVES_THE_CLOCK = 100 * 365 * 24 * 60 * 60_000;
+
   /** Answers like the shared stub, and records every git invocation. */
   const git: Runner = async (_file, args) => {
     gitCalls.push([...args]);
@@ -1261,16 +1289,20 @@ describe("the pulse", () => {
     ...over,
   });
 
-  /** Expires builder-1's lease and grants the task to builder-2. */
+  /** Expires builder-1's lease and grants the task to builder-2 — a day past
+   * the real clock, beyond lease-a's expiry and any pulse extension. */
   const supersede = () =>
     acquire(store, taskRef, "builder-2", {
       token: tok("builder-2"),
-      now: new Date(T0.getTime() + 24 * 60 * 60_000),
+      now: new Date(Date.now() + 24 * 60 * 60_000),
       newLeaseId: ids("lease-b"),
     });
 
   test("a build fenced while the agent runs commits nothing", async () => {
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    // Acquired at the REAL clock, which the spawn's custody proof reads —
+    // and short enough that supersede()'s day-later timestamp finds it
+    // expired, so builder-2's reclaim goes through and the fence trips.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: new Date(), ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
     const agent: Runner = async () => {
       supersede();
       await sleep(40); // several beats — the pulse must notice and latch
@@ -1287,7 +1319,10 @@ describe("the pulse", () => {
     // pulseMs 0: nothing beats during the run, so only the mandatory
     // synchronous re-proof after the agent stands between a superseded lease
     // and a stale commit.
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    // Acquired at the REAL clock, which the spawn's custody proof reads —
+    // and short enough that supersede()'s day-later timestamp finds it
+    // expired, so builder-2's reclaim goes through and the fence trips.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: new Date(), ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
     const agent: Runner = async () => {
       supersede();
       return { ...OK, stdout: AGENT_SAID };
@@ -1300,7 +1335,7 @@ describe("the pulse", () => {
   });
 
   test("a pulse that throws latches to fenced rather than vanishing", async () => {
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: OUTLIVES_THE_CLOCK, newLeaseId: ids("lease-a") });
     // The database refusing mid-flight proves nothing about the lease — and a
     // build that cannot prove its lease must not commit.
     const broken = Object.create(store) as Store;
@@ -1321,7 +1356,7 @@ describe("the pulse", () => {
   });
 
   test("the pulse stops when the build does", async () => {
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: ids("lease-a") });
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: OUTLIVES_THE_CLOCK, newLeaseId: ids("lease-a") });
     let beats = 0;
     const counting = Object.create(store) as Store;
     Object.defineProperty(counting, "touchRunner", {
@@ -1346,8 +1381,11 @@ describe("the pulse", () => {
 
   test("a healthy pulse keeps the lease alive past its original expiry", async () => {
     // The point of the whole mechanism: a lease shorter than the build, kept
-    // alive by the build being alive.
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60_000, newLeaseId: ids("lease-a") });
+    // alive by the build being alive. The spawn's custody proof reads the
+    // real clock this describe runs on, so the short lease is acquired at
+    // real "now" — its original expiry is still the thing the pulse outlives.
+    const start = new Date();
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: start, ttlMs: 60_000, newLeaseId: ids("lease-a") });
     const agent: Runner = async (_file, args, options) => {
       await sleep(25);
       conclude(args, options);
@@ -1359,7 +1397,7 @@ describe("the pulse", () => {
     expect(result).toMatchObject({ ok: true, committed: true });
     const claim = currentClaim(store, taskRef, new Date());
     expect(claim).not.toBeNull();
-    expect(Date.parse(claim!.expiresAt)).toBeGreaterThan(T0.getTime() + 60_000);
+    expect(Date.parse(claim!.expiresAt)).toBeGreaterThan(start.getTime() + 60_000);
   });
 });
 
@@ -1453,7 +1491,9 @@ describe("the park", () => {
     });
     propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     runId = store.startRun({
       taskRef,
       leaseId: currentClaim(store, taskRef, T0)!.leaseId,
@@ -1670,7 +1710,9 @@ describe("bounded repair", () => {
     });
     propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
     approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     runId = store.startRun({
       taskRef,
       leaseId: currentClaim(store, taskRef, T0)!.leaseId,
@@ -1881,7 +1923,9 @@ describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, upda
     });
     propose(store, { taskId: "t-g", goal: "add a guard on the payout path", now: T0 });
     approve(store, "t-g", "alex", T0, store.getScope("t-g")!.digest, approverToken);
-    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000 });
+    // The spawn's custody proof compares the run's lease to the LIVE one, so
+    // the lease the fixtures start runs under must be the lease acquired here.
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
     runId = store.startRun({
       taskRef, leaseId: currentClaim(store, taskRef, T0)!.leaseId, runner: "builder-1",
       branch: "feat/g", worktree, provider: "gemini", now: T0,

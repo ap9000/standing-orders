@@ -108,8 +108,8 @@ describe("registerRunnerIfIdle — the atomic take-or-refuse door", () => {
 
 describe("authenticated heartbeats and leases", () => {
   test("the lease door refuses a stale credential after rotation", () => {
-    const first = register(store, { name: "w-1", host: "here", now: T0 });
-    const taken = registerRunnerIfIdle(store, { name: "w-1", host: "here", now: DEAD });
+    const first = register(store, { name: "w-1", host: "here", repos: ["/repo"], now: T0 });
+    const taken = registerRunnerIfIdle(store, { name: "w-1", host: "here", repos: ["/repo"], now: DEAD });
     if (!taken.ok) throw new Error("takeover failed in setup");
     const stale = acquireWatchLeaseAuthed(
       store,
@@ -135,13 +135,13 @@ describe("authenticated heartbeats and leases", () => {
     const runId = store.startRun({
       taskRef: ref, leaseId: "lease-s", runner: "w-1", branch: "b", worktree: "/w", now: T0,
     });
-    store.acquireWatchLease("w-1", "/repo", "inc-a", 90_000, T0);
+    store.acquireWatchLease("w-1", REPO, "inc-a", 90_000, T0);
 
     // inc-a's lease expires; inc-b (same runner, still-valid token) takes over.
     const afterExpiry = later(5 * 60_000);
     const took = acquireWatchLeaseAuthed(
       store,
-      { runner: "w-1", token: reg.token, repo: "/repo", owner: "inc-b", ttlMs: 90_000 },
+      { runner: "w-1", token: reg.token, repo: REPO, owner: "inc-b", ttlMs: 90_000 },
       afterExpiry,
     );
     expect(took).toMatchObject({ ok: true, superseded: "inc-a" });
@@ -151,7 +151,7 @@ describe("authenticated heartbeats and leases", () => {
   });
 
   test("renewal answers false the moment the credential rotates — the caller must stop", () => {
-    const first = register(store, { name: "w-1", host: "here", now: T0 });
+    const first = register(store, { name: "w-1", host: "here", repos: ["/repo"], now: T0 });
     acquireWatchLeaseAuthed(store, { runner: "w-1", token: first.token, repo: "/repo", owner: "inc-a", ttlMs: 90_000 }, T0);
     expect(
       heartbeatWatchLeaseAuthed(store, { runner: "w-1", token: first.token, repo: "/repo", owner: "inc-a", ttlMs: 90_000 }, later(30_000)),

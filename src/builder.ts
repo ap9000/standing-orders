@@ -227,7 +227,10 @@ export type BuildRefusal =
   // The chain-custody refusal family (E3d): no spend happened, no strike —
   // both dispose through the invariant arm, released and refused in words.
   | "chain-credential"
-  | "chain-custody";
+  | "chain-custody"
+  // The runner gate's spawn leg (MCP spec v6): custody lapsed between the
+  // claim and the spawn — same no-spend, no-strike disposal.
+  | "runner-custody";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -649,6 +652,22 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ok: false,
       reason: "not-leased",
       message: `${worktree} was leased for another task — each build gets its own checkout`,
+    };
+  }
+  // The third leg of the runner tuple (MCP spec v6, round-4 finding 2):
+  // the worktree must be a checkout of the TASK's repository. Without
+  // this, a runner authorized for repo B could execute task A inside B's
+  // worktree — the task binding above proves whose task it is, not whose
+  // FILES it is standing in. Authority derives from task_ref.repo only.
+  const placedRepo = store.refForId(taskRef)?.repo ?? null;
+  if (placedRepo === null || leased.repo !== placedRepo) {
+    return {
+      ok: false,
+      reason: "not-leased",
+      message:
+        placedRepo === null
+          ? `${taskId} is placed in no repository — place it, then build`
+          : `${worktree} checks out ${leased.repo}, but ${taskId} lives in ${placedRepo} — a build runs in its own task's repository`,
     };
   }
 

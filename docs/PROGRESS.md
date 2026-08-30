@@ -1,5 +1,27 @@
 # Progress
 
+**2026-08-30 — MCP hardening 4: the tuple everywhere, and the migration
+epoch.** The runner gate's remaining legs: tick proves its canonical
+repo is in the runner's bound list BEFORE any git access, probe, or
+routine fires; standalone `build` proves it before leasing anything; the
+watch lease proves membership in its own transaction; the builder proves
+the worktree checks out the TASK's placed repository (a runner bound to
+repo B can no longer execute task A inside B's files); and
+`proveRunnerCustodyForSpawn` re-proves the whole tuple against LIVE rows
+immediately before every provider process exists — both gateways, all
+roles — refusing `runner-custody` (no spend, no strike) when the lease,
+the runner, or its binding lapsed between claim and spawn. Reviewer runs
+are the one proven exception: they hold no task claim by design, so
+their arm checks identity/liveness/membership without lease currency.
+Schema: the migrator now commits a NEGATIVE-version epoch sentinel
+before any DDL and clears it with the final bump, so a non-migrating
+reader can never bless a mid-DDL database; `openStoreNoMigrate` is the
+door that never creates or migrates, and `schemaCurrent()` is the
+per-call re-check. Seven more test files re-fixtured with real claims
+(three subagents); builder.test's steer re-attach test was passing FOR
+THE WRONG REASON (lease mismatch) and now models the disposition
+honestly. Suite 1476.
+
 **2026-08-30 — MCP hardening 3: runner authority is minted, not
 asserted.** `runner register` and `runner retire` are password
 ceremonies (`--as`/`--token`, approver-verified) and registration BINDS

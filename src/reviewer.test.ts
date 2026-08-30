@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { storeEvidence } from "./evidence.js";
+import { register } from "./runner.js";
+import { acquire } from "./claim.js";
 import { addApprover } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { maybeRequestAutoReview } from "./dispose.js";
@@ -244,6 +246,13 @@ describe("the reviewer role in the store", () => {
     let scratchRoot: string;
     beforeEach(() => {
       scratchRoot = mkdtempSync(join(tmpdir(), "so-review-scratch-"));
+      // The runner gate's spawn leg (MCP spec v6): reviewer runs are the
+      // ONE role that holds no task claim — admitReview's synthetic lease
+      // id is a marker, and the custody proof's reviewer arm checks
+      // identity, liveness, and repo membership WITHOUT lease currency.
+      // The registration is therefore the whole fixture: no claim exists
+      // here, which is exactly the production road.
+      register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-1" });
     });
     afterEach(() => {
       rmSync(scratchRoot, { recursive: true, force: true });

@@ -11,6 +11,8 @@ import { resetAttestationCache } from "./attest.js";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { invokeAgent, type InvokeResult } from "./invoke.js";
+import { register } from "./runner.js";
+import { acquire } from "./claim.js";
 
 /** Most of this suite exercises the RAN arm; the union's refusal arms have
  * their own describe below. */
@@ -21,6 +23,26 @@ async function invokeRan(...args: Parameters<typeof invokeAgent>) {
 }
 
 const T0 = new Date("2026-08-12T06:00:00.000Z");
+/** Long enough that the lease is unexpired at every clock a test uses,
+ * including the tests that run on the real wall clock. */
+const TTL = 10 * 365 * 24 * 3600 * 1000;
+const REPO = "/repo/invoke";
+const RUNNER = "builder-1";
+
+/** The runner gate's spawn leg (MCP spec v6) re-proves custody immediately
+ * before any provider process exists: the runner registered and bound to
+ * the task's repo, the task placed, and the run's lease the task's CURRENT
+ * live claim. Every run a test invokes gets this real fixture first. */
+function registerBuilder(store: Store): void {
+  register(store, { name: RUNNER, host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => `tok-${RUNNER}` });
+}
+function claimTask(store: Store, taskId: string, leaseId: string): number {
+  const ref = store.refFor("built-in", taskId).id;
+  store.placeTask(ref, REPO);
+  const took = acquire(store, ref, RUNNER, { now: T0, token: `tok-${RUNNER}`, newLeaseId: () => leaseId, ttlMs: TTL });
+  if (!took.ok) throw new Error(`fixture claim refused: ${took.reason}`);
+  return ref;
+}
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const CLAUDE = { provider: "claude" as const, model: null };
 const ASK = {
@@ -38,8 +60,9 @@ describe("the invocation gateway", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    registerBuilder(store);
     store.createTask({ id: "t-1", title: "w" }, T0);
-    const ref = store.refFor("built-in", "t-1").id;
+    const ref = claimTask(store, "t-1", "lease-1");
     runId = store.startRun({
       taskRef: ref,
       leaseId: "lease-1",
@@ -126,7 +149,7 @@ describe("the invocation gateway", () => {
 
   test("a codex run parses the retained JSONL — tokens measured, dollars honestly NULL", async () => {
     store.createTask({ id: "t-2", title: "w2" }, T0);
-    const ref2 = store.refFor("built-in", "t-2").id;
+    const ref2 = claimTask(store, "t-2", "lease-2");
     const codexRun = store.startRun({
       taskRef: ref2, leaseId: "lease-2", runner: "builder-1",
       branch: "b", worktree: "/w", provider: "codex", now: T0,
@@ -151,7 +174,7 @@ describe("the invocation gateway", () => {
   const codexRunFor = (id: string) => {
     store.createTask({ id, title: "w" }, T0);
     return store.startRun({
-      taskRef: store.refFor("built-in", id).id, leaseId: `lease-${id}`, runner: "builder-1",
+      taskRef: claimTask(store, id, `lease-${id}`), leaseId: `lease-${id}`, runner: "builder-1",
       branch: "b", worktree: "/w", provider: "codex", now: T0,
     });
   };
@@ -204,7 +227,7 @@ describe("the invocation gateway", () => {
     // diagnostic text lands in finalMessage, but text is not an attempt.
     store.createTask({ id: "t-err", title: "w" }, T0);
     const errRun = store.startRun({
-      taskRef: store.refFor("built-in", "t-err").id, leaseId: "lease-err", runner: "builder-1",
+      taskRef: claimTask(store, "t-err", "lease-err"), leaseId: "lease-err", runner: "builder-1",
       branch: "b", worktree: "/w", provider: "claude", now: T0,
     });
     const stream = JSON.stringify({
@@ -221,7 +244,7 @@ describe("the invocation gateway", () => {
   test("an observed init is never an init failure, whatever else went wrong", async () => {
     store.createTask({ id: "t-init-ok", title: "w" }, T0);
     const okRun = store.startRun({
-      taskRef: store.refFor("built-in", "t-init-ok").id, leaseId: "lease-io", runner: "builder-1",
+      taskRef: claimTask(store, "t-init-ok", "lease-io"), leaseId: "lease-io", runner: "builder-1",
       branch: "b", worktree: "/w", provider: "claude", now: T0,
     });
     const stream = JSON.stringify({ type: "system", subtype: "init", session_id: "s-up" });
@@ -247,7 +270,7 @@ describe("the attested gateway (Phase 3): gemini refusals are values", () => {
   const geminiRun = (id: string): number => {
     store.createTask({ id, title: "w" }, T0);
     return store.startRun({
-      taskRef: store.refFor("built-in", id).id, leaseId: `lease-${id}`, runner: "builder-1",
+      taskRef: claimTask(store, id, `lease-${id}`), leaseId: `lease-${id}`, runner: "builder-1",
       branch: "b", worktree: "/w", provider: "gemini", now: T0,
     });
   };
@@ -256,6 +279,7 @@ describe("the attested gateway (Phase 3): gemini refusals are values", () => {
 
   beforeEach(() => {
     store = openStore(":memory:");
+    registerBuilder(store);
     dir = mkdtempSync(join(tmpdir(), "invoke-attest-"));
     savedPath = process.env["PATH"];
     process.env["PATH"] = `${dir}:${savedPath ?? ""}`;
@@ -382,7 +406,7 @@ describe("the attested gateway (Phase 3): gemini refusals are values", () => {
     process.env["PATH"] = dir; // gemini absent, everything absent
     store.createTask({ id: "c-1", title: "w" }, T0);
     const runId = store.startRun({
-      taskRef: store.refFor("built-in", "c-1").id, leaseId: "lease-c1", runner: "builder-1",
+      taskRef: claimTask(store, "c-1", "lease-c1"), leaseId: "lease-c1", runner: "builder-1",
       branch: "b", worktree: "/w", now: T0,
     });
     const result = await invokeAgent(store, runId, CLAUDE, ASK, { runner: async () => OK });
@@ -394,13 +418,14 @@ describe("the fallback taxonomy stamp (E2): honest disposal, fail closed", () =>
   let store: Store;
   beforeEach(() => {
     store = openStore(":memory:");
+    registerBuilder(store);
   });
   afterEach(() => store.close());
 
   const codexRunFor = (id: string) => {
     store.createTask({ id, title: "w" }, T0);
     return store.startRun({
-      taskRef: store.refFor("built-in", id).id, leaseId: `lease-${id}`, runner: "builder-1",
+      taskRef: claimTask(store, id, `lease-${id}`), leaseId: `lease-${id}`, runner: "builder-1",
       branch: "b", worktree: "/w", provider: "codex", now: T0,
     });
   };
@@ -444,7 +469,7 @@ describe("the fallback taxonomy stamp (E2): honest disposal, fail closed", () =>
     try {
       store.createTask({ id: "e2-refused", title: "w" }, T0);
       const id = store.startRun({
-        taskRef: store.refFor("built-in", "e2-refused").id, leaseId: "lease-e2r", runner: "builder-1",
+        taskRef: claimTask(store, "e2-refused", "lease-e2r"), leaseId: "lease-e2r", runner: "builder-1",
         branch: "b", worktree: "/w", provider: "gemini", now: T0,
       });
       const result = await invokeAgent(store, id, { provider: "gemini" as const, model: null }, ASK, { runner: async () => OK });
@@ -462,13 +487,14 @@ describe("the chain-bound gateway (E3d review findings 1/3)", () => {
   let store: Store;
   beforeEach(() => {
     store = openStore(":memory:");
+    registerBuilder(store);
   });
   afterEach(() => store.close());
 
   /** A run bound to a chain entry, with a REAL cycle row backing the FK. */
   const chainBoundRun = (authMode: "subscription" | "api-key") => {
     store.createTask({ id: "t-chain", title: "w" }, T0);
-    const ref = store.refFor("built-in", "t-chain").id;
+    const ref = claimTask(store, "t-chain", "lease-ch");
     const runId = store.startRun({
       taskRef: ref, leaseId: "lease-ch", runner: "builder-1",
       branch: "b", worktree: "/w", provider: "claude", now: T0,

@@ -2504,6 +2504,45 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_live_fallback_cycle_per_task
 }
 
 /**
+ * The non-migrating door (MCP gateway spec v6): open an EXISTING database
+ * without creating directories, executing schema DDL, or migrating — the
+ * MCP server must never write schema or take migration locks. Refusals
+ * are words, not exceptions: an absent file, a version that is not
+ * exactly this build's, or a negative version (a migration mid-flight —
+ * the epoch sentinel) all refuse. Long-lived callers re-check with
+ * `store.schemaCurrent()` inside every unit of work, because another
+ * process may migrate underneath them.
+ */
+export function openStoreNoMigrate(
+  file: string,
+  options: OpenOptions = {},
+): { ok: true; store: Store } | { ok: false; reason: "missing" | "version"; message: string } {
+  const connect = options.connect ?? defaultConnect;
+  if (file === ":memory:" || !existsSync(file)) {
+    return { ok: false, reason: "missing", message: `${file} does not exist — run \`standing-orders\` once to create it` };
+  }
+  const db = connect(file);
+  let seen: number | null = null;
+  try {
+    const row = db.prepare("SELECT version FROM schema_version").get();
+    seen = row === undefined ? null : Number(row["version"]);
+  } catch {
+    seen = null;
+  }
+  if (seen !== SCHEMA_VERSION) {
+    db.close();
+    const said =
+      seen === null
+        ? "it carries no schema version"
+        : seen < 0
+          ? `a migration is mid-flight (epoch ${-seen})`
+          : `it is schema v${seen} and this build speaks v${SCHEMA_VERSION}`;
+    return { ok: false, reason: "version", message: `${file}: ${said} — open it with the CLI or console first` };
+  }
+  return { ok: true, store: new Store(db) };
+}
+
+/**
  * Loaded through `createRequire` rather than a top-level import so that the
  * cost — and the experimental warning — falls only on a command that actually
  * opens the database. `import()` would work too, but it would make opening the
@@ -2529,6 +2568,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_live_fallback_cycle_per_task
  * skipped if it is not. Nothing here rewrites or drops anything.
  */
 function migrate(db: Database): void {
+  // THE MIGRATION EPOCH (MCP gateway spec v6, Codex rounds 3/5). This
+  // migrator alters schema first and bumps schema_version last, so a
+  // reader re-checking the version can pass MID-DDL. The fix is a
+  // committed marker BEFORE any DDL: an upgrading database's version row
+  // goes NEGATIVE (−from) in its own autocommitted statement, and the
+  // final bookkeeping write at the end of openStore replaces it with the
+  // target. A non-migrating reader treats a negative version — or any
+  // version other than its own — as "not mine to touch". A crash mid-
+  // migration leaves the sentinel VISIBLE instead of a silently
+  // half-shaped database; re-running the same (idempotent) migrator
+  // clears it, which the resume below allows.
+  const stamped = db.prepare("SELECT version FROM schema_version").get();
+  if (stamped !== undefined) {
+    const seen = Number(stamped["version"]);
+    if (seen > 0 && seen < SCHEMA_VERSION) {
+      db.prepare("UPDATE schema_version SET version = ?").run(-seen);
+    }
+    // seen < 0: a prior migration died mid-flight — this run resumes it
+    // (every step is IF-NOT-EXISTS/recognize-and-rebuild idempotent).
+  }
   addColumn(db, "task_ref", "origin", "TEXT NOT NULL DEFAULT 'theirs'");
   addColumn(db, "task_ref", "repo", "TEXT");
   addColumn(db, "claim", "released_by", "TEXT");
@@ -7822,6 +7881,50 @@ export class Store {
    * only that a lease exists; it cannot prove the lease is current, so it
    * must never stand in for this.
    */
+  /**
+   * Whether this connection's database still carries EXACTLY this build's
+   * schema version (MCP spec v6): the non-migrating server calls this
+   * inside every unit of work, because a concurrent process may migrate
+   * underneath a long-lived connection — a negative version (the epoch
+   * sentinel) or any other version answers false.
+   */
+  schemaCurrent(): boolean {
+    try {
+      const row = this.db.prepare("SELECT version FROM schema_version").get();
+      return row !== undefined && Number(row["version"]) === SCHEMA_VERSION;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The spawn leg of the runner gate (MCP gateway spec v6, rounds 4–5):
+   * ONE transaction, immediately before a provider process exists, that
+   * re-proves the tuple against LIVE rows — the run open, its lease still
+   * the task's current claim held by ITS runner, the runner row present
+   * and unretired, the task placed, and the placement inside the runner's
+   * bound repos. A retirement, takeover, re-binding, or re-placement
+   * between acquisition and this instant refuses the spawn, whatever road
+   * built the request — build, plan, repair, review, and held alike.
+   */
+  proveRunnerCustodyForSpawn(runId: number, now: Date): boolean {
+    return this.transact(() => {
+      const run = this.getRun(runId);
+      if (run === null || run.outcome !== null) return false;
+      const found = this.getRunner(run.runner);
+      if (found === null || found.runner.retiredAt !== null) return false;
+      const repo = this.refForId(run.taskRef)?.repo ?? null;
+      if (repo === null || !found.runner.repos.includes(repo)) return false;
+      // Reviewer runs are the one role that holds NO task claim by design
+      // — they run after the build, on a task whose lease is settled, under
+      // admitReview's own single-winner admission (its synthetic lease id
+      // is a marker, not a claim). Identity, liveness, and membership are
+      // proven above; lease currency is the claim-holding roles' leg.
+      if (run.role === "reviewer") return true;
+      return this.currentLiveLease(run.taskRef, now) === run.leaseId;
+    });
+  }
+
   currentLiveLease(taskRef: number, now: Date): string | null {
     const live = this.db
       .prepare(

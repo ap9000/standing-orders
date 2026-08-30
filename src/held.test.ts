@@ -530,6 +530,9 @@ describe("the conversation loop (Phase 2E.2)", () => {
     // fixture (mirrors the earlier launchArgsFor, real-time clocks)
     store.createTask({ id: "t-att", title: "watched" }, T0);
     const ref = store.refFor("built-in", "t-att");
+    // the runner gate's spawn leg: placed and enrolled BEFORE the claim rides
+    store.placeTask(ref.id, "/repo");
+    enroll(store, "/repo", "mac-a");
     store
       .raw()
       .prepare(
@@ -824,6 +827,8 @@ describe("parallel attended sessions (v28): two held conversations on one runner
     const taskId = `t-par-${tag}`;
     store.createTask({ id: taskId, title: `watched ${tag}` }, T0);
     const ref = store.refFor("built-in", taskId);
+    // the runner gate's spawn leg: the task placed on the runner's repo
+    store.placeTask(ref.id, "/repo");
     store
       .raw()
       .prepare(
@@ -928,6 +933,9 @@ describe("parallel attended sessions (v28): two held conversations on one runner
     const coordinator = new HeldSessionCoordinator();
     const wtA = await gitWorktree("so/t-par-a");
     const wtB = await gitWorktree("so/t-par-b");
+    // enrolled ONCE, before any claim exists — register reclaims a name's
+    // claims, so it must precede the fixtures' leases
+    enroll(store, "/repo", "mac-a");
     const a = sessionFixture(store, "a", wtA.head);
     const b = sessionFixture(store, "b", wtB.head);
     const disposals: string[] = [];
@@ -1057,6 +1065,8 @@ describe("v28 round-1 folds: refusals consume nothing; the cap lives in the cust
     const taskId = `t-fold-${tag}`;
     store.createTask({ id: taskId, title: tag }, T0);
     const ref = store.refFor("built-in", taskId);
+    // the runner gate's spawn leg: the task placed on the runner's repo
+    store.placeTask(ref.id, "/repo");
     store.raw().prepare(
       `INSERT INTO task_scope (task_id, goal, out_of_scope, touches, proposed_at, digest)
        VALUES (?, 'g', NULL, '[]', ?, 'feedface'||substr('00000000000000000000000000000000',1,24))`,
@@ -1135,6 +1145,8 @@ describe("v28 round-1 folds: refusals consume nothing; the cap lives in the cust
     const coordinator = new HeldSessionCoordinator();
     const treeA = await wt("so/t-fold-c1");
     const treeB = await wt("so/t-fold-c2");
+    // enrolled ONCE, before the fixtures' claims — register reclaims a name
+    enroll(store, "/repo", "mac-a");
     const a = fixtureFor(store, "c1", treeA.head);
     const b = fixtureFor(store, "c2", treeB.head);
     const first = await coordinator.launch(argsFor(store, "c1", a, treeA, 1) as never);

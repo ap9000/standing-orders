@@ -1291,6 +1291,11 @@ async function buildCommand(
   }
 
   const repo = repoFrom(flags);
+  // Standalone build proves membership BEFORE leasing anything (MCP spec
+  // v6, round-4 finding 2): the caller's --repo is a claim, not authority.
+  if (!auth.runner.repos.includes(canonicalProject(repo) ?? resolve(repo))) {
+    return fail(write, json, "build", "unauthorized-repo", `${runner} is not bound to ${repo} — \`runner bind\` adds it`, EXIT.refused);
+  }
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
   const ref = store.refFor(BUILT_IN, id);
 
@@ -1495,6 +1500,13 @@ async function tickCommand(
   }
 
   const repo = repoFrom(flags);
+  // THE PRE-I/O MEMBERSHIP CHECK (MCP spec v6, round-4 finding 1): the
+  // pass proves its canonical repo is in the runner's BOUND list before
+  // any git access, probe, or routine fires. The --repo flag stops being
+  // authority on every runner road, not only at the claim.
+  if (!auth.runner.repos.includes(canonicalProject(repo) ?? resolve(repo))) {
+    return fail(write, json, "tick", "unauthorized-repo", `${runner} is not bound to ${repo} — \`runner bind\` adds it`, EXIT.refused);
+  }
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
   const model = text(flags, "model");
   const repairModel = text(flags, "repair-model");

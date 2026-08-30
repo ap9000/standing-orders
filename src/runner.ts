@@ -249,10 +249,16 @@ export function acquireWatchLeaseAuthed(
   now: Date,
 ):
   | { ok: true; generation: number; superseded: string | null; recovered: number }
-  | { ok: false; reason: "unknown" | "bad-token" | "retired" | "watch-busy"; holder?: string; until?: string } {
+  | { ok: false; reason: "unknown" | "bad-token" | "retired" | "watch-busy" | "unauthorized-repo"; holder?: string; until?: string } {
   return store.transact(() => {
     const auth = authenticate(store, args.runner, args.token);
     if (!auth.ok) return { ok: false as const, reason: auth.reason };
+    // Watching a repo is a runner road like any other (MCP spec v6,
+    // round-4 finding 1): membership is proven in the same transaction
+    // as the lease, before any repo activity rides it.
+    if (!auth.runner.repos.includes(canonicalProject(args.repo) ?? resolve(args.repo))) {
+      return { ok: false as const, reason: "unauthorized-repo" as const };
+    }
     const got = store.acquireWatchLease(args.runner, args.repo, args.owner, args.ttlMs, now);
     if (!got.ok) return { ok: false as const, reason: "watch-busy" as const, holder: got.holder, until: got.until };
     const recovered = got.superseded === null ? 0 : store.recoverIncarnation(args.runner, got.superseded, now);

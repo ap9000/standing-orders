@@ -74,7 +74,7 @@ export type InvokeResult =
   | { kind: "ran"; outcome: AgentOutcome }
   | {
       kind: "refused";
-      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody";
+      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody";
       providerVersion: string | null;
       diagnostic: string | null;
     };
@@ -112,6 +112,19 @@ export async function invokeAgent(
     invocation.phase,
     options.timeoutMs ?? 30 * 60_000,
   );
+
+  // The spawn leg of the runner gate (MCP spec v6): the tuple re-proven
+  // against LIVE rows immediately before any provider process exists —
+  // retirement, takeover, re-binding, or re-placement between the claim
+  // and this instant refuses here, on every road through this gateway.
+  if (!store.proveRunnerCustodyForSpawn(runId, clock())) {
+    return {
+      kind: "refused",
+      reason: "runner-custody",
+      providerVersion: null,
+      diagnostic: "the run's runner custody lapsed before spawn — the lease, the runner, or its repo binding no longer stands",
+    };
+  }
 
   // Tier-2 attestation (A2/B3): the authoritative check, immediately
   // before the spawn it authorizes. Tier-1 providers return null here and
@@ -377,6 +390,15 @@ export async function invokeHeldAgent(
 
   const adapter = adapterFor("claude");
   const { clock: _clock, starter, socketPath, cookie, graceMs, events, readyTimeoutMs, keyHome, ...runOptions } = options;
+
+  // The spawn leg of the runner gate (MCP spec v6) — held sessions are a
+  // provider spawn like any other; a lapsed custody throws, because the
+  // held road's contract is exceptions, not refusal values.
+  if (!store.proveRunnerCustodyForSpawn(runId, clock())) {
+    throw new Error(
+      `run ${runId}: runner custody lapsed before the held spawn — the lease, the runner, or its repo binding no longer stands`,
+    );
+  }
 
   // The stamp precedes the spawn — same direction as the one-shot gateway.
   store.stampProviderStart(runId, clock());
