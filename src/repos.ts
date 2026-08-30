@@ -36,9 +36,12 @@ export async function loadRepos(file: string): Promise<LoadResult> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
-  } catch {
-    // No file yet is the ordinary first-run state, not a failure.
-    return { repos: [] };
+  } catch (cause) {
+    // ONLY the missing file is the ordinary first-run state (round-3
+    // finding 6): a permission or I/O failure is an unreadable registry,
+    // never an empty one — the MCP gateway fails closed on it.
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { repos: [] };
+    return { error: `${file} could not be read (${String((cause as Error).message)})` };
   }
 
   let parsed: unknown;

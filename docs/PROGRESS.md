@@ -1,5 +1,29 @@
 # Progress
 
+**2026-08-30 — MCP review rounds 2 + 3: the wire made honest.** Round 2
+(`72abb9b`, no ledger entry then — recorded here): modern requests
+REQUIRE both namespaced `_meta` keys and the era pins per connection;
+modern ping answers -32601; -32022 carries `{supported, requested}`;
+`outputSchema` removed (it describes structuredContent these tools do
+not return); the reviewer custody arm binds `registeredAt <=
+startedAt` so a same-name rotation after admission refuses; setup
+custody consults the request's live clock; statusFor's five joins pin
+`backend='built-in'`; list_repos FAILS CLOSED on an unreadable
+registry; evidence carries mediaType; the db directory is born 0700
+and the gateway repairs it; the console speaks relative filing age and
+full quarantine words on the no-scope coordinator page. Round 3
+verified the deep closures and caught six wire gaps, all closed: the
+era pin now covers EVERY classified method (a refused modern ping
+pins; unknown methods cannot cross it); explicit `arguments: null`
+refuses — only absence defaults; a notification is the message with NO
+id, so `notifications/initialized` carrying one is malformed, not a
+silent handshake; an unsupported version on `server/discover` answers
+-32022 with the revision's own shape; `clientCapabilities` must be an
+object — an array refuses; and `loadRepos` treats only ENOENT as an
+empty registry, so a permission failure reaches the fail-closed
+refusal instead of dressing up as an empty answer. Six regression
+tests pin each. Suite 1533.
+
 **2026-08-30 — MCP review round 1: NO-GO honored, all ten findings
 closed.** Five fix batches: the 2026-07-28 wire made spec-true
 (namespaced `_meta` key, `supportedVersions` + namespaced serverInfo on

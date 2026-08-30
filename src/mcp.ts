@@ -348,7 +348,9 @@ export function serveMcp(
       io.exit(0);
       return;
     }
-    const rawArgs = params["arguments"] ?? {};
+    // Only an ABSENT `arguments` defaults to empty (round-3 finding 2): an
+    // explicit null is not the optional-object shape MCP defines.
+    const rawArgs = params["arguments"] === undefined ? {} : params["arguments"];
     if (typeof rawArgs !== "object" || rawArgs === null || Array.isArray(rawArgs)) {
       // The root of `arguments` is an object BEFORE any schema applies
       // (round-2 finding 2): 42 or false never passes an empty schema.
@@ -397,22 +399,28 @@ export function serveMcp(
       error(null, -32600, 'jsonrpc must be "2.0"');
       return;
     }
+    // A notification is the message that carries NO id — the method name
+    // never decides (round-3 finding 3): notifications/initialized WITH an
+    // id is a malformed message, not a quiet notification. MCP RequestId is
+    // a string or an INTEGER (round-2 finding 2): floats, null, and object
+    // shapes refuse wherever an id appears.
+    const hasId = "id" in request;
     const rawId = request["id"];
-    const isNotification = typeof request["method"] === "string" && (request["method"] as string).startsWith("notifications/");
-    // MCP RequestId is a string or an INTEGER (round-2 finding 2): floats
-    // and null ids on requests refuse; notifications carry no id at all.
-    if (!isNotification) {
-      if (rawId === undefined || rawId === null) {
-        error(null, -32600, "a request carries an id — a string or an integer");
+    if (hasId && (rawId === null || (typeof rawId !== "string" && !(typeof rawId === "number" && Number.isInteger(rawId))))) {
+      error(null, -32600, "id must be a string or an integer");
+      return;
+    }
+    const method = typeof request["method"] === "string" ? request["method"] : "";
+    if (method.startsWith("notifications/")) {
+      if (hasId) {
+        error(rawId as Json, -32600, "a notification carries no id");
         return;
       }
-      if (typeof rawId !== "string" && !(typeof rawId === "number" && Number.isInteger(rawId))) {
-        error(null, -32600, "id must be a string or an integer");
-        return;
-      }
+    } else if (!hasId) {
+      error(null, -32600, "a request carries an id — a string or an integer");
+      return;
     }
     const id = (rawId ?? null) as Json;
-    const method = typeof request["method"] === "string" ? request["method"] : "";
     const params = (request["params"] ?? {}) as Record<string, unknown>;
     const meta = (params["_meta"] ?? {}) as Record<string, unknown>;
 
@@ -443,6 +451,29 @@ export function serveMcp(
     }
     if (method.startsWith("notifications/")) return; // unknown notification: silence, never an error
 
+    // An unsupported protocol version refuses -32022 with the revision's
+    // OWN shape for EVERY request — server/discover included (round-3
+    // finding 4): the ask precedes any per-method branch.
+    const declared = typeof meta[META_VERSION] === "string" ? (meta[META_VERSION] as string) : null;
+    if (declared !== null && declared !== MODERN && declared !== LEGACY) {
+      io.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: UNSUPPORTED_VERSION,
+            message: `unsupported protocol version \`${declared}\``,
+            data: { supported: [MODERN, LEGACY], requested: declared },
+          },
+        }),
+      );
+      return;
+    }
+    // ClientCapabilities is an OBJECT shape (round-3 finding 5): an array
+    // is not a capabilities declaration.
+    const capabilitiesShape = (value: unknown): boolean =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+
     if (method === "initialize") {
       if (pinnedEra === "modern") {
         error(id, -32600, "this connection speaks the modern era — initialize belongs to the handshake era");
@@ -464,8 +495,7 @@ export function serveMcp(
         error(id, -32600, "this connection speaks the handshake era — server/discover belongs to the modern one");
         return;
       }
-      const declaredVersion = meta[META_VERSION];
-      if (declaredVersion !== MODERN || typeof meta[META_CAPABILITIES] !== "object" || meta[META_CAPABILITIES] === null) {
+      if (declared !== MODERN || !capabilitiesShape(meta[META_CAPABILITIES])) {
         // The modern era's requests carry BOTH namespaced keys (round-2
         // finding 1) — a bare discover is not a modern request.
         error(id, -32600, `server/discover requires _meta["${META_VERSION}"] = "${MODERN}" and _meta["${META_CAPABILITIES}"]`);
@@ -482,34 +512,20 @@ export function serveMcp(
       return;
     }
 
-    // Era classification precedes every remaining method. A modern request
-    // carries BOTH namespaced keys; the -32022 refusal carries the shape
-    // the revision defines (round-2 finding 1).
-    const declared = typeof meta[META_VERSION] === "string" ? (meta[META_VERSION] as string) : null;
-    if (declared !== null && declared !== MODERN && declared !== LEGACY) {
-      io.write(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id,
-          error: {
-            code: UNSUPPORTED_VERSION,
-            message: `unsupported protocol version \`${declared}\``,
-            data: { supported: [MODERN, LEGACY], requested: declared },
-          },
-        }),
-      );
-      return;
-    }
+    // Era classification precedes every remaining method — ping and unknown
+    // methods included (round-3 finding 1): a refused modern ping still pins
+    // the modern era, and a cross-era unknown method refuses on the pin
+    // instead of slipping past it.
     const era: "modern" | "legacy" = declared === MODERN ? "modern" : "legacy";
-    if (era === "modern" && (typeof meta[META_CAPABILITIES] !== "object" || meta[META_CAPABILITIES] === null)) {
+    if (era === "modern" && !capabilitiesShape(meta[META_CAPABILITIES])) {
       error(id, -32600, `a ${MODERN} request carries _meta["${META_CAPABILITIES}"]`);
       return;
     }
-    if (pinnedEra !== null && era !== pinnedEra && (method === "tools/list" || method === "tools/call" || method === "ping")) {
+    if (pinnedEra !== null && era !== pinnedEra) {
       error(id, -32600, `this connection is pinned to the ${pinnedEra} era`);
       return;
     }
-    if (method === "tools/list" || method === "tools/call") pinnedEra = era;
+    pinnedEra = era;
 
     if (method === "ping") {
       // ping left the protocol in 2026-07-28 — only the handshake era has it.

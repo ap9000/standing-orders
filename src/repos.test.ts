@@ -90,6 +90,24 @@ describe("loadRepos", () => {
 
     expect(await loadRepos(join(base, "empty", "repos.json"))).toEqual({ repos: [] });
   });
+
+  test("a read FAILURE is an unreadable registry, never an empty one", async () => {
+    // Round-3 finding 6: only ENOENT means nobody enrolled — an EACCES or
+    // I/O failure must surface as an error so the MCP gateway fails closed
+    // instead of answering an empty list_repos.
+    const file = join(base, "denied", "repos.json");
+    await mkdir(join(base, "denied"), { recursive: true });
+    await writeFile(file, JSON.stringify({ version: 1, repos: ["/code/a"] }));
+    const { chmod } = await import("node:fs/promises");
+    await chmod(file, 0o000);
+    try {
+      const result = await loadRepos(file);
+      expect("error" in result).toBe(true);
+      expect("error" in result && result.error).toContain(file);
+    } finally {
+      await chmod(file, 0o600);
+    }
+  });
 });
 
 describe("addRepos and removeRepos", () => {

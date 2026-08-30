@@ -119,6 +119,76 @@ describe("the MCP stdio server", () => {
     expect(legacy.last()["error"]).toMatchObject({ code: -32600 });
   });
 
+  test("the pin covers EVERY era-classified method: a refused modern ping pins, and unknown methods cannot cross the pin", () => {
+    // Round-3 finding 1: a first modern ping used to leave the connection
+    // unpinned, letting legacy initialize follow; unknown cross-era methods
+    // slipped past the pin check entirely.
+    const h = harness(store, token);
+    h.send({ jsonrpc: "2.0", id: 1, method: "ping", params: { _meta: modernMeta } });
+    expect(h.last()["error"]).toMatchObject({ code: -32601 }); // ping left the modern revision…
+    h.send({ jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: LEGACY } });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 }); // …but it PINNED the era.
+    h.send({ jsonrpc: "2.0", id: 3, method: "no/such", params: {} });
+    expect(String((h.last()["error"] as Record<string, unknown>)["message"])).toContain("pinned");
+
+    const legacy = harness(store, token);
+    legacy.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: LEGACY } });
+    legacy.send({ jsonrpc: "2.0", id: 2, method: "no/such", params: { _meta: modernMeta } });
+    expect(String((legacy.last()["error"] as Record<string, unknown>)["message"])).toContain("pinned");
+  });
+
+  test("explicit `arguments: null` refuses — only an ABSENT arguments defaults to empty", () => {
+    // Round-3 finding 2: `?? {}` used to bless null into an empty object.
+    const h = harness(store, token);
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: modernMeta, name: "list_repos", arguments: null } });
+    expect(h.last()["error"]).toMatchObject({ code: -32602 });
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "list_repos" } });
+    expect(h.last()["result"]).toBeDefined();
+  });
+
+  test("a notification is the message with NO id — the method prefix never decides", () => {
+    // Round-3 finding 3: notifications/initialized carrying an id used to
+    // bypass id validation and complete the handshake silently.
+    const h = harness(store, token);
+    h.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: LEGACY } });
+    h.send({ jsonrpc: "2.0", id: 2, method: "notifications/initialized" });
+    expect(String((h.last()["error"] as Record<string, unknown>)["message"])).toContain("notification carries no id");
+    h.send({ jsonrpc: "2.0", id: 1.5, method: "notifications/initialized" });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 }); // a float id is no id shape at all
+    h.send({ jsonrpc: "2.0", id: null, method: "tools/list", params: {} });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 }); // null id: neither request nor notification
+    // The mis-idented notifications above completed NOTHING: tools still
+    // refuse until a true no-id initialized arrives.
+    h.send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
+    expect(h.last()["error"]).toMatchObject({ code: -32002 });
+    h.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    h.send({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} });
+    expect(h.last()["result"]).toBeDefined();
+  });
+
+  test("an unsupported version on server/discover answers -32022 with {supported, requested} — never -32600", () => {
+    // Round-3 finding 4: the discover branch used to answer its own -32600
+    // before the unsupported-version refusal could speak.
+    const h = harness(store, token);
+    h.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "server/discover",
+      params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2030-01-01", "io.modelcontextprotocol/clientCapabilities": {} } },
+    });
+    expect(h.last()["error"]).toMatchObject({ code: -32022, data: { supported: [MODERN, LEGACY], requested: "2030-01-01" } });
+  });
+
+  test("clientCapabilities must be an OBJECT shape — an array refuses on every modern method", () => {
+    // Round-3 finding 5: `typeof [] === "object"` used to pass the check.
+    const arrayMeta = { "io.modelcontextprotocol/protocolVersion": MODERN, "io.modelcontextprotocol/clientCapabilities": [] };
+    const h = harness(store, token);
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: arrayMeta } });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 });
+    h.send({ jsonrpc: "2.0", id: 2, method: "server/discover", params: { _meta: arrayMeta } });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 });
+  });
+
   test("initialized without initialize completes nothing, and a bare arguments root refuses", () => {
     const h = harness(store, token);
     h.send({ jsonrpc: "2.0", method: "notifications/initialized" });

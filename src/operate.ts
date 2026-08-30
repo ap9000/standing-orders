@@ -1447,8 +1447,9 @@ async function mcpCommand(
     return said("demo console — no gateway");
   }
 
-  // The enrolled-project registry, best-effort: list_repos answers
-  // allowlist ∩ enrolled when it reads; the allowlist alone otherwise.
+  // The enrolled-project registry: list_repos answers allowlist ∩ enrolled
+  // when it reads; an unreadable registry leaves this null and the tool
+  // REFUSES rather than inventing an empty or full answer (fail-closed).
   let enrolled: string[] | null = null;
   try {
     const loaded = await loadRepos(configPath(process.env, homedir()));
