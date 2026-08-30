@@ -1347,6 +1347,42 @@ describe("runner ceremonies (MCP spec v6)", () => {
   });
 });
 
+describe("coordinator ceremonies (MCP spec v6)", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-coord-cer-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const run = (argv: string[]) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now: T0 });
+  };
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  test("mint is a password ceremony bound to repos; the token prints once; revoke kills it", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const approver = payload().token as string;
+    expect(await run(["coordinator", "mint", "bot", "--repo", "/r/a", "--json"])).toBe(EXIT.usage);
+    expect(await run(["coordinator", "mint", "bot", "--as", "alex", "--token", approver, "--json"])).toBe(EXIT.usage);
+    expect(await run(["coordinator", "mint", "bot", "--repo", "/r/a", "--as", "alex", "--token", "bad", "--json"])).toBe(EXIT.refused);
+    expect(await run(["coordinator", "mint", "bot", "--repo", "/r/a", "--per-hour", "3", "--as", "alex", "--token", approver, "--json"])).toBe(EXIT.ok);
+    const minted = payload();
+    expect(minted.repos).toEqual(["/r/a"]);
+    expect(typeof minted.token).toBe("string");
+    expect(await run(["coordinator", "mint", "bot", "--repo", "/r/b", "--as", "alex", "--token", approver, "--json"])).toBe(EXIT.refused);
+    expect(await run(["coordinator", "revoke", minted.cid, "--as", "alex", "--token", approver, "--json"])).toBe(EXIT.ok);
+    expect(await run(["coordinator", "mint", "bot", "--repo", "/r/b", "--as", "alex", "--token", approver, "--json"])).toBe(EXIT.ok);
+  });
+});
+
 describe("the CLI router", () => {
   test("every verb the operate dispatcher knows is reachable from the binary", async () => {
     // routine/config/providers shipped reachable only through runOperate —

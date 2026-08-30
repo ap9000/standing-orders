@@ -138,6 +138,7 @@ import {
   canonicalRepos,
   RUNNER_NAME_MAX,
 } from "./runner.js";
+import { mintCoordinator, revokeCoordinator, listCoordinators } from "./coordinator.js";
 import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
@@ -469,7 +470,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "stop-grace", "title", "name",
-  "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
+  "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -659,6 +660,8 @@ async function dispatch(
       return runnerCommand(positional, flags, context);
     case "approver":
       return approverCommand(positional, flags, context);
+    case "coordinator":
+      return coordinatorCommand(positional, flags, context);
     case "build":
       return buildCommand(positional, flags, context);
     case "tick":
@@ -1257,6 +1260,104 @@ async function runnerCommand(
     `unknown \`runner ${action}\` — try list, register, bind, heartbeat, reap, retire`,
     EXIT.usage,
   );
+}
+
+/**
+ * The coordinator principal's ceremonies (MCP gateway spec v6, DESIGN.md
+ * 9b): minting is an operator act that binds repos and a rate at the
+ * mint; the token prints once; revocation is immediate and audited.
+ */
+async function coordinatorCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, now } = context;
+  const [action, name] = positional;
+
+  if (action === "list" || action === undefined) {
+    const rows = listCoordinators(store);
+    if (json) {
+      write(envelopeJson({ ok: true, command: "coordinator list", coordinators: rows }));
+      return EXIT.ok;
+    }
+    if (rows.length === 0) {
+      write("No coordinators. `standing-orders coordinator mint <name> --repo <path> --as <you> --token <t>`");
+      return EXIT.ok;
+    }
+    for (const one of rows) {
+      const state = one.revokedAt === null ? `${one.perHour}/h` : "revoked";
+      write(`  ${one.name}#${one.cid.slice(0, 4)}  ${state}  ${one.repos.join(", ")}  last filed ${one.lastFiledAt ?? "never"}`);
+    }
+    return EXIT.ok;
+  }
+
+  if (action === "mint") {
+    if (name === undefined) {
+      return fail(write, json, "coordinator mint", "usage", "a coordinator needs a name", EXIT.usage);
+    }
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "coordinator mint", "usage", "`coordinator mint <name> --repo <path> --as <you> --token <t>` — minting filing authority is an operator act", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, "coordinator mint", authenticated.reason, describeApproveFailure(authenticated.reason, name), EXIT.refused);
+    }
+    const repos = context.repoList ?? [];
+    if (repos.length === 0) {
+      return fail(write, json, "coordinator mint", "usage", "--repo names at least one repository this coordinator may file into", EXIT.usage);
+    }
+    const perHourGiven = text(flags, "per-hour");
+    const perHour = perHourGiven === undefined ? undefined : Number(perHourGiven);
+    const made = mintCoordinator(store, {
+      name,
+      repos,
+      ...(perHour === undefined ? {} : { perHour }),
+      by: acting.name,
+      now,
+    });
+    if (!made.ok) {
+      const said: Record<string, string> = {
+        "bad-name": "a coordinator name is 1-32 characters of a-z, 0-9, and dashes",
+        "name-taken": `a live coordinator already answers to \`${name}\` — revoke it first, or pick another name`,
+        "bad-rate": "--per-hour is a whole number from 1 to 60",
+        "no-repos": "--repo names at least one repository",
+      };
+      return fail(write, json, "coordinator mint", made.reason, said[made.reason] ?? made.reason, made.reason === "name-taken" ? EXIT.refused : EXIT.usage);
+    }
+    return succeed(write, json, "coordinator mint", { cid: made.cid, token: made.token, repos: made.repos }, () => [
+      `Minted ${name}#${made.cid.slice(0, 4)} — may file into:`,
+      ...made.repos.map(one => `  ${one}`),
+      "",
+      `  token  ${made.token}`,
+      "",
+      "That token is shown once and is not stored — only a hash of it is.",
+      "Give it to the MCP server via a 0600 token file or STANDING_ORDERS_COORDINATOR.",
+    ]);
+  }
+
+  if (action === "revoke") {
+    if (name === undefined) {
+      return fail(write, json, "coordinator revoke", "usage", "which coordinator? (`coordinator list` shows cids)", EXIT.usage);
+    }
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "coordinator revoke", "usage", "`coordinator revoke <cid> --as <you> --token <t>` — revoking is an operator act", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token);
+    if (!authenticated.ok) {
+      return fail(write, json, "coordinator revoke", authenticated.reason, describeApproveFailure(authenticated.reason, name), EXIT.refused);
+    }
+    const revoked = revokeCoordinator(store, name, acting.name, now);
+    if (!revoked.ok) {
+      const said = revoked.reason === "unknown" ? `no coordinator \`${name}\` — \`coordinator list\` shows cids` : "already revoked";
+      return fail(write, json, "coordinator revoke", revoked.reason, said, EXIT.refused);
+    }
+    return succeed(write, json, "coordinator revoke", { cid: name }, () => [`${name} is revoked — its filings stand, its token does not.`]);
+  }
+
+  return fail(write, json, "coordinator", "usage", `unknown \`coordinator ${action}\` — try list, mint, revoke`, EXIT.usage);
 }
 
 function describeAuth(reason: string, name: string): string {
