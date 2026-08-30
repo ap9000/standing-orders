@@ -38,6 +38,8 @@ function harness(store: Store, token: string): {
   };
 }
 
+const modernMeta = { "io.modelcontextprotocol/protocolVersion": MODERN };
+
 describe("the MCP stdio server", () => {
   let store: Store;
   let token: string;
@@ -67,21 +69,50 @@ describe("the MCP stdio server", () => {
     expect(h.last()["id"]).toBe(2);
   });
 
-  test("modern era: discover and tools/list are schema-complete (resultType, ttlMs, cacheScope)", () => {
+  test("modern era: discover and tools/list are schema-complete, metadata is namespaced, versions negotiate by the book", () => {
     const h = harness(store, token);
     h.send({ jsonrpc: "2.0", id: 1, method: "server/discover", params: {} });
     const discover = h.last()["result"] as Record<string, unknown>;
     expect(discover["protocolVersion"]).toBe(MODERN);
+    expect(discover["supportedVersions"]).toEqual([MODERN, LEGACY]);
     expect(discover["resultType"]).toBe("complete");
     expect(discover["ttlMs"]).toBe(0);
-    expect(discover["cacheScope"]).toBe("session");
-    h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: { protocolVersion: MODERN } } });
+    expect(discover["cacheScope"]).toBe("private");
+    expect((discover["_meta"] as Record<string, unknown>)["io.modelcontextprotocol/serverInfo"]).toMatchObject({ name: "standing-orders" });
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
-    expect((listed["tools"] as unknown[]).length).toBe(6);
-    // An unsupported per-request version is the spec's error, not a guess.
-    h.send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: { _meta: { protocolVersion: "2030-01-01" } } });
+    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(6);
+    expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeDefined();
+    // The revision's OWN code for an unsupported version — and a modern
+    // ping carries the modern result shape.
+    h.send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2030-01-01" } } });
+    expect(h.last()["error"]).toMatchObject({ code: -32022 });
+    h.send({ jsonrpc: "2.0", id: 4, method: "ping", params: { _meta: modernMeta } });
+    expect((h.last()["result"] as Record<string, unknown>)["resultType"]).toBe("complete");
+  });
+
+  test("the engine validates: bad jsonrpc, bad id shapes, unknown arguments, and unknown notifications", () => {
+    const h = harness(store, token);
+    h.send({ jsonrpc: "1.0", id: 1, method: "ping" });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 });
+    h.send({ jsonrpc: "2.0", id: { object: true }, method: "ping" });
+    expect(h.last()["error"]).toMatchObject({ code: -32600 });
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "list_repos", arguments: { bogus: 1 } } });
     expect(h.last()["error"]).toMatchObject({ code: -32602 });
+    const before = h.out().length;
+    h.send({ jsonrpc: "2.0", method: "notifications/whatever" });
+    expect(h.out().length).toBe(before); // silence, never an error
+  });
+
+  test("the handshake era refuses tools before its lifecycle completes", () => {
+    const h = harness(store, token);
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    expect(h.last()["error"]).toMatchObject({ code: -32002 });
+    h.send({ jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: LEGACY } });
+    h.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    h.send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
+    expect((h.last()["result"] as Record<string, unknown>)["tools"]).toBeDefined();
   });
 
   test("malformed input answers in-protocol and never crashes: parse error, batch, depth, oversize, unknown method", () => {
@@ -100,13 +131,13 @@ describe("the MCP stdio server", () => {
     expect(h.last()["error"]).toMatchObject({ code: -32601 });
   });
 
-  test("a cancellation is a notification: no ack, and the cancelled id's response is suppressed entirely", () => {
+  test("cancellation touches in-flight work only: no ack ever, and a pre-cancelled future id is NOT suppressed", () => {
     const h = harness(store, token);
     h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 9 } });
-    expect(h.out()).toHaveLength(0);
-    h.send({ jsonrpc: "2.0", id: 9, method: "tools/list", params: {} });
-    expect(h.out()).toHaveLength(0); // suppressed — not even an error
-    h.send({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} });
+    expect(h.out()).toHaveLength(0); // a notification gets no reply
+    // The id was never in flight — cancelling it must not blacklist the
+    // future (review finding 2: one peer must not suppress another's ids).
+    h.send({ jsonrpc: "2.0", id: 9, method: "tools/list", params: { _meta: modernMeta } });
     expect(h.out()).toHaveLength(1);
   });
 
@@ -114,7 +145,7 @@ describe("the MCP stdio server", () => {
     const h = harness(store, token);
     h.send({
       jsonrpc: "2.0", id: 1, method: "tools/call",
-      params: { name: "file_proposal", arguments: { repo: REPO, title: "Fix the flaky test", idempotency_key: "key-mcp-0001" } },
+      params: { _meta: modernMeta, name: "file_proposal", arguments: { repo: REPO, title: "Fix the flaky test", idempotency_key: "key-mcp-0001" } },
     });
     const result = h.last()["result"] as Record<string, unknown>;
     expect(result["isError"]).toBeUndefined();
@@ -125,7 +156,7 @@ describe("the MCP stdio server", () => {
     // Outside the allowlist: a refusal in words, still a RESULT.
     h.send({
       jsonrpc: "2.0", id: 2, method: "tools/call",
-      params: { name: "file_proposal", arguments: { repo: "/foreign", title: "nope", idempotency_key: "key-mcp-0002" } },
+      params: { _meta: modernMeta, name: "file_proposal", arguments: { repo: "/foreign", title: "nope", idempotency_key: "key-mcp-0002" } },
     });
     const refused = h.last()["result"] as Record<string, unknown>;
     expect(refused["isError"]).toBe(true);
@@ -140,23 +171,23 @@ describe("the MCP stdio server", () => {
     if (!foreign.ok) throw new Error("filing failed");
 
     const h = harness(store, token);
-    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_task", arguments: { ref: foreign.id } } });
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: modernMeta, name: "get_task", arguments: { ref: foreign.id } } });
     const answer = h.last()["result"] as Record<string, unknown>;
     expect(answer["isError"]).toBe(true);
     expect(String((answer["content"] as { text: string }[])[0]?.text)).toContain("not-found");
 
-    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "status", arguments: {} } });
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "status", arguments: {} } });
     const status = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
     expect((status["repos"] as unknown[]).length).toBe(0); // nothing filed in OUR repo yet
   });
 
   test("revocation mid-session: the next call refuses and the server exits — tools/list visibility was never authorization", () => {
     const h = harness(store, token);
-    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_repos", arguments: {} } });
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: modernMeta, name: "list_repos", arguments: {} } });
     expect((h.last()["result"] as Record<string, unknown>)["isError"]).toBeUndefined();
     const rows = store.handle.prepare("SELECT cid FROM coordinator_credential").all();
     revokeCoordinator(store, String(rows[0]?.["cid"]), "alex", T0);
-    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_repos", arguments: {} } });
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "list_repos", arguments: {} } });
     expect(h.last()["error"]).toMatchObject({ code: -32000 });
     expect(h.exitCode()).toBe(0);
   });
@@ -165,7 +196,7 @@ describe("the MCP stdio server", () => {
     const h = harness(store, token);
     h.send({
       jsonrpc: "2.0", id: 1, method: "tools/call",
-      params: { name: "file_proposal", arguments: { repo: REPO, title: "e2e work", idempotency_key: "key-e2e-0001" } },
+      params: { _meta: modernMeta, name: "file_proposal", arguments: { repo: REPO, title: "e2e work", idempotency_key: "key-e2e-0001" } },
     });
     const body = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
     const taskId = String(body["ref"]);
@@ -185,10 +216,10 @@ describe("the MCP stdio server", () => {
     // The gateway's own view reflects it: the task is visible in OUR
     // repo, sealed and claimed (the raw claim primitive leaves the state
     // transition to its callers, so no state filter here).
-    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_tasks", arguments: {} } });
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "list_tasks", arguments: {} } });
     const listed = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
     expect((listed["tasks"] as { ref: string }[]).map(one => one.ref)).toEqual([taskId]);
-    h.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_task", arguments: { ref: taskId } } });
+    h.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { _meta: modernMeta, name: "get_task", arguments: { ref: taskId } } });
     const detail = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
     expect((detail["scope"] as Record<string, unknown>)["sealed"]).toBe(true);
   });

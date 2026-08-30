@@ -178,7 +178,7 @@ export function listCoordinators(store: Store): CoordinatorRow[] {
  * dead unsealed filings pressure cleanup, not silence. */
 const OUTSTANDING_SQL = `
   SELECT COUNT(*) AS n FROM task_ref
-    JOIN task ON task.id = task_ref.external_id
+    JOIN task ON task.id = task_ref.external_id AND task_ref.backend = 'built-in'
     LEFT JOIN task_scope ON task_scope.task_id = task_ref.external_id
    WHERE task_ref.coordinator_cid IS NOT NULL
      AND task.state NOT IN ('done','cancelled')
@@ -334,7 +334,7 @@ export function statusFor(store: Store, who: VerifiedCoordinator, now: Date): {
   // "Waits on you" = the board's attention lanes over this allowlist:
   // unsealed scopes + open decisions on live runs.
   const unsealed = one(
-    `SELECT COUNT(*) AS n FROM task_ref JOIN task ON task.id = task_ref.external_id
+    `SELECT COUNT(*) AS n FROM task_ref JOIN task ON task.id = task_ref.external_id AND task_ref.backend = 'built-in'
       LEFT JOIN task_scope ON task_scope.task_id = task_ref.external_id
       WHERE task_ref.repo IN (${sql}) AND task.state = 'queued'
         AND (task_scope.task_id IS NULL OR task_scope.approved_at IS NULL OR task_scope.approved_digest IS NOT task_scope.digest)`,
@@ -363,7 +363,7 @@ export function statusFor(store: Store, who: VerifiedCoordinator, now: Date): {
       `SELECT task_ref.repo AS repo,
               SUM(CASE WHEN task.state = 'queued' THEN 1 ELSE 0 END) AS queued,
               SUM(CASE WHEN task.state = 'running' THEN 1 ELSE 0 END) AS running
-         FROM task_ref JOIN task ON task.id = task_ref.external_id
+         FROM task_ref JOIN task ON task.id = task_ref.external_id AND task_ref.backend = 'built-in'
         WHERE task_ref.repo IN (${sql}) GROUP BY task_ref.repo ORDER BY task_ref.repo`,
     )
     .all(...args)
@@ -383,7 +383,7 @@ export function listTasksFor(
   const rows = store.handle
     .prepare(
       `SELECT task_ref.id AS rid, task.id AS tid, task.title AS title, task.state AS state, task_ref.repo AS repo, task_ref.filed_via AS via
-         FROM task_ref JOIN task ON task.id = task_ref.external_id
+         FROM task_ref JOIN task ON task.id = task_ref.external_id AND task_ref.backend = 'built-in'
         WHERE task_ref.repo IN (${sql})
           AND (? IS NULL OR task.state = ?)
           AND task_ref.id > ?
@@ -414,7 +414,7 @@ export function taskDetailFor(
   const row = store.handle
     .prepare(
       `SELECT task_ref.id AS rid, task.id AS tid, task.title AS title, task.state AS state, task_ref.repo AS repo
-         FROM task_ref JOIN task ON task.id = task_ref.external_id
+         FROM task_ref JOIN task ON task.id = task_ref.external_id AND task_ref.backend = 'built-in'
         WHERE task.id = ? AND task_ref.repo IN (${sql})`,
     )
     .get(taskId, ...args);

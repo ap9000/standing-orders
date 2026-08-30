@@ -2477,6 +2477,19 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true });
 
   const db = connect(file);
+  // THE EPOCH, BEFORE ANY DDL (implementation review, finding 3): even
+  // the fresh-SCHEMA exec below adds this build's new tables and indexes
+  // to an old database, so the sentinel commits FIRST — a non-migrating
+  // reader must never see new shapes under an old positive version.
+  try {
+    const seen = db.prepare("SELECT version FROM schema_version").get();
+    if (seen !== undefined) {
+      const v = Number(seen["version"]);
+      if (v > 0 && v < SCHEMA_VERSION) db.prepare("UPDATE schema_version SET version = ?").run(-v);
+    }
+  } catch {
+    // No schema_version table: a fresh file — nothing to fence.
+  }
   db.exec(SCHEMA);
   migrate(db);
   // Attention/history indexes come AFTER migration: on a database whose
@@ -2629,15 +2642,10 @@ function migrate(db: Database): void {
   // migration leaves the sentinel VISIBLE instead of a silently
   // half-shaped database; re-running the same (idempotent) migrator
   // clears it, which the resume below allows.
-  const stamped = db.prepare("SELECT version FROM schema_version").get();
-  if (stamped !== undefined) {
-    const seen = Number(stamped["version"]);
-    if (seen > 0 && seen < SCHEMA_VERSION) {
-      db.prepare("UPDATE schema_version SET version = ?").run(-seen);
-    }
-    // seen < 0: a prior migration died mid-flight — this run resumes it
-    // (every step is IF-NOT-EXISTS/recognize-and-rebuild idempotent).
-  }
+  // The epoch sentinel was committed by openStore BEFORE the SCHEMA exec
+  // (review finding 3). A negative version here is a prior death mid-
+  // flight — this run resumes it (every step is IF-NOT-EXISTS/
+  // recognize-and-rebuild idempotent) and the final bookkeeping clears it.
   addColumn(db, "task_ref", "origin", "TEXT NOT NULL DEFAULT 'theirs'");
   addColumn(db, "task_ref", "repo", "TEXT");
   addColumn(db, "claim", "released_by", "TEXT");
@@ -4384,6 +4392,24 @@ export class Store {
    * their own refusal words and wake bumps.
    */
   applyCancellation(
+    taskId: string,
+    reason:
+      | { kind: "operator"; text: string | null }
+      | { kind: "machine"; code: "mirror-latched" | "disowned-completion" },
+    now: Date,
+    admittedFrom: readonly TaskState[] | null,
+  ): { changed: boolean } {
+    // An operator reason is approver-read text like every other: bounded,
+    // control-free, no disguised writing (review finding 8).
+    if (reason.kind === "operator" && reason.text !== null) {
+      if (reason.text.length > 500 || hasForbiddenControls(reason.text)) {
+        throw new Error("a cancellation reason is at most 500 plain characters");
+      }
+    }
+    return this.transact(() => this.applyCancellationLocked(taskId, reason, now, admittedFrom));
+  }
+
+  private applyCancellationLocked(
     taskId: string,
     reason:
       | { kind: "operator"; text: string | null }

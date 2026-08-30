@@ -36,6 +36,11 @@ import {
 
 export const MODERN = "2026-07-28";
 export const LEGACY = "2025-11-25";
+/** The modern revision namespaces its per-request metadata. */
+export const META_VERSION = "io.modelcontextprotocol/protocolVersion";
+export const META_SERVER = "io.modelcontextprotocol/serverInfo";
+/** The revision's own error code for an unsupported protocol version. */
+export const UNSUPPORTED_VERSION = -32022;
 const MAX_REQUEST = 256 * 1024;
 const MAX_DEPTH = 32;
 
@@ -54,11 +59,22 @@ function depthOf(value: unknown, depth = 0): number {
 /** One typed descriptor per tool — THE source for parsing, inputSchema,
  * and projection. Output is built field-by-field; spreading a database
  * row into a result is forbidden in this module (arch-tested). */
+type ToolContext = {
+  store: Store;
+  who: VerifiedCoordinator;
+  /** The raw credential, per-SERVER closure state — never module state:
+   * two serveMcp instances in one process must not cross credentials
+   * (implementation review, finding 5). Filing re-authenticates with it
+   * inside its own transaction. */
+  token: string;
+  now: Date;
+};
+
 type Tool = {
   name: string;
   description: string;
   inputSchema: Json;
-  handle: (store: Store, who: VerifiedCoordinator, args: Record<string, unknown>, now: Date) =>
+  handle: (ctx: ToolContext, args: Record<string, unknown>) =>
     | { ok: true; body: Json }
     | { ok: false; message: string };
 };
@@ -72,6 +88,57 @@ const CONTRACT_GUIDE = [
   "Approve, steer, answer, pick, mint, configure, merge: those verbs do not exist on this surface, by construction.",
 ].join("\n");
 
+/** The descriptor's inputSchema IS the runtime parser (review finding 2):
+ * unknown fields, bad types, bad enums, and bound violations are protocol
+ * errors (InvalidParams), never tool refusals. Small on purpose — it
+ * covers exactly the schema features the descriptors use. */
+function invalidArgs(schema: Json, args: Record<string, unknown>): string | null {
+  const shape = schema as { properties?: Record<string, Record<string, unknown>>; required?: string[] };
+  const properties = shape.properties ?? {};
+  for (const key of Object.keys(args)) {
+    if (properties[key] === undefined) return "unknown argument `" + key + "`";
+  }
+  for (const key of shape.required ?? []) {
+    if (args[key] === undefined) return "missing required argument `" + key + "`";
+  }
+  for (const [key, rule] of Object.entries(properties)) {
+    const value = args[key];
+    if (value === undefined) continue;
+    if (rule["type"] === "string") {
+      if (typeof value !== "string") return "`" + key + "` must be a string";
+      const min = rule["minLength"];
+      const max = rule["maxLength"];
+      if (typeof min === "number" && value.length < min) return "`" + key + "` is shorter than " + String(min);
+      if (typeof max === "number" && value.length > max) return "`" + key + "` is longer than " + String(max);
+      const allowed = rule["enum"];
+      if (Array.isArray(allowed) && !allowed.includes(value)) return "`" + key + "` must be one of " + allowed.join(", ");
+    }
+    if (rule["type"] === "integer") {
+      if (typeof value !== "number" || !Number.isInteger(value)) return "`" + key + "` must be an integer";
+      const min = rule["minimum"];
+      const max = rule["maximum"];
+      if (typeof min === "number" && value < min) return "`" + key + "` is below " + String(min);
+      if (typeof max === "number" && value > max) return "`" + key + "` is above " + String(max);
+    }
+  }
+  return null;
+}
+
+/** Every tool's result is one shape — a content array of one text part
+ * carrying the JSON body — declared so clients can rely on it. */
+const OUTPUT_SCHEMA: Json = {
+  type: "object",
+  properties: {
+    content: {
+      type: "array",
+      items: { type: "object", properties: { type: { type: "string" }, text: { type: "string" } }, required: ["type", "text"], additionalProperties: false },
+    },
+    isError: { type: "boolean" },
+  },
+  required: ["content"],
+  additionalProperties: true,
+};
+
 function str(args: Record<string, unknown>, name: string, max: number): string | null {
   const value = args[name];
   if (typeof value !== "string" || value.length === 0 || value.length > max) return null;
@@ -83,7 +150,7 @@ const TOOLS: Tool[] = [
     name: "status",
     description: "The plane's liveness facts over your repo allowlist: what waits on the operator, what runs, what finished in the last 24h.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handle: (store, who, _args, now) => ({ ok: true, body: statusFor(store, who, now) as unknown as Json }),
+    handle: ctx => ({ ok: true, body: statusFor(ctx.store, ctx.who, ctx.now) as unknown as Json }),
   },
   {
     name: "list_tasks",
@@ -98,13 +165,13 @@ const TOOLS: Tool[] = [
       },
       additionalProperties: false,
     },
-    handle: (store, who, args) => {
+    handle: (ctx, args) => {
       const filter: { state?: string; repo?: string; cursor?: number; limit?: number } = {};
       if (typeof args["state"] === "string") filter.state = args["state"];
       if (typeof args["repo"] === "string") filter.repo = args["repo"];
       if (typeof args["cursor"] === "number") filter.cursor = args["cursor"];
       if (typeof args["limit"] === "number") filter.limit = args["limit"];
-      return { ok: true, body: listTasksFor(store, who, filter) as unknown as Json };
+      return { ok: true, body: listTasksFor(ctx.store, ctx.who, filter) as unknown as Json };
     },
   },
   {
@@ -116,10 +183,10 @@ const TOOLS: Tool[] = [
       required: ["ref"],
       additionalProperties: false,
     },
-    handle: (store, who, args) => {
+    handle: (ctx, args) => {
       const ref = str(args, "ref", 64);
       if (ref === null) return { ok: false, message: "ref is a task id, 1-64 characters" };
-      const detail = taskDetailFor(store, who, ref);
+      const detail = taskDetailFor(ctx.store, ctx.who, ref);
       if (detail === null) return { ok: false, message: `not-found: no task \`${ref}\` in your repositories` };
       return { ok: true, body: detail as unknown as Json };
     },
@@ -128,7 +195,7 @@ const TOOLS: Tool[] = [
     name: "list_repos",
     description: "The repositories your credential may see and file into.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handle: (_store, who) => ({ ok: true, body: { repos: [...who.repos] } }),
+    handle: ctx => ({ ok: true, body: { repos: [...ctx.who.repos] } }),
   },
   {
     name: "get_contract",
@@ -150,7 +217,7 @@ const TOOLS: Tool[] = [
       required: ["repo", "title", "idempotency_key"],
       additionalProperties: false,
     },
-    handle: (store, _who, args, now) => {
+    handle: (ctx, args) => {
       const repo = str(args, "repo", 800);
       const title = str(args, "title", 200);
       const key = str(args, "idempotency_key", 64);
@@ -161,10 +228,10 @@ const TOOLS: Tool[] = [
       // The token, not the pre-verified identity: filing re-authenticates
       // INSIDE its own transaction (the session's `who` is a courtesy).
       const outcome = fileCoordinatorProposal(
-        store,
-        currentToken,
+        ctx.store,
+        ctx.token,
         { repo, title, ...(intent === undefined ? {} : { intent }), idempotencyKey: key },
-        now,
+        ctx.now,
       );
       if (!outcome.ok) return { ok: false, message: outcome.message };
       return {
@@ -178,10 +245,6 @@ const TOOLS: Tool[] = [
     },
   },
 ];
-
-/** The filing tool needs the raw token for its in-transaction re-auth;
- * it is process state, set once at serve() start, never in tool output. */
-let currentToken = "";
 
 export type McpIo = {
   onLine: (handler: (line: string) => void) => void;
@@ -215,8 +278,11 @@ export function serveMcp(
           : "no live coordinator credential matches this token",
     };
   }
-  currentToken = token;
   const cancelled = new Set<string>();
+  const inFlight = new Set<string>();
+  // Legacy lifecycle state (review finding 2): initialize must come first
+  // in the handshake era; the modern era is stateless by design.
+  let legacyReady = false;
 
   const error = (id: Json, code: number, message: string): void =>
     io.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }));
@@ -225,18 +291,22 @@ export function serveMcp(
     if (id !== null && cancelled.has(JSON.stringify(id))) return; // suppressed entirely
     const complete: Record<string, Json> =
       era === "modern"
-        ? { ...result, resultType: "complete", ...(cacheable ? { ttlMs: 0, cacheScope: "session" } : {}) }
+        ? { ...result, resultType: "complete", ...(cacheable ? { ttlMs: 0, cacheScope: "private" } : {}) }
         : result;
     io.write(JSON.stringify({ jsonrpc: "2.0", id, result: complete }));
   };
 
   const toolsPayload = (): Json => ({
-    tools: TOOLS.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })),
+    tools: TOOLS.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, outputSchema: OUTPUT_SCHEMA })),
   });
 
   const callTool = (id: Json, era: "modern" | "legacy", params: Record<string, unknown>): void => {
-    // A concurrent migration refuses in words and the server exits clean —
-    // a long-lived reader never blesses a moved or mid-flight schema.
+    // ONE snapshot per call (review finding 3): the version check, the
+    // credential re-read, and every data read share a transaction, so a
+    // concurrent migration cannot slip between them; filing's own
+    // BEGIN IMMEDIATE reenters this one. A moved schema refuses in words
+    // and the server exits clean.
+    store.transact(() => {
     if (!store.schemaCurrent()) {
       error(id, -32000, "the database schema moved underneath this server — restart it");
       io.exit(0);
@@ -257,12 +327,18 @@ export function serveMcp(
       return;
     }
     const args = (params["arguments"] ?? {}) as Record<string, unknown>;
-    const answered = tool.handle(store, session.who, args, clock());
+    const invalid = invalidArgs(tool.inputSchema, args);
+    if (invalid !== null) {
+      error(id, -32602, invalid);
+      return;
+    }
+    const answered = tool.handle({ store, who: session.who, token, now: clock() }, args);
     if (!answered.ok) {
       respond(id, era, { content: [{ type: "text", text: answered.message }], isError: true }, false);
       return;
     }
     respond(id, era, { content: [{ type: "text", text: JSON.stringify(answered.body) }] }, false);
+    });
   };
 
   io.onLine(line => {
@@ -288,17 +364,45 @@ export function serveMcp(
       return;
     }
     const request = message as Record<string, unknown>;
-    const id = (request["id"] ?? null) as Json;
+    if (request["jsonrpc"] !== "2.0") {
+      error(null, -32600, 'jsonrpc must be "2.0"');
+      return;
+    }
+    const rawId = request["id"];
+    if (rawId !== undefined && typeof rawId !== "string" && typeof rawId !== "number" && rawId !== null) {
+      error(null, -32600, "id must be a string, a number, or null");
+      return;
+    }
+    const id = (rawId ?? null) as Json;
     const method = typeof request["method"] === "string" ? request["method"] : "";
     const params = (request["params"] ?? {}) as Record<string, unknown>;
     const meta = (params["_meta"] ?? {}) as Record<string, unknown>;
 
+    // Every method — lifecycle included — refuses on a moved schema
+    // (review finding 3): a server that answers discover from one world
+    // and tools from another is lying to somebody.
+    if (!store.schemaCurrent()) {
+      error(id, -32000, "the database schema moved underneath this server — restart it");
+      io.exit(0);
+      return;
+    }
+
     if (method === "notifications/cancelled") {
+      // Cancellation touches IN-FLIGHT work only (review finding 2): an id
+      // never seen, already answered, or yet to arrive is not cancellable —
+      // pre-cancelling the future would let a peer suppress request ids
+      // forever.
       const target = params["requestId"];
-      if (target !== undefined) cancelled.add(JSON.stringify(target as Json));
+      if (target !== undefined && inFlight.has(JSON.stringify(target as Json))) {
+        cancelled.add(JSON.stringify(target as Json));
+      }
       return; // a notification — no reply of any kind
     }
-    if (method === "notifications/initialized") return; // legacy lifecycle — received, ignored
+    if (method === "notifications/initialized") {
+      legacyReady = true;
+      return;
+    }
+    if (method.startsWith("notifications/")) return; // unknown notification: silence, never an error
 
     if (method === "initialize") {
       // The handshake era can only negotiate ITSELF: an unsupported ask is
@@ -310,33 +414,50 @@ export function serveMcp(
       }, false);
       return;
     }
-    if (method === "ping") {
-      respond(id, "legacy", {}, false);
-      return;
-    }
     if (method === "server/discover") {
       respond(id, "modern", {
         protocolVersion: MODERN,
+        supportedVersions: [MODERN, LEGACY],
         capabilities: { tools: {} },
-        serverInfo: { name: "standing-orders", version: "0.4.0" },
+        _meta: { [META_SERVER]: { name: "standing-orders", version: "0.4.0" } },
         ...(toolsPayload() as Record<string, Json>),
       }, true);
       return;
     }
 
-    const declared = typeof meta["protocolVersion"] === "string" ? meta["protocolVersion"] : null;
+    // Era classification PRECEDES every remaining method — a modern ping
+    // must carry the modern result shape (review finding 1).
+    const declared = typeof meta[META_VERSION] === "string" ? (meta[META_VERSION] as string) : null;
     const era: "modern" | "legacy" = declared === MODERN ? "modern" : "legacy";
     if (declared !== null && declared !== MODERN && declared !== LEGACY) {
-      error(id, -32602, `unsupported protocol version \`${declared}\` — this server speaks ${MODERN} and ${LEGACY}`);
+      error(id, UNSUPPORTED_VERSION, `unsupported protocol version \`${declared}\` — this server speaks ${MODERN} and ${LEGACY}`);
       return;
     }
 
+    if (method === "ping") {
+      respond(id, era, {}, false);
+      return;
+    }
+
+    // The handshake era operates only after its lifecycle completed; the
+    // modern era is stateless and needs no handshake.
+    if (era === "legacy" && !legacyReady && (method === "tools/list" || method === "tools/call")) {
+      error(id, -32002, "not initialized — the handshake era requires initialize and notifications/initialized first");
+      return;
+    }
     if (method === "tools/list") {
       respond(id, era, toolsPayload() as Record<string, Json>, true);
       return;
     }
     if (method === "tools/call") {
-      callTool(id, era, params);
+      const key = JSON.stringify(id);
+      inFlight.add(key);
+      try {
+        callTool(id, era, params);
+      } finally {
+        inFlight.delete(key);
+        cancelled.delete(key);
+      }
       return;
     }
     error(id, -32601, `unknown method \`${method}\``);

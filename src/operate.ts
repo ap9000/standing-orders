@@ -1409,7 +1409,7 @@ async function mcpCommand(
       const stat = fstatSync(fd);
       if (!stat.isFile()) return said(`${fromFile}: not a regular file`);
       if (stat.uid !== process.getuid?.()) return said(`${fromFile}: owned by somebody else`);
-      if ((stat.mode & 0o777) !== 0o600) return said(`${fromFile}: mode must be exactly 0600`);
+      if ((stat.mode & 0o7777) !== 0o600) return said(`${fromFile}: mode must be exactly 0600 — special bits included`);
       if (stat.size > 4096) return said(`${fromFile}: too large for a token file`);
       const buffer = Buffer.alloc(4096);
       const read = readSync(fd, buffer, 0, 4096, 0);
