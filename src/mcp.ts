@@ -62,6 +62,10 @@ function depthOf(value: unknown, depth = 0): number {
 type ToolContext = {
   store: Store;
   who: VerifiedCoordinator;
+  /** The installation's enrolled repos (repos.json), when the launcher
+   * knows them — list_repos answers allowlist ∩ enrolled. null = the
+   * launcher could not read the registry; the allowlist alone answers. */
+  enrolled: readonly string[] | null;
   /** The raw credential, per-SERVER closure state — never module state:
    * two serveMcp instances in one process must not cross credentials
    * (implementation review, finding 5). Filing re-authenticates with it
@@ -171,7 +175,7 @@ const TOOLS: Tool[] = [
       if (typeof args["repo"] === "string") filter.repo = args["repo"];
       if (typeof args["cursor"] === "number") filter.cursor = args["cursor"];
       if (typeof args["limit"] === "number") filter.limit = args["limit"];
-      return { ok: true, body: listTasksFor(ctx.store, ctx.who, filter) as unknown as Json };
+      return { ok: true, body: listTasksFor(ctx.store, ctx.who, filter, ctx.now) as unknown as Json };
     },
   },
   {
@@ -193,9 +197,19 @@ const TOOLS: Tool[] = [
   },
   {
     name: "list_repos",
-    description: "The repositories your credential may see and file into.",
+    description: "The repositories your credential may see and file into, with their operating-mode standing.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handle: ctx => ({ ok: true, body: { repos: [...ctx.who.repos] } }),
+    handle: ctx => ({
+      ok: true,
+      body: {
+        repos: ctx.who.repos
+          .filter(repo => ctx.enrolled === null || ctx.enrolled.includes(repo))
+          .map(repo => {
+            const mode = ctx.store.activeMode(repo, ctx.now);
+            return { repo, mode: mode === null ? "no operating mode — every act is a ceremony" : `mode ${mode.name} signed until ${mode.absoluteExpiry}` };
+          }),
+      },
+    }),
   },
   {
     name: "get_contract",
@@ -266,6 +280,7 @@ export function serveMcp(
   token: string,
   io: McpIo,
   clock: () => Date = () => new Date(),
+  enrolled: readonly string[] | null = null,
 ): McpOutcome {
   const auth = authenticateCoordinator(store, token);
   if (!auth.ok) {
@@ -332,7 +347,7 @@ export function serveMcp(
       error(id, -32602, invalid);
       return;
     }
-    const answered = tool.handle({ store, who: session.who, token, now: clock() }, args);
+    const answered = tool.handle({ store, who: session.who, token, enrolled, now: clock() }, args);
     if (!answered.ok) {
       respond(id, era, { content: [{ type: "text", text: answered.message }], isError: true }, false);
       return;

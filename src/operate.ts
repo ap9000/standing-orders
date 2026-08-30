@@ -43,7 +43,7 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
-import { configPath, addRepos, updateRepos } from "./repos.js";
+import { configPath, addRepos, updateRepos, loadRepos } from "./repos.js";
 import { pushPass } from "./push.js";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
@@ -1442,6 +1442,16 @@ async function mcpCommand(
     return said("demo console — no gateway");
   }
 
+  // The enrolled-project registry, best-effort: list_repos answers
+  // allowlist ∩ enrolled when it reads; the allowlist alone otherwise.
+  let enrolled: string[] | null = null;
+  try {
+    const loaded = await loadRepos(configPath(process.env, homedir()));
+    if (!("error" in loaded)) enrolled = loaded.repos;
+  } catch {
+    enrolled = null;
+  }
+
   return await new Promise<number>(resolvePromise => {
     let lineHandler: (line: string) => void = () => {};
     let eofHandler: () => void = () => {};
@@ -1458,7 +1468,7 @@ async function mcpCommand(
         store.close();
         resolvePromise(code);
       },
-    });
+    }, undefined, enrolled);
     if (!outcome.ok) {
       reader.close();
       store.close();

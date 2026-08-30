@@ -18,6 +18,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { canonicalRepos } from "./runner.js";
 import { fileTaskProposal } from "./proposal.js";
+import { describeScope } from "./scope.js";
 import type { Store } from "./store.js";
 
 declare const verifiedCoordinatorBrand: unique symbol;
@@ -322,6 +323,7 @@ function inClause(repos: readonly string[]): { sql: string; args: string[] } {
 
 export function statusFor(store: Store, who: VerifiedCoordinator, now: Date): {
   waitsOnYou: number;
+  waits: { approvals: number; questions: number; incidents: number; picks: number };
   running: number;
   builtToday: number;
   failedToday: number;
@@ -344,9 +346,23 @@ export function statusFor(store: Store, who: VerifiedCoordinator, now: Date): {
       JOIN task_ref ON task_ref.id = run.task_ref
       WHERE task_ref.repo IN (${sql}) AND decision.answered_at IS NULL AND decision.state IN ('open','expired')`,
   );
+  // "Running" is lease-based liveness, never `outcome IS NULL` (review
+  // finding 6): a live, unexpired, newest-generation claim.
   const running = one(
-    `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref
-      WHERE task_ref.repo IN (${sql}) AND run.outcome IS NULL`,
+    `SELECT COUNT(DISTINCT claim.task_ref) AS n FROM claim
+      JOIN task_ref ON task_ref.id = claim.task_ref
+      WHERE task_ref.repo IN (${sql}) AND claim.released_at IS NULL AND claim.expires_at > ?
+        AND claim.lease_generation = (SELECT MAX(newest.lease_generation) FROM claim AS newest WHERE newest.task_ref = claim.task_ref)`,
+    [now.toISOString()],
+  );
+  const incidents = one(
+    `SELECT COUNT(*) AS n FROM incident JOIN run ON run.id = incident.run
+      JOIN task_ref ON task_ref.id = run.task_ref
+      WHERE task_ref.repo IN (${sql}) AND incident.resolved_at IS NULL`,
+  );
+  const picks = one(
+    `SELECT COUNT(*) AS n FROM contest JOIN task_ref ON task_ref.id = contest.task_ref
+      WHERE task_ref.repo IN (${sql}) AND contest.state = 'pick-wait'`,
   );
   const builtToday = one(
     `SELECT COUNT(*) AS n FROM run JOIN task_ref ON task_ref.id = run.task_ref
@@ -368,32 +384,52 @@ export function statusFor(store: Store, who: VerifiedCoordinator, now: Date): {
     )
     .all(...args)
     .map(row => ({ repo: String(row["repo"]), queued: Number(row["queued"]), running: Number(row["running"]) }));
-  return { waitsOnYou: unsealed + questions, running, builtToday, failedToday, repos };
+  return {
+    waitsOnYou: unsealed + questions + incidents + picks,
+    waits: { approvals: unsealed, questions, incidents, picks },
+    running,
+    builtToday,
+    failedToday,
+    repos,
+  };
 }
 
 export function listTasksFor(
   store: Store,
   who: VerifiedCoordinator,
   filter: { state?: string; repo?: string; cursor?: number; limit?: number },
-): { tasks: { ref: string; title: string; state: string; repo: string; filedVia: string | null }[]; nextCursor: number | null } {
+  now: Date,
+): { tasks: { ref: string; title: string; state: string; chip: string; repo: string; filedVia: string | null }[]; nextCursor: number | null } {
   const limit = Math.min(Math.max(filter.limit ?? 20, 1), 50);
   const repos = filter.repo === undefined ? [...who.repos] : who.repos.includes(filter.repo) ? [filter.repo] : [];
   if (repos.length === 0) return { tasks: [], nextCursor: null };
   const { sql, args } = inClause(repos);
   const rows = store.handle
     .prepare(
-      `SELECT task_ref.id AS rid, task.id AS tid, task.title AS title, task.state AS state, task_ref.repo AS repo, task_ref.filed_via AS via
+      `SELECT task_ref.id AS rid, task.id AS tid, task.title AS title, task.state AS state, task_ref.repo AS repo, task_ref.filed_via AS via,
+              EXISTS(SELECT 1 FROM claim WHERE claim.task_ref = task_ref.id AND claim.released_at IS NULL AND claim.expires_at > ?
+                AND claim.lease_generation = (SELECT MAX(newest.lease_generation) FROM claim AS newest WHERE newest.task_ref = claim.task_ref)) AS live,
+              EXISTS(SELECT 1 FROM task_scope WHERE task_scope.task_id = task.id AND task_scope.approved_at IS NOT NULL AND task_scope.approved_digest = task_scope.digest) AS sealed
          FROM task_ref JOIN task ON task.id = task_ref.external_id AND task_ref.backend = 'built-in'
         WHERE task_ref.repo IN (${sql})
           AND (? IS NULL OR task.state = ?)
           AND task_ref.id > ?
         ORDER BY task_ref.id LIMIT ?`,
     )
-    .all(...args, filter.state ?? null, filter.state ?? null, filter.cursor ?? 0, limit + 1);
+    .all(now.toISOString(), ...args, filter.state ?? null, filter.state ?? null, filter.cursor ?? 0, limit + 1);
+  const chipOf = (state: string, live: boolean, sealed: boolean): string => {
+    if (live) return "building";
+    if (state === "queued") return sealed ? "ready to build" : "waiting for approval";
+    if (state === "running") return "running";
+    if (state === "done") return "built";
+    if (state === "failed") return "failed";
+    return state;
+  };
   const page = rows.slice(0, limit).map(row => ({
     ref: String(row["tid"]),
     title: String(row["title"]),
     state: String(row["state"]),
+    chip: chipOf(String(row["state"]), Number(row["live"]) === 1, Number(row["sealed"]) === 1),
     repo: String(row["repo"]),
     filedVia: row["via"] === null ? null : String(row["via"]),
   }));
@@ -407,8 +443,16 @@ export function taskDetailFor(
   taskId: string,
 ): {
   ref: string; title: string; state: string; repo: string;
-  scope: { sealed: boolean; goal: string | null };
-  attempts: { outcome: string | null; provider: string; model: string | null; startedAt: string; finishedAt: string | null }[];
+  filedBy: string | null;
+  scope: { sealed: boolean; goal: string | null; words: string[] };
+  waits: string[];
+  attempts: {
+    outcome: string | null; provider: string; model: string | null;
+    startedAt: string; finishedAt: string | null; durationMs: number | null;
+    costMicrousd: number | null;
+  }[];
+  cost: { totalMicrousd: number; measuredRuns: number; totalRuns: number };
+  evidence: { id: number; kind: string; bytes: number; sha256: string; captureStatus: string | null }[];
 } | null {
   const { sql, args } = inClause(who.repos);
   const row = store.handle
@@ -421,26 +465,71 @@ export function taskDetailFor(
   // A foreign or absent ref is the SAME answer: not-found — existence
   // outside the allowlist is not this credential's to learn.
   if (row === undefined) return null;
+  const rid = Number(row["rid"]);
   const scope = store.getScope(taskId);
   const attempts = store.handle
     .prepare(
-      `SELECT outcome, provider, model, started_at, finished_at FROM run
+      `SELECT outcome, provider, model, started_at, finished_at, cost_usd FROM run
         WHERE task_ref = ? ORDER BY id`,
     )
-    .all(Number(row["rid"]))
+    .all(rid)
     .map(one => ({
       outcome: one["outcome"] === null ? null : String(one["outcome"]),
       provider: String(one["provider"]),
       model: one["model"] === null ? null : String(one["model"]),
       startedAt: String(one["started_at"]),
       finishedAt: one["finished_at"] === null ? null : String(one["finished_at"]),
+      durationMs:
+        one["finished_at"] === null
+          ? null
+          : new Date(String(one["finished_at"])).getTime() - new Date(String(one["started_at"])).getTime(),
+      // Integer micro-USD, never a float (review finding 6); null = unmeasured.
+      costMicrousd: one["cost_usd"] === null ? null : Math.round(Number(one["cost_usd"]) * 1_000_000),
     }));
+  const measured = attempts.filter(one => one.costMicrousd !== null);
+  const waits: string[] = [];
+  const question = store.handle
+    .prepare(
+      `SELECT 1 AS hit FROM decision JOIN run ON run.id = decision.run
+        WHERE run.task_ref = ? AND decision.answered_at IS NULL AND decision.state IN ('open','expired') LIMIT 1`,
+    )
+    .get(rid);
+  if (question !== undefined) waits.push("a question waits on the operator");
+  if (!store.scopeSealed(taskId)) waits.push("the scope waits on the operator's signature");
+  const latestRun = store.handle.prepare("SELECT MAX(id) AS top FROM run WHERE task_ref = ?").get(rid);
+  const evidence =
+    latestRun?.["top"] === null || latestRun?.["top"] === undefined
+      ? []
+      : store.handle
+          .prepare("SELECT id, kind, bytes_original, sha256, capture_status FROM artifact WHERE run = ? ORDER BY id")
+          .all(Number(latestRun["top"]))
+          .map(one => ({
+            // Opaque metadata only — no filesystem paths, no bodies (spec v6).
+            id: Number(one["id"]),
+            kind: String(one["kind"]),
+            bytes: Number(one["bytes_original"]),
+            sha256: String(one["sha256"]),
+            captureStatus: one["capture_status"] === null ? null : String(one["capture_status"]),
+          }));
   return {
     ref: String(row["tid"]),
     title: String(row["title"]),
     state: String(row["state"]),
     repo: String(row["repo"]),
-    scope: { sealed: store.scopeSealed(taskId), goal: scope?.goal ?? null },
+    filedBy: store.coordinatorProvenanceOf(taskId)?.label ?? null,
+    scope: {
+      sealed: store.scopeSealed(taskId),
+      goal: scope?.goal ?? null,
+      // The scope in the console's own words — fallback chain included.
+      words: scope === null ? [] : describeScope(scope),
+    },
+    waits,
     attempts,
+    cost: {
+      totalMicrousd: measured.reduce((sum, one) => sum + (one.costMicrousd ?? 0), 0),
+      measuredRuns: measured.length,
+      totalRuns: attempts.length,
+    },
+    evidence,
   };
 }
