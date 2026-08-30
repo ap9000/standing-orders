@@ -104,7 +104,7 @@ import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS 
 import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
-import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, isLargeRepo } from "./onboard.js";
+import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
 import { verifiedAuthor } from "./store.js";
 import { updateRepos, addRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
@@ -223,6 +223,7 @@ export type ServeOptions = {
    * prove; gh itself is proved by onboard.test.ts. */
   ghPreview?: typeof previewGithubRepo;
   ghClone?: typeof cloneGithubRepo;
+  ghList?: typeof listGithubRepos;
 };
 
 const SESSION_COOKIE = "standing-orders_session";
@@ -722,7 +723,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       !/^\/t\/[^/]+$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
       url.pathname !== "/projects" &&
-      url.pathname !== "/projects/browse" && url.pathname !== "/workbench" &&
+      url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
@@ -785,6 +786,65 @@ export function createDecisionServer(options: ServeOptions): Server {
           parent,
           entries,
           csrf,
+        }),
+      );
+    }
+
+    if (url.pathname === "/projects/github") {
+      // The signed-in gh account's repositories, OFFERED instead of typed
+      // (operator request): read-only listing through the same hardened gh
+      // runner onboarding uses, every identity re-parsed strictly, and each
+      // row carries exactly ONE honest action — open (already a project
+      // here), add (a clone under a root this server may serve, never yet
+      // opened), or the EXISTING preview-and-password clone ceremony.
+      // Approver only: a viewer has no business enumerating private
+      // repository names.
+      if (who.via !== "cookie") return refuse(response, who, 403, "listing repositories feeds a browser session's act");
+      if (who.role !== "approver") return refuse(response, who, 403, "your login can watch — adding projects is an approver's act");
+      if (store.isDemo()) return refuse(response, who, 403, "the sandbox never talks to GitHub");
+      const listed = await (options.ghList ?? listGithubRepos)();
+      // What this machine already has, matched by the clone's own recorded
+      // origin — registered projects first, then the immediate children of
+      // the configured roots. Identities are compared case-insensitively
+      // (GitHub's rule); the FIRST match wins.
+      const localByIdentity = new Map<string, string>();
+      const registered = new Set<string>();
+      for (const project of store.listProjects()) {
+        if (!visible(project.path)) continue;
+        registered.add(project.path);
+        const identity = githubIdentityOf(originUrlOf(project.path) ?? "");
+        if (identity !== null && !localByIdentity.has(identity.toLowerCase())) {
+          localByIdentity.set(identity.toLowerCase(), project.path);
+        }
+      }
+      for (const root of ceiling.roots) {
+        let children: string[] = [];
+        try {
+          children = readdirSync(root, { withFileTypes: true })
+            .filter(one => one.isDirectory())
+            .slice(0, 400)
+            .map(one => join(root, one.name));
+        } catch {
+          children = [];
+        }
+        for (const child of children) {
+          if (!existsSync(join(child, ".git"))) continue;
+          const identity = githubIdentityOf(originUrlOf(child) ?? "");
+          if (identity !== null && !localByIdentity.has(identity.toLowerCase())) {
+            localByIdentity.set(identity.toLowerCase(), child);
+          }
+        }
+      }
+      return sendScreen(
+        response,
+        200,
+        githubReposPage(chromeFor(who.session.project, "projects"), {
+          listed,
+          local: localByIdentity,
+          registered,
+          csrf: who.session.csrf,
+          cloneReady: ceiling.roots.length > 0,
+          openProject: who.session.project ?? null,
         }),
       );
     }
@@ -7855,6 +7915,94 @@ type OnboardCardState =
 
 type ProjectPeek = { waiting: number; queued: number; running: number; doneRecently: number };
 
+/** owner/name from a git remote URL — https and ssh shapes only, else null. */
+function githubIdentityOf(remoteUrl: string): string | null {
+  const match = /github\.com[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(remoteUrl.trim());
+  return match === null ? null : `${match[1]}/${match[2]}`;
+}
+
+/** The `origin` remote's url from a repository's OWN .git/config — a
+ * bounded file read, no process spawned per row. null when unreadable or
+ * origin-less; a worktree-style `.git` FILE (gitdir pointer) reads null
+ * too, which is honest — its identity lives elsewhere. */
+function originUrlOf(repoPath: string): string | null {
+  try {
+    const config = readFileSync(join(repoPath, ".git", "config"), "utf8").slice(0, 64 * 1024);
+    const section = /\[remote "origin"\][^[]*/.exec(config)?.[0] ?? "";
+    const url = /^\s*url\s*=\s*(.+)$/m.exec(section)?.[1];
+    return url === undefined ? null : url.trim();
+  } catch {
+    return null;
+  }
+}
+
+/** The GitHub listing page: the account's repositories with ONE honest
+ * action each. Names, descriptions, and paths are gh/filesystem DATA —
+ * escaped at the sink like everything else. */
+function githubReposPage(
+  chrome: Chrome,
+  data: {
+    listed: ListOutcome;
+    local: Map<string, string>;
+    registered: Set<string>;
+    csrf: string;
+    cloneReady: boolean;
+    openProject: string | null;
+  },
+): Screen {
+  const openForm = (path: string, label: string): string =>
+    [
+      `<form method="post" action="/projects/open" class="inline">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<input type="hidden" name="path" value="${escape(path)}">`,
+      `<button type="submit">${escape(label)}</button>`,
+      `</form>`,
+    ].join("");
+  const cloneForm = (nameWithOwner: string): string =>
+    [
+      `<form method="post" action="/projects/onboard-preview" class="inline">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<input type="hidden" name="repo" value="${escape(nameWithOwner)}">`,
+      `<input type="hidden" name="root" value="0">`,
+      `<button type="submit">clone here →</button>`,
+      `</form>`,
+    ].join("");
+  const rows =
+    !data.listed.ok
+      ? `<p class="meta">${escape(data.listed.message)}</p>`
+      : data.listed.repos.length === 0
+        ? `<p class="meta">the signed-in GitHub account has no repositories to list</p>`
+        : data.listed.repos
+            .map(repo => {
+              const localPath = data.local.get(repo.nameWithOwner.toLowerCase()) ?? null;
+              const action =
+                localPath !== null && data.openProject === localPath
+                  ? `<span class="badge badge-done">open now</span>`
+                  : localPath !== null
+                    ? openForm(localPath, data.registered.has(localPath) ? "open →" : "add + open →")
+                    : data.cloneReady
+                      ? cloneForm(repo.nameWithOwner)
+                      : `<span class="meta">clone needs --project-root</span>`;
+              return [
+                `<div class="card project-card">`,
+                `<div class="row"><strong>${escape(repo.nameWithOwner)}</strong>${repo.isPrivate ? ` <span class="badge">private</span>` : ""}`,
+                `<span class="right">${action}</span></div>`,
+                localPath === null
+                  ? `<p class="meta">not on this machine yet${repo.updatedAt === "" ? "" : ` · pushed ${when(repo.updatedAt)}`}</p>`
+                  : `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(localPath)}</p>`,
+                repo.description === "" ? "" : `<p class="meta">${escape(repo.description)}</p>`,
+                `</div>`,
+              ].join("\n");
+            })
+            .join("\n");
+  return screen("projects", [
+    `<h1>your GitHub repositories</h1>`,
+    `<p class="meta">what the server's signed-in <span class="mono">gh</span> account can see — repositories already on this machine offer open; the rest clone through the usual preview and password.</p>`,
+    rows,
+    `<p class="row" style="margin-top:.6rem"><a class="badge" href="/projects">← back to projects</a></p>`,
+  ].join("\n"), { chrome });
+}
+
 function projectsPage(
   chrome: Chrome,
   recent: { path: string; name: string; lastOpenedAt: string }[],
@@ -7954,6 +8102,7 @@ function projectsPage(
     browsable
       ? `<p class="row"><a class="badge" href="/projects/browse">\ud83d\uddc2 browse this machine's folders \u2192</a></p>`
       : `<p class="meta">folder browsing needs a scoped serve \u2014 start with <code>--project-root &lt;dir&gt;</code> or <code>--repo</code> and this lights up</p>`,
+    onboard === null ? "" : `<p class="row"><a class="badge" href="/projects/github">see your GitHub repositories \u2192</a></p>`,
     onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
     `<details style="margin-top:.5rem"><summary class="meta">or type an exact path</summary>`,
     `<form method="post" action="/projects/open" class="card" style="margin-top:.4rem">`,

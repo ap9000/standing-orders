@@ -4701,6 +4701,42 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     expect(await refused.text()).toContain("--project-root");
   });
 
+  test("the GitHub listing offers ONE honest action per repo: open what's here, clone what isn't (cookie only)", async () => {
+    // A real clone under the root whose origin names alex/Already-Here —
+    // matched case-insensitively through its OWN .git/config, no process.
+    const cloned = join(root, "already-here");
+    mkdirSync(join(cloned, ".git"), { recursive: true });
+    writeFileSync(join(cloned, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:alex/Already-Here.git\n');
+    const ghList = async () => ({
+      ok: true as const,
+      repos: [
+        { nameWithOwner: "alex/already-here", isPrivate: true, updatedAt: "2026-08-01T00:00:00Z", description: "on disk already" },
+        { nameWithOwner: "alex/not-yet", isPrivate: false, updatedAt: "2026-08-02T00:00:00Z", description: "cloneable" },
+      ],
+    });
+    await boot({ projectRoots: [root], ghList });
+    const cookie = await login();
+    const page = await (await fetch(url("/projects/github"), { headers: { cookie } })).text();
+    // The on-disk clone is offered as add + open, with its path said plainly.
+    expect(page).toContain("add + open");
+    expect(page).toContain(cloned);
+    // The absent one pre-fills the EXISTING clone ceremony — preview,
+    // password, and size check all still stand behind that form.
+    expect(page).toContain('value="alex/not-yet"');
+    expect(page).toContain("clone here");
+    expect(page).toContain("private");
+    // No cookie session, no listing.
+    const anon = await fetch(url("/projects/github"), { redirect: "manual" });
+    expect(anon.status).not.toBe(200);
+  });
+
+  test("a gh that is missing or signed out renders its words, never a broken page", async () => {
+    await boot({ projectRoots: [root], ghList: async () => ({ ok: false as const, reason: "gh-auth" as const, message: "gh is not signed in — run `gh auth login --hostname github.com` where serve runs" }) });
+    const cookie = await login();
+    const page = await (await fetch(url("/projects/github"), { headers: { cookie } })).text();
+    expect(page).toContain("gh is not signed in");
+  });
+
   test("preview mints a single-use record; confirm takes the password, clones, enrolls, opens; replay refuses", async () => {
     const registry = join(root, "repos.json");
     await boot({ projectRoots: [root], registryPath: registry, ghPreview: fakePreview, ghClone: fakeClone });

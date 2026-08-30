@@ -215,6 +215,59 @@ export async function previewGithubRepo(owner: string, name: string): Promise<Pr
   };
 }
 
+export type RepoListing = {
+  nameWithOwner: string;
+  isPrivate: boolean;
+  /** ISO stamp of the last push, "" when GitHub omitted it. */
+  updatedAt: string;
+  description: string;
+};
+
+export type ListOutcome =
+  | { ok: true; repos: RepoListing[] }
+  | { ok: false; reason: "gh-missing" | "gh-auth" | "gh-timeout" | "gh-said-no" | "malformed"; message: string };
+
+/**
+ * `gh repo list` — the signed-in account's repositories, read-only, so the
+ * projects screen can OFFER them instead of making the operator type
+ * owner/name from memory. Same discipline as the preview: gh's answer is
+ * DATA — every identity is re-parsed through the strict parser and rows
+ * that fail it are dropped, never rendered. Nothing is written on any
+ * outcome.
+ */
+export async function listGithubRepos(limit = 100): Promise<ListOutcome> {
+  const answer = await runGhTree(
+    ["repo", "list", "--json", "nameWithOwner,isPrivate,updatedAt,description", "--limit", String(Math.max(1, Math.min(200, limit)))],
+    { timeoutMs: 30_000 },
+  );
+  if (answer.notFound) return { ok: false, reason: "gh-missing", message: "the GitHub CLI is not installed on this machine — install gh where serve runs" };
+  if (answer.timedOut) return { ok: false, reason: "gh-timeout", message: "GitHub did not answer in time" };
+  if (answer.code === 4) return { ok: false, reason: "gh-auth", message: "gh is not signed in — run `gh auth login --hostname github.com` where serve runs" };
+  if (answer.code !== 0) return { ok: false, reason: "gh-said-no", message: `GitHub said no — ${ghWords(answer.stderr) || "the account's repositories could not be listed"}` };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(answer.stdout);
+  } catch {
+    return { ok: false, reason: "malformed", message: "GitHub's answer was not the JSON gh promises" };
+  }
+  if (!Array.isArray(parsed)) return { ok: false, reason: "malformed", message: "GitHub's answer was not the JSON gh promises" };
+  const repos: RepoListing[] = [];
+  for (const raw of parsed) {
+    if (raw === null || typeof raw !== "object") continue;
+    const row = raw as Record<string, unknown>;
+    const nameWithOwner = row["nameWithOwner"];
+    if (typeof nameWithOwner !== "string" || !parseGithubRepo(nameWithOwner).ok) continue;
+    const description = typeof row["description"] === "string" ? row["description"] : "";
+    repos.push({
+      nameWithOwner,
+      isPrivate: row["isPrivate"] === true,
+      updatedAt: typeof row["updatedAt"] === "string" ? row["updatedAt"] : "",
+      description: description.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 120),
+    });
+  }
+  return { ok: true, repos };
+}
+
 export type CloneOutcome =
   | { ok: true; target: string }
   | { ok: false; reason: "exists" | "gh-missing" | "gh-auth" | "gh-timeout" | "clone-failed" | "verify-failed" | "residual"; message: string };

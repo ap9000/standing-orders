@@ -1,5 +1,23 @@
 # Progress
 
+**2026-08-29 — Your GitHub repositories, offered instead of typed.** The
+projects page's add card gains "see your GitHub repositories →": a new
+/projects/github page lists the server's signed-in gh account's repos
+(read-only, through the same hardened tree-killing gh runner onboarding
+uses; every identity re-parsed through the strict parser, malformed rows
+dropped, descriptions control-stripped). Each row carries exactly ONE
+honest action, decided by what this machine already has: "open →" (a
+registered project), "add + open →" (a clone under a configured root whose
+own .git/config origin names it — a bounded file read per row, no process,
+matched case-insensitively), or "clone here →" — a pre-filled form into
+the EXISTING preview-and-password onboarding ceremony, so the size check
+and the single-use nonce all still stand. gh missing/signed-out render
+their words. Approver + cookie only (a viewer has no business enumerating
+private repo names); the sandbox refuses. onboard.ts gains
+listGithubRepos() beside previewGithubRepo, injectable for tests. Suite
+1465 (+2 HTTP tests: the action matrix incl. case-insensitive origin
+matching + anon refusal; gh-signed-out words).
+
 **2026-08-29 — Fallback F+G review: NO-GO verdict honored, all six findings
 closed.** Codex refused to bless F+G as the feature-close ("dormant defects
 do not make the completed feature safe to arm") — every finding shut:
