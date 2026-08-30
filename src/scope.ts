@@ -790,9 +790,32 @@ export function describeScope(scope: Scope): string[] {
     ...(scope.budgetMicrousd === null
       ? []
       : [`  budget       $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} per build attempt — the agent is stopped at this figure`]),
+    // The FALLBACK CHAIN, in the words the yes agrees to (Layer F): when
+    // this scope files under configured fallbacks, the digest above binds
+    // the WHOLE ordered chain — so the card says every entry, credential
+    // included, before anyone signs.
+    ...chainWords(chainFromJson(scope.proposedChainJson ?? null)),
     `  reference    ${scope.digest}`,
     `  approved     ${describeApproval(approval)}`,
   ];
+}
+
+/** The chain's approval-card lines; empty for a single-profile scope. */
+export function chainWords(chain: ChainEntry[] | null): string[] {
+  if (chain === null || chain.length < 2) return [];
+  const credential = (mode: ChainEntry["authMode"]): string =>
+    mode === "subscription" ? "your subscription" : "your API key";
+  const lines: string[] = [];
+  const base = chain[0] as ChainEntry;
+  lines.push(`  runs on      ${base.profile.provider} (${base.profile.model}) — ${credential(base.authMode)}`);
+  for (const entry of chain.slice(1)) {
+    lines.push(
+      `  if that runs out  falls back to ${entry.profile.provider} (${entry.profile.model}) — ${credential(entry.authMode)}${
+        entry.authMode === "api-key" ? "; spend moves to that account" : ""
+      }`,
+    );
+  }
+  return lines;
 }
 
 function describeApproval(approval: Approval): string {

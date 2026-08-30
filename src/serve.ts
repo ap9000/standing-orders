@@ -93,6 +93,7 @@ import {
   attendedTermsJson,
   authenticateApprover,
   canonicalProfileJson,
+  chainFromJson,
   profileDigestOf,
   proposeGuarded,
   type AttendedTerms,
@@ -1108,6 +1109,10 @@ export function createDecisionServer(options: ServeOptions): Server {
                 `<option value="">the preset's default (standard: on; hands-off: off)</option>` +
                 `<option value="1">agent-review every finished build</option>` +
                 `<option value="0">only when I ask</option>` +
+                `</select></label>`,
+              `<label>if a subscription runs out<select name="allow-paid-fallback">` +
+                `<option value="">never switch to a paid API key on its own (the default, every preset)</option>` +
+                `<option value="1">allow the approved fallback — spend moves to that account</option>` +
                 `</select></label>`,
               `<button type="submit">read the full terms</button>`,
               `</form>`,
@@ -3290,6 +3295,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         ...preset,
         autoApproveFiling: body.get("auto-approve") === "" || body.get("auto-approve") === null ? preset.autoApproveFiling : body.get("auto-approve") === "1",
         reviewAuto: body.get("review-auto") === "" || body.get("review-auto") === null ? preset.reviewAuto : body.get("review-auto") === "1",
+        // The paid-fallback grant is NEVER a preset default (R8): unchecked
+        // stays false on every preset — only the explicit box grants it.
+        allowPaidFallback: body.get("allow-paid-fallback") === "1",
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
       if (terms.publication === "automerge" && !store.hasMergeCapableGrant(project, now)) {
@@ -3307,7 +3315,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
           `<input type="hidden" name="digest" value="${escape(digest)}">` +
-          ["name", "days", "publication", "auto-approve", "review-auto"]
+          ["name", "days", "publication", "auto-approve", "review-auto", "allow-paid-fallback"]
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
@@ -8421,6 +8429,22 @@ function taskBody(data: {
           `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
           scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
           scope.touches.length === 0 ? "" : `<p><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          // The fallback chain, on the card the yes reads (Layer F): the
+          // digest binds the WHOLE chain, so every entry — credential
+          // included — is said before anyone signs.
+          (() => {
+            const chain = chainFromJson(scope.proposedChainJson ?? null);
+            if (chain === null || chain.length < 2) return "";
+            return `<p><strong>if its subscription runs out</strong></p><p class="recap">${chain
+              .slice(1)
+              .map(
+                one =>
+                  `falls back to ${escape(one.profile.provider)} (${escape(one.profile.model)}) — ${
+                    one.authMode === "api-key" ? "your API key; spend moves to that account" : "its subscription login"
+                  }`,
+              )
+              .join("; ")}</p>`;
+          })(),
           `<p class="meta">terms fingerprint <span class="mono">${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>`,
           approval.approved
             ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`

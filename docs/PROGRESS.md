@@ -1,5 +1,35 @@
 # Progress
 
+**2026-08-29 — Fallback chains, layers F + G: the operator surfaces and the
+fault matrix — task #93's build is COMPLETE.** Layer F, the words and
+levers: `config set fallback --repo <path> --entries
+provider:model:auth-mode[,…]` (credentialed, per-repo, 1–3 entries, every
+malformed shape refused in words — unknown provider, empty model, bad auth
+mode, subscription on a login-less provider; `config show` renders the
+chain and `config clear fallback` removes it; NEW approvals bind it,
+existing approvals untouched); `mode set --allow-paid-fallback` grants the
+spend switch (NEVER a preset default — hands-off included — and the /mode
+web ceremony gains the same explicit choice, carried through
+confirm→sign); the approval card now SAYS the chain everywhere the yes is
+read — describeScope gains "runs on claude (sonnet) — your subscription /
+if that runs out: falls back to gemini (gemini-2.5-pro) — your API key;
+spend moves to that account" (every CLI approve/show surface), and the web
+task page's scope card carries the same line, so the digest that binds the
+whole chain is signed with the whole chain in view. Layer G, the fault
+matrix (fallback-faults.test.ts): crash between disposition and resolution
+→ the reconciler re-derives the SAME advance from durable state; crash
+after a success → 'succeeded', no lingering cycle; a racing second
+resolver loses with exactly one transition; the grant revoked between
+advance and admission → refused at the money moment, cycle closed clean,
+nothing created; the approved chain corrupted after advance → incident,
+nothing created; a replayed admission → not-pending, exactly one fallback
+run ever; a third-strike-failed task → the fallback claim refuses on
+state; an exhausted pinned credential → the claim refuses on quota. CLI
+lesson: `--allow-paid-fallback` is a BOOLEAN flag — in the value-flag list
+the parser eats the next `--as` as its value. Suite 1461 (74 files).
+Remaining for #93: a Codex review round on F+G, then the fixture-capture
+milestone doc (how a real exhausted-subscription fixture arms the feature).
+
 **2026-08-29 — Fallback chains E3d VERIFY round: 1/3/5 confirmed closed;
 residuals on 2/4/6/7 all closed.** Codex's verify pass confirmed the
 credential pin (1), the pre-spawn custody proof's atomicity (3), and the

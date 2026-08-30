@@ -460,6 +460,20 @@ describe("filing under a fallback chain (E3a): the digest binds it, the seal cop
     expect(store.getScope("t-seal")!.approvedChainJson).toBe(scope.proposedChainJson);
   });
 
+  test("the approval card SAYS the chain — every entry, credential included (Layer F)", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    const scope = placeAndPropose("t-words", "a guard");
+    const words = describeScope(scope).join("\n");
+    expect(words).toContain("runs on      claude (sonnet) — your subscription");
+    expect(words).toContain("falls back to gemini (gemini-2.5-pro) — your API key; spend moves to that account");
+    // A plain scope says nothing about chains.
+    const plain = placeAndPropose("t-words-plain", "a guard");
+    store.clearFallbackConfig(REPO);
+    propose(store, { taskId: "t-words-plain", goal: "a guard", now: later(1_000) });
+    expect(describeScope(store.getScope("t-words-plain")!).join("\n")).not.toContain("falls back");
+    void plain;
+  });
+
   test("a re-approved plain scope re-seals to 'profile' — a stale chain can never survive a rewrite", () => {
     store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
     const scope = placeAndPropose("t-rewrite", "a guard");

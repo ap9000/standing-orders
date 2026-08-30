@@ -462,7 +462,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
   "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
   "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
-  "choose", "note", "max-open-decisions", "max-held-sessions", "name", "days", "publication", "auto-approve", "review-auto", "port", "host", "allow-host",
+  "choose", "note", "max-open-decisions", "max-held-sessions", "name", "days", "publication", "auto-approve", "review-auto", "entries", "port", "host", "allow-host",
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
@@ -471,7 +471,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
-  "json", "yes", "all", "local", "latest-watch", "dry-run", "file",
+  "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify",
 ]);
@@ -4224,6 +4224,9 @@ async function modeCommand(
   if (text(flags, "publication") === "notify") terms.publication = "notify";
   if (flag(flags, "auto-approve")) terms.autoApproveFiling = true;
   if (flag(flags, "review-auto")) terms.reviewAuto = true;
+  // The paid-fallback grant (R8): NEVER a preset default — only this
+  // explicit flag lets an exhausted subscription switch to another account.
+  if (flag(flags, "allow-paid-fallback")) terms.allowPaidFallback = true;
   // Automerge requires a live merge-capable grant on the repo (D1).
   if (terms.publication === "automerge" && !store.hasMergeCapableGrant(repo, now)) {
     return fail(write, json, "mode set", "no-grant", "automerge needs a merge-capable publication grant on this repo — file one first", EXIT.refused);
@@ -4264,8 +4267,9 @@ async function configCommand(
           : { problem: answer.problem }),
       };
     });
+    const fallback = scope === INSTALLATION_SCOPE ? [] : store.fallbackConfig(scope);
     if (json) {
-      write(envelopeJson({ ok: true, command: "config show", installation, project, resolved }));
+      write(envelopeJson({ ok: true, command: "config show", installation, project, resolved, fallback }));
       return EXIT.ok;
     }
     write(`Effective phase agents${scope === INSTALLATION_SCOPE ? "" : ` for ${scope}`}:`);
@@ -4278,6 +4282,14 @@ async function configCommand(
     }
     write("");
     write("  repair note: the repair PROVIDER always inherits the build it mends — only its model is configurable.");
+    if (fallback.length > 0) {
+      write("");
+      write("  if the build agent's subscription runs out, NEW approvals bind this fallback chain:");
+      fallback.forEach((one, i) => {
+        write(`    ${i + 1}. ${one.provider} (${one.model}) — ${one.authMode === "subscription" ? "its subscription login" : "your API key"}`);
+      });
+      write("  it fires only when a signed mode allows the paid fallback (`mode set --allow-paid-fallback`).");
+    }
     if (installation.length === 0 && project.length === 0) {
       write("  nothing configured — every phase runs the default (claude).");
       write("  standing-orders config set build --provider claude --model sonnet --as <you> --token <t>");
@@ -4335,6 +4347,70 @@ async function configCommand(
       ...(racePer === null ? [] : [`  each tournament agent: $${(racePer / 1_000_000).toFixed(2)}`]),
       ...(raceTotal === null ? [] : [`  each tournament total: $${(raceTotal / 1_000_000).toFixed(2)}`]),
       ...(raceAgents === null ? [] : [`  tournaments race ${raceAgents} agents unless a filing says otherwise`]),
+    ]);
+  }
+
+  // The FALLBACK CHAIN (Layer F): the ordered entries a repository's NEW
+  // approvals bind after the base agent. Per-repo only — a chain names
+  // credentials for one project's work — and inert on its own: it only
+  // ever fires when a signed mode also allows the paid fallback.
+  if (phase === "fallback") {
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, `config ${action}`, "usage", "configuring fallbacks takes `--as <you> --token <t>`", EXIT.usage);
+    }
+    const authedFallback = authenticateApprover(store, acting.name, acting.token);
+    if (!authedFallback.ok) {
+      return fail(write, json, `config ${action}`, "unauthenticated", "that is not an approver, or the token does not match", EXIT.refused);
+    }
+    if (scope === INSTALLATION_SCOPE) {
+      return fail(write, json, `config ${action}`, "usage", "fallbacks are per repository — say --repo <path>", EXIT.usage);
+    }
+    if (action === "clear") {
+      const had = store.clearFallbackConfig(scope);
+      return succeed(write, json, "config clear", { repo: scope, fallback: null }, () => [
+        had
+          ? `${scope}: fallback chain cleared — new approvals bind the single configured agent again.`
+          : `${scope}: no fallback chain was configured.`,
+      ]);
+    }
+    const entriesGiven = text(flags, "entries");
+    if (entriesGiven === undefined) {
+      return fail(
+        write, json, "config set", "usage",
+        "`config set fallback --repo <path> --entries provider:model:auth-mode[,…]` — auth-mode is subscription or api-key; 1 to 3 entries",
+        EXIT.usage,
+      );
+    }
+    const entries: { provider: ProviderId; model: string; authMode: "subscription" | "api-key" }[] = [];
+    for (const one of entriesGiven.split(",")) {
+      const parts = one.trim().split(":");
+      const [provider, model, authMode] = parts;
+      if (parts.length !== 3 || provider === undefined || model === undefined || authMode === undefined) {
+        return fail(write, json, "config set", "usage", `"${one.trim()}" is not provider:model:auth-mode`, EXIT.usage);
+      }
+      if (!isProviderId(provider)) {
+        return fail(write, json, "config set", "usage", `unknown provider "${provider}" — one of ${PROVIDER_IDS.join(", ")}`, EXIT.usage);
+      }
+      if (model === "") {
+        return fail(write, json, "config set", "usage", "each entry names an exact model — approvals bind exact routing", EXIT.usage);
+      }
+      if (authMode !== "subscription" && authMode !== "api-key") {
+        return fail(write, json, "config set", "usage", `auth-mode is subscription or api-key, not "${authMode}"`, EXIT.usage);
+      }
+      if (authMode === "subscription" && !SUBSCRIPTION_CAPABLE[provider]) {
+        return fail(write, json, "config set", "usage", `${provider} has no subscription login — this entry must use api-key`, EXIT.usage);
+      }
+      entries.push({ provider, model, authMode });
+    }
+    if (entries.length < 1 || entries.length > 3) {
+      return fail(write, json, "config set", "usage", "1 to 3 fallback entries (the approval binds the whole chain)", EXIT.usage);
+    }
+    store.setFallbackConfig(scope, entries, acting.name, clock());
+    return succeed(write, json, "config set", { repo: scope, fallback: entries }, () => [
+      `${scope}: fallback chain set — NEW approvals bind it; existing approvals are untouched.`,
+      ...entries.map((one, i) => `  ${i + 1}. ${one.provider} (${one.model}) — ${one.authMode === "subscription" ? "its subscription login" : "your API key"}`),
+      "  it fires only when a signed mode allows the paid fallback: `standing-orders mode set --allow-paid-fallback …`",
     ]);
   }
 
