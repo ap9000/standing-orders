@@ -1,5 +1,19 @@
 # Progress
 
+**2026-08-30 — MCP hardening 1: the cancellation floor + the door's
+empty-repo fix.** One function (`applyCancellation`) is now the only
+writer of `state='cancelled'` — the generic state verb, operator
+dismissal (`cancelTask`, which grew an optional validated-reason
+parameter), the external-mirror latch, and disowned fenced completions
+all route through it with typed reasons (`operator` /
+`mirror-latched` / `disowned-completion`), and pending steering now
+settles superseded on EVERY cancellation road, not just the state
+verb's. An architecture test proves the write is singular; the
+coordinator_event insert lands on this exact seam next. Also closed:
+the canonical filing door admitted an omitted/empty repo UNDER A
+CEILING (bypassing the bound wholesale) — a bounded surface must now
+name a repository. Suite 1470.
+
 **2026-08-30 — MCP gateway spec APPROVED (6 Codex rounds).** Parity II's
 MCP phase has its constitution: docs/mcp-gateway-spec.md v6. standing-
 orders becomes an MCP stdio server (zero-dep, two pinned protocol

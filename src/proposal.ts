@@ -115,7 +115,15 @@ function checkRepo(
   given: string | undefined,
   admitted: readonly string[] | undefined,
 ): { ok: true; repo: string | undefined } | ProposalRefusal {
-  if (given === undefined || given === "") return { ok: true, repo: undefined };
+  if (given === undefined || given === "") {
+    // A ceiling names the ONLY repos this surface may file into. Filing
+    // repo-less under a ceiling would bypass it wholesale (MCP spec v2,
+    // Codex round 2 finding 2) — a bounded surface must say where.
+    if (admitted !== undefined) {
+      return refuse("outside-ceiling", "this surface must name a repository — it is limited to specific ones");
+    }
+    return { ok: true, repo: undefined };
+  }
   // Best-effort canonicalization, the codebase's one convention: a real
   // directory resolves through symlinks; a path that does not exist yet
   // still normalizes, because filing must not depend on this machine

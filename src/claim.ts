@@ -877,11 +877,22 @@ export function completeFenced(
 
     if (taskId !== undefined) {
       store.replay(mutation, "completeFenced", () => {
-        db.prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?").run(
-          disowned ? "cancelled" : state,
-          now.toISOString(),
-          String(taskId["external_id"]),
-        );
+        if (disowned) {
+          // Cancellation goes through the one floor — a disowned
+          // completion is a typed machine reason, not a bare state write.
+          store.applyCancellation(
+            String(taskId["external_id"]),
+            { kind: "machine", code: "disowned-completion" },
+            now,
+            null,
+          );
+        } else {
+          db.prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?").run(
+            state,
+            now.toISOString(),
+            String(taskId["external_id"]),
+          );
+        }
         return true;
       });
     }

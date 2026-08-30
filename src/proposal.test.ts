@@ -74,6 +74,24 @@ describe("the one filing door", () => {
     expect(cli).toMatchObject({ ok: true });
   });
 
+  test("an OMITTED repo under a ceiling refuses — repo-less filing must not bypass the bound", () => {
+    const omitted = fileTaskProposal(
+      store,
+      { title: "x", filedVia: "console", admittedRepos: [repo] },
+      T0,
+    );
+    expect(omitted).toMatchObject({ ok: false, reason: "outside-ceiling" });
+    const emptyString = fileTaskProposal(
+      store,
+      { title: "x", repo: "", filedVia: "console", admittedRepos: [repo] },
+      T0,
+    );
+    expect(emptyString).toMatchObject({ ok: false, reason: "outside-ceiling" });
+    // Without a ceiling, repo-less filing stays the CLI's honest "no repo yet".
+    const unbounded = fileTaskProposal(store, { title: "x", filedVia: "cli" }, T0);
+    expect(unbounded).toMatchObject({ ok: true });
+  });
+
   test("a repo that does not exist still normalizes — filing never depends on this machine seeing it", () => {
     const made = fileTaskProposal(store, { title: "x", repo: join(repo, "not-yet-cloned"), filedVia: "cli" }, T0);
     expect(made).toMatchObject({ ok: true });

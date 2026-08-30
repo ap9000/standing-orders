@@ -4258,6 +4258,47 @@ export class Store {
     return row === undefined ? null : readTaskRef(row);
   }
 
+  /**
+   * THE one writer of `state = 'cancelled'` (MCP gateway spec v6, Codex
+   * round-5 finding 2). Every cancellation road — the generic state verb,
+   * operator dismissal, the external-mirror latch, a disowned fenced
+   * completion — lands here, so a cancellation can never happen without a
+   * stated reason and (once coordinator filings exist) its durable event.
+   * An architecture test proves no other statement writes 'cancelled'.
+   *
+   * The floor does NOT decide admission — callers keep their own guards
+   * (live-claim refusals, latch conditions, fencing) and pass the states
+   * they admit from (`null` = any). It returns raw changes; callers keep
+   * their own refusal words and wake bumps.
+   */
+  applyCancellation(
+    taskId: string,
+    reason:
+      | { kind: "operator"; text: string | null }
+      | { kind: "machine"; code: "mirror-latched" | "disowned-completion" },
+    now: Date,
+    admittedFrom: readonly TaskState[] | null,
+  ): { changed: boolean } {
+    const filter = admittedFrom === null ? "" : ` AND state IN (${admittedFrom.map(() => "?").join(",")})`;
+    const { changes } = this.db
+      .prepare(`UPDATE task SET state = 'cancelled', updated_at = ? WHERE id = ?${filter}`)
+      .run(now.toISOString(), taskId, ...(admittedFrom ?? []));
+    if (Number(changes) === 0) return { changed: false };
+    // A cancelled task's pending steering settles superseded in the SAME
+    // transaction, whichever road cancelled it — a note silently waiting
+    // for a build that can no longer happen is wrong on every road, not
+    // just the state verb's.
+    const ref = this.db
+      .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
+      .get(BUILT_IN, taskId);
+    if (ref !== undefined) this.supersedeSteerNotes(Number(ref["id"]), now);
+    // The reason is part of the transition, not decoration: machine codes
+    // are typed here; the coordinator_event row rides this exact seam when
+    // coordinator filings arrive (spec: events atomic with state changes).
+    void reason;
+    return { changed: true };
+  }
+
   setTaskState(
     id: string,
     state: TaskState,
@@ -4280,6 +4321,14 @@ export class Store {
           if (latched !== undefined) return { ok: false as const, reason: "external-closed" as const };
         }
         return this.transact(() => {
+          if (state === "cancelled") {
+            // The floor is the only writer of 'cancelled' — the state verb
+            // is an operator road with no ceremony text of its own.
+            const done = this.applyCancellation(id, { kind: "operator", text: null }, now, null);
+            if (!done.changed) return { ok: false as const, reason: "unknown-task" as const };
+            this.bumpWake();
+            return { ok: true as const };
+          }
           const { changes } = this.db
             .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
             .run(state, now.toISOString(), id);
@@ -4287,7 +4336,7 @@ export class Store {
           // A finished task's pending steering settles superseded in the
           // SAME transaction (arc 1): shown as what it is, never a note
           // silently waiting for a build that can no longer happen.
-          if (state === "done" || state === "cancelled") {
+          if (state === "done") {
             const ref = this.db
               .prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?")
               .get(BUILT_IN, id);
@@ -5118,11 +5167,12 @@ export class Store {
         )
         .get(Number(ref["id"]));
       if (!live && contested === undefined) {
-        this.db
-          .prepare(
-            "UPDATE task SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','failed','running')",
-          )
-          .run(now.toISOString(), localTaskId);
+        this.applyCancellation(
+          localTaskId,
+          { kind: "machine", code: "mirror-latched" },
+          now,
+          ["queued", "failed", "running"],
+        );
       }
       this.bumpWake();
     });
@@ -7813,6 +7863,7 @@ export class Store {
   cancelTask(
     taskId: string,
     now: Date,
+    reason?: string,
   ): { ok: true } | { ok: false; reason: "unknown-task" | "claimed" | "already-terminal" } {
     return this.transact(() => {
       const ref = this.db
@@ -7820,15 +7871,15 @@ export class Store {
         .get(BUILT_IN, taskId);
       if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
 
-      const stamp = now.toISOString();
       if (this.hasLiveClaim(Number(ref["id"]), now)) return { ok: false as const, reason: "claimed" as const };
 
-      const { changes } = this.db
-        .prepare(
-          "UPDATE task SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','failed','running')",
-        )
-        .run(stamp, taskId);
-      if (Number(changes) === 0) return { ok: false as const, reason: "already-terminal" as const };
+      const done = this.applyCancellation(
+        taskId,
+        { kind: "operator", text: reason ?? null },
+        now,
+        ["queued", "failed", "running"],
+      );
+      if (!done.changed) return { ok: false as const, reason: "already-terminal" as const };
       this.bumpWake();
       return { ok: true as const };
     });
