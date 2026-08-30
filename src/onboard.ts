@@ -261,7 +261,12 @@ export async function listGithubRepos(limit = 100): Promise<ListOutcome> {
     repos.push({
       nameWithOwner,
       isPrivate: row["isPrivate"] === true,
-      updatedAt: typeof row["updatedAt"] === "string" ? row["updatedAt"] : "",
+      // The stamp is DATA too (ghlist review, finding 3): only an
+      // ISO-shaped value survives; anything else renders as nothing.
+      updatedAt:
+        typeof row["updatedAt"] === "string" && /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z?$/.test(row["updatedAt"])
+          ? row["updatedAt"]
+          : "",
       description: description.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 120),
     });
   }

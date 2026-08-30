@@ -1,5 +1,23 @@
 # Progress
 
+**2026-08-29 — GitHub listing review: NO-GO honored, all four findings
+closed.** (1 HIGH, unbounded I/O) originUrlOf now refuses symlinks and
+non-regular files (lstat + O_NOFOLLOW), caps the file size, and reads at
+most 64 KiB through readSync — a sparse monster or a fifo planted as a
+".git/config" reads as null, never a hang; the roots walk uses opendirSync
+and stops at 400 entries, and runs at all only when the listing returned
+repos to match. (2 MED, host confusion) githubIdentityOf accepts FULLY
+ANCHORED https/ssh github.com forms only — a foreign host carrying
+"github.com" in its path never maps — and the config parse is line-based
+with real section tracking, so a header embedded in a value opens nothing;
+the identity is documented as ADVISORY (the /projects/open road re-proves
+path/ceiling/git before anything mutates). (3 LOW) updatedAt is validated
+as ISO at ingestion AND at the render belt, escaped at the sink. (4) new
+adversarial tests: foreign-host origin offers the clone ceremony not an
+open, a section-header-in-a-value opens nothing, a hostile description
+renders dead (&lt;script&gt; escaped), a non-ISO stamp never renders.
+Suite 1467.
+
 **2026-08-29 — Your GitHub repositories, offered instead of typed.** The
 projects page's add card gains "see your GitHub repositories →": a new
 /projects/github page lists the server's signed-in gh account's repos

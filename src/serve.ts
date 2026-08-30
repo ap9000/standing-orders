@@ -43,7 +43,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
@@ -817,21 +817,32 @@ export function createDecisionServer(options: ServeOptions): Server {
           localByIdentity.set(identity.toLowerCase(), project.path);
         }
       }
-      for (const root of ceiling.roots) {
-        let children: string[] = [];
-        try {
-          children = readdirSync(root, { withFileTypes: true })
-            .filter(one => one.isDirectory())
-            .slice(0, 400)
-            .map(one => join(root, one.name));
-        } catch {
-          children = [];
-        }
-        for (const child of children) {
-          if (!existsSync(join(child, ".git"))) continue;
-          const identity = githubIdentityOf(originUrlOf(child) ?? "");
-          if (identity !== null && !localByIdentity.has(identity.toLowerCase())) {
-            localByIdentity.set(identity.toLowerCase(), child);
+      // Roots are walked ONLY when there are listed repos to match against
+      // (finding 1), through an iterator that stops at 400 entries — a
+      // directory with a million children costs 400 stats, not a scan.
+      if (listed.ok && listed.repos.length > 0) {
+        for (const root of ceiling.roots) {
+          const children: string[] = [];
+          try {
+            const dir = opendirSync(root);
+            try {
+              for (let seen = 0; seen < 400; seen++) {
+                const entry = dir.readSync();
+                if (entry === null) break;
+                if (entry.isDirectory()) children.push(join(root, entry.name));
+              }
+            } finally {
+              dir.closeSync();
+            }
+          } catch {
+            // an unreadable root offers nothing
+          }
+          for (const child of children) {
+            if (!existsSync(join(child, ".git"))) continue;
+            const identity = githubIdentityOf(originUrlOf(child) ?? "");
+            if (identity !== null && !localByIdentity.has(identity.toLowerCase())) {
+              localByIdentity.set(identity.toLowerCase(), child);
+            }
           }
         }
       }
@@ -7915,24 +7926,67 @@ type OnboardCardState =
 
 type ProjectPeek = { waiting: number; queued: number; running: number; doneRecently: number };
 
-/** owner/name from a git remote URL — https and ssh shapes only, else null. */
+/**
+ * owner/name from a git remote URL — FULLY ANCHORED https/ssh github.com
+ * forms only (ghlist review, finding 2): a foreign host carrying
+ * "github.com" in its path, or a non-github host, must never read as a
+ * GitHub identity. Everything else is null.
+ */
 function githubIdentityOf(remoteUrl: string): string | null {
-  const match = /github\.com[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(remoteUrl.trim());
-  return match === null ? null : `${match[1]}/${match[2]}`;
+  const trimmed = remoteUrl.trim();
+  const https = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (https !== null) return `${https[1]}/${https[2]}`;
+  const ssh = /^(?:ssh:\/\/)?git@github\.com[:/]([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (ssh !== null) return `${ssh[1]}/${ssh[2]}`;
+  return null;
 }
 
-/** The `origin` remote's url from a repository's OWN .git/config — a
- * bounded file read, no process spawned per row. null when unreadable or
- * origin-less; a worktree-style `.git` FILE (gitdir pointer) reads null
- * too, which is honest — its identity lives elsewhere. */
+/**
+ * The `origin` remote's url from a repository's OWN .git/config. BOUNDED
+ * I/O by construction (ghlist review, finding 1): the final component may
+ * not be a symlink (O_NOFOLLOW + lstat), must be a REGULAR file under a
+ * size cap, and at most 64 KiB are ever read — a sparse monster or a fifo
+ * planted as a "config" reads as null, never as a hang. Parsed LINE BY
+ * LINE with real section tracking (finding 2): a `[remote "origin"]`
+ * embedded inside some other value never opens the section. null when
+ * unreadable or origin-less; a worktree-style `.git` FILE (gitdir pointer)
+ * reads null too, which is honest — its identity lives elsewhere. The
+ * answer is ADVISORY metadata for offering a button: the /projects/open
+ * road re-proves path, ceiling, and git-ness before anything mutates, and
+ * a config that lies about its origin can only mislabel a repository the
+ * operator was already allowed to open.
+ */
 function originUrlOf(repoPath: string): string | null {
+  const file = join(repoPath, ".git", "config");
+  let fd: number | null = null;
   try {
-    const config = readFileSync(join(repoPath, ".git", "config"), "utf8").slice(0, 64 * 1024);
-    const section = /\[remote "origin"\][^[]*/.exec(config)?.[0] ?? "";
-    const url = /^\s*url\s*=\s*(.+)$/m.exec(section)?.[1];
-    return url === undefined ? null : url.trim();
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.size > 1024 * 1024) return null;
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const buffer = Buffer.alloc(64 * 1024);
+    const read = readSync(fd, buffer, 0, buffer.length, 0);
+    const config = buffer.toString("utf8", 0, read);
+    let inOrigin = false;
+    for (const line of config.split("\n")) {
+      if (/^\s*\[/.test(line)) {
+        inOrigin = /^\s*\[remote "origin"\]\s*$/.test(line);
+        continue;
+      }
+      if (!inOrigin) continue;
+      const url = /^\s*url\s*=\s*(.+)$/.exec(line)?.[1];
+      if (url !== undefined) return url.trim();
+    }
+    return null;
   } catch {
     return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed
+      }
+    }
   }
 }
 
@@ -7988,7 +8042,7 @@ function githubReposPage(
                 `<div class="row"><strong>${escape(repo.nameWithOwner)}</strong>${repo.isPrivate ? ` <span class="badge">private</span>` : ""}`,
                 `<span class="right">${action}</span></div>`,
                 localPath === null
-                  ? `<p class="meta">not on this machine yet${repo.updatedAt === "" ? "" : ` · pushed ${when(repo.updatedAt)}`}</p>`
+                  ? `<p class="meta">not on this machine yet${/^\d{4}-\d{2}-\d{2}T/.test(repo.updatedAt) ? ` · pushed ${escape(when(repo.updatedAt))}` : ""}</p>`
                   : `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(localPath)}</p>`,
                 repo.description === "" ? "" : `<p class="meta">${escape(repo.description)}</p>`,
                 `</div>`,

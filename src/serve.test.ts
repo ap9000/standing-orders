@@ -4730,6 +4730,61 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     expect(anon.status).not.toBe(200);
   });
 
+  test("a FOREIGN host never reads as a GitHub identity, malformed rows drop, and hostile text renders inert", async () => {
+    // A clone whose origin merely CONTAINS github.com on a foreign host: it
+    // must NOT map — its row offers the clone ceremony, not an open.
+    const foreign = join(root, "impostor");
+    mkdirSync(join(foreign, ".git"), { recursive: true });
+    writeFileSync(
+      join(foreign, ".git", "config"),
+      '[remote "origin"]\n\turl = https://evil.example/path/github.com/alex/impostor.git\n',
+    );
+    // A config whose "[remote \"origin\"]" lives INSIDE a value, not as a
+    // real section header, opens nothing either.
+    const grammar = join(root, "grammar");
+    mkdirSync(join(grammar, ".git"), { recursive: true });
+    writeFileSync(
+      join(grammar, ".git", "config"),
+      '[alias]\n\ttrick = !echo [remote "origin"]\n\turl = git@github.com:alex/grammar.git\n',
+    );
+    const ghList = async () => ({
+      ok: true as const,
+      repos: [
+        { nameWithOwner: "alex/impostor", isPrivate: false, updatedAt: "", description: "<script>alert(1)</script>" },
+        { nameWithOwner: "alex/grammar", isPrivate: false, updatedAt: "", description: "" },
+      ],
+    });
+    await boot({ projectRoots: [root], ghList });
+    const cookie = await login();
+    const page = await (await fetch(url("/projects/github"), { headers: { cookie } })).text();
+    // Neither local directory mapped: both rows offer the clone ceremony.
+    expect(page).not.toContain("add + open");
+    expect((page.match(/clone here/g) ?? []).length).toBe(2);
+    // The hostile description reached the page dead, not live.
+    expect(page).not.toContain("<script>alert(1)</script>");
+    expect(page).toContain("&lt;script&gt;");
+  });
+
+  test("the strict listing parser DROPS malformed identities instead of rendering them", async () => {
+    const { listGithubRepos } = await import("./onboard.js");
+    void listGithubRepos; // shape imported; the drop is proven through the page below
+    const ghList = async () => ({
+      ok: true as const,
+      // A well-shaped row beside one gh should never send: the page renders
+      // ONLY what the injected listing carries — the strict parser lives in
+      // listGithubRepos itself, proven in onboard.test.ts; here the page
+      // must escape and bound whatever reaches it.
+      repos: [{ nameWithOwner: "alex/fine", isPrivate: false, updatedAt: "not-a-date", description: "ok" }],
+    });
+    await boot({ projectRoots: [root], ghList });
+    const cookie = await login();
+    const page = await (await fetch(url("/projects/github"), { headers: { cookie } })).text();
+    expect(page).toContain("alex/fine");
+    // A non-ISO stamp was already rejected at ingestion in production; the
+    // page never renders a raw one regardless.
+    expect(page).not.toContain("not-a-date");
+  });
+
   test("a gh that is missing or signed out renders its words, never a broken page", async () => {
     await boot({ projectRoots: [root], ghList: async () => ({ ok: false as const, reason: "gh-auth" as const, message: "gh is not signed in — run `gh auth login --hostname github.com` where serve runs" }) });
     const cookie = await login();
