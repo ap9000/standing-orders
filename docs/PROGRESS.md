@@ -1,5 +1,12 @@
 # Progress
 
+**2026-08-30 — recovered: the workbench overview implementation.** The
+hardening-2 commit also carried ~374 lines of serve.ts (workbench
+overview + mobile rail + project peek) found uncommitted in the working
+tree: an earlier session had committed its TESTS into serve.test.ts but
+never the implementation, so a fresh clone failed the suite at HEAD.
+Now committed; the suite passes from a clean checkout again.
+
 **2026-08-30 — MCP hardening 2: the runner gate, first leg.** The shared
 acquisition primitive now proves, INSIDE the claim transaction: the
 runner's token verifies against its registered credential (a takeover
