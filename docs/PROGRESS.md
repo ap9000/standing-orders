@@ -1,5 +1,14 @@
 # Progress
 
+**2026-08-30 — MCP gateway arc CLOSES: round-4 verify = GO.** All six
+round-3 closures confirmed with independent gateway probes, no new
+findings. The full arc: spec approved after six Codex rounds, eight
+implementation commits, then four review rounds — ten findings, five
+areas, six wire gaps, clean GO. `standing-orders coordinator mint`
+issues the credential; `standing-orders mcp --token-file` serves the
+gateway; everything a coordinator files stays quarantined until the
+operator signs its scope.
+
 **2026-08-30 — MCP review rounds 2 + 3: the wire made honest.** Round 2
 (`72abb9b`, no ledger entry then — recorded here): modern requests
 REQUIRE both namespaced `_meta` keys and the era pins per connection;
