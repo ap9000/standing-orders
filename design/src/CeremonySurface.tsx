@@ -21,10 +21,11 @@ export interface CeremonySurfaceProps {
 }
 
 /**
- * Ceremony surface — the console's one pattern for every password form. Amber top
- * rule, the terms restated, the digest rendered as a seal, then the password and a
- * single amber action. If a screen looks like this, the password is about to bind
- * to exactly the terms shown.
+ * Ceremony surface — the console's pattern for an APPROVAL: a password that
+ * resolves work waiting on the user. The whole card wears the amber-tinted
+ * outline (never an edge stripe), the terms restated, the digest rendered as a
+ * seal, then the password and a single amber action. Credential and
+ * configuration forms are ordinary neutral cards, not ceremonies.
  */
 export function CeremonySurface({
   title,
@@ -36,7 +37,12 @@ export function CeremonySurface({
   className,
 }: CeremonySurfaceProps) {
   return (
-    <Card className={cn("max-w-[420px] gap-4 border-t-[3px] border-t-primary py-5", className)}>
+    <Card
+      className={cn(
+        "max-w-[420px] gap-4 border-[color-mix(in_srgb,var(--primary)_35%,var(--border))] py-5",
+        className,
+      )}
+    >
       <CardHeader className="px-5">
         <CardTitle className="text-base">{title}</CardTitle>
       </CardHeader>

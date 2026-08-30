@@ -5655,15 +5655,16 @@ const STYLE = `
   a.row { text-decoration: none; }
   a.row:hover { background: color-mix(in srgb, var(--muted) 55%, transparent); }
 
-  /* A parked decision is the page's reason to exist: amber top rule, the
-     question in full weight, the whole card the tap target. */
+  /* A parked decision is the page's reason to exist: the whole card wears
+     the amber-tinted state outline — never a stripe on one edge — with the
+     question in full weight and the whole card the tap target. */
   .decide-card {
-    display: block; border: 1px solid var(--border); border-radius: var(--radius);
+    display: block; border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--border));
+    border-radius: var(--radius);
     background: var(--card); padding: .875rem 1.125rem; margin: .625rem 0;
     text-decoration: none; transition: border-color .15s;
-    border-top: 2px solid var(--brand);
   }
-  .decide-card:hover { border-color: color-mix(in srgb, var(--brand) 45%, var(--border)); border-top-color: var(--brand); }
+  .decide-card:hover { border-color: color-mix(in srgb, var(--brand) 60%, var(--border)); }
   .decide-card .q { font-weight: 600; margin: 0 0 .25rem; }
 
   button {
@@ -5674,9 +5675,9 @@ const STYLE = `
   }
   button:hover { background: color-mix(in srgb, var(--secondary) 70%, var(--border)); border-color: color-mix(in srgb, var(--input) 70%, var(--muted-foreground)); }
   /* The approve act is the one amber verb: it resolves what waits on you.
-     A ceremony form carries the amber rule; a danger act stays red even
-     inside one. */
-  .approve-form { border-top: 2px solid var(--brand); }
+     A ceremony form wears the same full amber-tinted outline as the other
+     waits-on-you surfaces; a danger act stays red even inside one. */
+  .approve-form { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
   .approve-form button[type=submit] {
     background: var(--brand); color: #201503; border-color: var(--brand); font-weight: 600;
   }
@@ -5987,7 +5988,8 @@ const STYLE = `
     border-radius: calc(var(--radius) - 2px); padding: .5rem .625rem; margin-top: .5rem;
   }
   .lane-card:hover { border-color: color-mix(in srgb, var(--border) 55%, var(--muted-foreground)); }
-  .lane-attention .lane-card { border-top: 2px solid var(--brand); }
+  .lane-attention .lane-card { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
+  .lane-attention .lane-card:hover { border-color: color-mix(in srgb, var(--brand) 60%, var(--border)); }
   .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; }
   .lane-card .dot { margin-right: .4rem; }
   .lane-card .meta, .lane-card .mono { display: block; margin-top: .125rem; font-size: .75rem; }

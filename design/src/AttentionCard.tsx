@@ -15,13 +15,19 @@ export interface AttentionCardProps {
 }
 
 /**
- * Attention card — the "waits on you" surface. The amber top rule is the console's
- * accent doing its only job: marking work that cannot proceed without the user.
- * At most a handful of these exist at once; everything else on screen stays ink.
+ * Attention card — the "waits on you" surface. The whole card wears an
+ * amber-tinted outline — never a stripe on one edge — the accent doing its only
+ * job: marking work that cannot proceed without the user. At most a handful of
+ * these exist at once; everything else on screen stays ink.
  */
 export function AttentionCard({ title, meta, children, action, className }: AttentionCardProps) {
   return (
-    <Card className={cn("gap-3 border-t-[3px] border-t-primary py-4", className)}>
+    <Card
+      className={cn(
+        "gap-3 border-[color-mix(in_srgb,var(--primary)_35%,var(--border))] py-4",
+        className,
+      )}
+    >
       <CardHeader className="px-4">
         <CardTitle className="text-[15px]">{title}</CardTitle>
         {meta ? (
