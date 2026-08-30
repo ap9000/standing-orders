@@ -10,3 +10,11 @@ dist/
 # Protocol files a stray test stub could write into this checkout
 NIGHTORDERS-*.json
 *.tgz
+
+# design-sync machine state (staged scripts, build output, caches)
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+design/styles/operations-ledger.css

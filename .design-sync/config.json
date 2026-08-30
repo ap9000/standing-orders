@@ -1,0 +1,29 @@
+{
+  "pkg": "@standing-orders/design",
+  "globalName": "StandingOrdersDesign",
+  "shape": "package",
+  "buildCmd": "npm --prefix design run build",
+  "cssEntry": "styles/operations-ledger.css",
+  "readmeHeader": ".design-sync/conventions.md",
+  "componentSrcMap": {
+    "Button": "src/components/ui/button.tsx",
+    "Badge": "src/components/ui/badge.tsx",
+    "Card": "src/components/ui/card.tsx",
+    "Input": "src/components/ui/input.tsx",
+    "Label": "src/components/ui/label.tsx",
+    "Separator": "src/components/ui/separator.tsx",
+    "CardHeader": null,
+    "CardTitle": null,
+    "CardDescription": null,
+    "CardAction": null,
+    "CardContent": null,
+    "CardFooter": null
+  },
+  "extraFonts": [
+    "node_modules/@fontsource/ibm-plex-sans/400.css",
+    "node_modules/@fontsource/ibm-plex-sans/500.css",
+    "node_modules/@fontsource/ibm-plex-sans/600.css",
+    "node_modules/@fontsource/ibm-plex-sans/700.css",
+    "node_modules/@fontsource/ibm-plex-mono/400.css"
+  ]
+}

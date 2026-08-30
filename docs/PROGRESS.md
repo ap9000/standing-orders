@@ -1,5 +1,25 @@
 # Progress
 
+**2026-08-30 — The Operations Ledger authored as a custom shadcn design
+system, ready for Claude Design.** The console's design language (dark-first
+ink, IBM Plex Sans as the human voice / IBM Plex Mono for machine facts,
+amber meaning exclusively "waits on you", the five-word status vocabulary,
+the ceremony surface for every password form) now exists as real code:
+`design/` is a dev-only package (never published — npm files whitelist)
+holding shadcn/ui primitives vendored from the new-york-v4 registry and
+re-themed via Tailwind v4 tokens, plus the console's own vocabulary
+composed on top: StatusChip, DigestSeal, AttentionCard, CeremonySurface,
+KeyValueRow, Ledger/LedgerRow, NavBar, PageHeader, TextField. 16
+components, 33 preview cells authored with real console content, every
+sheet visually graded good; render check 16/16 clean against system Chrome
+(no playwright download — DS_CHROMIUM_PATH). `.design-sync/` carries the
+sync config, conventions header (the design agent's build rules: accent
+discipline, mono-for-machine-facts, vocabulary-first), and notes. Upload
+to claude.ai/design waits on a desktop `/design-login`; no project pinned
+yet. The library is also the reference implementation for translating the
+Operations Ledger into serve.ts's chrome layer (own arc, needs Alex's
+go).
+
 **2026-08-29 — GitHub listing review: NO-GO honored, all four findings
 closed.** (1 HIGH, unbounded I/O) originUrlOf now refuses symlinks and
 non-regular files (lstat + O_NOFOLLOW), caps the file size, and reads at

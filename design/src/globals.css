@@ -1,0 +1,75 @@
+/* The Operations Ledger — custom shadcn theme for the standing-orders console.
+ * Dark-first ink; a single committed theme, not a light/dark pair.
+ * One accent: amber (--primary) means "waits on you" and nothing else.
+ * IBM Plex Sans is the human voice; IBM Plex Mono is every machine fact. */
+@import "tailwindcss";
+@source "./";
+
+:root {
+  --background: #0c0e12; /* ground */
+  --foreground: #e9ebee; /* text */
+  --card: #14171d; /* surface */
+  --card-foreground: #e9ebee;
+  --popover: #1b1f27; /* inset wells */
+  --popover-foreground: #e9ebee;
+  --primary: #f5a524; /* amber — exclusively "waits on you" */
+  --primary-foreground: #201503;
+  --secondary: #1b1f27;
+  --secondary-foreground: #e9ebee;
+  --muted: #1b1f27;
+  --muted-foreground: #8b93a1; /* dim */
+  --accent: #1b1f27;
+  --accent-foreground: #e9ebee;
+  --destructive: #f06a5e;
+  --border: #262b35; /* hairlines */
+  --input: #262b35;
+  --ring: #5ca9ff;
+  --radius: 0.625rem;
+  /* Semantic run states — quiet 12%-tint outline chips, never surfaces. */
+  --running: #5ca9ff;
+  --built: #3ecf8e;
+  --failed: #f06a5e;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-running: var(--running);
+  --color-built: var(--built);
+  --color-failed: var(--failed);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+}
