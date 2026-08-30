@@ -6955,12 +6955,20 @@ export class Store {
       const chain = this.approvedChainOf(taskId);
       if (chain === null) return false;
       const cycle = this.fallbackCycleFor(run.taskRef);
+      // The custody holder is normally the run itself — but a bounded
+      // REPAIR turn spends under its PARENT'S custody (verify round, R2):
+      // the parent is still the cycle's open tail while its own attempt
+      // mends, and it vouches for exactly its child. Anything else refuses.
+      const tailHolds =
+        cycle !== null &&
+        (cycle.tailRun === runId ||
+          (run.role === "repair" && run.parentRun !== null && cycle.tailRun === run.parentRun));
       if (
         cycle === null ||
         cycle.id !== run.chainCycle ||
         cycle.state !== "open" ||
         cycle.cursor !== run.chainIndex ||
-        cycle.tailRun !== runId ||
+        !tailHolds ||
         cycle.chainDigest !== chainDigestOf(chain)
       ) {
         return false;

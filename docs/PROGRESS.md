@@ -1,5 +1,26 @@
 # Progress
 
+**2026-08-29 — Fallback chains E3d VERIFY round: 1/3/5 confirmed closed;
+residuals on 2/4/6/7 all closed.** Codex's verify pass confirmed the
+credential pin (1), the pre-spawn custody proof's atomicity (3), and the
+custody-transfer model (5) hold as claimed, and found four residuals — every
+one now shut: (R2 HIGH, my own pre-flagged suspicion confirmed) the custody
+proof refused REPAIR spawns (the cycle's tail is the parent) — it now
+accepts exactly a bounded repair child whose parentRun IS the current tail,
+proven by test alongside "binding alone is not custody" (a chain-bound
+stranger still refuses, stamping nothing). (R4 MED) acquireFallback gained
+the attention budget verbatim from the ordinary road — backoff really is
+the ONE exemption — with the tick's max-open-decisions threaded through.
+(R6 HIGH) the ordinary road's budget-unenforceable arm now FINISHES the
+already-created run and resolves its cycle (a refused-but-open run deferred
+a chain task forever — and read as a vanished attempt even off-chain); the
+fallback belt re-derives the effective cap AFTER admission and uses that
+same fresh value for the invocation's --max-budget-usd, so a backstop set
+mid-await governs the spend that actually happens. (R7 MED) build()'s chain
+proof re-derives the taskRef↔taskId pairing from the ref row's own
+external_id — two tasks sharing a chain digest can no longer cross-execute
+under each other's custody via a mismatched internal call. Suite 1450.
+
 **2026-08-29 — Fallback chains E3d review: ALL SEVEN findings closed — the
 binding chain is now fail-closed end to end.** Codex's E3d round found the
 custody model still porous ("not yet fail-closed"); every hole is shut:

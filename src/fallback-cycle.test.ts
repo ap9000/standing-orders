@@ -498,6 +498,28 @@ describe("advancing on exhaustion at disposition (E3c)", () => {
     expect(store.fallbackCycleFor(ref)!.state).toBe("open");
   });
 
+  test("the pre-spawn custody proof holds for the tail AND its repair child — nothing else (verify R2)", () => {
+    const { ref, run } = setup("t-custody");
+    // The tail itself proves and gets its start stamp.
+    expect(store.proveChainCustodyForSpawn(run, T0)).toBe(true);
+    expect(store.getRun(run)?.providerStartedAt).not.toBeNull();
+    // A bounded repair child of the tail spends under the parent's custody.
+    const repair = store.startRun({
+      taskRef: ref, leaseId: "l-r", runner: "b-1", branch: "b", worktree: "/w",
+      provider: "claude", role: "repair", parentRun: run, now: T0,
+    });
+    store.inheritChainBinding(repair, run);
+    expect(store.proveChainCustodyForSpawn(repair, T0)).toBe(true);
+    // A chain-bound run that is NEITHER the tail nor its repair child refuses.
+    const stranger = store.startRun({
+      taskRef: ref, leaseId: "l-s", runner: "b-1", branch: "b", worktree: "/w2",
+      provider: "claude", now: T0,
+    });
+    store.inheritChainBinding(stranger, run); // binding alone is not custody
+    expect(store.proveChainCustodyForSpawn(stranger, T0)).toBe(false);
+    expect(store.getRun(stranger)?.providerStartedAt ?? null).toBeNull();
+  });
+
   test("success closes the cycle through the SAME resolver", () => {
     const { ref, run } = setup("t-win");
     store.stampProviderStart(run, T0, VERSION);

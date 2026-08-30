@@ -506,10 +506,19 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     if (chain === null) {
       return { ok: false, reason: "stale-approval", message: `${taskId}: the chain approval no longer stands — re-approve (stale-approval)` };
     }
-    // The run must belong to THE TASK being built (finding 7): a chain
-    // digest excludes scope text, so two tasks can share one — the task_ref
-    // equality is what stops task B's cycle spending as task A.
-    if (chainRun.taskRef !== taskRef) {
+    // The run must belong to THE TASK being built (finding 7 + verify R7):
+    // a chain digest excludes scope text, so two tasks can share one. The
+    // task_ref equality alone is not enough — the caller supplies BOTH
+    // taskRef and taskId, so the pairing itself is re-derived from the
+    // store: the ref row's own external id must name exactly the task whose
+    // scope authorizes this build.
+    const chainOwner = store.refForId(taskRef);
+    if (
+      chainRun.taskRef !== taskRef ||
+      chainOwner === null ||
+      chainOwner.backend !== "built-in" ||
+      chainOwner.externalId !== taskId
+    ) {
       return { ok: false, reason: "stale-approval", message: `${taskId}: this run belongs to a different task than its dispatch claims (stale-approval)` };
     }
     const cycle = store.fallbackCycleFor(taskRef);

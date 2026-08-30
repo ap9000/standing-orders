@@ -2394,6 +2394,11 @@ async function tickCommand(
     const capMicrousd =
       scopeBudget === null ? backstop : backstop === null ? scopeBudget : Math.min(scopeBudget, backstop);
     if (capMicrousd !== null && MONEY_CAPABILITIES[spec.provider].nativeDollarCapFlag === null) {
+      // The run row and any chain cycle already exist — FINISH and RESOLVE
+      // them (E3d verify, R6): a refused-but-open run would defer a chain
+      // task forever and read as a vanished attempt everywhere else.
+      store.finishRun(runId, { outcome: "refused", reason: "budget-unenforceable", now: clock() });
+      store.resolveChainOnRunEnd(ref.id, id, repo, runId, clock());
       release(store, lease, clock());
       await worktrees.release(leased.worktree.path, clock());
       dispatched.push({ id, outcome: "skipped", reason: "budget-unenforceable" });
@@ -2581,6 +2586,9 @@ async function tickCommand(
       provider: peek.profile.provider,
       model: peek.profile.model,
       authMode: peek.authMode,
+      ...(text(flags, "max-open-decisions") === undefined
+        ? {}
+        : { maxOpenDecisions: Number(text(flags, "max-open-decisions")) }),
     });
     if (!claimed.ok) {
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: claimed.reason });
@@ -2614,11 +2622,16 @@ async function tickCommand(
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: `fallback-${admitted.reason}` });
       continue;
     }
-    // A belt on the budget rule (finding 6): the capability was proved on
-    // the peek BEFORE admission, so this arm is unreachable unless the
-    // approved chain changed under us — in which case the admitted run is
-    // FINISHED and its cycle resolved, never abandoned open.
-    if (capMicrousd !== null && MONEY_CAPABILITIES[admitted.provider as ProviderId].nativeDollarCapFlag === null) {
+    // The effective cap, RE-DERIVED after admission (E3d verify, R6): the
+    // pre-claim value is a survey; a backstop set while the claim and
+    // worktree awaits ran must govern the spend that actually happens. The
+    // belt then re-proves capability against the ADMITTED provider — and on
+    // refusal the run is FINISHED and its cycle resolved, never abandoned.
+    const scopeBudgetNow = store.getScope(pending.taskId)?.budgetMicrousd ?? null;
+    const backstopNow = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
+    const capNow =
+      scopeBudgetNow === null ? backstopNow : backstopNow === null ? scopeBudgetNow : Math.min(scopeBudgetNow, backstopNow);
+    if (capNow !== null && MONEY_CAPABILITIES[admitted.provider as ProviderId].nativeDollarCapFlag === null) {
       store.finishRun(admitted.runId, { outcome: "refused", reason: "budget-unenforceable", now: clock() });
       store.resolveChainOnRunEnd(pending.taskRef, admitted.taskId, repo, admitted.runId, clock());
       release(store, lease, clock());
@@ -2638,7 +2651,7 @@ async function tickCommand(
       branch,
       now: clock(),
       clock,
-      ...(capMicrousd === null ? {} : { maxBudgetUsd: capMicrousd / 1_000_000 }),
+      ...(capNow === null ? {} : { maxBudgetUsd: capNow / 1_000_000 }),
       provider: admitted.provider as ProviderId,
       model: admitted.model,
       ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),

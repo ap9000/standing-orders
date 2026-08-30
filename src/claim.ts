@@ -492,6 +492,7 @@ export function acquireFallback(
     provider: string;
     model: string;
     authMode: "subscription" | "api-key";
+    maxOpenDecisions?: number;
   },
 ): AcquireResult | NotReady {
   return inTransaction(store, () => {
@@ -568,6 +569,21 @@ export function acquireFallback(
         reason: "quota" as const,
         message: `${runner}'s ${options.provider} quota is exhausted (${quota.reason})${quota.resetAt === null ? "" : ` until ${quota.resetAt}`} — the fallback entry's own credential is spent`,
       };
+    }
+    // The attention budget, exactly as the ordinary road holds it (E3d
+    // verify, R4): a fallback attempt can park and add a decision like any
+    // other, so above the budget a task with a measured parking habit steps
+    // aside here too — backoff is the ONE exemption, not this.
+    const budget = options.maxOpenDecisions ?? DEFAULT_MAX_OPEN_DECISIONS;
+    if (store.countUnanswered() >= budget) {
+      const rate = store.refForId(taskRef)?.parkRate ?? 0;
+      if (rate > 0) {
+        return {
+          ok: false as const,
+          reason: "attention-budget" as const,
+          message: `${store.countUnanswered()} decisions already wait and this task parks ${Math.round(rate * 100)}% of its attempts — answer some before it may add more`,
+        };
+      }
     }
     const taken = acquireLocked(store, taskRef, runner, options);
     if (taken.ok && quota !== null) {
