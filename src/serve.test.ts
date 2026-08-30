@@ -4248,6 +4248,28 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     expect((await fetch(url("/apple-touch-icon.png"))).status).toBe(200);
   });
 
+  test("the typefaces serve pre-auth as woff2, exact names only, and the page CSP admits them", async () => {
+    const font = await fetch(url("/fonts/plex-sans-400.woff2"));
+    expect(font.status).toBe(200);
+    expect(font.headers.get("content-type")).toBe("font/woff2");
+    expect(font.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(font.headers.get("cache-control")).toBe("public, max-age=3600");
+    const bytes = Buffer.from(await font.arrayBuffer());
+    expect(bytes.subarray(0, 4).toString("latin1")).toBe("wOF2");
+    expect((await fetch(url("/fonts/plex-mono-600.woff2"))).status).toBe(200);
+    // Unknown names fall through to the ordinary unauthenticated refusal —
+    // a redirect to sign-in, never a read and never a server error.
+    expect((await fetch(url("/fonts/other.woff2"), { redirect: "manual" })).status).toBe(303);
+    const login = await fetch(url("/login"));
+    expect(login.headers.get("content-security-policy")).toContain("font-src 'self'");
+    // Every routed face is also declared: a served-but-undeclared weight
+    // would silently synthesize.
+    const html = await login.text();
+    for (const face of ["plex-sans-400", "plex-sans-500", "plex-sans-600", "plex-mono-400", "plex-mono-500", "plex-mono-600"]) {
+      expect(html).toContain(`/fonts/${face}.woff2`);
+    }
+  });
+
   test("push enrollment is a password ceremony and validates the endpoint (arc 3)", async () => {
     const cookie = await login();
     // This suite's server has no telegram file, so /settings is off — any

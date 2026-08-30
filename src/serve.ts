@@ -42,6 +42,7 @@
  */
 
 import { listCoordinators } from "./coordinator.js";
+import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
@@ -249,6 +250,15 @@ const PWA_ICON_192 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAB1klEQVR42u
 const PWA_ICON_512 = "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAIAAAB7GkOtAAAJF0lEQVR42u3VwQ0AEBBFQXU4KUD/TW0R3JzcRLJhfqYCwivDzMy+XHEEZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmZgJgZmYCYGZmAmBmJgBmZiYAZmYmAGZmJgBmZiYAZmYmAGZmJgDb1dYBOCEAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACAIAAACAAAAgAAAIAgAAAIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACAIAAACAAAAgAAAIAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIAAACAIAAACAAAAgAAAIAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIAAACAIAAACAAAAgAAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACcF+Y5Z5HKgACIAAmAAgAAmACgAAgACYACAACYAKAACAAJgAIAAJgAoAAIAAmAAgAAmACIAACgP/FBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQABMABAAARAAEwAEAAEwAUAAEAATAAQAATABQAAQABMABAABMAFAABAAEwABEAAEwARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEQADMBEAABEAAzARAAARAAMwEQAAEAEAABABAAAQAQAAAEAAABAAAAQBAAAAQAAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAANwcgAAAIAAACAAAAgCAAAAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIAgAAAIAAACAAAAgCAAAAgAAACIAC/C7Pc80gFQAAEwAQAAUAATAAQAATABAABQABMABAABMAEAAFAAEwAEAAEwAQAAUAATAAEQADwv5gACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgAkAAiAAAmACgAAgACYACAACYAKAACAAJgAIAAJgAoAAIAAmAAgAAmACIAACgACYAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAIgJkACIAACICZAAiAAAiAmQAIgAAACIAAAAiAAAAIAAACAIAAACAAAAgAAAIAgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAmwMQAAAEAAABAEAAABAAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAQAQAAEAEAABABAAAAQAAAEAAABAEAAABAAAASAJcxyzyMVAAEQABMABAABMAFAABAAEwAEAAEwAUAAEAATAAQAATABQAAQABMABAABMAEQAAHA/2ICIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgACYACIAACIAJAAKAAJgAIAAIgAkAAoAAmAAgAAiACQACgACYACAACIAJgAAIAAJgAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIgAGYCIAACIABmAiAAAiAAZgIgAAIAIAACACAAAgAgAAAIAAACAIAAACAAAAgAAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAAgAgAAIAIAACACAAbg5AAAAQAAAEAAABAEAAABAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAAQBAAAAQAAAEAAABAEAAABAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABEAAAARAAAAEQAAABcHkAAgCAAAAgAAAIAAACAIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgAAACIAAAAiAAAAIgJmZPT4BMDMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMxMAMzMTADMzEwAzMwEwMzMBMDMzATAzMwEwMzMBMDOzJzYBVJhD+Nnu218AAAAASUVORK5CYII=";
 const PWA_ICON_APPLE = "iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAIAAACyr5FlAAABqklEQVR42u3aMQ0AIAxFwepgQgD+TSECFHQiYWjv5ylobmwcs2ThBAaHwWFwGBwGh8FhcBgcBofBkW7MparBITgEh+AQHIJDcAgOwQEHHHDAAYfgEByCQ3AIDsEhOASHI8IBBxxwCA7BITgEh+AQHIJDcAgOOOCAQ3AIDsEhOASH4BAcguNPu9PggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOOCAAw44PPsIDsEhOASH4BAcgkNwCA444IADDjgEh+AQHIJDcAgOwSE44IDDg7EHYzjggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOOCAAw559hEcgkNwwAEHHHDAITgEh+AQHIJDcAgOwQEHHHDAAYfgEByCQ3B4MIYDDjjggAMOOOCAAw444IADDjjggAMOOOCAAw444IADDjjggAMOOODw7OPZBw7BITgEh+AQHIJDcAgOOOCAAw44BIfgEByCQ3AIDsEhOAQHHHDAITgEh+AQHIJDcAgOwSE44IADDjgecVjbwWFwGBwGh8FhcBgcBofBYeV3AaohX51oqNRKAAAAAElFTkSuQmCC";
 const PWA_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="6" y="6" width="88" height="88" rx="14" fill="#1a202c"/><rect x="28" y="28" width="44" height="8" rx="4" fill="#ebebeb"/><rect x="28" y="47" width="44" height="8" rx="4" fill="#ebebeb"/><rect x="28" y="66" width="44" height="8" rx="4" fill="#ebebeb"/></svg>`;
+/** The typefaces by route: exact names only, served pre-auth like the icons. */
+const FONT_FILES: Record<string, string> = {
+  "/fonts/plex-sans-400.woff2": PLEX_SANS_400,
+  "/fonts/plex-sans-500.woff2": PLEX_SANS_500,
+  "/fonts/plex-sans-600.woff2": PLEX_SANS_600,
+  "/fonts/plex-mono-400.woff2": PLEX_MONO_400,
+  "/fonts/plex-mono-500.woff2": PLEX_MONO_500,
+  "/fonts/plex-mono-600.woff2": PLEX_MONO_600,
+};
 const PWA_MANIFEST = JSON.stringify({
   name: "standing orders",
   short_name: "standing orders",
@@ -256,8 +266,8 @@ const PWA_MANIFEST = JSON.stringify({
   scope: "/",
   start_url: "/",
   display: "standalone",
-  background_color: "#ffffff",
-  theme_color: "#1a202c",
+  background_color: "#0c0e12",
+  theme_color: "#0c0e12",
   icons: [
     { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
     { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
@@ -575,6 +585,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (url.pathname === "/icon-512.png") return asset("image/png", Buffer.from(PWA_ICON_512, "base64"));
       if (url.pathname === "/apple-touch-icon.png") return asset("image/png", Buffer.from(PWA_ICON_APPLE, "base64"));
       if (url.pathname === "/sw.js") return asset("text/javascript; charset=utf-8", PWA_WORKER, "default-src 'none'");
+      // The typefaces: exact-allowlisted like the icons — nothing dynamic
+      // rides the path, unknown names fall through to the router's refusal.
+      const font = FONT_FILES[url.pathname];
+      if (font !== undefined) return asset("font/woff2", Buffer.from(font, "base64"));
     }
     // A fragment poll is the page keeping itself fresh, not a person acting.
     // It authenticates like any request but must not count as activity —
@@ -1146,7 +1160,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const hasGrant = store.hasMergeCapableGrant(project, now);
       const current =
         live === null || liveTerms === null
-          ? `<div class="card"><h2 style="margin-top:0">locked</h2><p class="meta">no mode is signed — every act keeps its own ceremony. That is the default, forever.</p></div>`
+          ? `<div class="card"><h2>locked</h2><p class="meta">no mode is signed — every action asks for your password. That is the default.</p></div>`
           : [
               `<div class="card">`,
               `<h2 style="margin-top:0">${escape(live.name)} <span class="meta">signed by ${personChip(live.signedBy)}</span></h2>`,
@@ -1394,7 +1408,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         screen("queue", [
           `<h1>queue</h1>`,
-          `<p class="hint">every worker's up-next list — drag a card to reorder or to reserve it for a worker; top is taken first. The order applies at the next selection; work already being taken keeps its claim.</p>`,
+          `<p class="hint">drag to reorder or to reserve for a worker — the top card is taken first</p>`,
           `<div id="queue-region">${body}</div>`,
           `<p class="meta" id="queue-region-stamp"></p>`,
         ].join("\n"), { chrome: chromeFor(project, "queue"), functional: { script: queueScript(), fetches: true } }),
@@ -1419,7 +1433,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         "fleet",
         [
           `<h1>fleet</h1>`,
-          `<p class="hint">one lane per worker — building pins to the top, queued reservations below it, every card wearing its project. Drag a queued card onto another worker to re-reserve it. Registering and retiring a worker are the only acts here, and both take your password.</p>`,
+          `<p class="hint">one lane per worker — drag a queued card onto another worker to re-reserve it</p>`,
           ...(said === null ? [] : [`<p class="meta">${escape(said)}</p>`]),
           `<div id="fleet-region">${body}</div>`,
           `<p class="meta" id="fleet-region-stamp"></p>`,
@@ -1501,7 +1515,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return page(
         response,
         200,
-        shell("menu", [`<h1>everything else</h1>`, `<div class="menu-list">${rows}</div>`].join("\n"), {
+        shell("menu", [`<h1>more</h1>`, `<div class="menu-list">${rows}</div>`].join("\n"), {
           chrome: chromeFor(project, "menu"),
         }),
       );
@@ -5291,7 +5305,7 @@ function isOverdue(decision: Decision, now: Date): boolean {
 
 const SAFETY = {
   "Content-Security-Policy":
-    "default-src 'none'; style-src 'unsafe-inline'; manifest-src 'self'; worker-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; manifest-src 'self'; worker-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Cache-Control": "no-store",
@@ -5299,9 +5313,16 @@ const SAFETY = {
 
 function respond(response: ServerResponse, status: number, type: string, body: string): void {
   // A route that set its OWN policy (the service worker's default-src
-  // 'none') keeps it — writeHead's headers would otherwise win.
+  // 'none') or its own caching (the pre-auth assets) keeps it —
+  // writeHead's headers would otherwise win.
   const own = response.getHeader("content-security-policy");
-  response.writeHead(status, { ...SAFETY, ...(own === undefined ? {} : { "content-security-policy": own as string }), "Content-Type": type });
+  const cache = response.getHeader("cache-control");
+  response.writeHead(status, {
+    ...SAFETY,
+    ...(own === undefined ? {} : { "content-security-policy": own as string }),
+    ...(cache === undefined ? {} : { "Cache-Control": cache as string }),
+    "Content-Type": type,
+  });
   response.end(body);
 }
 
@@ -5316,7 +5337,7 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
   response.writeHead(status, {
     ...SAFETY,
     "Content-Security-Policy":
-      `default-src 'none'; style-src 'unsafe-inline'; manifest-src 'self'; worker-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; ` +
+      `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; manifest-src 'self'; worker-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; ` +
       // connect-src only when the page's script actually fetches (a region
       // poller) — the chrome layer alone gets no network at all.
       `${fetches === true ? "connect-src 'self'; " : ""}form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
@@ -5349,7 +5370,7 @@ function refuse(
     response,
     status,
     shell("refused", [
-      `<h1>that did not happen</h1>`,
+      `<h1>request refused</h1>`,
       `<div class="problem">${escape(message)}</div>`,
       `<p class="meta"><a href="${escape(backHref)}">\u2190 back</a></p>`,
     ].join("\n")),
@@ -5432,148 +5453,103 @@ function escape(text: string): string {
 }
 
 /**
- * shadcn/ui's design system — its zinc palette, radii, and component
- * shapes — as pure CSS on server-rendered HTML. Deliberately not the React
- * library: the console ships zero dependencies and zero page JavaScript
- * under a CSP that forbids scripts, and a look is not worth that posture.
- * Dark mode follows the device (`prefers-color-scheme`), tokens redefined
- * wholesale, exactly as shadcn's own theme variables do.
+ * The Operations Ledger: the design system Alex approved in Figma and the
+ * design/ shadcn package, carried as pure CSS on server-rendered HTML.
+ * Deliberately not the React library: the console ships zero dependencies
+ * and zero page JavaScript under a CSP that forbids scripts, and a look is
+ * not worth that posture. One committed dark theme — no light variant, and
+ * `color-scheme: dark` says so to the browser.
  */
 const STYLE = `
-  :root {
-    color-scheme: light dark;
-    --background: hsl(0 0% 100%);
-    --foreground: hsl(240 10% 3.9%);
-    --card: hsl(0 0% 100%);
-    --muted: hsl(240 4.8% 95.9%);
-    --muted-foreground: hsl(240 3.8% 42%);
-    --border: hsl(240 5.9% 90%);
-    --input: hsl(240 5.9% 90%);
-    --primary: hsl(240 5.9% 10%);
-    --primary-foreground: hsl(0 0% 98%);
-    --secondary: hsl(240 4.8% 95.9%);
-    --secondary-foreground: hsl(240 5.9% 10%);
-    --accent: hsl(240 4.8% 95.9%);
-    --destructive: hsl(0 72% 38%);
-    --destructive-strong: hsl(0 74% 42%);
-    --destructive-soft: hsl(0 86% 97%);
-    --success: hsl(142 76% 26%);
-    --success-soft: hsl(141 84% 93%);
-    --warning: hsl(35 92% 28%);
-    --warning-soft: hsl(48 96% 89%);
-    --ring: hsl(240 5% 64.9%);
-    --brand: hsl(250 65% 48%);
-    --brand-soft: hsl(250 80% 96%);
-    --radius: 0.625rem;
-    --shadow: 0 1px 2px 0 hsl(240 10% 3.9% / 0.05);
-    --material-satin-surface:
-      linear-gradient(180deg, rgb(255 255 255 / .72) 0%, rgb(255 255 255 / .22) 16%, transparent 48%, rgb(17 24 39 / .025) 100%),
-      linear-gradient(135deg, #fff 0%, #f5f6f8 32%, #e9ecf1 70%, #f8fafc 100%);
-    /* Selected surfaces are configurable at one semantic switch point.
-       Neutral is the operational default; brand is an intentional emphasis;
-       flat removes optical texture while preserving the state outline. */
-    --material-card-selected-neutral:
-      linear-gradient(180deg, rgb(255 255 255 / .76) 0%, rgb(255 255 255 / .16) 18%, transparent 52%, rgb(17 24 39 / .025) 100%),
-      linear-gradient(135deg, #fff 0%, #f6f7f9 30%, #eceff3 72%, #fafbfc 100%);
-    --material-card-selected-brand:
-      linear-gradient(180deg, rgb(255 255 255 / .8) 0%, rgb(255 255 255 / .18) 18%, transparent 52%, rgb(75 44 201 / .035) 100%),
-      linear-gradient(135deg, #fff 0%, #f2f0ff 30%, #e3dffc 72%, #f8f7ff 100%);
-    --material-card-selected-flat: var(--card);
-    --material-card-selected: var(--material-card-selected-neutral);
-    --material-satin-selected: var(--material-card-selected);
-    --material-satin-control: linear-gradient(180deg, #fff 0%, #f1f3f6 38%, #e4e7ec 72%, #fafbfc 100%);
-    --material-graphite-chrome:
-      linear-gradient(180deg, rgb(255 255 255 / .11) 0%, rgb(255 255 255 / .035) 8%, transparent 42%, rgb(0 0 0 / .14) 100%),
-      linear-gradient(135deg, #242831 0%, #171a21 24%, #0e1015 70%, #1c2028 100%);
-    --material-resting-shadow:
-      inset 0 1px 1px rgb(255 255 255 / .72),
-      inset 0 -1px 1px rgb(17 19 24 / .035),
-      0 1px 3px rgb(17 19 24 / .07);
-    --material-raised-shadow:
-      inset 0 1px 1px rgb(255 255 255 / .78),
-      0 2px 7px -2px rgb(17 19 24 / .08),
-      0 18px 34px -16px rgb(17 19 24 / .13);
-    --material-selected-shadow:
-      inset 0 1px 1px rgb(255 255 255 / .82),
-      0 2px 7px -3px rgb(17 19 24 / .09);
-    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+/* The Operations Ledger — the console's one committed world (design pass,
+   2026-08-30). Dark ink ground, hairline structure, IBM Plex Sans for the
+   human voice and IBM Plex Mono for every machine fact. One accent: amber
+   means "waits on you" and nothing else. Semantic run states are quiet
+   tinted outline chips — running blue, built green, failed red — never
+   whole surfaces. Zero dependencies, zero page JS beyond the nonce'd
+   chrome layer; the shadcn new-york idiom carried as pure CSS. */
+  @font-face {
+    font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400;
+    font-display: swap; src: url("/fonts/plex-sans-400.woff2") format("woff2");
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --background: hsl(240 10% 3.9%);
-      --foreground: hsl(0 0% 98%);
-      --card: hsl(240 8% 6%);
-      --muted: hsl(240 3.7% 15.9%);
-      --muted-foreground: hsl(240 5% 64.9%);
-      --border: hsl(240 3.7% 15.9%);
-      --input: hsl(240 3.7% 17%);
-      --primary: hsl(0 0% 98%);
-      --primary-foreground: hsl(240 5.9% 10%);
-      --secondary: hsl(240 3.7% 15.9%);
-      --secondary-foreground: hsl(0 0% 98%);
-      --accent: hsl(240 3.7% 15.9%);
-      --destructive: hsl(0 84% 68%);
-      --destructive-strong: hsl(0 72% 51%);
-      --destructive-soft: hsl(0 50% 13%);
-      --success: hsl(142 62% 62%);
-      --success-soft: hsl(144 61% 11%);
-      --warning: hsl(45 92% 60%);
-      --warning-soft: hsl(36 50% 12%);
-      --ring: hsl(240 4.9% 45%);
-      --brand: hsl(250 80% 72%);
-      --brand-soft: hsl(250 40% 16%);
-      --shadow: none;
-      --material-satin-surface:
-        linear-gradient(180deg, rgb(255 255 255 / .08) 0%, rgb(255 255 255 / .02) 18%, transparent 54%, rgb(0 0 0 / .18) 100%),
-        linear-gradient(135deg, #20242c 0%, #191c23 32%, #111319 70%, #1b1f27 100%);
-      --material-card-selected-neutral:
-        linear-gradient(180deg, rgb(255 255 255 / .1) 0%, rgb(255 255 255 / .025) 20%, transparent 52%, rgb(0 0 0 / .16) 100%),
-        linear-gradient(135deg, #242832 0%, #20242a 32%, #16191f 72%, #21252d 100%);
-      --material-card-selected-brand:
-        linear-gradient(180deg, rgb(255 255 255 / .11) 0%, rgb(255 255 255 / .025) 20%, transparent 52%, rgb(99 74 214 / .08) 100%),
-        linear-gradient(135deg, #2b2743 0%, #24203b 32%, #191724 72%, #27233e 100%);
-      --material-card-selected-flat: var(--card);
-      --material-card-selected: var(--material-card-selected-neutral);
-      --material-satin-selected: var(--material-card-selected);
-      --material-satin-control: linear-gradient(180deg, #282c35 0%, #20242c 38%, #161920 72%, #242832 100%);
-      --material-resting-shadow:
-        inset 0 1px 1px rgb(255 255 255 / .09),
-        inset 0 -1px 1px rgb(0 0 0 / .34),
-        0 1px 3px rgb(0 0 0 / .42);
-      --material-raised-shadow:
-        inset 0 1px 1px rgb(255 255 255 / .11),
-        0 2px 8px -2px rgb(0 0 0 / .38),
-        0 18px 36px -16px rgb(0 0 0 / .58);
-      --material-selected-shadow:
-        inset 0 1px 1px rgb(255 255 255 / .13),
-        0 2px 8px -3px rgb(0 0 0 / .42);
-    }
+  @font-face {
+    font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500;
+    font-display: swap; src: url("/fonts/plex-sans-500.woff2") format("woff2");
+  }
+  @font-face {
+    font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600;
+    font-display: swap; src: url("/fonts/plex-sans-600.woff2") format("woff2");
+  }
+  @font-face {
+    font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400;
+    font-display: swap; src: url("/fonts/plex-mono-400.woff2") format("woff2");
+  }
+  @font-face {
+    font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500;
+    font-display: swap; src: url("/fonts/plex-mono-500.woff2") format("woff2");
+  }
+  @font-face {
+    font-family: "IBM Plex Mono"; font-style: normal; font-weight: 600;
+    font-display: swap; src: url("/fonts/plex-mono-600.woff2") format("woff2");
+  }
+  :root {
+    color-scheme: dark;
+    --background: #0c0e12;      /* ground */
+    --foreground: #e9ebee;      /* text */
+    --card: #14171d;            /* surface */
+    --muted: #1b1f27;           /* inset wells */
+    --muted-foreground: #8b93a1;/* dim */
+    --border: #262b35;          /* hairlines */
+    --input: #5a6478;           /* control boundaries: >=3:1 on ground and surface */
+    --primary: #e9ebee;
+    --primary-foreground: #0c0e12;
+    --secondary: #1b1f27;
+    --secondary-foreground: #e9ebee;
+    --accent: #1b1f27;
+    --destructive: #f06a5e;
+    --destructive-strong: #f06a5e;
+    --destructive-soft: color-mix(in srgb, #f06a5e 12%, transparent);
+    --success: #3ecf8e;
+    --success-soft: color-mix(in srgb, #3ecf8e 12%, transparent);
+    --warning: #f5a524;
+    --warning-soft: color-mix(in srgb, #f5a524 12%, transparent);
+    --running: #5ca9ff;
+    --running-soft: color-mix(in srgb, #5ca9ff 12%, transparent);
+    --ring: #5ca9ff;
+    /* amber — the one accent; it marks what waits on a person, only. */
+    --brand: #f5a524;
+    --brand-soft: color-mix(in srgb, #f5a524 12%, transparent);
+    --radius: 0.625rem;
+    --shadow: 0 1px 2px 0 rgb(0 0 0 / .3);
+    --shadow-overlay: 0 4px 12px -2px rgb(0 0 0 / .4), 0 16px 40px -12px rgb(0 0 0 / .6);
+    --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
-  ::selection { background: color-mix(in srgb, var(--foreground) 18%, transparent); }
+  ::selection { background: color-mix(in srgb, var(--running) 30%, transparent); }
+  ::placeholder { color: var(--muted-foreground); }
   body {
     margin: 0; background: var(--background); color: var(--foreground);
     caret-color: var(--foreground);
-    font: 400 0.9375rem/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    font: 400 0.9375rem/1.55 var(--font-sans);
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+  /* Scrollbars belong to the theme, not the platform default. */
+  * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+
   .topbar {
     position: sticky; top: 0; z-index: 10;
-    border-bottom: 1px solid var(--border);
-    background: var(--material-satin-surface);
-    box-shadow: var(--material-resting-shadow);
+    border-bottom: 1px solid var(--border); background: var(--background);
   }
   .topbar-inner {
     max-width: 44rem; margin-inline: auto; padding: 0 1.25rem; height: 3.25rem;
     display: flex; align-items: center; gap: 1.25rem;
   }
-  .brand { font-weight: 650; letter-spacing: -0.01em; color: var(--foreground); text-decoration: none;
+  .brand { font-weight: 600; letter-spacing: -0.01em; color: var(--foreground); text-decoration: none;
            display: flex; align-items: center; height: 100%; }
-  .brand .dot { color: var(--brand); }
-  /* The one accent hue (arc 4): orientation and liveness only — where you
-     are, what is alive. Never on verbs; buttons and the semantic colors
-     (success/warning/destructive) are untouched. */
-  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  .brand .dot { color: var(--muted-foreground); }
   .topbar nav { display: flex; gap: .25rem; margin-left: auto; height: 100%; }
   .topbar nav a {
     color: var(--muted-foreground); text-decoration: none; font-size: 0.8125rem; font-weight: 500;
@@ -5581,11 +5557,11 @@ const STYLE = `
   }
   .topbar nav a:hover { color: var(--foreground); }
   main { max-width: 44rem; margin-inline: auto; padding: 1.75rem 1.25rem 4rem; }
-  h1 { font-size: 1.375rem; font-weight: 650; letter-spacing: -0.025em; margin: 0 0 .25rem; }
+  h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 .25rem; }
   h1 .meta { font-weight: 400; letter-spacing: 0; }
   h2 {
-    font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
-    color: var(--muted-foreground); margin: 2.25rem 0 .625rem;
+    font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted-foreground); margin: 2.25rem 0 .625rem; font-family: var(--font-mono);
   }
   a { color: var(--foreground); text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
   a:hover { text-decoration-color: var(--muted-foreground); }
@@ -5595,46 +5571,74 @@ const STYLE = `
 
   .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
   .meta a { color: var(--muted-foreground); }
-  .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: -.375rem 0 .625rem; opacity: .8; }
+  .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: -.375rem 0 .625rem; }
   .eyebrow {
-    display: block; color: var(--muted-foreground); font-size: .6875rem;
-    font-weight: 650; letter-spacing: .08em; line-height: 1.3; text-transform: uppercase;
+    display: block; color: var(--muted-foreground); font-size: .625rem;
+    font-weight: 500; letter-spacing: .08em; line-height: 1.3; text-transform: uppercase;
+    font-family: var(--font-mono);
   }
   .num { font-variant-numeric: tabular-nums; }
+
+  /* Utility classes replacing the old inline style= attributes. */
+  .tight { margin-top: 0; }
+  .card > h2:first-child, .card > h3:first-child { margin-top: 0; }
+  .w-xs { width: 4.5rem; } .w-sm { width: 8rem; } .w-md { width: 12rem; } .w-lg { width: 14rem; }
+  .field-cap { width: 100%; max-width: 28rem; }
+  .field-cap-sm { width: 100%; max-width: 22rem; }
+  .field-cap-lg { width: 100%; max-width: 34rem; }
+  .prewrap { white-space: pre-wrap; }
+  .wrap-any { overflow-wrap: anywhere; }
+  .grab { cursor: grab; user-select: none; }
+
   .palette {
     position: fixed; top: 18vh; left: 50%; transform: translateX(-50%); width: min(32rem, 90vw);
-    background: var(--material-satin-surface); border: 1px solid var(--border); border-radius: var(--radius);
-    box-shadow: var(--material-raised-shadow);
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow-overlay);
     padding: .625rem; z-index: 50;
   }
   .palette input { width: 100%; margin: 0; }
   .palette ul { list-style: none; margin: .5rem 0 0; padding: 0; max-height: 40vh; overflow-y: auto; }
   .palette li { padding: .4375rem .625rem; border-radius: calc(var(--radius) - 4px); cursor: pointer; font-size: .875rem; }
-  .palette li[aria-selected="true"] {
-    background: var(--material-card-selected); color: var(--foreground);
-    outline: 1px solid color-mix(in srgb, var(--brand) 28%, var(--border)); outline-offset: -1px;
-    box-shadow: var(--material-selected-shadow);
-  }
+  .palette li[aria-selected="true"] { background: var(--muted); }
 
-  /* The ledger: the window's harvest as strong figures in a sentence,
-     not a metric-card grid. */
+  /* The ledger: the window's harvest as strong figures in a sentence. */
   .ledger { font-size: 0.9375rem; color: var(--muted-foreground); margin: .875rem 0 0; line-height: 1.9; }
-  .ledger b { font-weight: 650; font-size: 1.25rem; color: var(--foreground); font-variant-numeric: tabular-nums; padding-right: .1rem; }
+  .ledger b { font-weight: 600; font-size: 1.25rem; color: var(--foreground); font-variant-numeric: tabular-nums; padding-right: .1rem; font-family: var(--font-mono); }
   .ledger .good b { color: var(--success); }
   .ledger .bad b { color: var(--destructive); }
 
+  /* Status chips: one vocabulary — mono type, 12% tint, hairline of the
+     same hue. Neutral facts stay dim. */
   .badge {
     display: inline-block; border: 1px solid var(--border); border-radius: 9999px;
-    padding: .125rem .625rem; font-size: 0.75rem; font-weight: 500; line-height: 1.4;
-    background: var(--secondary); color: var(--secondary-foreground); vertical-align: middle;
+    padding: .0625rem .5rem; font-size: 0.6875rem; font-weight: 500; line-height: 1.5;
+    background: transparent; color: var(--muted-foreground); vertical-align: middle;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap;
   }
-  .badge-done, .badge-answered, .badge-verified, .badge-built { background: var(--success-soft); color: var(--success); border-color: transparent; }
-  .badge-failed, .badge-cancelled, .badge-overdue { background: var(--destructive-soft); color: var(--destructive); border-color: transparent; }
-  .badge-running, .badge-open, .badge-parked, .badge-cut { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+  .badge-done, .badge-answered, .badge-verified, .badge-built {
+    background: var(--success-soft); color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  }
+  .badge-failed, .badge-cancelled, .badge-overdue {
+    background: var(--destructive-soft); color: var(--destructive);
+    border-color: color-mix(in srgb, var(--destructive) 35%, transparent);
+  }
+  /* "open" is a neutral fact (an open PR, an open decision); the AMBER
+     form of it is the attention count — the number that waits on you. */
+  .badge-open { color: var(--foreground); }
+  .count.badge-open, .badge-parked {
+    background: var(--brand-soft); color: var(--brand);
+    border-color: color-mix(in srgb, var(--brand) 35%, transparent);
+  }
+  .badge-running {
+    background: var(--running-soft); color: var(--running);
+    border-color: color-mix(in srgb, var(--running) 35%, transparent);
+  }
+  .badge-cut { background: var(--muted); }
 
   .card {
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--material-satin-surface);
-    padding: 1rem 1.125rem; margin: .75rem 0; box-shadow: var(--material-resting-shadow);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    padding: 1rem 1.125rem; margin: .75rem 0;
   }
   .problem {
     border: 1px solid color-mix(in srgb, var(--destructive) 35%, transparent);
@@ -5649,42 +5653,52 @@ const STYLE = `
   .row:last-of-type { border-bottom: none; }
   .row .right { margin-left: auto; }
   a.row { text-decoration: none; }
-  a.row:hover { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+  a.row:hover { background: color-mix(in srgb, var(--muted) 55%, transparent); }
 
-  /* A parked decision is the page's reason to exist: it gets a card, a
-     question in full weight, and the whole card is the tap target. */
+  /* A parked decision is the page's reason to exist: amber top rule, the
+     question in full weight, the whole card the tap target. */
   .decide-card {
     display: block; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--material-satin-surface); padding: .875rem 1.125rem; margin: .625rem 0;
-    text-decoration: none; box-shadow: var(--material-raised-shadow); transition: border-color .15s;
+    background: var(--card); padding: .875rem 1.125rem; margin: .625rem 0;
+    text-decoration: none; transition: border-color .15s;
+    border-top: 2px solid var(--brand);
   }
-  .decide-card:hover { border-color: var(--ring); }
+  .decide-card:hover { border-color: color-mix(in srgb, var(--brand) 45%, var(--border)); border-top-color: var(--brand); }
   .decide-card .q { font-weight: 600; margin: 0 0 .25rem; }
 
   button {
-    font: 500 0.9375rem/1.4 inherit; cursor: pointer; border-radius: calc(var(--radius) - 2px);
-    border: 1px solid var(--border); background: var(--material-satin-control); color: var(--foreground);
-    padding: .5rem .875rem; min-height: 2.5rem; box-shadow: var(--material-resting-shadow);
-    transition: filter .15s, border-color .15s;
+    font: 500 0.875rem/1.4 var(--font-sans); cursor: pointer; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid var(--input); background: var(--secondary); color: var(--foreground);
+    padding: .5rem .875rem; min-height: 2.5rem;
+    transition: background .15s, border-color .15s;
   }
-  button:hover { filter: brightness(1.035); border-color: var(--ring); }
+  button:hover { background: color-mix(in srgb, var(--secondary) 70%, var(--border)); border-color: color-mix(in srgb, var(--input) 70%, var(--muted-foreground)); }
+  /* The approve act is the one amber verb: it resolves what waits on you.
+     A ceremony form carries the amber rule; a danger act stays red even
+     inside one. */
+  .approve-form { border-top: 2px solid var(--brand); }
   .approve-form button[type=submit] {
-    background: var(--material-graphite-chrome); color: hsl(0 0% 98%); border-color: hsl(240 5.9% 18%);
+    background: var(--brand); color: #201503; border-color: var(--brand); font-weight: 600;
   }
-  .approve-form button[type=submit]:hover { filter: brightness(1.08); }
-  button.danger { color: var(--destructive-strong); border-color: color-mix(in srgb, var(--destructive-strong) 40%, transparent); }
-  button.danger:hover { background: var(--destructive-soft); }
+  .approve-form button[type=submit]:hover { background: color-mix(in srgb, var(--brand) 88%, #fff); }
+  button.danger, .approve-form button[type=submit].danger {
+    color: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 50%, transparent);
+    background: transparent; font-weight: 500;
+  }
+  button.danger:hover, .approve-form button[type=submit].danger:hover { background: var(--destructive-soft); }
 
   label { display: block; font-size: 0.8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
-  input[type=text], input[type=password], textarea {
-    width: 100%; margin: .35rem 0 0; padding: .5rem .75rem; font: 400 0.9375rem/1.4 inherit;
-    color: var(--foreground); background: transparent; min-height: 2.5rem;
-    border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px); box-shadow: var(--shadow);
+  input[type=text], input[type=password], input[type=number], input[type=url], input[type=email], textarea, select {
+    width: 100%; margin: .35rem 0 0; padding: .5rem .75rem; font: 400 0.9375rem/1.4 var(--font-sans);
+    color: var(--foreground); background: var(--background); min-height: 2.5rem;
+    border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px);
   }
+  input[type=number] { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  input[type=radio], input[type=checkbox] { accent-color: var(--ring); }
+  input[type=password] { font-family: var(--font-mono); }
   input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible {
     outline: 2px solid var(--ring); outline-offset: 1px;
   }
-  ::placeholder { color: var(--muted-foreground); }
 
   .inline { display: inline-block; width: auto; margin: 0 .375rem .375rem 0; vertical-align: middle; }
   .inline input[type=text] { display: inline-block; width: auto; margin: 0 .375rem 0 0; vertical-align: middle; }
@@ -5693,95 +5707,118 @@ const STYLE = `
   /* One option = one container: consequence first, then the act. */
   form.option {
     margin: .75rem 0; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--material-satin-surface); padding: .875rem 1rem; box-shadow: var(--material-resting-shadow);
+    background: var(--card); padding: .875rem 1rem;
   }
   form.option button {
     display: block; width: 100%; text-align: left; font-size: 0.9375rem; font-weight: 600;
     min-height: 2.75rem;
   }
-  form.option.recommended {
-    background: var(--material-card-selected); border-color: var(--brand);
-    box-shadow: var(--material-selected-shadow), 0 0 0 1px var(--brand);
-  }
+  /* Recommended is a suggestion, not attention: neutral emphasis, no amber. */
+  form.option.recommended { border-color: color-mix(in srgb, var(--foreground) 30%, var(--border)); }
+  form.option.recommended .badge { background: var(--muted); color: var(--foreground); }
   .consequence { font-size: 0.8125rem; color: var(--muted-foreground); margin: 0 0 .625rem; white-space: pre-wrap; }
   form.option input[type=text] { font-size: 0.8125rem; margin-top: .5rem; min-height: 2.25rem; }
 
   .recap { color: var(--muted-foreground); margin: .75rem 0; white-space: pre-wrap; }
-  .question { font-size: 1.125rem; font-weight: 650; letter-spacing: -0.015em; margin: 1rem 0; white-space: pre-wrap; }
+  .question { font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; margin: 1rem 0; white-space: pre-wrap; }
   .answered {
     border: 1px solid color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft);
     border-radius: var(--radius); padding: .875rem 1rem; margin: 1rem 0;
   }
   details {
     margin: .75rem 0; border: 1px solid var(--border); border-radius: var(--radius);
-    padding: .25rem .875rem; background: var(--material-satin-surface); box-shadow: var(--material-resting-shadow);
+    padding: .25rem .875rem; background: var(--card);
   }
   details[open] { padding-bottom: .875rem; }
-  details.arm-danger { border-color: color-mix(in srgb, var(--destructive-strong) 30%, transparent); }
+  details.arm-danger { border-color: color-mix(in srgb, var(--destructive) 30%, transparent); }
   summary { padding: .625rem 0; cursor: pointer; font-weight: 500; font-size: 0.8125rem; color: var(--muted-foreground); min-height: 2.25rem; }
   summary:hover { color: var(--foreground); }
-  details form.option { border: none; box-shadow: none; padding: .25rem 0 0; margin: 0; }
+  details form.option { border: none; padding: .25rem 0 0; margin: 0; }
   .evidence { margin-top: 1.5rem; font-size: 0.8125rem; }
   .evidence a { display: block; padding: .55rem 0; border-bottom: 1px solid var(--border); text-decoration: none; }
   .evidence a:hover { color: var(--muted-foreground); }
-  .evidence strong { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground); }
+  .evidence strong { display: block; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted-foreground); font-family: var(--font-mono); }
 
   .filters { font-size: 0.8125rem; color: var(--muted-foreground); }
   .filters a, .filters strong {
     display: inline-block; padding: .25rem .625rem; border-radius: 9999px; text-decoration: none;
     color: var(--muted-foreground); font-weight: 500;
   }
-  .filters strong { background: var(--secondary); color: var(--secondary-foreground); }
+  .filters strong { background: var(--muted); color: var(--foreground); }
   .filters a:hover { color: var(--foreground); }
 
-  /* The workspace shell: sidebar + content, an optional list pane between.
-     One grid, collapsing to the phone column below 760px — the answering
-     flow keeps its single-column ritual. */
-  .app { display: grid; grid-template-columns: 252px minmax(0, 1fr); min-height: 100vh; }
+  /* A picked tournament result: marked in the built green, not amber. */
+  .card.picked { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); }
+  .seal {
+    display: inline-block; font-family: var(--font-mono); font-size: .75rem;
+    background: var(--muted); border: 1px solid color-mix(in srgb, var(--brand) 30%, var(--border));
+    color: var(--brand); border-radius: calc(var(--radius) - 4px); padding: .25rem .625rem;
+    font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+  }
+
+  /* The workspace shell: sidebar + content, an optional list pane between. */
+  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
   .side {
     border-right: 1px solid var(--border);
-    background: var(--material-graphite-chrome); color: hsl(0 0% 98%);
-    padding: 1rem .875rem; display: flex; flex-direction: column; gap: .25rem;
+    background: var(--background);
+    padding: .875rem .75rem 1rem; display: flex; flex-direction: column; gap: .125rem;
     position: sticky; top: 0; height: 100vh; overflow-y: auto;
   }
-  .side .brand { padding: .25rem .5rem .75rem; font-size: 1rem; height: auto; color: hsl(0 0% 98%); }
+  .side .brand { padding: .125rem .5rem .625rem; font-size: .9375rem; height: auto; }
   .side-project {
-    border: 1px solid rgb(255 255 255 / .18); border-radius: calc(var(--radius) - 2px);
-    padding: .7rem .75rem; margin: 0 0 .75rem; background: rgb(255 255 255 / .035);
-    box-shadow: inset 0 1px 1px rgb(255 255 255 / .08), 0 1px 3px rgb(0 0 0 / .34);
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+    padding: .625rem .7rem; margin: 0 0 .875rem; background: var(--card);
   }
-  .side-project .name { font-weight: 650; font-size: .9375rem; display: block; margin-top: .1rem; }
-  .side-project a { font-size: .75rem; color: hsl(0 0% 98%); }
-  .side-project .eyebrow, .side-project .switch, .side-project-status { color: hsl(240 5% 70%); }
-  .side-project .switch { display: inline-block; margin-top: .35rem; }
+  .side-project .name { font-weight: 600; font-size: .875rem; display: block; margin-top: .125rem; }
+  .side-project a { font-size: .75rem; color: var(--muted-foreground); text-decoration: none; }
+  .side-project a:hover { color: var(--foreground); }
+  .side-project .switch { display: inline-block; margin-top: .375rem; }
   .side-project-status {
-    display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .45rem;
+    display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .375rem;
     color: var(--muted-foreground); font-size: .6875rem; font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
   }
-  .side-project-status .hot { color: var(--warning); font-weight: 600; }
+  .side-project-status .hot { color: var(--brand); font-weight: 500; }
   .side nav { display: flex; flex-direction: column; gap: .125rem; }
+  .side .nav-label {
+    margin: .875rem .5rem .25rem; font-size: .625rem; font-weight: 500;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--muted-foreground);
+    font-family: var(--font-mono);
+  }
   .side nav a {
-    display: flex; align-items: center; gap: .5rem; padding: .5rem .625rem; min-height: 2.25rem;
-    border-radius: calc(var(--radius) - 2px); text-decoration: none;
-    color: hsl(240 5% 70%); font-size: .875rem; font-weight: 500;
+    display: flex; align-items: center; gap: .5rem; padding: .375rem .5rem; min-height: 2rem;
+    border-radius: calc(var(--radius) - 4px); text-decoration: none;
+    color: var(--muted-foreground); font-size: .8125rem; font-weight: 500;
   }
-  .side nav a:hover { background: var(--accent); color: var(--foreground); }
-  .side nav a.active {
-    background: var(--material-card-selected); color: hsl(240 10% 3.9%);
-    outline: 1px solid color-mix(in srgb, var(--brand) 28%, var(--border)); outline-offset: -1px;
-    box-shadow: var(--material-selected-shadow);
-  }
+  .side nav a:hover { background: var(--card); color: var(--foreground); }
+  .side nav a.active { background: var(--muted); color: var(--foreground); }
   .side nav a .count { margin-left: auto; }
   .side .grow { flex: 1; }
   .side .new-task {
-    display: block; text-align: center; text-decoration: none; font-weight: 600; font-size: .875rem;
-    background: var(--material-satin-control); color: hsl(240 10% 3.9%);
-    border-radius: calc(var(--radius) - 2px); padding: .625rem; margin: .75rem 0 .25rem;
-    box-shadow: var(--material-resting-shadow);
+    display: block; text-align: center; text-decoration: none; font-weight: 500; font-size: .8125rem;
+    background: var(--secondary); color: var(--foreground);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 2px); padding: .5rem; margin: .625rem 0 .125rem;
   }
-  .side .new-task:hover { opacity: .9; }
+  .side .new-task:hover { background: color-mix(in srgb, var(--secondary) 70%, var(--border)); }
+  /* The same action link outside the sidebar reads as a real button. */
+  .content .new-task {
+    display: inline-block; text-decoration: none; font-weight: 500; font-size: .8125rem;
+    background: var(--secondary); color: var(--foreground); border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 2px); padding: .5rem .875rem;
+  }
+  .content .new-task:hover { background: color-mix(in srgb, var(--secondary) 70%, var(--border)); }
   .content { min-width: 0; }
-  .content > main { max-width: 52rem; margin: 0; padding: 1.75rem 2rem 4rem; }
+  .content > main { max-width: 52rem; margin: 0; padding: 1.5rem 2rem 4rem; }
+
+  /* Banners: honest labels, quiet strips. */
+  .banner {
+    border-bottom: 1px solid var(--border); background: var(--card);
+    padding: .375rem .9rem; font-size: .8125rem; color: var(--muted-foreground);
+  }
+  .banner .badge { margin-right: .5rem; }
+  .banner a { color: var(--muted-foreground); }
+
   .split { display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr); min-height: 100vh; }
   .list-pane {
     border-right: 1px solid var(--border); overflow-y: auto; height: 100vh;
@@ -5789,19 +5826,19 @@ const STYLE = `
   }
   .list-pane h2 { margin-top: .25rem; }
   .list-pane a.item {
-    display: block; padding: .5rem .625rem; border-radius: calc(var(--radius) - 2px);
+    display: block; padding: .5rem .625rem; border-radius: calc(var(--radius) - 4px);
     text-decoration: none; font-size: .8125rem; margin-bottom: .125rem;
   }
-  .list-pane a.item:hover { background: var(--accent); }
-  .list-pane a.item.current { background: var(--material-card-selected); box-shadow: var(--material-selected-shadow); }
-  .list-pane a.item .t { display: block; font-weight: 550; color: var(--foreground);
+  .list-pane a.item:hover { background: var(--card); }
+  .list-pane a.item.current { background: var(--muted); }
+  .list-pane a.item .t { display: block; font-weight: 500; color: var(--foreground);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .list-pane a.item .m { display: flex; gap: .375rem; align-items: center; color: var(--muted-foreground);
     font-size: .75rem; margin-top: .125rem; }
   .split > .detail { min-width: 0; }
-  .split > .detail > main { max-width: 52rem; padding: 1.75rem 2rem 4rem; }
+  .split > .detail > main { max-width: 52rem; padding: 1.5rem 2rem 4rem; }
   .split:has(#wb-rail) { grid-template-columns: minmax(320px, 360px) minmax(0, 1fr); }
-  .list-pane:has(#wb-rail) { padding: 0; background: color-mix(in srgb, var(--muted) 35%, var(--background)); }
+  .list-pane:has(#wb-rail) { padding: 0; background: var(--background); }
   #wb-rail { padding: 1rem .75rem 1.5rem; }
   #wb-rail-stamp { padding: 0 .75rem; }
   .workbench-mobile-rail, .workbench-mobile-back { display: none; }
@@ -5812,50 +5849,48 @@ const STYLE = `
     .workbench-mobile-rail { margin-top: 1.75rem; border-top: 1px solid var(--border); padding-top: .75rem; }
     .workbench-mobile-back { margin: 0 0 1rem; }
   }
-  /* The phone shell (arc 4): the sidebar disappears; a top bar carries the
-     project (one tap to switch) and quick capture; a bottom tab bar carries
-     the four destinations a thumb actually visits, and everything else
-     lives one tap away behind "more". Desktop is untouched. */
+
+  /* The phone shell: the sidebar disappears; a top bar carries the project
+     and quick capture; a bottom tab bar carries the destinations a thumb
+     visits. Desktop is untouched. */
   .mobile-top, .tabbar { display: none; }
   @media (max-width: 760px) {
     .app { display: block; }
     .side { display: none; }
     .mobile-top {
       display: flex; align-items: center; gap: .5rem; position: sticky; top: 0; z-index: 30;
-      background: var(--material-satin-surface); border-bottom: 1px solid var(--border);
-      box-shadow: var(--material-resting-shadow);
-      padding: .5rem .75rem calc(.5rem + env(safe-area-inset-top, 0rem) * 0);
+      background: var(--background); border-bottom: 1px solid var(--border);
+      padding: .5rem .75rem;
     }
-    .mobile-top .brand-mini { font-weight: 700; font-size: .9375rem; text-decoration: none; color: var(--foreground); }
+    .mobile-top .brand-mini { font-weight: 600; font-size: .9375rem; text-decoration: none; color: var(--foreground); font-family: var(--font-mono); }
     .mobile-top .project-pill {
       flex: 1; min-width: 0; display: flex; align-items: center; gap: .375rem;
-      border: 1px solid var(--border); border-radius: 999px; background: var(--material-satin-control);
+      border: 1px solid var(--border); border-radius: 999px; background: var(--card);
       padding: .375rem .75rem; text-decoration: none; color: var(--foreground);
-      font-size: .875rem; font-weight: 600;
+      font-size: .875rem; font-weight: 500;
     }
     .mobile-top .project-pill .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .mobile-top .project-pill .chev { color: var(--muted-foreground); font-size: .75rem; flex: 0 0 auto; }
     .mobile-top .mobile-new {
       flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
       min-height: 2.5rem; padding: 0 .875rem; border-radius: 999px;
-      background: var(--material-graphite-chrome); color: hsl(0 0% 98%);
-      font-weight: 600; font-size: .875rem; text-decoration: none;
-      box-shadow: var(--material-resting-shadow);
+      background: var(--secondary); border: 1px solid var(--border); color: var(--foreground);
+      font-weight: 500; font-size: .875rem; text-decoration: none;
     }
     .tabbar {
       display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-      background: var(--material-satin-surface); border-top: 1px solid var(--border);
-      box-shadow: var(--material-resting-shadow);
+      background: var(--background); border-top: 1px solid var(--border);
       padding: .25rem .25rem calc(.25rem + env(safe-area-inset-bottom, 0rem));
     }
     .tabbar a {
       flex: 1; display: flex; flex-direction: column; align-items: center; gap: .125rem;
       padding: .375rem 0 .25rem; min-height: 3rem; text-decoration: none;
-      color: var(--muted-foreground); font-size: .6875rem; font-weight: 600;
+      color: var(--muted-foreground); font-size: .6875rem; font-weight: 500;
+      font-family: var(--font-mono);
     }
-    .tabbar a .glyph { font-size: 1.125rem; line-height: 1; }
-    .tabbar a.active { color: var(--foreground); background: var(--material-card-selected); box-shadow: var(--material-selected-shadow); }
-    .tabbar a.active .glyph { color: var(--brand); }
+    .tabbar a .glyph { display: flex; align-items: center; justify-content: center; height: 1.125rem; }
+    .tabbar a .glyph svg { width: 1rem; height: 1rem; }
+    .tabbar a.active { color: var(--foreground); }
     .tabbar a .count { position: absolute; transform: translate(0.9rem, -0.35rem); }
     .tabbar a { position: relative; }
     .content > main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
@@ -5864,15 +5899,15 @@ const STYLE = `
   .menu-list { display: flex; flex-direction: column; gap: .375rem; margin-top: .75rem; }
   .menu-row {
     display: flex; flex-direction: column; gap: .125rem; text-decoration: none;
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--material-satin-surface);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
     padding: .75rem .875rem; color: var(--foreground); min-height: 44px; justify-content: center;
-    box-shadow: var(--material-resting-shadow);
   }
+  .menu-row:hover { border-color: color-mix(in srgb, var(--border) 60%, var(--muted-foreground)); }
 
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .625rem; margin: .5rem 0; }
   .stat-card {
-    border: 1px solid var(--border); border-radius: var(--radius); background: var(--material-satin-surface);
-    padding: .75rem .875rem; box-shadow: var(--material-resting-shadow); min-width: 0;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    padding: .75rem .875rem; min-width: 0;
   }
   .stat-card .k { font-weight: 600; font-size: .875rem; display: flex; align-items: center; gap: .4rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -5880,29 +5915,29 @@ const STYLE = `
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 9999px; flex: none; }
   .dot-ok { background: var(--success); }
-  .dot-warn { background: var(--warning); }
+  /* Caution without a claim on the operator: quiet, not amber. */
+  .dot-warn { background: var(--muted-foreground); }
   .dot-off { background: var(--muted-foreground); opacity: .5; }
-  .dot-bad { background: var(--destructive-strong); }
+  .dot-bad { background: var(--destructive); }
   .pulse { animation: pulse 2s ease-in-out infinite; }
-  .dot-ok.pulse { background: var(--brand); }
+  .dot-ok.pulse { background: var(--running); }
   @keyframes pulse { 50% { opacity: .35; } }
 
   .login-viewport { min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem 1.25rem; }
   .login-shell { width: 100%; max-width: 23rem; }
-  .login-shell h1 { text-align: center; margin: 0 0 .375rem; font-size: 1.75rem; letter-spacing: -0.02em; }
-  .login-shell > .hint { text-align: center; margin: 0 0 2rem; font-size: 0.875rem; opacity: 1; }
+  .login-shell h1 { text-align: center; margin: 0 0 .375rem; font-size: 1.5rem; letter-spacing: -0.02em; }
+  .login-shell > .hint { text-align: center; margin: 0 0 2rem; font-size: 0.875rem; }
   .login-card {
-    background: var(--material-satin-surface); border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 1.5rem 1.5rem 1.625rem;
-    box-shadow: var(--material-raised-shadow);
   }
   .login-card label:first-child { margin-top: 0; }
   .login-card .problem { margin: 0 0 1rem; }
   .login-shell button {
     width: 100%; margin-top: 1.25rem;
-    background: var(--material-graphite-chrome); color: hsl(0 0% 98%); border-color: hsl(240 5.9% 18%);
+    background: var(--foreground); color: var(--background); border-color: var(--foreground); font-weight: 600;
   }
-  .login-shell button:hover { filter: brightness(1.08); }
+  .login-shell button:hover { background: color-mix(in srgb, var(--foreground) 85%, var(--background)); }
   .login-foot { text-align: center; margin: 1.5rem 0 0; font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.9; }
   .login-foot code { background: none; padding: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
 
@@ -5911,21 +5946,12 @@ const STYLE = `
     .topbar nav a { padding: 0 .5rem; }
   }
 
-  /* The board: lanes as columns, the pipeline left to right. The container
-     owns the horizontal scroll so narrow screens pan the pipeline instead
-     of crushing it. The reading measure is for prose — a five-lane
-     pipeline gets the whole content pane. */
+  /* The board: lanes as columns, the pipeline left to right. */
   .content > main:has(.board) { max-width: none; }
   .board {
-    display: grid; grid-template-columns: repeat(5, minmax(15rem, 1fr));
-    gap: .75rem; overflow-x: auto; padding-bottom: .75rem; align-items: start;
+    display: grid; grid-template-columns: repeat(5, minmax(12.5rem, 1fr));
+    gap: .625rem; overflow-x: auto; padding-bottom: .75rem; align-items: start;
   }
-  /* The phone board (arc 4): a pager — swipe between lanes, needs-you
-     first. The strip is viewport-bounded and sits in normal flow: the
-     page still scrolls to the headline above it and the routines below
-     it, while a deep lane scrolls INSIDE its own column. The sliver of
-     the next lane is the affordance; the poller's swap restores both
-     the lane you were on and where you were in it. */
   @media (max-width: 760px) {
     .board {
       display: flex; gap: .75rem; overflow-x: auto; overflow-y: hidden;
@@ -5933,8 +5959,6 @@ const STYLE = `
       height: clamp(22rem, calc(100dvh - 11.5rem), 42rem); padding-bottom: 0;
     }
     .board .lane {
-      /* 4.5rem reserved: a 1.5rem sliver of the neighboring lane on each
-         side after the gap — the swipe affordance must be unmissable. */
       flex: 0 0 calc(100% - 4.5rem); scroll-snap-align: center;
       overflow-y: auto; min-height: 0; height: 100%;
     }
@@ -5945,40 +5969,39 @@ const STYLE = `
     .board .lane-done { order: 4; }
   }
   .lane {
-    background: var(--muted); border: 1px solid var(--border);
-    border-radius: .625rem; padding: .625rem; min-height: 12rem;
+    background: color-mix(in srgb, var(--card) 45%, var(--background)); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: .625rem; min-height: 12rem;
   }
-  .lane h2 { display: flex; align-items: center; gap: .4rem; margin: 0 0 .125rem; font-size: .8125rem; }
+  .lane h2 { display: flex; align-items: center; gap: .4rem; margin: 0 0 .125rem; font-size: .6875rem; }
   .lane h2 a { color: inherit; text-decoration: none; }
   .lane .hint { margin-top: 0; }
   .lane-count { color: var(--muted-foreground); font-weight: 400; font-variant-numeric: tabular-nums; }
   .lane-attention h2::before, .lane-building h2::before {
     content: ""; width: .375rem; height: .375rem; border-radius: 9999px; flex: none;
   }
-  .lane-attention h2::before { background: var(--warning); }
-  .lane-building h2::before { background: var(--success); }
+  .lane-attention h2::before { background: var(--brand); }
+  .lane-building h2::before { background: var(--running); }
   .lane-card {
     display: block; text-decoration: none; color: inherit;
-    background: var(--material-satin-surface); border: 1px solid var(--border);
-    border-radius: .5rem; padding: .5rem .625rem; margin-top: .5rem;
-    box-shadow: var(--material-resting-shadow);
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 2px); padding: .5rem .625rem; margin-top: .5rem;
   }
-  .lane-card:hover { border-color: var(--ring); }
+  .lane-card:hover { border-color: color-mix(in srgb, var(--border) 55%, var(--muted-foreground)); }
+  .lane-attention .lane-card { border-top: 2px solid var(--brand); }
   .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; }
+  .lane-card .dot { margin-right: .4rem; }
   .lane-card .meta, .lane-card .mono { display: block; margin-top: .125rem; font-size: .75rem; }
   .lane-empty { margin: .75rem 0 .25rem; }
   .plan-doc { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; max-height: 24rem; overflow-y: auto; }
   .lane-more { display: block; margin-top: .5rem; font-size: .75rem; }
 
   /* The attended control room: one cross-workspace pulse, then a dense
-     master rail. It borrows the competitor pattern that makes the unit of
-     work stable, but keeps this product's truth: task, workspace, current
-     phase, and the exact reason a person is needed are separate facts. */
+     master rail. */
   .control-room-head {
     display: flex; align-items: flex-start; justify-content: space-between;
     gap: 1rem; margin-bottom: 1.1rem;
   }
-  .control-room-head h1 { font-size: 1.65rem; margin-top: .08rem; }
+  .control-room-head h1 { font-size: 1.375rem; margin-top: .08rem; }
   .control-room-head .actions { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: flex-end; }
   .control-room-head .actions a { text-decoration: none; }
   .command-metrics {
@@ -5986,29 +6009,29 @@ const STYLE = `
     gap: .625rem; margin: .85rem 0 1.5rem;
   }
   .command-metric {
-    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); background: var(--material-satin-surface);
-    padding: .8rem .9rem; min-width: 0; box-shadow: var(--material-resting-shadow);
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); background: var(--card);
+    padding: .8rem .9rem; min-width: 0;
   }
-  .command-metric .value { display: block; margin-top: .25rem; font-size: 1.55rem; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
-  .command-metric .label { display: flex; align-items: center; gap: .4rem; font-weight: 600; font-size: .8125rem; }
+  .command-metric .value { display: block; margin-top: .25rem; font-size: 1.5rem; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+  .command-metric .label { display: flex; align-items: center; gap: .4rem; font-weight: 500; font-size: .8125rem; }
   .command-metric .label::before {
     content: ""; width: .375rem; height: .375rem; border-radius: 9999px;
     background: var(--muted-foreground); flex: none;
   }
   .command-metric .detail { display: block; color: var(--muted-foreground); font-size: .6875rem; margin-top: .18rem; }
-  .command-metric.attention .label::before { background: var(--warning); }
-  .command-metric.live .label::before { background: var(--brand); }
+  .command-metric.attention .label::before { background: var(--brand); }
+  .command-metric.live .label::before { background: var(--running); }
   .workspace-pulse { margin: .4rem 0 1.5rem; }
   .workspace-row {
     display: grid; grid-template-columns: minmax(9rem, 1.35fr) repeat(4, minmax(4rem, .65fr));
     gap: .55rem; align-items: center; padding: .8rem .9rem; border: 1px solid var(--border);
-    border-radius: calc(var(--radius) - 2px); background: var(--material-satin-surface);
-    box-shadow: var(--material-resting-shadow); font-size: .8125rem; margin-top: .5rem;
+    border-radius: calc(var(--radius) - 2px); background: var(--card);
+    font-size: .8125rem; margin-top: .5rem;
   }
   .workspace-row .workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
   .workspace-row .pulse-stat { color: var(--muted-foreground); font-size: .75rem; white-space: nowrap; }
-  .workspace-row .pulse-stat b { color: var(--foreground); font-weight: 650; }
-  .workspace-row .pulse-stat.hot b { color: var(--warning); }
+  .workspace-row .pulse-stat b { color: var(--foreground); font-weight: 600; font-family: var(--font-mono); }
+  .workspace-row .pulse-stat.hot b { color: var(--brand); }
   .attention-stack { display: grid; gap: .55rem; }
   .attention-stack .decide-card { margin: 0; }
   .attention-stack .q { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
@@ -6016,25 +6039,21 @@ const STYLE = `
     display: flex; align-items: flex-end; justify-content: space-between; gap: .75rem;
     padding: 0 .15rem .6rem; border-bottom: 1px solid var(--border);
   }
-  .wb-rail-head h2 { margin: .1rem 0 0; color: var(--foreground); font-size: .875rem; letter-spacing: -.01em; text-transform: none; }
+  .wb-rail-head h2 { margin: .1rem 0 0; color: var(--foreground); font-size: .875rem; letter-spacing: -.01em; text-transform: none; font-family: var(--font-sans); }
   .wb-rail-head a { font-size: .75rem; color: var(--muted-foreground); }
   .wb-group { margin-top: 1.05rem; }
   .wb-group > h2 {
     display: flex; align-items: center; justify-content: space-between; margin: 0 .2rem .35rem;
-    font-size: .7rem;
+    font-size: .65rem;
   }
   .wb-group > h2 .lane-count { border: 1px solid var(--border); border-radius: 999px; padding: .04rem .42rem; }
   .wb-row {
     display: block; padding: .58rem .65rem; margin: .16rem 0; border: 1px solid transparent;
-    border-radius: calc(var(--radius) - 2px); color: inherit; text-decoration: none;
+    border-radius: calc(var(--radius) - 4px); color: inherit; text-decoration: none;
   }
   .wb-row:hover { background: var(--card); border-color: var(--border); }
-  .wb-row.wb-selected {
-    background: var(--material-card-selected);
-    border-color: color-mix(in srgb, var(--brand) 42%, var(--border));
-    box-shadow: var(--material-selected-shadow);
-  }
-  .wb-row .wb-title { display: block; font-size: .8125rem; font-weight: 600; line-height: 1.35; }
+  .wb-row.wb-selected { background: var(--muted); border-color: var(--border); }
+  .wb-row .wb-title { display: block; font-size: .8125rem; font-weight: 500; line-height: 1.35; }
   .wb-row .wb-meta { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; margin-top: .22rem; }
   .wb-row .badge { padding: .04rem .42rem; font-size: .65rem; }
   .wb-row .wb-reason { display: block; color: var(--muted-foreground); font-size: .72rem; margin-top: .22rem; line-height: 1.35; }
@@ -6046,39 +6065,40 @@ const STYLE = `
     .workspace-row .pulse-stat:nth-last-child(-n+2) { display: none; }
   }
 
-  /* Runner lanes (queue + fleet): one column per worker, so the grid is
-     computed from how many workers there are — never the board's fixed
-     five tracks. auto-fit collapses empty space: one worker spans wide,
-     six wrap to a readable minimum instead of scrolling off the edge. */
+  /* Runner lanes (queue + fleet): one column per worker. */
   .content > main:has(.lanes) { max-width: none; }
   .lanes {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-    gap: .75rem; padding-bottom: .75rem; align-items: start;
+    gap: .625rem; padding-bottom: .75rem; align-items: start;
   }
   @media (max-width: 40rem) {
     .lanes { display: flex; flex-direction: column; }
     .lanes .lane { min-height: 0; }
   }
   .runner-note { width: 100%; }
-  /* Fleet/queue cards: a compact two-line block — title row, then the
-     metadata row — so a card reads at a glance instead of stacking. */
   .queue-card p { margin: 0; }
+  .queue-card a { text-decoration: none; }
+  .queue-card a:hover { text-decoration: underline; }
   .queue-card .row + .row { margin-top: .125rem; border-bottom: none; }
   .queue-card p.row { padding: 0; border-bottom: none; }
   .tracks { margin-top: 1.5rem; }
   .tracks > .hint { margin-bottom: .75rem; }
   .track-row { margin-bottom: .6rem; }
+  .track-row p { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+  .track-row p .right { margin-left: auto; }
+  .track-row a { text-decoration: none; }
+  .track-row a:hover { text-decoration: underline; }
   .track-strip { display: inline-flex; gap: .3rem; align-items: center; vertical-align: middle; }
   .fire {
     display: inline-block; width: .65rem; height: .65rem; border-radius: 50%;
     background: var(--muted);
   }
   .fire-ok { background: var(--success); }
-  .fire-bad { background: var(--destructive-strong); }
-  .fire-live { background: var(--success); animation: pulse 1.6s ease-in-out infinite; }
+  .fire-bad { background: var(--destructive); }
+  .fire-live { background: var(--running); animation: pulse 1.6s ease-in-out infinite; }
   .fire-skip { background: transparent; border: 1.5px solid var(--muted); }
 
-/* the phone (arc 3): fingers, not cursors — tested at 320/390px */
+/* the phone: fingers, not cursors — tested at 320/390px */
 input, select, textarea { font-size: 16px; }
 button { min-height: 44px; }
 @media (max-width: 40rem) {
@@ -6087,11 +6107,10 @@ button { min-height: 44px; }
   main { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
 }
 
-/* Motion (arc 4): only where a human caused the change — navigation,
-   presses, overlays. Liveness swaps stay deliberately instant; the pulse
-   dot is the one "alive" signal. Everything here dies under
-   prefers-reduced-motion, and the auto-refresh pages opt out of the
-   navigation cross-fade separately (see shell()). */
+/* Motion: only where a human caused the change — navigation, presses,
+   overlays. Liveness swaps stay instant; the pulse dot is the one "alive"
+   signal. Everything dies under prefers-reduced-motion; auto-refresh pages
+   opt out of the navigation cross-fade separately (see shell()). */
 @view-transition { navigation: auto; }
 ::view-transition-old(root), ::view-transition-new(root) {
   animation-duration: 140ms; animation-timing-function: ease-out;
@@ -6104,7 +6123,7 @@ button { min-height: 44px; }
     .lane-card, .decide-card, .menu-row { transition: border-color .15s, transform .15s, box-shadow .15s; }
     .lane-card:hover, .decide-card:hover, .menu-row:hover {
       transform: translateY(-1px);
-      box-shadow: 0 2px 8px -2px hsl(240 10% 3.9% / .12);
+      box-shadow: 0 2px 8px -2px rgb(0 0 0 / .35);
     }
   }
 }
@@ -6115,16 +6134,15 @@ button { min-height: 44px; }
   .palette, .kbd-help { animation: none; }
 }
 
-/* The shortcuts overlay (arc 4): display-only, toggled by the chrome
-   layer, absent from sensitive pages. A centered card on desktop, a
-   bottom sheet above the tab bar on phones. */
+/* The shortcuts overlay: display-only, toggled by the chrome layer, absent
+   from sensitive pages. */
 .kbd-help {
   position: fixed; top: 18vh; left: 50%; transform: translateX(-50%); width: min(26rem, 92vw);
-  background: var(--material-satin-surface); border: 1px solid var(--border); border-radius: var(--radius);
-  box-shadow: var(--material-raised-shadow);
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
   padding: 1rem 1.25rem; z-index: 50;
 }
-.kbd-help h2 { margin: 0 0 .5rem; font-size: .9375rem; }
+.kbd-help h2 { margin: 0 0 .5rem; font-size: .8125rem; }
 .kbd-help table { width: 100%; border-collapse: collapse; font-size: .8125rem; }
 .kbd-help td { padding: .25rem 0; vertical-align: top; }
 .kbd-help td:first-child { width: 7.5rem; color: var(--muted-foreground); white-space: nowrap; }
@@ -6140,9 +6158,7 @@ button { min-height: 44px; }
   }
 }
 
-/* The tournament comparison (arc 6): an at-a-glance table (one column per
-   agent, scrolling in its own box on phones) and side-by-side cards on
-   wide screens — single column below 1100px, stated explicitly. */
+/* The tournament comparison: an at-a-glance table and side-by-side cards. */
 .scroll-x { overflow-x: auto; max-width: 100%; }
 .contest-glance { border-collapse: collapse; font-size: .8125rem; min-width: 34rem; margin: .75rem 0; }
 .contest-glance th, .contest-glance td { text-align: left; padding: .375rem .75rem .375rem 0; vertical-align: top; border-bottom: 1px solid var(--border); }
@@ -6155,17 +6171,15 @@ button { min-height: 44px; }
 }
 .contest-compare .card { margin: 0; }
 
-/* The per-file comment button (arc 6): a small real button beside a diff
-   row — keyboard-reachable, never fighting the editor link for a click. */
-button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; box-shadow: none; }
+/* The per-file comment button: a small real button beside a diff row. */
+button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 
-/* Sticky ceremony actions (arc 4): single-primary-action forms keep
-   their submit within thumb reach on phones. Desktop: plain flow. */
+/* Sticky ceremony actions: single-primary-action forms keep their submit
+   within thumb reach on phones. Desktop: plain flow. */
 @media (max-width: 760px) {
   .sticky-actions {
     position: sticky; bottom: calc(3.5rem + env(safe-area-inset-bottom, 0rem)); z-index: 20;
-    background: var(--material-satin-surface); border-top: 1px solid var(--border);
-    box-shadow: var(--material-resting-shadow);
+    background: var(--background); border-top: 1px solid var(--border);
     padding: .625rem 0; margin-top: .75rem;
   }
   .sticky-actions button { margin: 0; }
@@ -6483,6 +6497,7 @@ function shell(
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8">`,
     `<meta name="viewport" content="width=device-width, initial-scale=1">`,
+    `<meta name="theme-color" content="#0c0e12">`,
     // Live status with zero JavaScript: the page asks the browser to fetch
     // it again. Only ever on read-only briefing pages — a refresh on a page
     // with a form would eat what somebody was typing.
@@ -6533,7 +6548,7 @@ function shell(
       `<a class="switch" href="/projects">switch project →</a></div>`,
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
-    item("workbench", "/workbench", "control room"),
+    item("workbench", "/workbench", "workbench"),
     item("board", "/board", "board"),
     item("queue", "/queue", "queue"),
     item("fleet", "/fleet", "fleet"),
@@ -6543,6 +6558,7 @@ function shell(
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
     `<span class="grow"></span>`,
     `<nav class="foot">`,
+    `<span class="nav-label">more</span>`,
     item("activity", "/activity", "activity"),
     item("review", "/review", "review queue"),
     ...(chrome.chat === true ? [item("chat", "/chat", "chat")] : []),
@@ -6560,11 +6576,11 @@ function shell(
   // the refuseDemo gate in operate.ts, this is the honest label).
   const demoBanner =
     (chrome.demo === true
-      ? `<div style="background:hsl(45 90% 55% / .18);border-bottom:1px solid hsl(45 60% 45% / .5);padding:.4rem .9rem;font-size:.85rem">sandbox data \u2014 this is a demo database; nothing here spends money or reaches a remote</div>`
+      ? `<div class="banner"><span class="badge">sandbox</span>demo data \u2014 nothing here spends money or reaches a remote</div>`
       : "") +
     (chrome.modeBanner === undefined
       ? ""
-      : `<div style="background:hsl(265 60% 55% / .14);border-bottom:1px solid hsl(265 40% 50% / .45);padding:.4rem .9rem;font-size:.85rem">${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`);
+      : `<div class="banner"><span class="badge badge-running">mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`);
   const content =
     chrome.listPane === undefined
       ? `<div class="content">${demoBanner}<main>${body}</main></div>`
@@ -6586,16 +6602,27 @@ function shell(
     `<a class="mobile-new" href="/tasks/new">+ task</a>`,
     `</header>`,
   ].join("");
-  const tab = (key: Chrome["active"], href: string, glyph: string, label: string, count?: number): string =>
-    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}><span class="glyph">${glyph}</span>${label}` +
+  // Drawn icons, one stroke weight, inline and CSP-safe — never unicode
+  // glyphs standing in for an icon system.
+  const icon = (paths: string): string =>
+    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+  const TAB_ICONS = {
+    inbox: icon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
+    board: icon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
+    queue: icon(`<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>`),
+    runs: icon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
+    menu: icon(`<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`),
+  } as const;
+  const tab = (key: keyof typeof TAB_ICONS & Chrome["active"], href: string, label: string, count?: number): string =>
+    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}><span class="glyph">${TAB_ICONS[key]}</span>${label}` +
     `${count !== undefined && count > 0 ? `<span class="count badge badge-open">${count}</span>` : ""}</a>`;
   const tabbar = [
     `<nav class="tabbar">`,
-    tab("inbox", "/", "◉", "inbox", chrome.inboxCount),
-    tab("board", "/board", "▦", "board"),
-    tab("queue", "/queue", "≡", "queue"),
-    tab("runs", "/runs", "⚒", "builds"),
-    tab("menu", "/menu", "⋯", "more"),
+    tab("inbox", "/", "inbox", chrome.inboxCount),
+    tab("board", "/board", "board"),
+    tab("queue", "/queue", "queue"),
+    tab("runs", "/runs", "builds"),
+    tab("menu", "/menu", "more"),
     `</nav>`,
   ].join("");
 
@@ -6645,7 +6672,6 @@ function loginPage(problem: string | null): string {
   return shell("standing-orders", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
-    `<p class="meta hint">your fleet's control plane \u2014 sign in to see it</p>`,
     `<div class="login-card">`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
@@ -6708,7 +6734,7 @@ function inboxPage(chrome: Chrome, data: {
   const approvals =
     data.approvals.length === 0
       ? ""
-      : `<h2>approve a scope</h2><p class="hint">work waiting for your yes — review exactly what it may become, then agree with your password</p>` +
+      : `<h2>approve a scope</h2><p class="hint">scopes waiting for your approval — each binds to the exact wording you sign</p>` +
         data.approvals
           .map(
             one =>
@@ -6723,7 +6749,7 @@ function inboxPage(chrome: Chrome, data: {
   const requeueables =
     data.requeueables.length === 0
       ? ""
-      : `<h2>retry stalled work</h2><p class="hint">builds that gave up and now wait for a person — retry resolves the incidents, resets the strikes, and requeues</p>` +
+      : `<h2>retry stalled work</h2><p class="hint">failed builds waiting for a person — retry clears the incidents and requeues</p>` +
         data.requeueables
           .map(
             one =>
@@ -6772,8 +6798,8 @@ function inboxPage(chrome: Chrome, data: {
     data.wizard === null
       ? ""
       : `<div class="card">` +
-        `<p><strong>Getting started</strong> <span class="meta">\u2014 live state, not a saved step; this card retires itself after the first successful unattended run</span></p>` +
-        `<p class="meta">or run <span class="mono">standing-orders up</span> in a repository \u2014 it starts the console and a worker and completes the first steps; the rest of this list still shows what remains.</p>` +
+        `<p><strong>Getting started</strong> <span class="meta">\u2014 disappears after the first successful run</span></p>` +
+        `<p class="meta">or run <span class="mono">standing-orders up</span> in a repository \u2014 it starts the console and a worker for you.</p>` +
         data.wizard
           .map(
             step =>
@@ -6793,7 +6819,7 @@ function inboxPage(chrome: Chrome, data: {
 
   return screen("inbox", [
     `<h1>inbox</h1>`,
-    `<p class="meta">everything waiting on you \u2014 answer, approve, retry, repair, supply; when this is empty, nothing needs your attention</p>`,
+    `<p class="meta">everything that waits on you \u2014 empty means the fleet is working</p>`,
     wizard,
     empty ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
     empty && data.wizard === null ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
@@ -6815,7 +6841,7 @@ function inboxPage(chrome: Chrome, data: {
       : [
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="projectRevision" value="${data.revision}">`,
-          `<label>what should get done<input type="text" name="title" placeholder="a title the board can wear" maxlength="200"></label>`,
+          `<label>what should get done<input type="text" name="title" placeholder="task title" maxlength="200"></label>`,
           `<label>what success looks like <span class="meta">(becomes the scope you approve on the next screen)</span><textarea name="goal" rows="2"></textarea></label>`,
           `<button type="submit">queue it \u2192 approve its scope next</button>`,
           `</form>`,
@@ -6926,9 +6952,9 @@ function systemPage(chrome: Chrome, data: {
             one =>
               `<p class="row"><span class="mono">${escape(one.remoteRepo)}</span> ` +
               (one.blocked !== null
-                ? `<span class="badge badge-open">dispatch blocked</span> <span class="meta">the tracker connection needs repair — \`standing-orders sync\` says why</span>`
+                ? `<span class="badge badge-failed">dispatch blocked</span> <span class="meta">the tracker connection needs repair — \`standing-orders sync\` says why</span>`
                 : one.openEpisode !== null
-                  ? `<span class="badge badge-open">sync failing</span> <span class="meta">${escape(one.openEpisode)}</span>`
+                  ? `<span class="badge badge-failed">sync failing</span> <span class="meta">${escape(one.openEpisode)}</span>`
                   : `<span class="meta">syncing normally</span>`) +
               `</p>`,
           )
@@ -7103,7 +7129,7 @@ function boardBody(
     data.tracks.length === 0
       ? ""
       : `<section class="tracks"><h2><a href="/routines">routines</a></h2>` +
-        `<p class="hint">standing orders \u2014 each dot one firing, oldest left; instances surface above only when they need you</p>` +
+        `<p class="hint">each dot is one firing, oldest first \u2014 the full list is under routines</p>` +
         data.tracks.map(track => trackRow(track, data.all)).join("\n") +
         `</section>`;
 
@@ -7125,14 +7151,13 @@ function boardBody(
   return [
     `<h1>board</h1>`,
     deltaLine,
-    `<p class="meta">the whole pipeline at a glance, updating in place \u2014 open the <a href="/">inbox</a> to act on what needs you</p>`,
     toggle,
     `<div class="board">`,
-    lane("attention", "needs you", "answer, approve, or repair \u2014 these wait for a person", plain),
-    lane("queued", "queued", "ready \u2014 starts when a worker has a free slot", queuedCard),
-    lane("waiting", "waiting", "paused on a timer, a dependency, or a missing requirement", plain),
-    lane("building", "building", "live \u2014 each card is one agent in its own workspace", building),
-    `<section class="lane lane-done"><h2><a href="/done">done recently</a></h2><p class="hint">the last few finished \u2014 the full ledger is under done</p>${doneCards}</section>`,
+    lane("attention", "needs you", "these wait for a person", plain),
+    lane("queued", "queued", "starts when a worker is free", queuedCard),
+    lane("waiting", "waiting", "paused on a timer, dependency, or requirement", plain),
+    lane("building", "building", "one agent per card, in its own workspace", building),
+    `<section class="lane lane-done"><h2><a href="/done">done recently</a></h2><p class="hint">the most recent \u2014 the full list is under done</p>${doneCards}</section>`,
     `</div>`,
     tracksSection,
   ].join("\n");
@@ -7146,7 +7171,7 @@ function donePage(
 ): Screen {
   const list =
     rows.length === 0
-      ? `<p class="meta">Nothing completed yet \u2014 finished tasks land here with their final build, cost, and pull request.</p>`
+      ? `<p class="meta">No finished tasks yet.</p>`
       : rows
           .map(row => {
             const pr =
@@ -7190,7 +7215,7 @@ function routineStatus(routine: Routine): { text: string; badge: string } {
       badge: "badge badge-failed",
     };
   }
-  return { text: "live", badge: "badge badge-open" };
+  return { text: "live", badge: "badge badge-running" };
 }
 
 /**
@@ -7360,7 +7385,7 @@ function chatPage(chrome: Chrome, data: {
         `<form method="post" action="/chat/file/${escape(one.key)}" class="inline">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
         `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
-        `<button type="submit">file it — UNAPPROVED</button></form>` +
+        `<button type="submit">file unapproved</button></form>` +
         `</div>`,
     );
   }
@@ -7420,7 +7445,7 @@ function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="nonce" value="${escape(nonce)}">`,
     `<label>your password<input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">I own this charge — re-enable chat</button>`,
+    `<button type="submit">accept the charge — re-enable chat</button>`,
     `</form>`,
     `</div>`,
   ].join("\n"), { chrome });
@@ -7467,7 +7492,7 @@ function routinesPage(
       : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
   return screen("routines", [
     `<h1>routines</h1>`,
-    `<p class="hint">standing orders — repeating work that fires on a schedule, each instance building alone in its own workspace; anything needing you bubbles to the inbox</p>`,
+    `<p class="hint">scheduled work — anything needing a person appears in the inbox</p>`,
     list,
     capture,
   ].join("\n"), { chrome });
@@ -7960,8 +7985,8 @@ function workbenchOverview(data: {
   ).join("\n");
 
   return [
-    `<div class="control-room-head"><div><span class="eyebrow">attended overview</span><h1>control room</h1>` +
-      `<p class="meta">every workspace, plan, task, blocker, and live build — one place to supervise the fleet</p></div>` +
+    `<div class="control-room-head"><div><h1>workbench</h1>` +
+      `<p class="meta">every workspace and live build in one place</p></div>` +
       `<div class="actions"><a class="badge" href="/tasks/new">+ new task</a><a class="badge" href="/board?scope=all">full board →</a></div></div>`,
     `<div class="command-metrics">`,
     metric("attention", data.attention.length, "Need you", "questions, plans, approvals, repairs"),
@@ -7971,12 +7996,12 @@ function workbenchOverview(data: {
     `</div>`,
     data.saturated ? `<div class="problem">This overview reached its 200-task display cap. Counts ending in + are lower bounds; the task list holds the rest.</div>` : "",
     `<h2>workspace pulse</h2>`,
-    `<p class="hint">one row per repository — the recent-done tail is kept in the rail, while these counts show active flow</p>`,
+    `<p class="hint">one row per repository</p>`,
     pulseRows.length === 0
       ? `<div class="card"><p><strong>No active work yet.</strong></p><p class="meta">Queue a task and its progress will show here across every workspace.</p></div>`
       : `<div class="workspace-pulse">${workspaceRows}</div>`,
     `<h2>start with what needs you</h2>`,
-    `<p class="hint">the oldest human-blocked work leads — open one to answer, approve, or repair it in place</p>`,
+    `<p class="hint">oldest first — open one to answer, approve, or repair it</p>`,
     data.attention.length === 0
       ? `<div class="answered"><strong>Nothing needs you.</strong> <span class="meta">You can leave this open; live state updates in the rail.</span></div>`
       : `<div class="attention-stack">${attention}</div>${data.attention.length > 3 ? `<p class="meta"><a href="/next">clear all ${data.attention.length} one at a time →</a></p>` : ""}`,
@@ -8112,7 +8137,7 @@ function contestPage(chrome: Chrome, data: {
     const { contestant, run, winner, outcome, minutes, asked, cost, diff } = summary;
     const agent = summary.agent;
     const parts = [
-      `<div class="card${winner ? " approve-form" : ""}">`,
+      `<div class="card${winner ? " picked" : ""}">`,
       `<p><strong>agent ${contestant.ordinal}</strong> <span class="meta">${escape(contestant.provider)} · ${escape(contestant.model)}</span>` +
         `${winner ? ` <span class="badge badge-done">picked</span>` : ""}</p>`,
       `<p class="row">${escape(outcome)}` +
@@ -8203,11 +8228,11 @@ function contestCeremonyPage(chrome: Chrome, data: {
         ? `<p class="row">— the ${escape(contestDollars(data.totalMicrousd))} measured so far stays on the record</p>`
         : `<p class="row">— the ${escape(contestDollars(data.totalMicrousd))} already charged stays charged</p>`,
       `</div>`,
-      `<form method="post" action="/contest/${data.contestId}/abandon" class="card approve-form">`,
+      `<form method="post" action="/contest/${data.contestId}/abandon" class="card">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
       `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
       `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
-      `<button type="submit">yes — abandon the ${contestNoun(data.contestKind)}</button>`,
+      `<button type="submit" class="danger">abandon the ${contestNoun(data.contestKind)}</button>`,
       `</form>`,
       back,
     ].join("\n"), { chrome });
@@ -8998,7 +9023,7 @@ function taskBody(data: {
               )
               .join("; ")}</p>`;
           })(),
-          `<p class="meta">terms fingerprint <span class="mono">${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>`,
+          `<p class="meta"><span class="seal">signs ${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>`,
           approval.approved
             ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
             : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
@@ -9362,7 +9387,7 @@ function taskBody(data: {
     task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0
       ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
-    act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="why" aria-label="hold reason" style="width:12rem">`),
+    act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason" style="width:12rem">`),
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     stalled ? act("requeue", "retry — branch and workspace kept") : "",
     stalled
@@ -9383,17 +9408,19 @@ function taskBody(data: {
   ].join("\n");
 
   return [
-    `<h1>${escape(task.id)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span>` +
-      `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} failed attempt(s)` : ""}` +
-      `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
+    // The title leads; the machine facts — id, state, project, provenance —
+    // follow as one mono meta row instead of riding the headline.
+    `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
+    `<p class="meta"><span class="mono">${escape(task.id)}</span>` +
+      `${data.strikes > 0 ? ` · ${data.strikes} failed attempt(s)` : ""}` +
+      `${data.repo === null ? "" : ` · ${escape(projectName(data.repo))}`}` +
       `${
         data.coordinator !== null && data.coordinator !== undefined
           ? ` · filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` ${escape(data.coordinator.filedAgo)}`}`
           : data.filedVia === null || data.filedVia === undefined
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
-      }</span></h1>`,
-    `<p>${escape(task.title)}</p>`,
+      }</p>`,
     data.position !== null && data.position !== undefined && task.state === "queued"
       ? `<p class="meta">queue position ${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} — <a href="/queue">the queue screen</a> reorders</p>`
       : "",
@@ -9427,7 +9454,7 @@ function taskBody(data: {
           ? `<form method="post" action="${taskHref(task.id)}/reopen" class="row">` +
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
             `<input type="password" name="token" placeholder="your password" aria-label="your password" autocomplete="current-password">` +
-            `<button type="submit">reopen — the approved scope stands, the next pass may take it</button></form>`
+            `<button type="submit">reopen — the approved scope stands</button></form>`
           : "") +
         `</div>`
       );
@@ -9444,9 +9471,8 @@ function taskBody(data: {
         ? `<div class="card"><p><strong>This task is waiting on you: an agent filed it, and it has no scope.</strong></p>` +
           `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span> — nothing plans, claims, or runs until you write a scope below and sign it. Your signature runs their request.</p></div>`
         : `<div class="card"><p><strong>This task is waiting on you: it has no scope.</strong></p>` +
-          `<p class="meta">A scope is the contract an agent builds against — the goal, what is off-limits, which paths it may touch. ` +
-          `Nothing builds until one is written and approved. Write it in the open form below, or use <strong>plan first</strong> ` +
-          `(under acts) to send an agent to read the repository and draft it for you.</p></div>`
+          `<p class="meta">The scope is what you approve: the goal, what is off-limits, which paths it may touch. ` +
+          `Write it below, or use <strong>plan first</strong> to have an agent draft it from the repository.</p></div>`
       : "",
     scope !== null && !approval.approved && data.plan !== "requested" && task.state === "queued" && data.decisions.length === 0
       ? `<div class="card"><p><strong>This task is waiting on you: its scope needs your approval.</strong></p>` +
@@ -9553,7 +9579,7 @@ function reviewPage(
           .join("\n");
   return screen("review queue", [
     `<h1>review queue</h1>`,
-    `<p class="hint">what waits on your review, oldest reviewable first — this console recommends; merging stays yours, on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
+    `<p class="hint">published work waiting for review, oldest first — merging happens on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
     list,
   ].join("\n"), { chrome });
 }
@@ -9681,7 +9707,7 @@ function runDot(run: Run, live: boolean): string {
 function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: ReadonlySet<number>, nextCursor: number | null): Screen {
   const list =
     rows.length === 0
-      ? `<p class="meta">No runs yet \u2014 a run is one unattended build attempt; they appear once the watch dispatches an approved task.</p>`
+      ? `<p class="meta">No builds yet \u2014 they appear once an approved task is dispatched.</p>`
       : rows
           .map(
             run =>
@@ -10238,7 +10264,7 @@ function settingsPage(
       ? ""
       : [
           "<h2>provider API keys</h2>",
-          `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key is handed to its provider's process ONLY when that provider's sign-in is set to "the API key"; in subscription mode the provider uses its own login and the key is kept but not handed over. Every other provider's process is stripped of it either way.</p>`,
+          `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key reaches its provider only when that provider's sign-in is set to "the API key"; other providers never see it.</p>`,
           ...providerKeys.map(one =>
             [
               `<form method="post" action="/settings/provider-key" class="card">`,
@@ -10276,7 +10302,7 @@ function settingsPage(
           "<h2>receives alerts on this device</h2>",
           push.available
             ? [
-                `<p class="meta">a buzz when a decision, a tournament pick, or a pull request needs a person — fixed phrases only; task content never rides a notification. Notifications show on this device's lock screen, and tapping one opens whatever console session is signed in here.</p>`,
+                `<p class="meta">a notification when a decision, a pick, or a pull request needs a person — fixed phrases only; task content never rides a notification.</p>`,
                 `<p class="meta">on iPhone or iPad: add this console to the Home Screen first, then enable from inside it.</p>`,
                 `<form method="post" action="/push/subscribe" id="push-form" class="card">`,
                 `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
