@@ -321,9 +321,16 @@ process with the machinery that supervises it:
 | Principal | Credential | May |
 |---|---|---|
 | **operator** | password (scrypt, typed again per act) | approve scopes and routines, steer, pick tournament winners, grant/revoke authority, answer decisions, enroll devices, clone repositories |
-| **coordinator** | *reserved — no credential type exists yet; arrives with MCP writes. Until then every coordinator-shaped act is operator-only.* | (future) rate-limited proposal filing |
+| **coordinator** | minted token (operator ceremony), hashed, shown once; immutable cid; repo allowlist bound at the mint | rate-limited proposal filing through the canonical door — filings are quarantined until a password ceremony seals their scope; reads inside the allowlist. Nothing else is expressible. |
 | **runner** | minted token, hashed, shown once | claim, heartbeat, release, tick; every beat re-authenticated |
 | **attempt** | none — it is the supervised process | submit its prescribed outputs (handoff, park decision) through the builder's own protocol files; nothing else |
+
+**The MCP threat boundary.** stdio is a transport, not an authority
+sandbox: the boundary the coordinator credential draws covers the MCP
+surface and every remote or bridged caller behind an MCP host. A
+same-UID process on the machine can open the SQLite file directly —
+local OS-user compromise is out of scope, and the db, WAL, SHM, and
+their directory are created 0700/0600 to keep it that way.
 
 Authorship always derives from an authenticated principal. A
 caller-supplied author string is FORBIDDEN as authority anywhere — the

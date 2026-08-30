@@ -45,7 +45,7 @@ import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from 
 import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, updateRepos } from "./repos.js";
 import { pushPass } from "./push.js";
-import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, mkdirSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
@@ -1423,9 +1423,20 @@ async function mcpCommand(
     return said("no credential — pass --token-file <path> (0600) or set STANDING_ORDERS_COORDINATOR");
   }
 
+  // WAL/SHM are recreated by ANY writer, this server included: nothing
+  // this process creates is ever group- or world-readable, and existing
+  // db-adjacent files are repaired to 0600 best-effort (review finding 9).
+  process.umask?.(0o077);
   const door = openStoreNoMigrate(file);
   if (!door.ok) return said(door.message);
   const store = door.store;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      chmodSync(`${file}${suffix}`, 0o600);
+    } catch {
+      // Absent (no WAL yet) or not ours — the umask covers what we make.
+    }
+  }
   if (store.isDemo()) {
     store.close();
     return said("demo console — no gateway");

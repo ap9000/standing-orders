@@ -27,7 +27,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
@@ -869,7 +869,7 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- AUTHORITATIVE linkage — written only by the branded coordinator door,
   -- joined by exact cid, never parsed out of filed_via (which stays
   -- display-only). NULL is every other filer.
-  coordinator_cid         TEXT,
+  coordinator_cid         TEXT REFERENCES coordinator_credential(cid),
   UNIQUE (backend, external_id)
 );
 
@@ -2586,12 +2586,27 @@ export function openStoreNoMigrate(
     return { ok: false, reason: "missing", message: `${file} does not exist — run \`standing-orders\` once to create it` };
   }
   const db = connect(file);
+  // The same referential law every migrating connection gets from SCHEMA —
+  // this door never execs SCHEMA, so the pragma is explicit (review f9).
+  db.exec("PRAGMA foreign_keys = ON");
   let seen: number | null = null;
   try {
     const row = db.prepare("SELECT version FROM schema_version").get();
     seen = row === undefined ? null : Number(row["version"]);
   } catch {
     seen = null;
+  }
+  if (seen === null) {
+    // A file deleted between the existence check and the connect makes
+    // SQLite create an EMPTY one — refuse, and take the empty residue
+    // back out so the race leaves no trace (review finding 9).
+    db.close();
+    try {
+      if (statSync(file).size === 0) unlinkSync(file);
+    } catch {
+      // Already gone, or someone else's — leave it.
+    }
+    return { ok: false, reason: "version", message: `${file}: it carries no schema version — open it with the CLI or console first` };
   }
   if (seen !== SCHEMA_VERSION) {
     db.close();
@@ -3203,7 +3218,7 @@ function migrate(db: Database): void {
   // PK changes) — additive columns cannot change a primary key.
   // v31 (MCP gateway): the coordinator linkage column; the three new
   // tables arrive through the fresh SCHEMA's IF NOT EXISTS on both roads.
-  addColumn(db, "task_ref", "coordinator_cid", "TEXT");
+  addColumn(db, "task_ref", "coordinator_cid", "TEXT REFERENCES coordinator_credential(cid)");
   addColumn(db, "task_scope", "proposed_chain_json", "TEXT");
   addColumn(db, "task_scope", "approved_chain_json", "TEXT");
   addColumn(db, "task_scope", "approval_kind", "TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))");
