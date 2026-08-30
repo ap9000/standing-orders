@@ -40,6 +40,7 @@ import type { ProviderId } from "./provider.js";
 import type { BoardFacts } from "./board.js";
 import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
+import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
 export const SCHEMA_VERSION = 31;
@@ -7645,12 +7646,18 @@ export class Store {
    */
   admitReview(
     requestId: number,
-    spec: { runner: string; provider: string; model: string | null },
+    spec: { runner: string; token: string; provider: string; model: string | null },
     now: Date,
   ):
     | { ok: true; reviewerRunId: number; sourceRun: number; taskRef: number; taskId: string }
-    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed"; rail?: string; detail?: string } {
+    | { ok: false; reason: "gone" | "mode-ended" | "already-reviewed" | "railed" | "unauthenticated"; rail?: string; detail?: string } {
     return this.transact(() => {
+      // The reviewer road authenticates INSIDE the admission transaction
+      // (review finding 4): reviewer runs hold no task claim by design,
+      // so this txn-time identity proof is what a takeover cannot ride —
+      // a name alone is never authority.
+      const identity = runnerAuthenticate(this, spec.runner, spec.token);
+      if (!identity.ok) return { ok: false as const, reason: "unauthenticated" as const, detail: identity.reason };
       const row = this.db
         .prepare(
           `SELECT rr.run, rr.basis, rr.mode_digest,

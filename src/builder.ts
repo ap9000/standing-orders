@@ -695,6 +695,16 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // approved read of the bot token.
   const setupWanted = store.liveWorktreeSetup(leased.repo);
   if (setupWanted !== null && leased.setupDigest !== setupWanted.digest) {
+    // Setup is a process spawn like any other (review finding 4): the
+    // runner tuple is re-proven against LIVE rows immediately before it —
+    // a takeover between the claim and this instant runs nothing here.
+    if (!store.proveRunnerCustodyForSpawn(request.runId, now)) {
+      return {
+        ok: false,
+        reason: "runner-custody",
+        message: "runner custody lapsed before the setup spawn — the lease, the runner, or its repo binding no longer stands",
+      };
+    }
     const runSetup = request.setup ?? run;
     const made = await runSetup("/bin/sh", ["-c", setupWanted.command], {
       cwd: worktree,

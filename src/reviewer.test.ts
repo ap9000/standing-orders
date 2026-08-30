@@ -126,6 +126,9 @@ describe("the reviewer role in the store", () => {
     store.createTask({ id: "t-1", title: "wire the payout guard" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
+    // admitReview authenticates inside its transaction (review finding 4).
+    register(store, { name: "builder-1", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-1" });
+    register(store, { name: "builder-2", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => "tok-builder-2" });
     const seeded = seedBuilt();
     builtRun = seeded.runId;
     diffArtifact = seeded.artifactId;
@@ -272,7 +275,7 @@ describe("the reviewer role in the store", () => {
       };
 
     const passOnce = (agent: Runner) =>
-      reviewPass(store, { runner: "builder-1", now: T0, evidenceRoot, scratchRoot, agent });
+      reviewPass(store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot, scratchRoot, agent });
 
     test("manual road end to end: request → pass → comments land, run closes, request consumed", async () => {
       const asked = store.requestReview(builtRun, "alex", T0);
@@ -391,9 +394,9 @@ describe("the reviewer role in the store", () => {
     test("admission is one winner: a second admit finds the request gone, and a crash leaves a spent request + open run", async () => {
       const asked = store.requestReview(builtRun, "alex", T0);
       if (!asked.ok) throw new Error("ask");
-      const first = store.admitReview(asked.id, { runner: "builder-1", provider: "claude", model: null }, T0);
+      const first = store.admitReview(asked.id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null }, T0);
       if (!first.ok) throw new Error("admit");
-      expect(store.admitReview(asked.id, { runner: "builder-2", provider: "claude", model: null }, T0)).toEqual({ ok: false, reason: "gone" });
+      expect(store.admitReview(asked.id, { runner: "builder-2", token: "tok-builder-2", provider: "claude", model: null }, T0)).toEqual({ ok: false, reason: "gone" });
       // The crash shape: request spent 'dispatched', run open with outcome
       // NULL — a visible cut-down attempt, not a stuck queue.
       const request = store.raw().prepare("SELECT consumed_reason FROM review_request WHERE id = ?").get(asked.id);
@@ -412,9 +415,9 @@ describe("the reviewer role in the store", () => {
       const askedA = store.requestReview(builtRun, "alex", T0);
       const askedB = store.requestReview(second.runId, "alex", T0);
       if (!askedA.ok || !askedB.ok) throw new Error("asks");
-      const admitA = store.admitReview(askedA.id, { runner: "builder-1", provider: "claude", model: null }, T0);
+      const admitA = store.admitReview(askedA.id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null }, T0);
       expect(admitA.ok).toBe(true);
-      const admitB = store.admitReview(askedB.id, { runner: "builder-1", provider: "claude", model: null }, T0);
+      const admitB = store.admitReview(askedB.id, { runner: "builder-1", token: "tok-builder-1", provider: "claude", model: null }, T0);
       expect(admitB).toMatchObject({ ok: false, reason: "railed", rail: "daily-runs" });
       // Open for a later pass — the rail spends no request.
       expect(store.openReviewRequests()).toHaveLength(1);

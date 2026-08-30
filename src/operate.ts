@@ -3142,6 +3142,7 @@ async function tickCommand(
   {
     const reviewed = await reviewPass(store, {
       runner,
+      token,
       now: clock(),
       clock,
       ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),

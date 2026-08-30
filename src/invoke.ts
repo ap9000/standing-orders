@@ -113,19 +113,6 @@ export async function invokeAgent(
     options.timeoutMs ?? 30 * 60_000,
   );
 
-  // The spawn leg of the runner gate (MCP spec v6): the tuple re-proven
-  // against LIVE rows immediately before any provider process exists —
-  // retirement, takeover, re-binding, or re-placement between the claim
-  // and this instant refuses here, on every road through this gateway.
-  if (!store.proveRunnerCustodyForSpawn(runId, clock())) {
-    return {
-      kind: "refused",
-      reason: "runner-custody",
-      providerVersion: null,
-      diagnostic: "the run's runner custody lapsed before spawn — the lease, the runner, or its repo binding no longer stands",
-    };
-  }
-
   // Tier-2 attestation (A2/B3): the authoritative check, immediately
   // before the spawn it authorizes. Tier-1 providers return null here and
   // keep their road byte-identical.
@@ -196,6 +183,19 @@ export async function invokeAgent(
   // transaction re-derives the approval, cycle, entry, pin, and (past the
   // base) the live paid-fallback grant, and stamps ONLY if all still stand
   // — a grant revoked between admission and this instant refuses here.
+  // The spawn leg of the runner gate (MCP spec v6, review finding 4):
+  // the tuple re-proven against LIVE rows AFTER every awaited step, in
+  // the same breath as the stamp — a takeover during the attestation
+  // await can no longer slip a stale process through.
+  if (!store.proveRunnerCustodyForSpawn(runId, clock())) {
+    return {
+      kind: "refused",
+      reason: "runner-custody",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic: "the run's runner custody lapsed before spawn — the lease, the runner, or its repo binding no longer stands",
+    };
+  }
+
   if (run.chainCycle != null) {
     const custody =
       attested !== null
