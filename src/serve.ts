@@ -4351,7 +4351,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           // human road (approve() refuses) — the mode road refuses too.
           const filedScope = store.getScope(result.id);
           if (filedScope?.profileState === "resolved") {
-            store.sealScopeApproval(result.id, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
+            // A false answer here is the coordinator quarantine (review
+            // finding 7): the revision stays honestly unapproved and the
+            // task page it redirects to says so in the quarantine words.
+            void store.sealScopeApproval(result.id, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
           }
         }
         return result;
@@ -4997,7 +5000,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           if (coverage !== null) {
             const filedScope = store.getScope(taskId);
             if (filedScope?.profileState === "resolved") {
-              store.sealScopeApproval(taskId, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
+              const sealedUnderMode = store.sealScopeApproval(taskId, who.name, now, {}, { kind: "mode", modeDigest: coverage.digest });
+              // The quarantine speaks at the caller (review finding 7).
+              if (!sealedUnderMode) {
+                return { ok: false, status: 200, message: "scope saved — coordinator-filed: mode coverage cannot admit it; sign the scope" };
+              }
             }
           }
           if (plannedComparison !== null && plannedComparison.ok) {
@@ -8827,8 +8834,8 @@ function taskBody(data: {
   /** Immutable filing provenance (v12) — the approver sees which door
    * filed this (console, cli, intake, template:<name>) at the yes. */
   filedVia?: string | null;
-  /** `mcp:<name>#<cid4>` when a coordinator filed this; null otherwise. */
-  coordinator?: string | null;
+  /** Coordinator provenance when an agent filed this; null otherwise. */
+  coordinator?: { label: string; filedAt: string | null } | null;
   holds: Hold[];
   contest?: { id: number; state: string; agents: number; kind: "race" | "comparison" } | null;
   claimed: boolean;
@@ -9039,7 +9046,7 @@ function taskBody(data: {
           // signature, nothing plans, claims, or runs it.
           data.coordinator === null || data.coordinator === undefined
             ? ""
-            : `<p class="meta">filed by <span class="mono">${escape(data.coordinator)}</span> — an agent asked for this; nothing runs until you sign, and your signature runs THEIR request</p>`,
+            : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAt === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAt.slice(0, 16).replace("T", " "))}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
           `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
@@ -9364,7 +9371,13 @@ function taskBody(data: {
     `<h1>${escape(task.id)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span>` +
       `<span class="meta">${data.strikes > 0 ? ` ${data.strikes} failed attempt(s)` : ""}` +
       `${data.repo === null ? "" : ` · ${escape(data.repo)}`}` +
-      `${data.filedVia === null || data.filedVia === undefined ? "" : ` · filed via ${escape(data.filedVia)}`}</span></h1>`,
+      `${
+        data.coordinator !== null && data.coordinator !== undefined
+          ? ` · filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAt === null ? "" : ` ${escape(data.coordinator.filedAt.slice(0, 16).replace("T", " "))}`}`
+          : data.filedVia === null || data.filedVia === undefined
+            ? ""
+            : ` · filed via ${escape(data.filedVia)}`
+      }</span></h1>`,
     `<p>${escape(task.title)}</p>`,
     data.position !== null && data.position !== undefined && task.state === "queued"
       ? `<p class="meta">queue position ${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} — <a href="/queue">the queue screen</a> reorders</p>`

@@ -691,7 +691,7 @@ export function modeFilingCoverage(
 export function fileAndSealUnderMode(
   store: Store,
   input: ScopeInput & { repo: string | null; actor: string },
-): { ok: true; scope: Scope; basis: "mode" } | { ok: false; reason: "no-mode" | "not-signer" | "not-covered" } {
+): { ok: true; scope: Scope; basis: "mode" } | { ok: false; reason: "no-mode" | "not-signer" | "not-covered" | "coordinator-filed" } {
   return store.transact(() => {
     const mode = input.repo === null ? null : store.activeMode(input.repo, input.now);
     if (mode === null) return { ok: false as const, reason: "no-mode" as const };
@@ -713,7 +713,11 @@ export function fileAndSealUnderMode(
       ...(input.budgetMicrousd == null && defaultBudget !== null ? { budgetMicrousd: defaultBudget } : {}),
       ...(escalated ? { posture: "escalated" as const } : {}),
     });
-    store.sealScopeApproval(input.taskId, input.actor, input.now, input.mutation ?? {}, { kind: "mode", modeDigest: mode.digest });
+    const sealed = store.sealScopeApproval(input.taskId, input.actor, input.now, input.mutation ?? {}, { kind: "mode", modeDigest: mode.digest });
+    // The quarantine speaks through every caller (review finding 7): a
+    // coordinator-filed task is never mode-admitted, and pretending the
+    // seal landed would hide exactly the refusal the operator must see.
+    if (!sealed) return { ok: false as const, reason: "coordinator-filed" as const };
     return { ok: true as const, scope: store.getScope(input.taskId) as Scope, basis: "mode" as const };
   });
 }

@@ -8518,7 +8518,7 @@ function scopeTask(
   // whatever scope happens to be current.
   const filed = store.replay(mutationFrom(flags, now), "task-scope-filed", () =>
     store.transact(():
-    | { ok: true; scope: ReturnType<typeof propose>; sealedUnderMode: boolean }
+    | { ok: true; scope: ReturnType<typeof propose>; sealedUnderMode: boolean; modeRefusedCoordinator?: boolean }
     | { ok: false; reason: string; message: string } => {
     if (plannedRace !== null && plannedRace.ok) {
       const raceRef = store.refFor(BUILT_IN, id);
@@ -8549,9 +8549,10 @@ function scopeTask(
       now,
     });
     let sealedUnderMode = false;
+    let modeRefusedCoordinator = false;
     if (coverage !== null && proposed.profileState === "resolved") {
-      store.sealScopeApproval(id, actor as string, now, {}, { kind: "mode", modeDigest: coverage.digest });
-      sealedUnderMode = true;
+      sealedUnderMode = store.sealScopeApproval(id, actor as string, now, {}, { kind: "mode", modeDigest: coverage.digest });
+      modeRefusedCoordinator = !sealedUnderMode;
     }
     if (plannedRace !== null && plannedRace.ok) {
       const plan = plannedRace.plan;
@@ -8595,12 +8596,18 @@ function scopeTask(
         now,
       );
     }
-    return { ok: true, scope: proposed, sealedUnderMode };
+    return { ok: true, scope: proposed, sealedUnderMode, modeRefusedCoordinator };
   }));
   if (!filed.ok) {
     return fail(write, json, "task scope", filed.reason, filed.message, EXIT.refused);
   }
   const scope = filed.scope;
+  if (filed.modeRefusedCoordinator === true) {
+    return succeed(write, json, "task scope", { scope, approvedUnderMode: false, quarantined: true }, () => [
+      `Scope written for ${id} — but coordinator-filed: mode coverage cannot admit it; sign the scope.`,
+      ...describeScope(scope),
+    ]);
+  }
   if (filed.sealedUnderMode) {
     return succeed(write, json, "task scope", { scope, approvedUnderMode: true }, () => [
       `Scope written AND approved for ${id} — your operating mode covered it; it dispatches on the next pass.`,

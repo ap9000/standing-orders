@@ -9566,16 +9566,21 @@ export class Store {
    * or null for every other filer. Rendered on the task page and INSIDE
    * the approval ceremony (MCP spec v6: the operator sees WHO asked
    * before signing). */
-  coordinatorProvenanceOf(taskId: string): string | null {
+  coordinatorProvenanceOf(taskId: string): { label: string; filedAt: string | null } | null {
     const row = this.db
       .prepare(
-        `SELECT c.name AS name, c.cid AS cid FROM task_ref
+        `SELECT c.name AS name, c.cid AS cid,
+                (SELECT MIN(e.created_at) FROM coordinator_event e WHERE e.cid = c.cid AND e.task_id = task_ref.external_id AND e.kind = 'filed') AS filed_at
+           FROM task_ref
            JOIN coordinator_credential c ON c.cid = task_ref.coordinator_cid
           WHERE task_ref.backend = ? AND task_ref.external_id = ?`,
       )
       .get(BUILT_IN, taskId);
     if (row === undefined) return null;
-    return `mcp:${String(row["name"])}#${String(row["cid"]).slice(0, 4)}`;
+    return {
+      label: `mcp:${String(row["name"])}#${String(row["cid"]).slice(0, 4)}`,
+      filedAt: row["filed_at"] === null ? null : String(row["filed_at"]),
+    };
   }
 
   filedViaOf(taskId: string): string | null {
