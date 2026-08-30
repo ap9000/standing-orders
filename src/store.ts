@@ -6581,30 +6581,20 @@ export class Store {
         bind(opened.id, 0);
         return opened.id;
       }
+      // A LIVE cycle already exists. There is NO in-passing re-tag (Codex
+      // E3d review, finding 5): custody moves only through admitFallback or
+      // the proven parked-resume road. The tick's deferral keeps ordinary
+      // dispatch away from live-cycle tasks, so reaching here is a race or
+      // a stale cycle — either way this run gets NO binding, and the
+      // chain-entry dispatch proof refuses it before any money moves.
       const existing = this.fallbackCycleFor(taskRef);
-      if (existing === null) return null;
-      // A cycle bound to a DIFFERENT approved chain than the one now
-      // dispatching is stale authority (Codex E2/E3 review, finding 2/3):
-      // incident it so a human sees why, and govern NOTHING this dispatch —
-      // the next opens fresh under the new chain.
-      if (existing.chainDigest !== digest) {
+      if (existing !== null && existing.chainDigest !== digest) {
+        // Bound to a DIFFERENT approved chain: stale authority — incident it
+        // so a human sees why; the next dispatch opens fresh under the new
+        // chain (findings 2/3).
         this.incidentFallback(existing.id, existing.transitionGeneration, "chain-digest-changed-under-open-cycle", now);
-        return null;
       }
-      // Re-tag the tail to the live run ONLY when the cycle is open AND its
-      // current tail is NOT a concluded-but-unsettled run: overwriting a
-      // finished predecessor would lose its exhaustion advance (finding 3).
-      // A concluded tail is left as-is for the reconciler to resolve.
-      if (existing.state === "open" && existing.tailRun !== null) {
-        const tail = this.getRun(existing.tailRun);
-        if (tail !== null && tail.outcome === null) {
-          const moved = this.db
-            .prepare("UPDATE fallback_cycle SET tail_run = ?, updated_at = ? WHERE id = ? AND state = 'open'")
-            .run(runId, now.toISOString(), existing.id);
-          if (Number(moved.changes) > 0) bind(existing.id, existing.cursor);
-        }
-      }
-      return existing.id;
+      return null;
     });
   }
 
@@ -6817,18 +6807,28 @@ export class Store {
    */
   admitNextChainEntry(
     cycleId: number,
-    taskId: string,
-    repo: string,
     run: { leaseId: string; runner: string; branch: string; worktree: string },
     now: Date,
   ):
-    | { ok: true; runId: number; provider: string; model: string }
+    | { ok: true; runId: number; taskId: string; provider: string; model: string }
     | { ok: false; reason: "not-pending" | "stale-approval" | "grant-withheld" | "no-edge" | "raced" } {
     return this.transact(() => {
       const cycle = this.db.prepare("SELECT * FROM fallback_cycle WHERE id = ?").get(cycleId);
       if (cycle === undefined) return { ok: false as const, reason: "not-pending" as const };
       const c = readFallbackCycle(cycle as Record<string, unknown>);
       if (c.state !== "pending-admission") return { ok: false as const, reason: "not-pending" as const };
+      // Task and repo are DERIVED from the cycle's own task_ref (Codex E3d
+      // review, finding 7) — never accepted from the caller, so a mismatched
+      // call can't marry task B's approval to task A's cycle.
+      const owner = this.db
+        .prepare("SELECT external_id, repo FROM task_ref WHERE id = ? AND backend = ?")
+        .get(c.taskRef, BUILT_IN);
+      const taskId = owner === undefined ? null : String((owner as Record<string, unknown>)["external_id"]);
+      const repo = owner === undefined ? null : ((owner as Record<string, unknown>)["repo"] as string | null);
+      if (taskId === null || repo === null) {
+        this.incidentFallback(c.id, c.transitionGeneration, "cycle-task-unresolvable", now);
+        return { ok: false as const, reason: "stale-approval" as const };
+      }
       const chain = this.approvedChainOf(taskId);
       if (chain === null || chainDigestOf(chain) !== c.chainDigest) {
         this.incidentFallback(c.id, c.transitionGeneration, "approved-chain-invalid-at-admission", now);
@@ -6874,7 +6874,116 @@ export class Store {
         now,
       );
       if (!admitted.ok) return { ok: false as const, reason: "raced" as const };
-      return { ok: true as const, runId: admitted.runId, provider: entry.profile.provider, model: entry.profile.model };
+      return { ok: true as const, runId: admitted.runId, taskId, provider: entry.profile.provider, model: entry.profile.model };
+    });
+  }
+
+  /**
+   * A repair/resume child inherits its parent's chain binding VERBATIM
+   * (Codex E3d review, finding 2): the pinned entry — auth mode included —
+   * follows the custody, so a repair turn can never spend under the mutable
+   * per-provider auth file when its parent was pinned. First-write on the
+   * child; a no-op when the parent carries no binding.
+   */
+  inheritChainBinding(childRun: number, parentRun: number): void {
+    this.db
+      .prepare(
+        `UPDATE run SET
+           chain_cycle = (SELECT chain_cycle FROM run WHERE id = ?2),
+           chain_index = (SELECT chain_index FROM run WHERE id = ?2),
+           entry_digest = (SELECT entry_digest FROM run WHERE id = ?2),
+           auth_mode = (SELECT auth_mode FROM run WHERE id = ?2)
+         WHERE id = ?1 AND chain_cycle IS NULL
+           AND (SELECT chain_cycle FROM run WHERE id = ?2) IS NOT NULL`,
+      )
+      .run(childRun, parentRun);
+  }
+
+  /**
+   * The PARKED-RESUME custody transfer (Codex E3d review, finding 5): the
+   * ONE road a chain cycle's tail moves to a successor run — proved, never
+   * re-tagged in passing. In one transaction: the parent must carry the
+   * binding, its cycle must be OPEN with the parent as tail at the parent's
+   * index, and the parent must have parked (the paused-lineage state).
+   * The successor inherits the binding and becomes the tail.
+   */
+  resumeChainCustody(parkedRun: number, resumeRun: number, now: Date): boolean {
+    return this.transact(() => {
+      const parent = this.getRun(parkedRun);
+      if (parent === null || parent.chainCycle == null || parent.outcome !== "parked") return false;
+      const cycle = this.fallbackCycleFor(parent.taskRef);
+      if (
+        cycle === null ||
+        cycle.id !== parent.chainCycle ||
+        cycle.state !== "open" ||
+        cycle.tailRun !== parkedRun ||
+        cycle.cursor !== parent.chainIndex
+      ) {
+        return false;
+      }
+      this.inheritChainBinding(resumeRun, parkedRun);
+      const moved = this.db
+        .prepare("UPDATE fallback_cycle SET tail_run = ?, updated_at = ? WHERE id = ? AND state = 'open' AND tail_run = ?")
+        .run(resumeRun, now.toISOString(), cycle.id, parkedRun);
+      return Number(moved.changes) > 0;
+    });
+  }
+
+  /**
+   * The PRE-SPAWN custody proof (Codex E3d review, finding 3): the LAST
+   * gate before a chain-bound run's provider process starts, coupled to the
+   * start stamp in ONE transaction so nothing can lapse between the proof
+   * and the money. Re-derives, from durable state only: the approved chain
+   * still stands (freshness + digest); the run's cycle is live and OPEN
+   * with THIS run as tail at THIS run's index; the entry digest and pinned
+   * auth mode still match; and — for any entry past the base — the LIVE
+   * signed mode still grants the paid fallback (a base entry is the
+   * ordinary approved work and needs no grant). Only when every fact stands
+   * is provider_started_at stamped (first-write, with the version when the
+   * gateway proved one). Returns false — and stamps NOTHING — otherwise.
+   */
+  proveChainCustodyForSpawn(runId: number, now: Date, providerVersion?: string): boolean {
+    return this.transact(() => {
+      const run = this.getRun(runId);
+      if (run === null || run.chainCycle == null || run.outcome !== null) return false;
+      const owner = this.db
+        .prepare("SELECT external_id, repo FROM task_ref WHERE id = ? AND backend = ?")
+        .get(run.taskRef, BUILT_IN);
+      if (owner === undefined) return false;
+      const taskId = String((owner as Record<string, unknown>)["external_id"]);
+      const repo = (owner as Record<string, unknown>)["repo"] as string | null;
+      const chain = this.approvedChainOf(taskId);
+      if (chain === null) return false;
+      const cycle = this.fallbackCycleFor(run.taskRef);
+      if (
+        cycle === null ||
+        cycle.id !== run.chainCycle ||
+        cycle.state !== "open" ||
+        cycle.cursor !== run.chainIndex ||
+        cycle.tailRun !== runId ||
+        cycle.chainDigest !== chainDigestOf(chain)
+      ) {
+        return false;
+      }
+      const entry = chain[run.chainIndex ?? -1];
+      if (entry === undefined || entryDigestOf(entry) !== run.entryDigest || entry.authMode !== run.authMode) {
+        return false;
+      }
+      if ((run.chainIndex ?? 0) > 0) {
+        const liveGrant =
+          repo !== null && modeTermsFromJson(this.activeMode(repo, now)?.termsJson ?? null)?.allowPaidFallback === true;
+        if (!liveGrant) return false;
+      }
+      if (providerVersion !== undefined) {
+        this.db
+          .prepare("UPDATE run SET provider_started_at = COALESCE(provider_started_at, ?), provider_version = ? WHERE id = ?")
+          .run(now.toISOString(), providerVersion, runId);
+      } else {
+        this.db
+          .prepare("UPDATE run SET provider_started_at = COALESCE(provider_started_at, ?) WHERE id = ?")
+          .run(now.toISOString(), runId);
+      }
+      return true;
     });
   }
 

@@ -471,6 +471,113 @@ export function acquireIfReady(
 }
 
 /**
+ * The FALLBACK-ADMISSION claim (E3d, review finding 4): the one gate a
+ * pending-admission chain cycle dispatches through. It enforces everything
+ * `acquireIfReady` enforces — task state, holds, blockers, the approved
+ * scope + live-mode belt, capability, capacity, and quota — with EXACTLY
+ * ONE deliberate difference: a BACKOFF hold does not gate, because the
+ * pending admission IS the system's answer to the predecessor's failure
+ * (waiting out the exhausted entry's backoff to run a different credential
+ * would be waiting for nothing). Quota is keyed by the PINNED entry's
+ * provider, model, and auth mode — the credential that would actually
+ * spend — so an exhausted fallback credential refuses here, before any
+ * claim exists.
+ */
+export function acquireFallback(
+  store: Store,
+  taskRef: number,
+  runner: string,
+  options: AcquireOptions & {
+    repo?: string;
+    provider: string;
+    model: string;
+    authMode: "subscription" | "api-key";
+  },
+): AcquireResult | NotReady {
+  return inTransaction(store, () => {
+    const db = store.handle;
+    const stamp = options.now.toISOString();
+    const task = db
+      .prepare(
+        `SELECT task.id, task.state FROM task
+         JOIN task_ref ON task_ref.external_id = task.id AND task_ref.backend = ?
+         WHERE task_ref.id = ?`,
+      )
+      .get(BUILT_IN, taskRef);
+    if (task === undefined) return { ok: false as const, reason: "not-ready" as const, message: "no such task" };
+    // A task the strikes already ended (state failed) or that concluded is
+    // TERMINAL: its pending cycle never spends (the reviewer's third-strike
+    // scenario) — the cycle simply waits out as an inert record.
+    if (String(task["state"]) !== "queued") {
+      return { ok: false as const, reason: "not-ready" as const, message: `state is ${String(task["state"])}, not queued` };
+    }
+    // Every hold EXCEPT backoff gates: an operator hold, a decision hold,
+    // an incident hold all still mean "do not spend".
+    const hold = db
+      .prepare(
+        `SELECT reason FROM hold
+         WHERE task_ref = ? AND owner_kind <> 'backoff' AND (until IS NULL OR until > ?) LIMIT 1`,
+      )
+      .get(taskRef, stamp);
+    if (hold !== undefined) return { ok: false as const, reason: "not-ready" as const, message: `held: ${String(hold["reason"])}` };
+    const blocker = db
+      .prepare(
+        `SELECT blocker.id FROM task_edge
+         JOIN task AS blocker ON blocker.id = task_edge.blocker
+         WHERE task_edge.blocked = ? AND blocker.state <> 'done'
+         ORDER BY blocker.id LIMIT 1`,
+      )
+      .get(String(task["id"]));
+    if (blocker !== undefined) return { ok: false as const, reason: "not-ready" as const, message: `waiting on ${String(blocker["id"])}` };
+    // The approved scope + live-mode belt, verbatim from acquireIfReady: a
+    // chain approval IS a scope approval, and a mode-sealed one must still
+    // stand.
+    const approvedScope = db
+      .prepare(
+        `SELECT 1 AS hit FROM task_scope
+         JOIN task_ref ON task_ref.id = ? AND task_scope.task_id = task_ref.external_id
+         WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL AND (COALESCE(task_scope.approval_basis, 'password') <> 'mode'
+                OR EXISTS (SELECT 1 FROM operating_mode om
+                            JOIN approver signer ON signer.name = om.signed_by
+                           WHERE om.repo = task_ref.repo AND om.revoked_at IS NULL
+                             AND om.absolute_expiry > ? AND om.digest = task_scope.mode_digest
+                             AND signer.revoked_at IS NULL AND signer.role = 'approver'))`,
+      )
+      .get(taskRef, stamp);
+    if (approvedScope === undefined) {
+      return { ok: false as const, reason: "not-ready" as const, message: "the scope is not approved" };
+    }
+    const gap = missingCapability(store, taskRef, options.repo ?? null, options.now);
+    if (gap !== null) return { ok: false as const, reason: "capability" as const, message: gap };
+    const registered = store.getRunner(runner);
+    if (registered !== null) {
+      const held = store.liveClaimCount(runner, options.now);
+      if (held >= registered.runner.capacity) {
+        return {
+          ok: false as const,
+          reason: "capacity" as const,
+          message: `${runner} holds ${held} of ${registered.runner.capacity} slot(s) — a free CPU against a full ledger is not capacity`,
+        };
+      }
+    }
+    // Quota, keyed by the PINNED credential that would spend.
+    const quota = store.quotaState(runner, options.provider, options.model, options.now, options.authMode);
+    if (quota !== null && quota.state === "exhausted") {
+      return {
+        ok: false as const,
+        reason: "quota" as const,
+        message: `${runner}'s ${options.provider} quota is exhausted (${quota.reason})${quota.resetAt === null ? "" : ` until ${quota.resetAt}`} — the fallback entry's own credential is spent`,
+      };
+    }
+    const taken = acquireLocked(store, taskRef, runner, options);
+    if (taken.ok && quota !== null) {
+      store.consumeHalfOpen(runner, options.provider, options.model, options.now, options.authMode);
+    }
+    return taken;
+  });
+}
+
+/**
  * The first requirement this task fails, in words, or null. A requirement
  * whose capability was never recorded fails too — fail closed is the only
  * honest reading of "a task whose capabilities are not verified does not

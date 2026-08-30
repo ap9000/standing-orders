@@ -74,7 +74,7 @@ export type InvokeResult =
   | { kind: "ran"; outcome: AgentOutcome }
   | {
       kind: "refused";
-      reason: "provider-unattested" | "provider-protocol";
+      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody";
       providerVersion: string | null;
       diagnostic: string | null;
     };
@@ -127,6 +127,39 @@ export async function invokeAgent(
     };
   }
 
+  // Auth mode decides how the credential reaches the process (the operator
+  // keeps BOTH and prefers the subscription): in "api-key" mode the
+  // managed file wins, the ambient env is a real fallback (explicit
+  // re-supply survives resolveChildEnv's chat-key strip); in
+  // "subscription" mode the key is STRIPPED from the child so the CLI's
+  // own login is used — its key is retained, just not handed over.
+  // A CHAIN-BOUND run carries a PINNED mode sealed into its approved entry
+  // (E3d, review finding 5): the pin IS the authority — a per-provider
+  // mode-file flip between admission and spawn must never move the spend
+  // onto a credential the operator didn't approve for this entry. Every
+  // other run reads the operator's live setting, as always.
+  const { runner, clock: _clock, versionProbe: _probe, keyHome, ...runOptions } = options;
+  const authMode =
+    run.chainCycle != null && run.authMode != null ? run.authMode : readAuthMode(spec.provider, keyHome);
+  const ownKeyEnv = OWN_KEY_ENV[spec.provider];
+  const managedKey =
+    authMode === "api-key"
+      ? readProviderKey(spec.provider, keyHome) ?? (process.env[PROVIDER_KEY_ENV[spec.provider]] || null)
+      : null;
+  // A pinned api-key entry with NO key is REFUSED, not spawned (Codex E3d
+  // review, finding 1): with nothing to inject, the provider CLI would
+  // quietly fall back to its cached subscription login — spend on a
+  // credential the entry never approved. A value-shaped refusal before any
+  // stamp: no process, no spend, no strike.
+  if (run.chainCycle != null && authMode === "api-key" && managedKey === null) {
+    return {
+      kind: "refused",
+      reason: "chain-credential",
+      providerVersion: attested === null ? null : attested.version,
+      diagnostic: `the approved entry is pinned to a ${spec.provider} API key, and no managed or ambient key exists — add one on the keys screen`,
+    };
+  }
+
   // Resume XOR mint, enforced at the GATEWAY (Codex gemini verify round 2,
   // finding 3): a resume and a minted start id are mutually exclusive —
   // geminiArgv silently prefers --resume, so a minted id that rides
@@ -145,11 +178,27 @@ export async function invokeAgent(
   // that claims spend which never happened — the honest direction. A spawn
   // before the stamp would leave spend no record claims, which is the lie
   // the invariant exists to rule out. For attested providers the probed
-  // version rides the SAME durable write (B2).
-  if (attested !== null) store.stampProviderStart(runId, clock(), attested.version);
+  // version rides the SAME durable write (B2). A CHAIN-BOUND run's stamp is
+  // the PRE-SPAWN CUSTODY PROOF (Codex E3d review, finding 3): one
+  // transaction re-derives the approval, cycle, entry, pin, and (past the
+  // base) the live paid-fallback grant, and stamps ONLY if all still stand
+  // — a grant revoked between admission and this instant refuses here.
+  if (run.chainCycle != null) {
+    const custody =
+      attested !== null
+        ? store.proveChainCustodyForSpawn(runId, clock(), attested.version)
+        : store.proveChainCustodyForSpawn(runId, clock());
+    if (!custody) {
+      return {
+        kind: "refused",
+        reason: "chain-custody",
+        providerVersion: attested === null ? null : attested.version,
+        diagnostic: "the run's chain custody lapsed before spawn — the approval, cycle, entry pin, or paid-fallback grant no longer stands",
+      };
+    }
+  } else if (attested !== null) store.stampProviderStart(runId, clock(), attested.version);
   else store.stampProviderStart(runId, clock());
 
-  const { runner, clock: _clock, versionProbe: _probe, keyHome, ...runOptions } = options;
   const spawn = runner ?? adapter.defaultRunner;
   // B3: the attested executable IS the spawned executable — one resolution.
   // A MANAGED key reaches exactly its own provider's child environment
@@ -157,24 +206,6 @@ export async function invokeAgent(
   // else's, and the plane's own env never needed to carry it. A key
   // already ambient in the environment keeps working; the managed file,
   // being deliberate, wins.
-  // Auth mode decides how the credential reaches the process (the operator
-  // keeps BOTH and prefers the subscription): in "api-key" mode the
-  // managed file wins, the ambient env is a real fallback (explicit
-  // re-supply survives resolveChildEnv's chat-key strip); in
-  // "subscription" mode the key is STRIPPED from the child so the CLI's
-  // own login is used — its key is retained, just not handed over.
-  // A CHAIN-BOUND run carries a PINNED mode sealed into its approved entry
-  // (E3d, review finding 5): the pin IS the authority — a per-provider
-  // mode-file flip between admission and spawn must never move the spend
-  // onto a credential the operator didn't approve for this entry. Every
-  // other run reads the operator's live setting, as always.
-  const authMode =
-    run.chainCycle != null && run.authMode != null ? run.authMode : readAuthMode(spec.provider, keyHome);
-  const ownKeyEnv = OWN_KEY_ENV[spec.provider];
-  const managedKey =
-    authMode === "api-key"
-      ? readProviderKey(spec.provider, keyHome) ?? (process.env[PROVIDER_KEY_ENV[spec.provider]] || null)
-      : null;
   const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
     timeoutMs,
@@ -186,7 +217,12 @@ export async function invokeAgent(
       ...adapter.extraOmitEnv,
       // Subscription mode: shed this provider's OWN key too, so an ambient
       // one cannot force API billing over the login the operator prefers.
-      ...(authMode === "subscription" ? ownKeyEnv : []),
+      // Api-key mode: shed every OTHER own-key alias (finding 1) — gemini
+      // reads GOOGLE_API_KEY as well as GEMINI_API_KEY, and a stray alias
+      // must not override the ONE canonical key this mode injected.
+      ...(authMode === "subscription"
+        ? ownKeyEnv
+        : ownKeyEnv.filter(name => name !== PROVIDER_KEY_ENV[spec.provider])),
     ],
     // Providers run in their own process group (M6.12): the harness spawns
     // shells and tools of its own, and both the timeout and the watch's

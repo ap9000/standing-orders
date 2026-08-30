@@ -458,6 +458,53 @@ describe("the fallback taxonomy stamp (E2): honest disposal, fail closed", () =>
   });
 });
 
+describe("the chain-bound gateway (E3d review findings 1/3)", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = openStore(":memory:");
+  });
+  afterEach(() => store.close());
+
+  /** A run bound to a chain entry, with a REAL cycle row backing the FK. */
+  const chainBoundRun = (authMode: "subscription" | "api-key") => {
+    store.createTask({ id: "t-chain", title: "w" }, T0);
+    const ref = store.refFor("built-in", "t-chain").id;
+    const runId = store.startRun({
+      taskRef: ref, leaseId: "lease-ch", runner: "builder-1",
+      branch: "b", worktree: "/w", provider: "claude", now: T0,
+    });
+    const opened = store.openFallbackCycle(ref, "digest-x", runId, T0) as { ok: true; id: number };
+    store
+      .raw()
+      .prepare("UPDATE run SET chain_cycle = ?, chain_index = 0, entry_digest = 'e0', auth_mode = ? WHERE id = ?")
+      .run(opened.id, authMode, runId);
+    return runId;
+  };
+
+  test("a pinned api-key entry with NO key anywhere is REFUSED before any stamp — never the cached login (finding 1)", async () => {
+    const runId = chainBoundRun("api-key");
+    const saved = process.env["ANTHROPIC_API_KEY"];
+    delete process.env["ANTHROPIC_API_KEY"];
+    try {
+      const result = await invokeAgent(store, runId, CLAUDE, ASK, { runner: async () => OK, keyHome: "/nonexistent-keyhome" });
+      expect(result).toMatchObject({ kind: "refused", reason: "chain-credential" });
+      // No spend was implied: the start stamp never landed.
+      expect(store.getRun(runId)?.providerStartedAt ?? null).toBeNull();
+    } finally {
+      if (saved !== undefined) process.env["ANTHROPIC_API_KEY"] = saved;
+    }
+  });
+
+  test("a chain-bound run whose custody no longer proves is REFUSED at the spawn stamp (finding 3)", async () => {
+    // The run carries a binding, but the task has NO chain approval to
+    // re-derive — the pre-spawn custody proof must refuse, stamping nothing.
+    const runId = chainBoundRun("subscription");
+    const result = await invokeAgent(store, runId, CLAUDE, ASK, { runner: async () => OK });
+    expect(result).toMatchObject({ kind: "refused", reason: "chain-custody" });
+    expect(store.getRun(runId)?.providerStartedAt ?? null).toBeNull();
+  });
+});
+
 describe("the architecture rule", () => {
   /**
    * The zero-token invariant is only enforceable if there is exactly one

@@ -1,5 +1,42 @@
 # Progress
 
+**2026-08-29 — Fallback chains E3d review: ALL SEVEN findings closed — the
+binding chain is now fail-closed end to end.** Codex's E3d round found the
+custody model still porous ("not yet fail-closed"); every hole is shut:
+(1 HIGH, missing key → cached login) a chain run PINNED to api-key with no
+managed/ambient key is REFUSED at the gateway as a value (`chain-credential`)
+before any stamp — the provider CLI can never quietly spend its cached
+subscription login; api-key mode also sheds every other own-key alias
+(GOOGLE_API_KEY beside GEMINI_API_KEY) so only the ONE canonical injected
+key reaches the child. (2 HIGH, repair loses the pin) every repair run now
+INHERITS its parent's chain binding verbatim (inheritChainBinding,
+first-write) — the mending turn spends under exactly the pinned entry.
+(3 HIGH, proof↔spawn gap) proveChainCustodyForSpawn: the chain run's start
+stamp IS a custody proof — ONE transaction re-derives approval standing,
+cycle/tail/cursor, entry digest + pin, and (past the base) the LIVE
+paid-fallback grant, stamping provider_started_at only if all stand;
+refusal is `chain-custody`, no strike. (4 HIGH, bypassed gates)
+acquireFallback in claim.ts: the admission's claim now enforces EVERYTHING
+acquireIfReady does — task state (a third-strike failed task never
+dispatches a fallback), non-backoff holds, blockers, approved scope + live
+mode belt, capability, capacity, and quota KEYED BY THE PINNED
+provider/model/auth-mode — with exactly one exemption, the predecessor's
+backoff. (5 HIGH, re-tag backwards) the in-passing re-tag is GONE:
+custody moves only through admitFallback or the new PROVEN parked-resume
+transfer (resumeChainCustody: parent parked + binding + tail re-proved,
+successor inherits, single-use); the ordinary road defers EVERY live cycle
+except a parked tail, whose successor takes custody through that transfer.
+(6 HIGH, abandoned admitted run) the budget-capability gate moved BEFORE
+admission (on the peek); the unreachable belt now finishes the run and
+resolves the cycle rather than abandoning either. (7 MED, caller authority)
+admitNextChainEntry derives task + repo from the cycle's own task_ref, and
+the dispatch proof requires the run's task_ref to equal the task being
+built. Gateway refusals ride two new typed reasons through the no-strike
+invariant arm. E2E updated (ambient key present for the pinned entry) +
+new tests: no-binding-on-second-dispatch, proven parked-resume (live
+parent refuses, parked transfers, single-use), gateway chain-credential /
+chain-custody refusals with NO stamp landed. Suite 1449.
+
 **2026-08-29 — Fallback chains, layer E3d: the admission road + the
 chain-entry dispatch proof — the runtime is COMPLETE.** The last two review
 findings (5/6) closed, and the whole loop now runs end-to-end through the

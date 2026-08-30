@@ -123,10 +123,14 @@ describe("the fallback chain end-to-end (E3d)", () => {
     writeFileSync(join(bin, "gemini"), '#!/bin/sh\necho "0.57.0"\n');
     chmodSync(join(bin, "gemini"), 0o755);
     process.env["PATH"] = `${bin}${delimiter}${process.env["PATH"] ?? ""}`;
+    // The pinned api-key entry REFUSES with no key at all (review finding
+    // 1) — the stub never reads it, but the gateway must see one exist.
+    process.env["GEMINI_API_KEY"] = "test-key-never-read";
     resetAttestationCache();
   });
 
   afterEach(async () => {
+    delete process.env["GEMINI_API_KEY"];
     resetAttestationCache();
     await rm(base, { recursive: true, force: true });
   });

@@ -260,7 +260,7 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
     expect(c.chainDigest).toBe(expected);
   });
 
-  test("a second dispatch at the open cursor RE-TAGS the tail — never opens a second cycle", () => {
+  test("a second dispatch against a live cycle gets NO binding — custody never moves in passing (finding 5)", () => {
     store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
     store.createTask({ id: "t-retry", title: "w" }, T0);
     const ref = store.refFor("built-in", "t-retry").id;
@@ -271,12 +271,44 @@ describe("opening the base cycle from the approved chain (E3b)", () => {
 
     const first = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b1", worktree: "/w1", provider: "claude", now: T0 });
     const c1 = store.openChainCycleForDispatch(ref, "t-retry", first, T0);
+    expect(c1).not.toBeNull();
+    // The first run is BOUND to entry 0.
+    expect(store.getRun(first)).toMatchObject({ chainCycle: c1, chainIndex: 0, authMode: "subscription" });
+    // A second dispatch while the cycle lives: refused a binding — the
+    // cycle's tail stays with the first run, and the unbound second run
+    // would fail the chain-entry dispatch proof before spending.
     const second = store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b2", worktree: "/w2", provider: "claude", now: T0 });
-    const c2 = store.openChainCycleForDispatch(ref, "t-retry", second, T0);
-    expect(c2).toBe(c1); // same cycle
+    expect(store.openChainCycleForDispatch(ref, "t-retry", second, T0)).toBeNull();
     const c = store.fallbackCycleFor(ref)!;
-    expect(c.tailRun).toBe(second); // re-tagged to the live run
-    expect(c.cursor).toBe(0);
+    expect(c.tailRun).toBe(first);
+    expect(store.getRun(second)?.chainCycle ?? null).toBeNull();
+  });
+
+  test("the PROVEN parked-resume transfer: only a parked tail hands custody to a successor (finding 5)", () => {
+    store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
+    store.createTask({ id: "t-resume", title: "w" }, T0);
+    const ref = store.refFor("built-in", "t-resume").id;
+    store.placeTask(ref, REPO);
+    propose(store, { taskId: "t-resume", goal: "a guard", now: T0 });
+    const token = bootstrap();
+    expect(approve(store, "t-resume", "alex", T0, store.getScope("t-resume")!.digest, token).ok).toBe(true);
+
+    const parent = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b-1", branch: "b", worktree: "/w", provider: "claude", now: T0 });
+    store.openChainCycleForDispatch(ref, "t-resume", parent, T0);
+    const successor = store.startRun({ taskRef: ref, leaseId: "l2", runner: "b-1", branch: "b", worktree: "/w2", provider: "claude", now: T0 });
+    // A LIVE (unconcluded) parent refuses the transfer — the provider may
+    // still be alive, and custody is not moved off a possibly-running tail.
+    expect(store.resumeChainCustody(parent, successor, T0)).toBe(false);
+    // A PARKED parent is the paused lineage: the transfer proves and moves.
+    store.finishRun(parent, { outcome: "parked", reason: "decision", now: T0 });
+    expect(store.resumeChainCustody(parent, successor, T0)).toBe(true);
+    const c = store.fallbackCycleFor(ref)!;
+    expect(c).toMatchObject({ state: "open", cursor: 0, tailRun: successor });
+    // The successor INHERITED the binding verbatim — pinned auth mode included.
+    expect(store.getRun(successor)).toMatchObject({ chainCycle: c.id, chainIndex: 0, authMode: "subscription" });
+    // And the transfer is single-use: the parent is no longer the tail.
+    const third = store.startRun({ taskRef: ref, leaseId: "l3", runner: "b-1", branch: "b", worktree: "/w3", provider: "claude", now: T0 });
+    expect(store.resumeChainCustody(parent, third, T0)).toBe(false);
   });
 
   test("a scope REWRITTEN after a chain approval loses fallback authority — no cycle opens (finding 2)", () => {

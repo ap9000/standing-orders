@@ -93,6 +93,7 @@ import {
 type CapabilityKind = Capability["kind"];
 import {
   acquire,
+  acquireFallback,
   acquireIfReady,
   completeFenced,
   finalizeFailureFenced,
@@ -1786,12 +1787,19 @@ async function tickCommand(
       continue;
     }
 
-    // A task whose fallback cycle awaits its next entry belongs to the
-    // CHAIN ADMISSION pass below, never the ordinary road (E3d): admitting
-    // the base here would spend beside — and outside — the pending cycle.
+    // EVERY live fallback cycle defers the ordinary road (Codex E3d review,
+    // finding 5) — a pending admission belongs to the chain pass below, and
+    // an open cycle's custody moves only through proven roads, never an
+    // in-passing re-tag. The ONE exception: an open cycle whose tail PARKED
+    // — the paused lineage — proceeds, and the new run takes custody through
+    // the proven parked-resume transfer after it is created.
     const liveCycle = store.fallbackCycleFor(ref.id);
-    if (liveCycle !== null && liveCycle.state === "pending-admission") {
-      dispatched.push({ id, outcome: "skipped", reason: "fallback-pending" });
+    const parkedChainTail =
+      liveCycle !== null && liveCycle.state === "open" && liveCycle.tailRun !== null
+        ? store.getRun(liveCycle.tailRun)
+        : null;
+    if (liveCycle !== null && !(parkedChainTail !== null && parkedChainTail.outcome === "parked")) {
+      dispatched.push({ id, outcome: "skipped", reason: "fallback-active" });
       continue;
     }
 
@@ -2363,11 +2371,19 @@ async function tickCommand(
       now: clock(),
     });
 
-    // The base fallback cycle (E3b): if this task's approval sealed an
-    // explicit chain, open (or re-tag) its cycle bound to this run. A
+    // The chain custody for this run (E3b/E3d): a parked chain tail hands
+    // custody to this successor through the PROVEN resume transfer (parent
+    // parked + binding + tail all re-proved in one transaction); otherwise
+    // a chain approval opens its fresh cycle bound to this run. A
     // single-profile approval — every task until an operator configures a
-    // fallback chain — opens nothing, so this is inert by default.
-    store.openChainCycleForDispatch(ref.id, id, runId, clock());
+    // fallback chain — does nothing, so this is inert by default. Either
+    // road failing leaves the run UNBOUND, and the chain-entry dispatch
+    // proof refuses it before any money moves.
+    if (parkedChainTail !== null && liveCycle !== null) {
+      store.resumeChainCustody(parkedChainTail.id, runId, clock());
+    } else {
+      store.openChainCycleForDispatch(ref.id, id, runId, clock());
+    }
 
     // The per-attempt dollar cap (v15): the scope's approved term and the
     // installation backstop, the smaller of the two. A provider that
@@ -2538,14 +2554,34 @@ async function tickCommand(
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: railed.rail, detail: railed.detail });
       continue;
     }
-    // A peek proves the entry EXISTS before any claim is taken; the
-    // admission below re-derives it as authority inside its transaction.
+    // A peek proves the entry EXISTS and carries an enforceable budget
+    // BEFORE any claim or run row exists (review findings 4/6); the
+    // admission below re-derives the entry as authority in its transaction.
     const peek = store.approvedChainOf(pending.taskId)?.[pending.cursor];
     if (peek === undefined) {
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "fallback-unadmittable" });
       continue;
     }
-    const claimed = acquire(store, pending.taskRef, runner, { now: clock(), ttlMs: leaseTtlMs });
+    const scopeBudget = store.getScope(pending.taskId)?.budgetMicrousd ?? null;
+    const backstop = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
+    const capMicrousd =
+      scopeBudget === null ? backstop : backstop === null ? scopeBudget : Math.min(scopeBudget, backstop);
+    if (capMicrousd !== null && MONEY_CAPABILITIES[peek.profile.provider].nativeDollarCapFlag === null) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget-unenforceable" });
+      continue;
+    }
+    // The FALLBACK claim (finding 4): every acquireIfReady gate — task
+    // state, non-backoff holds, blockers, approved scope + mode belt,
+    // capability, capacity, and quota keyed by the PINNED credential —
+    // with only the predecessor's backoff exempted.
+    const claimed = acquireFallback(store, pending.taskRef, runner, {
+      now: clock(),
+      ttlMs: leaseTtlMs,
+      repo,
+      provider: peek.profile.provider,
+      model: peek.profile.model,
+      authMode: peek.authMode,
+    });
     if (!claimed.ok) {
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: claimed.reason });
       continue;
@@ -2569,8 +2605,6 @@ async function tickCommand(
     }
     const admitted = store.admitNextChainEntry(
       pending.cycleId,
-      pending.taskId,
-      repo,
       { leaseId: lease, runner, branch, worktree: leased.worktree.path },
       clock(),
     );
@@ -2580,13 +2614,13 @@ async function tickCommand(
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: `fallback-${admitted.reason}` });
       continue;
     }
-    // The per-attempt dollar cap, same rule as the ordinary road: enforce
-    // only explicit budgets, and never on a provider that cannot hold one.
-    const scopeBudget = store.getScope(pending.taskId)?.budgetMicrousd ?? null;
-    const backstop = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
-    const capMicrousd =
-      scopeBudget === null ? backstop : backstop === null ? scopeBudget : Math.min(scopeBudget, backstop);
+    // A belt on the budget rule (finding 6): the capability was proved on
+    // the peek BEFORE admission, so this arm is unreachable unless the
+    // approved chain changed under us — in which case the admitted run is
+    // FINISHED and its cycle resolved, never abandoned open.
     if (capMicrousd !== null && MONEY_CAPABILITIES[admitted.provider as ProviderId].nativeDollarCapFlag === null) {
+      store.finishRun(admitted.runId, { outcome: "refused", reason: "budget-unenforceable", now: clock() });
+      store.resolveChainOnRunEnd(pending.taskRef, admitted.taskId, repo, admitted.runId, clock());
       release(store, lease, clock());
       await worktrees.release(leased.worktree.path, clock());
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget-unenforceable" });

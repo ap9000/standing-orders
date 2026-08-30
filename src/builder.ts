@@ -223,7 +223,11 @@ export type BuildRefusal =
   // normal road from ever claiming; the second is the harness breaking
   // its own terminal or identity contract on a zero exit.
   | "provider-unattested"
-  | "provider-protocol";
+  | "provider-protocol"
+  // The chain-custody refusal family (E3d): no spend happened, no strike —
+  // both dispose through the invariant arm, released and refused in words.
+  | "chain-credential"
+  | "chain-custody";
 
 /** Long enough for real work; short enough that a stuck build ends the same night. */
 export const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60_000;
@@ -501,6 +505,12 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     const chain = store.approvedChainOf(taskId);
     if (chain === null) {
       return { ok: false, reason: "stale-approval", message: `${taskId}: the chain approval no longer stands — re-approve (stale-approval)` };
+    }
+    // The run must belong to THE TASK being built (finding 7): a chain
+    // digest excludes scope text, so two tasks can share one — the task_ref
+    // equality is what stops task B's cycle spending as task A.
+    if (chainRun.taskRef !== taskRef) {
+      return { ok: false, reason: "stale-approval", message: `${taskId}: this run belongs to a different task than its dispatch claims (stale-approval)` };
     }
     const cycle = store.fallbackCycleFor(taskRef);
     if (
@@ -1511,6 +1521,11 @@ async function ingestPark(args: {
       ...(resumableRepair && sessionId !== undefined ? { sessionId } : {}),
       now: clock(),
     });
+    // A repair turn inherits its parent's chain binding VERBATIM (Codex E3d
+    // review, finding 2): the pinned entry — auth mode included — follows
+    // the custody, so the mending turn spends under exactly the credential
+    // the operator approved for this entry. No-op for unpinned parents.
+    store.inheritChainBinding(repairRun, runId);
 
     const spoken = await invokeAgent(
       store,
