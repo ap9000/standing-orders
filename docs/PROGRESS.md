@@ -1,5 +1,23 @@
 # Progress
 
+**2026-08-30 — MCP gateway spec APPROVED (6 Codex rounds).** Parity II's
+MCP phase has its constitution: docs/mcp-gateway-spec.md v6. standing-
+orders becomes an MCP stdio server (zero-dep, two pinned protocol
+revisions); every tool requires the new coordinator credential
+(DESIGN.md §9b — minted ceremony, repo allowlist, cid column linkage,
+rate + outstanding caps, txn-time revocation); the one write verb files
+through the canonical proposal door; admission is the existing password
+scope ceremony, with a coordinator quarantine enforced in the
+primitives (mode-seal refusal + shared-acquisition exclusion). The loop
+also surfaced pre-existing authority debts that ship in-arc: runner
+mint/exec roads get password + repo binding with a three-way tuple gate
+(task_ref.repo/worktree.repo/runner.repos) proven in-transaction
+against takeover races; one lowest cancellation transition (typed
+machine reasons, atomic events) replaces three direct 'cancelled'
+writers; a migration epoch closes the mid-DDL race for non-migrating
+readers. Round arc: NO-GO(6 structural) → NO-GO(6) → NO-GO(7) →
+NO-GO(3) → NO-GO(2) → APPROVE clean.
+
 **2026-08-30 — The Operations Ledger authored as a custom shadcn design
 system, ready for Claude Design.** The console's design language (dark-first
 ink, IBM Plex Sans as the human voice / IBM Plex Mono for machine facts,
