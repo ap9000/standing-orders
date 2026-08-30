@@ -5252,7 +5252,7 @@ export function editorFileHref(worktree: string, path: string, line?: number | n
 /** The execution profile in plain words (v24): what the password signs
  * says WHAT RUNS — provider, exact model, permissions, and the real
  * bounds — or says honestly that it cannot yet. */
-function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion">): string {
+function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion" | "proposedChainJson">): string {
   if (scope.profileState === "unresolved") {
     return `<p class="meta"><strong>filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}. Restate the scope to fix it.</p>`;
   }
@@ -5263,11 +5263,29 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
       : "";
   }
   const repair = profile.repairModel === "inherit" ? "same model" : profile.repairModel;
-  return profile.provider === "claude"
-    ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — edits auto-accepted inside its leased worktree, ${profile.maxTurns} turns / ${Math.round(profile.timeoutSeconds / 60)} min per attempt; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
-    : profile.provider === "gemini"
-      ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "EVERY tool auto-approved" : "edits auto-approved, other tools refused"}, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
-      : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
+  const base =
+    profile.provider === "claude"
+      ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — edits auto-accepted inside its leased worktree, ${profile.maxTurns} turns / ${Math.round(profile.timeoutSeconds / 60)} min per attempt; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+      : profile.provider === "gemini"
+        ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "EVERY tool auto-approved" : "edits auto-approved, other tools refused"}, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+        : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
+  // The fallback chain rides EVERY surface these words sign (F+G review,
+  // finding 2): the digest binds the whole chain, so the password form —
+  // task page and /next alike — states every entry, credential included.
+  const chain = chainFromJson(scope.proposedChainJson ?? null);
+  const chainLine =
+    chain === null || chain.length < 2
+      ? ""
+      : `<p class="meta">if its subscription runs out: ${chain
+          .slice(1)
+          .map(
+            one =>
+              `falls back to <span class="mono">${escape(one.profile.provider)} · ${escape(one.profile.model)}</span> — ${
+                one.authMode === "api-key" ? "your API key; spend moves to that account" : "its subscription login"
+              }`,
+          )
+          .join("; ")}</p>`;
+  return base + chainLine;
 }
 
 /** Every character that could open a tag or an attribute, dead at the sink. */

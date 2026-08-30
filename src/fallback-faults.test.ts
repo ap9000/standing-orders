@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { propose, approve, addApprover } from "./scope.js";
-import { acquireFallback } from "./claim.js";
+import { acquireFallback, release } from "./claim.js";
 import { runOperate, EXIT } from "./operate.js";
 import { modeTermsFromJson, presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 
@@ -83,22 +83,20 @@ describe("the fault matrix (G)", () => {
     // The daemon died right after finishRun — the resolver never ran.
     concludeExhausted(run);
     expect(store.fallbackCycleFor(ref)!.state).toBe("open"); // stranded
-    // Next pass: the reconciler's read finds it, and the SAME resolver runs.
-    const stranded = store.strandedChainCycles(REPO);
-    expect(stranded).toHaveLength(1);
-    expect(stranded[0]).toMatchObject({ taskRef: ref, tailRun: run });
-    expect(store.resolveChainOnRunEnd(ref, "t-crash-adv", REPO, run, T0)).toEqual({ kind: "advanced", toIndex: 1 });
+    // Next pass: the SHARED reconciler — the exact call the tick makes —
+    // re-derives the same advance from durable state alone.
+    expect(store.reconcileStrandedChains(REPO, T0)).toBe(1);
     expect(store.fallbackCycleFor(ref)!.state).toBe("pending-admission");
+    expect(store.fallbackCycleFor(ref)!.cursor).toBe(1);
   });
 
   test("CRASH after a success's disposition: the reconciler closes 'succeeded' — no cycle lingers", () => {
     const { ref, run } = setup("t-crash-win");
     store.stampProviderStart(run, T0, VERSION);
     store.finishRun(run, { outcome: "built", committed: true, now: T0 });
-    const stranded = store.strandedChainCycles(REPO);
-    expect(stranded).toHaveLength(1);
-    expect(store.resolveChainOnRunEnd(ref, "t-crash-win", REPO, run, T0)).toEqual({ kind: "closed", reason: "succeeded" });
+    expect(store.reconcileStrandedChains(REPO, T0)).toBe(1);
     expect(store.fallbackCycleFor(ref)).toBeNull();
+    expect(store.raw().prepare("SELECT closed_reason FROM fallback_cycle").get()).toMatchObject({ closed_reason: "succeeded" });
   });
 
   test("a RACING second resolver loses cleanly: one advance, one transition, no double state", () => {
@@ -173,24 +171,56 @@ describe("the fault matrix (G)", () => {
     if (!claim.ok) expect(claim.reason).toBe("not-ready");
   });
 
-  test("an exhausted PINNED credential refuses the fallback claim before anything exists", () => {
+  test("quota is keyed to the PINNED credential: the other auth mode never blocks, the pinned one refuses, nothing is created", () => {
     grant();
     const { ref, run } = setup("t-quota");
     concludeExhausted(run);
     expect(store.resolveChainOnRunEnd(ref, "t-quota", REPO, run, T0).kind).toBe("advanced");
-    // The gemini api-key credential is itself durably exhausted.
+    // An exhausted SUBSCRIPTION row for the same provider/model must NOT
+    // block the api-key entry — the credentials are different accounts.
+    store.stampQuota(
+      { runner: "b-1", provider: "gemini", scope: "gemini-2.5-pro", reason: "plan spent", authMode: "subscription" },
+      T0,
+    );
+    const other = acquireFallback(store, ref, "b-1", { now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" });
+    expect(other.ok).toBe(true);
+    if (other.ok) release(store, other.claim.leaseId, T0);
+    // The PINNED credential's own exhaustion refuses — and creates nothing.
     store.stampQuota(
       { runner: "b-1", provider: "gemini", scope: "gemini-2.5-pro", reason: "credits gone", authMode: "api-key" },
       T0,
     );
-    const claim = acquireFallback(store, ref, "b-1", {
-      now: T0,
-      provider: "gemini",
-      model: "gemini-2.5-pro",
-      authMode: "api-key",
-    });
+    const before = Number((store.raw().prepare("SELECT COUNT(*) AS n FROM claim WHERE released_at IS NULL").get() as { n: number }).n);
+    const claim = acquireFallback(store, ref, "b-1", { now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" });
     expect(claim.ok).toBe(false);
     if (!claim.ok) expect(claim.reason).toBe("quota");
+    const after = Number((store.raw().prepare("SELECT COUNT(*) AS n FROM claim WHERE released_at IS NULL").get() as { n: number }).n);
+    expect(after).toBe(before);
+  });
+
+  test("the INCARNATION crash window: a daemon dying after admission is recovered by its successor and the cycle resolves (F+G finding 3)", () => {
+    grant();
+    const { ref, run } = setup("t-incarnation");
+    concludeExhausted(run);
+    expect(store.resolveChainOnRunEnd(ref, "t-incarnation", REPO, run, T0).kind).toBe("advanced");
+    // The doomed watch claims WITH its incarnation and admits the fallback.
+    const claim = acquireFallback(store, ref, "b-1", {
+      now: T0, provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key", incarnation: "watch-1",
+    });
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) return;
+    const cycle = store.fallbackCycleFor(ref)!;
+    const admitted = store.admitNextChainEntry(cycle.id, { leaseId: claim.claim.leaseId, runner: "b-1", branch: "b", worktree: "/w2" }, T0);
+    expect(admitted.ok).toBe(true);
+    if (!admitted.ok) return;
+    // CRASH before the provider ever spawns. The successor watch recovers
+    // the dead incarnation: claim released, the admitted run interrupted.
+    expect(store.recoverIncarnation("b-1", "watch-1", T0)).toBe(1);
+    expect(store.getRun(admitted.runId)).toMatchObject({ outcome: "failed", reason: "interrupted" });
+    // The SAME reconciler then resolves the cycle — an interrupted entry is
+    // an ordinary end: closed, and the ordinary road is free again.
+    expect(store.reconcileStrandedChains(REPO, T0)).toBe(1);
+    expect(store.fallbackCycleFor(ref)).toBeNull();
   });
 });
 
@@ -235,6 +265,18 @@ describe("the operator surfaces (Layer F): configuring and granting in words", (
     expect(await run(["config", "set", "fallback", "--repo", REPO, "--entries", "gemini:gemini-2.5-pro:password", "--as", "alex", "--token", token])).toBe(EXIT.usage);
     expect(await run(["config", "set", "fallback", "--repo", REPO, "--entries", "openrouter:gpt-5:subscription", "--as", "alex", "--token", token])).toBe(EXIT.usage);
     expect(await run(["config", "set", "fallback", "--entries", "gemini:gemini-2.5-pro:api-key", "--as", "alex", "--token", token])).toBe(EXIT.usage);
+    // A chain the CURRENT base cannot file refuses AT SET TIME (finding 4):
+    // with claude/sonnet configured, the same entry as a fallback dupes.
+    expect(await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+    expect(await run(["config", "set", "fallback", "--repo", REPO, "--entries", "claude:sonnet:subscription", "--as", "alex", "--token", token])).toBe(EXIT.usage);
+    // The refusal RESTORED the previous (valid) config.
+    expect(await run(["config", "show", "--repo", REPO, "--json"])).toBe(EXIT.ok);
+    expect(payload().fallback).toHaveLength(2);
+    // A model with a leading dash never seals (argv safety, finding 1) —
+    // and a colon-suffixed openrouter model DOES (first/last-colon parse).
+    expect(await run(["config", "set", "fallback", "--repo", REPO, "--entries", "claude:--dangerously-skip-permissions:api-key", "--as", "alex", "--token", token])).toBe(EXIT.usage);
+    expect(await run(["config", "set", "fallback", "--repo", REPO, "--entries", "openrouter:qwen/qwq-32b:free:api-key", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+    expect(payload().fallback).toEqual([{ provider: "openrouter", model: "qwen/qwq-32b:free", authMode: "api-key" }]);
     // Clear.
     expect(await run(["config", "clear", "fallback", "--repo", REPO, "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
     expect(await run(["config", "show", "--repo", REPO, "--json"])).toBe(EXIT.ok);

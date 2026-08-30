@@ -5502,6 +5502,16 @@ export class Store {
               { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
               { chain: chain.chain },
             );
+          } else if (!chain.ok) {
+            // The operator CONFIGURED fallbacks that cannot file (F+G
+            // review, finding 4): silently filing single-profile would
+            // approve something other than what they believe they set. The
+            // scope goes VISIBLY unresolved — dispatch and approval both
+            // blocked, the reason in words — until the config or the base
+            // routing is fixed.
+            profile = null;
+            unresolvedReason = `the configured fallback chain cannot file: ${chain.problem} — fix \`config set fallback\` for this repository, or clear it`;
+            boundDigest = scope.digest;
           }
         }
       }
@@ -6773,6 +6783,22 @@ export class Store {
         taskId: String((row as Record<string, unknown>)["task_id"]),
         tailRun: Number((row as Record<string, unknown>)["tail_run"]),
       }));
+  }
+
+  /**
+   * The chain reconciler in ONE callable piece (F+G review, finding 5): the
+   * EXACT code the tick runs each pass, so the fault tests drive the same
+   * road production does — deleting the tick's call would fail them.
+   * Resolves every open cycle whose tail concluded (non-parked) through the
+   * one resolver; returns how many it fed through.
+   */
+  reconcileStrandedChains(repo: string, now: Date): number {
+    let fed = 0;
+    for (const stranded of this.strandedChainCycles(repo)) {
+      this.resolveChainOnRunEnd(stranded.taskRef, stranded.taskId, repo, stranded.tailRun, now);
+      fed++;
+    }
+    return fed;
   }
 
   /** Cycles awaiting their next entry's admission, for one repo — what the

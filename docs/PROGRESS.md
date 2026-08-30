@@ -1,5 +1,30 @@
 # Progress
 
+**2026-08-29 — Fallback F+G review: NO-GO verdict honored, all six findings
+closed.** Codex refused to bless F+G as the feature-close ("dormant defects
+do not make the completed feature safe to arm") — every finding shut:
+(1 HIGH) fallback models now pass the SAME argv-safety validation every
+sealed model does (validateSpec in BOTH the CLI and resolveScopeChain; a
+leading-dash "model" refuses; first/last-colon parsing lets openrouter's
+":free"-suffixed ids seal — both tested). (2 HIGH) the chain disclosure is
+folded INTO profileWords, so EVERY password-signing surface — the task
+page's approve form and /next alike — states every entry, credential
+included, under the digest that binds them. (3 HIGH) the watch incarnation
+now rides the fallback claim, and the new incarnation-crash fault test
+proves the window: claim+admit, daemon dies pre-spawn, the successor's
+recoverIncarnation interrupts the admitted run, and the SHARED reconciler
+closes the cycle — the ordinary road is free again. (4 MED) an unfileable
+chain refuses AT SET TIME (set→prove-through-the-filing-resolver→restore
+on refusal; an unresolved base passes to the filing gate), and a chain
+that reaches filing broken makes the scope VISIBLY UNRESOLVED — approval
+blocked with the reason in words, never a silent single-profile yes.
+(5 MED) reconcileStrandedChains extracted: the tick and the fault tests
+drive the EXACT same code. (6 LOW) the quota test now proves credential
+ISOLATION: an exhausted subscription row never blocks the api-key entry,
+the pinned credential's own exhaustion refuses, and refusal creates
+nothing. Suite 1463. docs/fallback-fixtures.md (pushed earlier) records
+the fixture road; final confirmation round queued.
+
 **2026-08-29 — Fallback chains, layers F + G: the operator surfaces and the
 fault matrix — task #93's build is COMPLETE.** Layer F, the words and
 levers: `config set fallback --repo <path> --entries

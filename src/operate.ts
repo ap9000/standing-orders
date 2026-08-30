@@ -153,7 +153,7 @@ import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./propo
 import { TEMPLATES, templateByName } from "./templates.js";
 import { planTournament, planComparison, contestNoun, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
 import { priceOf, PRICED_MODELS } from "./converse.js";
-import { resolvePhaseAgent, resolveScopeProfile, INSTALLATION_SCOPE } from "./agentconfig.js";
+import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
@@ -1721,9 +1721,8 @@ async function tickCommand(
   // concluded tail — resolve each through the SAME resolver the disposition
   // uses, before any admission can re-tag or race it. Advancing here lands
   // the cycle in pending-admission for THIS pass's chain admission below.
-  for (const stranded of store.strandedChainCycles(repo)) {
-    store.resolveChainOnRunEnd(stranded.taskRef, stranded.taskId, repo, stranded.tailRun, clock());
-  }
+  // One shared piece with the fault tests (F+G review, finding 5).
+  store.reconcileStrandedChains(repo, clock());
 
   // The DISPATCH view of the queue (queue columns, v19): this runner's own
   // reserved work first, then the shared queue; work reserved for other
@@ -2586,6 +2585,11 @@ async function tickCommand(
       provider: peek.profile.provider,
       model: peek.profile.model,
       authMode: peek.authMode,
+      // The watch incarnation rides the claim (F+G review, finding 3): a
+      // daemon that dies after this claim — admitted or not — must be
+      // recoverable by its successor's incarnation takeover, exactly like
+      // the ordinary road.
+      ...(text(flags, "incarnation") === undefined ? {} : { incarnation: text(flags, "incarnation") as string }),
       ...(text(flags, "max-open-decisions") === undefined
         ? {}
         : { maxOpenDecisions: Number(text(flags, "max-open-decisions")) }),
@@ -4384,16 +4388,20 @@ async function configCommand(
     }
     const entries: { provider: ProviderId; model: string; authMode: "subscription" | "api-key" }[] = [];
     for (const one of entriesGiven.split(",")) {
-      const parts = one.trim().split(":");
-      const [provider, model, authMode] = parts;
-      if (parts.length !== 3 || provider === undefined || model === undefined || authMode === undefined) {
-        return fail(write, json, "config set", "usage", `"${one.trim()}" is not provider:model:auth-mode`, EXIT.usage);
+      // First and LAST colon split the three parts (F+G review, finding 1):
+      // model ids legitimately carry colons (openrouter's ":free" suffixes),
+      // so the model is everything between the provider and the auth mode.
+      const trimmed = one.trim();
+      const firstColon = trimmed.indexOf(":");
+      const lastColon = trimmed.lastIndexOf(":");
+      if (firstColon === -1 || lastColon === firstColon) {
+        return fail(write, json, "config set", "usage", `"${trimmed}" is not provider:model:auth-mode`, EXIT.usage);
       }
+      const provider = trimmed.slice(0, firstColon);
+      const model = trimmed.slice(firstColon + 1, lastColon);
+      const authMode = trimmed.slice(lastColon + 1);
       if (!isProviderId(provider)) {
         return fail(write, json, "config set", "usage", `unknown provider "${provider}" — one of ${PROVIDER_IDS.join(", ")}`, EXIT.usage);
-      }
-      if (model === "") {
-        return fail(write, json, "config set", "usage", "each entry names an exact model — approvals bind exact routing", EXIT.usage);
       }
       if (authMode !== "subscription" && authMode !== "api-key") {
         return fail(write, json, "config set", "usage", `auth-mode is subscription or api-key, not "${authMode}"`, EXIT.usage);
@@ -4401,12 +4409,35 @@ async function configCommand(
       if (authMode === "subscription" && !SUBSCRIPTION_CAPABLE[provider]) {
         return fail(write, json, "config set", "usage", `${provider} has no subscription login — this entry must use api-key`, EXIT.usage);
       }
+      // The model rides provider argv: the SAME argv-safety validation every
+      // other sealed model passes (never a leading dash or control bytes).
+      const argvSafe = validateSpec({ provider, model: model === "" ? null : model });
+      if (model === "" || !argvSafe.ok) {
+        return fail(write, json, "config set", "usage", model === "" ? "each entry names an exact model — approvals bind exact routing" : argvSafe.ok ? "invalid entry" : argvSafe.problem, EXIT.usage);
+      }
       entries.push({ provider, model, authMode });
     }
     if (entries.length < 1 || entries.length > 3) {
       return fail(write, json, "config set", "usage", "1 to 3 fallback entries (the approval binds the whole chain)", EXIT.usage);
     }
+    // The WHOLE chain must file against the CURRENT base (F+G review,
+    // finding 4): a fallback that duplicates the base — or another entry —
+    // refuses NOW, in words, not at some future filing. Set, prove through
+    // the same resolver filing uses, and restore the old config on refusal.
+    const previous = store.fallbackConfig(scope);
     store.setFallbackConfig(scope, entries, acting.name, clock());
+    const baseAgent = resolvePhaseAgent(store, "build", scope, {});
+    if (baseAgent.ok) {
+      const proven = resolveScopeChain(store, scope, undefined, {}, readAuthMode(baseAgent.spec.provider));
+      // An UNRESOLVED base (no explicit routing configured yet) cannot be
+      // duplicate-checked — the filing-time resolver holds that line; only
+      // a chain that provably cannot file refuses here.
+      if (!proven.ok && proven.reason !== "base-unresolved") {
+        if (previous.length > 0) store.setFallbackConfig(scope, previous, acting.name, clock());
+        else store.clearFallbackConfig(scope);
+        return fail(write, json, "config set", "usage", `this chain cannot file: ${proven.problem}`, EXIT.usage);
+      }
+    }
     return succeed(write, json, "config set", { repo: scope, fallback: entries }, () => [
       `${scope}: fallback chain set — NEW approvals bind it; existing approvals are untouched.`,
       ...entries.map((one, i) => `  ${i + 1}. ${one.provider} (${one.model}) — ${one.authMode === "subscription" ? "its subscription login" : "your API key"}`),

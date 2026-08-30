@@ -474,6 +474,20 @@ describe("filing under a fallback chain (E3a): the digest binds it, the seal cop
     void plain;
   });
 
+  test("a configured chain that CANNOT file makes the scope visibly UNRESOLVED — never a silent single-profile approval (F+G finding 4)", () => {
+    // The config road validates, but the store can be reached directly (or
+    // the base can change after a valid set): a duplicate-of-base chain.
+    store.setFallbackConfig(REPO, [{ provider: "claude", model: "sonnet", authMode: "subscription" }], "alex", T0);
+    const scope = placeAndPropose("t-unfileable", "a guard");
+    expect(scope.profileState).toBe("unresolved");
+    expect(scope.unresolvedReason).toContain("fallback chain cannot file");
+    expect(scope.proposedChainJson ?? null).toBeNull();
+    // Unresolved blocks approval — the operator sees WHY instead of signing
+    // something other than what they configured.
+    const token = bootstrapApprover(store);
+    expect(approve(store, "t-unfileable", "alex", T0, scope.digest, token)).toMatchObject({ ok: false, reason: "profile-unresolved" });
+  });
+
   test("a re-approved plain scope re-seals to 'profile' — a stale chain can never survive a rewrite", () => {
     store.setFallbackConfig(REPO, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
     const scope = placeAndPropose("t-rewrite", "a guard");

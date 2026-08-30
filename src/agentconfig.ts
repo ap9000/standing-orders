@@ -220,6 +220,13 @@ export function resolveScopeChain(
     if (one.authMode === "subscription" && !SUBSCRIPTION_CAPABLE[one.provider]) {
       return { ok: false, reason: "bad-fallback", problem: `${one.provider} has no subscription login — this entry must use an API key` };
     }
+    // The model rides provider argv (F+G review, finding 1): the SAME
+    // argv-safety validation every other sealed model passes — never a
+    // leading dash, control bytes, or whitespace into a harness's argv.
+    const argvSafe = validateSpec({ provider: one.provider, model: one.model });
+    if (!argvSafe.ok) {
+      return { ok: false, reason: "bad-fallback", problem: argvSafe.problem };
+    }
     entries.push({ profile: contestantProfileOf(one.provider, one.model, one.repairModel ?? "inherit"), authMode: one.authMode });
   }
   // Re-prove the whole chain through the strict rehydrator: it rejects
