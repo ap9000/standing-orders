@@ -12984,6 +12984,74 @@ export class Store {
   }
 
   /**
+   * The portfolio's ledger (portfolio arc, slice 1a): terminal runs started
+   * since the window opened, one row per run with its task's title and any
+   * publication — one joined read instead of per-row lookups. The outcome
+   * predicate is `IS NOT NULL` exactly: every terminal outcome renders its
+   * own chip; unfinished runs belong to the running section or the
+   * reconciler, never this ledger. `publication.run` is unique, so the left
+   * join cannot duplicate a run. Admission binds INSIDE the WHERE, before
+   * ORDER BY and LIMIT, like every rolled-up read — the caller still
+   * re-proves each row's repo against the ceiling.
+   */
+  portfolioLedgerScoped(
+    repo: string | null,
+    since: string,
+    limit: number,
+    admitted: string[] | null,
+  ): {
+    runId: number;
+    taskId: string;
+    title: string;
+    repo: string | null;
+    outcome: string;
+    provider: string | null;
+    model: string | null;
+    startedAt: string;
+    ranMinutes: number | null;
+    costUsd: number | null;
+    prNumber: number | null;
+    prUrl: string | null;
+  }[] {
+    const page = Math.max(1, Math.min(Math.floor(limit), 100));
+    const admission =
+      admitted === null ? "" : `AND (task_ref.repo IS NULL OR task_ref.repo IN (${admitted.map(() => "?").join(",")}))`;
+    return this.db
+      .prepare(
+        `SELECT run.id AS run_id, run.outcome, run.provider, run.model, run.cost_usd,
+                run.started_at, run.finished_at,
+                task_ref.external_id AS task_id, task_ref.repo AS task_repo, task.title AS title,
+                publication.pr_number, publication.pr_url
+         FROM run
+         JOIN task_ref ON task_ref.id = run.task_ref
+         LEFT JOIN task ON task_ref.backend = ? AND task.id = task_ref.external_id
+         LEFT JOIN publication ON publication.run = run.id
+         WHERE run.started_at >= ? AND run.outcome IS NOT NULL
+           AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
+           ${admission}
+         ORDER BY run.id DESC LIMIT ?`,
+      )
+      .all(BUILT_IN, since, repo, repo, ...(admitted ?? []), page)
+      .map(row => ({
+        runId: Number(row["run_id"]),
+        taskId: String(row["task_id"]),
+        title: row["title"] === null || row["title"] === undefined ? String(row["task_id"]) : String(row["title"]),
+        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
+        outcome: String(row["outcome"]),
+        provider: row["provider"] === null || row["provider"] === undefined ? null : String(row["provider"]),
+        model: row["model"] === null || row["model"] === undefined ? null : String(row["model"]),
+        startedAt: String(row["started_at"]),
+        ranMinutes:
+          row["finished_at"] === null || row["finished_at"] === undefined
+            ? null
+            : Math.max(1, Math.round((new Date(String(row["finished_at"])).getTime() - new Date(String(row["started_at"])).getTime()) / 60_000)),
+        costUsd: row["cost_usd"] === null ? null : Number(row["cost_usd"]),
+        prNumber: row["pr_number"] === null || row["pr_number"] === undefined ? null : Number(row["pr_number"]),
+        prUrl: row["pr_url"] === null || row["pr_url"] === undefined ? null : String(row["pr_url"]),
+      }));
+  }
+
+  /**
    * Everything the board needs, in one snapshot: every non-terminal task's
    * lane-relevant facts plus the recent completions, fetched inside a single
    * transaction so a concurrent writer cannot make one card appear in two

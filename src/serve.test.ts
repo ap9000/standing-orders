@@ -5554,3 +5554,236 @@ describe("the viewer role (v29, L2): reads everything, acts on nothing", () => {
     expect(alive).toContain("standing-orders_session");
   });
 });
+
+describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-08-11T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const boot = async (options: Record<string, unknown> = {}) => {
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), ...options });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  const seedTaskIn = (id: string, title: string, repo: string): number => {
+    store.createTask({ id, title }, T0);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, repo);
+    return ref;
+  };
+
+  /** A parked decision with one reversible and one irreversible option. */
+  const seedDecisionIn = (id: string, repo: string, question: string): number => {
+    const ref = seedTaskIn(id, `decide ${id}`, repo);
+    const run = store.startRun({
+      taskRef: ref, leaseId: `lease-${id}`, runner: "b1",
+      branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: T0,
+    });
+    return store.saveDecision(
+      {
+        run,
+        urgency: "blocking",
+        recap: `why ${id} stopped`,
+        question,
+        options: [
+          { id: "keep", label: "Keep and backfill", consequence: "reversible cleanup later", reversible: true },
+          { id: "drop", label: "Drop it", consequence: "it does not come back", reversible: false },
+        ],
+        recommendation: "keep",
+      },
+      T0,
+    );
+  };
+
+  /** A terminal run inside the 24h window; measured only when cost is given. */
+  const seedRunIn = (id: string, title: string, repo: string, outcome: "built" | "failed", costUsd: number | null): number => {
+    const ref = seedTaskIn(id, title, repo);
+    const now = new Date();
+    const run = store.startRun({
+      taskRef: ref, leaseId: `lease-${id}`, runner: "b1", provider: "claude",
+      branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now,
+    });
+    store.stampProviderStart(run, now);
+    if (costUsd !== null) store.recordUsage(run, { tokensIn: 100, tokensOut: 50, costUsd });
+    store.finishRun(run, { outcome, ...(outcome === "failed" ? { reason: "agent" } : {}), now: new Date() });
+    return run;
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-portfolio-ev-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  const scopeBarOf = (html: string): string => {
+    const match = /<div class="scope-bar">.*?<a class="switch"[^>]*>[^<]*<\/a><\/div>/s.exec(html);
+    if (match === null) throw new Error("no scope bar on the page");
+    return match[0];
+  };
+
+  test("the scope bar states each surface's scope: portfolio all-project, queue project-bound", async () => {
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+
+    // The open project's inbox: the bar names the project, with the switch road.
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    const homeBar = scopeBarOf(home);
+    expect(homeBar).toContain("main");
+    expect(homeBar).toContain("switch project");
+    expect(homeBar).not.toContain("all projects");
+
+    // The portfolio is all-project even while a project is open.
+    const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
+    expect(scopeBarOf(portfolio)).toContain("all projects");
+    expect(portfolio).toContain("<h1>portfolio</h1>");
+
+    // The queue stays project-bound.
+    const queue = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    const queueBar = scopeBarOf(queue);
+    expect(queueBar).toContain("main");
+    expect(queueBar).not.toContain("all projects");
+
+    // The mobile pill is inert — the scope bar owns the chrome's one
+    // /projects link per breakpoint.
+    expect(home).toContain('<span class="project-pill">');
+    expect(home).not.toContain('<a class="project-pill"');
+
+    // The nav regroup: portfolio label, the work group, builds in primary.
+    expect(home).toContain(">portfolio<");
+    expect(home).toContain('class="nav-group"');
+  });
+
+  test("portfolio hygiene: a hidden project leaks into no row, count, or dollar; fictions stay out", async () => {
+    seedDecisionIn("d-main", "/repo/main", "Answer the admitted question?");
+    seedDecisionIn("d-secret", "/repo/secret", "SECRET-DECIDE never renders");
+    seedRunIn("r-main", "admitted build", "/repo/main", "built", 1.23);
+    seedRunIn("r-side", "side build", "/repo/side", "failed", null);
+    seedRunIn("r-secret", "SECRET-RUN title", "/repo/secret", "built", 77.77);
+
+    await boot({ repos: ["/repo/main", "/repo/side"] });
+    const cookie = await login();
+    const html = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
+
+    // Admitted rows render; the hidden project's rows and dollars do not.
+    expect(html).toContain("Answer the admitted question?");
+    expect(html).not.toContain("SECRET-DECIDE");
+    expect(html).not.toContain("SECRET-RUN");
+    expect(html).not.toContain("77.77");
+
+    // The window rollup counts only visible runs, by the exhaustive
+    // outcome vocabulary, with spendLine's own wording.
+    expect(html).toContain("runs started");
+    expect(html).toContain("1 built · 1 failed");
+    expect(html).toContain("invocation(s)");
+    expect(html).toContain("$1.23");
+    expect(html).toContain("unmeasured");
+
+    // Deleted fictions never render.
+    expect(html).not.toContain("Pause dispatch");
+    expect(html).not.toContain("idle spend");
+
+    // The decision card answers reversibly inline — real words, no letters,
+    // no confirm field anywhere near it; the irreversible option is a link.
+    expect(html).toContain("decide-inline");
+    expect(html).toContain(">Keep and backfill</button>");
+    expect(html).not.toContain('name="confirm"');
+    expect(html).not.toContain('value="drop"');
+    expect(html).toContain("irreversible");
+    expect(html).toContain(">recommended</span>");
+
+    // Rows wear project chips.
+    expect(html).toContain("main</span>");
+  });
+
+  test("the roll-up inbox stays links-only; the selected-project inbox answers on the card", async () => {
+    seedDecisionIn("d-one", "/repo/main", "Which way?");
+
+    await boot({ repos: ["/repo/main", "/repo/side"] });
+    const cookie = await login();
+
+    // Projectless roll-up: the decision is a link, never a form.
+    const rollup = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(rollup).toContain("Which way?");
+    expect(rollup).not.toContain("decide-inline");
+    expect(rollup).not.toMatch(/<form[^>]*\/answer/);
+  });
+
+  test("a reversible option posts from the card exactly as the endpoint expects", async () => {
+    const decisionId = seedDecisionIn("d-tap", "/repo/main", "Tap to keep?");
+
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+    const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+    // The selected-project inbox renders the partial: inline reversible
+    // form without confirm, irreversible as a link.
+    expect(inbox).toContain("decide-inline");
+    expect(inbox).toContain(`data-decision-id="${decisionId}"`);
+    expect(inbox).not.toContain('name="confirm"');
+    expect(inbox).not.toContain('value="drop"');
+
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(inbox)?.[1];
+    if (csrf === undefined) throw new Error("no csrf on the inbox");
+    const posted = await fetch(url(`/d/${decisionId}/answer`), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, choice: "keep" }).toString(),
+      redirect: "manual",
+    });
+    expect(posted.status).toBe(303);
+    expect(posted.headers.get("location")).toBe(`/d/${decisionId}`);
+    const page = await (await fetch(url(`/d/${decisionId}`), { headers: { cookie } })).text();
+    expect(page).toContain("Answered:");
+  });
+
+  test("portfolioLedgerScoped: admission binds before the limit; unfinished runs never appear", async () => {
+    // More hidden recent rows than the limit, plus one admitted row —
+    // the admitted row must survive the page.
+    for (let i = 0; i < 5; i++) seedRunIn(`r-h${i}`, `hidden ${i}`, "/repo/hidden", "built", null);
+    seedRunIn("r-adm", "the admitted one", "/repo/main", "built", 0.5);
+    // An unfinished run in the admitted repo: outcome IS NOT NULL excludes it.
+    const openRef = seedTaskIn("r-open", "still going", "/repo/main");
+    store.startRun({
+      taskRef: openRef, leaseId: "lease-open", runner: "b1",
+      branch: "standing-orders/r-open", worktree: "/pool/r-open", now: new Date(),
+    });
+
+    const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    const rows = store.portfolioLedgerScoped(null, since, 3, ["/repo/main"]);
+    expect(rows.some(row => row.taskId === "r-adm")).toBe(true);
+    expect(rows.every(row => row.repo !== "/repo/hidden")).toBe(true);
+    expect(rows.some(row => row.taskId === "r-open")).toBe(false);
+
+    // Without admission the recent hidden rows would crowd the page.
+    const naive = store.portfolioLedgerScoped(null, since, 3, null);
+    expect(naive.length).toBe(3);
+
+    await boot({ repo: "/repo/main" }); // afterEach closes a server either way
+  });
+});

@@ -985,7 +985,35 @@ export function createDecisionServer(options: ServeOptions): Server {
         // The rail alone: same auth, same ceiling, no shell, no scripts.
         return respond(response, 200, "text/html; charset=utf-8", rail);
       }
-      let detail = workbenchOverview({ attention, building, waiting, queued, done, saturated: snapshot.saturated }) +
+      // The portfolio overview (arc slice 1a). All-scope hygiene throughout:
+      // admission binds inside every bounded SQL read, and every unlimited
+      // feed's rows pass visible() BEFORE they render or tally — a hidden
+      // project must not leak into a row, a count, or a dollar.
+      const sinceIso = new Date(now.getTime() - 24 * 3_600_000).toISOString();
+      const decisions = store
+        .listDecisionsScoped(null)
+        .filter(one => visible(one.repo ?? null))
+        .slice(0, 10);
+      const approvals = store.scopesAwaitingApproval(null, 10, admission).filter(one => visible(one.repo ?? null));
+      const requeueables = store.listRequeueablesScoped(null, now, 10, admission).filter(one => visible(one.repo ?? null));
+      const cancelledBlockers = store
+        .listCancelledBlockersScoped(null, 10, admission)
+        .filter(one => visible(one.repo ?? null) && visible(one.blockerRepo ?? null));
+      const runs24 = store.runsSinceScoped(sinceIso, null).filter(run => visible(taskRepoOf(run.taskRef)));
+      const live = store.liveClaims(null, now).filter(one => visible(one.repo));
+      const ledger = store
+        .portfolioLedgerScoped(null, sinceIso, 30, admission)
+        .filter(row => visible(row.repo));
+      // Gaps stay project-relative (the roll-up inbox's rule): computed for
+      // the OPEN project only — there is no scope-safe road to another
+      // project's /caps.
+      const gaps = project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10);
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      let detail = portfolioOverview({
+        attention, building, waiting, queued, done, saturated: snapshot.saturated,
+        decisions, approvals, requeueables, cancelledBlockers, gaps,
+        gapsProject: project, runs24, live, ledger, csrf, now,
+      }) +
         `<div class="workbench-mobile-rail">${rail}</div>`;
       if (selected !== null) {
         const view = taskViewData(selected, who, null);
@@ -996,13 +1024,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        screen("workbench", detail, {
+        screen("portfolio", detail, {
           chrome: chromeFor(
             project,
             "workbench",
             `<div id="wb-rail">${rail}</div><p class="meta" id="wb-rail-stamp"></p>`,
+            "all",
           ),
-          functional: { script: regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30), fetches: true },
+          functional: {
+            script:
+              regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30) +
+              (decisions.length > 0 ? decisionAnswerScript() : ""),
+            fetches: true,
+          },
         }),
       );
     }
@@ -1081,7 +1115,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         200,
         screen("board", regionBody, {
-          chrome: chromeFor(project, "board"),
+          chrome: chromeFor(project, "board", undefined, all ? "board-all" : undefined),
           functional: { script: regionScript("board-region", "1", buildingCount > 0 ? 10 : 30), fetches: true },
         }),
       );
@@ -1454,7 +1488,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // The password fields make this screen sensitive: sendScreen strips
         // the chrome additions and keeps the reorder poller — the named
         // functional exception (it never reads the fields).
-        { chrome: chromeFor(project, "fleet"), functional: { script: fleetScript(), fetches: true } },
+        { chrome: chromeFor(project, "fleet", undefined, "all"), functional: { script: fleetScript(), fetches: true } },
       );
       return sendScreen(response, 200, fleetScreen);
     }
@@ -1493,7 +1527,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const rows = (
         [
           ["/fleet", "fleet", "who is working, and on what"],
-          ["/workbench", "workbench", "the rail and the selected task"],
+          ["/workbench", "portfolio", "every project and live build in one place"],
           ["/routines", "routines", "scheduled tracks and their firings"],
           ["/done", "done", "what finished recently"],
           ["/activity", "activity", "the full ledger, newest first"],
@@ -2233,6 +2267,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     project: string | null,
     active: Chrome["active"],
     listPane?: string,
+    scope?: Chrome["scope"],
   ): Chrome {
     const key = project ?? "";
     const cached = badgeCache.get(key);
@@ -2275,6 +2310,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           }),
       ...(!unscopedMode && ceiling.roots.length === 0 && ceiling.repos.length > 0 ? { chat: true } : {}),
       ...(listPane === undefined ? {} : { listPane }),
+      ...(scope === undefined ? {} : { scope }),
     };
   }
 
@@ -5766,21 +5802,34 @@ const STYLE = `
     position: sticky; top: 0; height: 100vh; overflow-y: auto;
   }
   .side .brand { padding: .125rem .5rem .625rem; font-size: .9375rem; height: auto; }
-  .side-project {
-    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
-    padding: .625rem .7rem; margin: 0 0 .875rem; background: var(--card);
+  /* The scope bar: one hairline row, the single scope truth on every
+   * screen. Amber never appears here except the needs-you count. */
+  .scope-bar {
+    display: flex; align-items: baseline; gap: .625rem; flex-wrap: wrap;
+    padding: .5rem 1.25rem; border-bottom: 1px solid var(--border);
+    background: var(--background); font-size: .8125rem;
   }
-  .side-project .name { font-weight: 600; font-size: .875rem; display: block; margin-top: .125rem; }
-  .side-project a { font-size: .75rem; color: var(--muted-foreground); text-decoration: none; }
-  .side-project a:hover { color: var(--foreground); }
-  .side-project .switch { display: inline-block; margin-top: .375rem; }
-  .side-project-status {
-    display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .375rem;
+  .scope-bar .eyebrow {
+    font-size: .625rem; font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted-foreground); font-family: var(--font-mono);
+  }
+  .scope-bar .name { font-weight: 600; }
+  .scope-bar .switch { margin-left: auto; font-size: .75rem; color: var(--muted-foreground); text-decoration: none; }
+  .scope-bar .switch:hover { color: var(--foreground); }
+  .scope-status {
+    display: flex; gap: .5rem; flex-wrap: wrap;
     color: var(--muted-foreground); font-size: .6875rem; font-variant-numeric: tabular-nums;
     font-family: var(--font-mono);
   }
-  .side-project-status .hot { color: var(--brand); font-weight: 500; }
+  .scope-status .hot { color: var(--brand); font-weight: 500; }
   .side nav { display: flex; flex-direction: column; gap: .125rem; }
+  .side nav .nav-group { display: flex; flex-direction: column; gap: .125rem; margin: 0 0 .375rem; }
+  /* Inline decision options: neutral buttons — the card's amber outline is
+   * the attention signal; recommendation is a neutral badge, never amber. */
+  .decide-options { margin-top: .5rem; display: flex; flex-direction: column; gap: .375rem; }
+  .decide-option { margin: 0; display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
+  .decide-option button { margin: 0; }
+  .decide-option .meta { flex: 1 1 12rem; }
   .side .nav-label {
     margin: .875rem .5rem .25rem; font-size: .625rem; font-weight: 500;
     letter-spacing: .08em; text-transform: uppercase; color: var(--muted-foreground);
@@ -5871,7 +5920,6 @@ const STYLE = `
       font-size: .875rem; font-weight: 500;
     }
     .mobile-top .project-pill .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .mobile-top .project-pill .chev { color: var(--muted-foreground); font-size: .75rem; flex: 0 0 auto; }
     .mobile-top .mobile-new {
       flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
       min-height: 2.5rem; padding: 0 .875rem; border-radius: 999px;
@@ -6192,6 +6240,12 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 type Chrome = {
   active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "menu" | "none";
   project: string | null;
+  /** The surface's scope for the scope bar — which rows this screen can
+   * show. Derived from the ROUTE, not the session: portfolio and fleet are
+   * all-project even while a project is open; the board says which of its
+   * two modes it is in. Absent = the session default (open project, else
+   * all projects). Display only — switching stays POST + CSRF. */
+  scope?: "all" | "project" | "board-all";
   /** The saturated inbox count — never a sum of unbounded list reads. */
   inboxCount: number;
   inboxSaturated: boolean;
@@ -6534,28 +6588,41 @@ function shell(
     `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
-  const projectStatus = chrome.projectPeek === null || chrome.projectPeek === undefined
+  // The scope bar (portfolio arc §1): ONE row naming which rows this screen
+  // can show — derived from the route's declared scope, falling back to the
+  // session default. It replaced the sidebar workspace card and the mobile
+  // pill's link as the single scope truth. Display and GET navigation only;
+  // switching projects stays the POST + CSRF /projects flow.
+  const effectiveScope: "all" | "project" | "board-all" =
+    chrome.scope ?? (chrome.project === null ? "all" : "project");
+  const scopeStatus = chrome.projectPeek === null || chrome.projectPeek === undefined || effectiveScope !== "project"
     ? ""
-    : `<span class="side-project-status">` +
+    : `<span class="scope-status">` +
       (chrome.projectPeek.waiting > 0 ? `<span class="hot">${chrome.projectPeek.waiting} needs you</span>` : `<span>0 needs you</span>`) +
       `<span>${chrome.projectPeek.running} live</span><span>${chrome.projectPeek.queued} queued</span></span>`;
+  // No "scope" label word: in this product "scope" names a task's approved
+  // terms — the bar just states which projects the screen is showing.
+  const scopeBar =
+    `<div class="scope-bar">` +
+    `<span class="name">${
+      effectiveScope === "project" && chrome.project !== null
+        ? escape(projectName(chrome.project))
+        : "all projects"
+    }</span>` +
+    scopeStatus +
+    `<a class="switch" href="/projects">switch project →</a></div>`;
   const side = [
     `<aside class="side">`,
     `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
-    `<div class="side-project"><span class="eyebrow">workspace</span>` +
-      (chrome.project === null
-        ? `<span class="name">All workspaces</span>`
-        : `<span class="name">${escape(projectName(chrome.project))}</span>`) +
-      projectStatus +
-      `<a class="switch" href="/projects">switch project →</a></div>`,
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
-    item("workbench", "/workbench", "workbench"),
+    `<div class="nav-group"><span class="nav-label">work</span>`,
     item("board", "/board", "board"),
     item("queue", "/queue", "queue"),
+    `</div>`,
+    item("workbench", "/workbench", "portfolio"),
+    item("runs", "/runs", "builds"),
     item("fleet", "/fleet", "fleet"),
-    item("routines", "/routines", "routines"),
-    item("done", "/done", "done"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
     `<span class="grow"></span>`,
@@ -6565,8 +6632,9 @@ function shell(
     item("review", "/review", "review queue"),
     ...(chrome.chat === true ? [item("chat", "/chat", "chat")] : []),
     item("work", "/tasks", "task list"),
+    item("routines", "/routines", "routines"),
+    item("done", "/done", "done"),
     item("system", "/system", "system"),
-    item("runs", "/runs", "builds"),
     item("caps", "/caps", "requirements"),
     ...(chrome.settings ? [item("settings", "/settings", "settings")] : []),
     `</nav>`,
@@ -6583,10 +6651,12 @@ function shell(
     (chrome.modeBanner === undefined
       ? ""
       : `<div class="banner"><span class="badge badge-running">mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`);
+  // The scope bar sits between the banners and the main/split body, so it
+  // can never disappear with a responsive pane (portfolio arc §1).
   const content =
     chrome.listPane === undefined
-      ? `<div class="content">${demoBanner}<main>${body}</main></div>`
-      : `<div class="content">${demoBanner}<div class="split">` +
+      ? `<div class="content">${demoBanner}${scopeBar}<main>${body}</main></div>`
+      : `<div class="content">${demoBanner}${scopeBar}<div class="split">` +
         `<div class="list-pane">${chrome.listPane}</div>` +
         `<div class="detail"><main>${body}</main></div>` +
         `</div></div>`;
@@ -6598,9 +6668,11 @@ function shell(
   const mobileTop = [
     `<header class="mobile-top">`,
     `<a class="brand-mini" href="/">s·o</a>`,
-    `<a class="project-pill" href="/projects"><span class="name">${
-      chrome.project === null ? "All workspaces" : escape(projectName(chrome.project))
-    }</span><span class="chev">▾</span></a>`,
+    // Inert on purpose: the scope bar below is the one /projects link in
+    // chrome per breakpoint (portfolio arc §1); the pill just names scope.
+    `<span class="project-pill"><span class="name">${
+      effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "all projects"
+    }</span></span>`,
     `<a class="mobile-new" href="/tasks/new">+ task</a>`,
     `</header>`,
   ].join("");
@@ -6718,18 +6790,22 @@ function inboxPage(chrome: Chrome, data: {
     data.decisions.length + data.approvals.length + data.requeueables.length +
     data.cancelledBlockers.length + data.gaps.length === 0;
 
+  // The roll-up inbox keeps its links-only contract — acting means opening
+  // the project. A SELECTED project's inbox answers reversible options on
+  // the card itself (portfolio arc §2).
   const decisions =
     data.decisions.length === 0
       ? ""
       : `<h2>answer a question</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>` +
         data.decisions
-          .map(
-            decision =>
-              `<a class="decide-card" href="/d/${decision.id}">` +
-              `<p class="q">${escape(decision.question)}</p>` +
-              `<span class="mono meta">${escape(decision.taskId)}</span>${chip(decision.repo)}` +
-              `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
-              `</a>`,
+          .map(decision =>
+            data.rollup
+              ? `<a class="decide-card" href="/d/${decision.id}">` +
+                `<p class="q">${escape(decision.question)}</p>` +
+                `<span class="mono meta">${escape(decision.taskId)}</span>${chip(decision.repo)}` +
+                `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
+                `</a>`
+              : decisionAnswerCard(decision, data.csrf, data.now, false),
           )
           .join("\n");
 
@@ -6848,7 +6924,14 @@ function inboxPage(chrome: Chrome, data: {
           `<button type="submit">queue it \u2192 approve its scope next</button>`,
           `</form>`,
         ]),
-  ].join("\n"), { chrome });
+  ].join("\n"), {
+    chrome,
+    // The inline-answer enhancement rides only where its forms render; it
+    // touches one card and nothing else, so quick-capture input survives.
+    ...(!data.rollup && data.decisions.length > 0
+      ? { functional: { script: decisionAnswerScript(), fetches: true } }
+      : {}),
+  });
 }
 
 /** System: the machinery — workers, background service, workspaces. */
@@ -7900,7 +7983,7 @@ function workbenchRail(data: {
     `</section>`;
   const parts: string[] = [];
   parts.push(
-    `<div class="wb-rail-head"><div><span class="eyebrow">portfolio</span><h2>all workspaces</h2></div>` +
+    `<div class="wb-rail-head"><div><span class="eyebrow">portfolio</span><h2>all projects</h2></div>` +
     `<a href="/projects">manage →</a></div>`,
   );
   parts.push(group("needs you", data.attention, "Nothing needs your input.", card => row(card, escape(card.reason))));
@@ -7937,19 +8020,120 @@ function workbenchRail(data: {
   return parts.join("\n");
 }
 
+/** The project chip every all-scope row wears: null is UNPLACED, said so. */
+function projectChip(repo: string | null | undefined): string {
+  return repo === null || repo === undefined
+    ? ` <span class="badge">unplaced</span>`
+    : ` <span class="badge">${escape(projectName(repo))}</span>`;
+}
+
 /**
- * The unselected half of the attended control room. The first glance answers
- * four operator questions: what needs me, what is moving, what is blocked,
- * and what will start next. Workspace pulse keeps those answers attributable
- * when several repositories are in flight at once.
+ * The decision card everywhere a person may ANSWER (portfolio, the
+ * selected-project inbox; the task page joins in slice 3): a reversible
+ * option answers with one tap on the card, labeled with its own words —
+ * never a letter; an irreversible option is a LINK to the decision page,
+ * where the server-side confirm=yes guard lives. The roll-up inbox keeps
+ * its links-only cards and never renders this partial. The recommended
+ * option wears a neutral badge — recommendation is not urgency, and amber
+ * stays on the card's outline.
  */
-function workbenchOverview(data: {
+function decisionAnswerCard(
+  decision: Decision & { taskId: string; repo?: string | null },
+  csrf: string,
+  now: Date,
+  chip: boolean,
+): string {
+  const options = decision.options
+    .map(option => {
+      const recommended = option.id === decision.recommendation
+        ? ` <span class="badge">recommended</span>`
+        : "";
+      if (!option.reversible) {
+        return (
+          `<p class="decide-option"><a href="/d/${decision.id}">${escape(option.label)}</a>` +
+          ` <span class="badge badge-overdue">irreversible</span>${recommended}` +
+          ` <span class="meta">${escape(option.consequence)}</span></p>`
+        );
+      }
+      return (
+        `<form class="decide-option decide-inline" method="post" action="/d/${decision.id}/answer">` +
+        `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        `<input type="hidden" name="choice" value="${escape(option.id)}">` +
+        `<button type="submit">${escape(option.label)}</button>${recommended}` +
+        ` <span class="meta">${escape(option.consequence)} · reversible</span></form>`
+      );
+    })
+    .join("\n");
+  return (
+    `<div class="decide-card" data-decision-id="${decision.id}">` +
+    `<p class="q">${escape(decision.question)}</p>` +
+    `<p class="meta">${escape(oneLineOf(decision.recap, 160))}</p>` +
+    `<p class="meta"><span class="mono">${escape(decision.taskId)}</span>${chip ? projectChip(decision.repo) : ""}` +
+    `${isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
+    ` · <a href="/d/${decision.id}">the full question →</a></p>` +
+    `<div class="decide-options">${options}</div></div>`
+  );
+}
+
+/**
+ * The inline-answer enhancement (portfolio arc §2): submits a reversible
+ * option's form as the urlencoded POST the forms-only gate expects, follows
+ * the redirect, and — because an answered decision leaves the open list —
+ * replaces ONLY that card with the answered receipt parsed from the
+ * decision page's own rendering, or removes the card. Anything unexpected
+ * (auth, a page that is not the decision's) navigates instead of inserting.
+ * Nothing else on the page is touched: typed input elsewhere survives.
+ */
+function decisionAnswerScript(): string {
+  return (
+    `document.addEventListener("submit",function(e){` +
+    `var f=e.target;if(!f||!f.classList||!f.classList.contains("decide-inline"))return;` +
+    `e.preventDefault();` +
+    `var card=f.closest("[data-decision-id]");` +
+    `var page=f.action.replace(/\\/answer$/,"");` +
+    `fetch(f.action,{method:"POST",credentials:"same-origin",` +
+    `headers:{"content-type":"application/x-www-form-urlencoded"},` +
+    `body:new URLSearchParams(new FormData(f)).toString()})` +
+    `.then(function(r){return r.text().then(function(t){return{r:r,t:t}})})` +
+    `.then(function(x){` +
+    `var landed="";try{landed=new URL(x.r.url).pathname}catch(err){}` +
+    `if(!x.r.ok||landed!==new URL(page,location.href).pathname){location.href=page;return}` +
+    `var doc=new DOMParser().parseFromString(x.t,"text/html");` +
+    `var receipt=doc.querySelector(".answered");` +
+    `if(!card){location.href=page;return}` +
+    `if(receipt){card.replaceChildren(document.importNode(receipt,true))}else{card.remove()}` +
+    `},function(){location.href=page})});`
+  );
+}
+
+/**
+ * The portfolio overview (arc slice 1a): what waits on you, what the last
+ * 24 hours of run starts amounted to, what is running, and the terminal-run
+ * ledger — all of it across every admitted project, a project chip on every
+ * row. The caller has already applied admission and per-row visibility.
+ */
+function portfolioOverview(data: {
   attention: BoardCard[];
   building: BoardCard[];
   waiting: BoardCard[];
   queued: BoardCard[];
   done: WorkbenchDone[];
   saturated: boolean;
+  decisions: (Decision & { taskId: string; repo?: string | null })[];
+  approvals: { taskId: string; title: string; goal: string; proposedAt: string; repo?: string | null }[];
+  requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo?: string | null }[];
+  cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string; repo?: string | null; blockerRepo?: string | null }[];
+  gaps: Gap[];
+  gapsProject: string | null;
+  runs24: (Run & { taskId: string })[];
+  live: { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null; repo: string | null }[];
+  ledger: {
+    runId: number; taskId: string; title: string; repo: string | null; outcome: string;
+    provider: string | null; model: string | null; startedAt: string; ranMinutes: number | null;
+    costUsd: number | null; prNumber: number | null; prUrl: string | null;
+  }[];
+  csrf: string;
+  now: Date;
 }): string {
   type Pulse = { repo: string | null; attention: number; building: number; waiting: number; queued: number; done: number };
   const pulses = new Map<string, Pulse>();
@@ -7969,15 +8153,7 @@ function workbenchOverview(data: {
     b.attention - a.attention || b.building - a.building || b.waiting - a.waiting ||
     (a.repo === null ? 1 : b.repo === null ? -1 : projectName(a.repo).localeCompare(projectName(b.repo))),
   );
-  const metric = (kind: string, value: number, label: string, detail: string): string =>
-    `<div class="command-metric ${kind}"><span class="label">${label}</span>` +
-    `<span class="value">${value}${data.saturated ? "+" : ""}</span><span class="detail">${detail}</span></div>`;
   const workspace = (repo: string | null): string => repo === null ? "Unplaced work" : projectName(repo);
-  const attention = data.attention.slice(0, 3).map(card =>
-    `<a class="decide-card" href="${card.href}"><p class="q"><span>${escape(card.title)}</span>` +
-    `<span class="badge">${escape(workspace(card.repo))}</span></p>` +
-    `<p class="meta">${escape(card.reason)} · <span class="mono">${escape(card.taskId)}</span></p></a>`,
-  ).join("\n");
   const workspaceRows = pulseRows.map(one =>
     `<div class="workspace-row"><span class="workspace-name">${escape(workspace(one.repo))}</span>` +
     `<span class="pulse-stat${one.attention > 0 ? " hot" : ""}"><b>${one.attention}</b> need you</span>` +
@@ -7986,27 +8162,120 @@ function workbenchOverview(data: {
     `<span class="pulse-stat"><b>${one.queued}</b> next</span></div>`,
   ).join("\n");
 
+  // ---- waits on you: everything a person must resolve, across projects ----
+  const waitCount =
+    data.decisions.length + data.approvals.length + data.requeueables.length +
+    data.cancelledBlockers.length + data.gaps.length;
+  const decisionCards = data.decisions.map(one => decisionAnswerCard(one, data.csrf, data.now, true)).join("\n");
+  const approvalCards = data.approvals
+    .map(
+      one =>
+        `<a class="decide-card" href="${taskHref(one.taskId)}">` +
+        `<p class="q">${escape(one.title)}</p>` +
+        `<span class="meta">${escape(one.goal.length > 120 ? one.goal.slice(0, 120) + "…" : one.goal)}</span><br>` +
+        `<span class="mono meta">${escape(one.taskId)}</span>${projectChip(one.repo)} <span class="right meta">review and sign →</span>` +
+        `</a>`,
+    )
+    .join("\n");
+  const requeueRows = data.requeueables
+    .map(
+      one =>
+        `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> ${escape(one.title)}${projectChip(one.repo)}` +
+        `${one.incidentCount > 0 ? ` <span class="badge badge-failed">${one.incidentCount} incident${one.incidentCount > 1 ? "s" : ""}</span>` : ""}` +
+        `${one.strikes > 0 ? ` <span class="meta">${one.strikes} failed attempt${one.strikes > 1 ? "s" : ""}</span>` : ""}` +
+        `<span class="right meta">open the task to retry →</span></p>`,
+    )
+    .join("\n");
+  const cancelledRows = data.cancelledBlockers
+    .map(
+      one =>
+        `<p class="row"><a href="${taskHref(one.blockerId)}">${escape(one.blockerId)}</a>${projectChip(one.blockerRepo)} ` +
+        `<span class="meta">cancelled · ${one.dependentCount} task${one.dependentCount > 1 ? "s" : ""} waiting (e.g. ${escape(one.exampleDependent)})</span></p>`,
+    )
+    .join("\n");
+  const gapRows = data.gaps
+    .map(
+      gap =>
+        `<p class="row"><a href="/caps">${escape(gap.key)}</a>${data.gapsProject === null ? "" : projectChip(data.gapsProject)} ` +
+        `<span class="meta">frees ${gap.unblocks.length} task${gap.unblocks.length > 1 ? "s" : ""}</span>` +
+        `<span class="right meta">how to fix →</span></p>`,
+    )
+    .join("\n");
+
+  // ---- the last 24 hours: runs STARTED in the window, outcomes exhaustive ----
+  const groups: [string, number][] = [
+    ["built", data.runs24.filter(one => one.outcome === "built").length],
+    ["no change", data.runs24.filter(one => one.outcome === "no-change").length],
+    ["failed", data.runs24.filter(one => one.outcome === "failed").length],
+    ["refused", data.runs24.filter(one => one.outcome === "refused").length],
+    ["parked", data.runs24.filter(one => one.outcome === "parked").length],
+    ["interrupted", data.runs24.filter(one => one.outcome === "interrupted").length],
+    ["unfinished", data.runs24.filter(one => one.outcome === null).length],
+  ];
+  const outcomeWords = groups.filter(([, count]) => count > 0).map(([word, count]) => `${count} ${word}`).join(" · ");
+  const summary = tally(data.runs24);
+
+  // ---- running: current live claims, project chips on ----
+  const liveRows = data.live
+    .map(
+      one =>
+        `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a>${projectChip(one.repo)} ` +
+        `<span class="badge badge-running">running</span> ` +
+        `<span class="mono meta">${escape(one.runner)}${one.model === null ? "" : ` · ${escape(one.model)}`} · ` +
+        `<time data-elapsed-since="${escape(one.claimedAt)}"></time></span></p>`,
+    )
+    .join("\n");
+
+  // ---- the ledger: terminal runs started in the window, one chip each ----
+  const chipClass = (outcome: string): string =>
+    outcome === "built" || outcome === "no-change" ? "badge-done" : outcome === "failed" ? "badge-failed" : "";
+  const ledgerRows = data.ledger
+    .map(
+      one =>
+        `<p class="row"><a href="/r/${one.runId}">${escape(one.title)}</a>${projectChip(one.repo)} ` +
+        `<span class="badge ${chipClass(one.outcome)}">${escape(one.outcome)}</span> ` +
+        `<span class="mono meta">${one.provider === null ? "" : escape(one.provider)}${one.model === null ? "" : ` · ${escape(one.model)}`}` +
+        `${one.ranMinutes === null ? "" : ` · ${one.ranMinutes}m`}` +
+        ` · ${one.costUsd === null ? "unmeasured" : `$${one.costUsd.toFixed(2)}`}` +
+        `${one.prNumber === null ? "" : one.prUrl === null ? ` · PR #${one.prNumber}` : ` · <a href="${escape(one.prUrl)}">PR #${one.prNumber}</a>`}</span></p>`,
+    )
+    .join("\n");
+
   return [
-    `<div class="control-room-head"><div><h1>workbench</h1>` +
-      `<p class="meta">every workspace and live build in one place</p></div>` +
+    `<div class="control-room-head"><div><h1>portfolio</h1>` +
+      `<p class="meta">every project and live build in one place</p></div>` +
       `<div class="actions"><a class="badge" href="/tasks/new">+ new task</a><a class="badge" href="/board?scope=all">full board →</a></div></div>`,
-    `<div class="command-metrics">`,
-    metric("attention", data.attention.length, "Need you", "questions, plans, approvals, repairs"),
-    metric("live", data.building.length, "In progress", "agents working now"),
-    metric("", data.waiting.length, "Blocked / waiting", "dependencies, requirements, timers"),
-    metric("", data.queued.length, "Up next", "ready when capacity opens"),
-    `</div>`,
-    data.saturated ? `<div class="problem">This overview reached its 200-task display cap. Counts ending in + are lower bounds; the task list holds the rest.</div>` : "",
-    `<h2>workspace pulse</h2>`,
+    data.saturated ? `<div class="problem">This overview reached its 200-task display cap; the task list holds the rest.</div>` : "",
+    `<h2>waits on you</h2>`,
+    waitCount === 0
+      ? `<div class="answered"><strong>Nothing needs you.</strong> <span class="meta">You can leave this open; live state updates in the rail.</span></div>`
+      : [
+          decisionCards,
+          approvalCards,
+          requeueRows,
+          cancelledRows,
+          gapRows,
+          `<p class="meta"><a href="/next">clear the queue → one thing at a time</a></p>`,
+        ].filter(part => part !== "").join("\n"),
+    data.gapsProject === null
+      ? `<p class="meta">requirement gaps are checked one project at a time — open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
+      : "",
+    `<h2>project pulse</h2>`,
     `<p class="hint">one row per repository</p>`,
     pulseRows.length === 0
       ? `<div class="card"><p><strong>No active work yet.</strong></p><p class="meta">Queue a task and its progress will show here across every workspace.</p></div>`
       : `<div class="workspace-pulse">${workspaceRows}</div>`,
-    `<h2>start with what needs you</h2>`,
-    `<p class="hint">oldest first — open one to answer, approve, or repair it</p>`,
-    data.attention.length === 0
-      ? `<div class="answered"><strong>Nothing needs you.</strong> <span class="meta">You can leave this open; live state updates in the rail.</span></div>`
-      : `<div class="attention-stack">${attention}</div>${data.attention.length > 3 ? `<p class="meta"><a href="/next">clear all ${data.attention.length} one at a time →</a></p>` : ""}`,
+    `<h2>the last 24 hours</h2>`,
+    `<p class="hint">runs started in the last 24 hours</p>`,
+    data.runs24.length === 0
+      ? `<p class="meta">no runs started in the window</p>`
+      : `<p class="row"><span class="meta">runs started</span> <span class="mono">${data.runs24.length}</span></p>` +
+        `<p class="row"><span class="meta">outcomes</span> <span class="mono">${escape(outcomeWords)}</span></p>` +
+        `<p class="row"><span class="meta">spend</span> <span class="mono">${escape(spendLine(summary))}</span></p>`,
+    `<h2>running</h2>`,
+    data.live.length === 0 ? `<p class="meta">no agent is working right now</p>` : liveRows,
+    `<h2>terminal runs started in the last 24 hours</h2>`,
+    data.ledger.length === 0 ? `<p class="meta">none yet</p>` : ledgerRows,
   ].join("\n");
 }
 
