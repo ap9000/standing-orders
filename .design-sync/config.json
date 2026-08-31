@@ -25,5 +25,7 @@
     "node_modules/@fontsource/ibm-plex-sans/600.css",
     "node_modules/@fontsource/ibm-plex-sans/700.css",
     "node_modules/@fontsource/ibm-plex-mono/400.css"
-  ]
+  ],
+  "projectId": "24f676ee-5a93-47e6-84ee-c0b867e4848f",
+  "projectName": "Operations Ledger \u2014 standing-orders"
 }
