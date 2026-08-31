@@ -5614,7 +5614,10 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
   };
 
   /** A terminal run inside the 24h window; measured only when cost is given. */
-  const seedRunIn = (id: string, title: string, repo: string, outcome: "built" | "failed", costUsd: number | null): number => {
+  const seedRunIn = (
+    id: string, title: string, repo: string, outcome: "built" | "failed",
+    costUsd: number | null, tokens?: { tokensIn: number; tokensOut: number },
+  ): number => {
     const ref = seedTaskIn(id, title, repo);
     const now = new Date();
     const run = store.startRun({
@@ -5622,7 +5625,12 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
       branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now,
     });
     store.stampProviderStart(run, now);
-    if (costUsd !== null) store.recordUsage(run, { tokensIn: 100, tokensOut: 50, costUsd });
+    if (costUsd !== null || tokens !== undefined) {
+      store.recordUsage(run, {
+        tokensIn: tokens?.tokensIn ?? 100, tokensOut: tokens?.tokensOut ?? 50,
+        ...(costUsd === null ? {} : { costUsd }),
+      });
+    }
     store.finishRun(run, { outcome, ...(outcome === "failed" ? { reason: "agent" } : {}), now: new Date() });
     return run;
   };
@@ -5675,17 +5683,44 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     expect(home).toContain('<span class="project-pill">');
     expect(home).not.toContain('<a class="project-pill"');
 
-    // The nav regroup: portfolio label, the work group, builds in primary.
+    // The nav regroup: portfolio ADJACENT to inbox, above the work group
+    // (commit-1 review, finding 5) — order, not mere presence.
     expect(home).toContain(">portfolio<");
     expect(home).toContain('class="nav-group"');
+    expect(home.indexOf(">portfolio<")).toBeLessThan(home.indexOf('class="nav-group"'));
+    expect(home.indexOf(">inbox<")).toBeLessThan(home.indexOf(">portfolio<"));
+
+    // Fleet and the rolled-up board are all-project; the scoped board is not.
+    const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    expect(scopeBarOf(fleet)).toContain("all projects");
+    const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
+    expect(scopeBarOf(board)).not.toContain("all projects");
+    const boardAll = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
+    expect(scopeBarOf(boardAll)).toContain("all projects");
   });
 
-  test("portfolio hygiene: a hidden project leaks into no row, count, or dollar; fictions stay out", async () => {
+  test("portfolio hygiene: a hidden project leaks into no row, count, dollar, token, or claim; fictions stay out", async () => {
     seedDecisionIn("d-main", "/repo/main", "Answer the admitted question?");
     seedDecisionIn("d-secret", "/repo/secret", "SECRET-DECIDE never renders");
-    seedRunIn("r-main", "admitted build", "/repo/main", "built", 1.23);
-    seedRunIn("r-side", "side build", "/repo/side", "failed", null);
-    seedRunIn("r-secret", "SECRET-RUN title", "/repo/secret", "built", 77.77);
+    const mainRun = seedRunIn("r-main", "admitted build", "/repo/main", "built", 1.23);
+    // Token usage WITHOUT cost: the tokens row must still count it
+    // (commit-1 review, finding 2 — spendLine's mixed branch omits tokens).
+    seedRunIn("r-side", "side build", "/repo/side", "failed", null, { tokensIn: 7_000, tokensOut: 700 });
+    seedRunIn("r-secret", "SECRET-RUN title", "/repo/secret", "built", 77.77, { tokensIn: 999_000, tokensOut: 999 });
+    // A stored PR URL is a URL sink: only a verified github pull URL earns
+    // an anchor (commit-1 review, finding 3).
+    const mainRef = store.refFor("built-in", "r-main").id;
+    const pub = store.createPublicationIntent({
+      run: mainRun, taskRef: mainRef, githubRepo: "acme/payments", remote: "origin",
+      base: "main", head: "standing-orders/r-main", headSha: "a".repeat(40), bodyHash: "b".repeat(64), draft: false,
+    }, new Date());
+    store.markPublicationPushed(pub, new Date());
+    store.markPublicationOpened(pub, 13, "javascript:alert(1)", new Date());
+    // A live claim in the hidden project: never a running row here.
+    const secretLiveRef = seedTaskIn("t-sec-live", "SECRET-LIVE work", "/repo/secret");
+    register(store, { name: "secret-runner", host: "h", capacity: 1, repos: ["/repo/secret"], now: T0, newToken: () => "tok-secret" });
+    const taken = acquire(store, secretLiveRef, "secret-runner", { token: "tok-secret", now: new Date(), ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error("secret claim failed in setup");
 
     await boot({ repos: ["/repo/main", "/repo/side"] });
     const cookie = await login();
@@ -5697,13 +5732,23 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     expect(html).not.toContain("SECRET-RUN");
     expect(html).not.toContain("77.77");
 
+    // The hidden live claim never renders as a running row.
+    expect(html).not.toContain("secret-runner");
+    expect(html).not.toContain("SECRET-LIVE");
+
     // The window rollup counts only visible runs, by the exhaustive
-    // outcome vocabulary, with spendLine's own wording.
+    // outcome vocabulary, with spendLine's own wording — and tokens stand
+    // alone, counting the unmeasured invocation's reported usage.
     expect(html).toContain("runs started");
     expect(html).toContain("1 built · 1 failed");
     expect(html).toContain("invocation(s)");
     expect(html).toContain("$1.23");
     expect(html).toContain("unmeasured");
+    expect(html).toContain(`>${(7_000 + 700 + 150).toLocaleString()}</span>`);
+
+    // The corrupted PR URL renders as text — the number without navigation.
+    expect(html).toContain("PR #13");
+    expect(html).not.toContain("javascript:alert");
 
     // Deleted fictions never render.
     expect(html).not.toContain("Pause dispatch");
@@ -5733,6 +5778,57 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     expect(rollup).toContain("Which way?");
     expect(rollup).not.toContain("decide-inline");
     expect(rollup).not.toMatch(/<form[^>]*\/answer/);
+  });
+
+  test("the legacy unscoped projectless inbox is links-only too — no chosen project, no forms", async () => {
+    // Unplaced work in an unscoped installation (no ceiling configured).
+    store.createTask({ id: "d-free", title: "decide free" }, T0);
+    const ref = store.refFor("built-in", "d-free").id;
+    const run = store.startRun({
+      taskRef: ref, leaseId: "lease-free", runner: "b1",
+      branch: "standing-orders/d-free", worktree: "/pool/d-free", now: T0,
+    });
+    store.saveDecision(
+      {
+        run, urgency: "blocking", recap: "why", question: "Free-floating question?",
+        options: [{ id: "keep", label: "Keep it", consequence: "fine", reversible: true }],
+        recommendation: "keep",
+      },
+      T0,
+    );
+
+    await boot({});
+    const cookie = await login();
+    const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(inbox).toContain("Free-floating question?");
+    expect(inbox).not.toContain("decide-inline");
+    expect(inbox).not.toMatch(/<form[^>]*\/answer/);
+  });
+
+  test("a ceremony-bearing selected task never ships the decision script, whatever else is open", async () => {
+    seedDecisionIn("d-open", "/repo/main", "Open elsewhere?");
+    // A task whose page carries the password approval ceremony.
+    seedTaskIn("t-approve", "needs signing", "/repo/main");
+    store.saveScope({
+      taskId: "t-approve", goal: "sign me", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "c".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+
+    // The overview alone carries the enhancement…
+    const overview = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
+    expect(overview).toContain("decide-inline");
+
+    // …a selected ceremony page does not — sensitive pages gain no new
+    // scripts (commit-1 review, finding 1); the scope bar stays inert.
+    const selected = await (await fetch(url("/workbench?t=t-approve"), { headers: { cookie } })).text();
+    expect(selected).toContain('type="password"');
+    expect(selected).not.toContain("decide-inline");
+    expect(selected).not.toContain("replaceChildren");
+    expect(scopeBarOf(selected)).not.toMatch(/<form|<script/);
   });
 
   test("a reversible option posts from the card exactly as the endpoint expects", async () => {

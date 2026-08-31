@@ -897,6 +897,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           revision: who.via === "cookie" ? who.session.projectRevision : 0,
           rollup,
+          interactive: project !== null,
           decisions: store.listDecisionsScoped(project).filter(one => visible(one.repo)).slice(0, 10),
           approvals: store.scopesAwaitingApproval(project, 10, admission).filter(one => visible(one.repo)),
           requeueables: store.listRequeueablesScoped(project, now, 10, admission).filter(one => visible(one.repo)),
@@ -1032,9 +1033,12 @@ export function createDecisionServer(options: ServeOptions): Server {
             "all",
           ),
           functional: {
+            // The decision enhancement rides ONLY the overview: a selected
+            // task's pane may carry a password ceremony, and sensitive
+            // pages gain no new scripts (commit-1 review, finding 1).
             script:
               regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30) +
-              (decisions.length > 0 ? decisionAnswerScript() : ""),
+              (selected === null && decisions.length > 0 ? decisionAnswerScript() : ""),
             fetches: true,
           },
         }),
@@ -6616,11 +6620,11 @@ function shell(
     `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
     `<nav>`,
     item("inbox", "/", "inbox", chrome.inboxCount),
+    item("workbench", "/workbench", "portfolio"),
     `<div class="nav-group"><span class="nav-label">work</span>`,
     item("board", "/board", "board"),
     item("queue", "/queue", "queue"),
     `</div>`,
-    item("workbench", "/workbench", "portfolio"),
     item("runs", "/runs", "builds"),
     item("fleet", "/fleet", "fleet"),
     `</nav>`,
@@ -6771,6 +6775,10 @@ function inboxPage(chrome: Chrome, data: {
   /** No project open in scoped mode: every admitted project at once,
    * chips on every row, links only — acting means opening the project. */
   rollup: boolean;
+  /** A project is OPEN: only then do decisions answer on the card. The
+   * legacy unscoped projectless inbox stays links-only too (commit-1
+   * review, finding 4) — the partial belongs to a chosen project. */
+  interactive: boolean;
   decisions: (Decision & { taskId: string; repo?: string | null })[];
   approvals: { taskId: string; title: string; goal: string; proposedAt: string; repo?: string | null }[];
   requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo?: string | null }[];
@@ -6799,13 +6807,13 @@ function inboxPage(chrome: Chrome, data: {
       : `<h2>answer a question</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>` +
         data.decisions
           .map(decision =>
-            data.rollup
-              ? `<a class="decide-card" href="/d/${decision.id}">` +
+            data.interactive && !data.rollup
+              ? decisionAnswerCard(decision, data.csrf, data.now, false)
+              : `<a class="decide-card" href="/d/${decision.id}">` +
                 `<p class="q">${escape(decision.question)}</p>` +
                 `<span class="mono meta">${escape(decision.taskId)}</span>${chip(decision.repo)}` +
                 `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
-                `</a>`
-              : decisionAnswerCard(decision, data.csrf, data.now, false),
+                `</a>`,
           )
           .join("\n");
 
@@ -6928,7 +6936,7 @@ function inboxPage(chrome: Chrome, data: {
     chrome,
     // The inline-answer enhancement rides only where its forms render; it
     // touches one card and nothing else, so quick-capture input survives.
-    ...(!data.rollup && data.decisions.length > 0
+    ...(data.interactive && !data.rollup && data.decisions.length > 0
       ? { functional: { script: decisionAnswerScript(), fetches: true } }
       : {}),
   });
@@ -8237,7 +8245,13 @@ function portfolioOverview(data: {
         `<span class="mono meta">${one.provider === null ? "" : escape(one.provider)}${one.model === null ? "" : ` · ${escape(one.model)}`}` +
         `${one.ranMinutes === null ? "" : ` · ${one.ranMinutes}m`}` +
         ` · ${one.costUsd === null ? "unmeasured" : `$${one.costUsd.toFixed(2)}`}` +
-        `${one.prNumber === null ? "" : one.prUrl === null ? ` · PR #${one.prNumber}` : ` · <a href="${escape(one.prUrl)}">PR #${one.prNumber}</a>`}</span></p>`,
+        `${(() => {
+          if (one.prNumber === null) return "";
+          // The URL-sink rule (audit IV-11): only a verified github pull
+          // URL earns an anchor; a corrupted row renders as text.
+          const safe = safePrUrl(one.prUrl);
+          return safe === null ? ` · PR #${one.prNumber}` : ` · <a href="${escape(safe)}">PR #${one.prNumber}</a>`;
+        })()}</span></p>`,
     )
     .join("\n");
 
@@ -8271,7 +8285,13 @@ function portfolioOverview(data: {
       ? `<p class="meta">no runs started in the window</p>`
       : `<p class="row"><span class="meta">runs started</span> <span class="mono">${data.runs24.length}</span></p>` +
         `<p class="row"><span class="meta">outcomes</span> <span class="mono">${escape(outcomeWords)}</span></p>` +
-        `<p class="row"><span class="meta">spend</span> <span class="mono">${escape(spendLine(summary))}</span></p>`,
+        `<p class="row"><span class="meta">spend</span> <span class="mono">${escape(spendLine(summary))}</span></p>` +
+        // Tokens stand on their own: invocations that reported usage —
+        // independent of whether cost was measured (spec §2; spendLine's
+        // mixed branch omits them).
+        (summary.tokens > 0
+          ? `<p class="row"><span class="meta">tokens</span> <span class="mono">${summary.tokens.toLocaleString()}</span></p>`
+          : ""),
     `<h2>running</h2>`,
     data.live.length === 0 ? `<p class="meta">no agent is working right now</p>` : liveRows,
     `<h2>terminal runs started in the last 24 hours</h2>`,
