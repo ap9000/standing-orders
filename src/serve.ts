@@ -8092,7 +8092,7 @@ function decisionAnswerCard(
  * (auth, a page that is not the decision's) navigates instead of inserting.
  * Nothing else on the page is touched: typed input elsewhere survives.
  */
-function decisionAnswerScript(): string {
+export function decisionAnswerScript(): string {
   return (
     `document.addEventListener("submit",function(e){` +
     `var f=e.target;if(!f||!f.classList||!f.classList.contains("decide-inline"))return;` +
