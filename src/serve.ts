@@ -266,8 +266,8 @@ const PWA_MANIFEST = JSON.stringify({
   scope: "/",
   start_url: "/",
   display: "standalone",
-  background_color: "#0c0e12",
-  theme_color: "#0c0e12",
+  background_color: "#0f171f",
+  theme_color: "#0f171f",
   icons: [
     { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
     { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
@@ -5534,18 +5534,22 @@ const STYLE = `
   }
   :root {
     color-scheme: dark;
-    --background: #0c0e12;      /* ground */
-    --foreground: #e9ebee;      /* text */
-    --card: #14171d;            /* surface */
-    --muted: #1b1f27;           /* inset wells */
-    --muted-foreground: #8b93a1;/* dim */
-    --border: #262b35;          /* hairlines */
-    --input: #5a6478;           /* control boundaries: >=3:1 on ground and surface */
-    --primary: #e9ebee;
-    --primary-foreground: #0c0e12;
-    --secondary: #1b1f27;
-    --secondary-foreground: #e9ebee;
-    --accent: #1b1f27;
+    /* The marine-ink ramp (owner's ground, 2026-09-01): one hue ~210°
+     * bottom to top, Pantone-anchored — ground 5395C, surface 433C,
+     * hairline 432C, dim 430C, paper Cool Gray 1C. Amber stays the one
+     * accent and is this ground's true complement. */
+    --background: #0f171f;      /* ground — PMS 5395 C */
+    --foreground: #eaeef2;      /* text — Cool Gray 1 C */
+    --card: #16212b;            /* surface — PMS 433 C */
+    --muted: #1c2937;           /* inset wells */
+    --muted-foreground: #8fa0af;/* dim — PMS 430 C */
+    --border: #283747;          /* hairlines — PMS 432 C */
+    --input: #5d7185;           /* control boundaries: >=3:1 on ground and surface */
+    --primary: #eaeef2;
+    --primary-foreground: #0f171f;
+    --secondary: #1c2937;
+    --secondary-foreground: #eaeef2;
+    --accent: #1c2937;
     --destructive: #f06a5e;
     --destructive-strong: #f06a5e;
     --destructive-soft: color-mix(in srgb, #f06a5e 12%, transparent);
@@ -6557,7 +6561,7 @@ function shell(
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8">`,
     `<meta name="viewport" content="width=device-width, initial-scale=1">`,
-    `<meta name="theme-color" content="#0c0e12">`,
+    `<meta name="theme-color" content="#0f171f">`,
     // Live status with zero JavaScript: the page asks the browser to fetch
     // it again. Only ever on read-only briefing pages — a refresh on a page
     // with a form would eat what somebody was typing.
