@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 32;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -279,6 +279,63 @@ export type ChatTurn = {
   acknowledgedBy: string | null;
   replyBytes: number | null;
   candidateCount: number | null;
+  /** 'chat' = fleet chat v13, one request; 'mate-step' = one request of a mate turn. */
+  kind: "chat" | "mate-step";
+  mateTurn: number | null;
+};
+
+export type MateSession = {
+  id: number;
+  approver: string;
+  approverGeneration: number;
+  credentialKey: string;
+  ceilingMicrousd: number;
+  spentMicrousd: number;
+  ceilingDigest: string;
+  termsDigest: string;
+  mintedAt: string;
+  expiresAt: string;
+  endedAt: string | null;
+  endedBy: string | null;
+};
+
+export type MateThread = { id: number; approver: string; ceilingDigest: string; openedAt: string; lastTurnAt: string | null; closedAt: string | null };
+
+export type MateMessage = { id: number; thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity: string | null; createdAt: string };
+
+export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "scope" | "cancel";
+export type MateProposalState = "drafting" | "pending" | "confirming" | "confirmed" | "refused" | "dismissed" | "expired";
+export type MateProposal = {
+  id: number;
+  thread: number;
+  turn: number;
+  kind: MateProposalKind;
+  payload: Record<string, unknown>;
+  ceilingDigest: string;
+  state: MateProposalState;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  outcome: Record<string, unknown> | null;
+};
+
+export type MateTurn = {
+  id: number;
+  approver: string;
+  session: number;
+  thread: number;
+  credentialKey: string;
+  state: "queued" | "running" | "answered" | "failed";
+  generation: number;
+  createdAt: string;
+  deadlineAt: string;
+  finishedAt: string | null;
+  reservedMicrousd: number;
+  settledMicrousd: number | null;
+  steps: number;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  failureReason: string | null;
 };
 
 export type Routine = {
@@ -1229,6 +1286,86 @@ CREATE TABLE IF NOT EXISTS chat_turn (
 
 CREATE INDEX IF NOT EXISTS chat_turn_credential ON chat_turn (credential_key, created_at);
 CREATE INDEX IF NOT EXISTS chat_turn_approver ON chat_turn (approver, created_at);
+
+-- The mate (v32): one conversation per approver that manages the fleet
+-- by proposal. A session is delegated chat spend, signed once (ruling 10);
+-- a thread is the conversation, ceiling-bound (ruling 9); messages hold
+-- operator and assistant text only, for 24h (ruling 11); a proposal is
+-- inert until its turn finalizes and executes only through a confirm
+-- transaction (ruling 7); a turn is the accounting row for one operator
+-- message and its several provider requests, each of which is a chat_turn
+-- step (ruling 5).
+CREATE TABLE IF NOT EXISTS mate_session (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  approver            TEXT NOT NULL,
+  approver_generation INTEGER NOT NULL,
+  credential_key      TEXT NOT NULL,
+  ceiling_microusd    INTEGER NOT NULL,
+  spent_microusd      INTEGER NOT NULL DEFAULT 0,
+  ceiling_digest      TEXT NOT NULL,
+  terms_digest        TEXT NOT NULL,
+  minted_at           TEXT NOT NULL,
+  expires_at          TEXT NOT NULL,
+  ended_at            TEXT,
+  ended_by            TEXT
+);
+CREATE INDEX IF NOT EXISTS mate_session_live ON mate_session (approver, ended_at, expires_at);
+
+CREATE TABLE IF NOT EXISTS mate_thread (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  approver       TEXT NOT NULL,
+  ceiling_digest TEXT NOT NULL,
+  opened_at      TEXT NOT NULL,
+  last_turn_at   TEXT,
+  closed_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS mate_thread_live ON mate_thread (approver, closed_at);
+
+CREATE TABLE IF NOT EXISTS mate_message (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread     INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  turn       INTEGER,
+  role       TEXT NOT NULL CHECK (role IN ('operator','assistant')),
+  text       TEXT NOT NULL,
+  activity   TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mate_message_thread ON mate_message (thread, id);
+
+CREATE TABLE IF NOT EXISTS mate_proposal (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  turn           INTEGER NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel')),
+  payload_json   TEXT NOT NULL,
+  ceiling_digest TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
+  created_at     TEXT NOT NULL,
+  resolved_at    TEXT,
+  resolved_by    TEXT,
+  outcome_json   TEXT
+);
+CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state);
+
+CREATE TABLE IF NOT EXISTS mate_turn (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  approver          TEXT NOT NULL,
+  session           INTEGER NOT NULL REFERENCES mate_session(id),
+  thread            INTEGER NOT NULL REFERENCES mate_thread(id),
+  credential_key    TEXT NOT NULL,
+  state             TEXT NOT NULL CHECK (state IN ('queued','running','answered','failed')),
+  generation        INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL,
+  deadline_at       TEXT NOT NULL,
+  finished_at       TEXT,
+  reserved_microusd INTEGER NOT NULL,
+  settled_microusd  INTEGER,
+  steps             INTEGER NOT NULL DEFAULT 0,
+  tokens_in         INTEGER,
+  tokens_out        INTEGER,
+  failure_reason    TEXT
+);
+CREATE INDEX IF NOT EXISTS mate_turn_live ON mate_turn (approver, state);
 
 -- The firing ledger (v8): one row per scheduled slot, fired or skipped.
 -- UNIQUE (routine_id, scheduled_for) is the idempotency — two passes both
@@ -2738,6 +2875,11 @@ function migrate(db: Database): void {
   // skip existing files, recording v7 over a table that still refuses
   // planner rows).
   addColumn(db, "task_ref", "plan", "TEXT CHECK (plan IN ('requested','drafted'))");
+  // v32 (the mate): a chat_turn row may be one step of a mate turn; a
+  // scope may have been written by a confirmed mate proposal.
+  addColumn(db, "chat_turn", "kind", "TEXT NOT NULL DEFAULT 'chat'");
+  addColumn(db, "chat_turn", "mate_turn", "INTEGER");
+  addColumn(db, "task_scope", "proposed_via", "TEXT");
   addColumn(db, "task_ref", "plan_strikes", "INTEGER NOT NULL DEFAULT 0");
   rebuildForV4(
     db,
@@ -5637,7 +5779,7 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated" } = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated"; proposedVia?: "mate" | null } = {}): void {
     this.once(mutation, "saveScope", () => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -5761,6 +5903,9 @@ export class Store {
           provenance,
           proposedChainJson,
         );
+      // Who wrote THIS text (mate arc, ruling 2): set per write, so a human
+      // rewrite clears the mate's mark and a mate rewrite sets it.
+      this.db.prepare("UPDATE task_scope SET proposed_via = ? WHERE task_id = ?").run(options.proposedVia ?? null, scope.taskId);
       return null;
     });
   }
@@ -5783,6 +5928,14 @@ export class Store {
             .prepare("SELECT 1 AS hit FROM task_ref WHERE backend = ? AND external_id = ? AND coordinator_cid IS NOT NULL")
             .get(BUILT_IN, taskId);
           if (filedByCoordinator !== undefined) return false;
+          // THE MATE QUARANTINE (mate arc, ruling 2): a scope a confirmed
+          // mate proposal wrote is model-authored text; mode coverage never
+          // seals it. Only the password ceremony — which shows the operator
+          // every word — approves it.
+          const writtenByMate = this.db
+            .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ? AND proposed_via = 'mate'")
+            .get(taskId);
+          if (writtenByMate !== undefined) return false;
         }
         const changed = this.db
           .prepare(
@@ -6354,6 +6507,9 @@ export class Store {
         this.reconcileIntentsForMode(String(mode["repo"]), null, now);
       }
       this.revokeDerivedAuthority(name, by, now);
+      // Ruling 10: an approver's standing ends every mate session it minted, and its thread with them.
+      this.endMateSessionsFor(name, by, now);
+      this.closeMateThreadsFor(name, now);
       return {
         ok: true as const,
         modesRevoked: modes.length,
@@ -9366,13 +9522,7 @@ export class Store {
         .get(args.approver, dayStart);
       if (Number(today?.["n"] ?? 0) >= args.dailyTurns) return { ok: false as const, reason: "daily-cap" as const };
       const since = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
-      const spent = this.db
-        .prepare(
-          `SELECT COALESCE(SUM(COALESCE(settled_microusd, reserved_microusd)), 0) AS spent
-             FROM chat_turn WHERE credential_key = ? AND created_at >= ?`,
-        )
-        .get(args.credentialKey, since);
-      if (Number(spent?.["spent"] ?? 0) + args.reservedMicrousd > args.weeklyCeilingMicrousd) {
+      if (this.chatWeeklySpendMicrousd(args.credentialKey, now) + args.reservedMicrousd > args.weeklyCeilingMicrousd) {
         return { ok: false as const, reason: "over-budget" as const };
       }
       const inserted = this.db
@@ -9484,11 +9634,22 @@ export class Store {
   /** Rolling 7-day spend for the caps line: settled where known, reserved
    * where not — the same arithmetic the admission transaction uses. */
   chatWeeklySpendMicrousd(credentialKey: string, now: Date): number {
+    const since7 = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
+    const liveMate = this.db
+      .prepare("SELECT COALESCE(SUM(reserved_microusd), 0) AS n FROM mate_turn WHERE credential_key = ? AND state IN ('queued','running') AND created_at >= ?")
+      .get(credentialKey, since7);
+    const settledMate = this.db
+      .prepare("SELECT COALESCE(SUM(settled_microusd), 0) AS n FROM mate_turn WHERE credential_key = ? AND state IN ('answered','failed') AND created_at >= ?")
+      .get(credentialKey, since7);
+    return this.chatOnlyWeeklySpendMicrousd(credentialKey, now) + Number(liveMate?.["n"] ?? 0) + Number(settledMate?.["n"] ?? 0);
+  }
+
+  private chatOnlyWeeklySpendMicrousd(credentialKey: string, now: Date): number {
     const since = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
     const row = this.db
       .prepare(
         `SELECT COALESCE(SUM(COALESCE(settled_microusd, reserved_microusd)), 0) AS spent
-           FROM chat_turn WHERE credential_key = ? AND created_at >= ?`,
+           FROM chat_turn WHERE credential_key = ? AND created_at >= ? AND kind = 'chat'`,
       )
       .get(credentialKey, since);
     return Number(row?.["spent"] ?? 0);
@@ -12692,6 +12853,304 @@ export class Store {
       }));
   }
 
+  // ---- the mate (v32) --------------------------------------------------------
+
+  /** Delegated chat spend, signed once: the row every mate turn debits. */
+  mintMateSession(
+    args: { approver: string; approverGeneration: number; credentialKey: string; ceilingMicrousd: number; ceilingDigest: string; termsDigest: string; expiresAt: Date },
+    now: Date,
+  ): number {
+    return this.transact(() => {
+      // One live session per approver: minting ends the previous one.
+      this.db
+        .prepare("UPDATE mate_session SET ended_at = ?, ended_by = ? WHERE approver = ? AND ended_at IS NULL")
+        .run(now.toISOString(), args.approver, args.approver);
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO mate_session (approver, approver_generation, credential_key, ceiling_microusd, ceiling_digest, terms_digest, minted_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(args.approver, args.approverGeneration, args.credentialKey, args.ceilingMicrousd, args.ceilingDigest, args.termsDigest, now.toISOString(), args.expiresAt.toISOString());
+      return Number(inserted.lastInsertRowid);
+    });
+  }
+
+  /** The live session — not ended, not expired — or null. Exhaustion is the caller's arithmetic. */
+  activeMateSession(approver: string, now: Date): MateSession | null {
+    const row = this.db
+      .prepare("SELECT * FROM mate_session WHERE approver = ? AND ended_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1")
+      .get(approver, now.toISOString());
+    return row === undefined ? null : readMateSession(row);
+  }
+
+  getMateSession(id: number): MateSession | null {
+    const row = this.db.prepare("SELECT * FROM mate_session WHERE id = ?").get(id);
+    return row === undefined ? null : readMateSession(row);
+  }
+
+  endMateSession(id: number, by: string, now: Date): boolean {
+    const changed = this.db
+      .prepare("UPDATE mate_session SET ended_at = ?, ended_by = ? WHERE id = ? AND ended_at IS NULL")
+      .run(now.toISOString(), by, id);
+    return Number(changed.changes) === 1;
+  }
+
+  /** Revocation's companion (ruling 10): an approver's standing ends every session it minted. */
+  endMateSessionsFor(approver: string, by: string, now: Date): number {
+    const changed = this.db
+      .prepare("UPDATE mate_session SET ended_at = ?, ended_by = ? WHERE approver = ? AND ended_at IS NULL")
+      .run(now.toISOString(), by, approver);
+    return Number(changed.changes);
+  }
+
+  /** The live thread for this approver under THIS ceiling; a thread under
+   * another ceiling is closed first (ruling 9) — the surface says why. */
+  openMateThread(approver: string, ceilingDigest: string, now: Date): { thread: MateThread; ceilingChanged: boolean } {
+    return this.transact(() => {
+      const live = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL ORDER BY id DESC LIMIT 1").get(approver);
+      let ceilingChanged = false;
+      if (live !== undefined && String(live["ceiling_digest"]) !== ceilingDigest) {
+        this.db.prepare("UPDATE mate_thread SET closed_at = ? WHERE id = ?").run(now.toISOString(), Number(live["id"]));
+        this.db
+          .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE thread = ? AND state IN ('drafting','pending')")
+          .run(now.toISOString(), Number(live["id"]));
+        ceilingChanged = true;
+      } else if (live !== undefined) {
+        return { thread: readMateThread(live), ceilingChanged: false };
+      }
+      const inserted = this.db
+        .prepare("INSERT INTO mate_thread (approver, ceiling_digest, opened_at) VALUES (?, ?, ?)")
+        .run(approver, ceilingDigest, now.toISOString());
+      const row = this.db.prepare("SELECT * FROM mate_thread WHERE id = ?").get(Number(inserted.lastInsertRowid));
+      return { thread: readMateThread(row as Record<string, unknown>), ceilingChanged };
+    });
+  }
+
+  getMateThread(id: number): MateThread | null {
+    const row = this.db.prepare("SELECT * FROM mate_thread WHERE id = ?").get(id);
+    return row === undefined ? null : readMateThread(row);
+  }
+
+  /** `--end` and revocation: the thread and everything in it are gone. */
+  closeMateThreadsFor(approver: string, now: Date): number {
+    return this.transact(() => {
+      const rows = this.db.prepare("SELECT id FROM mate_thread WHERE approver = ? AND closed_at IS NULL").all(approver);
+      for (const row of rows) {
+        const id = Number(row["id"]);
+        this.db.prepare("DELETE FROM mate_message WHERE thread = ?").run(id);
+        this.db.prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE thread = ? AND state IN ('drafting','pending')").run(now.toISOString(), id);
+        this.db.prepare("UPDATE mate_thread SET closed_at = ? WHERE id = ?").run(now.toISOString(), id);
+      }
+      return rows.length;
+    });
+  }
+
+  appendMateMessage(message: { thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity?: string | null }, now: Date): number {
+    const inserted = this.db
+      .prepare("INSERT INTO mate_message (thread, turn, role, text, activity, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(message.thread, message.turn, message.role, message.text, message.activity ?? null, now.toISOString());
+    this.db.prepare("UPDATE mate_thread SET last_turn_at = ? WHERE id = ?").run(now.toISOString(), message.thread);
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /** The last `limit` messages, oldest first. */
+  listMateMessages(thread: number, limit: number): MateMessage[] {
+    return this.db
+      .prepare("SELECT * FROM (SELECT * FROM mate_message WHERE thread = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC")
+      .all(thread, limit)
+      .map(row => ({
+        id: Number(row["id"]),
+        thread: Number(row["thread"]),
+        turn: row["turn"] === null ? null : Number(row["turn"]),
+        role: String(row["role"]) as MateMessage["role"],
+        text: String(row["text"]),
+        activity: row["activity"] === null ? null : String(row["activity"]),
+        createdAt: String(row["created_at"]),
+      }));
+  }
+
+  /** Transcripts live 24 hours (ruling 11); pending proposals expire with them. */
+  sweepMateThreads(now: Date): { messages: number; proposals: number } {
+    const cutoff = new Date(now.getTime() - 24 * 3_600_000).toISOString();
+    const messages = this.db.prepare("DELETE FROM mate_message WHERE created_at < ?").run(cutoff);
+    const proposals = this.db
+      .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE state IN ('drafting','pending') AND created_at < ?")
+      .run(now.toISOString(), cutoff);
+    return { messages: Number(messages.changes), proposals: Number(proposals.changes) };
+  }
+
+  /** A proposal is inert (`drafting`) until its turn finalizes. */
+  draftMateProposal(proposal: { thread: number; turn: number; kind: MateProposalKind; payload: Record<string, unknown>; ceilingDigest: string }, now: Date): number {
+    const inserted = this.db
+      .prepare("INSERT INTO mate_proposal (thread, turn, kind, payload_json, ceiling_digest, state, created_at) VALUES (?, ?, ?, ?, ?, 'drafting', ?)")
+      .run(proposal.thread, proposal.turn, proposal.kind, JSON.stringify(proposal.payload), proposal.ceilingDigest, now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  promoteMateProposals(turn: number): number {
+    const changed = this.db.prepare("UPDATE mate_proposal SET state = 'pending' WHERE turn = ? AND state = 'drafting'").run(turn);
+    return Number(changed.changes);
+  }
+
+  discardMateProposals(turn: number, now: Date): number {
+    const changed = this.db
+      .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE turn = ? AND state = 'drafting'")
+      .run(now.toISOString(), turn);
+    return Number(changed.changes);
+  }
+
+  getMateProposal(id: number): MateProposal | null {
+    const row = this.db.prepare("SELECT * FROM mate_proposal WHERE id = ?").get(id);
+    return row === undefined ? null : readMateProposal(row);
+  }
+
+  listMateProposals(thread: number, states?: readonly MateProposalState[]): MateProposal[] {
+    const rows =
+      states === undefined
+        ? this.db.prepare("SELECT * FROM mate_proposal WHERE thread = ? ORDER BY id ASC").all(thread)
+        : this.db
+            .prepare(`SELECT * FROM mate_proposal WHERE thread = ? AND state IN (${states.map(() => "?").join(",")}) ORDER BY id ASC`)
+            .all(thread, ...states);
+    return rows.map(readMateProposal);
+  }
+
+  /** The state CAS confirmation rides on (ruling 7). */
+  casMateProposal(id: number, from: MateProposalState, to: MateProposalState, by: string | null, outcome: Record<string, unknown> | null, now: Date): boolean {
+    const terminal = to === "confirmed" || to === "refused" || to === "dismissed" || to === "expired";
+    const changed = this.db
+      .prepare(
+        `UPDATE mate_proposal SET state = ?, resolved_at = CASE WHEN ? THEN ? ELSE resolved_at END,
+           resolved_by = COALESCE(?, resolved_by), outcome_json = COALESCE(?, outcome_json)
+         WHERE id = ? AND state = ?`,
+      )
+      .run(to, terminal ? 1 : 0, now.toISOString(), by, outcome === null ? null : JSON.stringify(outcome), id, from);
+    return Number(changed.changes) === 1;
+  }
+
+  /**
+   * The turn's reservation, in ONE transaction against the session and the
+   * weekly ledger, before any dispatch (ruling 5). One live turn per
+   * approver serializes the console and the CLI.
+   */
+  openMateTurn(
+    args: { approver: string; session: number; thread: number; credentialKey: string; reservedMicrousd: number; weeklyCeilingMicrousd: number; deadlineMs: number },
+    now: Date,
+  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "session-exhausted" | "session-ended" | "over-budget" } {
+    return this.transact(() => {
+      const latched = this.db
+        .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
+        .get(args.credentialKey);
+      if (latched !== undefined) return { ok: false as const, reason: "latched" as const };
+      const live = this.db
+        .prepare("SELECT 1 AS hit FROM mate_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
+        .get(args.approver);
+      const liveChat = this.db
+        .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
+        .get(args.approver);
+      if (live !== undefined || liveChat !== undefined) return { ok: false as const, reason: "concurrent" as const };
+      const session = this.getMateSession(args.session);
+      if (session === null || session.endedAt !== null || session.expiresAt <= now.toISOString()) {
+        return { ok: false as const, reason: "session-ended" as const };
+      }
+      if (session.spentMicrousd + args.reservedMicrousd > session.ceilingMicrousd) {
+        return { ok: false as const, reason: "session-exhausted" as const };
+      }
+      if (this.chatWeeklySpendMicrousd(args.credentialKey, now) + args.reservedMicrousd > args.weeklyCeilingMicrousd) {
+        return { ok: false as const, reason: "over-budget" as const };
+      }
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO mate_turn (approver, session, thread, credential_key, state, created_at, deadline_at, reserved_microusd)
+           VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
+        )
+        .run(args.approver, args.session, args.thread, args.credentialKey, now.toISOString(), new Date(now.getTime() + args.deadlineMs).toISOString(), args.reservedMicrousd);
+      return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+    });
+  }
+
+  startMateTurn(id: number, now: Date): { ok: true; generation: number } | { ok: false } {
+    const changed = this.db
+      .prepare("UPDATE mate_turn SET state = 'running', generation = generation + 1 WHERE id = ? AND state = 'queued'")
+      .run(id);
+    if (Number(changed.changes) !== 1) return { ok: false };
+    const row = this.db.prepare("SELECT generation FROM mate_turn WHERE id = ?").get(id);
+    void now;
+    return { ok: true, generation: Number(row?.["generation"] ?? 0) };
+  }
+
+  /** One provider request of a mate turn: a chat_turn row of kind
+   * 'mate-step', reserved at zero (the turn holds the reservation), with
+   * the same dispatch CAS, terminal CAS, and crash latch as fleet chat. */
+  openMateStep(args: { mateTurn: number; approver: string; credentialKey: string; provider: ChatProviderId; model: string; deadlineMs: number }, now: Date): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO chat_turn (approver, credential_key, provider, model, state, created_at, deadline_at, reserved_microusd, kind, mate_turn)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, 'mate-step', ?)`,
+      )
+      .run(args.approver, args.credentialKey, args.provider, args.model, now.toISOString(), new Date(now.getTime() + args.deadlineMs).toISOString(), args.mateTurn);
+    this.db.prepare("UPDATE mate_turn SET steps = steps + 1 WHERE id = ?").run(args.mateTurn);
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /** Terminal CAS for the turn; settles the session in the same write. */
+  finalizeMateTurn(
+    id: number,
+    generation: number,
+    outcome: { state: "answered" | "failed"; settledMicrousd: number; tokensIn: number; tokensOut: number; failureReason?: string },
+    now: Date,
+  ): boolean {
+    return this.transact(() => {
+      const changed = this.db
+        .prepare(
+          `UPDATE mate_turn SET state = ?, settled_microusd = ?, tokens_in = ?, tokens_out = ?, failure_reason = ?, finished_at = ?
+           WHERE id = ? AND generation = ? AND state IN ('queued','running')`,
+        )
+        .run(outcome.state, outcome.settledMicrousd, outcome.tokensIn, outcome.tokensOut, outcome.failureReason ?? null, now.toISOString(), id, generation);
+      if (Number(changed.changes) !== 1) return false;
+      const turn = this.db.prepare("SELECT session FROM mate_turn WHERE id = ?").get(id);
+      this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(outcome.settledMicrousd, Number(turn?.["session"]));
+      return true;
+    });
+  }
+
+  /** The crash sweep for turns: past the deadline, failed; its steps are
+   * judged by sweepStaleChatTurns (a dispatched step latches). The
+   * settled sum of finished steps is what the session is charged. */
+  sweepStaleMateTurns(now: Date): number {
+    return this.transact(() => {
+      const rows = this.db
+        .prepare("SELECT id, session FROM mate_turn WHERE state IN ('queued','running') AND deadline_at < ?")
+        .all(now.toISOString());
+      for (const row of rows) {
+        const id = Number(row["id"]);
+        const settled = this.db
+          .prepare("SELECT COALESCE(SUM(settled_microusd), 0) AS n FROM chat_turn WHERE mate_turn = ? AND settled_microusd IS NOT NULL")
+          .get(id);
+        const spent = Number(settled?.["n"] ?? 0);
+        this.db
+          .prepare("UPDATE mate_turn SET state = 'failed', failure_reason = 'crashed', generation = generation + 1, settled_microusd = ?, finished_at = ? WHERE id = ?")
+          .run(spent, now.toISOString(), id);
+        this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(spent, Number(row["session"]));
+        this.db.prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE turn = ? AND state = 'drafting'").run(now.toISOString(), id);
+      }
+      return rows.length;
+    });
+  }
+
+  getMateTurn(id: number): MateTurn | null {
+    const row = this.db.prepare("SELECT * FROM mate_turn WHERE id = ?").get(id);
+    return row === undefined ? null : readMateTurn(row);
+  }
+
+  liveMateTurnFor(approver: string): MateTurn | null {
+    const row = this.db.prepare("SELECT * FROM mate_turn WHERE approver = ? AND state IN ('queued','running') ORDER BY id DESC LIMIT 1").get(approver);
+    return row === undefined ? null : readMateTurn(row);
+  }
+
+  mateStepsOf(mateTurn: number): ChatTurn[] {
+    return this.db.prepare("SELECT * FROM chat_turn WHERE mate_turn = ? ORDER BY id ASC").all(mateTurn).map(readChatTurn);
+  }
+
   // ---- projects ------------------------------------------------------------
 
   /** Remember a project was opened. Upsert keeps added_at; recency always moves. */
@@ -14852,6 +15311,79 @@ function readChatTurn(row: Record<string, unknown>): ChatTurn {
     acknowledgedBy: maybe("acknowledged_by"),
     replyBytes: maybeN("reply_bytes"),
     candidateCount: maybeN("candidate_count"),
+    kind: (maybe("kind") ?? "chat") as ChatTurn["kind"],
+    mateTurn: maybeN("mate_turn"),
+  };
+}
+
+function readMateSession(row: Record<string, unknown>): MateSession {
+  const maybe = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  return {
+    id: Number(row["id"]),
+    approver: String(row["approver"]),
+    approverGeneration: Number(row["approver_generation"]),
+    credentialKey: String(row["credential_key"]),
+    ceilingMicrousd: Number(row["ceiling_microusd"]),
+    spentMicrousd: Number(row["spent_microusd"]),
+    ceilingDigest: String(row["ceiling_digest"]),
+    termsDigest: String(row["terms_digest"]),
+    mintedAt: String(row["minted_at"]),
+    expiresAt: String(row["expires_at"]),
+    endedAt: maybe("ended_at"),
+    endedBy: maybe("ended_by"),
+  };
+}
+
+function readMateThread(row: Record<string, unknown>): MateThread {
+  const maybe = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  return {
+    id: Number(row["id"]),
+    approver: String(row["approver"]),
+    ceilingDigest: String(row["ceiling_digest"]),
+    openedAt: String(row["opened_at"]),
+    lastTurnAt: maybe("last_turn_at"),
+    closedAt: maybe("closed_at"),
+  };
+}
+
+function readMateProposal(row: Record<string, unknown>): MateProposal {
+  const maybe = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  const outcome = maybe("outcome_json");
+  return {
+    id: Number(row["id"]),
+    thread: Number(row["thread"]),
+    turn: Number(row["turn"]),
+    kind: String(row["kind"]) as MateProposalKind,
+    payload: JSON.parse(String(row["payload_json"])) as Record<string, unknown>,
+    ceilingDigest: String(row["ceiling_digest"]),
+    state: String(row["state"]) as MateProposalState,
+    createdAt: String(row["created_at"]),
+    resolvedAt: maybe("resolved_at"),
+    resolvedBy: maybe("resolved_by"),
+    outcome: outcome === null ? null : (JSON.parse(outcome) as Record<string, unknown>),
+  };
+}
+
+function readMateTurn(row: Record<string, unknown>): MateTurn {
+  const maybe = (key: string): string | null => (row[key] === null || row[key] === undefined ? null : String(row[key]));
+  const maybeN = (key: string): number | null => (row[key] === null || row[key] === undefined ? null : Number(row[key]));
+  return {
+    id: Number(row["id"]),
+    approver: String(row["approver"]),
+    session: Number(row["session"]),
+    thread: Number(row["thread"]),
+    credentialKey: String(row["credential_key"]),
+    state: String(row["state"]) as MateTurn["state"],
+    generation: Number(row["generation"]),
+    createdAt: String(row["created_at"]),
+    deadlineAt: String(row["deadline_at"]),
+    finishedAt: maybe("finished_at"),
+    reservedMicrousd: Number(row["reserved_microusd"]),
+    settledMicrousd: maybeN("settled_microusd"),
+    steps: Number(row["steps"]),
+    tokensIn: maybeN("tokens_in"),
+    tokensOut: maybeN("tokens_out"),
+    failureReason: maybe("failure_reason"),
   };
 }
 

@@ -21,7 +21,7 @@ agent, ship with a crew" on our authority model (docs/firstmate-assessment.md
    refuses `proposed_via = 'mate'` in the primitive — the same wall the
    coordinator quarantine uses. Only the password ceremony approves it.
 3. **A branded principal.** `VerifiedApprover` (module-private maker in
-   `src/approver.ts`, minted only by `authenticateApprover` or by the
+   `src/principal.ts`, minted only by `authenticateApprover` or by the
    session layer after csrf + role + generation re-proof) is the only
    principal the mate's tools and confirmers accept; the shared tool module
    takes `VerifiedCoordinator | VerifiedApprover`, never a structural
@@ -230,7 +230,7 @@ chat --say "…"` runs one turn and exits with the proposals listed.
 
 ## 7. Sequencing
 
-1. `src/approver.ts` (the brand) + `src/mate-tools.ts` (shared queries,
+1. `src/principal.ts` (the brand) + `src/mate-tools.ts` (shared queries,
    `mateView`, the read tools, `propose_task` as a row) + schema
    (`mate_session`, `mate_thread`, `mate_message`, `mate_proposal`,
    `mate_turn`, `chat_turn.kind/mate_turn`, `task_scope.proposed_via`) +

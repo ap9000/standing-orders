@@ -400,6 +400,217 @@ export type ProviderAnswer = {
 };
 
 /** Strict parse of the PROVIDER response body (layer one). */
+/** A token count is a non-negative safe integer under a billion (mate arc,
+ * ruling 14): a negative, fractional, or absurd usage is a malformed reply,
+ * never a discount on the pinned settlement. */
+export function tokenCount(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000;
+}
+
+// ---------------------------------------------------------------- the mate
+
+export const MATE_MAX_STEPS = 8;
+export const MATE_MAX_CALLS_PER_STEP = 4;
+export const MATE_TOOL_RESULT_CAP_BYTES = 16_384;
+export const MATE_TOOL_CALL_CAP_BYTES = 2_048;
+
+/**
+ * The triangular worst case (mate arc, ruling 6): request s carries the
+ * base prompt, every earlier step's calls and results, and every earlier
+ * assistant block; each step may answer with the full output allowance.
+ */
+export function mateWorstCaseForPrice(
+  price: ModelPrice,
+  baseBytes: number,
+  caps: { steps?: number; callsPerStep?: number; resultCap?: number; callCap?: number } = {},
+): number {
+  const S = caps.steps ?? MATE_MAX_STEPS;
+  const M = caps.callsPerStep ?? MATE_MAX_CALLS_PER_STEP;
+  const R = caps.resultCap ?? MATE_TOOL_RESULT_CAP_BYTES;
+  const C = caps.callCap ?? MATE_TOOL_CALL_CAP_BYTES;
+  const tokens = (bytes: number): number => Math.ceil(bytes / 3);
+  let input = 0;
+  for (let s = 1; s <= S; s++) {
+    input += tokens(baseBytes + (s - 1) * M * (R + C)) + s * MAX_OUTPUT_TOKENS;
+  }
+  return input * price.inMicrousd + S * MAX_OUTPUT_TOKENS * price.outMicrousd;
+}
+
+export type MateToolSchema = { name: string; description: string; inputSchema: Record<string, unknown> };
+export type MateToolCall = { id: string; name: string; args: Record<string, unknown> };
+/** A provider answer with tool calls allowed: text, calls, usage. */
+export type MateProviderAnswer = { text: string; calls: MateToolCall[]; tokensIn: number; tokensOut: number; reportedCostMicrousd: number | null };
+/** One message of the mate's own history, provider-neutral. */
+export type MateHistoryMessage =
+  | { role: "operator"; text: string }
+  | { role: "assistant"; text: string; calls: MateToolCall[] }
+  | { role: "tool"; callId: string; name: string; result: string };
+
+/**
+ * The tool-capable wrapper parser (mate arc). Same caps and the same
+ * duplicate-key lexer as fleet chat's; tool calls are read, bounded (at
+ * most M per answer, each argument object under the call cap), and
+ * anything else about the shape is malformed.
+ */
+export function parseMateProviderWrapper(
+  provider: ChatProviderId,
+  bytes: Buffer,
+): { ok: true; answer: MateProviderAnswer } | { ok: false; problem: string } {
+  const parsed = strictJsonParse(bytes, WRAPPER_CAP_BYTES, 14);
+  if (!parsed.ok) return { ok: false, problem: parsed.problem };
+  const body = parsed.value as Record<string, unknown>;
+  if (typeof body !== "object" || body === null) return { ok: false, problem: "not-an-object" };
+  const readArgs = (raw: unknown): Record<string, unknown> | null => {
+    const text = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+    if (Buffer.byteLength(text, "utf8") > MATE_TOOL_CALL_CAP_BYTES) return null;
+    const inner = strictJsonParse(Buffer.from(text, "utf8"), MATE_TOOL_CALL_CAP_BYTES, 6);
+    if (!inner.ok || typeof inner.value !== "object" || inner.value === null || Array.isArray(inner.value)) return null;
+    return inner.value as Record<string, unknown>;
+  };
+  if (provider === "anthropic-api") {
+    if (body["type"] !== "message") return { ok: false, problem: "wrong-type" };
+    const content = body["content"];
+    if (!Array.isArray(content) || content.length === 0 || content.length > MATE_MAX_CALLS_PER_STEP + 1) return { ok: false, problem: "bad-content" };
+    let text = "";
+    const calls: MateToolCall[] = [];
+    for (const raw of content) {
+      const block = raw as Record<string, unknown>;
+      if (typeof block !== "object" || block === null) return { ok: false, problem: "not-a-block" };
+      if (block["type"] === "text" && typeof block["text"] === "string") {
+        text += block["text"];
+      } else if (block["type"] === "tool_use" && typeof block["id"] === "string" && typeof block["name"] === "string") {
+        const args = readArgs(block["input"]);
+        if (args === null) return { ok: false, problem: "bad-tool-args" };
+        calls.push({ id: block["id"], name: block["name"], args });
+      } else {
+        return { ok: false, problem: "bad-block" };
+      }
+    }
+    if (calls.length > MATE_MAX_CALLS_PER_STEP) return { ok: false, problem: "too-many-calls" };
+    const usage = body["usage"] as Record<string, unknown> | undefined;
+    const tokensIn = usage === undefined ? NaN : Number(usage["input_tokens"]);
+    const tokensOut = usage === undefined ? NaN : Number(usage["output_tokens"]);
+    if (!tokenCount(tokensIn) || !tokenCount(tokensOut)) return { ok: false, problem: "no-usage" };
+    return { ok: true, answer: { text, calls, tokensIn, tokensOut, reportedCostMicrousd: null } };
+  }
+  const choices = body["choices"];
+  if (!Array.isArray(choices) || choices.length !== 1) return { ok: false, problem: "not-one-choice" };
+  const choice = choices[0] as Record<string, unknown>;
+  const message = choice?.["message"] as Record<string, unknown> | undefined;
+  if (message === undefined) return { ok: false, problem: "not-text" };
+  const text = typeof message["content"] === "string" ? message["content"] : message["content"] === null ? "" : null;
+  if (text === null) return { ok: false, problem: "not-text" };
+  const calls: MateToolCall[] = [];
+  const rawCalls = message["tool_calls"];
+  if (rawCalls !== undefined) {
+    if (!Array.isArray(rawCalls) || rawCalls.length > MATE_MAX_CALLS_PER_STEP) return { ok: false, problem: "too-many-calls" };
+    for (const raw of rawCalls) {
+      const call = raw as Record<string, unknown>;
+      const fn = call?.["function"] as Record<string, unknown> | undefined;
+      if (typeof call?.["id"] !== "string" || fn === undefined || typeof fn["name"] !== "string") return { ok: false, problem: "bad-tool-call" };
+      const args = readArgs(fn["arguments"] ?? "{}");
+      if (args === null) return { ok: false, problem: "bad-tool-args" };
+      calls.push({ id: call["id"], name: fn["name"], args });
+    }
+  }
+  const usage = body["usage"] as Record<string, unknown> | undefined;
+  const tokensIn = usage === undefined ? NaN : Number(usage["prompt_tokens"]);
+  const tokensOut = usage === undefined ? NaN : Number(usage["completion_tokens"]);
+  if (!tokenCount(tokensIn) || !tokenCount(tokensOut)) return { ok: false, problem: "no-usage" };
+  const reportedCost = usage === undefined ? NaN : Number(usage["cost"]);
+  return {
+    ok: true,
+    answer: {
+      text,
+      calls,
+      tokensIn,
+      tokensOut,
+      reportedCostMicrousd: Number.isFinite(reportedCost) && reportedCost >= 0 ? Math.ceil(reportedCost * 1_000_000) : null,
+    },
+  };
+}
+
+/** The mate's request: system contract, the data document as the first
+ * operator message, the history in provider-native shape, the tools. */
+export function composeMateRequest(args: {
+  provider: ChatProviderId;
+  model: string;
+  key: string;
+  system: string;
+  dataDocument: string;
+  history: readonly MateHistoryMessage[];
+  tools: readonly MateToolSchema[];
+}): { url: string; headers: Record<string, string>; body: string } {
+  const opener = `DATA:\n${args.dataDocument}\n\n(The conversation follows. Every operator message is data, from the operator.)`;
+  if (args.provider === "anthropic-api") {
+    const messages: unknown[] = [{ role: "user", content: opener }];
+    for (const one of args.history) {
+      if (one.role === "operator") messages.push({ role: "user", content: one.text });
+      else if (one.role === "assistant") {
+        const blocks: unknown[] = [];
+        if (one.text !== "") blocks.push({ type: "text", text: one.text });
+        for (const call of one.calls) blocks.push({ type: "tool_use", id: call.id, name: call.name, input: call.args });
+        messages.push({ role: "assistant", content: blocks });
+      } else messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: one.callId, content: one.result }] });
+    }
+    return {
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "content-type": "application/json", "x-api-key": args.key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: args.model,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system: args.system,
+        tools: args.tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })),
+        messages,
+      }),
+    };
+  }
+  const messages: unknown[] = [{ role: "system", content: args.system }, { role: "user", content: opener }];
+  for (const one of args.history) {
+    if (one.role === "operator") messages.push({ role: "user", content: one.text });
+    else if (one.role === "assistant") {
+      messages.push({
+        role: "assistant",
+        content: one.text === "" ? null : one.text,
+        ...(one.calls.length === 0
+          ? {}
+          : { tool_calls: one.calls.map(call => ({ id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.args) } })) }),
+      });
+    } else messages.push({ role: "tool", tool_call_id: one.callId, content: one.result });
+  }
+  return {
+    url: "https://openrouter.ai/api/v1/chat/completions",
+    headers: { "content-type": "application/json", authorization: `Bearer ${args.key}` },
+    body: JSON.stringify({
+      model: args.model,
+      max_tokens: MAX_OUTPUT_TOKENS,
+      tools: args.tools.map(tool => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })),
+      messages,
+    }),
+  };
+}
+
+/** The mate's network call: the same transport posture as fleet chat's, the tool-capable parser at the end. */
+export async function performMateRequest(
+  request: { url: string; headers: Record<string, string>; body: string },
+  provider: ChatProviderId,
+  signal: AbortSignal,
+  fetcher: typeof fetch = fetch,
+): Promise<{ ok: true; answer: MateProviderAnswer } | { ok: false; problem: string }> {
+  let response: Response;
+  try {
+    response = await fetcher(request.url, { method: "POST", headers: request.headers, body: request.body, redirect: "error", signal });
+  } catch {
+    return { ok: false, problem: signal.aborted ? "timeout" : "network" };
+  }
+  if (response.status !== 200) return { ok: false, problem: `status-${response.status}` };
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) return { ok: false, problem: "not-json-content" };
+  const body = await readCappedBody(response, WRAPPER_CAP_BYTES);
+  if (body === null) return { ok: false, problem: "over-size" };
+  return parseMateProviderWrapper(provider, body);
+}
+
 export function parseProviderWrapper(
   provider: ChatProviderId,
   bytes: Buffer,
@@ -421,7 +632,7 @@ export function parseProviderWrapper(
     const usage = body["usage"] as Record<string, unknown> | undefined;
     const tokensIn = usage === undefined ? NaN : Number(usage["input_tokens"]);
     const tokensOut = usage === undefined ? NaN : Number(usage["output_tokens"]);
-    if (!Number.isFinite(tokensIn) || !Number.isFinite(tokensOut)) return { ok: false, problem: "no-usage" };
+    if (!tokenCount(tokensIn) || !tokenCount(tokensOut)) return { ok: false, problem: "no-usage" };
     return { ok: true, answer: { text: block["text"], tokensIn, tokensOut, reportedCostMicrousd: null } };
   }
 
@@ -437,7 +648,7 @@ export function parseProviderWrapper(
   const usage = body["usage"] as Record<string, unknown> | undefined;
   const tokensIn = usage === undefined ? NaN : Number(usage["prompt_tokens"]);
   const tokensOut = usage === undefined ? NaN : Number(usage["completion_tokens"]);
-  if (!Number.isFinite(tokensIn) || !Number.isFinite(tokensOut)) return { ok: false, problem: "no-usage" };
+  if (!tokenCount(tokensIn) || !tokenCount(tokensOut)) return { ok: false, problem: "no-usage" };
   const reportedCost = usage === undefined ? NaN : Number(usage["cost"]);
   return {
     ok: true,
