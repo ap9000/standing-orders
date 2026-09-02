@@ -1,5 +1,32 @@
 # Progress
 
+**2026-09-01 — Portfolio arc lands: three slices, two review rounds,
+nine findings closed.** Spec v5 (`docs/portfolio-arc.md`) executed as
+three commits. Slice 1a (`3772303`): nav regroup (inbox · portfolio ·
+work · builds · fleet · more), the scope bar owning the one `/projects`
+link per breakpoint, the portfolio overview with its one new read-only
+query `portfolioLedgerScoped` (admission before LIMIT, `visible()`
+recheck), and the shared decision-answer partial with its inline
+enhancement — the survival test runs the shipped script in a DOM
+(`8cfcd0a`); Codex review closed six findings (`4cf9e82`). Slice 1b
+(`507094f`): the no-script move-to-front sentinel resolved server-side
+against a fresh snapshot (own column only; a taken or vanished card is
+the typed 409; already-front no-ops only after an explicit revision
+check), typed text/plain refusals inlined on the card via textContent,
+column headers naming "N building in this project · unattended capacity
+M" and never a ratio. Slice 1c (`243f165`): the active attempt panel
+named by build number and worker, polling the RUN's own peek/transcript
+fragments; the sensitive-page composition guard decided from the
+rendered body (no poller, static line, link-only decisions); the rail —
+answer cards, the sealed approved scope, economics measured-or-
+unmeasured on both rows, "publishes as" from `publicationGrantFor` with
+push, PR, and merge phrased independently; "hold next attempt"; retry
+words honest under a live claim. Codex review after commit 3 found three
+(login page into the queue region on the post-move refetch; unreported
+tokens summed as zero; the retry sentence twice), all closed
+(`bf361ea`). Recorded deferrals stand: all-projects builds view,
+cross-project gap fan-out, queue money metadata. Suite 1558.
+
 **2026-08-30 — MCP gateway arc CLOSES: round-4 verify = GO.** All six
 round-3 closures confirmed with independent gateway probes, no new
 findings. The full arc: spec approved after six Codex rounds, eight
