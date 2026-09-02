@@ -1,5 +1,41 @@
 # Progress
 
+**2026-09-02 — The mate lands: one conversation across every project,
+from the console and the terminal, four slices, three review rounds,
+forty-one findings closed.** Spec `docs/mate-arc.md` (v2 after a
+fifteen-finding Codex round on v1). Slice 1 (`749d328`): the branded
+`VerifiedApprover` (`src/principal.ts`), schema v32 (`mate_session`,
+`mate_thread`, `mate_message`, `mate_proposal`, `mate_turn`;
+`chat_turn.kind/mate_turn`; `task_scope.proposed_via` with the mode seal
+refusing a mate-written scope in the primitive), the tool-capable wrapper
+parser and the triangular worst-case reservation (`src/converse.ts`), the
+tools — six reads and seven propose_* that write rows, never acts
+(`src/mate-tools.ts`) — the versioned contract, and `runMateTurn`: one
+reservation for the whole loop, one `chat_turn` step per request, eight
+steps, tools in-process under the brand, only operator and assistant text
+kept. Codex round 2 found fourteen (three critical), all closed
+(`c90b938`): unknown cost charges the whole reservation; admission binds
+approver, session, thread, and credential; the brand is runtime;
+`mateView` scrubs every string; usage is typed integers within the
+allowance; the latch is re-checked per step; settle/promote/append is one
+write. Slice 2 (`bb878e1`): `src/mate-doors.ts` — the confirm door, one
+transaction through the plane's own primitives with the CAS material each
+card carries — and `/chat` as the thread while a mate session is live:
+the mint card (the one password ceremony), a password-free composer,
+proposal cards that confirm or dismiss, cancel cards that only point.
+Slice 3 (`bf9fa8a`, `5fde8af`): `standing-orders chat` — the same thread
+and doors from a REPL, `--say` for one turn, `--json` per turn. Slice 4
+(`b2f4420`): `recapOver`/`decisionsOver`/`queueOver` shared with the MCP
+gateway, which gains `recap`, `list_decisions`, `queue` for coordinators
+(paths, never consequences). Codex round 3 over slices 2–4 found twelve
+(five high), all closed (this commit's predecessor): a card dies with its
+session, standing re-proved inside the transaction, the ordered ceiling
+digest, stable REPL ordinals, the enrolled registry as the CLI's default
+ceiling, the place in the CAS, minting fences in-flight turns, `since`
+defined, key mismatch said in words. Deferred as recorded: propose_answer,
+proposals over the MCP gateway, scout tasks, Telegram digests. Suite 1615
+(one load-order flake in operate.test's `next refuses`, passes alone).
+
 **2026-09-01 — Portfolio arc lands: three slices, two review rounds,
 nine findings closed.** Spec v5 (`docs/portfolio-arc.md`) executed as
 three commits. Slice 1a (`3772303`): nav regroup (inbox · portfolio ·
