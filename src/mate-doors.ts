@@ -41,15 +41,19 @@ export type DoorRefusal =
   | "unknown-task"
   | "unknown-decision"
   | "already-answered"
+  | "expired"
   | "outside-ceiling"
   | "refused";
 
 export type DoorOptions = {
   /** The existing ceremony for an irreversible decision option: `confirm=yes`, typed explicitly (ruling 12). */
   confirm?: boolean;
-  /** Which surface answered — recorded on the decision. */
-  via?: "web" | "cli";
+  /** Which surface answered — recorded on the decision. Named by the caller, never defaulted (v3 review, finding 1). */
+  via: "web" | "cli";
 };
+
+/** A coordinator proposal lives seven days (§9); the door refuses an older one whatever the sweep did (v3 review, finding 3). */
+export const COORDINATOR_PROPOSAL_TTL_MS = 7 * 24 * 3_600_000;
 
 function payloadString(payload: Record<string, unknown>, key: string): string | null {
   const value = payload[key];
@@ -71,7 +75,7 @@ function payloadStrings(payload: Record<string, unknown>, key: string): string[]
  * generation under this ceiling; its turn answered; `pending →
  * confirming` CAS; the primitive; `confirming → confirmed | refused`.
  */
-export function confirmMateProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions = {}): DoorOutcome {
+export function confirmMateProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions): DoorOutcome {
   if (!isVerifiedApprover(who)) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
   return store.transact(() => {
     if (!reproveApprover(store, who).ok) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" } as const;
@@ -125,12 +129,16 @@ export function dismissMateProposal(store: Store, who: VerifiedApprover, proposa
  * executor; `confirming → confirmed | refused`. No mate session is
  * involved — nothing here spends.
  */
-export function confirmCoordinatorProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions = {}): DoorOutcome {
+export function confirmCoordinatorProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions): DoorOutcome {
   if (!isVerifiedApprover(who)) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
   return store.transact(() => {
     if (!reproveApprover(store, who).ok) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" } as const;
     const proposal = store.getCoordinatorProposal(proposalId);
     if (proposal === null || !who.repos.includes(proposal.repo)) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal in your projects" } as const;
+    if (Date.parse(proposal.createdAt) + COORDINATOR_PROPOSAL_TTL_MS <= now.getTime()) {
+      store.casCoordinatorProposal(proposalId, "pending", "expired", null, null, now);
+      return { ok: false, kind: proposal.kind, reason: "expired", said: "this proposal is older than seven days — it expired" } as const;
+    }
     if (proposal.kind === "cancel") {
       return { ok: false, kind: proposal.kind, reason: "not-confirmable", said: "cancelling is armed on the task itself — open the task" } as const;
     }
@@ -162,17 +170,19 @@ export function coordinatorProposalVisible(who: { repos: readonly string[] }, pr
 
 /**
  * The shared executor: one kind, one payload, the operator's own act
- * through the primitive that owns it. Only a branded approver reaches
- * here; `actor` is its name and ceiling, never a structural caller.
+ * through the primitive that owns it. Module-private (v3 review, finding
+ * 1): only the two doors above reach it, and it re-proves the brand and
+ * the standing itself — a structural caller executes nothing.
  */
-export function executeProposal(
+function executeProposal(
   store: Store,
   actor: VerifiedApprover,
   kind: ProposalKind,
   payload: Record<string, unknown>,
   now: Date,
-  options: DoorOptions & { scopeAuthor?: "mate" | "coordinator" } = {},
+  options: DoorOptions & { scopeAuthor?: "mate" | "coordinator" },
 ): DoorOutcome {
+  if (!isVerifiedApprover(actor) || !reproveApprover(store, actor).ok) return { ok: false, kind, reason: "standing", said: "your approver standing changed — sign in again" };
   const taskId = payloadString(payload, "task");
   const admitted = (repo: string | null): boolean => repo !== null && actor.repos.includes(repo);
   const refuse = (reason: DoorRefusal, said: string): DoorOutcome => ({ ok: false, kind, reason, said });
@@ -210,12 +220,20 @@ export function executeProposal(
     if (ref === null || !admitted(ref.repo)) return refuse("unknown-decision", "no such decision in your projects");
     const chosen = decision.options.find(one => one.id === option);
     if (chosen === undefined) return refuse("stale", "that option no longer exists on the decision");
+    // The proposal contract is "open": a decision past its deadline — swept
+    // or not — is not answered through a card (v3 review, finding 7).
+    if (decision.state === "answered") return refuse("already-answered", "already answered — somebody got there first");
+    if (decision.state !== "open" || (decision.deadline !== null && Date.parse(decision.deadline) <= now.getTime())) {
+      return refuse("stale", "this decision is no longer open — answer it on its own page if you still mean to");
+    }
     if (!chosen.reversible && options.confirm !== true) return refuse("needs-confirm", "an irreversible choice must be confirmed explicitly");
-    const answered = store.answerDecision({ id: decision.id, choice: chosen.id, by: actor.name, via: options.via ?? "web" }, now);
-    if (!answered.ok) {
-      return answered.reason === "already-answered"
-        ? refuse("already-answered", "already answered — somebody got there first")
-        : refuse("refused", `not answered: ${answered.reason}`);
+    const answered = store.answerDecision({ id: decision.id, choice: chosen.id, by: actor.name, via: options.via }, now);
+    // The same choice landed first from somewhere else: the decision keeps
+    // its first answerer, and this card did not answer it (finding 5).
+    if (!answered.ok || answered.duplicate === true) {
+      return !answered.ok && answered.reason !== "already-answered"
+        ? refuse("refused", `not answered: ${answered.reason}`)
+        : refuse("already-answered", "already answered — somebody got there first");
     }
     return { ok: true, kind, said: `decision #${decision.id} answered: ${chosen.label}`, taskId: ref.externalId };
   }

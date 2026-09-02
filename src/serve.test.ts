@@ -6985,7 +6985,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: clockNow });
     store.saveDecision({ run, urgency: "blocking", recap: "RECAP-CANARY", question: "Ship it?", options: [{ id: "go", label: "Ship", consequence: "it ships", reversible: false }], recommendation: "go" }, clockNow);
     expect(proposeAsCoordinator(store, minted.token, "next", { ref: "b" }, clockNow)).toMatchObject({ ok: true, id: 1 });
-    expect(proposeAsCoordinator(store, minted.token, "answer", { decision: 1, option: "go", rationale: "tests are green" }, clockNow)).toMatchObject({ ok: true, id: 2 });
+    expect(proposeAsCoordinator(store, minted.token, "answer", { decision: 1, option: "go", rationale: "tests are green" }, clockNow, { readDecisions: new Set([1]) })).toMatchObject({ ok: true, id: 2 });
     const cookie = await login();
     let html = await page(cookie);
     const csrf = csrfFrom(html);
@@ -7000,6 +7000,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const taskPage = await (await fetch(url("/t/b"), { headers: { cookie } })).text();
     expect(taskPage).toContain('action="/proposals/1/confirm"');
     expect(taskPage).toContain('name="return" value="/t/b"');
+    // A backslash return is not same-site to a browser: refused to "/" (v3 review, finding 10).
+    const crooked = await post(cookie, "/proposals/999/dismiss", { csrf, return: "/\\evil.example" });
+    expect(crooked.headers.get("location")).toBe("/");
     const confirmed = await post(cookie, "/proposals/1/confirm", { csrf, return: "/t/b" });
     expect(confirmed.headers.get("location")).toBe("/t/b");
     expect(store.getCoordinatorProposal(1)).toMatchObject({ state: "confirmed", resolvedBy: "alex" });

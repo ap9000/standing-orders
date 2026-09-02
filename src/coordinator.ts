@@ -270,7 +270,9 @@ export function fileCoordinatorProposal(
     const filedRow = store.handle
       .prepare("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM coordinator_event WHERE cid = ? AND kind = 'filed' AND created_at > ?")
       .get(who.cid, windowStart);
-    const filed = Number(filedRow?.["n"] ?? 0);
+    // Filings and proposals share the hourly window in BOTH directions
+    // (v3 review, finding 2).
+    const filed = Number(filedRow?.["n"] ?? 0) + store.coordinatorProposalsSince(who.cid, new Date(windowStart));
     if (filed >= who.perHour) {
       const oldest = String(filedRow?.["oldest"] ?? now.toISOString());
       const slotMs = new Date(oldest).getTime() + 3_600_000 - now.getTime();

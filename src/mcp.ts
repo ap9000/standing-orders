@@ -76,6 +76,8 @@ type ToolContext = {
    * inside its own transaction. */
   token: string;
   now: Date;
+  /** Decisions this connection read with get_decision — propose_answer needs one. */
+  readDecisions: Set<number>;
 };
 
 type Tool = {
@@ -114,6 +116,33 @@ function invalidArgs(schema: Json, args: Record<string, unknown>): string | null
   for (const [key, rule] of Object.entries(properties)) {
     const value = args[key];
     if (value === undefined) continue;
+    // A union type (`["string","null"]`) admits null or its other member;
+    // an array checks its items and its cap (v3 review, finding 8).
+    if (Array.isArray(rule["type"])) {
+      const types = rule["type"] as string[];
+      if (value === null) {
+        if (!types.includes("null")) return "`" + key + "` must not be null";
+        continue;
+      }
+      const member = types.find(one => one !== "null");
+      const problem = invalidArgs({ type: "object", properties: { [key]: { ...rule, type: member ?? "string" } } } as unknown as Json, { [key]: value });
+      if (problem !== null) return problem;
+      continue;
+    }
+    if (rule["type"] === "array") {
+      if (!Array.isArray(value)) return "`" + key + "` must be an array";
+      const maxItems = rule["maxItems"];
+      if (typeof maxItems === "number" && value.length > maxItems) return "`" + key + "` has more than " + String(maxItems) + " items";
+      const items = rule["items"] as Record<string, unknown> | undefined;
+      if (items !== undefined) {
+        for (const one of value) {
+          const problem = invalidArgs({ type: "object", properties: { item: items } } as unknown as Json, { item: one });
+          if (problem !== null) return "`" + key + "`: " + problem.replace("`item`", "an item");
+        }
+      }
+      continue;
+    }
+    if (rule["type"] === "boolean" && typeof value !== "boolean") return "`" + key + "` must be a boolean";
     if (rule["type"] === "string") {
       if (typeof value !== "string") return "`" + key + "` must be a string";
       const min = rule["minLength"];
@@ -249,6 +278,7 @@ const TOOLS: Tool[] = [
     handle: (ctx, args) => {
       const found = decisionOver(ctx.store, ctx.who.repos, Number(args["decision"]), ctx.now);
       if (found === null) return { ok: false, message: "not-found: no such decision in your repositories" };
+      ctx.readDecisions.add(Number(args["decision"]));
       return { ok: true, body: labelRepos(found, index => ctx.who.repos[index] ?? "") as unknown as Json };
     },
   },
@@ -310,7 +340,7 @@ function proposeTools(): Tool[] {
     description,
     inputSchema: { type: "object", properties, required, additionalProperties: false } as unknown as Json,
     handle: (ctx, args) => {
-      const outcome = proposeAsCoordinator(ctx.store, ctx.token, kind, args, ctx.now);
+      const outcome = proposeAsCoordinator(ctx.store, ctx.token, kind, args, ctx.now, { readDecisions: ctx.readDecisions });
       if (!outcome.ok) return { ok: false, message: outcome.message };
       return { ok: true, body: { proposal: outcome.id, kind: outcome.kind, awaiting: outcome.awaiting } };
     },
@@ -348,6 +378,8 @@ export function serveMcp(
   clock: () => Date = () => new Date(),
   enrolled: readonly string[] | null = null,
 ): McpOutcome {
+  /** Per connection: which decisions this credential read in full (v3). */
+  const readDecisions = new Set<number>();
   const auth = authenticateCoordinator(store, token);
   if (!auth.ok) {
     return {
@@ -435,7 +467,7 @@ export function serveMcp(
       error(id, -32602, invalid);
       return;
     }
-    const answered = tool.handle({ store, who: session.who, token, enrolled, now: clock() }, args);
+    const answered = tool.handle({ store, who: session.who, token, enrolled, now: clock(), readDecisions }, args);
     if (!answered.ok) {
       respond(id, era, { content: [{ type: "text", text: answered.message }], isError: true }, false);
       return;

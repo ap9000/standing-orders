@@ -2684,6 +2684,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         incidents: ref === null ? [] : store.incidentsForTask(ref.id),
         coordinatorProposals: (() => {
           if (ref === null || ref.repo === null || who.role !== "approver") return null;
+          store.sweepCoordinatorProposals(now);
           const rows = store.listCoordinatorProposals({ repos: [ref.repo], taskId });
           return { rows, decisions: decisionsFor(store, rows), now };
         })(),
@@ -4217,6 +4218,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const principal = matePrincipal(who);
       if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
       const id = Number(coordinatorProposal[1]);
+      store.sweepCoordinatorProposals(now);
       const back = body.get("return") === null ? "/chat" : safeReturn(body.get("return"));
       if (coordinatorProposal[2] === "dismiss") {
         dismissCoordinatorProposal(store, principal, id, now);
@@ -8264,7 +8266,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
       (decision === null ? "" : `<p style="white-space:pre-wrap">${escape(decision.question)}</p>`) +
       options +
       `<p class="meta">proposed: <strong>${escape(text("optionLabel"))}</strong> — ${escape(text("rationale"))}</p>` +
-      `<p class="meta">${view.by.mate ? "the mate" : "the coordinator"} read every consequence but not the builder's recap; you see both here${decision !== null && decision.state !== "open" ? " · this decision is no longer open" : ""}</p>`;
+      `<p class="meta">${payload["readConsequences"] === true ? `${view.by.mate ? "the mate" : "the coordinator"} read every consequence but not the builder's recap` : `${view.by.mate ? "the mate" : "the coordinator"} did NOT read the consequences`}; you see both here${decision !== null && decision.state !== "open" ? " · this decision is no longer open" : ""}</p>`;
   } else {
     what = `<strong>cancel <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
   }
@@ -9751,7 +9753,8 @@ const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string }>
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "/";
-  if (!raw.startsWith("/") || raw.startsWith("//") || /[\r\n\t\u0000-\u001f]/.test(raw) || raw.length > 512) return "/";
+  // A backslash is a slash to a browser's URL parser (`/\evil` → `//evil`), so it is refused too (v3 review, finding 10).
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\") || /[\r\n\t\u0000-\u001f]/.test(raw) || raw.length > 512) return "/";
   return raw;
 }
 

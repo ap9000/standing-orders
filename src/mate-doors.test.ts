@@ -53,7 +53,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     const seen = store.transact(() => ({ queueRevision: store.queueRevision(), position: store.queuePosition("c")! }));
     const id = pending("next", { task: "c", queueRevision: seen.queueRevision, position: seen.position.position, column: seen.position.column });
     clockAt += 5_000;
-    expect(confirmMateProposal(store, who, id, clock())).toMatchObject({ ok: false, reason: "session-ended" });
+    expect(confirmMateProposal(store, who, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "session-ended" });
     expect(store.getMateProposal(id)?.state).toBe("pending");
     expect(store.queuePosition("c")?.position).toBe(3);
   });
@@ -65,11 +65,11 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     store.saveApprover("alex", "n".repeat(64), clock());
     expect(store.activeMateSession("alex", clock())).toBeNull();
     expect(store.getMateProposal(id)).toBeNull();
-    expect(confirmMateProposal(store, who, id, clock())).toMatchObject({ ok: false, reason: "standing" });
+    expect(confirmMateProposal(store, who, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "standing" });
     // The new generation mints its own principal and finds nothing to confirm.
     const fresh = principal();
     expect(fresh.generation).toBe(who.generation + 1);
-    expect(confirmMateProposal(store, fresh, id, clock())).toMatchObject({ ok: false, reason: "not-yours" });
+    expect(confirmMateProposal(store, fresh, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "not-yours" });
   });
 
   test("the place the mate saw is part of the CAS: a neighbour leaving the queue refuses a stale next", () => {
@@ -80,21 +80,21 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     expect(store.cancelTask("b", clock())).toMatchObject({ ok: true });
     expect(store.queueRevision()).toBe(seen.queueRevision);
     expect(store.queuePosition("c")?.position).toBe(2);
-    expect(confirmMateProposal(store, who, id, clock())).toMatchObject({ ok: false, reason: "stale" });
+    expect(confirmMateProposal(store, who, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "stale" });
     expect(store.getMateProposal(id)?.state).toBe("refused");
   });
 
   test("a hold card confirms as the operator's own hold, once; a second confirm and a dismiss both answer in words", () => {
     session();
     const id = pending("hold", { task: "a", reason: "wait", sawHold: null });
-    expect(confirmMateProposal(store, who, id, clock())).toMatchObject({ ok: true, said: "a held: wait" });
+    expect(confirmMateProposal(store, who, id, clock(), { via: "cli" })).toMatchObject({ ok: true, said: "a held: wait" });
     expect(store.activeHolds(store.refFor("built-in", "a").id, clock()).map(one => one.reason)).toEqual(["wait"]);
-    expect(confirmMateProposal(store, who, id, clock())).toMatchObject({ ok: false, reason: "not-pending" });
+    expect(confirmMateProposal(store, who, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "not-pending" });
     expect(dismissMateProposal(store, who, id, clock())).toBe(false);
     // A hand-placed hold after the proposal: the stale card must not overwrite it.
     const again = pending("hold", { task: "b", reason: "model text", sawHold: null });
     store.hold(store.refFor("built-in", "b").id, "by hand", null, clock());
-    expect(confirmMateProposal(store, who, again, clock())).toMatchObject({ ok: false, reason: "stale" });
+    expect(confirmMateProposal(store, who, again, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "stale" });
     expect(store.activeHolds(store.refFor("built-in", "b").id, clock()).map(one => one.reason)).toEqual(["by hand"]);
   });
 
@@ -106,20 +106,34 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
       T0,
     );
     const irreversible = pending("answer", { decision: 1, task: "a", option: "y", optionLabel: "Y", reversible: false, rationale: "because" });
-    expect(confirmMateProposal(store, who, irreversible, clock())).toMatchObject({ ok: false, reason: "needs-confirm" });
+    expect(confirmMateProposal(store, who, irreversible, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "needs-confirm" });
     expect(store.getMateProposal(irreversible)?.state).toBe("pending");
     expect(store.getDecision(1)?.state).toBe("open");
     expect(confirmMateProposal(store, who, irreversible, clock(), { confirm: true, via: "cli" })).toMatchObject({ ok: true, said: "decision #1 answered: Y", taskId: "a" });
     expect(store.getDecision(1)).toMatchObject({ state: "answered", answeredBy: "alex", answeredVia: "cli" });
     const late = pending("answer", { decision: 1, task: "a", option: "x", optionLabel: "X", reversible: true, rationale: "too late" });
-    expect(confirmMateProposal(store, who, late, clock())).toMatchObject({ ok: false, reason: "already-answered" });
+    expect(confirmMateProposal(store, who, late, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "already-answered" });
+    // The SAME choice landing first elsewhere is not this card's answer either (v3 review, finding 5).
+    const run2 = store.startRun({ taskRef: store.refFor("built-in", "b").id, leaseId: "l2", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    store.saveDecision({ run: run2, urgency: "blocking", recap: "r", question: "Again?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }], recommendation: "x" }, T0);
+    const same = pending("answer", { decision: 2, task: "b", option: "x", optionLabel: "X", reversible: true, rationale: "x" });
+    store.answerDecision({ id: 2, choice: "x", by: "root", via: "cli" }, clock());
+    expect(confirmMateProposal(store, who, same, clock(), { via: "web" })).toMatchObject({ ok: false, reason: "already-answered" });
+    expect(store.getDecision(2)).toMatchObject({ answeredBy: "root", answeredVia: "cli" });
+    // A decision past its deadline is not "open" for a card, swept or not (finding 7).
+    const run3 = store.startRun({ taskRef: store.refFor("built-in", "c").id, leaseId: "l3", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    store.saveDecision({ run: run3, urgency: "blocking", recap: "r", question: "Late?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }], recommendation: "x", deadline: new Date(clockAt + 60_000).toISOString() }, T0);
+    const timed = pending("answer", { decision: 3, task: "c", option: "x", optionLabel: "X", reversible: true, rationale: "x" });
+    clockAt += 120_000;
+    expect(confirmMateProposal(store, who, timed, clock(), { via: "web" })).toMatchObject({ ok: false, reason: "stale" });
+    expect(store.getDecision(3)?.state).toBe("open");
   });
 
   test("a structural principal never confirms", () => {
     session();
     const id = pending("hold", { task: "a", reason: "wait", sawHold: null });
     const copy = { ...who } as unknown as VerifiedApprover;
-    expect(confirmMateProposal(store, copy, id, clock())).toMatchObject({ ok: false, reason: "standing" });
+    expect(confirmMateProposal(store, copy, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "standing" });
     expect(store.getMateProposal(id)?.state).toBe("pending");
   });
 });

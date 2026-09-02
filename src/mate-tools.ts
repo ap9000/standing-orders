@@ -24,6 +24,10 @@ export type MateToolContext = {
   now: Date;
   /** Records a proposal as `drafting` under the running turn; null when the turn may draft no more. */
   draft: (kind: MateProposalKind, payload: Record<string, unknown>) => number | null;
+  /** The step this call runs in, and which decisions were read (by get_decision) at which step —
+   * an answer may be proposed only for a decision read in an EARLIER step (v3 review, finding 6). */
+  step: number;
+  readDecisions: Map<number, number>;
 };
 
 export type MateToolResult = { ok: true; body: unknown } | { ok: false; message: string };
@@ -228,11 +232,14 @@ export function decisionOver(store: Store, repos: readonly string[], decisionId:
   if (ref === null || ref.repo === null) return null;
   const repoIndex = repos.indexOf(ref.repo);
   if (repoIndex === -1) return null;
+  // "Open" is derived, not stored (v3 review, finding 7): a decision past
+  // its deadline is expired here whether or not the sweep has run.
+  const state = decision.state === "open" && decision.deadline !== null && Date.parse(decision.deadline) <= now.getTime() ? "expired" : decision.state;
   return {
     repoIndex,
     decision: decision.id,
     task: ref.externalId,
-    state: decision.state,
+    state,
     question: decision.question,
     options: decision.options.map(one => ({ id: one.id, label: one.label, reversible: one.reversible, consequence: one.consequence })),
     ageHours: Math.max(0, Math.round((now.getTime() - Date.parse(decision.createdAt)) / 3_600_000)),
@@ -347,6 +354,7 @@ export const MATE_TOOLS: MateTool[] = [
       if (typeof id !== "number" || !Number.isInteger(id) || id < 1) return { ok: false, message: "decision is its id" };
       const found = decisionOver(ctx.store, ctx.who.repos, id, ctx.now);
       if (found === null) return { ok: false, message: "not-found: no such decision in your projects" };
+      ctx.readDecisions.set(id, ctx.step);
       return { ok: true, body: labelRepos(found, index => `r${index + 1}`) };
     },
   },
@@ -486,6 +494,10 @@ export const MATE_TOOLS: MateTool[] = [
       const found = decisionOver(ctx.store, ctx.who.repos, id, ctx.now);
       if (found === null) return { ok: false, message: "not-found: no such decision in your projects" };
       if (found["state"] !== "open") return { ok: false, message: "that decision is no longer open" };
+      const readAt = ctx.readDecisions.get(id);
+      if (readAt === undefined || readAt >= ctx.step) {
+        return { ok: false, message: "read the decision first with get_decision, and propose in a later step — an answer chosen before its consequences arrived is a guess" };
+      }
       const options = found["options"] as { id: string; label: string; reversible: boolean }[];
       const chosen = options.find(one => one.id === args["option"]);
       if (chosen === undefined) return { ok: false, message: `option must be one of ${options.map(one => one.id).join(", ")}` };
@@ -498,6 +510,7 @@ export const MATE_TOOLS: MateTool[] = [
         optionLabel: chosen.label,
         reversible: chosen.reversible,
         rationale: args["rationale"],
+        readConsequences: true,
       });
       if (proposalId === null) return tooMany();
       return { ok: true, body: { proposal: proposalId, kind: "answer", decision: id, option: chosen.id, awaiting: chosen.reversible ? "the operator's confirmation" : "the operator's explicit confirmation — this option is irreversible" } };

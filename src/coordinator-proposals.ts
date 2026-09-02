@@ -22,8 +22,17 @@ export type ProposeOutcome =
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** The coordinator's proposal as a row; the shape of `args` is the MCP tool's. */
-export function proposeAsCoordinator(store: Store, token: string, kind: CoordinatorProposalKind, args: Record<string, unknown>, now: Date): ProposeOutcome {
+export function proposeAsCoordinator(
+  store: Store,
+  token: string,
+  kind: CoordinatorProposalKind,
+  args: Record<string, unknown>,
+  now: Date,
+  /** The decisions this connection has read with get_decision — an answer needs one (v3 review, finding 6). */
+  seen: { readDecisions: ReadonlySet<number> } = { readDecisions: new Set() },
+): ProposeOutcome {
   return store.transact(() => {
+    store.sweepCoordinatorProposals(now);
     const auth = authenticateCoordinator(store, token);
     if (!auth.ok) {
       return auth.reason === "revoked"
@@ -45,7 +54,7 @@ export function proposeAsCoordinator(store: Store, token: string, kind: Coordina
     if (pending >= PER_CID_PENDING_PROPOSALS) {
       return { ok: false as const, reason: "pending-cap" as const, message: `${pending} of your proposals are still waiting on the operator — they resolve before more file` };
     }
-    const built = buildPayload(store, who, kind, args, now);
+    const built = buildPayload(store, who, kind, args, now, seen);
     if (!built.ok) return built;
     const id = store.fileCoordinatorProposalRow({ cid: who.cid, name: who.name, repo: built.repo, kind, payload: built.payload }, now);
     return { ok: true as const, id, kind, awaiting: built.awaiting };
@@ -62,7 +71,7 @@ function admittedTask(store: Store, who: VerifiedCoordinator, args: Record<strin
   return { taskId: raw, refId: ref.id, repo: ref.repo };
 }
 
-function buildPayload(store: Store, who: VerifiedCoordinator, kind: CoordinatorProposalKind, args: Record<string, unknown>, now: Date): Built {
+function buildPayload(store: Store, who: VerifiedCoordinator, kind: CoordinatorProposalKind, args: Record<string, unknown>, now: Date, seen: { readDecisions: ReadonlySet<number> }): Built {
   const notFound = (): Built => ({ ok: false, reason: "not-found", message: "not-found: no such task in your repositories" });
   const bad = (message: string): Built => ({ ok: false, reason: "bad-args", message });
   const confirmation = "the operator's confirmation";
@@ -73,6 +82,7 @@ function buildPayload(store: Store, who: VerifiedCoordinator, kind: CoordinatorP
     const found = decisionOver(store, who.repos, decisionId, now);
     if (found === null) return { ok: false, reason: "not-found", message: "not-found: no such decision in your repositories" };
     if (found["state"] !== "open") return { ok: false, reason: "not-proposable", message: "that decision is no longer open" };
+    if (!seen.readDecisions.has(decisionId)) return { ok: false, reason: "not-proposable", message: "read the decision first with get_decision — an answer chosen without its consequences is a guess" };
     const options = found["options"] as { id: string; label: string; reversible: boolean }[];
     const chosen = options.find(one => one.id === args["option"]);
     if (chosen === undefined) return bad(`option must be one of ${options.map(one => one.id).join(", ")}`);
@@ -81,7 +91,7 @@ function buildPayload(store: Store, who: VerifiedCoordinator, kind: CoordinatorP
     return {
       ok: true,
       repo,
-      payload: { decision: decisionId, task: found["task"], option: chosen.id, optionLabel: chosen.label, reversible: chosen.reversible, rationale: args["rationale"] },
+      payload: { decision: decisionId, task: found["task"], option: chosen.id, optionLabel: chosen.label, reversible: chosen.reversible, rationale: args["rationale"], readConsequences: true },
       awaiting: chosen.reversible ? confirmation : "the operator's explicit confirmation — this option is irreversible",
     };
   }

@@ -182,6 +182,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   let proposals = 0;
   let reads = 0;
   let steps = 0;
+  const readDecisions = new Map<number, number>();
   let tokensIn = 0;
   let tokensOut = 0;
   let settled = 0;
@@ -292,7 +293,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     }
     history.push({ role: "assistant", text: answer.text, calls: answer.calls });
     for (const call of answer.calls) {
-      const outcome = executeMateTool({ store, who, now: clock(), draft }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, step: steps, readDecisions }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });
     }

@@ -160,7 +160,7 @@ describe("the mate's turn", () => {
     expect(sent).toContain("[approver]");
     expect(sent).toContain("[digest]");
     // The task outside the ceiling is unreachable even by id.
-    const outside = executeMateTool({ store, who, now: clock(), draft: () => null }, "get_task", { task: "out-1" });
+    const outside = executeMateTool({ store, who, now: clock(), draft: () => null, step: 1, readDecisions: new Map() }, "get_task", { task: "out-1" });
     expect(outside).toMatchObject({ ok: false, message: expect.stringContaining("not-found") });
   });
 
@@ -192,7 +192,7 @@ describe("the mate's turn", () => {
     expect(rows[2]?.payload).toMatchObject({ task: "other-1", repoId: "r2", reason: "not this week", sawHold: null });
     expect(rows.every(one => one.ceilingDigest === who.ceilingDigest)).toBe(true);
     // A hold proposed over an existing operator hold carries that hold's id.
-    const seen = executeMateTool({ store, who, now: clock(), draft: (_kind, payload) => (payload["sawHold"] === rows[1]?.payload["holdId"] ? 99 : null) }, "propose_hold", { task: "in-2", reason: "again" });
+    const seen = executeMateTool({ store, who, now: clock(), draft: (_kind, payload) => (payload["sawHold"] === rows[1]?.payload["holdId"] ? 99 : null), step: 1, readDecisions: new Map() }, "propose_hold", { task: "in-2", reason: "again" });
     expect(seen).toMatchObject({ ok: true, body: { proposal: 99 } });
   });
 
@@ -504,7 +504,8 @@ describe("the mate's turn", () => {
   });
 
   test("get_decision shows consequences through mateView but never the recap or the recommendation; propose_answer carries the pick", async () => {
-    const ctx = { store, who, now: clock(), draft: (_k: string, payload: Record<string, unknown>) => (payload["option"] === "closed" ? 7 : null) };
+    const readDecisions = new Map<number, number>();
+    const ctx = { store, who, now: clock(), draft: (_k: string, payload: Record<string, unknown>) => (payload["option"] === "closed" ? 7 : null), step: 1, readDecisions };
     const got = executeMateTool(ctx, "get_decision", { decision: 1 });
     expect(got).toMatchObject({ ok: true, body: { decision: 1, task: "in-1", repo: "r1", state: "open", options: [{ id: "open", reversible: true }, { id: "closed", reversible: false }] } });
     const serialized = JSON.stringify(got);
@@ -512,19 +513,27 @@ describe("the mate's turn", () => {
     expect(serialized).not.toContain("RECAP-CANARY");
     expect(serialized).not.toContain("recommend");
     expect(executeMateTool(ctx, "get_decision", { decision: 99 })).toMatchObject({ ok: false, message: expect.stringContaining("not-found") });
-    expect(executeMateTool(ctx, "propose_answer", { decision: 1, option: "nope", rationale: "x" })).toMatchObject({ ok: false, message: expect.stringContaining("option must be one of") });
-    expect(executeMateTool(ctx, "propose_answer", { decision: 1, option: "closed", rationale: "safer under load" })).toMatchObject({ ok: true, body: { proposal: 7, kind: "answer", awaiting: expect.stringContaining("irreversible") } });
-    // In a turn: the row goes pending with the option's label and reversibility, and the outbound canary still holds.
-    const script = scripted([answer([call("get_decision", { decision: 1 }), call("propose_answer", { decision: 1, option: "open", rationale: "reversible, and unblocks the build" })]), text("I propose failing open.")]);
+    // Read in THIS step: the model chose before the consequences arrived — refused (v3 review, finding 6).
+    expect(executeMateTool(ctx, "propose_answer", { decision: 1, option: "closed", rationale: "safer under load" })).toMatchObject({ ok: false, message: expect.stringContaining("get_decision") });
+    const later = { ...ctx, step: 2 };
+    expect(executeMateTool(later, "propose_answer", { decision: 1, option: "nope", rationale: "x" })).toMatchObject({ ok: false, message: expect.stringContaining("option must be one of") });
+    expect(executeMateTool(later, "propose_answer", { decision: 1, option: "closed", rationale: "safer under load" })).toMatchObject({ ok: true, body: { proposal: 7, kind: "answer", awaiting: expect.stringContaining("irreversible") } });
+    // In a turn: the read and the proposal in ONE response is refused; read, then propose in the next step, goes pending.
+    const script = scripted([
+      answer([call("get_decision", { decision: 1 }), call("propose_answer", { decision: 1, option: "open", rationale: "guessing" })]),
+      answer([call("propose_answer", { decision: 1, option: "open", rationale: "reversible, and unblocks the build" })]),
+      text("I propose failing open."),
+    ]);
     const outcome = await turn("what about the decision?", script.fetcher);
-    expect(outcome).toMatchObject({ ok: true, proposals: 1, activity: "read 1 · proposed 1 · 2 steps" });
+    expect(outcome).toMatchObject({ ok: true, proposals: 1, activity: "read 1 · proposed 1 · 3 steps" });
+    expect(script.bodies[1]).toContain("get_decision");
     const row = store.listMateProposals(thread().id, ["pending"])[0];
     expect(row).toMatchObject({ kind: "answer", payload: { decision: 1, task: "in-1", option: "open", optionLabel: "Fail open", reversible: true } });
     expect(script.bodies.join("\n")).not.toContain("RECAP-CANARY");
   });
 
   test("the tools refuse bad arguments with typed messages, count decisions per task, and place the queue by column", () => {
-    const ctx = { store, who, now: clock(), draft: () => 1 };
+    const ctx = { store, who, now: clock(), draft: () => 1, step: 1, readDecisions: new Map<number, number>() };
     expect(executeMateTool(ctx, "queue", { repo: "r9" })).toMatchObject({ ok: false });
     expect(executeMateTool(ctx, "list_tasks", { repo: INSIDE })).toMatchObject({ ok: false });
     expect(executeMateTool(ctx, "propose_task", { repo: "r1", title: "x", goal: "<script>alert(1)</script>" })).toMatchObject({ ok: true });

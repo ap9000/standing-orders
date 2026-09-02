@@ -2917,26 +2917,7 @@ function migrate(db: Database): void {
   addColumn(db, "task_scope", "proposed_via", "TEXT");
   // v33 (mate v3): `answer` joins the proposal kinds — a CHECK widening,
   // copy-rename against the v32 shape.
-  rebuildForV4(
-    db,
-    "mate_proposal",
-    "'task','next','reserve','hold','unhold','scope','cancel'",
-    "'answer'",
-    `CREATE TABLE mate_proposal_next (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
-  turn           INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel','answer')),
-  payload_json   TEXT NOT NULL,
-  ceiling_digest TEXT NOT NULL,
-  state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
-  created_at     TEXT NOT NULL,
-  resolved_at    TEXT,
-  resolved_by    TEXT,
-  outcome_json   TEXT
-)`,
-    ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"],
-  );
+  rebuildMateProposalForV33(db);
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
   addColumn(db, "task_ref", "plan_strikes", "INTEGER NOT NULL DEFAULT 0");
   rebuildForV4(
@@ -3435,6 +3416,70 @@ function migrate(db: Database): void {
 /** v30: quota's PRIMARY KEY grows auth_mode + credential_fp (a subscription
  * and an API key exhaust independently). A PK change is a rebuild, not an
  * addColumn; recognized exactly like every other v-rebuild. */
+const MATE_PROPOSAL_V32_DDL = `CREATE TABLE IF NOT EXISTS mate_proposal (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  turn           INTEGER NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel')),
+  payload_json   TEXT NOT NULL,
+  ceiling_digest TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
+  created_at     TEXT NOT NULL,
+  resolved_at    TEXT,
+  resolved_by    TEXT,
+  outcome_json   TEXT
+)`;
+const MATE_PROPOSAL_V33_DDL = (name: string): string => `CREATE TABLE ${name} (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  turn           INTEGER NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel','answer')),
+  payload_json   TEXT NOT NULL,
+  ceiling_digest TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
+  created_at     TEXT NOT NULL,
+  resolved_at    TEXT,
+  resolved_by    TEXT,
+  outcome_json   TEXT
+)`;
+
+/**
+ * v33 (mate v3): `answer` joins mate_proposal's kinds — an EXACT recognizer
+ * (v3 review, finding 9): the stored DDL must equal the v32 shape or the
+ * v33 shape, byte for byte after canonicalization; anything else refuses
+ * rather than being guessed. Rows and ids are carried whole; the one
+ * shipped index is recreated; foreign keys are checked before commit.
+ */
+export function rebuildMateProposalForV33(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  const target = canonicalDdl(MATE_PROPOSAL_V33_DDL("mate_proposal_next")).replace("mate_proposal_next", "mate_proposal");
+  if (stored === target) return;
+  if (stored !== canonicalDdl(MATE_PROPOSAL_V32_DDL).replace("IF NOT EXISTS ", "")) {
+    throw new Error("the mate_proposal table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(MATE_PROPOSAL_V33_DDL("mate_proposal_next"));
+      db.exec("INSERT INTO mate_proposal_next (id, thread, turn, kind, payload_json, ceiling_digest, state, created_at, resolved_at, resolved_by, outcome_json) SELECT id, thread, turn, kind, payload_json, ceiling_digest, state, created_at, resolved_at, resolved_by, outcome_json FROM mate_proposal");
+      db.exec("DROP TABLE mate_proposal");
+      db.exec("ALTER TABLE mate_proposal_next RENAME TO mate_proposal");
+      db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) throw new Error("the mate_proposal rebuild left a dangling reference — rolled back");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
 function rebuildQuotaForV30(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'quota'").get();
   if (row === undefined) return;

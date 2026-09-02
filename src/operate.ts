@@ -79,7 +79,7 @@ import {
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { ask, askHidden, confirm, interactive } from "./prompt.js";
-import { runMateCli, type MateCliSeams } from "./mate-cli.js";
+import { runMateCli, answerContextLines, type MateCliSeams } from "./mate-cli.js";
 import { confirmCoordinatorProposal, dismissCoordinatorProposal } from "./mate-doors.js";
 import { verifyApproverByPassword } from "./principal.js";
 import { canonicalProject, projectName } from "./project.js";
@@ -8909,7 +8909,8 @@ async function proposalsCommand(positional: readonly string[], flags: Map<string
                         : one.kind === "scope"
                           ? `rewrite the scope of ${t("task")}`
                           : `cancel ${t("task")}: ${t("reason")} (arm it yourself: standing-orders task cancel ${t("task")})`;
-            return `  #${one.id} ${what} — by ${one.name} in ${projectName(one.repo)} [${one.state}]`;
+            const head = `  #${one.id} ${what} — by ${one.name} in ${projectName(one.repo)} [${one.state}]`;
+            return one.kind === "answer" ? [head, ...answerContextLines(store, one.payload)].join("\n") : head;
           }),
     );
   }
@@ -8926,8 +8927,15 @@ async function proposalsCommand(positional: readonly string[], flags: Map<string
       ? succeed(write, json, "proposals dismiss", { proposal: id }, () => [`dismissed #${id}`])
       : fail(write, json, "proposals dismiss", "not-pending", "no pending proposal by that id in your projects", EXIT.refused);
   }
+  // An answer is confirmed only after its context was shown (finding 4): the
+  // confirm prints the question, every consequence, and the recommendation
+  // before the door runs, and an irreversible one needs --yes on top.
+  const row = store.getCoordinatorProposal(id);
+  if (row !== null && row.kind === "answer" && !json) {
+    for (const line of answerContextLines(store, row.payload)) write(line);
+  }
   const outcome = confirmCoordinatorProposal(store, verified.who, id, now, { confirm: flags.has("yes"), via: "cli" });
-  if (!outcome.ok) return fail(write, json, "proposals confirm", outcome.reason, outcome.reason === "needs-confirm" ? `${outcome.said} — pass --yes` : outcome.said, outcome.reason === "standing" ? EXIT.refused : EXIT.refused);
+  if (!outcome.ok) return fail(write, json, "proposals confirm", outcome.reason, outcome.reason === "needs-confirm" ? `${outcome.said} — read the consequences above, then pass --yes` : outcome.said, EXIT.refused);
   return succeed(write, json, "proposals confirm", { proposal: id, kind: outcome.kind, said: outcome.said, ...(outcome.taskId === null ? {} : { task: outcome.taskId }) }, () => [
     outcome.said,
     ...(outcome.kind === "scope" && outcome.taskId !== null ? [`approve it with your password: standing-orders task approve ${outcome.taskId}`] : []),

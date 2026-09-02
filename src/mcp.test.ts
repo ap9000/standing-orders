@@ -600,10 +600,23 @@ describe("the MCP stdio server", () => {
     expect(call(2, "propose_next", { ref: "no-such" }).body).toContain("not-found");
     expect(call(3, "propose_hold", { ref: filed.id, reason: "AKIAABCDEFGHIJKLMNOP" }).body).toContain("plain text");
     expect(call(4, "propose_hold", { ref: filed.id, reason: "later" }).isError).toBe(false);
+    // Compound argument shapes are validated at the protocol layer (v3 review, finding 8).
+    h.send({ jsonrpc: "2.0", id: 40, method: "tools/call", params: { _meta: modernMeta, name: "propose_reserve", arguments: { ref: filed.id, worker: 7 } } });
+    expect(h.last()["error"]).toMatchObject({ code: -32602 });
+    h.send({ jsonrpc: "2.0", id: 41, method: "tools/call", params: { _meta: modernMeta, name: "propose_scope", arguments: { ref: filed.id, goal: "g", touches: { a: 1 } } } });
+    expect(h.last()["error"]).toMatchObject({ code: -32602 });
+    h.send({ jsonrpc: "2.0", id: 42, method: "tools/call", params: { _meta: modernMeta, name: "propose_scope", arguments: { ref: filed.id, goal: "g", touches: ["src/a.ts", 3] } } });
+    expect(h.last()["error"]).toMatchObject({ code: -32602 });
+    // An answer needs get_decision on THIS connection first.
+    const run = store.startRun({ taskRef: store.refFor("built-in", filed.id).id, leaseId: "l-2", runner: "runner-1", branch: "b", worktree: "/w", now: T0 });
+    store.saveDecision({ run, urgency: "blocking", recap: "RECAP", question: "Q?", options: [{ id: "a", label: "A", consequence: "ca", reversible: true }], recommendation: "a" }, T0);
+    expect(call(43, "propose_answer", { decision: 1, option: "a", rationale: "fine" }).body).toContain("get_decision");
+    expect(call(44, "get_decision", { decision: 1 }).body).toContain("ca");
+    expect(JSON.parse(call(45, "propose_answer", { decision: 1, option: "a", rationale: "fine" }).body)).toMatchObject({ kind: "answer" });
     // The row is a coordinator proposal, admitted to an approver whose ceiling holds the repo.
     const rows = store.listCoordinatorProposals({ repos: [REPO] });
-    expect(rows.map(one => one.kind)).toEqual(["hold", "next"]);
-    expect(rows[1]).toMatchObject({ name: "planner-bot", repo: REPO, payload: { task: second.id, position: 2, of: 2 } });
+    expect(rows.map(one => one.kind)).toEqual(["answer", "hold", "next"]);
+    expect(rows[2]).toMatchObject({ name: "planner-bot", repo: REPO, payload: { task: second.id, position: 2, of: 2 } });
     expect(store.listCoordinatorProposals({ repos: ["/repo/other"] })).toEqual([]);
     // Revoking the credential expires its pending rows.
     revokeCoordinator(store, rows[0]!.cid, "alex", T0);

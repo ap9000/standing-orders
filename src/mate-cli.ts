@@ -58,6 +58,25 @@ function keyFor(config: ChatConfig, databaseFile: string, env: Record<string, st
   }
 }
 
+/**
+ * What a terminal must show before an answer is confirmed (v3 review,
+ * finding 4): the question, every option with its consequence, which one
+ * the builder recommends, which one is proposed — the card's content.
+ */
+export function answerContextLines(store: Store, payload: Record<string, unknown>): string[] {
+  const id = typeof payload["decision"] === "number" ? payload["decision"] : null;
+  const decision = id === null ? null : store.getDecision(id);
+  if (decision === null) return ["     (the decision is gone)"];
+  const pick = typeof payload["option"] === "string" ? payload["option"] : "";
+  return [
+    `     ${decision.question}${decision.state !== "open" ? ` [${decision.state}]` : ""}`,
+    ...decision.options.map(
+      one =>
+        `     ${one.id === pick ? "→" : " "} ${one.label}${one.reversible ? "" : " (irreversible)"}${one.id === decision.recommendation ? " — the builder recommends this" : ""}: ${one.consequence}`,
+    ),
+  ];
+}
+
 /** One line per proposal, numbered in thread order, for the operator to name. */
 export function proposalLines(proposals: readonly MateProposal[], repos: readonly string[], ordinal: (proposal: MateProposal) => number = (_p) => 0): string[] {
   return proposals.map((one, index) => {
@@ -88,6 +107,12 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
     const state = one.state === "pending" ? "" : ` [${one.state}${one.outcome !== null && typeof (one.outcome as { said?: unknown }).said === "string" ? `: ${(one.outcome as { said: string }).said}` : ""}]`;
     return `  ${number}. ${what}${state}`;
   });
+}
+
+/** The lines for one proposal, its answer context included when it is an answer. */
+export function proposalBlock(store: Store, proposal: MateProposal, repos: readonly string[], number: number): string[] {
+  const [line] = proposalLines([proposal], repos, () => number);
+  return proposal.kind === "answer" ? [line as string, ...answerContextLines(store, proposal.payload)] : [line as string];
 }
 
 async function* linesOf(seams: MateCliSeams | undefined): AsyncGenerator<string> {
@@ -201,7 +226,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     if (rows.length === 0) return;
     say("proposals — `confirm N`, `dismiss N`, `open N`:");
     for (const row of rows) ordinalOf(row);
-    for (const line of proposalLines(rows, repos, ordinalOf)) say(line);
+    for (const row of rows) for (const line of proposalBlock(store, row, repos, ordinalOf(row))) say(line);
   };
 
   const turn = async (message: string): Promise<MateTurnOutcome> => {

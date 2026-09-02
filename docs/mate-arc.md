@@ -188,6 +188,34 @@ Codex read commit 749d328 against this spec and found 3 critical, 8 high,
 12. **Coordinators never see the installation-wide queue revision.**
     (finding 12)
 
+## Round-4 rulings (v3 review, 2026-09-02: ten findings, all closed)
+
+1. **The executor is private and re-proves the brand itself**; `via` is
+   named by every caller, never defaulted. (finding 1)
+2. **The hourly window is shared in both directions**: filing counts
+   proposals, proposals count filings. (finding 2)
+3. **Seven days is enforced at the door**, sweep or no sweep; the task
+   page and the confirm route sweep as well. (finding 3)
+4. **A terminal shows the answer's context before any confirm**: the
+   question, every option with its consequence, the builder's
+   recommendation, the proposed pick — in the REPL's list and in
+   `proposals list`/`confirm`. (finding 4)
+5. **The same choice landing first elsewhere is `already-answered`**, not
+   this card's success. (finding 5)
+6. **Reading is proved**: `propose_answer` needs `get_decision` on the
+   same decision in an EARLIER step (the mate) or earlier on the same
+   connection (the gateway); the card says "read every consequence" only
+   when the row records it. (finding 6)
+7. **"Open" is derived**: a decision past its deadline is expired for the
+   proposal contract whether or not the sweep ran; the door refuses it as
+   stale. (finding 7)
+8. **The gateway's argument parser understands unions and arrays**, so
+   `worker: 7` or a malformed `touches` is `-32602`. (finding 8)
+9. **The v33 rebuild is an exact recognizer** (`rebuildMateProposalForV33`):
+   v32 or v33 byte-for-byte, anything else refuses; tested against a
+   populated v32 table and an unknown shape. (finding 9)
+10. **`safeReturn` refuses backslashes.** (finding 10)
+
 ## 0. Hard boundaries
 
 - **No new authority.** Every proposal executes through an existing door:
