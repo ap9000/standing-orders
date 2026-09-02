@@ -294,6 +294,21 @@ form-free fragment: proposals render inert until the turn ends).
 
 ## 6. The CLI
 
+**As landed (slice 3, 2026-09-02).** `standing-orders chat --as <you>
+--token <t> [--repo <path>…] [--say "…"] [--end] [--ceiling-usd <n>]
+[--hours <n>] [--json]` in `src/mate-cli.ts`, dispatched from
+`src/operate.ts`. The password mints the session (defaults $5 for 4 h;
+the terms are printed); the ceiling is the `--repo` list, or the enrolled
+projects when none are named; a live session under other projects is
+ended and re-minted, and says so. The REPL reads lines: text is a turn;
+`proposals`, `confirm N`, `dismiss N`, `open N` act on the pending cards
+numbered in thread order (re-numbered after every act); `end` forgets the
+thread; `quit` leaves the session live. Confirming runs
+`src/mate-doors.ts` under the password-minted principal; scope and cancel
+cards print their CLI ceremony. `--json` emits one envelope per turn or
+act. Tests: `src/mate-cli.test.ts` through `runOperate` with injected
+fetch, key environment, and stdin lines.
+
 `standing-orders chat [--as <you> --token <t>] [--end]`: a REPL over the
 same thread. First run mints the mate session (the same restated terms,
 the password typed once); turns print the assistant's text, tool activity

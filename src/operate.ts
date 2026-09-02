@@ -79,6 +79,7 @@ import {
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { ask, askHidden, confirm, interactive } from "./prompt.js";
+import { runMateCli, type MateCliSeams } from "./mate-cli.js";
 import { canonicalProject } from "./project.js";
 import { tally, spendLine } from "./summary.js";
 import {
@@ -204,6 +205,8 @@ export type OperateOptions = {
   shouldStop?: () => boolean;
   /** Injected by tests: the external-dispatch gh surface. */
   dispatchAdapter?: DispatchAdapter;
+  /** Injected by tests: the mate's provider fetch, key environment, and stdin lines. */
+  mateSeams?: MateCliSeams;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
@@ -358,6 +361,11 @@ Agents — which provider and model each phase runs on
       --model <m> --weekly-usd <n> [--daily-turns <n>] --as <you> --token <t>
       the fleet chat engine: a direct no-tool API call; the key rides the
       serve environment, the ceiling is enforced in integer micro-dollars
+  standing-orders chat --as <you> --token <t> [--repo <path>…]
+      [--say "…"] [--end] [--ceiling-usd <n>] [--hours <n>] [--json]
+      the mate: one conversation across your projects, the same thread the
+      console shows; the password mints a spending session once; it reads
+      and proposes, you confirm cards (confirm N / dismiss N / open N)
   standing-orders config show [--repo <path>]
   standing-orders config set <phase> --provider claude|codex|openrouter
       [--model <m>] [--repo <path>] --as <you> --token <t>
@@ -469,6 +477,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
   "choose", "note", "max-open-decisions", "max-held-sessions", "name", "days", "publication", "auto-approve", "review-auto", "entries", "port", "host", "allow-host",
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
+  "say", "ceiling-usd", "hours",
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
@@ -478,7 +487,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
-  "no-open", "no-verify",
+  "no-open", "no-verify", "end",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -598,6 +607,7 @@ export async function runOperate(
       ...(options.publishExec === undefined ? {} : { publishExec: options.publishExec }),
       ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
+      ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
     });
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
@@ -623,6 +633,7 @@ type Context = {
   telegramTransport?: TelegramTransport;
   /** Injected by tests: what `publish` runs for git and gh. */
   publishExec?: PublishExec;
+  mateSeams?: MateCliSeams;
   /** Injected by tests: the external-dispatch gh surface. */
   dispatchAdapter?: DispatchAdapter;
   /**
@@ -693,6 +704,8 @@ async function dispatch(
       return routineCommand(positional, flags, context);
     case "config":
       return configCommand(positional, flags, context);
+    case "chat":
+      return chatCommand(flags, context);
     case "mode":
       return modeCommand(positional, flags, context);
     case "people":
@@ -8843,6 +8856,36 @@ function describeApproveFailure(reason: string, id: string): string {
  * is simply asked, with the password hidden. Under --json (or any non-TTY)
  * missing credentials stay a usage refusal, exactly as before.
  */
+/**
+ * `standing-orders chat` (mate arc §6): the console's thread from a
+ * terminal. The password mints the session once; the REPL runs turns and
+ * confirms cards through the same doors the console uses.
+ */
+async function chatCommand(flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json } = context;
+  const credentials = await askCredentials(flags, context);
+  if (credentials === null) {
+    return fail(write, json, "chat", "usage", "the mate takes `--as <you> --token <t>` — the password mints the session once", EXIT.usage);
+  }
+  const ceilingGiven = text(flags, "ceiling-usd");
+  const hoursGiven = text(flags, "hours");
+  const repos = context.repoList !== undefined && context.repoList.length > 0 ? context.repoList : store.listProjects().map(one => one.path);
+  const result = await runMateCli({
+    store,
+    databaseFile: context.databaseFile,
+    write,
+    json,
+    credentials,
+    repos,
+    say: text(flags, "say"),
+    end: flags.has("end"),
+    ceilingUsd: ceilingGiven === undefined ? undefined : Number(ceilingGiven),
+    hours: hoursGiven === undefined ? undefined : Number(hoursGiven),
+    ...(context.mateSeams === undefined ? {} : { seams: { ...context.mateSeams, clock: context.mateSeams.clock ?? context.clock } }),
+  });
+  return result.code;
+}
+
 async function askCredentials(
   flags: Map<string, string | true>,
   context: Context,

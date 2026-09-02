@@ -106,6 +106,9 @@ and any queue command + --help prints it too
   standing-orders heartbeat <lease> / release <lease> / reap
   standing-orders tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
+  standing-orders chat --as <you> --token <t>
+                               talk to the mate: one conversation across every
+                               project; it proposes, you confirm (--say "…" for one turn)
   standing-orders serve --repo <path>  the console; watch, decide, approve
                                (--editor vscode with --runner: file links
                                open in VS Code on the device you browse from)
