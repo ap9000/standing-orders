@@ -164,6 +164,7 @@ describe("the machine envelope", () => {
       webhook: ["status", "--json"],
       coordinator: ["list", "--json"],
       chat: ["--json"],
+      proposals: ["list", "--json"],
       // mcp is the stdio protocol server: its --json story is the protocol
       // itself; with no credential configured it refuses on stderr before
       // any store opens, and the exit code is the envelope.

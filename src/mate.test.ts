@@ -503,6 +503,26 @@ describe("the mate's turn", () => {
     expect(String(second.messages.at(-1)?.content)).toContain("\"queued\"");
   });
 
+  test("get_decision shows consequences through mateView but never the recap or the recommendation; propose_answer carries the pick", async () => {
+    const ctx = { store, who, now: clock(), draft: (_k: string, payload: Record<string, unknown>) => (payload["option"] === "closed" ? 7 : null) };
+    const got = executeMateTool(ctx, "get_decision", { decision: 1 });
+    expect(got).toMatchObject({ ok: true, body: { decision: 1, task: "in-1", repo: "r1", state: "open", options: [{ id: "open", reversible: true }, { id: "closed", reversible: false }] } });
+    const serialized = JSON.stringify(got);
+    expect(serialized).toContain("CONSEQUENCE-CANARY");
+    expect(serialized).not.toContain("RECAP-CANARY");
+    expect(serialized).not.toContain("recommend");
+    expect(executeMateTool(ctx, "get_decision", { decision: 99 })).toMatchObject({ ok: false, message: expect.stringContaining("not-found") });
+    expect(executeMateTool(ctx, "propose_answer", { decision: 1, option: "nope", rationale: "x" })).toMatchObject({ ok: false, message: expect.stringContaining("option must be one of") });
+    expect(executeMateTool(ctx, "propose_answer", { decision: 1, option: "closed", rationale: "safer under load" })).toMatchObject({ ok: true, body: { proposal: 7, kind: "answer", awaiting: expect.stringContaining("irreversible") } });
+    // In a turn: the row goes pending with the option's label and reversibility, and the outbound canary still holds.
+    const script = scripted([answer([call("get_decision", { decision: 1 }), call("propose_answer", { decision: 1, option: "open", rationale: "reversible, and unblocks the build" })]), text("I propose failing open.")]);
+    const outcome = await turn("what about the decision?", script.fetcher);
+    expect(outcome).toMatchObject({ ok: true, proposals: 1, activity: "read 1 · proposed 1 · 2 steps" });
+    const row = store.listMateProposals(thread().id, ["pending"])[0];
+    expect(row).toMatchObject({ kind: "answer", payload: { decision: 1, task: "in-1", option: "open", optionLabel: "Fail open", reversible: true } });
+    expect(script.bodies.join("\n")).not.toContain("RECAP-CANARY");
+  });
+
   test("the tools refuse bad arguments with typed messages, count decisions per task, and place the queue by column", () => {
     const ctx = { store, who, now: clock(), draft: () => 1 };
     expect(executeMateTool(ctx, "queue", { repo: "r9" })).toMatchObject({ ok: false });

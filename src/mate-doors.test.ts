@@ -23,7 +23,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   const session = (expiresInMs = 3_600_000) =>
     store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64), expiresAt: new Date(clockAt + expiresInMs) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
-  const pending = (kind: "next" | "reserve" | "hold", payload: Record<string, unknown>): number => {
+  const pending = (kind: "next" | "reserve" | "hold" | "answer", payload: Record<string, unknown>): number => {
     const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
     const live = store.activeMateSession("alex", clock())!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
@@ -96,6 +96,23 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     store.hold(store.refFor("built-in", "b").id, "by hand", null, clock());
     expect(confirmMateProposal(store, who, again, clock())).toMatchObject({ ok: false, reason: "stale" });
     expect(store.activeHolds(store.refFor("built-in", "b").id, clock()).map(one => one.reason)).toEqual(["by hand"]);
+  });
+
+  test("an answer card answers the decision as the operator; an irreversible option needs the explicit field; an answered decision refuses", () => {
+    session();
+    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    store.saveDecision(
+      { run, urgency: "blocking", recap: "r", question: "Which?", options: [{ id: "x", label: "X", consequence: "cx", reversible: true }, { id: "y", label: "Y", consequence: "cy", reversible: false }], recommendation: "x" },
+      T0,
+    );
+    const irreversible = pending("answer", { decision: 1, task: "a", option: "y", optionLabel: "Y", reversible: false, rationale: "because" });
+    expect(confirmMateProposal(store, who, irreversible, clock())).toMatchObject({ ok: false, reason: "needs-confirm" });
+    expect(store.getMateProposal(irreversible)?.state).toBe("pending");
+    expect(store.getDecision(1)?.state).toBe("open");
+    expect(confirmMateProposal(store, who, irreversible, clock(), { confirm: true, via: "cli" })).toMatchObject({ ok: true, said: "decision #1 answered: Y", taskId: "a" });
+    expect(store.getDecision(1)).toMatchObject({ state: "answered", answeredBy: "alex", answeredVia: "cli" });
+    const late = pending("answer", { decision: 1, task: "a", option: "x", optionLabel: "X", reversible: true, rationale: "too late" });
+    expect(confirmMateProposal(store, who, late, clock())).toMatchObject({ ok: false, reason: "already-answered" });
   });
 
   test("a structural principal never confirms", () => {

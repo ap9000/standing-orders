@@ -80,7 +80,9 @@ import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { ask, askHidden, confirm, interactive } from "./prompt.js";
 import { runMateCli, type MateCliSeams } from "./mate-cli.js";
-import { canonicalProject } from "./project.js";
+import { confirmCoordinatorProposal, dismissCoordinatorProposal } from "./mate-doors.js";
+import { verifyApproverByPassword } from "./principal.js";
+import { canonicalProject, projectName } from "./project.js";
 import { tally, spendLine } from "./summary.js";
 import {
   bodyHashOf,
@@ -366,7 +368,11 @@ Agents — which provider and model each phase runs on
       --token <t> only for scripts — it lands in shell history)
       the mate: one conversation across your projects, the same thread the
       console shows; the password mints a spending session once; it reads
-      and proposes, you confirm cards (confirm N / dismiss N / open N)
+      and proposes, you confirm cards (confirm N / dismiss N / open N;
+      confirm N yes for an irreversible answer)
+  standing-orders proposals [list [--all]] | confirm <id> [--yes] | dismiss <id>
+      what coordinators proposed over the MCP gateway; confirming runs the
+      same door the console runs, under your password
   standing-orders config show [--repo <path>]
   standing-orders config set <phase> --provider claude|codex|openrouter
       [--model <m>] [--repo <path>] --as <you> --token <t>
@@ -707,6 +713,8 @@ async function dispatch(
       return configCommand(positional, flags, context);
     case "chat":
       return chatCommand(flags, context);
+    case "proposals":
+      return proposalsCommand(positional, flags, context);
     case "mode":
       return modeCommand(positional, flags, context);
     case "people":
@@ -8857,6 +8865,75 @@ function describeApproveFailure(reason: string, id: string): string {
  * is simply asked, with the password hidden. Under --json (or any non-TTY)
  * missing credentials stay a usage refusal, exactly as before.
  */
+export const PROPOSALS_ACTIONS = ["list", "confirm", "dismiss"] as const;
+
+/**
+ * `standing-orders proposals` (mate arc v3): what coordinators proposed
+ * over the gateway, and the doors that confirm or dismiss one — the same
+ * doors the console runs, under a password-minted principal whose ceiling
+ * is the `--repo` list or the enrolled registry.
+ */
+async function proposalsCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json, now } = context;
+  const [action = "list", idGiven] = positional;
+  if (!(PROPOSALS_ACTIONS as readonly string[]).includes(action)) {
+    return fail(write, json, "proposals", "usage", `unknown \`proposals ${action}\` — try ${PROPOSALS_ACTIONS.join(", ")}`, EXIT.usage);
+  }
+  store.sweepCoordinatorProposals(now);
+  let repos: string[] | null;
+  if (context.repoList !== undefined && context.repoList.length > 0) {
+    repos = context.repoList;
+  } else {
+    const loaded = await loadRepos(join(dirname(context.databaseFile), "repos.json")).catch(() => ({ error: "unreadable" }));
+    if ("error" in loaded) return fail(write, json, `proposals ${action}`, "registry", "the enrolled-project registry could not be read — name projects with --repo", EXIT.refused);
+    repos = loaded.repos;
+  }
+  if (action === "list") {
+    const rows = store.listCoordinatorProposals({ repos, states: flags.has("all") ? ["pending", "confirming", "confirmed", "refused", "dismissed", "expired"] : ["pending"] });
+    return succeed(write, json, "proposals list", { proposals: rows.map(one => ({ id: one.id, kind: one.kind, by: one.name, repo: one.repo, state: one.state, payload: one.payload, outcome: one.outcome, createdAt: one.createdAt })) }, () =>
+      rows.length === 0
+        ? ["No coordinator proposals are pending."]
+        : rows.map(one => {
+            const t = (key: string): string => (typeof one.payload[key] === "string" ? (one.payload[key] as string) : "");
+            const what =
+              one.kind === "answer"
+                ? `answer decision #${String(one.payload["decision"])} on ${t("task")} with "${t("optionLabel")}"${one.payload["reversible"] === false ? " (irreversible — confirm with --yes)" : ""}: ${t("rationale")}`
+                : one.kind === "next"
+                  ? `move ${t("task")} to the front`
+                  : one.kind === "reserve"
+                    ? `${one.payload["worker"] === null ? `release ${t("task")} to the shared queue` : `reserve ${t("task")} for ${t("worker")}`}`
+                    : one.kind === "hold"
+                      ? `hold ${t("task")}: ${t("reason")}`
+                      : one.kind === "unhold"
+                        ? `release ${t("task")} from its hold`
+                        : one.kind === "scope"
+                          ? `rewrite the scope of ${t("task")}`
+                          : `cancel ${t("task")}: ${t("reason")} (arm it yourself: standing-orders task cancel ${t("task")})`;
+            return `  #${one.id} ${what} — by ${one.name} in ${projectName(one.repo)} [${one.state}]`;
+          }),
+    );
+  }
+  const id = Number(idGiven);
+  if (idGiven === undefined || !Number.isInteger(id) || id < 1) return fail(write, json, `proposals ${action}`, "usage", `which proposal? standing-orders proposals ${action} <id>`, EXIT.usage);
+  const acting = await askCredentials(flags, context);
+  if (acting === null) return fail(write, json, `proposals ${action}`, "usage", "confirming or dismissing takes your name and password — `--as <you>` and the hidden prompt", EXIT.usage);
+  const admitted = repos.length === 0 ? [] : repos;
+  const verified = verifyApproverByPassword(store, acting.name, acting.token, admitted);
+  if (!verified.ok) return fail(write, json, `proposals ${action}`, "unauthenticated", "that is not an approver, or the password does not match", EXIT.refused);
+  if (action === "dismiss") {
+    const done = dismissCoordinatorProposal(store, verified.who, id, now);
+    return done
+      ? succeed(write, json, "proposals dismiss", { proposal: id }, () => [`dismissed #${id}`])
+      : fail(write, json, "proposals dismiss", "not-pending", "no pending proposal by that id in your projects", EXIT.refused);
+  }
+  const outcome = confirmCoordinatorProposal(store, verified.who, id, now, { confirm: flags.has("yes"), via: "cli" });
+  if (!outcome.ok) return fail(write, json, "proposals confirm", outcome.reason, outcome.reason === "needs-confirm" ? `${outcome.said} — pass --yes` : outcome.said, outcome.reason === "standing" ? EXIT.refused : EXIT.refused);
+  return succeed(write, json, "proposals confirm", { proposal: id, kind: outcome.kind, said: outcome.said, ...(outcome.taskId === null ? {} : { task: outcome.taskId }) }, () => [
+    outcome.said,
+    ...(outcome.kind === "scope" && outcome.taskId !== null ? [`approve it with your password: standing-orders task approve ${outcome.taskId}`] : []),
+  ]);
+}
+
 /**
  * `standing-orders chat` (mate arc §6): the console's thread from a
  * terminal. The password mints the session once; the REPL runs turns and

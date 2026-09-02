@@ -80,7 +80,9 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
               ? `hold ${t("task")}: ${t("reason")}`
               : one.kind === "unhold"
                 ? `release ${t("task")} from its hold`
-                : one.kind === "scope"
+                : one.kind === "answer"
+                  ? `answer decision #${String(payload["decision"])} on ${t("task")} with "${t("optionLabel")}"${payload["reversible"] === false ? " (irreversible — confirm N yes)" : ""}: ${t("rationale")}`
+                  : one.kind === "scope"
                   ? `rewrite the scope of ${t("task")} (then approve it: standing-orders task approve ${t("task")})`
                   : `cancel ${t("task")}: ${t("reason")} (arm it yourself: standing-orders task cancel ${t("task")})`;
     const state = one.state === "pending" ? "" : ` [${one.state}${one.outcome !== null && typeof (one.outcome as { said?: unknown }).said === "string" ? `: ${(one.outcome as { said: string }).said}` : ""}]`;
@@ -244,7 +246,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     const line = raw.trim();
     if (line === "") continue;
     now = clock();
-    const act = /^(confirm|dismiss|open)\s+([0-9]{1,3})$/i.exec(line);
+    const act = /^(confirm|dismiss|open)\s+([0-9]{1,3})(\s+yes)?$/i.exec(line);
     if (act !== null) {
       for (const row of pendingProposals()) ordinalOf(row);
       const proposal = byOrdinal(Number(act[2]));
@@ -264,9 +266,9 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
         emit({ ok: done, act: "dismiss", proposal: proposal.id });
         say(done ? `dismissed ${act[2]}` : "that proposal was already acted on");
       } else {
-        const outcome = confirmMateProposal(store, who, proposal.id, now);
+        const outcome = confirmMateProposal(store, who, proposal.id, now, { confirm: act[3] !== undefined, via: "cli" });
         emit({ ok: outcome.ok, act: "confirm", proposal: proposal.id, ...(outcome.ok ? { said: outcome.said, taskId: outcome.taskId } : { reason: outcome.reason, said: outcome.said }) });
-        say(outcome.ok ? outcome.said : `refused: ${outcome.said}`);
+        say(outcome.ok ? outcome.said : outcome.reason === "needs-confirm" ? `${outcome.said}: confirm ${act[2]} yes` : `refused: ${outcome.said}`);
         if (outcome.ok && outcome.kind === "scope" && outcome.taskId !== null) say(`approve it with your password: standing-orders task approve ${outcome.taskId}`);
       }
       continue;

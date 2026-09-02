@@ -91,7 +91,7 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
-    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(9);
+    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(17);
     // No outputSchema: it describes structuredContent, which these tools
     // do not return (round-2 finding 1).
     expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeUndefined();
@@ -427,6 +427,46 @@ describe("the MCP stdio server", () => {
         inputSchema: { type: "object", properties: { repo: { type: "string", minLength: 1, maxLength: 800 } }, required: ["repo"], additionalProperties: false },
       },
       {
+        name: "get_decision",
+        description: "One open decision in your allowlist in full: question, options with id, label, reversible, and consequence. Never the builder's recommendation.",
+        inputSchema: { type: "object", properties: { decision: { type: "integer", minimum: 1 } }, required: ["decision"], additionalProperties: false },
+      },
+      {
+        name: "propose_next",
+        description: "Propose moving a queued task to the front of its column. An approver confirms; a queue that moved meanwhile refuses.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 } }, required: ["ref"], additionalProperties: false },
+      },
+      {
+        name: "propose_reserve",
+        description: "Propose reserving a queued task for one worker, or releasing it to the shared queue with worker null.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 }, worker: { type: ["string", "null"], maxLength: 60 } }, required: ["ref", "worker"], additionalProperties: false },
+      },
+      {
+        name: "propose_hold",
+        description: "Propose holding a task's next attempt, with a reason. A running attempt is never interrupted.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 }, reason: { type: "string", maxLength: 200 } }, required: ["ref", "reason"], additionalProperties: false },
+      },
+      {
+        name: "propose_unhold",
+        description: "Propose lifting the operator's own hold on a task.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 } }, required: ["ref"], additionalProperties: false },
+      },
+      {
+        name: "propose_scope",
+        description: "Propose rewriting a task's scope. An approver confirms the rewrite, then approves it with a password — a scope you wrote never seals under a mode.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 } }, required: ["ref", "goal"], additionalProperties: false },
+      },
+      {
+        name: "propose_cancel",
+        description: "Propose cancelling a task, with a reason. The approver arms and confirms it on the task itself.",
+        inputSchema: { type: "object", properties: { ref: { type: "string", minLength: 1, maxLength: 64 }, reason: { type: "string", maxLength: 200 } }, required: ["ref", "reason"], additionalProperties: false },
+      },
+      {
+        name: "propose_answer",
+        description: "Propose an answer to an open decision you read with get_decision, with a rationale. The approver confirms where every consequence and the builder's recommendation are shown; an irreversible option needs their explicit confirmation.",
+        inputSchema: { type: "object", properties: { decision: { type: "integer", minimum: 1 }, option: { type: "string", minLength: 1, maxLength: 64 }, rationale: { type: "string", maxLength: 400 } }, required: ["decision", "option", "rationale"], additionalProperties: false },
+      },
+      {
         name: "get_contract",
         description: "This surface's contract: what a coordinator may do, the proposal lifecycle, and the admission promise.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -539,5 +579,36 @@ describe("the MCP stdio server", () => {
     });
     h.send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { _meta: modernMeta, name: "queue", arguments: { repo: "/repo/not-mine" } } });
     expect((h.last()["result"] as Record<string, unknown>)["isError"]).toBe(true);
+  });
+
+  test("propose_* over the gateway (mate arc v3): rows, not acts — allowlist, rate, pending cap, and an approver's confirm", () => {
+    const filed = fileCoordinatorProposal(store, token, { repo: REPO, title: "first", idempotencyKey: "key-00000001" }, T0);
+    const second = fileCoordinatorProposal(store, token, { repo: REPO, title: "second", idempotencyKey: "key-00000002" }, T0);
+    if (!filed.ok || !second.ok) throw new Error("filing failed");
+    const h = harness(store, token);
+    const call = (id: number, name: string, args: Record<string, unknown>) => {
+      h.send({ jsonrpc: "2.0", id, method: "tools/call", params: { _meta: modernMeta, name, arguments: args } });
+      const last = h.last();
+      const result = last["result"] as Record<string, unknown> | undefined;
+      if (result === undefined) return { isError: true, body: JSON.stringify(last["error"] ?? last) };
+      return { isError: result["isError"] === true, body: String((result["content"] as { text: string }[])[0]?.text ?? "") };
+    };
+    const moved = call(1, "propose_next", { ref: second.id });
+    expect(moved.isError).toBe(false);
+    expect(JSON.parse(moved.body)).toMatchObject({ proposal: 1, kind: "next", awaiting: "the operator's confirmation" });
+    expect(store.queuePosition(second.id)?.position).toBe(2);
+    expect(call(2, "propose_next", { ref: "no-such" }).body).toContain("not-found");
+    expect(call(3, "propose_hold", { ref: filed.id, reason: "AKIAABCDEFGHIJKLMNOP" }).body).toContain("plain text");
+    expect(call(4, "propose_hold", { ref: filed.id, reason: "later" }).isError).toBe(false);
+    // The row is a coordinator proposal, admitted to an approver whose ceiling holds the repo.
+    const rows = store.listCoordinatorProposals({ repos: [REPO] });
+    expect(rows.map(one => one.kind)).toEqual(["hold", "next"]);
+    expect(rows[1]).toMatchObject({ name: "planner-bot", repo: REPO, payload: { task: second.id, position: 2, of: 2 } });
+    expect(store.listCoordinatorProposals({ repos: ["/repo/other"] })).toEqual([]);
+    // Revoking the credential expires its pending rows.
+    revokeCoordinator(store, rows[0]!.cid, "alex", T0);
+    expect(store.listCoordinatorProposals({ repos: [REPO] })).toEqual([]);
+    expect(store.getCoordinatorProposal(1)?.state).toBe("expired");
+    expect(call(5, "propose_next", { ref: second.id }).body).toContain("no longer stands");
   });
 });

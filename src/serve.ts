@@ -147,10 +147,10 @@ import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf,
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
-import type { MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
+import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
-import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
+import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
 
 export type ServeOptions = {
   store: Store;
@@ -1784,7 +1784,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       store.sweepStaleChatTurns(now);
       store.sweepStaleMateTurns(now);
       store.sweepMateThreads(now);
+      store.sweepCoordinatorProposals(now);
       sweepChatDrafts(Date.now());
+      // Pending cards, and the recently answered ones so the door's words are read (last 30).
+      const coordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos: [...ceiling.repos], states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
       const enabled = chatEnablement();
       const pending = store.liveChatTurnFor(who.name);
       const latched = enabled.ok ? store.latchedChatTurns(enabled.credentialKey) : [];
@@ -1808,6 +1811,8 @@ export function createDecisionServer(options: ServeOptions): Server {
               session: mateSession,
               messages: store.listMateMessages(opened.thread.id, 40),
               proposals: store.listMateProposals(opened.thread.id),
+              decisions: decisionsFor(store, [...store.listMateProposals(opened.thread.id), ...coordinatorRows]),
+              coordinatorProposals: coordinatorRows,
               pending: store.liveMateTurnFor(who.name),
               latched,
               recent: store.recentMateTurns(who.name, 5),
@@ -1850,6 +1855,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             (ceilingStale ? "the admitted projects changed since your mate session was minted — start a new conversation below; that ends the old one" : null) ??
             takeMateNote(who.session.csrf, null),
           ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled.config.weeklyCeilingMicrousd) } : {}),
+          ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now) } : {}),
         }),
       );
     }
@@ -2676,6 +2682,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         runs: ref === null ? [] : store.runsFor(ref.id),
         decisions: ref === null ? [] : store.decisionsForTask(ref.id),
         incidents: ref === null ? [] : store.incidentsForTask(ref.id),
+        coordinatorProposals: (() => {
+          if (ref === null || ref.repo === null || who.role !== "approver") return null;
+          const rows = store.listCoordinatorProposals({ repos: [ref.repo], taskId });
+          return { rows, decisions: decisionsFor(store, rows), now };
+        })(),
         steering: ref === null ? [] : store.listSteerNotes(ref.id),
         // "publishes as" reads ONLY publicationGrantFor(repo) — the grant
         // the publisher would act under — never listGrants(), which is
@@ -4191,11 +4202,31 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
         return redirect(response, "/chat");
       }
-      const outcome = confirmMateProposal(store, principal, id, now);
+      const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web" });
       if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
         return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, "/chat");
       }
+      if (!outcome.ok && outcome.reason === "needs-confirm") noteMate(who.session.csrf, null, outcome.said);
       return redirect(response, "/chat");
+    }
+    // Coordinator proposals (mate arc v3): confirmed by any approver whose
+    // ceiling admits the repo; the card lives on /chat and on the task.
+    const coordinatorProposal = /^\/proposals\/([0-9]{1,15})\/(confirm|dismiss)$/.exec(url.pathname);
+    if (coordinatorProposal !== null) {
+      if (who.via !== "cookie") return refuse(response, who, 403, "proposals are confirmed from the browser or the CLI");
+      const principal = matePrincipal(who);
+      if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
+      const id = Number(coordinatorProposal[1]);
+      const back = body.get("return") === null ? "/chat" : safeReturn(body.get("return"));
+      if (coordinatorProposal[2] === "dismiss") {
+        dismissCoordinatorProposal(store, principal, id, now);
+        return redirect(response, back);
+      }
+      const outcome = confirmCoordinatorProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web" });
+      if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
+        return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, back);
+      }
+      return redirect(response, outcome.ok || outcome.reason !== "needs-confirm" ? back : `${back}${back.includes("?") ? "&" : "?"}said=${encodeURIComponent(outcome.said)}`);
     }
 
     if (url.pathname === "/chat") {
@@ -6523,6 +6554,11 @@ const STYLE = `
   .mate-terms { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; }
   .mate-terms .inline-field { white-space: nowrap; }
   button.quiet { background: transparent; color: var(--fg-muted); border-color: var(--border); }
+  .answer-options { list-style: none; padding: 0; margin: 0.4rem 0; }
+  .answer-options li { padding: 0.35rem 0.6rem; border-left: 3px solid var(--border); margin: 0.25rem 0; }
+  .answer-options li.picked { border-left-color: var(--brand); }
+  .proposal label.arm { display: inline-flex; gap: 0.35rem; align-items: center; margin-right: 0.5rem; font-size: 0.85rem; }
+  .coordinator-proposals .card { margin: 0.5rem 0; }
   .workspace-head { display: flex; align-items: center; gap: .5rem; min-width: 0; }
   .workspace-head .workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-family: var(--font-mono); font-size: .8125rem; }
   .workspace-head .badge { flex: none; }
@@ -7964,6 +8000,8 @@ function chatPage(chrome: Chrome, data: {
   problem: string | null;
   /** The card that mints a mate session (mate arc §5), approvers only. */
   mateMint?: string;
+  /** Pending coordinator proposals as cards (mate arc v3), approvers only. */
+  coordinatorProposals?: string;
 }): Screen {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
@@ -8029,6 +8067,7 @@ function chatPage(chrome: Chrome, data: {
     `<p class="meta">what leaves this machine: task ids/titles/states, open questions and option labels, incident kinds, routine names/schedules, PR numbers and observed check states — deliberately, to the configured provider. Paths, branches, diffs, notes, decision details, and identities never do.</p>`,
   );
   if (data.mateMint !== undefined) parts.push(data.mateMint);
+  if (data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
   for (const turn of data.latched) {
     parts.push(
       `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
@@ -8150,61 +8189,155 @@ function mateMintCard(csrf: string, weeklyCeilingMicrousd: number): string {
   ].join("\n");
 }
 
-/** A proposal card inside the assistant's message: what, then confirm/dismiss, or the door's answer. */
-function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean): string {
-  const payload = proposal.payload;
+/** The decisions the cards on a page name, for the answer card's consequences and the builder's recommendation. */
+function decisionsFor(store: Store, proposals: readonly { kind: string; payload: Record<string, unknown> }[]): Map<number, Decision> {
+  const out = new Map<number, Decision>();
+  for (const one of proposals) {
+    if (one.kind !== "answer" || typeof one.payload["decision"] !== "number") continue;
+    const decision = store.getDecision(one.payload["decision"]);
+    if (decision !== null) out.set(decision.id, decision);
+  }
+  return out;
+}
+
+type ProposalCardView = {
+  id: number;
+  kind: MateProposal["kind"];
+  payload: Record<string, unknown>;
+  state: string;
+  outcome: Record<string, unknown> | null;
+  /** Who proposed: the mate, or a coordinator by name. */
+  by: { mate: true } | { mate: false; name: string; ago: string };
+  /** Where confirm/dismiss post: `/chat/proposal` for the mate's, `/proposals` for a coordinator's. */
+  actionBase: string;
+};
+
+/**
+ * A proposal card: what, then confirm/dismiss, or the door's answer. An
+ * `answer` card shows the question, every option WITH its consequence,
+ * the builder's recommendation beside the proposer's pick, and — for an
+ * irreversible option — the explicit confirmation field the decision
+ * page itself uses (ruling 12).
+ */
+function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, decision: Decision | null): string {
+  const payload = view.payload;
   const text = (key: string): string => (typeof payload[key] === "string" ? (payload[key] as string) : "");
   const task = text("task");
   const repoId = text("repoId");
-  const what =
-    proposal.kind === "task"
-      ? `<strong>file ${escape(text("title"))}</strong> in <span class="mono">${escape(repoId)}</span><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
-        (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`) +
-        (Array.isArray(payload["touches"]) && payload["touches"].length > 0 ? `<p class="meta">touches: ${escape((payload["touches"] as string[]).join(", "))}</p>` : "")
-      : proposal.kind === "next"
-        ? `<strong>move <a href="${taskHref(task)}">${escape(task)}</a> to the front</strong> <span class="meta">(it was ${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))})</span>`
-        : proposal.kind === "reserve"
-          ? `<strong>${payload["worker"] === null ? "release" : "reserve"} <a href="${taskHref(task)}">${escape(task)}</a>${payload["worker"] === null ? " to the shared queue" : ` for ${escape(text("worker"))}`}</strong>`
-          : proposal.kind === "hold"
-            ? `<strong>hold <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`
-            : proposal.kind === "unhold"
-              ? `<strong>release <a href="${taskHref(task)}">${escape(task)}</a> from its hold</strong>`
-              : proposal.kind === "scope"
-                ? `<strong>rewrite the scope of <a href="${taskHref(task)}">${escape(task)}</a></strong><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
-                  (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`)
-                : `<strong>cancel <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
-  const outcome = proposal.outcome as { said?: unknown; taskId?: unknown } | null;
+  let what: string;
+  if (view.kind === "task") {
+    what =
+      `<strong>file ${escape(text("title"))}</strong> in <span class="mono">${escape(repoId)}</span><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
+      (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`) +
+      (Array.isArray(payload["touches"]) && payload["touches"].length > 0 ? `<p class="meta">touches: ${escape((payload["touches"] as string[]).join(", "))}</p>` : "");
+  } else if (view.kind === "next") {
+    what = `<strong>move <a href="${taskHref(task)}">${escape(task)}</a> to the front</strong> <span class="meta">(it was ${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))})</span>`;
+  } else if (view.kind === "reserve") {
+    what = `<strong>${payload["worker"] === null ? "release" : "reserve"} <a href="${taskHref(task)}">${escape(task)}</a>${payload["worker"] === null ? " to the shared queue" : ` for ${escape(text("worker"))}`}</strong>`;
+  } else if (view.kind === "hold") {
+    what = `<strong>hold <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
+  } else if (view.kind === "unhold") {
+    what = `<strong>release <a href="${taskHref(task)}">${escape(task)}</a> from its hold</strong>`;
+  } else if (view.kind === "scope") {
+    what =
+      `<strong>rewrite the scope of <a href="${taskHref(task)}">${escape(task)}</a></strong><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
+      (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`);
+  } else if (view.kind === "answer") {
+    const decisionId = typeof payload["decision"] === "number" ? payload["decision"] : 0;
+    const pick = text("option");
+    const options =
+      decision === null
+        ? `<p class="meta">the decision is gone</p>`
+        : `<ul class="answer-options">` +
+          decision.options
+            .map(
+              one =>
+                `<li${one.id === pick ? ' class="picked"' : ""}><strong>${escape(one.label)}</strong>${one.reversible ? "" : ' <span class="badge">irreversible</span>'}` +
+                `${one.id === decision.recommendation ? ' <span class="meta">— the builder recommends this</span>' : ""}` +
+                `${one.id === pick ? ' <span class="meta">— proposed</span>' : ""}` +
+                `<p class="meta">${escape(one.consequence)}</p></li>`,
+            )
+            .join("") +
+          `</ul>`;
+    what =
+      `<strong>answer <a href="/d/${decisionId}">decision #${decisionId}</a> on <a href="${taskHref(task)}">${escape(task)}</a></strong>` +
+      (decision === null ? "" : `<p style="white-space:pre-wrap">${escape(decision.question)}</p>`) +
+      options +
+      `<p class="meta">proposed: <strong>${escape(text("optionLabel"))}</strong> — ${escape(text("rationale"))}</p>` +
+      `<p class="meta">${view.by.mate ? "the mate" : "the coordinator"} read every consequence but not the builder's recap; you see both here${decision !== null && decision.state !== "open" ? " · this decision is no longer open" : ""}</p>`;
+  } else {
+    what = `<strong>cancel <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
+  }
+  const outcome = view.outcome as { said?: unknown; taskId?: unknown } | null;
   const said = outcome !== null && typeof outcome.said === "string" ? outcome.said : null;
+  const irreversible = view.kind === "answer" && payload["reversible"] === false;
+  const provenance = view.by.mate ? "" : `<p class="meta">proposed by <span class="mono">${escape(view.by.name)}</span> · ${escape(view.by.ago)}</p>`;
   let acts = "";
-  if (proposal.state === "pending" && !inert) {
+  if (view.state === "pending" && !inert) {
     acts =
-      proposal.kind === "cancel"
+      view.kind === "cancel"
         ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
-          `<form method="post" action="/chat/proposal/${proposal.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>`
+          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>`
         : `<div class="acts">` +
-          `<form method="post" action="/chat/proposal/${proposal.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">confirm</button></form>` +
-          `<form method="post" action="/chat/proposal/${proposal.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>` +
+          `<form method="post" action="${view.actionBase}/${view.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+          (irreversible ? `<label class="arm"><input type="checkbox" name="confirm" value="yes"> I understand this cannot be undone</label>` : "") +
+          `<button type="submit">confirm</button></form>` +
+          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>` +
           `</div>`;
-  } else if (proposal.state === "pending") {
+  } else if (view.state === "pending") {
     acts = `<p class="meta">confirm or dismiss once the turn ends</p>`;
-  } else if (proposal.state === "confirmed") {
+  } else if (view.state === "confirmed") {
     const filed = outcome !== null && typeof outcome.taskId === "string" ? outcome.taskId : null;
     acts =
       `<p class="meta done">${escape(said ?? "confirmed")}` +
-      (proposal.kind === "scope" && filed !== null ? ` — <a href="${taskHref(filed)}#approve">approve it</a>` : filed !== null && proposal.kind === "task" ? ` — <a href="${taskHref(filed)}">open it</a>` : "") +
+      (view.kind === "scope" && filed !== null ? ` — <a href="${taskHref(filed)}#approve">approve it</a>` : filed !== null && view.kind === "task" ? ` — <a href="${taskHref(filed)}">open it</a>` : "") +
       `</p>`;
-  } else if (proposal.state === "refused") {
+  } else if (view.state === "refused") {
     acts = `<p class="meta refused">${escape(said ?? "refused")}</p>`;
   } else {
-    acts = `<p class="meta">${escape(proposal.state)}</p>`;
+    acts = `<p class="meta">${escape(view.state)}</p>`;
   }
-  return `<div class="card proposal ${escape(proposal.state)}"><p><span class="badge">${escape(proposal.kind)}</span> ${what}</p>${acts}</div>`;
+  return `<div class="card proposal ${escape(view.state)}"><p><span class="badge">${escape(view.kind)}</span> ${what}</p>${provenance}${acts}</div>`;
+}
+
+function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean, decision: Decision | null): string {
+  return proposalCard({ id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: true }, actionBase: "/chat/proposal" }, csrf, inert, decision);
+}
+
+function coordinatorProposalCard(proposal: CoordinatorProposal, csrf: string, now: Date, decision: Decision | null): string {
+  return proposalCard(
+    { id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: false, name: proposal.name, ago: relativeAge(proposal.createdAt, now) }, actionBase: "/proposals" },
+    csrf,
+    false,
+    decision,
+  );
+}
+
+function relativeAge(iso: string, now: Date): string {
+  const minutes = Math.max(0, Math.round((now.getTime() - Date.parse(iso)) / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+/** The section shared by /chat (both modes) and the task page: pending coordinator proposals as cards. */
+function coordinatorProposalsSection(proposals: readonly CoordinatorProposal[], decisions: Map<number, Decision>, csrf: string, now: Date, heading = true): string {
+  if (proposals.length === 0) return "";
+  return (
+    (heading ? `<h2>proposed by coordinators <span class="meta">${proposals.length}</span></h2>` : "") +
+    `<div class="coordinator-proposals">` +
+    proposals.map(one => coordinatorProposalCard(one, csrf, now, decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null)).join("") +
+    `</div>`
+  );
 }
 
 function matePage(chrome: Chrome, data: {
   session: MateSession;
   messages: MateMessage[];
   proposals: MateProposal[];
+  /** The decisions the answer cards name. */
+  decisions: Map<number, Decision>;
+  coordinatorProposals: CoordinatorProposal[];
   pending: MateTurn | null;
   latched: ChatTurn[];
   recent: MateTurn[];
@@ -8238,6 +8371,7 @@ function matePage(chrome: Chrome, data: {
     byTurn.set(one.turn, list);
   }
   const inert = data.pending !== null;
+  parts.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now));
   parts.push(`<div class="thread">`);
   if (data.messages.length === 0) parts.push(`<p class="meta">nothing said yet — ask how things stand.</p>`);
   for (const message of data.messages) {
@@ -8250,7 +8384,7 @@ function matePage(chrome: Chrome, data: {
       `<div class="msg mate">` +
         (message.activity === null ? "" : `<p class="meta mono activity">${escape(message.activity)}</p>`) +
         `<p style="white-space:pre-wrap">${escape(message.text)}</p>` +
-        cards.map(one => mateProposalCard(one, data.csrf, inert)).join("") +
+        cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null)).join("") +
         `</div>`,
     );
   }
@@ -10032,6 +10166,8 @@ function taskBody(data: {
   runs: Run[];
   decisions: Decision[];
   incidents: Incident[];
+  /** Pending coordinator proposals on this task (mate arc v3), with the decisions their answer cards name. */
+  coordinatorProposals?: { rows: CoordinatorProposal[]; decisions: Map<number, Decision>; now: Date } | null;
   /** Operator steering notes (arc 1), delivery state included. */
   steering?: SteerNote[];
   /** The publication grant the publisher would act under — from
@@ -10767,6 +10903,21 @@ function taskBody(data: {
     `<div class="task-layout"><div class="task-main">`,
     contestCard,
     attemptPanel,
+    data.coordinatorProposals == null || data.coordinatorProposals.rows.length === 0
+      ? ""
+      : section(
+          "proposals",
+          `<h2>proposed by coordinators</h2>` +
+            coordinatorProposalsSection(
+              data.coordinatorProposals.rows,
+              data.coordinatorProposals.decisions,
+              data.csrf,
+              data.coordinatorProposals.now,
+              false,
+            ).replace(/<form method="post" action="\/proposals\/(\d+)\/(confirm|dismiss)" class="inline">/g, (_m, id: string, verb: string) => `<form method="post" action="/proposals/${id}/${verb}" class="inline"><input type="hidden" name="return" value="${escape(taskHref(data.task.id))}">`),
+          true,
+          data.coordinatorProposals.rows.length,
+        ),
     section("decisions", decisions, true, data.decisions.length),
     section("incidents", incidents, true, data.incidents.length),
     data.publication === null || data.publication === undefined

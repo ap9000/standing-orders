@@ -381,3 +381,56 @@ chat --say "…"` runs one turn and exits with the proposals listed.
 
 Scout tasks (report-shaped deliverable), Telegram digests, project-level
 standing notes, propose-* over the MCP gateway for coordinators, voice.
+
+## 9. v3 (2026-09-02): suggested answers, and proposals over the gateway
+
+Both were deferred in v1; the operator asked for them. Two rule changes,
+stated:
+
+**Rule change #3 — the mate may read a decision's consequences.** v13
+excluded recaps, consequences, and recommendations from anything sent to
+a provider. A suggested answer that has not read the consequences is a
+guess, so `get_decision` returns the question and each option's id,
+label, reversibility, and consequence — through `mateView`, so a path or
+a name typed into a consequence is scrubbed — and never the recap or the
+builder's own recommendation (the mate's judgment stays independent; the
+card shows both side by side). The v13 fleet chat keeps its exclusion.
+
+**`propose_answer {decision, option, rationale}`** writes an `answer`
+proposal carrying the decision id, the task, the option id and label, its
+reversibility, and the rationale (≤ 400 plain characters). The card shows
+the question, every option WITH its consequence, the builder's
+recommendation, and the mate's pick and rationale, and says the mate read
+consequences but not the recap. Confirming answers the decision as the
+operator through `answerDecision` (via `web` or `cli`); an irreversible
+option confirms only with the existing `confirm=yes` field (a checkbox on
+the card; `confirm N yes` in the REPL) — ruling 12 unchanged. A decision
+answered meanwhile refuses `already-answered`.
+
+**Proposals over the MCP gateway.** Coordinators gain `get_decision` and
+`propose_next / propose_reserve / propose_hold / propose_unhold /
+propose_scope / propose_cancel / propose_answer`, each writing a row in
+`coordinator_proposal` (cid, the coordinator's name at filing, repo, kind,
+payload with the same CAS material the mate's carry, state
+`pending|confirming|confirmed|refused|dismissed|expired`). Each tool
+re-authenticates the token inside its transaction, refuses a task or
+decision outside the allowlist as not-found, counts against the
+credential's per-hour limit together with filings, and holds at most 20
+pending rows per credential. Rows expire after 7 days; revoking the
+credential expires its pending rows.
+
+**Who confirms.** Any approver whose ceiling admits the row's repo, from
+the console — cards under "proposed by coordinators" on `/chat` (both
+modes) and on the task's own page, `POST /proposals/:id/confirm|dismiss`
+with csrf — or the CLI (`standing-orders proposals`, `proposals confirm
+<id> [--yes]`, `proposals dismiss <id>`). The door is
+`confirmCoordinatorProposal`: one transaction, standing re-proved inside,
+the repo re-checked against the confirmer's ceiling, `pending →
+confirming` CAS, the shared executor, `confirming → confirmed|refused`.
+A scope a coordinator wrote stamps `proposed_via = 'coordinator'`, and
+the mode seal refuses it exactly as it refuses the mate's.
+
+**Shared executor.** `executeProposal` in `src/mate-doors.ts` runs every
+kind for either door under `{ name, repos }` taken from a
+`VerifiedApprover` — never a structural caller object.
+

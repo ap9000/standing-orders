@@ -117,12 +117,17 @@ function admittedRef(ctx: MateToolContext, taskId: string): { id: number; repo: 
   return repoId === null ? null : { id: ref.id, repo: ref.repo, repoId };
 }
 
-function readOptionalText(value: unknown, maxChars: number): string | null | undefined {
+/** The same text rule, for the gateway's proposals. */
+export function honestText(value: unknown, maxChars: number): value is string {
+  return honest(value, maxChars);
+}
+
+export function readOptionalText(value: unknown, maxChars: number): string | null | undefined {
   if (value === undefined || value === null) return null;
   return honest(value, maxChars) ? value : undefined;
 }
 
-function readTouches(value: unknown): string[] | null {
+export function readTouches(value: unknown): string[] | null {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 50 || !value.every(one => honest(one, 200))) return null;
   return value as string[];
@@ -206,6 +211,31 @@ export function decisionsOver(store: Store, repos: readonly string[], now: Date)
   return {
     decisions: snapshot.decisions.map(one => ({ repoIndex: one.repoIndex, decision: one.id, task: one.taskId, question: one.question, options: one.options, ageHours: one.ageHours })),
     truncated: snapshot.decisionsSaturated,
+  };
+}
+
+/**
+ * One decision as a proposer may read it (mate arc v3, rule change #3):
+ * the question, each option's id, label, reversibility, and consequence —
+ * never the recap or the builder's recommendation. `repoIndex` names the
+ * task's repo for the view; a decision outside `repos` is null.
+ */
+export function decisionOver(store: Store, repos: readonly string[], decisionId: number, now: Date): Record<string, unknown> | null {
+  const decision = store.getDecision(decisionId);
+  if (decision === null) return null;
+  const run = store.getRun(decision.run);
+  const ref = run === null ? null : store.refById(run.taskRef);
+  if (ref === null || ref.repo === null) return null;
+  const repoIndex = repos.indexOf(ref.repo);
+  if (repoIndex === -1) return null;
+  return {
+    repoIndex,
+    decision: decision.id,
+    task: ref.externalId,
+    state: decision.state,
+    question: decision.question,
+    options: decision.options.map(one => ({ id: one.id, label: one.label, reversible: one.reversible, consequence: one.consequence })),
+    ageHours: Math.max(0, Math.round((now.getTime() - Date.parse(decision.createdAt)) / 3_600_000)),
   };
 }
 
@@ -306,6 +336,19 @@ export const MATE_TOOLS: MateTool[] = [
       "Open decisions across your projects: id, task, question, the options (id, label, whether reversible), age in hours. Never consequences or recommendations — you do not choose; the operator answers on the decision page.",
     inputSchema: schema({}),
     handle: ctx => ({ ok: true, body: labelRepos(decisionsOver(ctx.store, ctx.who.repos, ctx.now), index => `r${index + 1}`) }),
+  },
+  {
+    name: "get_decision",
+    description:
+      "One open decision in full: the question and every option with its id, label, whether it is reversible, and its consequence. Never the builder's recommendation. Read this before propose_answer.",
+    inputSchema: schema({ decision: { type: "integer", minimum: 1 } }, ["decision"]),
+    handle: (ctx, args) => {
+      const id = args["decision"];
+      if (typeof id !== "number" || !Number.isInteger(id) || id < 1) return { ok: false, message: "decision is its id" };
+      const found = decisionOver(ctx.store, ctx.who.repos, id, ctx.now);
+      if (found === null) return { ok: false, message: "not-found: no such decision in your projects" };
+      return { ok: true, body: labelRepos(found, index => `r${index + 1}`) };
+    },
   },
   {
     name: "queue",
@@ -430,6 +473,34 @@ export const MATE_TOOLS: MateTool[] = [
       const id = ctx.draft("scope", { task: taskId, repoId: ref.repoId, goal: args["goal"], not, touches, sawDigest: scope?.digest ?? null });
       if (id === null) return tooMany();
       return { ok: true, body: { proposal: id, kind: "scope", task: taskId, awaiting: "the operator's confirmation, then a password to approve" } };
+    },
+  },
+  {
+    name: "propose_answer",
+    description:
+      "Propose an answer to an open decision you have read with get_decision, with a short rationale. The operator confirms on a card showing every consequence and the builder's recommendation; an irreversible option needs their explicit confirmation there.",
+    inputSchema: schema({ decision: { type: "integer", minimum: 1 }, option: { type: "string", minLength: 1, maxLength: 64 }, rationale: { type: "string", maxLength: 400 } }, ["decision", "option", "rationale"]),
+    handle: (ctx, args) => {
+      const id = args["decision"];
+      if (typeof id !== "number" || !Number.isInteger(id) || id < 1) return { ok: false, message: "decision is its id" };
+      const found = decisionOver(ctx.store, ctx.who.repos, id, ctx.now);
+      if (found === null) return { ok: false, message: "not-found: no such decision in your projects" };
+      if (found["state"] !== "open") return { ok: false, message: "that decision is no longer open" };
+      const options = found["options"] as { id: string; label: string; reversible: boolean }[];
+      const chosen = options.find(one => one.id === args["option"]);
+      if (chosen === undefined) return { ok: false, message: `option must be one of ${options.map(one => one.id).join(", ")}` };
+      if (!honest(args["rationale"], 400)) return { ok: false, message: "rationale is plain text ≤400" };
+      const proposalId = ctx.draft("answer", {
+        decision: id,
+        task: found["task"],
+        repoId: `r${(found["repoIndex"] as number) + 1}`,
+        option: chosen.id,
+        optionLabel: chosen.label,
+        reversible: chosen.reversible,
+        rationale: args["rationale"],
+      });
+      if (proposalId === null) return tooMany();
+      return { ok: true, body: { proposal: proposalId, kind: "answer", decision: id, option: chosen.id, awaiting: chosen.reversible ? "the operator's confirmation" : "the operator's explicit confirmation — this option is irreversible" } };
     },
   },
   {

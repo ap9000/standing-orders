@@ -136,10 +136,12 @@ export function revokeCoordinator(
     store.handle
       .prepare("UPDATE coordinator_credential SET revoked_at = ? WHERE cid = ?")
       .run(now.toISOString(), cid);
-    // The revocation event rides the SAME transaction as the state change.
+    // The revocation event rides the SAME transaction as the state change,
+    // and the credential's pending proposals expire with it (mate arc v3).
     store.handle
       .prepare("INSERT INTO coordinator_event (cid, kind, detail, created_at) VALUES (?, 'revoked', ?, ?)")
       .run(cid, `by ${by}`, now.toISOString());
+    store.sweepCoordinatorProposals(now, cid);
     return { ok: true as const };
   });
 }

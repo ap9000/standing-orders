@@ -401,7 +401,7 @@ export type ScopeInput = {
   posture?: "escalated";
   /** Who wrote this text (mate arc, ruling 2): `mate` for a confirmed mate
    * proposal — mode coverage then never seals it; a human rewrite clears it. */
-  proposedVia?: "mate" | null;
+  proposedVia?: "mate" | "coordinator" | null;
   now: Date;
   mutation?: Mutation;
 };

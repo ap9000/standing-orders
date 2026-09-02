@@ -6977,6 +6977,43 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(store.activeMateSession("alex", clockNow)).not.toBeNull();
   });
 
+  test("coordinator proposals are cards on /chat and the task page; an irreversible answer confirms only with the field", async () => {
+    const { mintCoordinator } = await import("./coordinator.js");
+    const { proposeAsCoordinator } = await import("./coordinator-proposals.js");
+    const minted = mintCoordinator(store, { name: "planner-bot", repos: [repoDir], by: "alex", now: clockNow });
+    if (!minted.ok) throw new Error("mint");
+    const run = store.startRun({ taskRef: store.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: clockNow });
+    store.saveDecision({ run, urgency: "blocking", recap: "RECAP-CANARY", question: "Ship it?", options: [{ id: "go", label: "Ship", consequence: "it ships", reversible: false }], recommendation: "go" }, clockNow);
+    expect(proposeAsCoordinator(store, minted.token, "next", { ref: "b" }, clockNow)).toMatchObject({ ok: true, id: 1 });
+    expect(proposeAsCoordinator(store, minted.token, "answer", { decision: 1, option: "go", rationale: "tests are green" }, clockNow)).toMatchObject({ ok: true, id: 2 });
+    const cookie = await login();
+    let html = await page(cookie);
+    const csrf = csrfFrom(html);
+    expect(html).toContain("proposed by coordinators");
+    expect(html).toContain('action="/proposals/1/confirm"');
+    expect(html).toContain('action="/proposals/2/confirm"');
+    expect(html).toContain("it ships");
+    expect(html).toContain("the builder recommends this");
+    expect(html).toContain('name="confirm" value="yes"');
+    expect(html).not.toContain("RECAP-CANARY");
+    // The task page carries the same card, returning to the task after the act.
+    const taskPage = await (await fetch(url("/t/b"), { headers: { cookie } })).text();
+    expect(taskPage).toContain('action="/proposals/1/confirm"');
+    expect(taskPage).toContain('name="return" value="/t/b"');
+    const confirmed = await post(cookie, "/proposals/1/confirm", { csrf, return: "/t/b" });
+    expect(confirmed.headers.get("location")).toBe("/t/b");
+    expect(store.getCoordinatorProposal(1)).toMatchObject({ state: "confirmed", resolvedBy: "alex" });
+    expect(store.queuePosition("b")?.position).toBe(1);
+    // The irreversible answer: no field, no answer; with the field, answered as alex via the web.
+    await post(cookie, "/proposals/2/confirm", { csrf });
+    expect(store.getDecision(1)?.state).toBe("open");
+    expect(store.getCoordinatorProposal(2)?.state).toBe("pending");
+    await post(cookie, "/proposals/2/confirm", { csrf, confirm: "yes" });
+    expect(store.getDecision(1)).toMatchObject({ state: "answered", answeredBy: "alex", answeredVia: "web" });
+    html = await page(cookie);
+    expect(html).toContain("decision #1 answered: Ship");
+  });
+
   test("a refused turn is said once on the thread; a bearer caller and a viewer have no mate", async () => {
     const cookie = await login();
     const csrf = await mint(cookie);

@@ -33,7 +33,9 @@ import {
   taskDetailFor,
   type VerifiedCoordinator,
 } from "./coordinator.js";
-import { ISO_STAMP_RULE, decisionsOver, labelRepos, queueOver, recapOver } from "./mate-tools.js";
+import { ISO_STAMP_RULE, decisionOver, decisionsOver, labelRepos, queueOver, recapOver } from "./mate-tools.js";
+import { proposeAsCoordinator } from "./coordinator-proposals.js";
+import type { CoordinatorProposalKind } from "./store.js";
 
 export const MODERN = "2026-07-28";
 export const LEGACY = "2025-11-25";
@@ -91,7 +93,8 @@ const CONTRACT_GUIDE = [
   "A filed proposal is an ordinary unapproved task: it is quarantined from planning, claiming, and running until the operator signs its scope in a password ceremony that shows them who asked. Modes never auto-admit coordinator filings.",
   "file_proposal requires an idempotency_key (8-64 printable chars, unique per request): replaying the same key+request returns the original task; the same key with a different request refuses.",
   "You are rate-limited per hour and capped on outstanding unapproved filings. Refusals say the limit and the road in words.",
-  "recap, list_decisions, and queue are the plane's own read queries (shared with the operator's mate): decisions carry ids, questions, and option labels — never consequences or recommendations, which only the operator sees.",
+  "recap, list_decisions, get_decision, and queue are the plane's own read queries (shared with the operator's mate). get_decision shows each option's consequence, never the builder's recommendation.",
+  "propose_next, propose_reserve, propose_hold, propose_unhold, propose_scope, propose_cancel, and propose_answer write a PROPOSAL row and nothing else: an approver confirms it on the console or the CLI, and a stale one refuses there. Proposals share your hourly filing rate and hold at most 20 pending per credential; they expire after seven days.",
   "Approve, steer, answer, pick, mint, configure, merge: those verbs do not exist on this surface, by construction.",
 ].join("\n");
 
@@ -240,6 +243,17 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "get_decision",
+    description: "One open decision in your allowlist in full: question, options with id, label, reversible, and consequence. Never the builder's recommendation.",
+    inputSchema: { type: "object", properties: { decision: { type: "integer", minimum: 1 } }, required: ["decision"], additionalProperties: false },
+    handle: (ctx, args) => {
+      const found = decisionOver(ctx.store, ctx.who.repos, Number(args["decision"]), ctx.now);
+      if (found === null) return { ok: false, message: "not-found: no such decision in your repositories" };
+      return { ok: true, body: labelRepos(found, index => ctx.who.repos[index] ?? "") as unknown as Json };
+    },
+  },
+  ...proposeTools(),
+  {
     name: "get_contract",
     description: "This surface's contract: what a coordinator may do, the proposal lifecycle, and the admission promise.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -287,6 +301,30 @@ const TOOLS: Tool[] = [
     },
   },
 ];
+
+/** The propose_* tools: each writes one proposal row through the coordinator door. */
+function proposeTools(): Tool[] {
+  const ref = { type: "string", minLength: 1, maxLength: 64 };
+  const make = (kind: CoordinatorProposalKind, description: string, properties: Record<string, unknown>, required: string[]): Tool => ({
+    name: `propose_${kind}`,
+    description,
+    inputSchema: { type: "object", properties, required, additionalProperties: false } as unknown as Json,
+    handle: (ctx, args) => {
+      const outcome = proposeAsCoordinator(ctx.store, ctx.token, kind, args, ctx.now);
+      if (!outcome.ok) return { ok: false, message: outcome.message };
+      return { ok: true, body: { proposal: outcome.id, kind: outcome.kind, awaiting: outcome.awaiting } };
+    },
+  });
+  return [
+    make("next", "Propose moving a queued task to the front of its column. An approver confirms; a queue that moved meanwhile refuses.", { ref }, ["ref"]),
+    make("reserve", "Propose reserving a queued task for one worker, or releasing it to the shared queue with worker null.", { ref, worker: { type: ["string", "null"], maxLength: 60 } }, ["ref", "worker"]),
+    make("hold", "Propose holding a task's next attempt, with a reason. A running attempt is never interrupted.", { ref, reason: { type: "string", maxLength: 200 } }, ["ref", "reason"]),
+    make("unhold", "Propose lifting the operator's own hold on a task.", { ref }, ["ref"]),
+    make("scope", "Propose rewriting a task's scope. An approver confirms the rewrite, then approves it with a password — a scope you wrote never seals under a mode.", { ref, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 } }, ["ref", "goal"]),
+    make("cancel", "Propose cancelling a task, with a reason. The approver arms and confirms it on the task itself.", { ref, reason: { type: "string", maxLength: 200 } }, ["ref", "reason"]),
+    make("answer", "Propose an answer to an open decision you read with get_decision, with a rationale. The approver confirms where every consequence and the builder's recommendation are shown; an irreversible option needs their explicit confirmation.", { decision: { type: "integer", minimum: 1 }, option: { type: "string", minLength: 1, maxLength: 64 }, rationale: { type: "string", maxLength: 400 } }, ["decision", "option", "rationale"]),
+  ];
+}
 
 export type McpIo = {
   onLine: (handler: (line: string) => void) => void;

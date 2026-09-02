@@ -141,6 +141,21 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "key-mismatch" });
   });
 
+  test("an irreversible answer takes `confirm N yes`", async () => {
+    const store0 = openStore(db);
+    const runId = store0.startRun({ taskRef: store0.refFor("built-in", "a").id, leaseId: "l", runner: "r", branch: "b", worktree: "/w", now: T0 });
+    store0.saveDecision({ run: runId, urgency: "blocking", recap: "r", question: "Which?", options: [{ id: "y", label: "Y", consequence: "cy", reversible: false }], recommendation: "y" }, T0);
+    store0.close();
+    script.push(() => answer([{ type: "tool_use", id: "c1", name: "propose_answer", input: { decision: 1, option: "y", rationale: "only option" } }]), () => text("I propose Y."));
+    expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo], ["decide", "confirm 1", "confirm 1 yes", "quit"])).toBe(0);
+    expect(out()).toContain('answer decision #1 on a with "Y" (irreversible — confirm N yes)');
+    expect(out()).toContain("an irreversible choice must be confirmed explicitly: confirm 1 yes");
+    expect(out()).toContain("decision #1 answered: Y");
+    const after = openStore(db);
+    expect(after.getDecision(1)).toMatchObject({ state: "answered", answeredVia: "cli" });
+    after.close();
+  });
+
   test("--end ends a live session; a stale card refuses in words; a password-class act points at its ceremony", async () => {
     script.push(
       () => answer([{ type: "tool_use", id: "c1", name: "propose_scope", input: { task: "a", goal: "a better goal" } }, { type: "tool_use", id: "c2", name: "propose_next", input: { task: "b" } }]),

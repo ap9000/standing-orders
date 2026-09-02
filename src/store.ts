@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 32;
+export const SCHEMA_VERSION = 33;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -303,7 +303,27 @@ export type MateThread = { id: number; approver: string; ceilingDigest: string; 
 
 export type MateMessage = { id: number; thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity: string | null; createdAt: string };
 
-export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "scope" | "cancel";
+export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "scope" | "cancel" | "answer";
+
+/** A coordinator's proposal over the MCP gateway (mate arc v3): the same
+ * kinds as the mate's (no `task` — filing has its own door), confirmed by
+ * any approver whose ceiling admits the repo. */
+export type CoordinatorProposalKind = "next" | "reserve" | "hold" | "unhold" | "scope" | "cancel" | "answer";
+export type CoordinatorProposalState = "pending" | "confirming" | "confirmed" | "refused" | "dismissed" | "expired";
+export type CoordinatorProposal = {
+  id: number;
+  cid: string;
+  /** The coordinator's name at filing — display provenance. */
+  name: string;
+  repo: string;
+  kind: CoordinatorProposalKind;
+  payload: Record<string, unknown>;
+  state: CoordinatorProposalState;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  outcome: Record<string, unknown> | null;
+};
 export type MateProposalState = "drafting" | "pending" | "confirming" | "confirmed" | "refused" | "dismissed" | "expired";
 export type MateProposal = {
   id: number;
@@ -1336,7 +1356,7 @@ CREATE TABLE IF NOT EXISTS mate_proposal (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
   turn           INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel')),
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel','answer')),
   payload_json   TEXT NOT NULL,
   ceiling_digest TEXT NOT NULL,
   state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
@@ -1346,6 +1366,21 @@ CREATE TABLE IF NOT EXISTS mate_proposal (
   outcome_json   TEXT
 );
 CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state);
+
+CREATE TABLE IF NOT EXISTS coordinator_proposal (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  cid          TEXT NOT NULL REFERENCES coordinator_credential(cid),
+  name         TEXT NOT NULL,
+  repo         TEXT NOT NULL,
+  kind         TEXT NOT NULL CHECK (kind IN ('next','reserve','hold','unhold','scope','cancel','answer')),
+  payload_json TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending','confirming','confirmed','refused','dismissed','expired')),
+  created_at   TEXT NOT NULL,
+  resolved_at  TEXT,
+  resolved_by  TEXT,
+  outcome_json TEXT
+);
+CREATE INDEX IF NOT EXISTS coordinator_proposal_state ON coordinator_proposal (state, repo);
 
 CREATE TABLE IF NOT EXISTS mate_turn (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2880,6 +2915,29 @@ function migrate(db: Database): void {
   addColumn(db, "chat_turn", "kind", "TEXT NOT NULL DEFAULT 'chat'");
   addColumn(db, "chat_turn", "mate_turn", "INTEGER");
   addColumn(db, "task_scope", "proposed_via", "TEXT");
+  // v33 (mate v3): `answer` joins the proposal kinds — a CHECK widening,
+  // copy-rename against the v32 shape.
+  rebuildForV4(
+    db,
+    "mate_proposal",
+    "'task','next','reserve','hold','unhold','scope','cancel'",
+    "'answer'",
+    `CREATE TABLE mate_proposal_next (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  turn           INTEGER NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel','answer')),
+  payload_json   TEXT NOT NULL,
+  ceiling_digest TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
+  created_at     TEXT NOT NULL,
+  resolved_at    TEXT,
+  resolved_by    TEXT,
+  outcome_json   TEXT
+)`,
+    ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
   addColumn(db, "task_ref", "plan_strikes", "INTEGER NOT NULL DEFAULT 0");
   rebuildForV4(
     db,
@@ -5779,7 +5837,7 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated"; proposedVia?: "mate" | null } = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | null } = {}): void {
     this.once(mutation, "saveScope", () => this.transact(() => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -5933,7 +5991,7 @@ export class Store {
           // seals it. Only the password ceremony — which shows the operator
           // every word — approves it.
           const writtenByMate = this.db
-            .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ? AND proposed_via = 'mate'")
+            .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ? AND proposed_via IN ('mate','coordinator')")
             .get(taskId);
           if (writtenByMate !== undefined) return false;
         }
@@ -8338,7 +8396,7 @@ export class Store {
       filedVia?: string;
       /** Who wrote the scope text (mate arc, ruling 2): a confirmed mate
        * proposal stamps `mate`, and mode coverage then never seals it. */
-      proposedVia?: "mate" | null;
+      proposedVia?: "mate" | "coordinator" | null;
     },
     now: Date,
     cap = 500,
@@ -13235,6 +13293,81 @@ export class Store {
     });
   }
 
+  /** A task_ref by its row id: the external id and repo — for decisions, which hang off runs. */
+  refById(id: number): { id: number; externalId: string; repo: string | null } | null {
+    const row = this.db.prepare("SELECT id, external_id, repo FROM task_ref WHERE id = ? AND backend = ?").get(id, BUILT_IN);
+    return row === undefined ? null : { id: Number(row["id"]), externalId: String(row["external_id"]), repo: row["repo"] === null ? null : String(row["repo"]) };
+  }
+
+  // ---- coordinator proposals (mate arc v3) --------------------------------
+
+  fileCoordinatorProposalRow(proposal: { cid: string; name: string; repo: string; kind: CoordinatorProposalKind; payload: Record<string, unknown> }, now: Date): number {
+    const inserted = this.db
+      .prepare("INSERT INTO coordinator_proposal (cid, name, repo, kind, payload_json, state, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)")
+      .run(proposal.cid, proposal.name, proposal.repo, proposal.kind, JSON.stringify(proposal.payload), now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  getCoordinatorProposal(id: number): CoordinatorProposal | null {
+    const row = this.db.prepare("SELECT * FROM coordinator_proposal WHERE id = ?").get(id);
+    return row === undefined ? null : readCoordinatorProposal(row);
+  }
+
+  /** Pending rows over an admitted-repo list (null = every repo — the CLI without a ceiling), newest first, optionally one task's. */
+  listCoordinatorProposals(filter: { repos: readonly string[] | null; states?: readonly CoordinatorProposalState[]; taskId?: string; cid?: string; limit?: number }): CoordinatorProposal[] {
+    const clauses: string[] = [];
+    const args: (string | number)[] = [];
+    if (filter.repos !== null) {
+      if (filter.repos.length === 0) return [];
+      clauses.push(`repo IN (${filter.repos.map(() => "?").join(",")})`);
+      args.push(...filter.repos);
+    }
+    const states = filter.states ?? ["pending"];
+    clauses.push(`state IN (${states.map(() => "?").join(",")})`);
+    args.push(...states);
+    if (filter.cid !== undefined) {
+      clauses.push("cid = ?");
+      args.push(filter.cid);
+    }
+    if (filter.taskId !== undefined) {
+      clauses.push("json_extract(payload_json, '$.task') = ?");
+      args.push(filter.taskId);
+    }
+    args.push(Math.max(1, Math.min(filter.limit ?? 100, 500)));
+    return this.db
+      .prepare(`SELECT * FROM coordinator_proposal WHERE ${clauses.join(" AND ")} ORDER BY id DESC LIMIT ?`)
+      .all(...args)
+      .map(readCoordinatorProposal);
+  }
+
+  /** Proposals this credential filed in the window — they share the filing rate with file_proposal. */
+  coordinatorProposalsSince(cid: string, since: Date): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM coordinator_proposal WHERE cid = ? AND created_at > ?").get(cid, since.toISOString());
+    return Number(row?.["n"] ?? 0);
+  }
+
+  casCoordinatorProposal(id: number, from: CoordinatorProposalState, to: CoordinatorProposalState, by: string | null, outcome: Record<string, unknown> | null, now: Date): boolean {
+    const terminal = to === "confirmed" || to === "refused" || to === "dismissed" || to === "expired";
+    const changed = this.db
+      .prepare(
+        `UPDATE coordinator_proposal SET state = ?, resolved_at = CASE WHEN ? THEN ? ELSE resolved_at END,
+           resolved_by = COALESCE(?, resolved_by), outcome_json = COALESCE(?, outcome_json)
+         WHERE id = ? AND state = ?`,
+      )
+      .run(to, terminal ? 1 : 0, now.toISOString(), by, outcome === null ? null : JSON.stringify(outcome), id, from);
+    return Number(changed.changes) === 1;
+  }
+
+  /** Pending rows expire after seven days; a revoked credential's pending rows expire at once. */
+  sweepCoordinatorProposals(now: Date, cid?: string): number {
+    const cutoff = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
+    const changed =
+      cid === undefined
+        ? this.db.prepare("UPDATE coordinator_proposal SET state = 'expired', resolved_at = ? WHERE state = 'pending' AND created_at < ?").run(now.toISOString(), cutoff)
+        : this.db.prepare("UPDATE coordinator_proposal SET state = 'expired', resolved_at = ? WHERE state IN ('pending','confirming') AND cid = ?").run(now.toISOString(), cid);
+    return Number(changed.changes);
+  }
+
   recentMateTurns(approver: string, limit = 10): MateTurn[] {
     return this.db
       .prepare("SELECT * FROM mate_turn WHERE approver = ? ORDER BY id DESC LIMIT ?")
@@ -15448,6 +15581,22 @@ function readMateThread(row: Record<string, unknown>): MateThread {
     openedAt: String(row["opened_at"]),
     lastTurnAt: maybe("last_turn_at"),
     closedAt: maybe("closed_at"),
+  };
+}
+
+function readCoordinatorProposal(row: Record<string, unknown>): CoordinatorProposal {
+  return {
+    id: Number(row["id"]),
+    cid: String(row["cid"]),
+    name: String(row["name"]),
+    repo: String(row["repo"]),
+    kind: String(row["kind"]) as CoordinatorProposalKind,
+    payload: JSON.parse(String(row["payload_json"])) as Record<string, unknown>,
+    state: String(row["state"]) as CoordinatorProposalState,
+    createdAt: String(row["created_at"]),
+    resolvedAt: row["resolved_at"] === null ? null : String(row["resolved_at"]),
+    resolvedBy: row["resolved_by"] === null ? null : String(row["resolved_by"]),
+    outcome: row["outcome_json"] === null ? null : (JSON.parse(String(row["outcome_json"])) as Record<string, unknown>),
   };
 }
 
