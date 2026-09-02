@@ -6353,8 +6353,22 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     finished("t-money", ref, "failed", null);
     rail = railOf(await (await fetch(url("/t/t-money"), { headers: { cookie } })).text());
     expect(rail).toContain("this attempt</span> <span class=\"mono\">unmeasured — 44k tokens, no dollar figure reported");
-    expect(rail).toContain("task total</span> <span class=\"mono\">$1.25 measured across 1/2 attempts — 1 unmeasured");
+    expect(rail).toContain("task total</span> <span class=\"mono\">$1.25 measured across 1/2 attempts — 1 unmeasured · 88k tokens");
     expect(rail).not.toContain("$0.00");
+
+    // Measured dollars with NO token report (commit-3 review, finding 2):
+    // the tokens are said unreported, never summed as zero.
+    const ref2 = seed("t-quiet", "priced, tokens unreported");
+    const quiet = store.startRun({
+      taskRef: ref2, leaseId: "lease-quiet", runner: "night-shift-1", provider: "claude",
+      branch: "standing-orders/t-quiet", worktree: "/pool/t-quiet", now: T0,
+    });
+    store.stampProviderStart(quiet, T0);
+    store.recordUsage(quiet, { costUsd: 0.4 });
+    store.finishRun(quiet, { outcome: "built", now: T0 });
+    const quietRail = railOf(await (await fetch(url("/t/t-quiet"), { headers: { cookie } })).text());
+    expect(quietRail).toContain("this attempt</span> <span class=\"mono\">$0.40 · tokens unreported · measured");
+    expect(quietRail).not.toContain("0 tokens");
   });
 
   test("hold is 'hold next attempt'; while an attempt runs, retry says when it becomes available instead of offering a deferred button", async () => {
@@ -6368,8 +6382,17 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const cookie = await login();
     const html = await (await fetch(url("/t/t-verbs"), { headers: { cookie } })).text();
     expect(html).toContain("<button type=\"submit\">hold next attempt</button>");
-    expect(html).toContain("retry becomes available after this attempt finishes");
+    // Said once (commit-3 review, finding 3), and only where a retry applies.
+    expect(html.split("retry becomes available after this attempt finishes").length - 1).toBe(1);
     expect(html).not.toContain('action="/t/t-verbs/requeue"');
+
+    // A healthy live task offers no retry and says nothing about one.
+    const ref2 = seed("t-fine", "just running");
+    live("t-fine", ref2);
+    const fine = await (await fetch(url("/t/t-fine"), { headers: { cookie } })).text();
+    expect(fine).toContain("hold next attempt");
+    expect(fine).not.toContain("retry becomes available");
+    expect(fine).not.toContain('action="/t/t-fine/requeue"');
     // The attempts ledger row: chip, then one mono meta run with the
     // unmeasured word for the live attempt.
     expect(html).toContain("unmeasured so far");

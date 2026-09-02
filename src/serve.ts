@@ -9204,7 +9204,8 @@ export function queueScript(): string {
     `var old=card.querySelector(".queue-problem");if(old)old.remove();` +
     `var row=document.createElement("p");row.className="problem queue-problem";row.setAttribute("role","alert");row.textContent=text;card.appendChild(row);return true;}` +
     `fetch("/queue/move",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:post.toString(),redirect:"manual"})` +
-    `.then(function(r){if(r.ok)return fetch("/queue?fragment=1",{cache:"no-store"}).then(function(f){return f.ok?f.text():null;});` +
+    `.then(function(r){if(r.ok)return fetch("/queue?fragment=1",{redirect:"manual",cache:"no-store"}).then(function(f){` +
+    `if(f.type==="opaqueredirect"||f.status===401||f.status===403){location.href="/login";return false;}return f.ok?f.text():null;});` +
     `if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return false;}` +
     `var kind=(r.headers&&r.headers.get?r.headers.get("content-type"):"")||"";` +
     `if(r.status===409&&kind.indexOf("text/plain")===0){return r.text().then(function(text){return problem(drag.task,text)?false:null;});}` +
@@ -9716,16 +9717,25 @@ function taskBody(data: {
     if (rows.length === 0) return "no attempt yet";
     const measured = rows.filter(one => one.costUsd !== null);
     const dollars = measured.reduce((sum, one) => sum + (one.costUsd ?? 0), 0);
-    const tokens = rows.reduce((sum, one) => sum + (one.tokensIn ?? 0) + (one.tokensOut ?? 0), 0);
-    if (measured.length === rows.length) return `$${dollars.toFixed(2)} · ${compactCount(tokens)} tokens · measured`;
+    // Tokens count only where an attempt reported them; a null report is
+    // said, never summed as zero (commit-3 review, finding 2).
+    const reported = rows.filter(one => one.tokensIn !== null || one.tokensOut !== null);
+    const tokens = reported.reduce((sum, one) => sum + (one.tokensIn ?? 0) + (one.tokensOut ?? 0), 0);
+    const tokenWords =
+      reported.length === 0
+        ? "tokens unreported"
+        : reported.length < rows.length
+          ? `${compactCount(tokens)} tokens from ${reported.length}/${rows.length} attempts`
+          : `${compactCount(tokens)} tokens`;
+    if (measured.length === rows.length) return `$${dollars.toFixed(2)} · ${tokenWords} · measured`;
     if (measured.length === 0) {
-      return tokens > 0
-        ? `unmeasured — ${compactCount(tokens)} tokens, no dollar figure reported`
+      return reported.length > 0
+        ? `unmeasured — ${tokenWords}, no dollar figure reported`
         : rows.some(one => one.id === liveRunId)
           ? "unmeasured so far — the figure lands when the attempt finishes"
           : "unmeasured — nothing reported";
     }
-    return `$${dollars.toFixed(2)} measured across ${measured.length}/${rows.length} attempts — ${rows.length - measured.length} unmeasured`;
+    return `$${dollars.toFixed(2)} measured across ${measured.length}/${rows.length} attempts — ${rows.length - measured.length} unmeasured · ${tokenWords}`;
   };
   const thisAttempt = liveRun ?? data.runs[0];
   const economics =
@@ -9870,7 +9880,9 @@ function taskBody(data: {
     // the NEXT start), and requeue refuses while a claim is live — so the
     // words say exactly when each becomes real (slice 1c).
     data.claimed
-      ? `<p class="meta">a worker is building this right now — <em>hold next attempt</em> stops the one after it; retry becomes available after this attempt finishes; cancel waits for the current build to finish</p>`
+      ? `<p class="meta">a worker is building this right now — <em>hold next attempt</em> stops the one after it; cancel waits for the current build to finish${
+          stalled ? "; retry becomes available after this attempt finishes" : ""
+        }</p>`
       : "",
     `<div class="card">`,
     data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined)
@@ -9890,9 +9902,6 @@ function taskBody(data: {
     stalled && !data.claimed ? act("requeue", "retry — branch and workspace kept") : "",
     stalled && !data.claimed
       ? `<p class="meta">resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased</p>`
-      : "",
-    stalled && data.claimed
-      ? `<p class="meta">retry becomes available after this attempt finishes</p>`
       : "",
     `</div>`,
     // Cancel gets the same ceremony as an irreversible answer: armed behind

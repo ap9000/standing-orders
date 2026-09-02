@@ -110,6 +110,24 @@ describe("queueScript, executed", () => {
     expect(navigated).toEqual(["/login"]);
   });
 
+  test("a login redirect on the post-move refetch navigates — the login page never lands in the region", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", (url: string) => {
+      calls.push(url);
+      return Promise.resolve(
+        url === "/queue/move"
+          ? { ok: true, status: 200, type: "basic", headers: { get: () => "text/plain" }, text: () => Promise.resolve("moved") }
+          : { ok: false, status: 0, type: "opaqueredirect", headers: { get: () => null }, text: () => Promise.resolve("<html>login</html>") },
+      );
+    });
+    dropTwoOnOne();
+    await flush();
+    expect(calls).toEqual(["/queue/move", "/queue?fragment=1"]);
+    expect(document.getElementById("queue-region")?.textContent).not.toContain("login");
+    expect(document.querySelector('[data-task="t-1"]')).not.toBeNull();
+    expect(navigated).toEqual(["/login"]);
+  });
+
   test("a successful move re-fetches the fragment and swaps the region", async () => {
     const calls: string[] = [];
     vi.stubGlobal("fetch", (url: string) => {
