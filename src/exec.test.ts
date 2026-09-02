@@ -1,7 +1,10 @@
 import { describe, test, expect } from "vitest";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { run, runStreamJsonl, runGeminiStreamJsonl, terminateLiveProviders, NOT_FOUND_CODE } from "./exec.js";
+import {
+  run, runStreamJsonl, runGeminiStreamJsonl, terminateLiveProviders, NOT_FOUND_CODE,
+  retryTransientSpawn, isTransientSpawnFailure, type SpawnAttempt,
+} from "./exec.js";
 
 /** node itself is the one binary guaranteed to exist wherever these tests run. */
 const NODE = process.execPath;
@@ -240,5 +243,69 @@ describe("the gemini retention runner (Phase 3 D1/A7)", () => {
     const result = await runGeminiStreamJsonl("/no/such/gemini-binary", [], { timeoutMs: 5_000 });
     expect(result.notFound).toBe(true);
     expect(result.code).toBe(NOT_FOUND_CODE);
+  });
+});
+
+describe("transient spawn failures are retried, bounded — a process that never started is not a result", () => {
+  const failed = (code: string | number): SpawnAttempt => ({
+    result: { code: 1, stdout: "", stderr: `spawn git ${code}`, timedOut: false, notFound: false },
+    transient: isTransientSpawnFailure({ code }),
+  });
+  const ok: SpawnAttempt = { result: { code: 0, stdout: "main\n", stderr: "", timedOut: false, notFound: false }, transient: false };
+
+  test("EAGAIN, EMFILE, and ENFILE are the transient class; exits, not-found, and timeouts are not", () => {
+    expect(isTransientSpawnFailure({ code: "EAGAIN" })).toBe(true);
+    expect(isTransientSpawnFailure({ code: "EMFILE" })).toBe(true);
+    expect(isTransientSpawnFailure({ code: "ENFILE" })).toBe(true);
+    expect(isTransientSpawnFailure({ code: "ENOENT" })).toBe(false);
+    expect(isTransientSpawnFailure({ code: 1 })).toBe(false);
+    expect(isTransientSpawnFailure({})).toBe(false);
+    expect(isTransientSpawnFailure(null)).toBe(false);
+  });
+
+  test("two refused spawns then a start: three attempts, the delays honored in order, the real answer returned", async () => {
+    const answers = [failed("EAGAIN"), failed("EMFILE"), ok];
+    let attempts = 0;
+    const slept: number[] = [];
+    const result = await retryTransientSpawn(
+      () => Promise.resolve(answers[attempts++] as SpawnAttempt),
+      [10, 20, 30],
+      ms => { slept.push(ms); return Promise.resolve(); },
+    );
+    expect(attempts).toBe(3);
+    expect(slept).toEqual([10, 20]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("main\n");
+  });
+
+  test("a machine that never frees a slot: the delays run out and the last refusal stands, honestly", async () => {
+    let attempts = 0;
+    const result = await retryTransientSpawn(
+      () => { attempts++; return Promise.resolve(failed("EAGAIN")); },
+      [1, 1, 1],
+      () => Promise.resolve(),
+    );
+    expect(attempts).toBe(4);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("EAGAIN");
+  });
+
+  test("a real failure is answered at once — no retry hides an exit code or a missing binary", async () => {
+    let attempts = 0;
+    const exit = await retryTransientSpawn(
+      () => { attempts++; return Promise.resolve({ result: { code: 128, stdout: "", stderr: "fatal", timedOut: false, notFound: false }, transient: false }); },
+      [1, 1],
+      () => Promise.resolve(),
+    );
+    expect(attempts).toBe(1);
+    expect(exit.code).toBe(128);
+    let again = 0;
+    const missing = await retryTransientSpawn(
+      () => { again++; return Promise.resolve({ result: { code: NOT_FOUND_CODE, stdout: "", stderr: "", timedOut: false, notFound: true }, transient: false }); },
+      [1, 1],
+      () => Promise.resolve(),
+    );
+    expect(again).toBe(1);
+    expect(missing.notFound).toBe(true);
   });
 });

@@ -1276,8 +1276,10 @@ describe("the park, end to end — a judgement call survives the night", () => {
 
     const code = await tick(runnerToken, babblingAgent);
 
-    // The attempt broke and the pass says so.
-    expect(code).toBe(EXIT.failed);
+    // The attempt broke and the pass says so. (On a mismatch the pass's
+    // own JSON is the assertion message — an exit code alone cannot say
+    // which road refused.)
+    expect(code, lines.join("\n")).toBe(EXIT.failed);
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "failed", reason: "malformed-decision" }]);
 
     const store = openStore(db);

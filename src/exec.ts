@@ -207,6 +207,44 @@ type ExecError = Error & {
   signal?: NodeJS.Signals | null;
 };
 
+/**
+ * A spawn the OS refused for the moment — no free process slot or file
+ * descriptor (a loaded machine, a fork storm from a parallel test suite) —
+ * is not the command failing: the command never ran. Left as an exit 1, a
+ * `git symbolic-ref` that never started reads as "no branch checked out"
+ * and an unattended pass refuses on a lie. So the two buffered transports
+ * retry EXACTLY this class, bounded, before answering.
+ */
+const TRANSIENT_SPAWN_CODES: ReadonlySet<string> = new Set(["EAGAIN", "EMFILE", "ENFILE"]);
+export const SPAWN_RETRY_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800];
+
+export function isTransientSpawnFailure(error: { code?: number | string } | null | undefined): boolean {
+  return error !== null && error !== undefined && typeof error.code === "string" && TRANSIENT_SPAWN_CODES.has(error.code);
+}
+
+/** One attempt's answer, with whether the process never started at all. */
+export type SpawnAttempt = { result: ExecResult; transient: boolean };
+
+/**
+ * Retry `attempt` while it reports a transient spawn failure, sleeping the
+ * given delays between tries; the last answer stands when they run out.
+ * A non-transient answer — success, a real exit code, not found, timeout —
+ * is returned at once: only the never-started case is retried.
+ */
+export async function retryTransientSpawn(
+  attempt: () => Promise<SpawnAttempt>,
+  delays: readonly number[] = SPAWN_RETRY_DELAYS_MS,
+  sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+): Promise<ExecResult> {
+  let last = await attempt();
+  for (const delay of delays) {
+    if (!last.transient) return last.result;
+    await sleep(delay);
+    last = await attempt();
+  }
+  return last.result;
+}
+
 export function run(file: string, args: readonly string[], options: RunOptions = {}): Promise<ExecResult> {
   const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER } = options;
   const childEnv = resolveChildEnv(options);
@@ -214,37 +252,45 @@ export function run(file: string, args: readonly string[], options: RunOptions =
   // A provider run needs its own process group; execFile cannot give one,
   // so the buffered path detours through spawn with identical semantics.
   if (options.processGroup === true) {
-    return runBufferedGroup(file, args, {
-      timeoutMs,
-      maxBuffer,
-      ...(cwd === undefined ? {} : { cwd }),
-      ...(childEnv === undefined ? {} : { childEnv }),
-      ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
-    });
+    return retryTransientSpawn(() =>
+      runBufferedGroup(file, args, {
+        timeoutMs,
+        maxBuffer,
+        ...(cwd === undefined ? {} : { cwd }),
+        ...(childEnv === undefined ? {} : { childEnv }),
+        ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
+      }),
+    );
   }
 
-  return new Promise(resolve => {
-    execFile(
-      file,
-      [...args],
-      {
-        cwd,
-        timeout: timeoutMs,
-        maxBuffer,
-        encoding: "utf8",
-        shell: false,
-        windowsHide: true,
-        ...(childEnv === undefined ? {} : { env: childEnv }),
-      },
-      (error, stdout, stderr) => {
-        if (error === null) {
-          resolve({ code: 0, stdout, stderr, timedOut: false, notFound: false });
-          return;
-        }
-        resolve(describeFailure(error as ExecError, stdout, stderr));
-      },
-    );
-  });
+  return retryTransientSpawn(
+    () =>
+      new Promise<SpawnAttempt>(resolve => {
+        execFile(
+          file,
+          [...args],
+          {
+            cwd,
+            timeout: timeoutMs,
+            maxBuffer,
+            encoding: "utf8",
+            shell: false,
+            windowsHide: true,
+            ...(childEnv === undefined ? {} : { env: childEnv }),
+          },
+          (error, stdout, stderr) => {
+            if (error === null) {
+              resolve({ result: { code: 0, stdout, stderr, timedOut: false, notFound: false }, transient: false });
+              return;
+            }
+            resolve({
+              result: describeFailure(error as ExecError, stdout, stderr),
+              transient: isTransientSpawnFailure(error as ExecError),
+            });
+          },
+        );
+      }),
+  );
 }
 
 /**
@@ -257,7 +303,7 @@ function runBufferedGroup(
   file: string,
   args: readonly string[],
   bag: { cwd?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void },
-): Promise<ExecResult> {
+): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child: ReturnType<typeof spawn>;
     try {
@@ -271,7 +317,10 @@ function runBufferedGroup(
       });
       if (child.pid !== undefined) bag.onSpawn?.(child.pid);
     } catch (error) {
-      resolve({ code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false });
+      resolve({
+        result: { code: 1, stdout: "", stderr: String(error), timedOut: false, notFound: false },
+        transient: isTransientSpawnFailure(error as ExecError),
+      });
       return;
     }
     liveProviders.add(child);
@@ -301,22 +350,27 @@ function runBufferedGroup(
     });
 
     let settled = false;
+    let transient = false;
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       liveProviders.delete(child);
       resolve({
-        code: notFound ? NOT_FOUND_CODE : overflowed ? OVERFLOW_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
-        stdout,
-        stderr,
-        // Overflow also killed the child; it is not a timeout and must not read as one.
-        timedOut: timedOut && !overflowed,
-        notFound,
+        result: {
+          code: notFound ? NOT_FOUND_CODE : overflowed ? OVERFLOW_CODE : timedOut ? TIMEOUT_CODE : (code ?? 1),
+          stdout,
+          stderr,
+          // Overflow also killed the child; it is not a timeout and must not read as one.
+          timedOut: timedOut && !overflowed,
+          notFound,
+        },
+        transient,
       });
     };
     child.on("error", error => {
       notFound = (error as NodeJS.ErrnoException).code === "ENOENT";
+      transient = isTransientSpawnFailure(error as NodeJS.ErrnoException);
       if (stderr === "") stderr = String(error);
       finish(null);
     });
