@@ -1234,12 +1234,23 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
   const portIndex = argv.indexOf("--port");
   const portGiven = portIndex === -1 ? "0" : (argv[portIndex + 1] ?? "");
   const port = Number(portGiven);
+  const DEMO_USAGE = "`standing-orders demo [--port <n>] [--host <addr>] [--allow-host name:port,…] [--keep]` — the port is a number under 65536; absent, a free one is picked";
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
-    write(
-      json
-        ? envelopeJson({ ok: false, command: "demo", reason: "usage", message: "`standing-orders demo [--port <n>] [--keep]` — the port is a number under 65536; absent, a free one is picked" })
-        : "`standing-orders demo [--port <n>] [--keep]` — the port is a number under 65536; absent, a free one is picked",
-    );
+    write(json ? envelopeJson({ ok: false, command: "demo", reason: "usage", message: DEMO_USAGE }) : DEMO_USAGE);
+    return 2;
+  }
+  // Reachability, same flags as `serve`: --host binds beyond localhost
+  // (a tailnet, a LAN), and --allow-host names the Host headers the
+  // console will answer to there — a bind on 0.0.0.0 alone still refuses
+  // any name it was not told. Nothing here loosens the demo fence: the
+  // database stays stamped, spend stays refused.
+  const hostIndex = argv.indexOf("--host");
+  const host = hostIndex === -1 ? "127.0.0.1" : (argv[hostIndex + 1] ?? "");
+  const allowIndex = argv.indexOf("--allow-host");
+  const allowedHosts =
+    allowIndex === -1 ? [] : (argv[allowIndex + 1] ?? "").split(",").map(one => one.trim()).filter(one => one !== "");
+  if (host === "" || host.startsWith("--") || (allowIndex !== -1 && allowedHosts.length === 0)) {
+    write(json ? envelopeJson({ ok: false, command: "demo", reason: "usage", message: DEMO_USAGE }) : DEMO_USAGE);
     return 2;
   }
 
@@ -1247,14 +1258,19 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
   const { createDecisionServer } = await import("./serve.js");
   const now = new Date();
   const { sandbox, store, seed, evidenceRoot, passwordFile } = createDemoSandbox(now);
-  const server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repos: seed.repos });
+  const server = createDecisionServer({
+    store, evidenceRoot, clock: () => new Date(), repos: seed.repos,
+    ...(allowedHosts.length === 0 ? {} : { allowedHosts }),
+  });
   await new Promise<void>((ready, failed) => {
     server.once("error", failed);
-    server.listen(port, "127.0.0.1", ready);
+    server.listen(port, host, ready);
   });
   const address = server.address();
   const boundPort = typeof address === "object" && address !== null ? address.port : port;
-  const url = `http://127.0.0.1:${boundPort}`;
+  // The greeting names a road that will actually answer: the first allowed
+  // name when one was given, else the loopback.
+  const url = allowedHosts.length > 0 ? `http://${allowedHosts[0]}` : `http://127.0.0.1:${boundPort}`;
 
   if (json) {
     // The password is deliberately NOT here (adoption review, finding 9):
