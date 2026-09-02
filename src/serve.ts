@@ -6083,6 +6083,16 @@ const STYLE = `
   .acts-bar .primary button:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); }
   .acts-bar .act-hold input[type=text] { width: 10rem; min-height: 2.25rem; margin: 0; font-size: .8125rem; }
   .acts-why { margin: 0 0 .5rem; }
+  .approve-form { margin: .75rem 0; }
+  .approve-form .ceremony-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; margin: 0 0 .5rem; }
+  .approve-form .ceremony-head a { font-size: .8125rem; color: var(--muted-foreground); white-space: nowrap; }
+  .approve-form .recap { margin: .125rem 0 .5rem; }
+  .ceremony-road { margin: .75rem 0 0; }
+  .button-link {
+    display: inline-flex; align-items: center; justify-content: center; min-height: 2.25rem; padding: 0 .875rem;
+    border-radius: calc(var(--radius) - 2px); background: var(--primary); color: var(--primary-foreground);
+    font-weight: 600; font-size: .8125rem; text-decoration: none; border: 1px solid var(--primary);
+  }
   .props .row { padding: .4375rem .375rem; align-items: baseline; }
   .props .row .meta { flex: 0 0 6.5rem; }
   .props .row .mono { flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
@@ -9912,17 +9922,26 @@ function taskBody(data: {
   // approves what is on this form, not what is elsewhere on the page — and
   // requires the token typed again. The session got you here; only the
   // token agrees.
+  // The ceremony is the page's first card when a scope waits for its yes
+  // (task page pass): it states the wait, restates every term the digest
+  // binds, and puts the approve act above the fold — the consent-sheet
+  // shape. An unapprovable scope gets the problem and the edit road
+  // instead of a password it cannot use.
   const approveForm =
     scope === null || approval.approved
       ? ""
       : data.revision !== null && data.revision !== undefined && "problem" in data.revision
-        ? `<div class="card"><p><strong>approval is blocked</strong></p><p class="meta">${escape(data.revision.problem)} — a revision approves only against a brief that verifies</p></div>`
+        ? `<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: approval is blocked.</strong></p><p class="meta">${escape(data.revision.problem)} — a revision approves only against a brief that verifies</p></div>`
+        : scope.profileState === "unresolved"
+          ? `<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: its scope cannot be approved yet.</strong></p>` +
+            profileWords(scope) +
+            `<p class="ceremony-road"><a class="button-link" href="#scope">edit the scope to fix it →</a></p></div>`
         : [
-          `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form">`,
+          `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form" id="approve">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
-          `<p><strong>approve exactly this:</strong></p>`,
+          `<p class="ceremony-head"><strong>This task is waiting on you — approve exactly this:</strong> <a href="#scope">edit instead →</a></p>`,
           // The filer INSIDE the ceremony (MCP spec v6): a coordinator's
           // request is signed knowing whose it is — and until this
           // signature, nothing plans, claims, or runs it.
@@ -10325,7 +10344,8 @@ function taskBody(data: {
     `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason"></form>`;
   const actsBar = [
     `<div class="acts-bar">`,
-    primaryAct === null ? "" : `<span class="primary">${primaryAct.html}</span>`,
+    // While a ceremony leads the page, no other act competes as primary.
+    primaryAct === null ? "" : approveForm === "" ? `<span class="primary">${primaryAct.html}</span>` : primaryAct.html,
     task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0
       ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
@@ -10373,7 +10393,7 @@ function taskBody(data: {
             : ` · filed via ${escape(data.filedVia)}`
       }</p>`,
     `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
-    actsBar,
+    approveForm === "" ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
     // observed state, and — when the tracker closed it and has been seen
     // open again — the authenticated reopen act. Done + closed is display
@@ -10424,10 +10444,8 @@ function taskBody(data: {
           `<p class="meta">The scope is what you approve: the goal, what is off-limits, which paths it may touch. ` +
           `<a href="#scope">Write it below</a>, or use <strong>plan first</strong> to have an agent draft it from the repository.</p></div>`
       : "",
-    scope !== null && !approval.approved && data.plan !== "requested" && task.state === "queued" && data.decisions.length === 0
-      ? `<div class="card"><p><strong>This task is waiting on you: its scope needs your approval.</strong></p>` +
-        `<p class="meta"><a href="#scope">Read the goal and limits below</a> — approving is what lets an agent build this unattended.</p></div>`
-      : "",
+    approveForm,
+    approveForm === "" ? "" : actsBar,
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up. The rail
@@ -10452,7 +10470,7 @@ function taskBody(data: {
     section("attempts", runs, true, data.runs.length),
     section("spend", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
-    section("scope", ["<h2>scope</h2>", scopeCard, planCard, revisionCard, approveForm, attendedCard, scopeForm].join("\n"), true),
+    section("scope", ["<h2>scope</h2>", scopeCard, planCard, revisionCard, attendedCard, scopeForm].join("\n"), true),
     section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),
     cancelAct,

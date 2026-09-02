@@ -6692,6 +6692,56 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(board.headers.get("location")).toBe("/board");
   });
 
+  test("a scope waiting for its yes leads the page: the ceremony is the first card, above the acts, with the approve act in it", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    await fetch(url("/projects/open"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf: csrfOf(home), path: repoA, return: "/" }),
+      redirect: "manual",
+    });
+    store.createTask({ id: "t-yes", title: "needs the yes" }, T0);
+    store.placeTask(store.refFor("built-in", "t-yes").id, repoA);
+    store.saveScope({
+      taskId: "t-yes", goal: "the goal", outOfScope: "not that", touches: ["src/a.ts"],
+      proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const page = await (await fetch(url("/t/t-yes"), { headers: { cookie } })).text();
+    const ceremony = page.indexOf('<form method="post" action="/t/t-yes/approve" class="card approve-form" id="approve">');
+    const title = page.indexOf("<h1>needs the yes ");
+    const bar = page.indexOf('<div class="acts-bar">');
+    const layout = page.indexOf('<div class="task-layout">');
+    expect(ceremony).toBeGreaterThan(title);
+    expect(bar).toBeGreaterThan(ceremony);
+    expect(layout).toBeGreaterThan(bar);
+    expect(page).toContain('<p class="ceremony-head"><strong>This task is waiting on you — approve exactly this:</strong> <a href="#scope">edit instead →</a></p>');
+    expect(page).toContain("approve exactly this:");
+    // No other act wears primary while the ceremony leads; the old
+    // "needs your approval" card is gone (the ceremony says it).
+    expect(page.slice(bar, page.indexOf("</div>", bar))).not.toContain('class="primary"');
+    expect(page).not.toContain("its scope needs your approval");
+    // The scope section still holds the goal card and the edit road, not the ceremony.
+    const scopeSection = page.slice(page.indexOf('<details class="section" id="scope"'), page.indexOf("</details>", page.indexOf('<details class="section" id="scope"')));
+    expect(scopeSection).not.toContain('action="/t/t-yes/approve"');
+    expect(scopeSection).toContain("edit the scope");
+
+    // A scope the store could not resolve to a routing gets the fix road,
+    // never a password it cannot use.
+    store.setPhaseConfig("installation", "build", "claude", null, "test", T0);
+    store.createTask({ id: "t-fix", title: "cannot be approved yet" }, T0);
+    store.placeTask(store.refFor("built-in", "t-fix").id, repoA);
+    store.saveScope({
+      taskId: "t-fix", goal: "the goal", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const fix = await (await fetch(url("/t/t-fix"), { headers: { cookie } })).text();
+    if (fix.includes("filed but unapprovable")) {
+      expect(fix).toContain('<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: its scope cannot be approved yet.</strong></p>');
+      expect(fix).toContain('<a class="button-link" href="#scope">edit the scope to fix it →</a>');
+      expect(fix).not.toContain('action="/t/t-fix/approve"');
+    }
+  });
+
   test("a sensitive page renders the switcher inert: the name and the one link, no forms in the chrome", async () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();

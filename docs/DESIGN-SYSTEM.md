@@ -103,8 +103,14 @@ top-down and every long thing folds.
    scope, build-next in the queue); hold with its reason beside it; unhold
    when a hold exists. One line beneath says what the primary does. Cancel
    stays armed at the foot of the page, far from the primary.
-4. **What waits on you** — the decision cards and the "this task is waiting
-   on you" card, linking to the section that resolves it.
+4. **What waits on you** — when a scope waits for its yes, the approval
+   ceremony IS the first card under the title (the consent-sheet shape:
+   the wait stated, every bound term restated, the amber approve act in the
+   first screen, "edit instead →" beside the heading); the acts bar then
+   follows it with no competing primary. A scope the store cannot route
+   gets the problem and a primary "edit the scope to fix it" road instead
+   of a password. Otherwise the decision cards and the "this task is
+   waiting on you" card, linking to the section that resolves it.
 5. **Property list** (the rail on a desktop, above the sections on a phone):
    worker or last attempt · queue place · scope with its seal · publishes as
    · this attempt · task total · strikes — one row grammar, dim key, mono
