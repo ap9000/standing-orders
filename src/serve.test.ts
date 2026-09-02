@@ -5883,3 +5883,230 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     await boot({ repo: "/repo/main" }); // afterEach closes a server either way
   });
 });
+
+describe("the queue (portfolio arc, slice 1b): move-to-front resolved server-side, refusals inline", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-08-11T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const boot = async (options: Record<string, unknown> = {}) => {
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main", ...options });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  /** A queued task; placed in a repo when one is named, else repo-less. */
+  const seed = (id: string, title: string, repo: string | null, at: Date): number => {
+    store.createTask({ id, title }, at);
+    const ref = store.refFor("built-in", id).id;
+    if (repo !== null) store.placeTask(ref, repo);
+    store.saveScope({
+      taskId: id, goal: "go", outOfScope: null, touches: [],
+      proposedAt: at.toISOString(), digest: `d-${id}`, approvedAt: at.toISOString(), approvedBy: "alex", approvedDigest: `d-${id}`,
+    });
+    return ref;
+  };
+
+  const worker = (name: string, capacity: number): void => {
+    store.saveRunner(
+      { name, host: "here", capacity, repos: ["/repo/main", "/repo/other"], agents: [], registeredAt: T0.toISOString(), heartbeatAt: new Date().toISOString(), retiredAt: null },
+      hashToken(`tok-${name}`),
+    );
+  };
+
+  const csrf = (html: string): string => {
+    const match = /name="csrf" value="([0-9a-f]+)"/.exec(html);
+    if (match === null) throw new Error("no csrf token on the page");
+    return match[1] as string;
+  };
+
+  /** The exact no-script form the ▲ button submits (no `respond` field). */
+  const frontForm = (cookie: string, token: string, task: string, column: string, revision: number) =>
+    fetch(url("/queue/move"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf: token, projectRevision: "1", queueRevision: String(revision), task, column, before: "__TOP__" }),
+      redirect: "manual",
+    });
+
+  /** The order of one partition — exact repo AND assignment — as the store keeps it. */
+  const partition = (repo: string | null, runner: string | null): string[] =>
+    store.queueScoped("/repo/main", new Date()).filter(one => one.repo === repo && one.assignedRunner === runner).map(one => one.id);
+
+  /** The shared column, mixed: a repo-less task first, then two of the project's. */
+  const mixedColumn = (): void => {
+    seed("t-any", "anywhere", null, new Date(T0.getTime() + 1_000));
+    seed("t-b", "second of the project", "/repo/main", new Date(T0.getTime() + 2_000));
+    seed("t-c", "third of the project", "/repo/main", new Date(T0.getTime() + 3_000));
+  };
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-queue-1b-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the no-script ▲ moves a card to the front of ITS partition — not before a repo-less neighbour, never a 200 alone", async () => {
+    await boot();
+    worker("builder-1", 2);
+    mixedColumn();
+    expect(partition("/repo/main", null)).toEqual(["t-b", "t-c"]);
+    expect(partition(null, null)).toEqual(["t-any"]);
+
+    const cookie = await login();
+    const page = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    expect(page).toContain('name="before" value="__TOP__"');
+    const before = store.queueRevision();
+
+    const moved = await frontForm(cookie, csrf(page), "t-c", "anyone", before);
+    expect(moved.status).toBe(303);
+    expect(moved.headers.get("location")).toBe("/queue");
+    // The asserted ORDER: t-c now leads its own partition; the repo-less
+    // card's partition is untouched; the revision moved exactly once.
+    expect(partition("/repo/main", null)).toEqual(["t-c", "t-b"]);
+    expect(partition(null, null)).toEqual(["t-any"]);
+    expect(store.queueRevision()).toBe(before + 1);
+
+    // Inside a worker's column the same button works against that column.
+    store.moveTask({ taskId: "t-b", toRunner: "builder-1", beforeTaskId: null }, new Date());
+    store.moveTask({ taskId: "t-c", toRunner: "builder-1", beforeTaskId: null }, new Date());
+    expect(partition("/repo/main", "builder-1")).toEqual(["t-b", "t-c"]);
+    const again = await frontForm(cookie, csrf(page), "t-c", "builder-1", store.queueRevision());
+    expect(again.status).toBe(303);
+    expect(partition("/repo/main", "builder-1")).toEqual(["t-c", "t-b"]);
+  });
+
+  test("already at the front: a no-op that still checks the revision — fresh passes, stale is the typed 409", async () => {
+    await boot();
+    mixedColumn();
+    const cookie = await login();
+    const page = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    const token = csrf(page);
+    const revision = store.queueRevision();
+
+    // t-b already leads its partition: nothing moves, nothing bumps.
+    const noop = await frontForm(cookie, token, "t-b", "anyone", revision);
+    expect(noop.status).toBe(303);
+    expect(partition("/repo/main", null)).toEqual(["t-b", "t-c"]);
+    expect(store.queueRevision()).toBe(revision);
+
+    // The same no-op over the fragment transport says so in plain text.
+    const inPlace = await fetch(url("/queue/move"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ respond: "fragment", csrf: token, projectRevision: "1", queueRevision: String(revision), task: "t-b", column: "anyone", before: "__TOP__" }),
+      redirect: "manual",
+    });
+    expect(inPlace.status).toBe(200);
+    expect(await inPlace.text()).toBe("already at the front");
+
+    // A stale revision on the no-op branch is refused — the branch never
+    // reaches moveTask()'s CAS, so the handler makes the check itself.
+    const stale = await fetch(url("/queue/move"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ respond: "fragment", csrf: token, projectRevision: "1", queueRevision: String(revision + 9), task: "t-b", column: "anyone", before: "__TOP__" }),
+      redirect: "manual",
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.text()).toContain("moved underneath you");
+    expect(partition("/repo/main", null)).toEqual(["t-b", "t-c"]);
+  });
+
+  test("the sentinel is honored only inside a task's own column; a cross-column front is refused, assignment untouched", async () => {
+    await boot();
+    worker("builder-1", 1);
+    mixedColumn();
+    const cookie = await login();
+    const page = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    const refused = await fetch(url("/queue/move"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ respond: "fragment", csrf: csrf(page), projectRevision: "1", queueRevision: String(store.queueRevision()), task: "t-c", column: "builder-1", before: "__TOP__" }),
+      redirect: "manual",
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain("own column");
+    expect(store.assignedRunnerOf(store.refFor("built-in", "t-c").id)).toBeNull();
+    expect(partition("/repo/main", null)).toEqual(["t-b", "t-c"]);
+  });
+
+  test("a claim that lands after the form rendered does not bump the revision — the snapshot refuses the move, order unchanged", async () => {
+    await boot();
+    worker("builder-1", 2);
+    mixedColumn();
+    const cookie = await login();
+    const page = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    const revision = store.queueRevision();
+
+    // The scheduler takes t-c between render and submit.
+    const taken = acquire(store, store.refFor("built-in", "t-c").id, "builder-1", { token: "tok-builder-1", now: new Date(), ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error(`claim refused: ${taken.message}`);
+    expect(store.queueRevision()).toBe(revision); // a claim is not a queue edit
+
+    // The revision still matches, so only the fresh snapshot can catch it.
+    const refused = await fetch(url("/queue/move"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ respond: "fragment", csrf: csrf(page), projectRevision: "1", queueRevision: String(revision), task: "t-c", column: "anyone", before: "__TOP__" }),
+      redirect: "manual",
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toContain("being taken");
+    expect(store.queueRevision()).toBe(revision);
+    // The free partition is t-b alone now; t-c kept its claim and its rank.
+    expect(partition("/repo/main", null)).toEqual(["t-b", "t-c"]);
+    expect(store.queueScoped("/repo/main", new Date()).find(one => one.id === "t-c")?.taken).toBe(true);
+  });
+
+  test("column headers: building counted in THIS project beside the global unattended capacity — never a ratio; no dollar figure; the claim primitive behind details", async () => {
+    await boot();
+    worker("builder-1", 2);
+    mixedColumn();
+    // builder-1 is busy once here and once in another project.
+    seed("t-here", "built here", "/repo/main", new Date(T0.getTime() + 4_000));
+    seed("t-there", "built elsewhere", "/repo/other", new Date(T0.getTime() + 5_000));
+    for (const id of ["t-here", "t-there"]) {
+      const taken = acquire(store, store.refFor("built-in", id).id, "builder-1", { token: "tok-builder-1", now: new Date(), ttlMs: 3_600_000 });
+      if (!taken.ok) throw new Error(`claim refused: ${taken.message}`);
+    }
+    store.moveTask({ taskId: "t-b", toRunner: "builder-1", beforeTaskId: null }, new Date());
+
+    const cookie = await login();
+    const html = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    expect(html).toContain("1 building in this project · unattended capacity 2");
+    expect(html).not.toMatch(/\b[12]\s*\/\s*2\b/);
+    const main = html.slice(html.indexOf("<main>"), html.indexOf("</main>"));
+    expect(main).not.toContain("slot");
+    // Money is not in the queue query and is not invented on the screen.
+    expect(html).not.toMatch(/\$\s?\d/);
+    // The shared column in plain words; the claim primitive folded away.
+    expect(html).toContain("workers take from here when their column is empty");
+    expect(html).toMatch(/<details[^>]*>\s*<summary>how a worker takes from here<\/summary>/);
+    // Card chips over the existing snapshot shape: state and reservation owner.
+    expect(html).toContain('<span class="badge">queued</span>');
+    expect(html).toContain('<span class="badge">reserved for builder-1</span>');
+    expect(html).toContain("being taken — keeps its claim");
+  });
+});

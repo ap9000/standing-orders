@@ -1430,13 +1430,28 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/queue") {
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const revision = who.via === "cookie" ? who.session.projectRevision : 0;
-      const tasks = store.queueScoped(project, clock());
+      const now = clock();
+      const tasks = store.queueScoped(project, now);
       const owned = new Set(tasks.map(one => one.assignedRunner).filter((one): one is string => one !== null));
+      // Column headers read one thing beyond the queue snapshot: live claims
+      // in THIS project, per worker. That count and the worker's unattended
+      // capacity are different scopes (the capacity is global; attended
+      // claims may exceed it), so the header names both and never a ratio.
+      const building = new Map<string, number>();
+      for (const claim of store.liveClaims(project, now)) {
+        building.set(claim.runner, (building.get(claim.runner) ?? 0) + 1);
+      }
       // Columns: active workers, plus retired workers that still own tasks.
       const workers = store
         .listRunners()
         .filter(one => one.retiredAt === null || owned.has(one.name))
-        .map(one => ({ name: one.name, retired: one.retiredAt !== null, note: one.queueNote ?? null }));
+        .map(one => ({
+          name: one.name,
+          retired: one.retiredAt !== null,
+          note: one.queueNote ?? null,
+          capacity: one.capacity,
+          building: building.get(one.name) ?? 0,
+        }));
       const body = queueBody(tasks, workers, csrf, revision, store.queueRevision());
       if (url.searchParams.get("fragment") === "1") {
         return respond(response, 200, "text/html; charset=utf-8", body);
@@ -1446,7 +1461,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         screen("queue", [
           `<h1>queue</h1>`,
-          `<p class="hint">drag to reorder or to reserve for a worker — the top card is taken first</p>`,
+          `<p class="hint">drag to reorder, or to reserve a task for one worker</p>`,
+          `<details class="meta"><summary>how a worker takes from here</summary>` +
+            `<p>a free worker takes the top card of its own column first, then the top of the shared queue. ` +
+            `a reservation keeps other workers off a task; it does not occupy capacity. ` +
+            `a card marked <em>being taken</em> already has a worker on it and keeps its claim whatever is dragged.</p></details>`,
           `<div id="queue-region">${body}</div>`,
           `<p class="meta" id="queue-region-stamp"></p>`,
         ].join("\n"), { chrome: chromeFor(project, "queue"), functional: { script: queueScript(), fetches: true } }),
@@ -3405,14 +3424,53 @@ export function createDecisionServer(options: ServeOptions): Server {
         const ref = store.lookupRef(id);
         return ref !== null && visible(ref.repo) && (fromFleet || project === null || ref.repo === null || ref.repo === project);
       };
-      if (!belongs(taskId) || (beforeGiven !== "" && !belongs(beforeGiven))) {
+      if (!belongs(taskId) || (beforeGiven !== "" && beforeGiven !== QUEUE_FRONT && !belongs(beforeGiven))) {
         return respondMove(404, "that task is not in this queue");
+      }
+      // The no-script "move to the front" button cannot name the front: the
+      // front of a task's partition is decided by the store's exact repo AND
+      // assignment, and the page's snapshot is bounded — so the sentinel is
+      // resolved HERE, against a fresh snapshot, into a real task id (slice
+      // 1b, fix 1). It is honored only within the task's own column; a
+      // cross-column front is not provable from a bounded snapshot.
+      let beforeTaskId: string | null = beforeGiven === "" ? null : beforeGiven;
+      if (beforeGiven === QUEUE_FRONT) {
+        const ref = store.lookupRef(taskId);
+        if (ref === null) return respondMove(404, "that task is not in this queue");
+        if (ref.assignedRunner !== toRunner) {
+          return respondMove(409, "move to the front works inside a task's own column — drag it across to reserve it elsewhere");
+        }
+        const now = clock();
+        const snapshot = store.queueScoped(ref.repo, now);
+        const self = snapshot.find(one => one.id === taskId);
+        // A claim or a contest can land after the form rendered WITHOUT
+        // bumping queueRevision, so the snapshot — not the form — decides
+        // whether the card is still free. A taken or vanished card is the
+        // typed refusal, never a silent no-op that would skip moveTask()'s
+        // own claimed/contest recheck.
+        if (self === undefined) return respondMove(409, moveReason("unknown-task"));
+        if (self.taken) return respondMove(409, moveReason("claimed"));
+        const partition = snapshot.filter(
+          one => one.repo === ref.repo && one.assignedRunner === ref.assignedRunner && !one.taken,
+        );
+        const front = partition[0];
+        if (front === undefined) return respondMove(409, moveReason("unknown-task"));
+        if (front.id === taskId) {
+          // Already the front: a no-op, but only against the revision the
+          // form was rendered with — this branch never reaches moveTask()'s
+          // CAS, so the check is made here.
+          if (!Number.isSafeInteger(revisionGiven) || revisionGiven !== store.queueRevision()) {
+            return respondMove(409, moveReason("stale"));
+          }
+          return respondMove(200, "already at the front");
+        }
+        beforeTaskId = front.id;
       }
       const moved = store.moveTask(
         {
           taskId,
           toRunner,
-          beforeTaskId: beforeGiven === "" ? null : beforeGiven,
+          beforeTaskId,
           ...(Number.isSafeInteger(revisionGiven) ? { queueRevision: revisionGiven } : {}),
         },
         clock(),
@@ -8839,11 +8897,23 @@ function projectsPage(
  * in — then straight to the approve card, which is the aha the flow serves.
  */
 /** One queue card. Taken work renders pinned — visible, never draggable. */
+/** The no-script "move to the front" sentinel: the form cannot name the
+ * front of a partition, so the handler resolves it (slice 1b, fix 1). */
+const QUEUE_FRONT = "__TOP__";
+
 function queueCard(one: { id: string; title: string; approved: boolean; blockers: number; taken: boolean }, csrf: string, revision: number, queueRevision: number, workers: { name: string; retired: boolean }[], column: string): string {
+  // Presentation over queueScoped()'s shape only: state, scope, blockers,
+  // and the reservation owner. Money is not in this query and is not
+  // invented here — it stays on the task page, labeled.
+  const state = one.taken
+    ? `<span class="badge">being taken — keeps its claim</span>`
+    : column === "anyone"
+      ? `<span class="badge">queued</span>`
+      : `<span class="badge">reserved for ${escape(column)}</span>`;
   const chips =
-    `${one.approved ? "" : ` <a class="badge" href="${taskHref(one.id)}">approve its scope</a>`}` +
-    `${one.blockers > 0 ? ` <span class="badge">waits for ${one.blockers} task${one.blockers > 1 ? "s" : ""}</span>` : ""}` +
-    `${one.taken ? ` <span class="badge">being taken — keeps its claim</span>` : ""}`;
+    ` ${state}` +
+    `${one.approved ? "" : ` <a class="badge" href="${taskHref(one.id)}">scope unapproved</a>`}` +
+    `${one.blockers > 0 ? ` <span class="badge">${one.blockers} blocker${one.blockers > 1 ? "s" : ""}</span>` : ""}`;
   const hidden =
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="projectRevision" value="${revision}">` +
@@ -8853,7 +8923,7 @@ function queueCard(one: { id: string; title: string; approved: boolean; blockers
     ? ""
     : `<form method="post" action="/queue/move" class="inline">${hidden}` +
       `<input type="hidden" name="column" value="${escape(column)}">` +
-      `<input type="hidden" name="before" value="__TOP__">` +
+      `<input type="hidden" name="before" value="${QUEUE_FRONT}">` +
       `<button type="submit" aria-label="move to the front">▲</button></form>` +
       `<form method="post" action="/queue/move" class="inline">${hidden}` +
       `<select name="column" aria-label="reserve for">` +
@@ -8872,7 +8942,7 @@ function queueCard(one: { id: string; title: string; approved: boolean; blockers
 /** The queue columns fragment — shared queue first, then each worker. */
 function queueBody(
   tasks: ReturnType<Store["queueScoped"]>,
-  workers: { name: string; retired: boolean; note: string | null }[],
+  workers: { name: string; retired: boolean; note: string | null; capacity: number; building: number }[],
   csrf: string,
   revision: number,
   queueRevision: number,
@@ -8903,19 +8973,20 @@ function queueBody(
           )
           .join("\n")) +
     `</section>`;
-  const noteForm = (worker: { name: string; retired: boolean; note: string | null }): string =>
+  const noteForm = (worker: { name: string; retired: boolean; note: string | null; capacity: number; building: number }): string =>
     worker.retired
       ? `<p class="meta">this worker is retired — drag these elsewhere, or register the name again</p>`
-      : `<form method="post" action="/queue/note" class="row">` +
+      : `<p class="meta mono">${worker.building} building in this project · unattended capacity ${worker.capacity}</p>` +
+        `<form method="post" action="/queue/note" class="row">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<input type="hidden" name="projectRevision" value="${revision}">` +
         `<input type="hidden" name="runner" value="${escape(worker.name)}">` +
         `<input type="text" name="note" value="${worker.note === null ? "" : escape(worker.note)}" data-initial="${worker.note === null ? "" : escape(worker.note)}" placeholder="what this worker is working through" aria-label="column note" maxlength="200">` +
         `<button type="submit">save</button></form>` +
-        `<p class="meta">takes from the shared queue when its own is empty</p>`;
+        `<p class="meta">takes from the shared queue when this column is empty</p>`;
   return (
     `<div class="lanes" data-queue-revision="${queueRevision}">` +
-    column("shared queue", "anyone", `<p class="meta">any free worker takes from here, top first</p>`, shared, "nothing waiting — every task is reserved or running") +
+    column("shared queue", "anyone", `<p class="meta">workers take from here when their column is empty — top card first</p>`, shared, "nothing waiting — every task is reserved or running") +
     workers
       .map(worker => column(worker.name + (worker.retired ? " (retired)" : ""), worker.name, noteForm(worker), columnOf(worker.name), "nothing queued — this worker will take from the shared queue"))
       .join("\n") +
@@ -9065,7 +9136,7 @@ function fleetScript(): string {
  * before the fetch. Select dirtiness compares against data-initial
  * (finding 18); missing that, a select counts clean.
  */
-function queueScript(): string {
+export function queueScript(): string {
   return (
     `(function(){var region=document.getElementById("queue-region");if(!region)return;` +
     `var stamp=document.getElementById("queue-region-stamp");var dragging=null;var ghost=null;` +
@@ -9107,9 +9178,20 @@ function queueScript(): string {
     `var fields={respond:"fragment",csrf:(region.querySelector("input[name=csrf]")||{value:""}).value,projectRevision:(region.querySelector("input[name=projectRevision]")||{value:""}).value,` +
     `queueRevision:wrap?wrap.getAttribute("data-queue-revision"):"",task:drag.task,column:column,before:before};` +
     `var post=new URLSearchParams();Object.keys(fields).forEach(function(k){if(fields[k]!==""||k==="respond")post.append(k,fields[k]);});` +
+    // A refused move (slice 1b, fix 2): the handler's typed text/plain 409
+    // lands on the card as a problem row — textContent, never markup. Only
+    // an authenticated plain-text 409 is inlined; an HTML refusal (the
+    // stale-project page), a login bounce, or anything unexpected navigates.
+    `function problem(task,text){var card=region.querySelector('.queue-card[data-task="'+task.replace(/["\\\\]/g,"")+'"]');if(!card)return false;` +
+    `var old=card.querySelector(".queue-problem");if(old)old.remove();` +
+    `var row=document.createElement("p");row.className="problem queue-problem";row.setAttribute("role","alert");row.textContent=text;card.appendChild(row);return true;}` +
     `fetch("/queue/move",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:post.toString(),redirect:"manual"})` +
-    `.then(function(r){return r.ok?fetch("/queue?fragment=1",{cache:"no-store"}).then(function(f){return f.ok?f.text():null;}):null;})` +
-    `.then(function(t){if(t&&!paused()){region.innerHTML=t;last=Date.now();}else if(t===null){location.href="/queue";}})` +
+    `.then(function(r){if(r.ok)return fetch("/queue?fragment=1",{cache:"no-store"}).then(function(f){return f.ok?f.text():null;});` +
+    `if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return false;}` +
+    `var kind=(r.headers&&r.headers.get?r.headers.get("content-type"):"")||"";` +
+    `if(r.status===409&&kind.indexOf("text/plain")===0){return r.text().then(function(text){return problem(drag.task,text)?false:null;});}` +
+    `return null;})` +
+    `.then(function(t){if(t===false)return;if(t&&!paused()){region.innerHTML=t;last=Date.now();}else if(t===null){location.href="/queue";}})` +
     `.catch(function(){})` +
     `.then(function(){tell();});});` +
     `})();`
