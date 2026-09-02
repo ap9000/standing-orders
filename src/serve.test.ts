@@ -931,8 +931,9 @@ describe("the operations console", () => {
     expect(queue).toContain("review next");
     expect(queue).toContain("CI passing — observed");
     expect(queue).toContain("CI failing — observed");
-    // Read-only: no merge button, no form on this page.
-    expect(queue).not.toContain("<form");
+    // Read-only: no merge button, no form on this page's own content
+    // (the chrome's project switcher is the one form outside <main>).
+    expect(queue.slice(queue.indexOf("<main>"), queue.indexOf("</main>"))).not.toContain("<form");
 
     // The failing run's page carries the draft button; the quiet one does not.
     const failingRun = await (await fetch(url(`/r/${run2}`), { headers: { cookie } })).text();
@@ -1647,15 +1648,23 @@ describe("the board — the pipeline as lanes, live in place", () => {
       expect(board).toContain(lane);
     }
     expect(board).toContain("being built");
-    expect(board).toContain("builder-1");
-    expect(board).toContain("m elapsed");
-    expect(board).toContain("claude");
-    expect(board).toContain("standing-orders-t-live-abc");
+    // The building card (board pass): a live strip with the stage and the
+    // clock — never a percent — then mono facts: worker, model, branch and
+    // workspace. Lanes are sections that fold; a lane with cards is open.
+    const card = /<a class="lane-card building".*?<\/a>/s.exec(board)?.[0] ?? "";
+    expect(card).toMatch(/<span class="live-line"><span class="stage">[^<]+<\/span><span class="clock">1[0-9]m<\/span><\/span>/);
+    expect(card).not.toMatch(/\d+%/);
+    expect(card).toContain('<span class="fact"><span class="k">worker</span><span class="v">builder-1</span></span>');
+    expect(card).toContain('<span class="fact"><span class="k">model</span><span class="v">claude</span></span>');
+    expect(card).toContain("standing-orders-t-live-abc");
+    expect(board).toContain('<details class="lane lane-building" open><summary><h2>building');
+    expect(board).toContain('<details class="lane lane-waiting"><summary><h2>waiting'); // empty: folded
     expect(board).toContain("all set");
     expect(board).toContain("write its scope");
     // Read-only by construction: an auto-refreshing surface never holds a
-    // form, a nonce, or a password field.
-    expect(board).not.toContain("<form");
+    // form, a nonce, or a password field — the polled region is form-free;
+    // the chrome's project switcher lives outside it and is never swapped.
+    expect(board.slice(board.indexOf('<div id="board-region">'), board.indexOf('id="board-region-stamp"'))).not.toContain("<form");
     expect(board).not.toContain('type="password"');
   });
 
@@ -2043,8 +2052,8 @@ describe("routines — standing orders on the console", () => {
     expect(board).toContain("this week");
     // The queued instance does NOT sit in the main lanes...
     expect(board).not.toContain(`lane-card" href="/t/${fired.taskId}`);
-    // ...and the board stays form-free, tracks included.
-    expect(board).not.toContain("<form");
+    // ...and the board's polled region stays form-free, tracks included.
+    expect(board.slice(board.indexOf('<div id="board-region">'), board.indexOf('id="board-region-stamp"'))).not.toContain("<form");
 
     // Now the instance needs a person: it fails. It surfaces in attention,
     // wearing the routine's name.
@@ -4380,10 +4389,14 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     // centered lane, each lane's place.
     expect(html).toContain("preventScroll");
     expect(html).toContain("lane-[a-z]+");
-    // The stylesheet ships the motion contracts.
+    // …and each lane's fold (board pass): a section the reader closed
+    // stays closed through the swap, one they opened stays open.
+    expect(html).toContain('data.fold[k]=d.open');
+    expect(html).toContain('if(data.fold[k])d.setAttribute("open","");else d.removeAttribute("open")');
+    // The stylesheet ships the motion contracts and the phone's stacked lanes.
     expect(html).toContain("@view-transition { navigation: auto; }");
     expect(html).toContain("prefers-reduced-motion: reduce");
-    expect(html).toContain("scroll-snap-type: x mandatory");
+    expect(html).toContain(".board { display: flex; flex-direction: column;");
     expect(html).toContain("--brand:");
   });
 
@@ -5673,26 +5686,27 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     // The open project's inbox: the bar names the project, with the switch road.
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
     const homeBar = scopeBarOf(home);
-    expect(homeBar).toContain("main");
+    // The bar's NAME is the summary of the switcher (board pass); the menu
+    // beneath lists every project and "all projects" as plain POST forms.
+    expect(homeBar).toContain('<details class="switcher"><summary class="name">main<svg');
     expect(homeBar).toContain("switch project");
-    expect(homeBar).not.toContain("all projects");
+    expect(homeBar).toContain('<form method="post" action="/projects/open">');
 
     // The portfolio is all-project even while a project is open.
     const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
-    expect(scopeBarOf(portfolio)).toContain("all projects");
+    expect(scopeBarOf(portfolio)).toContain('<summary class="name">all projects<svg');
     expect(portfolio).toContain("<h1>portfolio</h1>");
 
     // The queue stays project-bound.
     const queue = await (await fetch(url("/queue"), { headers: { cookie } })).text();
     const queueBar = scopeBarOf(queue);
-    expect(queueBar).toContain("main");
-    expect(queueBar).not.toContain("all projects");
+    expect(queueBar).toContain('<summary class="name">main<svg');
 
     // One visible /projects link per breakpoint (portfolio arc §1, amended
     // by the mobile pass): the scope bar's on desktop, the header pill's on
     // a phone — where the scope bar hides and the pill carries the name,
     // the counts, and the switch. Exactly those two links live in chrome.
-    expect(home).toContain('<a class="project-pill" href="/projects">');
+    expect(home).toContain('<details class="project-pill switcher"><summary><span class="name">main<svg');
     expect(home).toContain('<span class="pill-status">');
     expect((home.match(/href="\/projects"/g) ?? []).length).toBe(2);
 
@@ -5707,9 +5721,9 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
     expect(scopeBarOf(fleet)).toContain("all projects");
     const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
-    expect(scopeBarOf(board)).not.toContain("all projects");
+    expect(scopeBarOf(board)).toContain('<summary class="name">main<svg');
     const boardAll = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
-    expect(scopeBarOf(boardAll)).toContain("all projects");
+    expect(scopeBarOf(boardAll)).toContain('<summary class="name">all projects<svg');
   });
 
   test("portfolio hygiene: a hidden project leaks into no row, count, dollar, token, or claim; fictions stay out", async () => {
@@ -6454,12 +6468,12 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
   test("the header pill names the scope: project with counts when one is open, 'all projects' on the portfolio", async () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
-    const pill = /<a class="project-pill" href="\/projects">(.*?)<\/a>/s.exec(home)?.[1] ?? "";
-    expect(pill).toContain('<span class="name">main</span>');
+    const pill = /<details class="project-pill switcher"><summary>(.*?)<\/summary>/s.exec(home)?.[1] ?? "";
+    expect(pill).toContain('<span class="name">main<svg');
     expect(pill).toMatch(/<span class="pill-status">.*needs you.*live.*queued.*<\/span>/s);
     const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
-    const wide = /<a class="project-pill" href="\/projects">(.*?)<\/a>/s.exec(portfolio)?.[1] ?? "";
-    expect(wide).toContain('<span class="name">all projects</span>');
+    const wide = /<details class="project-pill switcher"><summary>(.*?)<\/summary>/s.exec(portfolio)?.[1] ?? "";
+    expect(wide).toContain('<span class="name">all projects<svg');
     expect(wide).not.toContain("pill-status");
   });
 
@@ -6496,5 +6510,152 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     const cookie = await login();
     const html = await (await fetch(url("/next"), { headers: { cookie } })).text();
     expect(html).toMatch(/<p class="meta next-pager"><span>[^<]*waiting on you<\/span><a class="skip" href="\/next\?skip=[^"]*">not now — next →<\/a><\/p>/);
+  });
+});
+
+
+describe("the project switcher (board pass): one tap from any screen, forms with the session's own token", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+  let repoA: string;
+  let repoB: string;
+
+  const T0 = new Date("2026-08-11T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+  const csrfOf = (html: string): string => /name="csrf" value="([0-9a-f]+)"/.exec(html)?.[1] ?? "";
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-switcher-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-switcher-repos-")));
+    repoA = join(root, "alpha");
+    repoB = join(root, "beta");
+    const { execSync } = await import("node:child_process");
+    for (const repo of [repoA, repoB]) {
+      mkdirSync(repo, { recursive: true });
+      execSync("git init -q", { cwd: repo });
+    }
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repos: [repoA, repoB] });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("every served project is one form in the menu, each carrying the token and this screen as the return", async () => {
+    const cookie = await login();
+    const board = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
+    const bar = /<div class="scope-bar">.*?<a class="switch"/s.exec(board)?.[0] ?? "";
+    expect(bar).toContain('<summary class="name">all projects<svg');
+    expect(bar).toContain('<button type="submit" class="current" aria-current="true">all projects</button>');
+    for (const repo of [repoA, repoB]) {
+      expect(bar).toContain(`<form method="post" action="/projects/open"><input type="hidden" name="csrf" value="${csrfOf(board)}"><input type="hidden" name="return" value="/board?scope=all"><input type="hidden" name="path" value="${repo}"><button type="submit">${repo.split("/").pop()}</button></form>`);
+    }
+    // The phone pill carries the same menu, plus the one road to /projects.
+    expect(board).toContain('<details class="project-pill switcher"><summary>');
+    expect(board).toContain('<a class="manage" href="/projects">manage projects →</a>');
+    expect((board.match(/href="\/projects"/g) ?? []).length).toBe(2);
+    // The chrome layer folds an open switcher on an outside tap.
+    expect(board).toContain('details.switcher[open]');
+  });
+
+  test("opening a project returns to the screen the switch was made on — a same-site path only", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    const csrf = csrfOf(home);
+    const opened = await fetch(url("/projects/open"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf, path: repoA, return: "/queue" }),
+      redirect: "manual",
+    });
+    expect(opened.status).toBe(303);
+    expect(opened.headers.get("location")).toBe("/queue");
+    // The project is open: the queue renders it and the menu marks it current.
+    const queue = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    expect(queue).toContain('<summary class="name">alpha<svg');
+    expect(queue).toContain(`<input type="hidden" name="path" value="${repoA}"><button type="submit" class="current" aria-current="true">alpha</button>`);
+    // An off-site or protocol-relative return lands home instead.
+    for (const bad of ["https://evil.example/", "//evil.example/x", "queue"]) {
+      const refused = await fetch(url("/projects/open"), {
+        method: "POST", headers: { cookie },
+        body: new URLSearchParams({ csrf, path: repoB, return: bad }),
+        redirect: "manual",
+      });
+      expect(refused.status).toBe(303);
+      expect(refused.headers.get("location")).toBe("/");
+    }
+    // Widening to all projects returns the same way.
+    const widened = await fetch(url("/projects/select"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf, path: "", return: "/workbench" }),
+      redirect: "manual",
+    });
+    expect(widened.headers.get("location")).toBe("/workbench");
+  });
+
+  test("the portfolio's workspace cards say one status word, count four ways, bar the same counts, and open the board in one tap", async () => {
+    const cookie = await login();
+    store.createTask({ id: "t-a", title: "alpha needs a scope" }, T0);
+    store.placeTask(store.refFor("built-in", "t-a").id, repoA);
+    const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
+    const card = /<div class="workspace-card hot">.*?<div class="workspace-bar" aria-hidden="true">.*?<\/div><\/div>/s.exec(portfolio)?.[0] ?? "";
+    expect(card).toContain('<span class="workspace-name">alpha</span><span class="badge badge-open">needs you</span>');
+    expect(card).toContain(`<input type="hidden" name="path" value="${repoA}"><input type="hidden" name="return" value="/board"><button type="submit">board →</button>`);
+    expect(card).toContain('<span class="pulse-stat hot"><b>1</b> need you</span>');
+    expect(card).toContain('<span class="seg attention" style="flex-grow:1"></span>');
+    expect(card).not.toContain('class="seg building"');
+    // Follow the tap: the board opens on that project.
+    const board = await fetch(url("/projects/open"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf: csrfOf(portfolio), path: repoA, return: "/board" }),
+      redirect: "manual",
+    });
+    expect(board.headers.get("location")).toBe("/board");
+  });
+
+  test("a sensitive page renders the switcher inert: the name and the one link, no forms in the chrome", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    await fetch(url("/projects/open"), {
+      method: "POST", headers: { cookie },
+      body: new URLSearchParams({ csrf: csrfOf(home), path: repoA, return: "/" }),
+      redirect: "manual",
+    });
+    // A task whose scope awaits its password ceremony.
+    store.createTask({ id: "t-sign", title: "needs the yes" }, T0);
+    store.placeTask(store.refFor("built-in", "t-sign").id, repoA);
+    store.saveScope({
+      taskId: "t-sign", goal: "the goal", outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const page = await (await fetch(url("/t/t-sign"), { headers: { cookie } })).text();
+    expect(SENSITIVE_INPUT.test(page)).toBe(true);
+    expect(page).not.toContain('<div class="switcher-menu"');
+    expect(page).not.toContain('action="/projects/open"');
+    expect(page).toContain('<div class="scope-bar"><span class="name">alpha</span>');
+    expect(page).toContain('<a class="project-pill" href="/projects"><span class="name">alpha</span>');
   });
 });

@@ -105,6 +105,7 @@ import { hasForbiddenControls, validateNote } from "./decision.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
 import { verifiedAuthor } from "./store.js";
@@ -715,8 +716,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         : respond(response, 401, "text/plain; charset=utf-8", "authenticate first");
     }
 
-    if (method === "GET") return void (await handleGet(url, who, request, response));
-    if (method === "POST") return handlePost(url, who, request, response);
+    const requestFacts = {
+      csrf: who.via === "cookie" ? who.session.csrf : "",
+      returnTo: safeReturn(url.pathname + url.search),
+    };
+    if (method === "GET") return void (await requestContext.run(requestFacts, () => handleGet(url, who, request, response)));
+    if (method === "POST") return requestContext.run(requestFacts, () => handlePost(url, who, request, response));
     return respond(response, 405, "text/plain; charset=utf-8", "no such method here");
   }
 
@@ -2269,6 +2274,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       : s.body;
     const html = shell(s.title, body, {
       ...(s.chrome === undefined ? {} : { chrome: s.chrome }),
+      ...(sensitive ? { sensitive: true } : {}),
       ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: s.refreshSeconds }),
       ...(nonce === undefined ? {} : { live: { nonce, script, fallbackRefresh: s.functional?.fetches === true } }),
     });
@@ -2311,10 +2317,28 @@ export function createDecisionServer(options: ServeOptions): Server {
         projectPeek = undefined;
       }
     }
+    const facts = requestContext.getStore();
     return {
       active,
       project,
       ...(projectPeek === undefined ? {} : { projectPeek }),
+      // Enrolled projects first (most recently opened), then the repos this
+      // server was told to serve that nobody has opened yet — the switcher
+      // lists every project it is allowed to show, each exactly once.
+      projects: (() => {
+        const seen = new Set<string>();
+        const rows: { path: string; name: string }[] = [];
+        for (const one of [
+          ...store.listProjects().map(one => ({ path: one.path, name: one.name })),
+          ...ceiling.repos.map(path => ({ path, name: projectName(path) })),
+        ]) {
+          if (seen.has(one.path) || !visible(one.path)) continue;
+          seen.add(one.path);
+          rows.push(one);
+        }
+        return rows;
+      })(),
+      ...(facts === undefined ? {} : { csrf: facts.csrf, returnTo: facts.returnTo }),
       inboxCount: badge.count,
       inboxSaturated: badge.saturated,
       settings: options.telegramTokenFile !== undefined,
@@ -3244,7 +3268,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       who.session.project = canonicalPick;
       who.session.projectRevision += 1;
-      return redirect(response, body.get("return") ?? "/");
+      return redirect(response, safeReturn(body.get("return")));
     }
 
     if (url.pathname === "/projects/open") {
@@ -3271,7 +3295,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       store.upsertProject(canonical, projectName(canonical), now);
       who.session.project = canonical;
       who.session.projectRevision++;
-      return redirect(response, "/");
+      // The switcher (board pass) opens a project from any screen and
+      // returns there — a same-site path only, never an off-site road.
+      return redirect(response, safeReturn(body.get("return")));
     }
 
     if (url.pathname === "/tasks/add") {
@@ -5884,6 +5910,34 @@ const STYLE = `
     color: var(--muted-foreground); font-family: var(--font-mono);
   }
   .scope-bar .name { font-weight: 600; }
+  /* The switcher: a folded menu of enrolled projects under the scope's name. */
+  .switcher { position: relative; }
+  .switcher > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: .25rem; }
+  .switcher > summary::-webkit-details-marker { display: none; }
+  .switcher .chevron { width: .875rem; height: .875rem; color: var(--muted-foreground); transition: transform .15s; }
+  .switcher[open] > summary .chevron { transform: rotate(180deg); }
+  .switcher-menu {
+    position: absolute; top: calc(100% + .375rem); left: 0; z-index: 40; min-width: 15rem; max-width: 22rem;
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow-overlay); padding: .375rem; display: flex; flex-direction: column; gap: .125rem;
+  }
+  .switcher-menu form { margin: 0; }
+  .switcher-menu button {
+    display: flex; align-items: center; gap: .5rem; width: 100%; text-align: left; margin: 0;
+    background: transparent; border: 0; min-height: 2.5rem; padding: 0 .75rem;
+    border-radius: calc(var(--radius) - 4px); font: inherit; font-size: .875rem; color: var(--foreground);
+  }
+  .switcher-menu button::before {
+    content: ""; width: .375rem; height: .375rem; border-radius: 9999px; flex: none;
+    background: transparent; border: 1px solid var(--border);
+  }
+  .switcher-menu button.current { font-weight: 600; }
+  .switcher-menu button.current::before { background: var(--foreground); border-color: var(--foreground); }
+  .switcher-menu button:hover { background: var(--muted); }
+  .switcher-menu .manage {
+    display: block; margin-top: .25rem; padding: .625rem .75rem; border-top: 1px solid var(--border);
+    font-size: .75rem; color: var(--muted-foreground); text-decoration: none;
+  }
   .scope-bar .switch { margin-left: auto; font-size: .75rem; color: var(--muted-foreground); text-decoration: none; }
   .scope-bar .switch:hover { color: var(--foreground); }
   .scope-status {
@@ -5994,13 +6048,21 @@ const STYLE = `
     /* One header row: the pill carries scope, counts, and the switch. */
     .scope-bar { display: none; }
     .mobile-top .brand-mini { font-weight: 600; font-size: .9375rem; text-decoration: none; color: var(--foreground); font-family: var(--font-mono); }
-    .mobile-top .project-pill {
-      flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: .0625rem;
+    .mobile-top .project-pill { flex: 1; min-width: 0; position: static; }
+    .mobile-top a.project-pill, .mobile-top .project-pill > summary {
+      min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: .0625rem;
       border: 1px solid var(--border); border-radius: 1.375rem; background: var(--card);
       min-height: 2.75rem; padding: .25rem .875rem; text-decoration: none; color: var(--foreground);
-      font-size: .875rem; font-weight: 500; line-height: 1.25;
+      font-size: .875rem; font-weight: 500; line-height: 1.25; cursor: pointer;
     }
-    .mobile-top .project-pill:active { background: var(--muted); }
+    .mobile-top .project-pill > summary .name { display: inline-flex; align-items: center; gap: .25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mobile-top a.project-pill:active, .mobile-top .project-pill > summary:active { background: var(--muted); }
+    /* On a phone the menu is a sheet above the tab bar, within thumb reach. */
+    .mobile-top .switcher-menu {
+      position: fixed; left: .5rem; right: .5rem; top: auto; max-width: none;
+      bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem)); z-index: 45;
+    }
+    .mobile-top .switcher-menu button { min-height: 2.75rem; }
     .mobile-top .pill-status {
       display: flex; gap: .5rem; overflow: hidden; white-space: nowrap;
       font-family: var(--font-mono); font-size: .6875rem; font-weight: 500;
@@ -6089,16 +6151,26 @@ const STYLE = `
     display: grid; grid-template-columns: repeat(5, minmax(12.5rem, 1fr));
     gap: .625rem; overflow-x: auto; padding-bottom: .75rem; align-items: start;
   }
+  /* The phone board (board pass): lanes stack as sections that fold, the
+     counts readable before a single card — what needs you, then what is
+     building, then the rest. A header is a 2.75rem tap; a drawn chevron
+     says which way it folds. */
   @media (max-width: 760px) {
-    .board {
-      display: flex; gap: .75rem; overflow-x: auto; overflow-y: hidden;
-      scroll-snap-type: x mandatory; overscroll-behavior-x: contain;
-      height: clamp(22rem, calc(100dvh - 11.5rem), 42rem); padding-bottom: 0;
+    .board { display: flex; flex-direction: column; gap: .5rem; padding-bottom: 0; }
+    .board .lane { min-height: 0; padding: 0 .625rem .125rem; }
+    .board .lane > summary {
+      cursor: pointer; display: flex; align-items: center; min-height: 2.75rem; margin: 0;
+      -webkit-tap-highlight-color: transparent;
     }
-    .board .lane {
-      flex: 0 0 calc(100% - 4.5rem); scroll-snap-align: center;
-      overflow-y: auto; min-height: 0; height: 100%;
+    .board .lane > summary h2 { flex: 1; font-size: .75rem; }
+    .board .lane > summary::after {
+      content: ""; width: .5rem; height: .5rem; flex: none; margin-right: .25rem;
+      border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground);
+      transform: rotate(45deg) translateY(-.125rem); transition: transform .15s;
     }
+    .board .lane[open] > summary::after { transform: rotate(225deg) translateY(-.125rem); }
+    .board .lane .hint { margin-bottom: .25rem; }
+    .board .lane .lane-card:last-of-type { margin-bottom: .5rem; }
     .board .lane-attention { order: 0; }
     .board .lane-building { order: 1; }
     .board .lane-queued { order: 2; }
@@ -6109,8 +6181,11 @@ const STYLE = `
     background: color-mix(in srgb, var(--card) 45%, var(--background)); border: 1px solid var(--border);
     border-radius: var(--radius); padding: .625rem; min-height: 12rem;
   }
-  .lane h2 { display: flex; align-items: center; gap: .4rem; margin: 0 0 .125rem; font-size: .6875rem; }
+  .lane > summary { list-style: none; cursor: default; margin: 0 0 .125rem; }
+  .lane > summary::-webkit-details-marker { display: none; }
+  .lane h2 { display: flex; align-items: center; gap: .4rem; margin: 0; font-size: .6875rem; }
   .lane h2 a { color: inherit; text-decoration: none; }
+  .lane h2 a:hover { text-decoration: underline; }
   .lane .hint { margin-top: 0; }
   .lane-count { color: var(--muted-foreground); font-weight: 400; font-variant-numeric: tabular-nums; }
   .lane-attention h2::before, .lane-building h2::before {
@@ -6126,9 +6201,25 @@ const STYLE = `
   .lane-card:hover { border-color: color-mix(in srgb, var(--border) 55%, var(--muted-foreground)); }
   .lane-attention .lane-card { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
   .lane-attention .lane-card:hover { border-color: color-mix(in srgb, var(--brand) 60%, var(--border)); }
-  .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; }
+  .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; line-height: 1.35; }
   .lane-card .dot { margin-right: .4rem; }
   .lane-card .meta, .lane-card .mono { display: block; margin-top: .125rem; font-size: .75rem; }
+  .lane-card .why { display: block; margin-top: .125rem; font-size: .75rem; color: var(--muted-foreground); }
+  /* The facts: mono key–value pairs, keys dim, values ink — one grammar on every lane. */
+  .lane-card .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .0625rem .625rem; margin-top: .4rem; font-size: .6875rem; line-height: 1.5; }
+  .lane-card .fact { display: contents; }
+  .lane-card .fact .k { color: var(--muted-foreground); font-family: var(--font-mono); }
+  .lane-card .fact .v { font-family: var(--font-mono); color: var(--foreground); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .lane-card .chips { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .4rem; }
+  .lane-card .chips .badge { margin: 0; }
+  /* The live strip on a building card: stage and clock in an inset well —
+     the run's own facts, never a percent. */
+  .lane-card .live-line {
+    display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-top: .375rem;
+    padding: .3rem .5rem; border-radius: calc(var(--radius) - 4px); background: var(--muted);
+    font-family: var(--font-mono); font-size: .6875rem; color: var(--running); font-variant-numeric: tabular-nums;
+  }
+  .lane-card .live-line .clock { color: var(--muted-foreground); }
   .lane-empty { margin: .75rem 0 .25rem; }
   .plan-doc { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; max-height: 24rem; overflow-y: auto; }
   .lane-more { display: block; margin-top: .5rem; font-size: .75rem; }
@@ -6159,17 +6250,30 @@ const STYLE = `
   .command-metric .detail { display: block; color: var(--muted-foreground); font-size: .6875rem; margin-top: .18rem; }
   .command-metric.attention .label::before { background: var(--brand); }
   .command-metric.live .label::before { background: var(--running); }
-  .workspace-pulse { margin: .4rem 0 1.5rem; }
-  .workspace-row {
-    display: grid; grid-template-columns: minmax(9rem, 1.35fr) repeat(4, minmax(4rem, .65fr));
-    gap: .55rem; align-items: center; padding: .8rem .9rem; border: 1px solid var(--border);
-    border-radius: calc(var(--radius) - 2px); background: var(--card);
-    font-size: .8125rem; margin-top: .5rem;
+  .workspace-pulse { margin: .4rem 0 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); gap: .625rem; }
+  /* The workspace card: name and status word, four counts, the same counts
+     as a bar, and the one tap to its board. Amber outline only when it
+     needs a person. */
+  .workspace-card {
+    padding: .75rem .9rem; border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 2px); background: var(--card); font-size: .8125rem; min-width: 0;
   }
-  .workspace-row .workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-  .workspace-row .pulse-stat { color: var(--muted-foreground); font-size: .75rem; white-space: nowrap; }
-  .workspace-row .pulse-stat b { color: var(--foreground); font-weight: 600; font-family: var(--font-mono); }
-  .workspace-row .pulse-stat.hot b { color: var(--brand); }
+  .workspace-card.hot { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
+  .workspace-head { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+  .workspace-head .workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-family: var(--font-mono); font-size: .8125rem; }
+  .workspace-head .badge { flex: none; }
+  .workspace-head form { margin: 0 0 0 auto; }
+  .workspace-head form button { min-height: 2rem; padding: 0 .625rem; font-size: .75rem; width: auto; }
+  .workspace-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; margin-top: .625rem; }
+  .workspace-stats .pulse-stat { color: var(--muted-foreground); font-size: .6875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .workspace-stats .pulse-stat b { display: block; color: var(--foreground); font-weight: 600; font-family: var(--font-mono); font-size: 1.125rem; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .workspace-stats .pulse-stat.hot b { color: var(--brand); }
+  .workspace-bar { display: flex; gap: 2px; height: .375rem; margin-top: .625rem; border-radius: 9999px; overflow: hidden; background: var(--muted); }
+  .workspace-bar .seg { flex: 1 1 0; }
+  .workspace-bar .seg.attention { background: var(--brand); }
+  .workspace-bar .seg.building { background: var(--running); }
+  .workspace-bar .seg.waiting { background: var(--muted-foreground); }
+  .workspace-bar .seg.queued { background: color-mix(in srgb, var(--muted-foreground) 45%, transparent); }
   .attention-stack { display: grid; gap: .55rem; }
   .attention-stack .decide-card { margin: 0; }
   .attention-stack .q { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
@@ -6199,8 +6303,7 @@ const STYLE = `
     .control-room-head { display: block; }
     .control-room-head .actions { justify-content: flex-start; margin-top: .75rem; }
     .command-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .workspace-row { grid-template-columns: minmax(8rem, 1.4fr) repeat(2, minmax(4rem, .6fr)); }
-    .workspace-row .pulse-stat:nth-last-child(-n+2) { display: none; }
+    .workspace-pulse { grid-template-columns: 1fr; }
   }
 
   /* Runner lanes (queue + fleet): one column per worker. */
@@ -6383,6 +6486,15 @@ type Chrome = {
   /** A compact pulse for the currently open workspace. Null in the
    * cross-workspace view; absent only when the store could not answer. */
   projectPeek?: ProjectPeek | null;
+  /** The switcher (board pass): every enrolled project inside the ceiling,
+   * most recently opened first — the one-tap switch on any screen. */
+  projects?: { path: string; name: string }[];
+  /** The session's csrf token, for the switcher's forms; "" when the
+   * request has no cookie session (bearer), which renders the switcher
+   * inert. */
+  csrf?: string;
+  /** Where a switch made on this screen returns to. */
+  returnTo?: string;
 };
 
 /**
@@ -6419,7 +6531,8 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     // scroll pass. All coordinates come from bounding rects, never
     // offsetLeft against an unpositioned parent (finding 21).
     `function laneKey(l){var m=/(^|\\s)(lane-[a-z]+)(\\s|$)/.exec(l.className);return m?m[2]:null;}` +
-    `function keep(){var data={lanes:[],focus:null,pager:-1};` +
+    `function keep(){var data={lanes:[],focus:null,pager:-1,fold:{}};` +
+    `region.querySelectorAll("details.lane").forEach(function(d){var k=laneKey(d);if(k)data.fold[k]=d.open;});` +
     `var act=document.activeElement;` +
     `if(act&&region.contains(act)&&act.matches&&act.matches("a.row, a.lane-card"))data.focus=act.getAttribute("href");` +
     `var board=region.querySelector(".board");` +
@@ -6434,6 +6547,7 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     `data.lanes.push({key:key,href:first,off:off,top:l.scrollTop});}` +
     `return data;}` +
     `function restore(data){` +
+    `region.querySelectorAll("details.lane").forEach(function(d){var k=laneKey(d);if(k&&k in data.fold){if(data.fold[k])d.setAttribute("open","");else d.removeAttribute("open");}});` +
     `for(var i=0;i<data.lanes.length;i++){var d=data.lanes[i];var l=region.querySelector(".lane."+d.key);if(!l)continue;` +
     `var done=false;` +
     `if(d.href){var cards=l.querySelectorAll("a.lane-card");` +
@@ -6565,7 +6679,8 @@ function chromeScript(): string {
     `function toggleHelp(){if(!help)return;` +
     `if(help.hidden){helpBack=document.activeElement;help.hidden=false;help.focus();}` +
     `else{help.hidden=true;if(helpBack&&helpBack.focus)helpBack.focus();helpBack=null;}}` +
-    `document.addEventListener("click",function(ev){if(helpOpen()&&!help.contains(ev.target))toggleHelp();});` +
+    `document.addEventListener("click",function(ev){if(helpOpen()&&!help.contains(ev.target))toggleHelp();` +
+    `document.querySelectorAll("details.switcher[open]").forEach(function(d){if(!d.contains(ev.target))d.removeAttribute("open");});});` +
     // j/k: a roving focus over the page's rows — only from body or from
     // inside the set, clamped at the ends, preventDefault only on a real
     // move (finding 9); held keys may repeat
@@ -6666,6 +6781,9 @@ function shell(
   options: {
     nav?: boolean;
     chrome?: Chrome;
+    /** A password ceremony is on this page: the chrome gains no forms, so
+     * the switcher renders inert — the name, and the one /projects link. */
+    sensitive?: boolean;
     refreshSeconds?: number;
     /** The page's one nonce'd script: region pollers + the chrome layer,
      * composed by sendScreen. Read-only regions only; one nonce per
@@ -6731,15 +6849,38 @@ function shell(
     : (chrome.projectPeek.waiting > 0 ? `<span class="hot">${chrome.projectPeek.waiting} needs you</span>` : `<span>0 needs you</span>`) +
       `<span>${chrome.projectPeek.running} live</span><span>${chrome.projectPeek.queued} queued</span>`;
   const scopeStatus = scopeCounts === "" ? "" : `<span class="scope-status">${scopeCounts}</span>`;
+  const scopeName = effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "all projects";
+  // The switcher (board pass): the scope's name opens a menu of every
+  // enrolled project — one tap to open one, or to widen to all — as plain
+  // POST forms carrying the session's csrf, returning to this screen.
+  // Inert wherever the chrome may carry no forms: a sensitive page, or a
+  // request without a cookie session.
+  const canSwitch =
+    options.sensitive !== true && chrome.csrf !== undefined && chrome.csrf !== "" && chrome.projects !== undefined;
+  const switcherMenu = (foot: string): string => {
+    if (!canSwitch) return "";
+    const hidden =
+      `<input type="hidden" name="csrf" value="${escape(chrome.csrf as string)}">` +
+      `<input type="hidden" name="return" value="${escape(chrome.returnTo ?? "/")}">`;
+    const allCurrent = effectiveScope !== "project";
+    const rows = [
+      `<form method="post" action="/projects/select">${hidden}<input type="hidden" name="path" value="">` +
+        `<button type="submit"${allCurrent ? ' class="current" aria-current="true"' : ""}>all projects</button></form>`,
+      ...(chrome.projects ?? []).map(
+        one =>
+          `<form method="post" action="/projects/open">${hidden}<input type="hidden" name="path" value="${escape(one.path)}">` +
+          `<button type="submit"${!allCurrent && chrome.project === one.path ? ' class="current" aria-current="true"' : ""}>${escape(one.name)}</button></form>`,
+      ),
+    ];
+    return `<div class="switcher-menu" role="menu">${rows.join("")}${foot}</div>`;
+  };
   // No "scope" label word: in this product "scope" names a task's approved
   // terms — the bar just states which projects the screen is showing.
   const scopeBar =
     `<div class="scope-bar">` +
-    `<span class="name">${
-      effectiveScope === "project" && chrome.project !== null
-        ? escape(projectName(chrome.project))
-        : "all projects"
-    }</span>` +
+    (canSwitch
+      ? `<details class="switcher"><summary class="name">${scopeName}${CHEVRON_ICON}</summary>${switcherMenu("")}</details>`
+      : `<span class="name">${scopeName}</span>`) +
     scopeStatus +
     `<a class="switch" href="/projects">switch project →</a></div>`;
   const side = [
@@ -6803,9 +6944,13 @@ function shell(
     // name, its three counts, and the one /projects link at that
     // breakpoint — the scope bar hides below 760px so the header is one
     // row, not three. Desktop keeps the scope bar's link and hides this.
-    `<a class="project-pill" href="/projects"><span class="name">${
-      effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "all projects"
-    }</span>${scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`}</a>`,
+    canSwitch
+      ? `<details class="project-pill switcher"><summary><span class="name">${scopeName}${CHEVRON_ICON}</span>${
+          scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
+        }</summary>${switcherMenu(`<a class="manage" href="/projects">manage projects →</a>`)}</details>`
+      : `<a class="project-pill" href="/projects"><span class="name">${scopeName}</span>${
+          scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
+        }</a>`,
     `<a class="mobile-new" href="/tasks/new">+ task</a>`,
     `</header>`,
   ].join("");
@@ -7242,25 +7387,46 @@ function boardBody(
     }
     const shown = cards.slice(0, CAP);
     const more = cards.length - shown.length;
+    // A lane is a section that can fold (board pass): open when it holds
+    // cards, folded when empty, so a phone reads the counts first and a
+    // desktop column never spends its height on "nothing here".
     return (
-      `<section class="lane lane-${key}"><h2>${title} <span class="lane-count">${cards.length}${
-        data.saturated ? "+" : ""
-      }</span></h2><p class="hint">${hint}</p>` +
+      `<details class="lane lane-${key}"${shown.length === 0 ? "" : " open"}>` +
+      `<summary><h2>${title} <span class="lane-count">${cards.length}${data.saturated ? "+" : ""}</span></h2></summary>` +
+      `<p class="hint">${hint}</p>` +
       (shown.length === 0 ? `<p class="meta lane-empty">nothing here</p>` : shown.map((card, index) => renderOne(card, index)).join("")) +
       (more > 0 ? `<a class="lane-more" href="/tasks">+${more} more in the task list</a>` : "") +
-      `</section>`
+      `</details>`
     );
+  };
+
+  // The card's facts: mono key–value pairs under the title (board pass) —
+  // task, worker, runtime — the same grammar on every lane, so the eye
+  // learns one card. Chips carry the words (project, routine, reservation).
+  const facts = (rows: [string, string][]): string =>
+    rows.length === 0
+      ? ""
+      : `<span class="facts">${rows
+          .map(([k, v]) => `<span class="fact"><span class="k">${escape(k)}</span><span class="v">${escape(v)}</span></span>`)
+          .join("")}</span>`;
+  const chips = (parts: string[]): string => {
+    const kept = parts.filter(one => one !== "");
+    return kept.length === 0 ? "" : `<span class="chips">${kept.join(" ")}</span>`;
   };
 
   const plain = (card: BoardCard): string =>
     `<a class="lane-card" href="${card.href}">` +
     `<span class="t">${escape(card.title)}</span>` +
-    `<span class="meta">${escape(card.reason)}${
-      card.routineName === null ? "" : ` <span class="badge">${escape(card.routineName)}</span>`
-    }${chip(card.repo)}</span>` +
-    `<span class="mono meta">${escape(card.taskId)}${
-      card.stalledSince === null ? "" : ` \u00b7 waiting ${age(card.stalledSince)}`
-    }</span></a>`;
+    `<span class="why">${escape(card.reason)}</span>` +
+    facts([
+      ["task", card.taskId],
+      ...(card.stalledSince === null ? [] : [["waiting", age(card.stalledSince)] as [string, string]]),
+    ]) +
+    chips([
+      card.routineName === null ? "" : `<span class="badge">${escape(card.routineName)}</span>`,
+      chip(card.repo).trim(),
+    ]) +
+    `</a>`;
 
   // The queued lane: ranks compare only within a COLUMN (queue-columns
   // review, finding 14), so the badge is per column head — the shared
@@ -7277,16 +7443,20 @@ function boardBody(
   const queuedCard = (card: BoardCard): string =>
     `<a class="lane-card" href="${card.href}">` +
     `<span class="t">${escape(card.title)}</span>` +
-    `<span class="meta">${escape(card.reason)}${
+    `<span class="why">${escape(card.reason)}</span>` +
+    facts([
+      ["task", card.taskId],
+      ["worker", card.assignedRunner === null ? "any free worker" : card.assignedRunner],
+    ]) +
+    chips([
       queuedHeads.get(`${card.assignedRunner ?? ""}|${card.repo ?? ""}`) === card.taskId
-        ? ` <span class="badge">${card.assignedRunner === null ? "next up" : `next for ${escape(card.assignedRunner)}`}</span>`
-        : ""
-    }${
-      card.assignedRunner === null ? "" : ` <span class="badge">reserved for ${escape(card.assignedRunner)}</span>`
-    }${
-      card.routineName === null ? "" : ` <span class="badge">${escape(card.routineName)}</span>`
-    }${chip(card.repo)}</span>` +
-    `<span class="mono meta">${escape(card.taskId)}</span></a>`;
+        ? `<span class="badge">${card.assignedRunner === null ? "next up" : `next for ${escape(card.assignedRunner)}`}</span>`
+        : "",
+      card.assignedRunner === null ? "" : `<span class="badge">reserved</span>`,
+      card.routineName === null ? "" : `<span class="badge">${escape(card.routineName)}</span>`,
+      chip(card.repo).trim(),
+    ]) +
+    `</a>`;
 
   const building = (card: BoardCard): string => {
     const claim = card.claim;
@@ -7295,17 +7465,25 @@ function boardBody(
     const workspace = claim.worktree === null ? null : (claim.worktree.split("/").pop() ?? claim.worktree);
     // Chip copy: unknown phases show nothing rather than raw tokens.
     const phase = claim.phase === null ? undefined : PHASE_WORDS[claim.phase];
+    // The live strip is the run's own phase and clock — never a percent:
+    // a build has no honest progress figure, only a stage and an elapsed.
+    const live = claim.model === null ? "preparing workspace" : (phase ?? "the agent is working");
     return (
       `<a class="lane-card building" href="${card.href}">` +
       `<span class="t"><span class="dot dot-ok pulse"></span>${escape(card.title)}</span>` +
-      `<span class="meta">${escape(claim.runner)} \u00b7 ${minutes}m elapsed${
-        claim.model === null ? " \u00b7 preparing workspace" : ` \u00b7 ${escape(claim.model)}`
-      }${claim.provider !== null && claim.provider !== "claude" ? ` \u00b7 ${escape(claim.provider)}` : ""}${
-        phase === undefined ? "" : ` \u00b7 ${phase}`
-      }${card.attempt === null ? "" : ` \u00b7 attempt ${card.attempt}`}${chip(card.repo)}</span>` +
-      (claim.branch === null
-        ? ""
-        : `<span class="mono meta">${escape(claim.branch)}${workspace === null ? "" : ` \u00b7 ${escape(workspace)}`}</span>`) +
+      `<span class="live-line"><span class="stage">${escape(live)}</span><span class="clock">${minutes}m</span></span>` +
+      facts([
+        ["task", card.taskId],
+        ["worker", claim.runner],
+        ...(claim.model === null
+          ? []
+          : [["model", `${claim.provider !== null && claim.provider !== "claude" ? `${claim.provider} · ` : ""}${claim.model}`] as [string, string]]),
+        ...(claim.branch === null ? [] : [["branch", `${claim.branch}${workspace === null ? "" : ` · ${workspace}`}`] as [string, string]]),
+      ]) +
+      chips([
+        card.attempt === null ? "" : `<span class="badge">attempt ${card.attempt}</span>`,
+        chip(card.repo).trim(),
+      ]) +
       `</a>`
     );
   };
@@ -7323,11 +7501,18 @@ function boardBody(
             return (
               `<a class="lane-card" href="${taskHref(row.taskId)}">` +
               `<span class="t">${escape(row.title)}</span>` +
-              `<span class="meta">${row.outcome === "no-change" ? "no change needed" : "built"}${
-                row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`
-              }${row.costUsd === null ? "" : ` \u00b7 $${row.costUsd.toFixed(2)}`}${pr}</span>` +
-              `${row.handoff === null ? "" : `<span class="meta">${escape(row.handoff.length > 120 ? row.handoff.slice(0, 120) + "\u2026" : row.handoff)}</span>`}` +
-              `<span class="mono meta">${escape(row.taskId)}</span></a>`
+              `${row.handoff === null ? "" : `<span class="why">${escape(row.handoff.length > 120 ? row.handoff.slice(0, 120) + "\u2026" : row.handoff)}</span>`}` +
+              facts([
+                ["task", row.taskId],
+                ...(row.ranMinutes === null ? [] : [["ran", `${row.ranMinutes}m`] as [string, string]]),
+                ["cost", row.costUsd === null ? "unmeasured" : `$${row.costUsd.toFixed(2)}`],
+              ]) +
+              chips([
+                `<span class="badge badge-done">${row.outcome === "no-change" ? "no change" : "built"}</span>`,
+                pr.trim(),
+                data.all && row.repo !== null ? `<span class="badge">${escape(projectName(row.repo))}</span>` : "",
+              ]) +
+              `</a>`
             );
           })
           .join("");
@@ -7379,7 +7564,7 @@ function boardBody(
     lane("queued", "queued", "starts when a worker is free", queuedCard),
     lane("waiting", "waiting", "paused on a timer, dependency, or requirement", plain),
     lane("building", "building", "one agent per card, in its own workspace", building),
-    `<section class="lane lane-done"><h2><a href="/done">done recently</a></h2><p class="hint">the most recent \u2014 the full list is under done</p>${doneCards}</section>`,
+    `<details class="lane lane-done"${data.done.length === 0 ? "" : " open"}><summary><h2><a href="/done">done recently</a></h2></summary><p class="hint">the most recent \u2014 the full list is under done</p>${doneCards}</details>`,
     `</div>`,
     tracksSection,
   ].join("\n");
@@ -8291,13 +8476,48 @@ function portfolioOverview(data: {
     (a.repo === null ? 1 : b.repo === null ? -1 : projectName(a.repo).localeCompare(projectName(b.repo))),
   );
   const workspace = (repo: string | null): string => repo === null ? "Unplaced work" : projectName(repo);
-  const workspaceRows = pulseRows.map(one =>
-    `<div class="workspace-row"><span class="workspace-name">${escape(workspace(one.repo))}</span>` +
-    `<span class="pulse-stat${one.attention > 0 ? " hot" : ""}"><b>${one.attention}</b> need you</span>` +
-    `<span class="pulse-stat"><b>${one.building}</b> live</span>` +
-    `<span class="pulse-stat"><b>${one.waiting}</b> waiting</span>` +
-    `<span class="pulse-stat"><b>${one.queued}</b> next</span></div>`,
-  ).join("\n");
+  // A workspace card (board pass): the repo's name and one status word,
+  // its four counts, a bar of the same counts in proportion, and — for a
+  // real repo, with a session token — the one tap to its own board. The
+  // status word is the loudest true thing: needs you beats building beats
+  // waiting beats queued; a repo with nothing in flight is idle.
+  const statusOf = (one: (typeof pulseRows)[number]): { word: string; cls: string } =>
+    one.attention > 0
+      ? { word: "needs you", cls: "badge-open" }
+      : one.building > 0
+        ? { word: "building", cls: "badge-running" }
+        : one.waiting > 0
+          ? { word: "waiting", cls: "" }
+          : one.queued > 0
+            ? { word: "queued", cls: "" }
+            : { word: "idle", cls: "" };
+  const workspaceRows = pulseRows.map(one => {
+    const status = statusOf(one);
+    const total = one.attention + one.building + one.waiting + one.queued;
+    const seg = (cls: string, count: number): string =>
+      count === 0 ? "" : `<span class="seg ${cls}" style="flex-grow:${count}"></span>`;
+    const boardForm =
+      one.repo === null || data.csrf === ""
+        ? ""
+        : `<form method="post" action="/projects/open" class="inline">` +
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+          `<input type="hidden" name="path" value="${escape(one.repo)}">` +
+          `<input type="hidden" name="return" value="/board">` +
+          `<button type="submit">board →</button></form>`;
+    return (
+      `<div class="workspace-card${one.attention > 0 ? " hot" : ""}">` +
+      `<div class="workspace-head"><span class="workspace-name">${escape(workspace(one.repo))}</span>` +
+      `<span class="badge ${status.cls}">${status.word}</span>${boardForm}</div>` +
+      `<div class="workspace-stats">` +
+      `<span class="pulse-stat${one.attention > 0 ? " hot" : ""}"><b>${one.attention}</b> need you</span>` +
+      `<span class="pulse-stat"><b>${one.building}</b> live</span>` +
+      `<span class="pulse-stat"><b>${one.waiting}</b> waiting</span>` +
+      `<span class="pulse-stat"><b>${one.queued}</b> next</span></div>` +
+      `<div class="workspace-bar${total === 0 ? " empty" : ""}" aria-hidden="true">` +
+      seg("attention", one.attention) + seg("building", one.building) + seg("waiting", one.waiting) + seg("queued", one.queued) +
+      `</div></div>`
+    );
+  }).join("\n");
 
   // ---- waits on you: everything a person must resolve, across projects ----
   const waitCount =
@@ -8964,6 +9184,22 @@ function projectsPage(
  * in — then straight to the approve card, which is the aha the flow serves.
  */
 /** One queue card. Taken work renders pinned — visible, never draggable. */
+/**
+ * The request's own session facts, readable from anywhere below the
+ * dispatcher without threading them through forty call sites: the csrf
+ * token the chrome's switcher forms carry, and the path a switch returns
+ * to. AsyncLocalStorage follows the request's own async chain, so two
+ * interleaved requests never read each other's token.
+ */
+const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string }>();
+
+/** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
+function safeReturn(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined) return "/";
+  if (!raw.startsWith("/") || raw.startsWith("//") || /[\r\n\t\u0000-\u001f]/.test(raw) || raw.length > 512) return "/";
+  return raw;
+}
+
 /** The no-script "move to the front" sentinel: the form cannot name the
  * front of a partition, so the handler resolves it (slice 1b, fix 1). */
 const QUEUE_FRONT = "__TOP__";
@@ -8976,6 +9212,9 @@ const GRIP_ICON =
 const TO_FRONT_ICON =
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">` +
   `<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>`;
+const CHEVRON_ICON =
+  `<svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">` +
+  `<path d="m6 9 6 6 6-6"/></svg>`;
 /** The drag grip: a 2rem touch-sized handle that owns its touches
  * (touch-action: none), so a finger on it drags instead of scrolling. */
 const GRIP_HANDLE = `<span class="queue-handle" aria-hidden="true">${GRIP_ICON}</span>`;

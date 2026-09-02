@@ -6,23 +6,27 @@
 @source "./";
 
 :root {
-  --background: #0c0e12; /* ground */
-  --foreground: #e9ebee; /* text */
-  --card: #14171d; /* surface */
-  --card-foreground: #e9ebee;
-  --popover: #1b1f27; /* inset wells */
-  --popover-foreground: #e9ebee;
-  --primary: #f5a524; /* amber — exclusively "waits on you" */
+  /* The marine-ink ramp (owner's ground, 2026-09-01): one hue ~210° bottom
+   * to top, Pantone-anchored — ground 5395C, surface 433C, hairline 432C,
+   * dim 430C, paper Cool Gray 1C. These are the console's own values
+   * (src/serve.ts) — the package and the console must never drift. */
+  --background: #0f171f; /* ground — PMS 5395 C */
+  --foreground: #eaeef2; /* text — Cool Gray 1 C */
+  --card: #16212b; /* surface — PMS 433 C */
+  --card-foreground: #eaeef2;
+  --popover: #1c2937; /* inset wells */
+  --popover-foreground: #eaeef2;
+  --primary: #f5a524; /* amber — exclusively "waits on you" (PMS 137 C) */
   --primary-foreground: #201503;
-  --secondary: #1b1f27;
-  --secondary-foreground: #e9ebee;
-  --muted: #1b1f27;
-  --muted-foreground: #8b93a1; /* dim */
-  --accent: #1b1f27;
-  --accent-foreground: #e9ebee;
+  --secondary: #1c2937;
+  --secondary-foreground: #eaeef2;
+  --muted: #1c2937;
+  --muted-foreground: #8fa0af; /* dim — PMS 430 C */
+  --accent: #1c2937;
+  --accent-foreground: #eaeef2;
   --destructive: #f06a5e;
-  --border: #262b35; /* hairlines */
-  --input: #262b35;
+  --border: #283747; /* hairlines — PMS 432 C */
+  --input: #5d7185; /* control boundaries: >=3:1 on ground and surface */
   --ring: #5ca9ff;
   --radius: 0.625rem;
   /* Semantic run states — quiet 12%-tint outline chips, never surfaces. */
