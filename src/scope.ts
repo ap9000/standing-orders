@@ -399,6 +399,9 @@ export type ScopeInput = {
   /** The mode road's escalated filing default (C7): the resolved profile
    * seals claude bypassPermissions / gemini yolo; codex-shaped unchanged. */
   posture?: "escalated";
+  /** Who wrote this text (mate arc, ruling 2): `mate` for a confirmed mate
+   * proposal — mode coverage then never seals it; a human rewrite clears it. */
+  proposedVia?: "mate" | null;
   now: Date;
   mutation?: Mutation;
 };
@@ -453,7 +456,7 @@ export function digestOf(
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile, posture } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile, posture, proposedVia = null } = input;
 
   const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd };
   const previous = store.getScope(taskId);
@@ -476,6 +479,7 @@ export function propose(store: Store, input: ScopeInput): Scope {
   store.saveScope(scope, mutation, {
     ...(profile === undefined ? {} : { profile }),
     ...(posture === undefined ? {} : { posture }),
+    proposedVia,
   });
   // The store may have RECOMPUTED the digest to bind the resolved profile
   // (v24 filing invariant) — what callers display must be what is stored.

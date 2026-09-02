@@ -68,6 +68,8 @@ export type TaskProposalInput = {
   touches?: string[];
   /** Which door filed this: 'cli', 'console', 'intake', 'template:<name>'. */
   filedVia: string;
+  /** The scope text's author when it is the mate's (ruling 2): mode coverage never seals it. */
+  proposedVia?: "mate";
   /**
    * The caller's ceiling as canonical repo paths. undefined = the caller
    * genuinely has none (the CLI on the operator's own machine). A surface
@@ -194,6 +196,7 @@ export function fileTaskProposal(
       outOfScope,
       touches,
       filedVia: input.filedVia,
+      proposedVia: input.proposedVia ?? null,
     },
     now,
   );

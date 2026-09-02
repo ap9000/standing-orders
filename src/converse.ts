@@ -411,29 +411,44 @@ export function tokenCount(value: number): boolean {
 
 export const MATE_MAX_STEPS = 8;
 export const MATE_MAX_CALLS_PER_STEP = 4;
+/** A tool result, measured AS EMBEDDED — the JSON-encoded string, escapes included. */
 export const MATE_TOOL_RESULT_CAP_BYTES = 16_384;
+/** A tool call, measured as the serialized `{id, name, args}` — the id counts. */
 export const MATE_TOOL_CALL_CAP_BYTES = 2_048;
+export const MATE_TOOL_CALL_ID_CAP_BYTES = 64;
+/** One step's assistant text; over it the reply is malformed (review finding 7). */
+export const MATE_STEP_TEXT_CAP_BYTES = 8_192;
 
 /**
- * The triangular worst case (mate arc, ruling 6): request s carries the
- * base prompt, every earlier step's calls and results, and every earlier
- * assistant block; each step may answer with the full output allowance.
+ * The triangular worst case (mate arc, ruling 6; slice-1 review finding 7):
+ * request s carries the base prompt plus every earlier step's calls,
+ * results, and assistant text. Calls and results are measured as
+ * embedded and may be JSON-escaped ONCE more on the wire (OpenRouter
+ * serializes arguments twice; a result string re-escapes inside the
+ * body), so each is budgeted at twice its cap — escaping at most doubles
+ * a string. Each step may answer with the full output allowance.
  */
 export function mateWorstCaseForPrice(
   price: ModelPrice,
   baseBytes: number,
-  caps: { steps?: number; callsPerStep?: number; resultCap?: number; callCap?: number } = {},
+  caps: { steps?: number; callsPerStep?: number; resultCap?: number; callCap?: number; textCap?: number } = {},
 ): number {
   const S = caps.steps ?? MATE_MAX_STEPS;
   const M = caps.callsPerStep ?? MATE_MAX_CALLS_PER_STEP;
   const R = caps.resultCap ?? MATE_TOOL_RESULT_CAP_BYTES;
   const C = caps.callCap ?? MATE_TOOL_CALL_CAP_BYTES;
+  const T = caps.textCap ?? MATE_STEP_TEXT_CAP_BYTES;
   const tokens = (bytes: number): number => Math.ceil(bytes / 3);
   let input = 0;
   for (let s = 1; s <= S; s++) {
-    input += tokens(baseBytes + (s - 1) * M * (R + C)) + s * MAX_OUTPUT_TOKENS;
+    input += tokens(baseBytes + (s - 1) * (M * 2 * (R + C) + 2 * T));
   }
   return input * price.inMicrousd + S * MAX_OUTPUT_TOKENS * price.outMicrousd;
+}
+
+/** The bytes a tool result costs on the wire: its JSON string form. */
+export function embeddedBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8");
 }
 
 export type MateToolSchema = { name: string; description: string; inputSchema: Record<string, unknown> };
@@ -467,6 +482,27 @@ export function parseMateProviderWrapper(
     if (!inner.ok || typeof inner.value !== "object" || inner.value === null || Array.isArray(inner.value)) return null;
     return inner.value as Record<string, unknown>;
   };
+  // A call is bounded WHOLE (finding 7): the id is repeated in the assistant
+  // block and the result, so it is capped and counted inside the call cap.
+  const readCall = (id: unknown, name: unknown, rawArgs: unknown): MateToolCall | null => {
+    if (typeof id !== "string" || id === "" || Buffer.byteLength(id, "utf8") > MATE_TOOL_CALL_ID_CAP_BYTES) return null;
+    if (typeof name !== "string" || name === "" || name.length > 64) return null;
+    const args = readArgs(rawArgs);
+    if (args === null) return null;
+    const call = { id, name, args };
+    if (Buffer.byteLength(JSON.stringify(call), "utf8") > MATE_TOOL_CALL_CAP_BYTES) return null;
+    return call;
+  };
+  // Usage is integers or nothing (ruling 14; finding 8): no coercion from
+  // null, booleans, or strings, and output never exceeds what was asked.
+  const usageOf = (usage: unknown, inKey: string, outKey: string): { tokensIn: number; tokensOut: number } | null => {
+    if (typeof usage !== "object" || usage === null) return null;
+    const tokensIn = (usage as Record<string, unknown>)[inKey];
+    const tokensOut = (usage as Record<string, unknown>)[outKey];
+    if (typeof tokensIn !== "number" || typeof tokensOut !== "number" || !tokenCount(tokensIn) || !tokenCount(tokensOut)) return null;
+    if (tokensOut > MAX_OUTPUT_TOKENS) return null;
+    return { tokensIn, tokensOut };
+  };
   if (provider === "anthropic-api") {
     if (body["type"] !== "message") return { ok: false, problem: "wrong-type" };
     const content = body["content"];
@@ -478,20 +514,19 @@ export function parseMateProviderWrapper(
       if (typeof block !== "object" || block === null) return { ok: false, problem: "not-a-block" };
       if (block["type"] === "text" && typeof block["text"] === "string") {
         text += block["text"];
-      } else if (block["type"] === "tool_use" && typeof block["id"] === "string" && typeof block["name"] === "string") {
-        const args = readArgs(block["input"]);
-        if (args === null) return { ok: false, problem: "bad-tool-args" };
-        calls.push({ id: block["id"], name: block["name"], args });
+      } else if (block["type"] === "tool_use") {
+        const call = readCall(block["id"], block["name"], block["input"]);
+        if (call === null) return { ok: false, problem: "bad-tool-call" };
+        calls.push(call);
       } else {
         return { ok: false, problem: "bad-block" };
       }
     }
     if (calls.length > MATE_MAX_CALLS_PER_STEP) return { ok: false, problem: "too-many-calls" };
-    const usage = body["usage"] as Record<string, unknown> | undefined;
-    const tokensIn = usage === undefined ? NaN : Number(usage["input_tokens"]);
-    const tokensOut = usage === undefined ? NaN : Number(usage["output_tokens"]);
-    if (!tokenCount(tokensIn) || !tokenCount(tokensOut)) return { ok: false, problem: "no-usage" };
-    return { ok: true, answer: { text, calls, tokensIn, tokensOut, reportedCostMicrousd: null } };
+    if (Buffer.byteLength(text, "utf8") > MATE_STEP_TEXT_CAP_BYTES) return { ok: false, problem: "text-over-cap" };
+    const usage = usageOf(body["usage"], "input_tokens", "output_tokens");
+    if (usage === null) return { ok: false, problem: "no-usage" };
+    return { ok: true, answer: { text, calls, tokensIn: usage.tokensIn, tokensOut: usage.tokensOut, reportedCostMicrousd: null } };
   }
   const choices = body["choices"];
   if (!Array.isArray(choices) || choices.length !== 1) return { ok: false, problem: "not-one-choice" };
@@ -505,29 +540,29 @@ export function parseMateProviderWrapper(
   if (rawCalls !== undefined) {
     if (!Array.isArray(rawCalls) || rawCalls.length > MATE_MAX_CALLS_PER_STEP) return { ok: false, problem: "too-many-calls" };
     for (const raw of rawCalls) {
-      const call = raw as Record<string, unknown>;
-      const fn = call?.["function"] as Record<string, unknown> | undefined;
-      if (typeof call?.["id"] !== "string" || fn === undefined || typeof fn["name"] !== "string") return { ok: false, problem: "bad-tool-call" };
-      const args = readArgs(fn["arguments"] ?? "{}");
-      if (args === null) return { ok: false, problem: "bad-tool-args" };
-      calls.push({ id: call["id"], name: fn["name"], args });
+      const one = raw as Record<string, unknown>;
+      const fn = one?.["function"] as Record<string, unknown> | undefined;
+      if (typeof one !== "object" || one === null || fn === undefined || typeof fn !== "object" || fn === null) return { ok: false, problem: "bad-tool-call" };
+      const call = readCall(one["id"], fn["name"], fn["arguments"] ?? "{}");
+      if (call === null) return { ok: false, problem: "bad-tool-call" };
+      calls.push(call);
     }
   }
-  const usage = body["usage"] as Record<string, unknown> | undefined;
-  const tokensIn = usage === undefined ? NaN : Number(usage["prompt_tokens"]);
-  const tokensOut = usage === undefined ? NaN : Number(usage["completion_tokens"]);
-  if (!tokenCount(tokensIn) || !tokenCount(tokensOut)) return { ok: false, problem: "no-usage" };
-  const reportedCost = usage === undefined ? NaN : Number(usage["cost"]);
-  return {
-    ok: true,
-    answer: {
-      text,
-      calls,
-      tokensIn,
-      tokensOut,
-      reportedCostMicrousd: Number.isFinite(reportedCost) && reportedCost >= 0 ? Math.ceil(reportedCost * 1_000_000) : null,
-    },
-  };
+  if (Buffer.byteLength(text, "utf8") > MATE_STEP_TEXT_CAP_BYTES) return { ok: false, problem: "text-over-cap" };
+  const usage = usageOf(body["usage"], "prompt_tokens", "completion_tokens");
+  if (usage === null) return { ok: false, problem: "no-usage" };
+  // A reported cost is absent, or a finite non-negative number whose
+  // micro-dollar form is a safe integer; anything else is malformed, never
+  // a silent discount (finding 8).
+  const rawCost = (body["usage"] as Record<string, unknown>)["cost"];
+  let reportedCostMicrousd: number | null = null;
+  if (rawCost !== undefined && rawCost !== null) {
+    if (typeof rawCost !== "number" || !Number.isFinite(rawCost) || rawCost < 0) return { ok: false, problem: "bad-cost" };
+    const micro = Math.ceil(rawCost * 1_000_000);
+    if (!Number.isSafeInteger(micro)) return { ok: false, problem: "bad-cost" };
+    reportedCostMicrousd = micro;
+  }
+  return { ok: true, answer: { text, calls, tokensIn: usage.tokensIn, tokensOut: usage.tokensOut, reportedCostMicrousd } };
 }
 
 /** The mate's request: system contract, the data document as the first

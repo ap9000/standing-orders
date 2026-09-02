@@ -225,7 +225,7 @@ export type ChatSnapshot = {
   repos: string[];
   tasks: { repoIndex: number; id: string; title: string; state: string; ageHours: number; strikes: number }[];
   tasksSaturated: boolean;
-  decisions: { repoIndex: number; id: number; question: string; optionLabels: string[] }[];
+  decisions: { repoIndex: number; id: number; question: string; optionLabels: string[]; taskId: string; options: { id: string; label: string; reversible: boolean }[]; ageHours: number }[];
   decisionsSaturated: boolean;
   incidents: { repoIndex: number; kind: string; ageHours: number }[];
   incidentsSaturated: boolean;
@@ -5780,7 +5780,7 @@ export class Store {
   // ---- scope --------------------------------------------------------------
 
   saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated"; proposedVia?: "mate" | null } = {}): void {
-    this.once(mutation, "saveScope", () => {
+    this.once(mutation, "saveScope", () => this.transact(() => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
       // digest recomputed to bind it, version 2) or UNRESOLVED with its
@@ -5907,7 +5907,7 @@ export class Store {
       // rewrite clears the mate's mark and a mate rewrite sets it.
       this.db.prepare("UPDATE task_scope SET proposed_via = ? WHERE task_id = ?").run(options.proposedVia ?? null, scope.taskId);
       return null;
-    });
+    }));
   }
 
   /** The approval SEAL (foundations finding 4/17): stamps the approval
@@ -6507,7 +6507,9 @@ export class Store {
         this.reconcileIntentsForMode(String(mode["repo"]), null, now);
       }
       this.revokeDerivedAuthority(name, by, now);
-      // Ruling 10: an approver's standing ends every mate session it minted, and its thread with them.
+      // Ruling 10: an approver's standing ends every mate session it minted,
+      // its thread, and any turn in flight (charged whole — finding 5).
+      this.failLiveMateTurnsFor(name, "revoked", now);
       this.endMateSessionsFor(name, by, now);
       this.closeMateThreadsFor(name, now);
       return {
@@ -8333,6 +8335,9 @@ export class Store {
       /** Immutable provenance (v12): which door filed this. Stamped in the
        * same transaction as the create; there is no API to change it. */
       filedVia?: string;
+      /** Who wrote the scope text (mate arc, ruling 2): a confirmed mate
+       * proposal stamps `mate`, and mode coverage then never seals it. */
+      proposedVia?: "mate" | null;
     },
     now: Date,
     cap = 500,
@@ -8394,7 +8399,7 @@ export class Store {
             approvedDigest: null,
           },
           {},
-          spec.posture === undefined ? {} : { posture: spec.posture },
+          { ...(spec.posture === undefined ? {} : { posture: spec.posture }), proposedVia: spec.proposedVia ?? null },
         );
       }
       return { ok: true as const, id };
@@ -9351,7 +9356,8 @@ export class Store {
         .all(...admittedRepos);
       const decisionRows = this.db
         .prepare(
-          `SELECT decision.id AS id, decision.question AS question, decision.options AS options, task_ref.repo AS repo
+          `SELECT decision.id AS id, decision.question AS question, decision.options AS options, task_ref.repo AS repo,
+                  task_ref.external_id AS task_id, decision.created_at AS created_at
              FROM decision JOIN run ON run.id = decision.run JOIN task_ref ON task_ref.id = run.task_ref
             WHERE decision.state IN ('open','expired') AND task_ref.repo IN (${marks})
             ORDER BY decision.id DESC LIMIT 21`,
@@ -9381,14 +9387,17 @@ export class Store {
             ORDER BY publication.id DESC LIMIT 21`,
         )
         .all(...admittedRepos);
-      const optionLabelsOf = (raw: unknown): string[] => {
+      const optionsOf = (raw: unknown): { id: string; label: string; reversible: boolean }[] => {
         try {
-          const parsed = JSON.parse(String(raw)) as { label?: unknown }[];
-          return Array.isArray(parsed) ? parsed.map(one => String(one?.label ?? "")).slice(0, 6) : [];
+          const parsed = JSON.parse(String(raw)) as { id?: unknown; label?: unknown; reversible?: unknown }[];
+          return Array.isArray(parsed)
+            ? parsed.slice(0, 6).map(one => ({ id: String(one?.id ?? ""), label: String(one?.label ?? ""), reversible: one?.reversible === true }))
+            : [];
         } catch {
           return [];
         }
       };
+      const optionLabelsOf = (raw: unknown): string[] => optionsOf(raw).map(one => one.label);
       return {
         repos: [...admittedRepos],
         tasks: taskRows.slice(0, 60).map(row => ({
@@ -9405,6 +9414,9 @@ export class Store {
           id: Number(row["id"]),
           question: String(row["question"]),
           optionLabels: optionLabelsOf(row["options"]),
+          taskId: String(row["task_id"]),
+          options: optionsOf(row["options"]),
+          ageHours: Math.max(0, Math.round((now.getTime() - Date.parse(String(row["created_at"]))) / 3_600_000)),
         })),
         decisionsSaturated: decisionRows.length > 20,
         incidents: incidentRows.slice(0, 20).map(row => ({
@@ -9515,13 +9527,11 @@ export class Store {
       const live = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
         .get(args.approver);
-      if (live !== undefined) return { ok: false as const, reason: "concurrent" as const };
-      const dayStart = `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
-      const today = this.db
-        .prepare("SELECT COUNT(*) AS n FROM chat_turn WHERE approver = ? AND created_at >= ?")
-        .get(args.approver, dayStart);
-      if (Number(today?.["n"] ?? 0) >= args.dailyTurns) return { ok: false as const, reason: "daily-cap" as const };
-      const since = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
+      const liveMate = this.db
+        .prepare("SELECT 1 AS hit FROM mate_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
+        .get(args.approver);
+      if (live !== undefined || liveMate !== undefined) return { ok: false as const, reason: "concurrent" as const };
+      if (this.chatTurnsToday(args.approver, now) >= args.dailyTurns) return { ok: false as const, reason: "daily-cap" as const };
       if (this.chatWeeklySpendMicrousd(args.credentialKey, now) + args.reservedMicrousd > args.weeklyCeilingMicrousd) {
         return { ok: false as const, reason: "over-budget" as const };
       }
@@ -9655,12 +9665,17 @@ export class Store {
     return Number(row?.["spent"] ?? 0);
   }
 
+  /** The day's turns: fleet chat turns plus mate turns — a mate turn is
+   * one turn however many steps it took (slice-1 review, finding 11). */
   chatTurnsToday(approver: string, now: Date): number {
     const dayStart = `${now.toISOString().slice(0, 10)}T00:00:00.000Z`;
-    const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM chat_turn WHERE approver = ? AND created_at >= ?")
+    const chat = this.db
+      .prepare("SELECT COUNT(*) AS n FROM chat_turn WHERE approver = ? AND created_at >= ? AND kind = 'chat'")
       .get(approver, dayStart);
-    return Number(row?.["n"] ?? 0);
+    const mate = this.db
+      .prepare("SELECT COUNT(*) AS n FROM mate_turn WHERE approver = ? AND created_at >= ?")
+      .get(approver, dayStart);
+    return Number(chat?.["n"] ?? 0) + Number(mate?.["n"] ?? 0);
   }
 
   /** Turns blocking this credential until somebody owns the worst case. */
@@ -12931,14 +12946,15 @@ export class Store {
     return row === undefined ? null : readMateThread(row);
   }
 
-  /** `--end` and revocation: the thread and everything in it are gone. */
+  /** `--end` and revocation: the thread's text and every proposal in it are
+   * deleted; the thread row stays as closed metadata (when, whose). */
   closeMateThreadsFor(approver: string, now: Date): number {
     return this.transact(() => {
       const rows = this.db.prepare("SELECT id FROM mate_thread WHERE approver = ? AND closed_at IS NULL").all(approver);
       for (const row of rows) {
         const id = Number(row["id"]);
         this.db.prepare("DELETE FROM mate_message WHERE thread = ?").run(id);
-        this.db.prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE thread = ? AND state IN ('drafting','pending')").run(now.toISOString(), id);
+        this.db.prepare("DELETE FROM mate_proposal WHERE thread = ?").run(id);
         this.db.prepare("UPDATE mate_thread SET closed_at = ? WHERE id = ?").run(now.toISOString(), id);
       }
       return rows.length;
@@ -12969,14 +12985,16 @@ export class Store {
       }));
   }
 
-  /** Transcripts live 24 hours (ruling 11); pending proposals expire with them. */
+  /** Transcripts live 24 hours (ruling 11); pending proposals expire with them, in one write. */
   sweepMateThreads(now: Date): { messages: number; proposals: number } {
-    const cutoff = new Date(now.getTime() - 24 * 3_600_000).toISOString();
-    const messages = this.db.prepare("DELETE FROM mate_message WHERE created_at < ?").run(cutoff);
-    const proposals = this.db
-      .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE state IN ('drafting','pending') AND created_at < ?")
-      .run(now.toISOString(), cutoff);
-    return { messages: Number(messages.changes), proposals: Number(proposals.changes) };
+    return this.transact(() => {
+      const cutoff = new Date(now.getTime() - 24 * 3_600_000).toISOString();
+      const messages = this.db.prepare("DELETE FROM mate_message WHERE created_at < ?").run(cutoff);
+      const proposals = this.db
+        .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE state IN ('drafting','pending') AND created_at < ?")
+        .run(now.toISOString(), cutoff);
+      return { messages: Number(messages.changes), proposals: Number(proposals.changes) };
+    });
   }
 
   /** A proposal is inert (`drafting`) until its turn finalizes. */
@@ -12987,15 +13005,17 @@ export class Store {
     return Number(inserted.lastInsertRowid);
   }
 
+  /** Drafts become confirmable only under a turn that ANSWERED (review finding 12). */
   promoteMateProposals(turn: number): number {
-    const changed = this.db.prepare("UPDATE mate_proposal SET state = 'pending' WHERE turn = ? AND state = 'drafting'").run(turn);
+    const changed = this.db
+      .prepare("UPDATE mate_proposal SET state = 'pending' WHERE turn = ? AND state = 'drafting' AND EXISTS (SELECT 1 FROM mate_turn WHERE id = ? AND state = 'answered')")
+      .run(turn, turn);
     return Number(changed.changes);
   }
 
-  discardMateProposals(turn: number, now: Date): number {
-    const changed = this.db
-      .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE turn = ? AND state = 'drafting'")
-      .run(now.toISOString(), turn);
+  /** A failed turn's drafts are DELETED — nothing a failed turn produced is durable (finding 4). */
+  discardMateProposals(turn: number): number {
+    const changed = this.db.prepare("DELETE FROM mate_proposal WHERE turn = ? AND state = 'drafting'").run(turn);
     return Number(changed.changes);
   }
 
@@ -13033,10 +13053,20 @@ export class Store {
    * approver serializes the console and the CLI.
    */
   openMateTurn(
-    args: { approver: string; session: number; thread: number; credentialKey: string; reservedMicrousd: number; weeklyCeilingMicrousd: number; deadlineMs: number },
+    args: { approver: string; session: number; thread: number; credentialKey: string; reservedMicrousd: number; dailyTurns: number; weeklyCeilingMicrousd: number; deadlineMs: number },
     now: Date,
-  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "session-exhausted" | "session-ended" | "over-budget" } {
+  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "daily-cap" | "session-exhausted" | "session-ended" | "not-yours" | "thread-closed" | "over-budget" } {
     return this.transact(() => {
+      // The binding (slice-1 review, finding 2): the session and the thread
+      // are THIS approver's, under THIS credential, under one ceiling, and
+      // the thread is open — a structural snapshot proves none of that.
+      const session = this.getMateSession(args.session);
+      const thread = this.getMateThread(args.thread);
+      if (session === null || thread === null) return { ok: false as const, reason: "not-yours" as const };
+      if (session.approver !== args.approver || thread.approver !== args.approver || session.credentialKey !== args.credentialKey) {
+        return { ok: false as const, reason: "not-yours" as const };
+      }
+      if (thread.closedAt !== null || thread.ceilingDigest !== session.ceilingDigest) return { ok: false as const, reason: "thread-closed" as const };
       const latched = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
         .get(args.credentialKey);
@@ -13048,8 +13078,8 @@ export class Store {
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
         .get(args.approver);
       if (live !== undefined || liveChat !== undefined) return { ok: false as const, reason: "concurrent" as const };
-      const session = this.getMateSession(args.session);
-      if (session === null || session.endedAt !== null || session.expiresAt <= now.toISOString()) {
+      if (this.chatTurnsToday(args.approver, now) >= args.dailyTurns) return { ok: false as const, reason: "daily-cap" as const };
+      if (session.endedAt !== null || session.expiresAt <= now.toISOString()) {
         return { ok: false as const, reason: "session-ended" as const };
       }
       if (session.spentMicrousd + args.reservedMicrousd > session.ceilingMicrousd) {
@@ -13081,57 +13111,122 @@ export class Store {
   /** One provider request of a mate turn: a chat_turn row of kind
    * 'mate-step', reserved at zero (the turn holds the reservation), with
    * the same dispatch CAS, terminal CAS, and crash latch as fleet chat. */
-  openMateStep(args: { mateTurn: number; approver: string; credentialKey: string; provider: ChatProviderId; model: string; deadlineMs: number }, now: Date): number {
-    const inserted = this.db
-      .prepare(
-        `INSERT INTO chat_turn (approver, credential_key, provider, model, state, created_at, deadline_at, reserved_microusd, kind, mate_turn)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, 'mate-step', ?)`,
-      )
-      .run(args.approver, args.credentialKey, args.provider, args.model, now.toISOString(), new Date(now.getTime() + args.deadlineMs).toISOString(), args.mateTurn);
-    this.db.prepare("UPDATE mate_turn SET steps = steps + 1 WHERE id = ?").run(args.mateTurn);
-    return Number(inserted.lastInsertRowid);
+  openMateStep(
+    args: { mateTurn: number; generation: number; approver: string; credentialKey: string; provider: ChatProviderId; model: string; deadlineMs: number },
+    now: Date,
+  ): { ok: true; id: number } | { ok: false; reason: "latched" | "gone" } {
+    return this.transact(() => {
+      // The latch is re-checked before EVERY dispatch (finding 11): another
+      // approver's unknown-cost turn on the shared credential stops this
+      // loop between steps, exactly as it would stop a fresh turn.
+      const latched = this.db
+        .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
+        .get(args.credentialKey);
+      if (latched !== undefined) return { ok: false as const, reason: "latched" as const };
+      const parent = this.db
+        .prepare("SELECT 1 AS hit FROM mate_turn WHERE id = ? AND generation = ? AND state = 'running'")
+        .get(args.mateTurn, args.generation);
+      if (parent === undefined) return { ok: false as const, reason: "gone" as const };
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO chat_turn (approver, credential_key, provider, model, state, created_at, deadline_at, reserved_microusd, kind, mate_turn)
+           VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, 'mate-step', ?)`,
+        )
+        .run(args.approver, args.credentialKey, args.provider, args.model, now.toISOString(), new Date(now.getTime() + args.deadlineMs).toISOString(), args.mateTurn);
+      this.db.prepare("UPDATE mate_turn SET steps = steps + 1 WHERE id = ?").run(args.mateTurn);
+      return { ok: true as const, id: Number(inserted.lastInsertRowid) };
+    });
   }
 
-  /** Terminal CAS for the turn; settles the session in the same write. */
+  /**
+   * Terminal CAS for the turn. One write settles the turn, debits the
+   * session, promotes the drafts, and appends the assistant text (review
+   * finding 12) — a crash leaves all of it or none. A step whose cost is
+   * unknown charges the WHOLE reservation (finding 1): the ledger never
+   * releases money it cannot prove was not spent; acknowledging the step
+   * later does not refund it.
+   */
   finalizeMateTurn(
     id: number,
     generation: number,
-    outcome: { state: "answered" | "failed"; settledMicrousd: number; tokensIn: number; tokensOut: number; failureReason?: string },
+    outcome: {
+      state: "answered" | "failed";
+      settledMicrousd: number;
+      unknownSpend?: boolean;
+      tokensIn: number;
+      tokensOut: number;
+      failureReason?: string;
+      /** Answered turns: the assistant row, written in the same transaction as the promotion. */
+      message?: { text: string; activity: string };
+    },
     now: Date,
   ): boolean {
     return this.transact(() => {
+      const before = this.db.prepare("SELECT reserved_microusd AS reserved, session, thread FROM mate_turn WHERE id = ? AND generation = ? AND state IN ('queued','running')").get(id, generation);
+      if (before === undefined) return false;
+      const settled = outcome.unknownSpend === true ? Math.max(Number(before["reserved"]), outcome.settledMicrousd) : outcome.settledMicrousd;
       const changed = this.db
         .prepare(
           `UPDATE mate_turn SET state = ?, settled_microusd = ?, tokens_in = ?, tokens_out = ?, failure_reason = ?, finished_at = ?
            WHERE id = ? AND generation = ? AND state IN ('queued','running')`,
         )
-        .run(outcome.state, outcome.settledMicrousd, outcome.tokensIn, outcome.tokensOut, outcome.failureReason ?? null, now.toISOString(), id, generation);
+        .run(outcome.state, settled, outcome.tokensIn, outcome.tokensOut, outcome.failureReason ?? null, now.toISOString(), id, generation);
       if (Number(changed.changes) !== 1) return false;
-      const turn = this.db.prepare("SELECT session FROM mate_turn WHERE id = ?").get(id);
-      this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(outcome.settledMicrousd, Number(turn?.["session"]));
+      this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(settled, Number(before["session"]));
+      if (outcome.state === "answered") {
+        this.promoteMateProposals(id);
+        if (outcome.message !== undefined) {
+          this.appendMateMessage({ thread: Number(before["thread"]), turn: id, role: "assistant", text: outcome.message.text, activity: outcome.message.activity }, now);
+        }
+      } else {
+        this.discardMateProposals(id);
+      }
       return true;
     });
   }
 
-  /** The crash sweep for turns: past the deadline, failed; its steps are
-   * judged by sweepStaleChatTurns (a dispatched step latches). The
-   * settled sum of finished steps is what the session is charged. */
+  /** Revocation's companion for a loop in flight (finding 5): every live
+   * turn of the approver fails NOW, charged its whole reservation, its
+   * generation moved so the returning loop's terminal CAS loses. */
+  failLiveMateTurnsFor(approver: string, reason: string, now: Date): number {
+    return this.transact(() => {
+      const rows = this.db.prepare("SELECT id, session, reserved_microusd AS reserved FROM mate_turn WHERE approver = ? AND state IN ('queued','running')").all(approver);
+      for (const row of rows) {
+        const id = Number(row["id"]);
+        this.db
+          .prepare("UPDATE mate_turn SET state = 'failed', failure_reason = ?, generation = generation + 1, settled_microusd = ?, finished_at = ? WHERE id = ?")
+          .run(reason, Number(row["reserved"]), now.toISOString(), id);
+        this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(Number(row["reserved"]), Number(row["session"]));
+        this.discardMateProposals(id);
+      }
+      return rows.length;
+    });
+  }
+
+  /** The crash sweep for turns: past the deadline, failed. The session is
+   * charged the settled sum of the steps that answered — unless any step
+   * is unproven (dispatched and never settled, or latched), in which case
+   * the WHOLE reservation is charged (finding 1). Drafts are deleted. */
   sweepStaleMateTurns(now: Date): number {
     return this.transact(() => {
+      this.sweepStaleChatTurns(now);
       const rows = this.db
-        .prepare("SELECT id, session FROM mate_turn WHERE state IN ('queued','running') AND deadline_at < ?")
+        .prepare("SELECT id, session, reserved_microusd AS reserved FROM mate_turn WHERE state IN ('queued','running') AND deadline_at < ?")
         .all(now.toISOString());
       for (const row of rows) {
         const id = Number(row["id"]);
         const settled = this.db
           .prepare("SELECT COALESCE(SUM(settled_microusd), 0) AS n FROM chat_turn WHERE mate_turn = ? AND settled_microusd IS NOT NULL")
           .get(id);
-        const spent = Number(settled?.["n"] ?? 0);
+        const unproven = this.db
+          .prepare("SELECT 1 AS hit FROM chat_turn WHERE mate_turn = ? AND (state IN ('queued','running') OR unknown_spend = 1 OR settled_microusd IS NULL) LIMIT 1")
+          .get(id);
+        const spent = unproven === undefined ? Number(settled?.["n"] ?? 0) : Math.max(Number(row["reserved"]), Number(settled?.["n"] ?? 0));
         this.db
           .prepare("UPDATE mate_turn SET state = 'failed', failure_reason = 'crashed', generation = generation + 1, settled_microusd = ?, finished_at = ? WHERE id = ?")
           .run(spent, now.toISOString(), id);
         this.db.prepare("UPDATE mate_session SET spent_microusd = spent_microusd + ? WHERE id = ?").run(spent, Number(row["session"]));
-        this.db.prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE turn = ? AND state = 'drafting'").run(now.toISOString(), id);
+        this.discardMateProposals(id);
       }
       return rows.length;
     });

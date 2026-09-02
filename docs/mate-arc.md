@@ -91,6 +91,69 @@ agent, ship with a crew" on our authority model (docs/firstmate-assessment.md
 15. **Real-HTTP contracts** for every confirm door: ownership, csrf, role,
     ceiling re-proof, double-submit, ceremony redirects.
 
+## Round-2 rulings (slice-1 review, 2026-09-02: fourteen findings, all closed)
+
+Codex read commit 749d328 against this spec and found 3 critical, 8 high,
+3 medium. Each is now a rule, folded into the sections below and into
+`src/mate.test.ts`:
+
+1. **Unknown cost charges the whole reservation.** A step that times
+   out, drops, or answers malformed leaves the turn's cost unprovable;
+   `finalizeMateTurn` and the crash sweep then charge the turn's FULL
+   reservation to the session and the week. Acknowledging the latched
+   step re-enables the credential and refunds nothing. (finding 1)
+2. **Admission binds everything.** `openMateTurn` re-reads the session
+   and the thread and refuses unless both are this approver's, the thread
+   is open, the session's credential is the one derived from the key in
+   hand, and both sit under one ceiling. The engine takes the chat config
+   and the key; the credential identity and the price are DERIVED, never
+   supplied. (finding 2)
+3. **The brand is runtime.** A principal is frozen at mint and remembered
+   in a module-private set; `isVerifiedApprover` and `reproveApprover`
+   refuse structural copies, mutated repos, and a ceiling digest that no
+   longer matches the repos. `verifyApproverStanding` takes the generation
+   the session holds. (finding 3)
+4. **Proposal text is scanned before it is drafted**, and a failed turn's
+   drafts are DELETED, not expired; `--end` and revocation delete the
+   thread's proposals with its messages. (finding 4)
+5. **Revocation ends a loop in flight.** `revokeAccount` fails the
+   approver's live turns first (charged whole, generation moved), then
+   ends sessions and threads; the engine re-reads its own row and
+   re-proves standing after every network wait, before any tool runs.
+   (finding 5)
+6. **`proposed_via` flows.** `ScopeInput`, `proposeGuarded`,
+   `createConsoleTask`, and `fileTaskProposal` carry `proposedVia:
+   "mate"`; `saveScope` writes the scope and the mark in one transaction.
+   (finding 6)
+7. **The reservation is an upper bound.** Calls are bounded whole (id ≤
+   64 bytes, the serialized call ≤ 2 KiB), results are measured as
+   embedded, one step's text is ≤ 8 KiB, and the triangular formula
+   budgets every call and result at TWICE its cap for the one further
+   JSON escaping the wire can add. (finding 7)
+8. **Usage is typed integers, output within the allowance, input within
+   the bytes sent**; a present cost is a finite non-negative number;
+   anything else is malformed with unknown cost. (finding 8)
+9. **`mateView` is a choke point over every string**: exact repo paths and
+   their basenames, path-shaped text, hex digests of 32+ digits, and
+   account names are replaced in titles, questions, labels, reasons, and
+   the data document alike. (finding 9)
+10. **CAS material is complete**: `propose_next` and `propose_reserve` read
+    revision and position in one transaction and carry both; `propose_hold`
+    carries the operator's existing hold id (`sawHold`) so a stale card
+    never overwrites a hand-placed hold. (finding 10)
+11. **The latch is re-checked before every step**; mate turns count once
+    in the daily cap; fleet chat and the mate are one live turn per
+    approver, both ways. (finding 11)
+12. **Terminal persistence is one write**: settle, debit, promote, append
+    the assistant text; promotion requires an answered turn. (finding 12)
+13. **The read tools keep their contracts**: `recap` takes `since` and
+    reports approvals awaiting, finished, and failed; `list_decisions`
+    carries task, option ids, reversibility, and age; `get_task` counts
+    the task's own decisions; `queue` places tasks within their column.
+    (finding 13)
+14. **The tests cover the dangerous cases** named above, including the
+    OpenRouter loop and a revocation during the model's answer. (finding 14)
+
 ## 0. Hard boundaries
 
 - **No new authority.** Every proposal executes through an existing door:
