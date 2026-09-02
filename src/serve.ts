@@ -6073,6 +6073,34 @@ const STYLE = `
   .workbench-mobile-rail, .workbench-mobile-back { display: none; }
   /* The task page (slice 1c): main column beside a rail; one column narrow. */
   .task-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 19rem); gap: 0 2rem; align-items: start; }
+  /* The task page (task page pass): eyebrow, title, the acts in one row,
+     then folding sections; the rail is the property list. */
+  .task-eyebrow { margin: 0 0 .25rem; }
+  .acts-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .75rem 0 .25rem; }
+  .acts-bar form.inline { margin: 0; display: inline-flex; align-items: center; gap: .375rem; }
+  .acts-bar form.inline button { width: auto; }
+  .acts-bar .primary button { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+  .acts-bar .primary button:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); }
+  .acts-bar .act-hold input[type=text] { width: 10rem; min-height: 2.25rem; margin: 0; font-size: .8125rem; }
+  .acts-why { margin: 0 0 .5rem; }
+  .props .row { padding: .4375rem .375rem; align-items: baseline; }
+  .props .row .meta { flex: 0 0 6.5rem; }
+  .props .row .mono { flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
+  .props .row .seal { margin-right: .375rem; }
+  details.section { border: 0; background: transparent; padding: 0; margin: 1.25rem 0 0; border-radius: 0; box-shadow: none; }
+  details.section[open] { padding-bottom: 0; }
+  details.section > summary { list-style: none; display: flex; align-items: center; padding: .25rem 0; min-height: 2.25rem; }
+  details.section > summary::-webkit-details-marker { display: none; }
+  details.section > summary h2 { margin: 0; flex: 1; display: flex; align-items: center; gap: .4rem; }
+  details.section > summary h2 .lane-count { border: 1px solid var(--border); border-radius: 999px; padding: .04rem .5rem; font-weight: 500; color: var(--muted-foreground); font-size: .6875rem; }
+  details.section > summary::after {
+    content: ""; width: .45rem; height: .45rem; flex: none; margin-right: .375rem;
+    border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground);
+    transform: rotate(45deg) translateY(-.125rem); transition: transform .15s;
+  }
+  details.section[open] > summary::after { transform: rotate(225deg) translateY(-.125rem); }
+  details.section > summary:hover h2 { color: var(--foreground); }
+  details.more-agents { margin: .75rem 0 0; }
   .task-layout > .task-main { min-width: 0; }
   .task-rail { position: sticky; top: 1rem; }
   .task-rail .card { margin-top: .75rem; }
@@ -6081,6 +6109,11 @@ const STYLE = `
   @media (max-width: 980px) {
     .task-layout { grid-template-columns: 1fr; }
     .task-rail { position: static; order: -1; border-bottom: 1px solid var(--border); padding-bottom: .75rem; margin-bottom: .75rem; }
+    .acts-bar form.inline, .acts-bar .primary, .acts-bar .primary form { flex: 1 1 auto; }
+    .acts-bar .primary { flex-basis: 100%; }
+    .acts-bar .primary button { width: 100%; }
+    .acts-bar .act-hold { flex-wrap: wrap; }
+    .acts-bar .act-hold input[type=text] { flex: 1 1 8rem; width: auto; }
     .split { grid-template-columns: 1fr; }
     .list-pane { display: none; }
     .workbench-mobile-rail, .workbench-mobile-back { display: block; }
@@ -10017,6 +10050,7 @@ function taskBody(data: {
             ? (defaults.raceTotalMicrousd / 1_000_000).toFixed(2)
             : "";
       return [
+        `<details class="more-agents"${selectedCount > 0 ? " open" : ""}><summary>more than one agent (optional)</summary>`,
         `<label>how many agents compete <span class="meta">(a tournament builds the task independently N times — you compare and pick one)</span>` +
           `<select name="race-count">` +
           `<option value=""${selectedCount === 0 ? " selected" : ""}>one agent — no tournament</option>` +
@@ -10039,6 +10073,7 @@ function taskBody(data: {
             `</select></label>` +
             `<label>its exact model<input type="text" name="compare-model-${lane}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
         ),
+        `</details>`,
       ].join("\n");
     })(),
     `<button type="submit">save scope</button>`,
@@ -10116,10 +10151,11 @@ function taskBody(data: {
     return `$${dollars.toFixed(2)} measured across ${measured.length}/${rows.length} attempts — ${rows.length - measured.length} unmeasured · ${tokenWords}`;
   };
   const thisAttempt = liveRun ?? data.runs[0];
+  const prop = (key: string, value: string): string =>
+    `<p class="row"><span class="meta">${key}</span> <span class="mono">${value}</span></p>`;
   const economics =
-    `<p><strong>economics</strong></p>` +
-    `<p class="row"><span class="meta">this attempt</span> <span class="mono">${escape(thisAttempt === undefined ? "no attempt yet" : spendWords([thisAttempt]))}</span></p>` +
-    `<p class="row"><span class="meta">task total</span> <span class="mono">${escape(spendWords(data.runs))}</span></p>`;
+    prop("this attempt", escape(thisAttempt === undefined ? "no attempt yet" : spendWords([thisAttempt]))) +
+    prop("task total", escape(spendWords(data.runs)));
   // "publishes as": push, open-PR, and merge are INDEPENDENT fields on the
   // grant — each phrased on its own; absent means exactly that.
   const publishesAs = (() => {
@@ -10132,14 +10168,28 @@ function taskBody(data: {
       grant.merge === true ? `may merge${grant.mergeMethod == null ? "" : ` (${grant.mergeMethod})`}` : "cannot merge",
     ].filter((part): part is string => part !== null).join(" · ");
   })();
-  const publishesRow =
-    `<p><strong>publishes as</strong></p><p class="row"><span class="mono">${escape(publishesAs)}</span></p>`;
-  const approvedScopeCard =
-    scope === null || !approval.approved
-      ? ""
-      : `<div class="card"><p><strong>approved scope</strong></p>` +
-        `<p class="recap">${escape(scope.goal)}</p>` +
-        `<p class="meta"><span class="seal">signs ${shortDigest(scope.digest)}</span> · approved by ${escape(approval.by)} at ${escape(approval.at)}</p></div>`;
+  const publishesRow = prop("publishes as", escape(publishesAs));
+  // The property list (task page pass): worker and attempt, queue place,
+  // the scope's standing with its seal, publication, spend — the key
+  // facts a reader scans before anything else, in one row grammar.
+  const workerRow =
+    liveRun !== undefined
+      ? prop("worker", `${escape(liveRun.runner)} · <a href="/r/${liveRun.id}">build #${liveRun.id}</a> running`)
+      : data.runs[0] !== undefined
+        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">build #${data.runs[0].id}</a> · ${escape(data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
+        : "";
+  const queueRow =
+    data.position !== null && data.position !== undefined && task.state === "queued"
+      ? prop("queue", `${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} · <a href="/queue">reorder</a>`)
+      : "";
+  const scopeRow =
+    scope === null
+      ? prop("scope", "none yet")
+      : approval.approved
+        ? prop("approved scope", `<span class="seal">signs ${shortDigest(scope.digest)}</span> approved by ${escape(approval.by)} · ${escape(when(approval.at))}`)
+        : prop("scope", approval.reason === "changed" ? "rewritten since its approval — needs a new yes" : "not approved");
+  const strikesRow = data.strikes > 0 ? prop("strikes", `${data.strikes} failed attempt(s)`) : "";
+  const propsCard = `<div class="card props">${workerRow}${queueRow}${scopeRow}${publishesRow}${economics}${strikesRow}</div>`;
   // Open decisions as the shared partial — answerable inline when the
   // page is not sensitive; link-only cards otherwise.
   const openDecisions = data.decisions.filter(one => one.state === "open" || one.state === "expired");
@@ -10156,7 +10206,7 @@ function taskBody(data: {
               : decisionAnswerCard({ ...decision, taskId: task.id, repo: data.repo }, data.csrf, data.now, false),
           )
           .join("\n");
-  const rail = [decisionRail, approvedScopeCard, economics, publishesRow].filter(part => part !== "").join("\n");
+  const rail = [decisionRail, propsCard].filter(part => part !== "").join("\n");
 
   // Spend by provider, from the same rows — dollars only where a provider
   // measured them, and the unmeasured said in words, never summed as $0.
@@ -10252,38 +10302,46 @@ function taskBody(data: {
       ? ""
       : `<h2>waits for</h2>${waitRows === "" ? `<p class="meta">nothing — it starts when a worker is free</p>` : waitRows}${waitAdd}`;
 
-  const acts = [
-    `<h2>acts</h2>`,
-    // A live claim is never disturbed by an operator hold (the hold governs
-    // the NEXT start), and requeue refuses while a claim is live — so the
-    // words say exactly when each becomes real (slice 1c).
-    data.claimed
-      ? `<p class="meta">a worker is building this right now — <em>hold next attempt</em> stops the one after it; cancel waits for the current build to finish${
-          stalled ? "; retry becomes available after this attempt finishes" : ""
-        }</p>`
-      : "",
-    `<div class="card">`,
-    data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined)
-      ? act("plan", "plan first")
-      : "",
-    data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined)
-      ? `<p class="meta">plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it</p>`
-      : "",
-    // Queue rank is scheduling, never authority: moving up changes when
-    // the next free worker looks, and approval is still required.
-    task.state === "queued" && !data.claimed && (data.position?.position ?? 1) > 1 ? act("next", "build this next") : "",
+  // The acts bar (task page pass): every verb in one row under the title,
+  // the one that resolves this task's state first and primary — retry on a
+  // stalled task, build-next in the queue, plan-first with no scope. The
+  // hold's reason sits beside its button; cancel stays armed at the foot,
+  // far from the primary. A live claim is never disturbed by an operator
+  // hold (the hold governs the NEXT start), and requeue refuses while a
+  // claim is live — so the words say exactly when each becomes real.
+  const canPlan = data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined);
+  const primaryAct =
+    stalled && !data.claimed
+      ? { html: act("requeue", "retry — branch and workspace kept"), why: "resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased" }
+      : canPlan
+        ? { html: act("plan", "plan first"), why: "plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it" }
+        : task.state === "queued" && !data.claimed && (data.position?.position ?? 1) > 1
+          ? { html: act("next", "build this next"), why: "moves it to the front of its queue — the next free worker looks here first; approval is still required" }
+          : null;
+  const holdAct =
+    `<form method="post" action="${taskHref(task.id)}/hold" class="inline act-hold">` +
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+    `<button type="submit">hold next attempt</button>` +
+    `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason"></form>`;
+  const actsBar = [
+    `<div class="acts-bar">`,
+    primaryAct === null ? "" : `<span class="primary">${primaryAct.html}</span>`,
     task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0
       ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
-    act("hold", "hold next attempt", `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason" style="width:12rem">`),
+    holdAct,
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
-    stalled && !data.claimed ? act("requeue", "retry — branch and workspace kept") : "",
-    stalled && !data.claimed
-      ? `<p class="meta">resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased</p>`
-      : "",
     `</div>`,
-    // Cancel gets the same ceremony as an irreversible answer: armed behind
-    // one deliberate tap, styled as the destructive act it is.
+    primaryAct === null ? "" : `<p class="meta acts-why">${primaryAct.why}</p>`,
+    data.claimed
+      ? `<p class="meta acts-why">a worker is building this right now — <em>hold next attempt</em> stops the one after it; cancel waits for the current build to finish${
+          stalled ? "; retry becomes available after this attempt finishes" : ""
+        }</p>`
+      : "",
+  ].join("\n");
+  // Cancel gets the same ceremony as an irreversible answer: armed behind
+  // one deliberate tap, styled as the destructive act it is.
+  const cancelAct =
     task.state === "queued" || task.state === "running" || task.state === "failed"
       ? [
           `<details class="arm-danger"><summary>cancel this task — tap to arm</summary>`,
@@ -10292,14 +10350,19 @@ function taskBody(data: {
           `<button type="submit" class="danger">cancel ${escape(task.id)}</button>`,
           `</form></details>`,
         ].join("")
-      : "",
-  ].join("\n");
+      : "";
+  // Long sections fold, each with its count in the header: what needs
+  // reading stays open; a ledger or a form folds until asked.
+  const section = (title: string, html: string, open: boolean, count?: number): string =>
+    html === ""
+      ? ""
+      : `<details class="section" id="${title.replace(/\s+/g, "-")}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` +
+        html.replace(`<h2>${title}</h2>`, "") + `</details>`;
 
   return [
     // The title leads; the machine facts — id, state, project, provenance —
     // follow as one mono meta row instead of riding the headline.
-    `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
-    `<p class="meta"><span class="mono">${escape(task.id)}</span>` +
+    `<p class="meta task-eyebrow"><span class="mono">${escape(task.id)}</span>` +
       `${data.strikes > 0 ? ` · ${data.strikes} failed attempt(s)` : ""}` +
       `${data.repo === null ? "" : ` · ${escape(projectName(data.repo))}`}` +
       `${
@@ -10309,9 +10372,8 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }</p>`,
-    data.position !== null && data.position !== undefined && task.state === "queued"
-      ? `<p class="meta">queue position ${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} — <a href="/queue">the queue screen</a> reorders</p>`
-      : "",
+    `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
+    actsBar,
     // External work wears its tracker on the page: the link, the last
     // observed state, and — when the tracker closed it and has been seen
     // open again — the authenticated reopen act. Done + closed is display
@@ -10360,11 +10422,11 @@ function taskBody(data: {
           `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span> — nothing plans, claims, or runs until you write a scope below and sign it. Your signature runs their request.</p></div>`
         : `<div class="card"><p><strong>This task is waiting on you: it has no scope.</strong></p>` +
           `<p class="meta">The scope is what you approve: the goal, what is off-limits, which paths it may touch. ` +
-          `Write it below, or use <strong>plan first</strong> to have an agent draft it from the repository.</p></div>`
+          `<a href="#scope">Write it below</a>, or use <strong>plan first</strong> to have an agent draft it from the repository.</p></div>`
       : "",
     scope !== null && !approval.approved && data.plan !== "requested" && task.state === "queued" && data.decisions.length === 0
       ? `<div class="card"><p><strong>This task is waiting on you: its scope needs your approval.</strong></p>` +
-        `<p class="meta">Read the goal and limits below — approving is what lets an agent build this unattended.</p></div>`
+        `<p class="meta"><a href="#scope">Read the goal and limits below</a> — approving is what lets an agent build this unattended.</p></div>`
       : "",
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
@@ -10374,8 +10436,8 @@ function taskBody(data: {
     `<div class="task-layout"><div class="task-main">`,
     contestCard,
     attemptPanel,
-    decisions,
-    incidents,
+    section("decisions", decisions, true, data.decisions.length),
+    section("incidents", incidents, true, data.incidents.length),
     data.publication === null || data.publication === undefined
       ? ""
       : `<p class="row"><span class="meta">published</span> ` +
@@ -10387,19 +10449,13 @@ function taskBody(data: {
             ? ` · CI ${data.publication.lastCheckState} at last observation`
             : " · no checks observed"
         }</span></p>`,
-    runs,
-    spendCard,
-    steeringCard,
-    "<h2>scope</h2>",
-    scopeCard,
-    planCard,
-    revisionCard,
-    approveForm,
-    attendedCard,
-    scopeForm,
-    waitsForCard,
-    holds,
-    acts,
+    section("attempts", runs, true, data.runs.length),
+    section("spend", spendCard, false),
+    section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
+    section("scope", ["<h2>scope</h2>", scopeCard, planCard, revisionCard, approveForm, attendedCard, scopeForm].join("\n"), true),
+    section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
+    section("holds", holds, true, data.holds.length),
+    cancelAct,
     `</div><aside class="task-rail">${rail}</aside></div>`,
   ].join("\n");
 }

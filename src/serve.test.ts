@@ -3675,7 +3675,8 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
 
     expect((await post("/t/q-two/next")).status).toBe(303);
     const page = await (await fetch(url("/t/q-two"), { headers: { cookie } })).text();
-    expect(page).toContain("queue position 1 of 2 in the shared queue");
+    // The queue place is a property row now (task page pass).
+    expect(page).toContain('<span class="meta">queue</span> <span class="mono">1 of 2 in the shared queue');
     expect(page).toContain("back to filing order");
 
     // Only the actual front of the shared queue says "next up".
@@ -6330,7 +6331,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const cookie = await login();
     const words = async (id: string): Promise<string> => {
       const rail = railOf(await (await fetch(url(`/t/${id}`), { headers: { cookie } })).text());
-      const match = /publishes as<\/strong><\/p><p class="row"><span class="mono">([^<]*)<\/span>/.exec(rail);
+      const match = /<span class="meta">publishes as<\/span> <span class="mono">([^<]*)<\/span>/.exec(rail);
       if (match === null) throw new Error("no publishes-as row");
       return match[1] as string;
     };
@@ -6387,6 +6388,40 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const quietRail = railOf(await (await fetch(url("/t/t-quiet"), { headers: { cookie } })).text());
     expect(quietRail).toContain("this attempt</span> <span class=\"mono\">$0.40 · tokens unreported · measured");
     expect(quietRail).not.toContain("0 tokens");
+  });
+
+  test("the task page reads top-down (task page pass): eyebrow, title with state, the acts bar with the resolving act primary, the property list, then folded sections with counts", async () => {
+    const ref = seed("t-shape", "shaped");
+    const failedRun = finished("t-shape", ref, "failed", null);
+    store.createIncident({ run: failedRun, kind: "attempts-exhausted" }, new Date());
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/t/t-shape"), { headers: { cookie } })).text();
+    // Order: the mono eyebrow, then the title with its state chip, then the acts bar.
+    const eyebrow = html.indexOf('<p class="meta task-eyebrow"><span class="mono">t-shape</span>');
+    const title = html.search(/<h1>shaped <span class="badge badge-[a-z]+">[a-z]+<\/span><\/h1>/);
+    const bar = html.indexOf('<div class="acts-bar">');
+    expect(eyebrow).toBeGreaterThan(-1);
+    expect(title).toBeGreaterThan(eyebrow);
+    expect(bar).toBeGreaterThan(title);
+    // A stalled task's primary act is the retry; hold rides beside it with its reason.
+    const barHtml = html.slice(bar, html.indexOf("</div>", bar));
+    expect(barHtml).toContain('<span class="primary"><form method="post" action="/t/t-shape/requeue"');
+    expect(barHtml).toContain("<button type=\"submit\">hold next attempt</button>");
+    expect(barHtml).toContain('name="reason"');
+    // The rail is the property list, one row grammar for every key fact.
+    const rail = railOf(html);
+    expect(rail).toContain('<div class="card props">');
+    expect(rail).toMatch(/<span class="meta">last attempt<\/span> <span class="mono"><a href="\/r\/\d+">build #\d+<\/a> · failed · night-shift-1<\/span>/);
+    expect(rail).toContain('<span class="meta">approved scope</span> <span class="mono"><span class="seal">signs ');
+    expect(rail).toContain('<span class="meta">publishes as</span>');
+    expect(rail).toContain('<span class="meta">this attempt</span>');
+    // Sections fold with counts: attempts open, spend folded, scope open and addressable.
+    expect(html).toContain('<details class="section" id="attempts" open><summary><h2>attempts <span class="lane-count">1</span></h2></summary>');
+    expect(html).toContain('<details class="section" id="spend"><summary><h2>spend</h2></summary>');
+    expect(html).toContain('<details class="section" id="scope" open><summary><h2>scope</h2></summary>');
+    // Cancel stays armed at the foot, after every section.
+    expect(html.lastIndexOf('<details class="arm-danger">')).toBeGreaterThan(html.lastIndexOf('<details class="section"'));
   });
 
   test("hold is 'hold next attempt'; while an attempt runs, retry says when it becomes available instead of offering a deferred button", async () => {

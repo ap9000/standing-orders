@@ -91,6 +91,29 @@ A card: mono id eyebrow · title · one honest "why" · facts grid · chips. A
 building card adds the live strip — stage word and elapsed clock in an inset
 well, blue — never a percent.
 
+## 4b. The task page
+
+Modelled on issue detail in Linear, GitHub, and Jira (iOS): the page reads
+top-down and every long thing folds.
+
+1. **Eyebrow** — mono id · project · provenance.
+2. **Title** with its state chip.
+3. **Acts bar** — every verb in one row; the act that resolves the task's
+   state first and primary (retry on a stalled task, plan-first with no
+   scope, build-next in the queue); hold with its reason beside it; unhold
+   when a hold exists. One line beneath says what the primary does. Cancel
+   stays armed at the foot of the page, far from the primary.
+4. **What waits on you** — the decision cards and the "this task is waiting
+   on you" card, linking to the section that resolves it.
+5. **Property list** (the rail on a desktop, above the sections on a phone):
+   worker or last attempt · queue place · scope with its seal · publishes as
+   · this attempt · task total · strikes — one row grammar, dim key, mono
+   value.
+6. **Sections that fold**, each with its count: decisions, incidents,
+   attempts (open), spend (folded), steering (open only when notes exist),
+   scope (open; the edit form and the tournament fields fold inside it),
+   waits for (folded when empty), holds.
+
 ## 5. The shell
 
 Desktop: a 220px sidebar (inbox · portfolio · work{board, queue} · builds ·
