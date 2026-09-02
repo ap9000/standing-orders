@@ -6466,6 +6466,26 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(html).toContain('<meta name="apple-mobile-web-app-capable" content="yes">');
   });
 
+  test("the design system (v2): one token ramp in two schemes, a theme color per scheme, icons on the sidebar's primary rows", async () => {
+    const cookie = await login();
+    const html = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(html).toContain("color-scheme: light dark;");
+    // The light block redefines the same names — never a color that lives in one scheme only.
+    const light = /@media \(prefers-color-scheme: light\) \{\s*:root \{(.*?)\}\s*\}/s.exec(html)?.[1] ?? "";
+    for (const token of ["--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input", "--brand", "--brand-foreground", "--running", "--success", "--destructive", "--ring"]) {
+      expect(light).toContain(`${token}:`);
+    }
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0c0e">');
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa">');
+    // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
+    expect(html).toMatch(/<a href="\/"[^>]*><span class="glyph"><svg/);
+    expect(html).toMatch(/<a href="\/workbench"><span class="glyph"><svg/);
+    expect(html).toMatch(/<a href="\/activity">activity<\/a>/);
+    // Section headers speak sans; the state chips wear a dot before the word.
+    expect(html).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
+    expect(html).toContain(".badge-running::before, .badge-parked::before, .count.badge-open::before {");
+  });
+
   test("the header pill names the scope: project with counts when one is open, 'all projects' on the portfolio", async () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();

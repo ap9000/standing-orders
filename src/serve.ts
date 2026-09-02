@@ -267,8 +267,8 @@ const PWA_MANIFEST = JSON.stringify({
   scope: "/",
   start_url: "/",
   display: "standalone",
-  background_color: "#0f171f",
-  theme_color: "#0f171f",
+  background_color: "#0b0c0e",
+  theme_color: "#0b0c0e",
   icons: [
     { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
     { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
@@ -5589,13 +5589,14 @@ function escape(text: string): string {
  * `color-scheme: dark` says so to the browser.
  */
 const STYLE = `
-/* The Operations Ledger — the console's one committed world (design pass,
-   2026-08-30). Dark ink ground, hairline structure, IBM Plex Sans for the
-   human voice and IBM Plex Mono for every machine fact. One accent: amber
-   means "waits on you" and nothing else. Semantic run states are quiet
-   tinted outline chips — running blue, built green, failed red — never
-   whole surfaces. Zero dependencies, zero page JS beyond the nonce'd
-   chrome layer; the shadcn new-york idiom carried as pure CSS. */
+/* The Console — the design system, v2 (2026-09-02). The bar is Linear and
+   Vercel: quiet density, an identifier and a status on every row, mono for
+   every machine fact, one neutral ramp that renders dark or light from the
+   same token names, and exactly one accent — amber — which means "waits on
+   you" and nothing else. Run states are dots and quiet tinted chips, never
+   whole surfaces. Zero dependencies, zero page JS beyond the nonce'd chrome
+   layer. IBM Plex stays the voice: already vendored, already licensed, and
+   its sans/mono pairing is the product's own. */
   @font-face {
     font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400;
     font-display: swap; src: url("/fonts/plex-sans-400.woff2") format("woff2");
@@ -5621,23 +5622,21 @@ const STYLE = `
     font-display: swap; src: url("/fonts/plex-mono-600.woff2") format("woff2");
   }
   :root {
-    color-scheme: dark;
-    /* The marine-ink ramp (owner's ground, 2026-09-01): one hue ~210°
-     * bottom to top, Pantone-anchored — ground 5395C, surface 433C,
-     * hairline 432C, dim 430C, paper Cool Gray 1C. Amber stays the one
-     * accent and is this ground's true complement. */
-    --background: #0f171f;      /* ground — PMS 5395 C */
-    --foreground: #eaeef2;      /* text — Cool Gray 1 C */
-    --card: #16212b;            /* surface — PMS 433 C */
-    --muted: #1c2937;           /* inset wells */
-    --muted-foreground: #8fa0af;/* dim — PMS 430 C */
-    --border: #283747;          /* hairlines — PMS 432 C */
-    --input: #5d7185;           /* control boundaries: >=3:1 on ground and surface */
-    --primary: #eaeef2;
-    --primary-foreground: #0f171f;
-    --secondary: #1c2937;
-    --secondary-foreground: #eaeef2;
-    --accent: #1c2937;
+    color-scheme: light dark;
+    /* Dark: the after-hours scene. A true neutral ramp with a whisper of
+     * cool, Vercel's grays with Linear's temperature. */
+    --background: #0b0c0e;
+    --foreground: #ededef;
+    --card: #121316;
+    --muted: #1a1c20;
+    --muted-foreground: #8b919c;
+    --border: #24272d;
+    --input: #3a3e46;
+    --primary: #ededef;
+    --primary-foreground: #0b0c0e;
+    --secondary: #1a1c20;
+    --secondary-foreground: #ededef;
+    --accent: #1a1c20;
     --destructive: #f06a5e;
     --destructive-strong: #f06a5e;
     --destructive-soft: color-mix(in srgb, #f06a5e 12%, transparent);
@@ -5645,17 +5644,52 @@ const STYLE = `
     --success-soft: color-mix(in srgb, #3ecf8e 12%, transparent);
     --warning: #f5a524;
     --warning-soft: color-mix(in srgb, #f5a524 12%, transparent);
-    --running: #5ca9ff;
-    --running-soft: color-mix(in srgb, #5ca9ff 12%, transparent);
-    --ring: #5ca9ff;
+    --running: #52a8ff;
+    --running-soft: color-mix(in srgb, #52a8ff 12%, transparent);
+    --ring: #52a8ff;
     /* amber — the one accent; it marks what waits on a person, only. */
     --brand: #f5a524;
+    --brand-foreground: #201503;
     --brand-soft: color-mix(in srgb, #f5a524 12%, transparent);
-    --radius: 0.625rem;
-    --shadow: 0 1px 2px 0 rgb(0 0 0 / .3);
-    --shadow-overlay: 0 4px 12px -2px rgb(0 0 0 / .4), 0 16px 40px -12px rgb(0 0 0 / .6);
+    --radius: 0.5rem;
+    --shadow: 0 1px 2px 0 rgb(0 0 0 / .4);
+    --shadow-overlay: 0 4px 12px -2px rgb(0 0 0 / .5), 0 16px 40px -12px rgb(0 0 0 / .7);
     --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      /* Light: a phone in daylight, a laptop by a window. Paper ground,
+       * white surfaces, the same names; every status hue re-picked to hold
+       * 4.5:1 as text on white. */
+      --background: #fafafa;
+      --foreground: #171717;
+      --card: #ffffff;
+      --muted: #f1f2f4;
+      --muted-foreground: #64697a;
+      --border: #e4e5e9;
+      --input: #c4c7cf;
+      --primary: #171717;
+      --primary-foreground: #fafafa;
+      --secondary: #f1f2f4;
+      --secondary-foreground: #171717;
+      --accent: #f1f2f4;
+      --destructive: #d1332e;
+      --destructive-strong: #d1332e;
+      --destructive-soft: color-mix(in srgb, #d1332e 10%, transparent);
+      --success: #118a4f;
+      --success-soft: color-mix(in srgb, #118a4f 10%, transparent);
+      --warning: #a15c00;
+      --warning-soft: color-mix(in srgb, #f5a524 14%, transparent);
+      --running: #0b6fd6;
+      --running-soft: color-mix(in srgb, #0b6fd6 10%, transparent);
+      --ring: #0b6fd6;
+      --brand: #a15c00;
+      --brand-foreground: #ffffff;
+      --brand-soft: color-mix(in srgb, #f5a524 16%, transparent);
+      --shadow: 0 1px 2px 0 rgb(0 0 0 / .06);
+      --shadow-overlay: 0 4px 12px -2px rgb(0 0 0 / .08), 0 16px 40px -12px rgb(0 0 0 / .16);
+    }
   }
   * { box-sizing: border-box; }
   ::selection { background: color-mix(in srgb, var(--running) 30%, transparent); }
@@ -5663,7 +5697,7 @@ const STYLE = `
   body {
     margin: 0; background: var(--background); color: var(--foreground);
     caret-color: var(--foreground);
-    font: 400 0.9375rem/1.55 var(--font-sans);
+    font: 400 0.875rem/1.5 var(--font-sans);
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
   :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
@@ -5689,17 +5723,19 @@ const STYLE = `
   }
   .topbar nav a:hover { color: var(--foreground); }
   main { max-width: 44rem; margin-inline: auto; padding: 1.75rem 1.25rem 4rem; }
-  h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 .25rem; }
+  h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 .25rem; line-height: 1.3; }
   h1 .meta { font-weight: 400; letter-spacing: 0; }
+  /* Section headers speak in the human voice (mono is for machine facts
+     only): small, semibold, dim — Linear's "In Progress 5" register. */
   h2 {
-    font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
-    color: var(--muted-foreground); margin: 2.25rem 0 .625rem; font-family: var(--font-mono);
+    font-size: 0.8125rem; font-weight: 600; letter-spacing: -0.005em;
+    color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);
   }
   a { color: var(--foreground); text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
   a:hover { text-decoration-color: var(--muted-foreground); }
   p { margin: .4rem 0; }
   code { background: var(--muted); border-radius: .3rem; padding: .1rem .35rem; font-family: var(--font-mono); font-size: .8125rem; }
-  .mono { font-family: var(--font-mono); font-size: .8125rem; font-variant-numeric: tabular-nums; }
+  .mono { font-family: var(--font-mono); font-size: .8125rem; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 
   .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
   .meta a { color: var(--muted-foreground); }
@@ -5742,11 +5778,18 @@ const STYLE = `
   /* Status chips: one vocabulary — mono type, 12% tint, hairline of the
      same hue. Neutral facts stay dim. */
   .badge {
-    display: inline-block; border: 1px solid var(--border); border-radius: 9999px;
+    display: inline-flex; align-items: center; gap: .375rem; border: 1px solid var(--border); border-radius: 9999px;
     padding: .0625rem .5rem; font-size: 0.6875rem; font-weight: 500; line-height: 1.5;
     background: transparent; color: var(--muted-foreground); vertical-align: middle;
-    font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap;
+    font-family: var(--font-sans); font-variant-numeric: tabular-nums; white-space: nowrap;
   }
+  /* A state word wears its dot; neutral facts (a project, a routine) do not. */
+  .badge-done::before, .badge-answered::before, .badge-verified::before, .badge-built::before,
+  .badge-failed::before, .badge-cancelled::before, .badge-overdue::before,
+  .badge-running::before, .badge-parked::before, .count.badge-open::before {
+    content: ""; width: .375rem; height: .375rem; border-radius: 9999px; background: currentColor; flex: none;
+  }
+  .count.badge-open::before { display: none; }
   .badge-done, .badge-answered, .badge-verified, .badge-built {
     background: var(--success-soft); color: var(--success);
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
@@ -5770,22 +5813,23 @@ const STYLE = `
 
   .card {
     border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
-    padding: 1rem 1.125rem; margin: .75rem 0;
+    padding: .875rem 1rem; margin: .75rem 0; box-shadow: var(--shadow);
   }
   .problem {
     border: 1px solid color-mix(in srgb, var(--destructive) 35%, transparent);
     background: var(--destructive-soft); color: var(--destructive);
     border-radius: var(--radius); padding: .625rem .875rem; margin: .75rem 0; font-size: 0.8125rem;
   }
+  /* A row is 2.25rem of quiet: hairline below, hover fills, nothing else. */
   .row {
     display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap;
-    padding: .625rem .125rem; border-bottom: 1px solid var(--border);
-    margin: 0;
+    padding: .5rem .375rem; min-height: 2.25rem; border-bottom: 1px solid var(--border);
+    margin: 0; border-radius: calc(var(--radius) - 4px);
   }
   .row:last-of-type { border-bottom: none; }
   .row .right { margin-left: auto; }
   a.row { text-decoration: none; }
-  a.row:hover { background: color-mix(in srgb, var(--muted) 55%, transparent); }
+  a.row:hover { background: var(--muted); }
 
   /* A parked decision is the page's reason to exist: the whole card wears
      the amber-tinted state outline — never a stripe on one edge — with the
@@ -5799,21 +5843,30 @@ const STYLE = `
   .decide-card:hover { border-color: color-mix(in srgb, var(--brand) 60%, var(--border)); }
   .decide-card .q { font-weight: 600; margin: 0 0 .25rem; }
 
+  /* Buttons: secondary by default (surface + hairline); a form's one
+     submit is primary (ink on paper, paper on ink); the approve act is
+     amber; danger is red and outlined. 2.25rem at a desk, 2.75rem to a thumb. */
   button {
-    font: 500 0.875rem/1.4 var(--font-sans); cursor: pointer; border-radius: calc(var(--radius) - 2px);
-    border: 1px solid var(--input); background: var(--secondary); color: var(--foreground);
-    padding: .5rem .875rem; min-height: 2.5rem;
+    font: 500 0.8125rem/1.4 var(--font-sans); cursor: pointer; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid var(--border); background: var(--card); color: var(--foreground);
+    padding: .375rem .75rem; min-height: 2.25rem; box-shadow: var(--shadow);
     transition: background .15s, border-color .15s;
   }
-  button:hover { background: color-mix(in srgb, var(--secondary) 70%, var(--border)); border-color: color-mix(in srgb, var(--input) 70%, var(--muted-foreground)); }
+  button:hover { background: var(--muted); border-color: var(--input); }
+  form.card > button[type=submit], .sticky-actions button[type=submit], form.card .sticky-actions button {
+    background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600;
+  }
+  form.card > button[type=submit]:hover, .sticky-actions button[type=submit]:hover {
+    background: color-mix(in srgb, var(--primary) 85%, var(--background)); border-color: color-mix(in srgb, var(--primary) 85%, var(--background));
+  }
   /* The approve act is the one amber verb: it resolves what waits on you.
      A ceremony form wears the same full amber-tinted outline as the other
      waits-on-you surfaces; a danger act stays red even inside one. */
   .approve-form { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
-  .approve-form button[type=submit] {
-    background: var(--brand); color: #201503; border-color: var(--brand); font-weight: 600;
+  .approve-form button[type=submit], .approve-form .sticky-actions button[type=submit] {
+    background: var(--brand); color: var(--brand-foreground); border-color: var(--brand); font-weight: 600;
   }
-  .approve-form button[type=submit]:hover { background: color-mix(in srgb, var(--brand) 88%, #fff); }
+  .approve-form button[type=submit]:hover, .approve-form .sticky-actions button[type=submit]:hover { background: color-mix(in srgb, var(--brand) 85%, var(--foreground)); border-color: color-mix(in srgb, var(--brand) 85%, var(--foreground)); }
   button.danger, .approve-form button[type=submit].danger {
     color: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 50%, transparent);
     background: transparent; font-weight: 500;
@@ -5822,16 +5875,19 @@ const STYLE = `
 
   label { display: block; font-size: 0.8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
   input[type=text], input[type=password], input[type=number], input[type=url], input[type=email], textarea, select {
-    width: 100%; margin: .35rem 0 0; padding: .5rem .75rem; font: 400 0.9375rem/1.4 var(--font-sans);
-    color: var(--foreground); background: var(--background); min-height: 2.5rem;
+    width: 100%; margin: .35rem 0 0; padding: .375rem .625rem; font: 400 0.875rem/1.4 var(--font-sans);
+    color: var(--foreground); background: var(--card); min-height: 2.25rem;
     border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px);
+    transition: border-color .15s, box-shadow .15s;
   }
+  input:hover, textarea:hover, select:hover { border-color: var(--muted-foreground); }
   input[type=number] { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   input[type=radio], input[type=checkbox] { accent-color: var(--ring); }
   input[type=password] { font-family: var(--font-mono); }
-  input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible {
-    outline: 2px solid var(--ring); outline-offset: 1px;
+  input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 25%, transparent);
   }
+  button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
   .inline { display: inline-block; width: auto; margin: 0 .375rem .375rem 0; vertical-align: middle; }
   .inline input[type=text] { display: inline-block; width: auto; margin: 0 .375rem 0 0; vertical-align: middle; }
@@ -5864,7 +5920,7 @@ const STYLE = `
   }
   details[open] { padding-bottom: .875rem; }
   details.arm-danger { border-color: color-mix(in srgb, var(--destructive) 30%, transparent); }
-  summary { padding: .625rem 0; cursor: pointer; font-weight: 500; font-size: 0.8125rem; color: var(--muted-foreground); min-height: 2.25rem; }
+  summary { padding: .5rem 0; cursor: pointer; font-weight: 500; font-size: 0.8125rem; color: var(--muted-foreground); min-height: 2.25rem; }
   summary:hover { color: var(--foreground); }
   details form.option { border: none; padding: .25rem 0 0; margin: 0; }
   .evidence { margin-top: 1.5rem; font-size: 0.8125rem; }
@@ -5890,7 +5946,7 @@ const STYLE = `
   }
 
   /* The workspace shell: sidebar + content, an optional list pane between. */
-  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+  .app { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
   .side {
     border-right: 1px solid var(--border);
     background: var(--background);
@@ -5905,10 +5961,7 @@ const STYLE = `
     padding: .5rem 1.25rem; border-bottom: 1px solid var(--border);
     background: var(--background); font-size: .8125rem;
   }
-  .scope-bar .eyebrow {
-    font-size: .625rem; font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
-    color: var(--muted-foreground); font-family: var(--font-mono);
-  }
+  .scope-bar .eyebrow { font-size: .6875rem; font-weight: 500; color: var(--muted-foreground); }
   .scope-bar .name { font-weight: 600; }
   /* The switcher: a folded menu of enrolled projects under the scope's name. */
   .switcher { position: relative; }
@@ -5955,26 +6008,28 @@ const STYLE = `
   .decide-option button { margin: 0; }
   .decide-option .meta { flex: 1 1 12rem; }
   .side .nav-label {
-    margin: .875rem .5rem .25rem; font-size: .625rem; font-weight: 500;
-    letter-spacing: .08em; text-transform: uppercase; color: var(--muted-foreground);
-    font-family: var(--font-mono);
+    margin: .875rem .5rem .25rem; font-size: .6875rem; font-weight: 500;
+    color: var(--muted-foreground); font-family: var(--font-sans);
   }
   .side nav a {
-    display: flex; align-items: center; gap: .5rem; padding: .375rem .5rem; min-height: 2rem;
-    border-radius: calc(var(--radius) - 4px); text-decoration: none;
+    display: flex; align-items: center; gap: .5rem; padding: .3125rem .5rem; min-height: 1.875rem;
+    border-radius: calc(var(--radius) - 2px); text-decoration: none;
     color: var(--muted-foreground); font-size: .8125rem; font-weight: 500;
   }
+  .side nav a .glyph { display: inline-flex; width: 1rem; height: 1rem; color: var(--muted-foreground); flex: none; }
+  .side nav a .glyph svg { width: 1rem; height: 1rem; }
   .side nav a:hover { background: var(--card); color: var(--foreground); }
   .side nav a.active { background: var(--muted); color: var(--foreground); }
+  .side nav a.active .glyph { color: var(--foreground); }
   .side nav a .count { margin-left: auto; }
   .side .grow { flex: 1; }
   .side .new-task {
-    display: block; text-align: center; text-decoration: none; font-weight: 500; font-size: .8125rem;
-    background: var(--secondary); color: var(--foreground);
-    border: 1px solid var(--border);
-    border-radius: calc(var(--radius) - 2px); padding: .5rem; margin: .625rem 0 .125rem;
+    display: block; text-align: center; text-decoration: none; font-weight: 600; font-size: .8125rem;
+    background: var(--primary); color: var(--primary-foreground);
+    border: 1px solid var(--primary);
+    border-radius: calc(var(--radius) - 2px); padding: .4375rem; margin: .625rem 0 .125rem;
   }
-  .side .new-task:hover { background: color-mix(in srgb, var(--secondary) 70%, var(--border)); }
+  .side .new-task:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); }
   /* The same action link outside the sidebar reads as a real button. */
   .content .new-task {
     display: inline-block; text-decoration: none; font-weight: 500; font-size: .8125rem;
@@ -6807,7 +6862,8 @@ function shell(
     // viewport-fit=cover is what makes env(safe-area-inset-*) non-zero on a
     // notched phone; without it the tab bar sits under the home indicator.
     `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`,
-    `<meta name="theme-color" content="#0f171f">`,
+    `<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0c0e">`,
+    `<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa">`,
     `<meta name="mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">`,
@@ -6842,7 +6898,8 @@ function shell(
 
   const chrome = options.chrome;
   const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
-    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>${label}` +
+    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
+    `${NAV_ICONS[key] === undefined ? "" : `<span class="glyph">${NAV_ICONS[key]}</span>`}${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
   // The scope bar (portfolio arc §1): ONE row naming which rows this screen
@@ -9220,6 +9277,19 @@ const GRIP_ICON =
 const TO_FRONT_ICON =
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">` +
   `<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>`;
+/** One stroke weight, from the tab bar's set: the sidebar's primary rows
+ * wear an icon each; the foot's list stays text, the way Linear's does. */
+const strokeIcon = (paths: string): string =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
+  inbox: strokeIcon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
+  workbench: strokeIcon(`<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>`),
+  board: strokeIcon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
+  queue: strokeIcon(`<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>`),
+  runs: strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
+  fleet: strokeIcon(`<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>`),
+};
+
 const CHEVRON_ICON =
   `<svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">` +
   `<path d="m6 9 6 6 6-6"/></svg>`;

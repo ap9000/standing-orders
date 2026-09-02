@@ -1,103 +1,109 @@
-# The Operations Ledger — design system
+# The Console — design system v2
 
-The one visual world the console and its React package share. `src/serve.ts`
-implements it as plain CSS; `design/` implements it as a shadcn theme with the
-same tokens. When they disagree, this document decides, and the token values
-in `design/src/globals.css` and the `:root` block of `src/serve.ts` are
-brought back together in the same commit.
+The one visual world the console and its React package share, rebuilt on
+2026-09-02 to sit beside Linear and Vercel: their craft level is the bar.
+`src/serve.ts` implements it as plain CSS; `design/` implements it as a
+shadcn theme with the same token names. When they disagree, this document
+decides, and the `:root` blocks of both are brought back together in the
+same commit.
 
 ## 1. Voice
 
-- **Dark ink, one hue.** The ground is marine ink at ~210°; every surface
-  above it is the same hue, lighter. No gradients, no glass, no colored
-  stripes on an edge.
-- **Amber means one thing.** `--brand` / `--primary` (#f5a524) marks work that
-  waits on a person — a card's outline, a count, a chip — and nothing else. A
+- **Quiet density.** An identifier and a status on every row; hairlines,
+  not boxes; whitespace does the grouping. A screen holds many rows and
+  stays calm.
+- **Two schemes, one ramp.** A true neutral ramp with a whisper of cool.
+  Dark is the default scene (an operator after hours); light follows the
+  device (a phone in daylight). Every token has a value in both; no rule may
+  name a color that only exists in one.
+- **Amber means one thing.** `--brand` marks work that waits on a person — a
+  card's outline, a count, a chip, the approve act — and nothing else. A
   recommended option is never amber; a selected row is never blue.
-- **Two faces.** IBM Plex Sans is the human voice: titles, sentences, hints.
-  IBM Plex Mono is every machine fact: ids, workers, models, clocks, dollars,
-  digests. Mono is never a costume for "technical".
-- **Plain words, honest words.** "needs you", "building", "queued",
-  "waiting", "done". "measured" or "unmeasured", never a summed $0. A build
-  shows a stage and a clock, never a percent — there is no honest progress
-  figure for an agent.
-- **Drawn icons.** One stroke weight (1.75), from the tab bar's set. Never a
-  unicode glyph or emoji standing in for an icon.
+- **Two faces, strictly cast.** IBM Plex Sans is the human voice: titles,
+  sentences, section headers, chips. IBM Plex Mono is every machine fact:
+  ids, workers, models, clocks, dollars, digests, tokens. Mono is never a
+  costume for "technical", and section headers are no longer mono.
+- **Honest words.** needs you · building · queued · waiting · done;
+  measured or unmeasured, never a summed $0; a stage and a clock, never a
+  percent.
+- **Drawn icons.** One stroke weight (1.75) on a 24-unit grid, from one set,
+  in the sidebar, the tab bar, the queue's controls. Never a glyph.
 
 ## 2. Tokens
 
-| Token | Value | Role |
-|---|---|---|
-| `--background` | `#0f171f` | ground (PMS 5395 C) |
-| `--card` | `#16212b` | surface (PMS 433 C) |
-| `--muted` / `--secondary` / `--accent` | `#1c2937` | inset wells, menus' hover |
-| `--border` | `#283747` | hairlines (PMS 432 C) |
-| `--input` | `#5d7185` | control boundaries (≥3:1 on ground and surface) |
-| `--muted-foreground` | `#8fa0af` | dim text (PMS 430 C) |
-| `--foreground` | `#eaeef2` | text (Cool Gray 1 C) |
-| `--brand` / `--primary` | `#f5a524` | waits on you (PMS 137 C) |
-| `--running` | `#5ca9ff` | a live build |
-| `--success` / `--built` | `#3ecf8e` | built |
-| `--destructive` / `--failed` | `#f06a5e` | failed, and the arm-to-cancel act |
-| `--radius` | `0.625rem` | cards; `-2px` for rows, `-4px` for chips and wells |
-| `--font-sans` | IBM Plex Sans | the human voice |
-| `--font-mono` | IBM Plex Mono | every machine fact |
+| Token | Dark | Light | Role |
+|---|---|---|---|
+| `--background` | `#0b0c0e` | `#fafafa` | ground |
+| `--card` | `#121316` | `#ffffff` | surface |
+| `--muted` / `--secondary` / `--accent` | `#1a1c20` | `#f1f2f4` | inset wells, hover fills |
+| `--border` | `#24272d` | `#e4e5e9` | hairlines |
+| `--input` | `#3a3e46` | `#c4c7cf` | control boundaries |
+| `--muted-foreground` | `#8b919c` | `#64697a` | dim text (≥4.5:1 on ground and surface) |
+| `--foreground` | `#ededef` | `#171717` | text |
+| `--primary` (console) | ink on paper | paper on ink | the one primary button per form |
+| `--brand` | `#f5a524` | `#a15c00` | waits on you; `--brand-foreground` is its button text |
+| `--running` / `--ring` | `#52a8ff` | `#0b6fd6` | a live build; focus |
+| `--success` (`--built`) | `#3ecf8e` | `#118a4f` | built |
+| `--destructive` (`--failed`) | `#f06a5e` | `#d1332e` | failed; the arm-to-cancel act |
+| `--radius` | `0.5rem` | | cards; `-2px` rows, buttons, inputs; `-4px` chips and wells |
+| `--shadow` / `--shadow-overlay` | deep | faint | cards and menus; light carries real offset shadows |
 
-Type scale: body 15px/1.55; meta 13px; chips and facts 11px; h1 1.375rem
-tracking -0.01em; section h2 uppercase mono 11px with 0.08em tracking.
-Spacing rhythm: 0.125 / 0.375 / 0.625 / 0.875 / 1.25rem; more space above a
-heading than below it.
+`color-scheme: light dark` on `:root`; the light block overrides under
+`@media (prefers-color-scheme: light)`. Two `theme-color` metas, one per
+scheme. The manifest stays dark.
+
+Type: body 14px/1.5 Plex Sans; meta 13px; chips and facts 11px; h1 20px
+semibold, -0.02em; h2 13px semibold dim sans (Linear's "In Progress 5"
+register), with a count pill where a count exists. Rhythm: 0.125 / 0.375 /
+0.625 / 0.875 / 1.25rem; more space above a heading than below it.
+
+Controls: 2.25rem tall at a desk, 2.75rem to a thumb (≤40rem). Focus: a 2px
+ring at 2px offset on buttons and links; a ring-colored border with a soft
+3px halo on fields.
 
 ## 3. Components and their two implementations
 
-| Component | Console (CSS class) | Package (`design/src`) | Rule |
+| Component | Console (CSS) | Package (`design/src`) | Rule |
 |---|---|---|---|
-| Status chip | `.badge`, `.badge-open` (amber), `.badge-running`, `.badge-done`, `.badge-failed` | `StatusChip` | five words, 12%-tint outline pill; amber only for waits-on-you |
-| Attention card | `.decide-card`, `.lane-attention .lane-card` | `AttentionCard` | amber outline on the whole card, never a stripe |
-| Ledger row | `p.row` with `.mono` meta and a chip | `LedgerRow` | title · mono facts · chip at the end |
-| Key–value | `.lane-card .facts` (`.fact > .k + .v`) | `KeyValueRow` | dim mono key, ink mono value |
-| Digest seal | `.seal` | `DigestSeal` | the signed digest, mono, boxed |
-| Page header | `h1` + `.hint`, `.control-room-head` | `PageHeader` | name over a hairline, quiet subtitle, right actions |
-| Card | `.card` | `Card` | surface + hairline + radius; never nested |
-| Lane | `details.lane` with `summary > h2` | — | a column on a desktop, a folding section on a phone |
-| Workspace card | `.workspace-card` | — | name · status word · four counts · proportional bar · board tap |
-| Project switcher | `details.switcher` + `.switcher-menu` | `NavBar` (desktop) | POST forms with the session's token; inert on sensitive pages |
-| Shell | `.side` (desktop), `.mobile-top` + `.tabbar` (phone) | `NavBar` | one visible `/projects` link per breakpoint |
+| Status chip | `.badge` + `.badge-open` (amber), `-running`, `-done`, `-failed` | `StatusChip` | sans 11px pill; a state word wears a dot before it, a neutral fact (project, routine) does not |
+| Attention card | `.decide-card`, `.lane-attention .lane-card`, `.workspace-card.hot` | `AttentionCard` | amber outline on the whole card, never a stripe |
+| Row | `.row` (2.25rem, hairline below, hover fill) | `LedgerRow` | title · mono facts · chip at the end |
+| Facts | `.facts` (`.fact > .k + .v`) | `KeyValueRow` | dim mono key, ink mono value |
+| Seal | `.seal` | `DigestSeal` | the signed digest, mono, boxed in amber |
+| Card | `.card` | `Card` | surface, hairline, 0.5rem radius, faint shadow; never nested |
+| Buttons | `button` (secondary), `form.card > [type=submit]` (primary), `.approve-form [type=submit]` (amber), `.danger` | `Button` | one primary per form; approve is the only amber verb |
+| Fields | `input`, `textarea`, `select` | `Input` | surface-colored, hairline, hover darkens, focus halo |
+| Section header | `h2` (+ `.lane-count` pill) | — | small semibold dim sans |
+| Lane | `details.lane` with `summary > h2` | — | a column on a desktop, a folding section on a phone; a state dot on every header |
+| Workspace card | `.workspace-card` | — | name · status word · four inset count cells · proportional bar · board tap |
+| Switcher | `details.switcher` + `.switcher-menu` | `NavBar` | POST forms with the session token; a check marks the current row; inert on sensitive pages |
+| Shell | `.side` 220px with icon rows; `.mobile-top` + `.tabbar` | `NavBar` | primary rows carry icons, the foot list stays text; one visible `/projects` link per breakpoint |
 
 ## 4. The board
 
-Five lanes in pipeline order: **needs you · queued · waiting · building · done
-recently**. Each lane is a `details` with its count in the summary; a lane
-with cards is open, an empty lane folds. On a desktop the lanes are columns
-and the summary is not a control; on a phone (≤760px) they stack, the summary
-is a 2.75rem tap with a drawn chevron, and the poller preserves each fold
-across swaps.
+Five lanes in pipeline order: needs you · queued · waiting · building · done
+recently. Each lane is a `details` with its count in the summary and its
+state dot on the header; a lane with cards is open, an empty one folds. On a
+phone (≤760px) lanes stack, the summary is a 2.75rem tap with a drawn
+chevron, and the poller preserves each fold across swaps.
 
-A card reads the same in every lane:
-
-1. title (with the live dot on a building card);
-2. **why** — one honest phrase for the lane ("write its scope", "failed",
-   the question);
-3. **facts** — mono key–value pairs: `task`, `worker`, `runtime`/`waiting`,
-   `model`, `branch`, `ran`, `cost`;
-4. **chips** — project (all-projects view), routine, reservation, PR, outcome.
-
-A building card adds the **live strip**: the run's stage word and elapsed
-clock in an inset well, blue. No percent, no bar.
+A card: mono id eyebrow · title · one honest "why" · facts grid · chips. A
+building card adds the live strip — stage word and elapsed clock in an inset
+well, blue — never a percent.
 
 ## 5. The shell
 
-Desktop: a 232px sidebar (inbox · portfolio · work{board, queue} · builds ·
-fleet · more), and a scope bar under the banner naming what the screen shows
-— the name is the switcher's summary; the menu lists every served project and
-"all projects" as plain POST forms carrying the session's csrf and returning
-to the same screen; "switch project →" keeps the road to `/projects`.
+Desktop: a 220px sidebar (inbox · portfolio · work{board, queue} · builds ·
+fleet, each with its icon; more: text rows) and a primary "+ new task". The
+scope bar under the banner names what the screen shows; its name is the
+switcher's summary, listing every served project and "all projects" as POST
+forms returning to the same screen; "switch project →" keeps the road to
+`/projects`.
 
-Phone: one sticky header row — brand, the project pill (name · counts;
-tapping it opens the same menu as a sheet above the tab bar, with "manage
-projects →" as the one `/projects` link), and quick capture — then a fixed
-five-tab bar (inbox · board · queue · builds · more) padded for the home
-indicator. `viewport-fit=cover` makes the safe areas real.
+Phone: one sticky header row — brand, the project pill (name · counts; tap
+for the same menu as a sheet above the tab bar, with "manage projects →"),
+quick capture — then the five-tab bar padded for the home indicator.
+`viewport-fit=cover` makes the safe areas real.
 
 Sensitive pages (a password ceremony on screen) gain no scripts and no chrome
 forms: the switcher renders as the name and its one link.
@@ -107,21 +113,29 @@ forms: the switcher renders as the name and its one link.
 One navigation cross-fade (140ms) for navigation a person chose; liveness
 swaps are instant; the pulse dot is the one "alive" signal; everything dies
 under `prefers-reduced-motion`. Selection, caret, scrollbars, focus rings and
-tabular numerals are themed from the palette — never left at browser defaults.
+tabular numerals are themed from the palette in both schemes.
 
 ## 7. Recording a change
 
-A change to a token or a component's rule lands in three places in one
-commit: `src/serve.ts`, `design/src/globals.css` (or the component), and this
-document. The ds-bundle recompiles from the package (`_ds_needs_recompile`).
+A token or component rule lands in three places in one commit: `src/serve.ts`,
+`design/src/globals.css` (or the component), and this document. The ds-bundle
+recompiles from the package (`_ds_needs_recompile`).
 
-## 8. References (Mobbin, 2026-09-01 pass)
+## 8. References (Mobbin)
 
-What the board pass was checked against, and what each reference earned:
+The bar: [Linear issues](https://mobbin.com/screens/610d34b6-6ad8-45ab-80fb-2107b31ed01e)
+(identifier + status icon on every row, dim section headers with counts),
+[Linear inbox on iOS](https://mobbin.com/screens/3d9ccfd8-2425-49e9-a00b-27189140d3a3),
+[Vercel project overview](https://mobbin.com/screens/21283de1-3b87-491d-9503-2a4c13f6a181)
+(status dot + word, mono commit facts, black primary button, paper ground),
+[Railway](https://mobbin.com/screens/cf56574a-01d3-4efe-b841-e091c9ecc39d)
+(dark ops surfaces, status pills). Earlier board references:
+[Plane](https://mobbin.com/screens/69990ffa-9153-4bf1-bb53-87317f9e040f),
+[GitHub iOS](https://mobbin.com/screens/b2165009-6e10-4b74-9c30-4be5b19ad123),
+[Asana iOS](https://mobbin.com/screens/51074f57-02ca-4420-9c8e-dc7317c4bcf6),
+[Linear switcher](https://mobbin.com/screens/2679ae03-f852-47c3-a880-480c493c1369).
 
-- Boards — [Plane](https://mobbin.com/screens/69990ffa-9153-4bf1-bb53-87317f9e040f), [GitHub Projects](https://mobbin.com/screens/56eb55a9-913c-4252-b91c-675d597aa25f), [Programa](https://mobbin.com/screens/894a77ba-3553-4f11-a721-e274fd07b621): the identifier as a mono eyebrow above the title; a state dot on every lane header, not only the loud ones.
-- Phone sections — [GitHub iOS](https://mobbin.com/screens/b2165009-6e10-4b74-9c30-4be5b19ad123), [Asana iOS](https://mobbin.com/screens/aadcf680-960b-45ec-a9c8-867535872ae0), [monday.com](https://mobbin.com/screens/4c0e4721-4399-442a-bfc8-aa209c78c79c): status sections with the count in a pill and label rows under each item — the same grammar as our facts grid.
-- Project dashboards — [Asana iOS](https://mobbin.com/screens/51074f57-02ca-4420-9c8e-dc7317c4bcf6), [Jira Cloud iOS](https://mobbin.com/screens/70e65408-4923-4c05-8acd-bda458c58602): count tiles as inset cells under the project's name; our workspace card keeps its bar instead of a donut because the bar reads at a glance on a phone.
-- Switchers — [Linear](https://mobbin.com/screens/2679ae03-f852-47c3-a880-480c493c1369), [Fibery](https://mobbin.com/screens/e470f040-82a2-44ec-8954-c70e56ce695b), [Air](https://mobbin.com/screens/fa59dedd-7f78-48a1-b5bc-a628f154af8e): the current workspace wears a check at the row's end.
-- Choice screens — [Acorns](https://mobbin.com/screens/df1fd7cf-de22-4499-ac47-54f015dc5109), [NYTimes](https://mobbin.com/screens/80851436-a558-4854-9b48-07f2c2be5f38): choice cards with a title and a consequence line. Ours answer in one tap per option instead of select-then-confirm, because a decision page must work without script and a phone wants fewer taps.
-- Build pages — [Laravel Cloud](https://mobbin.com/screens/dd29535f-34aa-4279-82fc-76e11059f596), [Vercel](https://mobbin.com/screens/50a79ff4-37c0-4a9b-8df3-29599652a9fb): a status word, an identifier, and a duration on one header line; a step list with per-step durations. We show the stage and the clock; per-phase durations are not recorded, so no step list is invented.
+Declined on purpose: a blue brand accent (amber is the product's one accent
+and it already carries meaning), Geist or Inter (Plex is vendored, licensed,
+and already the product's voice; the system is the grammar, not the face), a
+percent on builds, a select-then-confirm decision screen.

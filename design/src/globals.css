@@ -1,38 +1,65 @@
-/* The Operations Ledger — custom shadcn theme for the standing-orders console.
- * Dark-first ink; a single committed theme, not a light/dark pair.
- * One accent: amber (--primary) means "waits on you" and nothing else.
- * IBM Plex Sans is the human voice; IBM Plex Mono is every machine fact. */
+/* The Console — custom shadcn theme for the standing-orders console, v2.
+ * One neutral ramp, two schemes from the same token names (dark default,
+ * light by device preference). One accent: amber (--primary) means "waits
+ * on you" and nothing else. IBM Plex Sans is the human voice; IBM Plex
+ * Mono is every machine fact. */
 @import "tailwindcss";
 @source "./";
 
 :root {
-  /* The marine-ink ramp (owner's ground, 2026-09-01): one hue ~210° bottom
-   * to top, Pantone-anchored — ground 5395C, surface 433C, hairline 432C,
-   * dim 430C, paper Cool Gray 1C. These are the console's own values
-   * (src/serve.ts) — the package and the console must never drift. */
-  --background: #0f171f; /* ground — PMS 5395 C */
-  --foreground: #eaeef2; /* text — Cool Gray 1 C */
-  --card: #16212b; /* surface — PMS 433 C */
-  --card-foreground: #eaeef2;
-  --popover: #1c2937; /* inset wells */
-  --popover-foreground: #eaeef2;
-  --primary: #f5a524; /* amber — exclusively "waits on you" (PMS 137 C) */
+  /* The Console, v2 (2026-09-02): one neutral ramp that renders dark or
+   * light from the same names — the console's own values (src/serve.ts);
+   * the package and the console must never drift. Dark is the default
+   * scene; light follows the device. */
+  --background: #0b0c0e;
+  --foreground: #ededef;
+  --card: #121316;
+  --card-foreground: #ededef;
+  --popover: #1a1c20;
+  --popover-foreground: #ededef;
+  --primary: #f5a524; /* amber — exclusively "waits on you" */
   --primary-foreground: #201503;
-  --secondary: #1c2937;
-  --secondary-foreground: #eaeef2;
-  --muted: #1c2937;
-  --muted-foreground: #8fa0af; /* dim — PMS 430 C */
-  --accent: #1c2937;
-  --accent-foreground: #eaeef2;
+  --secondary: #1a1c20;
+  --secondary-foreground: #ededef;
+  --muted: #1a1c20;
+  --muted-foreground: #8b919c;
+  --accent: #1a1c20;
+  --accent-foreground: #ededef;
   --destructive: #f06a5e;
-  --border: #283747; /* hairlines — PMS 432 C */
-  --input: #5d7185; /* control boundaries: >=3:1 on ground and surface */
-  --ring: #5ca9ff;
-  --radius: 0.625rem;
-  /* Semantic run states — quiet 12%-tint outline chips, never surfaces. */
-  --running: #5ca9ff;
+  --border: #24272d;
+  --input: #3a3e46;
+  --ring: #52a8ff;
+  --radius: 0.5rem;
+  /* Semantic run states — dots and quiet 12%-tint outline chips, never surfaces. */
+  --running: #52a8ff;
   --built: #3ecf8e;
   --failed: #f06a5e;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --background: #fafafa;
+    --foreground: #171717;
+    --card: #ffffff;
+    --card-foreground: #171717;
+    --popover: #ffffff;
+    --popover-foreground: #171717;
+    --primary: #a15c00;
+    --primary-foreground: #ffffff;
+    --secondary: #f1f2f4;
+    --secondary-foreground: #171717;
+    --muted: #f1f2f4;
+    --muted-foreground: #64697a;
+    --accent: #f1f2f4;
+    --accent-foreground: #171717;
+    --destructive: #d1332e;
+    --border: #e4e5e9;
+    --input: #c4c7cf;
+    --ring: #0b6fd6;
+    --running: #0b6fd6;
+    --built: #118a4f;
+    --failed: #d1332e;
+  }
 }
 
 @theme inline {
