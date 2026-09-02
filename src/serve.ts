@@ -5927,12 +5927,12 @@ const STYLE = `
     background: transparent; border: 0; min-height: 2.5rem; padding: 0 .75rem;
     border-radius: calc(var(--radius) - 4px); font: inherit; font-size: .875rem; color: var(--foreground);
   }
-  .switcher-menu button::before {
-    content: ""; width: .375rem; height: .375rem; border-radius: 9999px; flex: none;
-    background: transparent; border: 1px solid var(--border);
-  }
   .switcher-menu button.current { font-weight: 600; }
-  .switcher-menu button.current::before { background: var(--foreground); border-color: var(--foreground); }
+  .switcher-menu button.current::after {
+    content: ""; margin-left: auto; width: .375rem; height: .625rem; flex: none;
+    border-right: 1.75px solid var(--foreground); border-bottom: 1.75px solid var(--foreground);
+    transform: rotate(45deg) translateY(-.125rem);
+  }
   .switcher-menu button:hover { background: var(--muted); }
   .switcher-menu .manage {
     display: block; margin-top: .25rem; padding: .625rem .75rem; border-top: 1px solid var(--border);
@@ -6163,6 +6163,7 @@ const STYLE = `
       -webkit-tap-highlight-color: transparent;
     }
     .board .lane > summary h2 { flex: 1; font-size: .75rem; }
+    .board .lane > summary .lane-count { border: 1px solid var(--border); border-radius: 999px; padding: .04rem .5rem; margin-left: .25rem; }
     .board .lane > summary::after {
       content: ""; width: .5rem; height: .5rem; flex: none; margin-right: .25rem;
       border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground);
@@ -6188,11 +6189,13 @@ const STYLE = `
   .lane h2 a:hover { text-decoration: underline; }
   .lane .hint { margin-top: 0; }
   .lane-count { color: var(--muted-foreground); font-weight: 400; font-variant-numeric: tabular-nums; }
-  .lane-attention h2::before, .lane-building h2::before {
+  .lane h2::before {
     content: ""; width: .375rem; height: .375rem; border-radius: 9999px; flex: none;
+    background: var(--muted-foreground); opacity: .55;
   }
-  .lane-attention h2::before { background: var(--brand); }
-  .lane-building h2::before { background: var(--running); }
+  .lane-attention h2::before { background: var(--brand); opacity: 1; }
+  .lane-building h2::before { background: var(--running); opacity: 1; }
+  .lane-done h2::before { background: var(--success); opacity: 1; }
   .lane-card {
     display: block; text-decoration: none; color: inherit;
     background: var(--card); border: 1px solid var(--border);
@@ -6201,6 +6204,7 @@ const STYLE = `
   .lane-card:hover { border-color: color-mix(in srgb, var(--border) 55%, var(--muted-foreground)); }
   .lane-attention .lane-card { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
   .lane-attention .lane-card:hover { border-color: color-mix(in srgb, var(--brand) 60%, var(--border)); }
+  .lane-card .id { display: block; font-family: var(--font-mono); font-size: .6875rem; color: var(--muted-foreground); margin-bottom: .125rem; overflow-wrap: anywhere; }
   .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; line-height: 1.35; }
   .lane-card .dot { margin-right: .4rem; }
   .lane-card .meta, .lane-card .mono { display: block; margin-top: .125rem; font-size: .75rem; }
@@ -6264,8 +6268,11 @@ const STYLE = `
   .workspace-head .badge { flex: none; }
   .workspace-head form { margin: 0 0 0 auto; }
   .workspace-head form button { min-height: 2rem; padding: 0 .625rem; font-size: .75rem; width: auto; }
-  .workspace-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; margin-top: .625rem; }
-  .workspace-stats .pulse-stat { color: var(--muted-foreground); font-size: .6875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .workspace-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .375rem; margin-top: .625rem; }
+  .workspace-stats .pulse-stat {
+    color: var(--muted-foreground); font-size: .6875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    background: var(--muted); border-radius: calc(var(--radius) - 4px); padding: .375rem .5rem; text-align: center;
+  }
   .workspace-stats .pulse-stat b { display: block; color: var(--foreground); font-weight: 600; font-family: var(--font-mono); font-size: 1.125rem; line-height: 1.2; font-variant-numeric: tabular-nums; }
   .workspace-stats .pulse-stat.hot b { color: var(--brand); }
   .workspace-bar { display: flex; gap: 2px; height: .375rem; margin-top: .625rem; border-radius: 9999px; overflow: hidden; background: var(--muted); }
@@ -6304,6 +6311,7 @@ const STYLE = `
     .control-room-head .actions { justify-content: flex-start; margin-top: .75rem; }
     .command-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .workspace-pulse { grid-template-columns: 1fr; }
+    .workspace-stats .pulse-stat { padding: .375rem .125rem; font-size: .625rem; letter-spacing: -.01em; }
   }
 
   /* Runner lanes (queue + fleet): one column per worker. */
@@ -7416,10 +7424,10 @@ function boardBody(
 
   const plain = (card: BoardCard): string =>
     `<a class="lane-card" href="${card.href}">` +
+    `<span class="id">${escape(card.taskId)}</span>` +
     `<span class="t">${escape(card.title)}</span>` +
     `<span class="why">${escape(card.reason)}</span>` +
     facts([
-      ["task", card.taskId],
       ...(card.stalledSince === null ? [] : [["waiting", age(card.stalledSince)] as [string, string]]),
     ]) +
     chips([
@@ -7442,10 +7450,10 @@ function boardBody(
   })();
   const queuedCard = (card: BoardCard): string =>
     `<a class="lane-card" href="${card.href}">` +
+    `<span class="id">${escape(card.taskId)}</span>` +
     `<span class="t">${escape(card.title)}</span>` +
     `<span class="why">${escape(card.reason)}</span>` +
     facts([
-      ["task", card.taskId],
       ["worker", card.assignedRunner === null ? "any free worker" : card.assignedRunner],
     ]) +
     chips([
@@ -7470,10 +7478,10 @@ function boardBody(
     const live = claim.model === null ? "preparing workspace" : (phase ?? "the agent is working");
     return (
       `<a class="lane-card building" href="${card.href}">` +
+      `<span class="id">${escape(card.taskId)}</span>` +
       `<span class="t"><span class="dot dot-ok pulse"></span>${escape(card.title)}</span>` +
       `<span class="live-line"><span class="stage">${escape(live)}</span><span class="clock">${minutes}m</span></span>` +
       facts([
-        ["task", card.taskId],
         ["worker", claim.runner],
         ...(claim.model === null
           ? []
@@ -7500,10 +7508,10 @@ function boardBody(
                   (ciRed(row.prNumber) ? ` <span class="badge badge-failed">CI failing</span>` : "");
             return (
               `<a class="lane-card" href="${taskHref(row.taskId)}">` +
+              `<span class="id">${escape(row.taskId)}</span>` +
               `<span class="t">${escape(row.title)}</span>` +
               `${row.handoff === null ? "" : `<span class="why">${escape(row.handoff.length > 120 ? row.handoff.slice(0, 120) + "\u2026" : row.handoff)}</span>`}` +
               facts([
-                ["task", row.taskId],
                 ...(row.ranMinutes === null ? [] : [["ran", `${row.ranMinutes}m`] as [string, string]]),
                 ["cost", row.costUsd === null ? "unmeasured" : `$${row.costUsd.toFixed(2)}`],
               ]) +

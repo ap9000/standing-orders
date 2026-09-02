@@ -1654,6 +1654,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const card = /<a class="lane-card building".*?<\/a>/s.exec(board)?.[0] ?? "";
     expect(card).toMatch(/<span class="live-line"><span class="stage">[^<]+<\/span><span class="clock">1[0-9]m<\/span><\/span>/);
     expect(card).not.toMatch(/\d+%/);
+    expect(card).toContain('<span class="id">t-live</span><span class="t">');
     expect(card).toContain('<span class="fact"><span class="k">worker</span><span class="v">builder-1</span></span>');
     expect(card).toContain('<span class="fact"><span class="k">model</span><span class="v">claude</span></span>');
     expect(card).toContain("standing-orders-t-live-abc");

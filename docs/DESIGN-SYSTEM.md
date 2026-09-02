@@ -114,3 +114,14 @@ tabular numerals are themed from the palette — never left at browser defaults.
 A change to a token or a component's rule lands in three places in one
 commit: `src/serve.ts`, `design/src/globals.css` (or the component), and this
 document. The ds-bundle recompiles from the package (`_ds_needs_recompile`).
+
+## 8. References (Mobbin, 2026-09-01 pass)
+
+What the board pass was checked against, and what each reference earned:
+
+- Boards — [Plane](https://mobbin.com/screens/69990ffa-9153-4bf1-bb53-87317f9e040f), [GitHub Projects](https://mobbin.com/screens/56eb55a9-913c-4252-b91c-675d597aa25f), [Programa](https://mobbin.com/screens/894a77ba-3553-4f11-a721-e274fd07b621): the identifier as a mono eyebrow above the title; a state dot on every lane header, not only the loud ones.
+- Phone sections — [GitHub iOS](https://mobbin.com/screens/b2165009-6e10-4b74-9c30-4be5b19ad123), [Asana iOS](https://mobbin.com/screens/aadcf680-960b-45ec-a9c8-867535872ae0), [monday.com](https://mobbin.com/screens/4c0e4721-4399-442a-bfc8-aa209c78c79c): status sections with the count in a pill and label rows under each item — the same grammar as our facts grid.
+- Project dashboards — [Asana iOS](https://mobbin.com/screens/51074f57-02ca-4420-9c8e-dc7317c4bcf6), [Jira Cloud iOS](https://mobbin.com/screens/70e65408-4923-4c05-8acd-bda458c58602): count tiles as inset cells under the project's name; our workspace card keeps its bar instead of a donut because the bar reads at a glance on a phone.
+- Switchers — [Linear](https://mobbin.com/screens/2679ae03-f852-47c3-a880-480c493c1369), [Fibery](https://mobbin.com/screens/e470f040-82a2-44ec-8954-c70e56ce695b), [Air](https://mobbin.com/screens/fa59dedd-7f78-48a1-b5bc-a628f154af8e): the current workspace wears a check at the row's end.
+- Choice screens — [Acorns](https://mobbin.com/screens/df1fd7cf-de22-4499-ac47-54f015dc5109), [NYTimes](https://mobbin.com/screens/80851436-a558-4854-9b48-07f2c2be5f38): choice cards with a title and a consequence line. Ours answer in one tap per option instead of select-then-confirm, because a decision page must work without script and a phone wants fewer taps.
+- Build pages — [Laravel Cloud](https://mobbin.com/screens/dd29535f-34aa-4279-82fc-76e11059f596), [Vercel](https://mobbin.com/screens/50a79ff4-37c0-4a9b-8df3-29599652a9fb): a status word, an identifier, and a duration on one header line; a step list with per-step durations. We show the stage and the clock; per-phase durations are not recorded, so no step list is invented.
