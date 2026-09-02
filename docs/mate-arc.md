@@ -268,6 +268,18 @@ recommendations — the data document already hides them.
 
 ## 5. The console
 
+**As landed (slice 2, 2026-09-02).** `/chat` is the thread while a mate
+session is live and fleet chat v13 otherwise, with the mint card on top:
+`POST /chat/mate/mint` (ceiling dollars, hours, the password once) mints
+the session and opens the thread; `POST /chat` with a live session runs a
+mate turn without a password; `POST /chat/proposal/:id/confirm|dismiss`
+run `src/mate-doors.ts` under the session-layer principal; `POST
+/chat/mate/end` fails any live turn, ends the session, and deletes the
+thread's text and proposals. The turn runs detached and the page refreshes
+every 3 s while it runs, with proposal cards inert until it ends; a refusal
+or a failed turn is said once at the top of the thread. Cancel cards carry
+no confirm — they link to the task's own arm-then-POST control.
+
 `/chat` becomes the thread: messages in order; tool activity as quiet mono
 lines ("looked at 2 projects · 5 tasks"); proposals as cards inside the
 assistant's message, each a form with one button (`confirm`) posting to

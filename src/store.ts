@@ -13232,6 +13232,13 @@ export class Store {
     });
   }
 
+  recentMateTurns(approver: string, limit = 10): MateTurn[] {
+    return this.db
+      .prepare("SELECT * FROM mate_turn WHERE approver = ? ORDER BY id DESC LIMIT ?")
+      .all(approver, Math.max(1, Math.min(limit, 100)))
+      .map(readMateTurn);
+  }
+
   getMateTurn(id: number): MateTurn | null {
     const row = this.db.prepare("SELECT * FROM mate_turn WHERE id = ?").get(id);
     return row === undefined ? null : readMateTurn(row);

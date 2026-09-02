@@ -6765,3 +6765,208 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(page).toContain('<a class="project-pill" href="/projects"><span class="name">alpha</span>');
   });
 });
+
+describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversation whose acts are cards", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+  let repoDir: string;
+  let script: (() => Response)[];
+  let clockNow: Date;
+
+  const url = (path: string) => `${base}${path}`;
+  const T0 = new Date("2026-09-02T12:00:00.000Z");
+  type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
+  const answer = (blocks: Block[]) =>
+    new Response(JSON.stringify({ type: "message", content: blocks, usage: { input_tokens: 100, output_tokens: 20 } }), { status: 200, headers: { "content-type": "application/json" } });
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken }), redirect: "manual" });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+  const page = async (cookie: string): Promise<string> => (await fetch(url("/chat"), { headers: { cookie } })).text();
+  const csrfFrom = (html: string): string => {
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf on /chat");
+    return match[1] as string;
+  };
+  const post = (cookie: string, path: string, fields: Record<string, string>) =>
+    fetch(url(path), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams(fields), redirect: "manual" });
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 200; i++) {
+      if (store.liveMateTurnFor("alex") === null) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error("the mate turn never settled");
+  };
+  const mint = async (cookie: string, ceilingUsd = "50"): Promise<string> => {
+    const csrf = csrfFrom(await page(cookie));
+    const minted = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": ceilingUsd, hours: "4", token: approverToken });
+    expect(minted.status).toBe(303);
+    expect(minted.headers.get("location")).toBe("/chat");
+    return csrf;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-mate-ev-"));
+    repoDir = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-mate-repo-")));
+    clockNow = T0;
+    script = [];
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 100_000_000, priceInMicrousd: 3, priceOutMicrousd: 15 }, "alex", T0);
+    for (const id of ["a", "b"]) {
+      const made = store.createConsoleTask({ id, title: `task ${id}`, repo: repoDir, goal: `do ${id}`, filedVia: "cli" }, T0);
+      if (!made.ok) throw new Error(made.reason);
+    }
+    server = createDecisionServer({
+      store,
+      evidenceRoot,
+      clock: () => clockNow,
+      repo: repoDir,
+      chatEnv: { ANTHROPIC_API_KEY: "sk-test-key" },
+      chatFetcher: (async () => {
+        const next = script.shift();
+        if (next === undefined) throw new Error("the script ran out");
+        return next();
+      }) as typeof fetch,
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  test("the mint card is the one password ceremony; the thread then takes messages without one", async () => {
+    const cookie = await login();
+    const before = await page(cookie);
+    expect(before).toContain('action="/chat/mate/mint"');
+    expect(before).not.toContain('class="thread"');
+    const csrf = csrfFrom(before);
+    const noPassword = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5", hours: "4" });
+    expect(noPassword.headers.get("location") ?? "").toContain("password");
+    expect(store.activeMateSession("alex", clockNow)).toBeNull();
+    const badTerms = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "0", hours: "4", token: approverToken });
+    expect(badTerms.headers.get("location") ?? "").toContain("dollar");
+    await mint(cookie, "5");
+    const session = store.activeMateSession("alex", clockNow);
+    expect(session).toMatchObject({ approver: "alex", ceilingMicrousd: 5_000_000, spentMicrousd: 0 });
+    const thread = await page(cookie);
+    expect(thread).toContain('class="thread"');
+    expect(thread).toContain('class="card composer"');
+    expect(thread).not.toContain('name="token"');
+    expect(thread).toContain("this session: $0.00 of $5.00");
+    expect(thread).toContain('action="/chat/mate/end"');
+  });
+
+  test("a turn: the model reads and proposes, the card confirms through the door, a stale card refuses", async () => {
+    const cookie = await login();
+    const csrf = await mint(cookie);
+    script.push(
+      () => answer([{ type: "tool_use", id: "c1", name: "queue", input: { repo: "r1" } }, { type: "tool_use", id: "c2", name: "propose_next", input: { task: "b" } }]),
+      () => answer([{ type: "text", text: "I propose moving b to the front." }]),
+    );
+    const sent = await post(cookie, "/chat", { csrf, message: "what is queued?" });
+    expect(sent.status).toBe(303);
+    await settle();
+    const turn = store.recentMateTurns("alex", 1)[0];
+    expect(turn).toMatchObject({ state: "answered", steps: 2 });
+    let html = await page(cookie);
+    expect(html).toContain('<div class="msg op"><p style="white-space:pre-wrap">what is queued?</p></div>');
+    expect(html).toContain("I propose moving b to the front.");
+    expect(html).toContain("read 1 · proposed 1 · 2 steps");
+    expect(html).toContain('action="/chat/proposal/1/confirm"');
+    expect(html).toContain('action="/chat/proposal/1/dismiss"');
+    // No csrf: the central gate refuses, nothing moves.
+    const forged = await fetch(url("/chat/proposal/1/confirm"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({}), redirect: "manual" });
+    expect(forged.status).toBe(403);
+    expect(store.getMateProposal(1)?.state).toBe("pending");
+    const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf });
+    expect(confirmed.status).toBe(303);
+    expect(store.getMateProposal(1)).toMatchObject({ state: "confirmed", resolvedBy: "alex" });
+    expect(store.queuePosition("b")?.position).toBe(1);
+    html = await page(cookie);
+    expect(html).toContain("b moved to the front of its column");
+    expect(html).not.toContain('action="/chat/proposal/1/confirm"');
+    // A second act on the same card is a no-op with a note.
+    await post(cookie, "/chat/proposal/1/confirm", { csrf });
+    expect(store.getMateProposal(1)?.state).toBe("confirmed");
+    // A proposal the queue outran: the door refuses with the typed reason, rendered on the card.
+    script.push(
+      () => answer([{ type: "tool_use", id: "c3", name: "propose_next", input: { task: "a" } }]),
+      () => answer([{ type: "text", text: "Now a." }]),
+    );
+    await post(cookie, "/chat", { csrf, message: "and a?" });
+    await settle();
+    expect(store.getMateProposal(2)?.state).toBe("pending");
+    store.moveTaskNext("a", clockNow);
+    await post(cookie, "/chat/proposal/2/confirm", { csrf });
+    expect(store.getMateProposal(2)).toMatchObject({ state: "refused" });
+    html = await page(cookie);
+    expect(html).toContain("the queue moved since this was proposed");
+    // Session spend is the two turns' settled cost, shown on the page.
+    const session = store.activeMateSession("alex", clockNow);
+    expect(session?.spentMicrousd).toBe(4 * (100 * 3 + 20 * 15));
+    expect(html).toContain("this session: $0.00 of $50.00");
+  });
+
+  test("a cancel card only points at the task; dismiss retires a card; ending the session forgets the thread", async () => {
+    const cookie = await login();
+    const csrf = await mint(cookie);
+    script.push(
+      () => answer([{ type: "tool_use", id: "c1", name: "propose_cancel", input: { task: "a", reason: "superseded" } }, { type: "tool_use", id: "c2", name: "propose_hold", input: { task: "b", reason: "not yet" } }]),
+      () => answer([{ type: "text", text: "Two suggestions." }]),
+    );
+    await post(cookie, "/chat", { csrf, message: "tidy up" });
+    await settle();
+    let html = await page(cookie);
+    expect(html).toContain("cancelling is armed on the task itself");
+    expect(html).not.toContain('action="/chat/proposal/1/confirm"');
+    expect(html).toContain('action="/chat/proposal/2/confirm"');
+    await post(cookie, "/chat/proposal/1/confirm", { csrf });
+    expect(store.getMateProposal(1)?.state).toBe("pending");
+    await post(cookie, "/chat/proposal/2/dismiss", { csrf });
+    expect(store.getMateProposal(2)?.state).toBe("dismissed");
+    expect(store.activeHolds(store.refFor("built-in", "b").id, clockNow)).toEqual([]);
+    const threadId = store.openMateThread("alex", store.activeMateSession("alex", clockNow)!.ceilingDigest, clockNow).thread.id;
+    expect(store.listMateMessages(threadId, 10)).toHaveLength(2);
+    const ended = await post(cookie, "/chat/mate/end", { csrf });
+    expect(ended.status).toBe(303);
+    expect(store.activeMateSession("alex", clockNow)).toBeNull();
+    expect(store.listMateMessages(threadId, 10)).toEqual([]);
+    expect(store.listMateProposals(threadId)).toEqual([]);
+    html = await page(cookie);
+    expect(html).toContain('action="/chat/mate/mint"');
+    expect(html).not.toContain('class="thread"');
+  });
+
+  test("a refused turn is said once on the thread; a bearer caller and a viewer have no mate", async () => {
+    const cookie = await login();
+    const csrf = await mint(cookie);
+    const empty = await post(cookie, "/chat", { csrf, message: "   " });
+    expect(empty.headers.get("location") ?? "").toContain("characters");
+    script.push(() => new Response("<html>", { status: 200, headers: { "content-type": "text/html" } }));
+    await post(cookie, "/chat", { csrf, message: "hello" });
+    await settle();
+    let html = await page(cookie);
+    expect(html).toContain("malformed");
+    expect(html).toContain("unknown spend blocks chat");
+    html = await page(cookie);
+    expect(html).not.toContain("malformed and was discarded");
+    const bearer = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { authorization: `Bearer ${approverToken}`, origin: base }, body: new URLSearchParams({ "ceiling-usd": "5", hours: "1", token: approverToken }), redirect: "manual" });
+    expect([401, 403]).toContain(bearer.status);
+  });
+});

@@ -147,6 +147,10 @@ import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf,
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
+import type { MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
+import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
+import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
 
 export type ServeOptions = {
   store: Store;
@@ -1778,10 +1782,47 @@ export function createDecisionServer(options: ServeOptions): Server {
       // THIS session's memory; a bearer caller has nowhere to keep them.
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface — it keeps your drafts in the session");
       store.sweepStaleChatTurns(now);
+      store.sweepStaleMateTurns(now);
+      store.sweepMateThreads(now);
       sweepChatDrafts(Date.now());
       const enabled = chatEnablement();
       const pending = store.liveChatTurnFor(who.name);
       const latched = enabled.ok ? store.latchedChatTurns(enabled.credentialKey) : [];
+      // The mate (mate arc §5): while a mate session is live, /chat IS the
+      // thread — the same rows the CLI reads. Without one, fleet chat as
+      // before, plus the card that mints a session.
+      const mateSession = enabled.ok && who.role === "approver" ? store.activeMateSession(who.name, now) : null;
+      const principal = enabled.ok && who.role === "approver" ? matePrincipal(who) : null;
+      if (enabled.ok && mateSession !== null && principal !== null) {
+        if (mateSession.ceilingDigest !== principal.ceilingDigest) {
+          store.endMateSession(mateSession.id, who.name, now);
+          store.closeMateThreadsFor(who.name, now);
+          mateSaid.set(who.name, "the admitted projects changed — that session ended; mint a new one");
+        } else {
+          const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
+          const said = mateSaid.get(who.name) ?? null;
+          mateSaid.delete(who.name);
+          return sendScreen(
+            response,
+            200,
+            matePage(chromeFor(project, "chat"), {
+              session: mateSession,
+              messages: store.listMateMessages(opened.thread.id, 40),
+              proposals: store.listMateProposals(opened.thread.id),
+              pending: store.liveMateTurnFor(who.name),
+              latched,
+              recent: store.recentMateTurns(who.name, 5),
+              config: enabled.config,
+              turnsToday: store.chatTurnsToday(who.name, now),
+              weeklySpent: store.chatWeeklySpendMicrousd(enabled.credentialKey, now),
+              repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
+              csrf: who.session.csrf,
+              problem: url.searchParams.get("said") ?? said,
+              now,
+            }),
+          );
+        }
+      }
       return sendScreen(
         response,
         200,
@@ -1805,7 +1846,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           }),
           openrouterModels: (await chatCatalog())?.map(one => one.id) ?? null,
           csrf: who.session.csrf,
-          problem: url.searchParams.get("said"),
+          problem: url.searchParams.get("said") ?? mateSaid.get(who.name) ?? null,
+          ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled.config.weeklyCeilingMicrousd) } : {}),
         }),
       );
     }
@@ -1959,6 +2001,15 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   const chatFetcher = options.chatFetcher ?? fetch;
   const chatEnv = options.chatEnv ?? process.env;
+  /** The mate's last non-answer per approver (a refusal or a failed turn),
+   * shown once on the thread; the rows carry everything else. */
+  const mateSaid = new Map<string, string>();
+  /** The session-layer principal (ruling 3): cookie, csrf, and role were
+   * proved at the edge; the row and the generation are re-proved here. */
+  function matePrincipal(who: Who & { via: "cookie" }): VerifiedApprover | null {
+    const verified = verifyApproverStanding(store, who.name, who.session.generation, ceiling.repos);
+    return verified.ok ? verified.who : null;
+  }
   const CHAT_CANDIDATES_PER_APPROVER = 9;
   const CHAT_CANDIDATE_TTL_MS = 30 * 60_000;
 
@@ -4072,10 +4123,85 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, "/chat");
     }
 
+    // ---- the mate (mate arc §5) ------------------------------------------
+    if (url.pathname === "/chat/mate/mint") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const enabled = chatEnablement();
+      if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
+      // The one password ceremony of a conversation (§1): it restates the
+      // terms — this much, until then, over these projects — and mints the
+      // session every later turn debits without asking again.
+      const ceilingUsd = Number((body.get("ceiling-usd") ?? "").trim());
+      const hours = Number((body.get("hours") ?? "").trim());
+      if (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000) {
+        return redirect(response, `/chat?said=${encodeURIComponent("the session ceiling is a dollar amount between 0 and 1000")}`);
+      }
+      if (!Number.isInteger(hours) || hours < 1 || hours > 24) {
+        return redirect(response, `/chat?said=${encodeURIComponent("a session lasts a whole number of hours, 1 to 24")}`);
+      }
+      const verified = verifyApproverByPassword(store, who.name, body.get("token") ?? "", ceiling.repos);
+      if (!verified.ok) return redirect(response, `/chat?said=${encodeURIComponent("minting a session takes your password, typed again")}`);
+      const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
+      const expiresAt = new Date(now.getTime() + hours * 3_600_000);
+      const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${expiresAt.toISOString()}\n${verified.who.ceilingDigest}`).digest("hex");
+      store.mintMateSession(
+        { approver: who.name, approverGeneration: verified.who.generation, credentialKey: enabled.credentialKey, ceilingMicrousd, ceilingDigest: verified.who.ceilingDigest, termsDigest, expiresAt },
+        now,
+      );
+      store.openMateThread(who.name, verified.who.ceilingDigest, now);
+      mateSaid.delete(who.name);
+      return redirect(response, "/chat");
+    }
+    if (url.pathname === "/chat/mate/end") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      // Ending spend and forgetting the thread takes no password: any
+      // approver may revoke (§1), and the thread is theirs to drop (ruling 11).
+      store.failLiveMateTurnsFor(who.name, "ended", now);
+      store.endMateSessionsFor(who.name, who.name, now);
+      store.closeMateThreadsFor(who.name, now);
+      mateSaid.delete(who.name);
+      return redirect(response, "/chat");
+    }
+    const mateProposal = /^\/chat\/proposal\/([0-9]{1,15})\/(confirm|dismiss)$/.exec(url.pathname);
+    if (mateProposal !== null) {
+      if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const principal = matePrincipal(who);
+      if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
+      const id = Number(mateProposal[1]);
+      if (mateProposal[2] === "dismiss") {
+        if (!dismissMateProposal(store, principal, id, now)) mateSaid.set(who.name, "that proposal was already acted on");
+        return redirect(response, "/chat");
+      }
+      const outcome = confirmMateProposal(store, principal, id, now);
+      if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
+        return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, "/chat");
+      }
+      return redirect(response, "/chat");
+    }
+
     if (url.pathname === "/chat") {
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
       const enabled = chatEnablement();
       if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
+      // A live mate session: the message is a mate turn — no password, the
+      // session's ceremony already covered it (§1); the engine refuses on
+      // its own terms and the thread shows why.
+      const mateSession = who.role === "approver" ? store.activeMateSession(who.name, now) : null;
+      if (mateSession !== null) {
+        const principal = matePrincipal(who);
+        if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
+        const message = (body.get("message") ?? "").trim();
+        if (message === "" || message.length > MATE_MESSAGE_MAX_CHARS) {
+          return redirect(response, `/chat?said=${encodeURIComponent(`a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`)}`);
+        }
+        const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, fetcher: chatFetcher, clock })
+          .then(outcome => {
+            if (!outcome.ok) mateSaid.set(who.name, outcome.message);
+          })
+          .catch(() => mateSaid.set(who.name, "the turn failed unexpectedly"));
+        return redirect(response, "/chat");
+      }
       // The password, typed again, on EVERY message (v2 ruling 2): chat is
       // spend, and a seven-day cookie is not a spend credential.
       const password = body.get("token") ?? "";
@@ -6361,6 +6487,23 @@ const STYLE = `
     border-radius: calc(var(--radius) - 2px); background: var(--card); font-size: .8125rem; min-width: 0;
   }
   .workspace-card.hot { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
+  /* the mate's thread (mate arc §5) */
+  .thread { display: flex; flex-direction: column; gap: 0.75rem; margin: 1rem 0; }
+  .thread .msg { max-width: 46rem; padding: 0.6rem 0.85rem; border-radius: 0.75rem; border: 1px solid var(--border); }
+  .thread .msg p { margin: 0.25rem 0; }
+  .thread .msg.op { align-self: flex-end; background: color-mix(in srgb, var(--brand) 12%, var(--surface)); }
+  .thread .msg.mate { align-self: flex-start; background: var(--surface); }
+  .thread .activity { font-size: 0.8rem; opacity: 0.7; }
+  .thread .proposal { margin: 0.5rem 0 0; }
+  .thread .proposal .acts { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+  .thread .proposal.confirmed { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+  .thread .proposal.refused { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+  .thread .proposal .done { color: var(--ok); }
+  .thread .proposal .refused { color: var(--danger); }
+  .composer textarea { width: 100%; }
+  .mate-terms { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; }
+  .mate-terms .inline-field { white-space: nowrap; }
+  button.quiet { background: transparent; color: var(--fg-muted); border-color: var(--border); }
   .workspace-head { display: flex; align-items: center; gap: .5rem; min-width: 0; }
   .workspace-head .workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-family: var(--font-mono); font-size: .8125rem; }
   .workspace-head .badge { flex: none; }
@@ -7800,6 +7943,8 @@ function chatPage(chrome: Chrome, data: {
   openrouterModels: string[] | null;
   csrf: string;
   problem: string | null;
+  /** The card that mints a mate session (mate arc §5), approvers only. */
+  mateMint?: string;
 }): Screen {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
@@ -7864,6 +8009,7 @@ function chatPage(chrome: Chrome, data: {
       ` · repos: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
     `<p class="meta">what leaves this machine: task ids/titles/states, open questions and option labels, incident kinds, routine names/schedules, PR numbers and observed check states — deliberately, to the configured provider. Paths, branches, diffs, notes, decision details, and identities never do.</p>`,
   );
+  if (data.mateMint !== undefined) parts.push(data.mateMint);
   for (const turn of data.latched) {
     parts.push(
       `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
@@ -7964,6 +8110,154 @@ function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string
     `</form>`,
     `</div>`,
   ].join("\n"), { chrome });
+}
+
+/** The card that starts a conversation: the one password ceremony (mate arc §1). */
+function mateMintCard(csrf: string, weeklyCeilingMicrousd: number): string {
+  return [
+    `<div class="card mate-mint">`,
+    `<p><strong>talk to the mate.</strong> <span class="meta">one conversation across every project this console serves — it reads, recaps, and proposes; you confirm each act on a card</span></p>`,
+    `<form method="post" action="/chat/mate/mint">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<div class="mate-terms">`,
+    `<label>this session may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
+    `<label>for <span class="inline-field"><input type="text" name="hours" inputmode="numeric" value="4" style="width:4rem"> hours</span></label>`,
+    `</div>`,
+    `<p class="meta">the weekly chat ceiling (${chatMoney(weeklyCeilingMicrousd)}) still binds above it; every turn reserves its worst case first and is refused before it spends when either would be exceeded</p>`,
+    `<label>your password <span class="meta">(once — this mints the session; messages need no password after)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">start the conversation</button>`,
+    `</form>`,
+    `</div>`,
+  ].join("\n");
+}
+
+/** A proposal card inside the assistant's message: what, then confirm/dismiss, or the door's answer. */
+function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean): string {
+  const payload = proposal.payload;
+  const text = (key: string): string => (typeof payload[key] === "string" ? (payload[key] as string) : "");
+  const task = text("task");
+  const repoId = text("repoId");
+  const what =
+    proposal.kind === "task"
+      ? `<strong>file ${escape(text("title"))}</strong> in <span class="mono">${escape(repoId)}</span><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
+        (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`) +
+        (Array.isArray(payload["touches"]) && payload["touches"].length > 0 ? `<p class="meta">touches: ${escape((payload["touches"] as string[]).join(", "))}</p>` : "")
+      : proposal.kind === "next"
+        ? `<strong>move <a href="${taskHref(task)}">${escape(task)}</a> to the front</strong> <span class="meta">(it was ${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))})</span>`
+        : proposal.kind === "reserve"
+          ? `<strong>${payload["worker"] === null ? "release" : "reserve"} <a href="${taskHref(task)}">${escape(task)}</a>${payload["worker"] === null ? " to the shared queue" : ` for ${escape(text("worker"))}`}</strong>`
+          : proposal.kind === "hold"
+            ? `<strong>hold <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`
+            : proposal.kind === "unhold"
+              ? `<strong>release <a href="${taskHref(task)}">${escape(task)}</a> from its hold</strong>`
+              : proposal.kind === "scope"
+                ? `<strong>rewrite the scope of <a href="${taskHref(task)}">${escape(task)}</a></strong><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
+                  (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`)
+                : `<strong>cancel <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
+  const outcome = proposal.outcome as { said?: unknown; taskId?: unknown } | null;
+  const said = outcome !== null && typeof outcome.said === "string" ? outcome.said : null;
+  let acts = "";
+  if (proposal.state === "pending" && !inert) {
+    acts =
+      proposal.kind === "cancel"
+        ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
+          `<form method="post" action="/chat/proposal/${proposal.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>`
+        : `<div class="acts">` +
+          `<form method="post" action="/chat/proposal/${proposal.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">confirm</button></form>` +
+          `<form method="post" action="/chat/proposal/${proposal.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>` +
+          `</div>`;
+  } else if (proposal.state === "pending") {
+    acts = `<p class="meta">confirm or dismiss once the turn ends</p>`;
+  } else if (proposal.state === "confirmed") {
+    const filed = outcome !== null && typeof outcome.taskId === "string" ? outcome.taskId : null;
+    acts =
+      `<p class="meta done">${escape(said ?? "confirmed")}` +
+      (proposal.kind === "scope" && filed !== null ? ` — <a href="${taskHref(filed)}#approve">approve it</a>` : filed !== null && proposal.kind === "task" ? ` — <a href="${taskHref(filed)}">open it</a>` : "") +
+      `</p>`;
+  } else if (proposal.state === "refused") {
+    acts = `<p class="meta refused">${escape(said ?? "refused")}</p>`;
+  } else {
+    acts = `<p class="meta">${escape(proposal.state)}</p>`;
+  }
+  return `<div class="card proposal ${escape(proposal.state)}"><p><span class="badge">${escape(proposal.kind)}</span> ${what}</p>${acts}</div>`;
+}
+
+function matePage(chrome: Chrome, data: {
+  session: MateSession;
+  messages: MateMessage[];
+  proposals: MateProposal[];
+  pending: MateTurn | null;
+  latched: ChatTurn[];
+  recent: MateTurn[];
+  config: import("./store.js").ChatConfig;
+  turnsToday: number;
+  weeklySpent: number;
+  repoLabels: { id: string; label: string }[];
+  csrf: string;
+  problem: string | null;
+  now: Date;
+}): Screen {
+  const parts: string[] = [
+    "<h1>chat</h1>",
+    `<p class="meta">the mate reads every project this console serves and proposes; nothing happens until you confirm a card. ` +
+      `<span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
+      ` · this session: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)} until ${escape(data.session.expiresAt.slice(11, 16))}Z` +
+      ` · this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)} · ${data.turnsToday} of ${data.config.dailyTurns} turns today</p>`,
+    `<p class="meta">projects: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
+  ];
+  if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
+  for (const turn of data.latched) {
+    parts.push(
+      `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
+        `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
+    );
+  }
+  const byTurn = new Map<number, MateProposal[]>();
+  for (const one of data.proposals) {
+    const list = byTurn.get(one.turn) ?? [];
+    list.push(one);
+    byTurn.set(one.turn, list);
+  }
+  const inert = data.pending !== null;
+  parts.push(`<div class="thread">`);
+  if (data.messages.length === 0) parts.push(`<p class="meta">nothing said yet — ask how things stand.</p>`);
+  for (const message of data.messages) {
+    if (message.role === "operator") {
+      parts.push(`<div class="msg op"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
+      continue;
+    }
+    const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
+    parts.push(
+      `<div class="msg mate">` +
+        (message.activity === null ? "" : `<p class="meta mono activity">${escape(message.activity)}</p>`) +
+        `<p style="white-space:pre-wrap">${escape(message.text)}</p>` +
+        cards.map(one => mateProposalCard(one, data.csrf, inert)).join("") +
+        `</div>`,
+    );
+  }
+  parts.push(`</div>`);
+  if (data.pending !== null) {
+    parts.push(`<div class="card"><p><strong>thinking…</strong> <span class="meta">turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
+    return screen("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
+  }
+  parts.push(
+    `<form method="post" action="/chat" class="card composer">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<label>message<textarea name="message" rows="3" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="how do things stand?"></textarea></label>`,
+    `<button type="submit">send</button>`,
+    `</form>`,
+    `<details><summary class="meta">this session</summary>`,
+    `<p class="meta">minted ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · expires ${escape(data.session.expiresAt.slice(0, 16).replace("T", " "))}Z · the thread lives 24 hours and is deleted when the session ends</p>`,
+    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><button type="submit" class="quiet">end the session and forget the thread</button></form>`,
+    data.recent.length === 0
+      ? ""
+      : `<p class="meta">recent turns: ${data.recent
+          .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
+          .join(" · ")}</p>`,
+    `<p class="meta">chat settings live on this page once the session ends</p>`,
+    `</details>`,
+  );
+  return screen("chat", parts.join("\n"), { chrome });
 }
 
 function routinesPage(
