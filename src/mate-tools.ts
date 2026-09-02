@@ -143,6 +143,85 @@ const REPO_ARG = { type: "string", pattern: "^r[0-9]{1,3}$" };
 
 export type MateTool = MateToolSchema & { handle: (ctx: MateToolContext, args: Record<string, unknown>) => MateToolResult };
 
+// ------------------------------------------------- shared queries (§2)
+// The one set of queries both the mate and the MCP gateway read. Every
+// row names its repo by INDEX into the caller's admitted list; the view
+// then labels it — `rN` for the mate, the path for a coordinator whose
+// allowlist is its authority. Consequences and recommendations are never
+// read here at all.
+
+/** Replace every `repoIndex` with a `repo` label, recursively. */
+export function labelRepos<T>(value: T, label: (index: number) => string): T {
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (typeof node === "object" && node !== null) {
+      const out: Record<string, unknown> = {};
+      for (const [key, inner] of Object.entries(node)) {
+        if (key === "repoIndex" && typeof inner === "number") out["repo"] = label(inner);
+        else out[key] = walk(inner);
+      }
+      return out;
+    }
+    return node;
+  };
+  return walk(value) as T;
+}
+
+export function recapOver(store: Store, repos: readonly string[], now: Date, since: string | null): Record<string, unknown> {
+  const horizonHours = since === null ? Infinity : Math.max(0, (now.getTime() - Date.parse(since)) / 3_600_000);
+  const snapshot = store.chatSnapshot(repos, now);
+  const recent = <T extends { ageHours: number }>(rows: T[]): T[] => rows.filter(one => one.ageHours <= horizonHours);
+  const tasks = recent(snapshot.tasks);
+  const decisions = recent(snapshot.decisions);
+  const incidents = recent(snapshot.incidents);
+  const awaitingApproval = snapshot.tasks.filter(one => one.state === "queued" && scopeStandingOf(store, one.id) !== "approved");
+  const perRepo = repos.map((_, index) => {
+    const mine = <T extends { repoIndex: number }>(rows: T[]): T[] => rows.filter(one => one.repoIndex === index);
+    return {
+      repoIndex: index,
+      waitsOnYou: { decisions: mine(decisions).length, incidents: mine(incidents).length, scopesAwaitingApproval: mine(awaitingApproval).length },
+      running: mine(tasks).filter(one => one.state === "running").length,
+      queued: mine(snapshot.tasks).filter(one => one.state === "queued").length,
+      finished: mine(tasks).filter(one => one.state === "done").length,
+      failed: mine(tasks).filter(one => one.state === "failed").length,
+    };
+  });
+  return {
+    since,
+    repos: perRepo,
+    waitsOnYou: {
+      decisions: decisions.map(one => ({ repoIndex: one.repoIndex, decision: one.id, task: one.taskId })),
+      incidents: incidents.length,
+      scopesAwaitingApproval: awaitingApproval.map(one => ({ repoIndex: one.repoIndex, task: one.id })),
+    },
+    running: tasks.filter(one => one.state === "running").map(one => ({ repoIndex: one.repoIndex, task: one.id, title: one.title })),
+    truncated: snapshot.tasksSaturated || snapshot.decisionsSaturated || snapshot.incidentsSaturated,
+  };
+}
+
+export function decisionsOver(store: Store, repos: readonly string[], now: Date): Record<string, unknown> {
+  const snapshot = store.chatSnapshot(repos, now);
+  return {
+    decisions: snapshot.decisions.map(one => ({ repoIndex: one.repoIndex, decision: one.id, task: one.taskId, question: one.question, options: one.options, ageHours: one.ageHours })),
+    truncated: snapshot.decisionsSaturated,
+  };
+}
+
+export function queueOver(store: Store, repo: string, now: Date): Record<string, unknown> {
+  const rows = store.queueScoped(repo, now).filter(one => one.repo === repo);
+  const columns = new Map<string, { position: number; task: string; title: string; approved: boolean; blockers: unknown; beingTaken: boolean }[]>();
+  for (const one of rows) {
+    const column = one.assignedRunner ?? "shared";
+    const list = columns.get(column) ?? [];
+    list.push({ position: list.length + 1, task: one.id, title: one.title, approved: one.approved, blockers: one.blockers, beingTaken: one.taken });
+    columns.set(column, list);
+  }
+  const ordered = [...columns.entries()].sort(([a], [b]) => (a === "shared" ? -1 : b === "shared" ? 1 : a.localeCompare(b)));
+  return { queueRevision: store.queueRevision(), columns: ordered.map(([column, tasks]) => ({ column, tasks })) };
+}
+
+export const ISO_STAMP_RULE = ISO_STAMP;
+
 /** Whether a queued task's scope stands approved as written. */
 function scopeStandingOf(store: Store, taskId: string): "none" | "approved" | "rewritten since its approval" | "not approved" {
   const scope = store.getScope(taskId);
@@ -162,42 +241,7 @@ export const MATE_TOOLS: MateTool[] = [
       if (since !== undefined && (typeof since !== "string" || !ISO_STAMP.test(since) || Number.isNaN(Date.parse(since)))) {
         return { ok: false, message: "since is an ISO timestamp like 2026-09-02T12:00:00Z" };
       }
-      const horizonHours = typeof since === "string" ? Math.max(0, (ctx.now.getTime() - Date.parse(since)) / 3_600_000) : Infinity;
-      const snapshot = ctx.store.chatSnapshot(ctx.who.repos, ctx.now);
-      const recent = <T extends { ageHours: number }>(rows: T[]): T[] => rows.filter(one => one.ageHours <= horizonHours);
-      const tasks = recent(snapshot.tasks);
-      const decisions = recent(snapshot.decisions);
-      const incidents = recent(snapshot.incidents);
-      const awaitingApproval = snapshot.tasks.filter(one => one.state === "queued" && scopeStandingOf(ctx.store, one.id) !== "approved");
-      const repos = ctx.who.repos.map((_, index) => {
-        const mine = <T extends { repoIndex: number }>(rows: T[]): T[] => rows.filter(one => one.repoIndex === index);
-        return {
-          repo: `r${index + 1}`,
-          waitsOnYou: {
-            decisions: mine(decisions).length,
-            incidents: mine(incidents).length,
-            scopesAwaitingApproval: mine(awaitingApproval).length,
-          },
-          running: mine(tasks).filter(one => one.state === "running").length,
-          queued: mine(snapshot.tasks).filter(one => one.state === "queued").length,
-          finished: mine(tasks).filter(one => one.state === "done").length,
-          failed: mine(tasks).filter(one => one.state === "failed").length,
-        };
-      });
-      return {
-        ok: true,
-        body: {
-          since: typeof since === "string" ? since : null,
-          repos,
-          waitsOnYou: {
-            decisions: decisions.map(one => ({ repo: `r${one.repoIndex + 1}`, decision: one.id, task: one.taskId })),
-            incidents: incidents.length,
-            scopesAwaitingApproval: awaitingApproval.map(one => ({ repo: `r${one.repoIndex + 1}`, task: one.id })),
-          },
-          running: tasks.filter(one => one.state === "running").map(one => ({ repo: `r${one.repoIndex + 1}`, task: one.id, title: one.title })),
-          truncated: snapshot.tasksSaturated || snapshot.decisionsSaturated || snapshot.incidentsSaturated,
-        },
-      };
+      return { ok: true, body: labelRepos(recapOver(ctx.store, ctx.who.repos, ctx.now, typeof since === "string" ? since : null), index => `r${index + 1}`) };
     },
   },
   {
@@ -259,23 +303,7 @@ export const MATE_TOOLS: MateTool[] = [
     description:
       "Open decisions across your projects: id, task, question, the options (id, label, whether reversible), age in hours. Never consequences or recommendations — you do not choose; the operator answers on the decision page.",
     inputSchema: schema({}),
-    handle: ctx => {
-      const snapshot = ctx.store.chatSnapshot(ctx.who.repos, ctx.now);
-      return {
-        ok: true,
-        body: {
-          decisions: snapshot.decisions.map(one => ({
-            repo: `r${one.repoIndex + 1}`,
-            decision: one.id,
-            task: one.taskId,
-            question: one.question,
-            options: one.options,
-            ageHours: one.ageHours,
-          })),
-          truncated: snapshot.decisionsSaturated,
-        },
-      };
-    },
+    handle: ctx => ({ ok: true, body: labelRepos(decisionsOver(ctx.store, ctx.who.repos, ctx.now), index => `r${index + 1}`) }),
   },
   {
     name: "queue",
@@ -284,23 +312,7 @@ export const MATE_TOOLS: MateTool[] = [
     handle: (ctx, args) => {
       const repo = repoPathOf(ctx.who, args["repo"]);
       if (repo === null) return { ok: false, message: "repo must be one of the ids from list_repos" };
-      const rows = ctx.store.queueScoped(repo, ctx.now).filter(one => one.repo === repo);
-      const columns = new Map<string, { position: number; task: string; title: string; approved: boolean; blockers: unknown; beingTaken: boolean }[]>();
-      for (const one of rows) {
-        const column = one.assignedRunner ?? "shared";
-        const list = columns.get(column) ?? [];
-        list.push({ position: list.length + 1, task: one.id, title: one.title, approved: one.approved, blockers: one.blockers, beingTaken: one.taken });
-        columns.set(column, list);
-      }
-      const ordered = [...columns.entries()].sort(([a], [b]) => (a === "shared" ? -1 : b === "shared" ? 1 : a.localeCompare(b)));
-      return {
-        ok: true,
-        body: {
-          repo: args["repo"],
-          queueRevision: ctx.store.queueRevision(),
-          columns: ordered.map(([column, tasks]) => ({ column, tasks })),
-        },
-      };
+      return { ok: true, body: { repo: args["repo"], ...queueOver(ctx.store, repo, ctx.now) } };
     },
   },
   {

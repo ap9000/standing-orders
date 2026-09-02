@@ -33,6 +33,7 @@ import {
   taskDetailFor,
   type VerifiedCoordinator,
 } from "./coordinator.js";
+import { ISO_STAMP_RULE, decisionsOver, labelRepos, queueOver, recapOver } from "./mate-tools.js";
 
 export const MODERN = "2026-07-28";
 export const LEGACY = "2025-11-25";
@@ -90,6 +91,7 @@ const CONTRACT_GUIDE = [
   "A filed proposal is an ordinary unapproved task: it is quarantined from planning, claiming, and running until the operator signs its scope in a password ceremony that shows them who asked. Modes never auto-admit coordinator filings.",
   "file_proposal requires an idempotency_key (8-64 printable chars, unique per request): replaying the same key+request returns the original task; the same key with a different request refuses.",
   "You are rate-limited per hour and capped on outstanding unapproved filings. Refusals say the limit and the road in words.",
+  "recap, list_decisions, and queue are the plane's own read queries (shared with the operator's mate): decisions carry ids, questions, and option labels — never consequences or recommendations, which only the operator sees.",
   "Approve, steer, answer, pick, mint, configure, merge: those verbs do not exist on this surface, by construction.",
 ].join("\n");
 
@@ -203,6 +205,34 @@ const TOOLS: Tool[] = [
           }),
       },
       };
+    },
+  },
+  {
+    name: "recap",
+    description: "How things stand per repository in your allowlist, counts and ids: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, finished, failed. Pass `since` (an ISO timestamp) to count only what changed after it.",
+    inputSchema: { type: "object", properties: { since: { type: "string", maxLength: 30 } }, additionalProperties: false },
+    handle: (ctx, args) => {
+      const since = args["since"];
+      if (since !== undefined && (typeof since !== "string" || !ISO_STAMP_RULE.test(since) || Number.isNaN(Date.parse(since)))) {
+        return { ok: false, message: "since is an ISO timestamp like 2026-09-02T12:00:00Z" };
+      }
+      return { ok: true, body: labelRepos(recapOver(ctx.store, ctx.who.repos, ctx.now, typeof since === "string" ? since : null), index => ctx.who.repos[index] ?? "") as unknown as Json };
+    },
+  },
+  {
+    name: "list_decisions",
+    description: "Open decisions in your allowlist: id, task, question, options (id, label, reversible), age in hours. Never consequences or recommendations; the operator answers them.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handle: ctx => ({ ok: true, body: labelRepos(decisionsOver(ctx.store, ctx.who.repos, ctx.now), index => ctx.who.repos[index] ?? "") as unknown as Json }),
+  },
+  {
+    name: "queue",
+    description: "One repository's queue by column — the shared column, then each worker's reserved column — each in dispatch order, with the queue revision.",
+    inputSchema: { type: "object", properties: { repo: { type: "string", minLength: 1, maxLength: 800 } }, required: ["repo"], additionalProperties: false },
+    handle: (ctx, args) => {
+      const repo = str(args, "repo", 800);
+      if (repo === null || !ctx.who.repos.includes(repo)) return { ok: false, message: "not-found: that repository is not in your allowlist" };
+      return { ok: true, body: { repo, ...queueOver(ctx.store, repo, ctx.now) } as unknown as Json };
     },
   },
   {

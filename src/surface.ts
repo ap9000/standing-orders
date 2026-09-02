@@ -93,6 +93,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   { invocation: "pulls", synopsis: "report what is waiting on a person", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
   { invocation: "graph", synopsis: "report which work graph is already here", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
   { invocation: "repos", synopsis: "list connected repositories", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
+  operator("chat", "talk to the mate — one conversation across your projects; the password mints a spending session once; it reads and proposes, you confirm each card"),
   operator("repos add", "connect a repository to the installation"),
   operator("repos remove", "disconnect a repository"),
   operator("repos add-from-github", "preview, clone from GitHub, and connect - the console onboarding ceremony as a CLI verb"),

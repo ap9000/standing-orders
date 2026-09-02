@@ -91,7 +91,7 @@ describe("the MCP stdio server", () => {
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
-    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(6);
+    expect((listed["tools"] as { outputSchema?: unknown }[]).length).toBe(9);
     // No outputSchema: it describes structuredContent, which these tools
     // do not return (round-2 finding 1).
     expect((listed["tools"] as { outputSchema?: unknown }[])[0]?.outputSchema).toBeUndefined();
@@ -412,6 +412,21 @@ describe("the MCP stdio server", () => {
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
       },
       {
+        name: "recap",
+        description: "How things stand per repository in your allowlist, counts and ids: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, finished, failed. Pass `since` (an ISO timestamp) to count only what changed after it.",
+        inputSchema: { type: "object", properties: { since: { type: "string", maxLength: 30 } }, additionalProperties: false },
+      },
+      {
+        name: "list_decisions",
+        description: "Open decisions in your allowlist: id, task, question, options (id, label, reversible), age in hours. Never consequences or recommendations; the operator answers them.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      },
+      {
+        name: "queue",
+        description: "One repository's queue by column — the shared column, then each worker's reserved column — each in dispatch order, with the queue revision.",
+        inputSchema: { type: "object", properties: { repo: { type: "string", minLength: 1, maxLength: 800 } }, required: ["repo"], additionalProperties: false },
+      },
+      {
         name: "get_contract",
         description: "This surface's contract: what a coordinator may do, the proposal lifecycle, and the admission promise.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -489,5 +504,40 @@ describe("the MCP stdio server", () => {
     // `...row` reaches a tool result.
     const source = require("node:fs").readFileSync(new URL("./mcp.ts", import.meta.url), "utf8") as string;
     expect(source.includes("...row")).toBe(false);
+  });
+
+  test("the read tools the mate shares (mate arc, slice 4): recap, list_decisions, queue — the coordinator's view keeps paths, never consequences", () => {
+    const filed = fileCoordinatorProposal(store, token, { repo: REPO, title: "first", idempotencyKey: "key-00000001" }, T0);
+    const second = fileCoordinatorProposal(store, token, { repo: REPO, title: "second", idempotencyKey: "key-00000002" }, T0);
+    if (!filed.ok || !second.ok) throw new Error("filing failed");
+    const run = store.startRun({ taskRef: store.refFor("built-in", filed.id).id, leaseId: "l-1", runner: "runner-1", branch: "b", worktree: "/w", now: T0 });
+    store.saveDecision(
+      {
+        run,
+        urgency: "blocking",
+        recap: "RECAP-CANARY",
+        question: "Which way?",
+        options: [{ id: "a", label: "A", consequence: "CONSEQUENCE-CANARY", reversible: true }],
+        recommendation: "a",
+      },
+      T0,
+    );
+    const h = harness(store, token);
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: modernMeta, name: "recap", arguments: {} } });
+    const recap = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
+    expect(recap).toMatchObject({ repos: [{ repo: REPO, queued: 2, waitsOnYou: { decisions: 1, scopesAwaitingApproval: 2 } }], waitsOnYou: { decisions: [{ repo: REPO, decision: 1, task: filed.id }] } });
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "recap", arguments: { since: "yesterday" } } });
+    expect((h.last()["result"] as Record<string, unknown>)["isError"]).toBe(true);
+    h.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { _meta: modernMeta, name: "list_decisions", arguments: {} } });
+    const decisionsText = String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text);
+    expect(JSON.parse(decisionsText)).toMatchObject({ decisions: [{ repo: REPO, decision: 1, task: filed.id, question: "Which way?", options: [{ id: "a", label: "A", reversible: true }], ageHours: 0 }] });
+    expect(decisionsText).not.toContain("CANARY");
+    h.send({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { _meta: modernMeta, name: "queue", arguments: { repo: REPO } } });
+    expect(JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text))).toMatchObject({
+      repo: REPO,
+      columns: [{ column: "shared", tasks: [{ position: 1, task: filed.id, approved: false }, { position: 2, task: second.id }] }],
+    });
+    h.send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { _meta: modernMeta, name: "queue", arguments: { repo: "/repo/not-mine" } } });
+    expect((h.last()["result"] as Record<string, unknown>)["isError"]).toBe(true);
   });
 });

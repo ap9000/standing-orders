@@ -226,6 +226,15 @@ The MCP gateway gains the same read tools (`recap`, `list_decisions`,
 `queue`) for coordinators; the propose-* tools stay approver-only in v1
 (coordinators file; steering by a foreign credential is a later ruling).
 
+**As landed (slice 4, 2026-09-02).** The shared queries live in
+`src/mate-tools.ts` as `recapOver`, `decisionsOver`, and `queueOver`,
+naming repos by index; `labelRepos` gives each view its label — `rN`
+through `mateView` for the mate, the path for a coordinator in
+`src/mcp.ts`, whose `recap`, `list_decisions`, and `queue` tools are the
+same functions behind the coordinator's allowlist. The coordinator's older
+`status`/`list_tasks`/`get_task` DTOs are unchanged. Neither view ever reads
+a consequence or a recommendation.
+
 ## 3. The turn
 
 `runMateTurn(thread, message)`:
