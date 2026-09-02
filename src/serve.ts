@@ -144,7 +144,7 @@ import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
-import type { Routine, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
+import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 
 export type ServeOptions = {
@@ -1020,7 +1020,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const view = taskViewData(selected, who, null);
         detail = view === null
           ? `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p><div class="card"><p class="meta">no such task — it may have been outside this console's view</p></div>`
-          : `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p>${taskBody(view)}`;
+          : `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p>${taskBody({ ...view, degraded: "pane" })}`;
       }
       return sendScreen(
         response,
@@ -2583,6 +2583,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         decisions: ref === null ? [] : store.decisionsForTask(ref.id),
         incidents: ref === null ? [] : store.incidentsForTask(ref.id),
         steering: ref === null ? [] : store.listSteerNotes(ref.id),
+        // "publishes as" reads ONLY publicationGrantFor(repo) — the grant
+        // the publisher would act under — never listGrants(), which is
+        // dispatch authority (slice 1c).
+        grant: ref === null || ref.repo === null ? null : store.publicationGrantFor(ref.repo),
         csrf: who.via === "cookie" ? who.session.csrf : "",
         nonce,
         problem,
@@ -5958,7 +5962,16 @@ const STYLE = `
   #wb-rail { padding: 1rem .75rem 1.5rem; }
   #wb-rail-stamp { padding: 0 .75rem; }
   .workbench-mobile-rail, .workbench-mobile-back { display: none; }
+  /* The task page (slice 1c): main column beside a rail; one column narrow. */
+  .task-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 19rem); gap: 0 2rem; align-items: start; }
+  .task-layout > .task-main { min-width: 0; }
+  .task-rail { position: sticky; top: 1rem; }
+  .task-rail .card { margin-top: .75rem; }
+  .task-rail .mono { overflow-wrap: anywhere; }
+  main:has(.task-layout) { max-width: 76rem; }
   @media (max-width: 980px) {
+    .task-layout { grid-template-columns: 1fr; }
+    .task-rail { position: static; order: -1; border-bottom: 1px solid var(--border); padding-bottom: .75rem; margin-bottom: .75rem; }
     .split { grid-template-columns: 1fr; }
     .list-pane { display: none; }
     .workbench-mobile-rail, .workbench-mobile-back { display: block; }
@@ -6341,8 +6354,12 @@ type Chrome = {
  * escaped at the sink like every page, fetched same-origin — and the
  * nonce'd CSP refuses to execute anything the region could smuggle.
  */
-function regionScript(regionId: string, fragmentName: string, everySeconds: number): string {
+function regionScript(regionId: string, fragmentName: string, everySeconds: number, path?: string): string {
   const ms = Math.max(5, Math.floor(everySeconds)) * 1000;
+  // Where the fragment lives: the page's own URL by default; an explicit
+  // path when a page embeds another entity's region (the task page embeds
+  // the live run's peek, slice 1c — no proxy route exists for it).
+  const target = path === undefined ? "location.pathname+q" : JSON.stringify(`${path}?fragment=${fragmentName}`);
   // The named-region poller (attended review, finding 2): swaps exactly one
   // element, never a form-bearing pane. Failures are VISIBLE — a frozen
   // page must never look live (finding 6): the stamp says how old the
@@ -6392,7 +6409,7 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     `setInterval(tell,1000);` +
     `function cycle(){if(document.hidden||busy){setTimeout(cycle,wait);return;}busy=true;` +
     `var q=location.search?location.search+"&fragment="+${JSON.stringify(fragmentName)}:"?fragment="+${JSON.stringify(fragmentName)};` +
-    `fetch(location.pathname+q,{redirect:"manual",cache:"no-store"})` +
+    `fetch(${target},{redirect:"manual",cache:"no-store"})` +
     `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return null;}` +
     `return r.ok?r.text():null;})` +
     `.then(function(t){if(t){var kept=keep();region.innerHTML=t;restore(kept);last=Date.now();wait=${ms};}else{wait=Math.min(wait*2,${ms}*8);}})` +
@@ -6411,13 +6428,14 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
  * request in flight, visibility-paused, stops on `final`, and a `replaced`
  * answer restarts from zero with a visible line — never a silent re-read.
  */
-function transcriptScript(): string {
+function transcriptScript(path?: string): string {
+  const base = path === undefined ? "location.pathname" : JSON.stringify(path);
   return (
     `(function(){var out=document.getElementById("live-transcript");if(!out)return;` +
     `var from=0,busy=false,stopped=false;` +
     `function near(){return out.scrollHeight-out.scrollTop-out.clientHeight<40;}` +
     `function go(){if(stopped)return;if(busy||document.hidden){later();return;}busy=true;` +
-    `fetch(location.pathname+"?fragment=transcript&from="+from,{redirect:"manual",cache:"no-store"})` +
+    `fetch(${base}+"?fragment=transcript&from="+from,{redirect:"manual",cache:"no-store"})` +
     `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){stopped=true;return null;}` +
     `if(r.status===409)return{error:"replaced"};return r.ok?r.json():null;})` +
     `.then(function(d){busy=false;if(d===null){later();return;}if(stopped)return;` +
@@ -9281,6 +9299,16 @@ function taskBody(data: {
   incidents: Incident[];
   /** Operator steering notes (arc 1), delivery state included. */
   steering?: SteerNote[];
+  /** The publication grant the publisher would act under — from
+   * publicationGrantFor(repo) only; null when none, or no project. */
+  grant?: PublicationGrant | null;
+  /** Degraded composition (slice 1c). "sensitive": the page carries a
+   * password ceremony, so no live poller runs, the attempt panel is a
+   * static line, and open decisions render link-only — decided by the page
+   * wrapper from the rendered body itself. "pane": the body is embedded in
+   * the workbench's selected-task pane, which carries no run pollers, so
+   * only the attempt panel degrades. */
+  degraded?: "sensitive" | "pane";
   csrf: string;
   nonce: string;
   problem: string | null;
@@ -9304,18 +9332,43 @@ function taskBody(data: {
       `</form>`,
     ].join("");
 
-  // The live-peek door (A2, finding 10's selected-pane rule): the WATCHING
-  // happens on the run page's own polled region — this is only the way in.
-  // The link promises a live file view only where one exists; a serve that
-  // never asserted its runner offers the running build without the promise
-  // (round-4, A1).
+  // The active attempt panel (slice 1c): the run whose lease is the task's
+  // CURRENT claim, named by its one unambiguous identity — build number and
+  // worker (runsFor mixes roles newest-first, so an "attempt N" ordinal is
+  // undefined and not used). The live peek and transcript embed here,
+  // polled from the RUN's own authenticated fragments; a serve that never
+  // asserted its runner says so in the same words the run page uses; a
+  // page carrying a password ceremony degrades to the static line.
   const liveRunId = data.liveRunId ?? null;
-  const watchLink =
-    liveRunId === null
-      ? ""
-      : data.peekable === true
-        ? `<p class="row"><a href="/r/${liveRunId}">watch what is changing right now — build #${liveRunId}</a></p>`
-        : `<p class="row"><a href="/r/${liveRunId}">open the running build — build #${liveRunId}</a></p>`;
+  const liveRun = liveRunId === null ? undefined : data.runs.find(one => one.id === liveRunId);
+  const degraded = data.degraded === "sensitive";
+  const attemptPanel = (() => {
+    if (liveRunId === null || liveRun === undefined) return "";
+    const minutes = Math.max(0, Math.round((data.now.getTime() - new Date(liveRun.startedAt).getTime()) / 60_000));
+    const head =
+      `<p><strong>build #${liveRun.id} · ${escape(liveRun.runner)} · running ` +
+      `<time data-elapsed-since="${escape(liveRun.startedAt)}">${minutes}m</time></strong></p>`;
+    const door = `<p class="row"><a href="/r/${liveRun.id}">full build view →</a></p>`;
+    if (data.degraded !== undefined) {
+      return `<div class="card attempt-live" data-live-run="${liveRun.id}">${head}` +
+        `<p class="meta">${data.degraded === "sensitive" ? "this page carries a password ceremony, so the live view stays on the build page" : "the live view is on the build page"}</p>${door}</div>`;
+    }
+    const peek =
+      data.peekable === true
+        ? `<p class="meta">what is changing right now</p>` +
+          `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
+          `<p class="meta" id="run-peek-stamp"></p>`
+        : `<p class="meta">the live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
+    const transcript =
+      data.peekable !== true
+        ? ""
+        : liveRun.provider !== "claude"
+          ? `<p class="meta">the live transcript needs the claude harness for now \u2014 this build runs on ${escape(liveRun.provider)}</p>`
+          : `<p class="meta">what the agent is saying · display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
+            `<pre id="live-transcript" class="mono" style="max-height:18rem;overflow:auto;white-space:pre-wrap"></pre>` +
+            `<p class="meta" id="live-transcript-state"></p>`;
+    return `<div class="card attempt-live" data-live-run="${liveRun.id}">${head}${peek}${transcript}${door}</div>`;
+  })();
 
   const contest = data.contest ?? null;
   const contestCard =
@@ -9629,6 +9682,9 @@ function taskBody(data: {
     run.tokensIn === null && run.tokensOut === null
       ? null
       : `${run.tokensIn === null ? "?" : compactCount(run.tokensIn)}/${run.tokensOut === null ? "?" : compactCount(run.tokensOut)} tok`;
+  // Ledger rows (slice 1c): the same row grammar as the portfolio's terminal
+  // ledger — identity, outcome chip, one mono meta run of provider · model ·
+  // duration · tokens · measured-or-unmeasured cost.
   const runs =
     data.runs.length === 0
       ? ""
@@ -9637,9 +9693,10 @@ function taskBody(data: {
           .map(run => {
             const bits = [
               run.provider,
+              run.model,
               minutesOf(run),
               tokensOf(run),
-              run.costUsd !== null ? `$${run.costUsd.toFixed(2)}` : run.tokensIn !== null || run.tokensOut !== null ? "unmeasured $" : null,
+              run.costUsd !== null ? `$${run.costUsd.toFixed(2)}` : run.id === liveRunId ? "unmeasured so far" : "unmeasured",
               run.parentRun !== null ? `↳ of #${run.parentRun}` : null,
             ].filter((bit): bit is string => bit !== null);
             return (
@@ -9651,6 +9708,67 @@ function taskBody(data: {
             );
           })
           .join("\n");
+
+  // ---- the right rail (slice 1c) ------------------------------------------
+  // Dollars stated per attempt set, measured or unmeasured in words — a
+  // missing figure is never summed as $0.
+  const spendWords = (rows: Run[]): string => {
+    if (rows.length === 0) return "no attempt yet";
+    const measured = rows.filter(one => one.costUsd !== null);
+    const dollars = measured.reduce((sum, one) => sum + (one.costUsd ?? 0), 0);
+    const tokens = rows.reduce((sum, one) => sum + (one.tokensIn ?? 0) + (one.tokensOut ?? 0), 0);
+    if (measured.length === rows.length) return `$${dollars.toFixed(2)} · ${compactCount(tokens)} tokens · measured`;
+    if (measured.length === 0) {
+      return tokens > 0
+        ? `unmeasured — ${compactCount(tokens)} tokens, no dollar figure reported`
+        : rows.some(one => one.id === liveRunId)
+          ? "unmeasured so far — the figure lands when the attempt finishes"
+          : "unmeasured — nothing reported";
+    }
+    return `$${dollars.toFixed(2)} measured across ${measured.length}/${rows.length} attempts — ${rows.length - measured.length} unmeasured`;
+  };
+  const thisAttempt = liveRun ?? data.runs[0];
+  const economics =
+    `<p><strong>economics</strong></p>` +
+    `<p class="row"><span class="meta">this attempt</span> <span class="mono">${escape(thisAttempt === undefined ? "no attempt yet" : spendWords([thisAttempt]))}</span></p>` +
+    `<p class="row"><span class="meta">task total</span> <span class="mono">${escape(spendWords(data.runs))}</span></p>`;
+  // "publishes as": push, open-PR, and merge are INDEPENDENT fields on the
+  // grant — each phrased on its own; absent means exactly that.
+  const publishesAs = (() => {
+    const grant = data.grant ?? null;
+    if (data.repo === null) return "no project — no publication grant can apply";
+    if (grant === null) return "no publication grant — built work stays on its branch";
+    return [
+      grant.capabilities.includes("push-branch") ? `may push ${grant.headPrefix}* to ${grant.githubRepo}` : "cannot push",
+      grant.capabilities.includes("open-pr") ? `may open a PR against ${grant.base}${grant.draft ? " (draft)" : ""}` : null,
+      grant.merge === true ? `may merge${grant.mergeMethod == null ? "" : ` (${grant.mergeMethod})`}` : "cannot merge",
+    ].filter((part): part is string => part !== null).join(" · ");
+  })();
+  const publishesRow =
+    `<p><strong>publishes as</strong></p><p class="row"><span class="mono">${escape(publishesAs)}</span></p>`;
+  const approvedScopeCard =
+    scope === null || !approval.approved
+      ? ""
+      : `<div class="card"><p><strong>approved scope</strong></p>` +
+        `<p class="recap">${escape(scope.goal)}</p>` +
+        `<p class="meta"><span class="seal">signs ${shortDigest(scope.digest)}</span> · approved by ${escape(approval.by)} at ${escape(approval.at)}</p></div>`;
+  // Open decisions as the shared partial — answerable inline when the
+  // page is not sensitive; link-only cards otherwise.
+  const openDecisions = data.decisions.filter(one => one.state === "open" || one.state === "expired");
+  const decisionRail =
+    openDecisions.length === 0
+      ? ""
+      : `<p><strong>waits on you</strong></p>` +
+        openDecisions
+          .map(decision =>
+            degraded
+              ? `<div class="decide-card" data-decision-id="${decision.id}"><p class="q">${escape(decision.question)}</p>` +
+                `<p class="meta">${escape(oneLineOf(decision.recap, 160))}</p>` +
+                `<p class="meta"><a href="/d/${decision.id}">the full question →</a></p></div>`
+              : decisionAnswerCard({ ...decision, taskId: task.id, repo: data.repo }, data.csrf, data.now, false),
+          )
+          .join("\n");
+  const rail = [decisionRail, approvedScopeCard, economics, publishesRow].filter(part => part !== "").join("\n");
 
   // Spend by provider, from the same rows — dollars only where a provider
   // measured them, and the unmeasured said in words, never summed as $0.
@@ -9748,8 +9866,11 @@ function taskBody(data: {
 
   const acts = [
     `<h2>acts</h2>`,
+    // A live claim is never disturbed by an operator hold (the hold governs
+    // the NEXT start), and requeue refuses while a claim is live — so the
+    // words say exactly when each becomes real (slice 1c).
     data.claimed
-      ? `<p class="meta">a worker is building this right now — a hold prevents the <em>next</em> start; cancel and requeue wait for the current build to finish</p>`
+      ? `<p class="meta">a worker is building this right now — <em>hold next attempt</em> stops the one after it; retry becomes available after this attempt finishes; cancel waits for the current build to finish</p>`
       : "",
     `<div class="card">`,
     data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined)
@@ -9764,11 +9885,14 @@ function taskBody(data: {
     task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0
       ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
-    act("hold", "hold", `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason" style="width:12rem">`),
+    act("hold", "hold next attempt", `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason" style="width:12rem">`),
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
-    stalled ? act("requeue", "retry — branch and workspace kept") : "",
-    stalled
+    stalled && !data.claimed ? act("requeue", "retry — branch and workspace kept") : "",
+    stalled && !data.claimed
       ? `<p class="meta">resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased</p>`
+      : "",
+    stalled && data.claimed
+      ? `<p class="meta">retry becomes available after this attempt finishes</p>`
       : "",
     `</div>`,
     // Cancel gets the same ceremony as an irreversible answer: armed behind
@@ -9857,9 +9981,12 @@ function taskBody(data: {
       : "",
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
-    // (scope, holds, acts) after. Only trustworthy facts moved up.
+    // (scope, holds, acts) after. Only trustworthy facts moved up. The rail
+    // (slice 1c) rides beside the main column on wide screens and above it
+    // on narrow ones.
+    `<div class="task-layout"><div class="task-main">`,
     contestCard,
-    watchLink,
+    attemptPanel,
     decisions,
     incidents,
     data.publication === null || data.publication === undefined
@@ -9886,16 +10013,35 @@ function taskBody(data: {
     waitsForCard,
     holds,
     acts,
+    `</div><aside class="task-rail">${rail}</aside></div>`,
   ].join("\n");
 }
 
 function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen {
-  // The beat (Phase 2E): while an authorization is open, THIS page being
-  // visible is what "while you watch" means — a 15-second durable beat
-  // carrying the authorization id, paused exactly when the tab hides.
   // The beat moved to the chrome layer (v28): every console page keeps the
   // approver's sessions live; this page no longer carries its own.
-  return screen(`task \u00b7 ${data.task.id}`, taskBody(data), { chrome });
+  //
+  // The sensitive-page composition guard (slice 1c): a live attended
+  // attempt can coexist with an unapproved scope, so this page may carry a
+  // password ceremony. sendScreen() would keep a functional script on such
+  // a page — so the decision is made HERE, from the rendered body itself:
+  // when the body (or the chrome's list pane) shows a password input, the
+  // page re-renders degraded — no poller, static attempt line, link-only
+  // decisions — and ships no functional script at all.
+  const first = taskBody(data);
+  const sensitive =
+    SENSITIVE_INPUT.test(first) || (chrome.listPane !== undefined && SENSITIVE_INPUT.test(chrome.listPane));
+  if (sensitive) return screen(`task \u00b7 ${data.task.id}`, taskBody({ ...data, degraded: "sensitive" }), { chrome });
+  const liveRunId = data.liveRunId ?? null;
+  const liveRun = liveRunId === null ? undefined : data.runs.find(one => one.id === liveRunId);
+  const script =
+    (liveRun !== undefined && data.peekable === true ? regionScript("run-peek", "peek", 15, `/r/${liveRun.id}`) : "") +
+    (liveRun !== undefined && data.peekable === true && liveRun.provider === "claude" ? transcriptScript(`/r/${liveRun.id}`) : "") +
+    (data.csrf !== "" && data.decisions.some(one => one.state === "open" || one.state === "expired") ? decisionAnswerScript() : "");
+  return screen(`task \u00b7 ${data.task.id}`, first, {
+    chrome,
+    ...(script === "" ? {} : { functional: { script, fetches: true } }),
+  });
 }
 
 /**

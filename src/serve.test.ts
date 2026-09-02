@@ -3544,11 +3544,18 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     expect(finished).toContain("data-region-stop");
   });
 
-  test("the task page offers the live build honestly: a plain door without --runner, the watch promise with it", async () => {
+  test("the task page offers the live build honestly: the attempt panel names the build, says the view is off without --runner, embeds it with", async () => {
     const cookie = await login();
     const plain = await (await fetch(url("/t/alive"), { headers: { cookie } })).text();
-    expect(plain).toContain(`open the running build — build #${liveRun}`);
-    expect(plain).not.toContain("watch what is changing right now");
+    // The panel (slice 1c) names the run by its one unambiguous identity
+    // and always carries the door to the full build view.
+    expect(plain).toContain(`build #${liveRun} · night-shift-1 · running`);
+    expect(plain).toContain(`href="/r/${liveRun}">full build view →`);
+    // Without --runner the panel says the view is off — no poller, no
+    // region, and no promise of a live look.
+    expect(plain).toContain("the live file view is off");
+    expect(plain).not.toContain('id="run-peek"');
+    expect(plain).not.toContain("?fragment=peek");
 
     // The run page still shows the section, saying why it is empty — the
     // click must never land on silence.
@@ -3559,15 +3566,18 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     await boot({ localRunner: "night-shift-1" });
     const cookieOn = await login();
     const watching = await (await fetch(url("/t/alive"), { headers: { cookie: cookieOn } })).text();
-    expect(watching).toContain(`watch what is changing right now — build #${liveRun}`);
+    expect(watching).toContain(`build #${liveRun} · night-shift-1 · running`);
+    expect(watching).toContain('id="run-peek"');
+    expect(watching).toContain("watching…");
+    expect(watching).not.toContain("the live file view is off");
     const runOn = await (await fetch(url(`/r/${liveRun}`), { headers: { cookie: cookieOn } })).text();
     expect(runOn).toContain("watching…");
     expect(runOn).not.toContain("the live file view is off");
 
-    // The orphan's task page offers no door at all — there is nothing live.
+    // The orphan's task page has no panel at all — there is nothing live.
     const orphanTask = await (await fetch(url("/t/orphan"), { headers: { cookie: cookieOn } })).text();
-    expect(orphanTask).not.toContain("open the running build");
-    expect(orphanTask).not.toContain("watch what is changing");
+    expect(orphanTask).not.toContain("full build view");
+    expect(orphanTask).not.toContain('class="card attempt-live"');
   });
 
   test("a building card lands on the build itself; a vanished build stays a repair card on the task", async () => {
@@ -6108,5 +6118,260 @@ describe("the queue (portfolio arc, slice 1b): move-to-front resolved server-sid
     expect(html).toContain('<span class="badge">queued</span>');
     expect(html).toContain('<span class="badge">reserved for builder-1</span>');
     expect(html).toContain("being taken — keeps its claim");
+  });
+});
+
+
+describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail, the honest verbs", () => {
+  let store: Store;
+  let server: Server | null = null;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-08-11T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const boot = async (options: Record<string, unknown> = {}) => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main", ...options });
+    await new Promise<void>(resolve => (server as Server).listen(0, "127.0.0.1", resolve));
+    const address = (server as Server).address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  /** A task in the project with a signed scope — the store recomputes
+   * the digest at filing, so the yes goes through the real ceremony. */
+  const sign = (id: string): void => {
+    const agreed = approve(store, id, "alex", new Date(), store.getScope(id)?.digest as string, approverToken);
+    if (!agreed.ok) throw new Error(`approval refused: ${agreed.reason}`);
+  };
+  const seed = (id: string, title: string): number => {
+    store.createTask({ id, title }, T0);
+    const ref = store.refFor("built-in", id, "ours").id;
+    store.placeTask(ref, "/repo/main");
+    store.saveScope({
+      taskId: id, goal: `goal of ${id}`, outOfScope: null, touches: [],
+      proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    sign(id);
+    return ref;
+  };
+
+  /** A live attempt: a real claim under the runner's credential, and its run. */
+  const live = (id: string, ref: number, provider = "claude"): number => {
+    const taken = acquire(store, ref, "night-shift-1", { token: "tok-night-shift-1", now: new Date(), ttlMs: 3_600_000 });
+    if (!taken.ok) throw new Error(`claim refused: ${taken.message}`);
+    const run = store.startRun({
+      taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", provider,
+      branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: new Date(Date.now() - 7 * 60_000),
+    });
+    store.setRunPhase(run, "agent-running");
+    store.setTaskState(id, "running", T0);
+    return run;
+  };
+
+  /** A finished attempt; measured only when cost is given. */
+  const finished = (id: string, ref: number, outcome: "built" | "failed", costUsd: number | null, tokens = { tokensIn: 40_000, tokensOut: 4_000 }): number => {
+    const run = store.startRun({
+      taskRef: ref, leaseId: `lease-${id}-${outcome}-${costUsd ?? "u"}`, runner: "night-shift-1", provider: "claude",
+      branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: T0,
+    });
+    store.stampProviderStart(run, T0);
+    store.recordUsage(run, { ...tokens, ...(costUsd === null ? {} : { costUsd }) });
+    store.finishRun(run, { outcome, ...(outcome === "failed" ? { reason: "agent" } : {}), now: T0 });
+    return run;
+  };
+
+  const railOf = (html: string): string => {
+    const match = /<aside class="task-rail">(.*?)<\/aside>/s.exec(html);
+    if (match === null) throw new Error("no rail on the page");
+    return match[1] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-task-1c-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    register(store, { name: "night-shift-1", host: "here", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok-night-shift-1" });
+  });
+
+  afterEach(async () => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = null;
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the attempt panel names the run; its pollers hit the RUN's fragments, never the task URL", async () => {
+    const ref = seed("t-live", "being built");
+    const run = live("t-live", ref);
+    await boot({ localRunner: "night-shift-1" });
+    const cookie = await login();
+    const html = await (await fetch(url("/t/t-live"), { headers: { cookie } })).text();
+
+    expect(html).toContain(`build #${run} · night-shift-1 · running`);
+    expect(html).toContain(`data-live-run="${run}"`);
+    expect(html).toContain(`href="/r/${run}">full build view →`);
+    // The embedded regions and the scripts that fill them, addressed to
+    // the run's own authenticated fragments — no /t/:id?fragment= proxy.
+    expect(html).toContain('id="run-peek"');
+    expect(html).toContain('id="live-transcript"');
+    expect(html).toContain(`"/r/${run}?fragment=peek"`);
+    expect(html).toContain(`"/r/${run}"+"?fragment=transcript&from="`);
+    expect(html).not.toContain("fetch(location.pathname");
+    expect(html).not.toContain("/t/t-live?fragment");
+    // Honesty lines preserved verbatim from the run page.
+    expect(html).toContain("display only");
+
+    // The Claude-only transcript limitation is kept: a codex build gets the
+    // peek and the stated limit, not an empty transcript.
+    const ref2 = seed("t-codex", "built by codex");
+    const run2 = live("t-codex", ref2, "codex");
+    const codex = await (await fetch(url("/t/t-codex"), { headers: { cookie } })).text();
+    expect(codex).toContain(`build #${run2} · night-shift-1 · running`);
+    expect(codex).toContain("the live transcript needs the claude harness for now");
+    expect(codex).not.toContain('id="live-transcript"');
+    expect(codex).not.toContain("?fragment=transcript");
+
+    // The workbench's selected-task pane carries no run pollers, so the
+    // panel there is the static line with the door — never an empty
+    // region promising a look that cannot land.
+    const pane = await (await fetch(url("/workbench?t=t-live"), { headers: { cookie } })).text();
+    expect(pane).toContain(`build #${run} · night-shift-1 · running`);
+    expect(pane).toContain("the live view is on the build page");
+    expect(pane).toContain(`href="/r/${run}">full build view →`);
+    expect(pane).not.toContain('id="run-peek"');
+    expect(pane).not.toContain(`/r/${run}?fragment=peek`);
+  });
+
+  test("sensitive composition: a password ceremony beside a live attempt — no poller, a static panel, link-only decisions", async () => {
+    const ref = seed("t-both", "live and unsigned");
+    const run = live("t-both", ref);
+    // The scope is rewritten after the claim: the approval no longer binds
+    // it, so the page grows its password ceremony while the run stays live.
+    const signed0 = store.getScope("t-both");
+    if (signed0 === null) throw new Error("no scope");
+    store.saveScope({ ...signed0, goal: "a wider goal", proposedAt: new Date().toISOString() });
+    store.saveDecision(
+      {
+        run, urgency: "blocking", recap: "why it stopped", question: "Which way?",
+        options: [
+          { id: "keep", label: "Keep and backfill", consequence: "cleanup later", reversible: true },
+          { id: "drop", label: "Drop it", consequence: "gone", reversible: false },
+        ],
+        recommendation: "keep",
+      },
+      new Date(),
+    );
+    await boot({ localRunner: "night-shift-1" });
+    const cookie = await login();
+    const html = await (await fetch(url("/t/t-both"), { headers: { cookie } })).text();
+
+    expect(SENSITIVE_INPUT.test(html)).toBe(true);
+    // The panel is a static line with the door; nothing polls.
+    expect(html).toContain(`build #${run} · night-shift-1 · running`);
+    expect(html).toContain(`href="/r/${run}">full build view →`);
+    expect(html).not.toContain('id="run-peek"');
+    expect(html).not.toContain('id="live-transcript"');
+    expect(html).not.toContain("?fragment=peek");
+    expect(html).not.toContain("?fragment=transcript");
+    // The decision renders link-only: the question and its road, no form
+    // that answers, no enhancement script.
+    expect(html).toContain("Which way?");
+    expect(html).toContain("the full question →");
+    expect(html).not.toContain('class="decide-inline"');
+    expect(html).not.toContain("decide-inline");
+    expect(html).not.toContain('action="/d/');
+
+    // The same task, once re-signed, gets the live composition back.
+    sign("t-both");
+    const signed = await (await fetch(url("/t/t-both"), { headers: { cookie } })).text();
+    expect(SENSITIVE_INPUT.test(signed)).toBe(false);
+    expect(signed).toContain('id="run-peek"');
+    expect(signed).toContain('class="decide-option decide-inline"');
+    expect(signed).toContain("decide-inline"); // the inline enhancement rides
+  });
+
+  test("publishes as: push, open-PR, and merge are phrased independently; absent says so", async () => {
+    await boot();
+    const cookie = await login();
+    const words = async (id: string): Promise<string> => {
+      const rail = railOf(await (await fetch(url(`/t/${id}`), { headers: { cookie } })).text());
+      const match = /publishes as<\/strong><\/p><p class="row"><span class="mono">([^<]*)<\/span>/.exec(rail);
+      if (match === null) throw new Error("no publishes-as row");
+      return match[1] as string;
+    };
+    seed("t-none", "no grant");
+    expect(await words("t-none")).toBe("no publication grant — built work stays on its branch");
+
+    const grant = (capabilities: ("push-branch" | "open-pr")[], merge: boolean) =>
+      store.savePublicationGrant(
+        {
+          repo: "/repo/main", githubRepo: "ap9000/main", remote: "origin", headPrefix: "standing-orders/", base: "main",
+          capabilities, selector: "ours", draft: false, grantedBy: "alex",
+          ...(merge ? { merge: true, mergeMethod: "squash" as const } : {}),
+        },
+        new Date(),
+      );
+    grant(["push-branch"], false);
+    expect(await words("t-none")).toBe("may push standing-orders/* to ap9000/main · cannot merge");
+    grant(["push-branch", "open-pr"], false);
+    expect(await words("t-none")).toBe("may push standing-orders/* to ap9000/main · may open a PR against main · cannot merge");
+    grant(["push-branch", "open-pr"], true);
+    expect(await words("t-none")).toBe("may push standing-orders/* to ap9000/main · may open a PR against main · may merge (squash)");
+  });
+
+  test("economics rows say measured or unmeasured on both lines; the approved scope wears its seal in the rail", async () => {
+    const ref = seed("t-money", "costly");
+    finished("t-money", ref, "built", 1.25);
+    await boot();
+    const cookie = await login();
+    let rail = railOf(await (await fetch(url("/t/t-money"), { headers: { cookie } })).text());
+    expect(rail).toContain("this attempt</span> <span class=\"mono\">$1.25 · 44k tokens · measured");
+    expect(rail).toContain("task total</span> <span class=\"mono\">$1.25 · 44k tokens · measured");
+    expect(rail).toContain("approved scope");
+    expect(rail).toContain('<span class="seal">signs ');
+    expect(rail).toContain("approved by alex");
+
+    // A newer unmeasured attempt: this attempt is unmeasured in words, the
+    // total says how many were, and $0 is never invented.
+    finished("t-money", ref, "failed", null);
+    rail = railOf(await (await fetch(url("/t/t-money"), { headers: { cookie } })).text());
+    expect(rail).toContain("this attempt</span> <span class=\"mono\">unmeasured — 44k tokens, no dollar figure reported");
+    expect(rail).toContain("task total</span> <span class=\"mono\">$1.25 measured across 1/2 attempts — 1 unmeasured");
+    expect(rail).not.toContain("$0.00");
+  });
+
+  test("hold is 'hold next attempt'; while an attempt runs, retry says when it becomes available instead of offering a deferred button", async () => {
+    const ref = seed("t-verbs", "with verbs");
+    // Stalled AND live: a failed earlier attempt with an unresolved
+    // incident, and a live claim right now.
+    const failedRun = finished("t-verbs", ref, "failed", null);
+    store.createIncident({ run: failedRun, kind: "attempts-exhausted" }, new Date());
+    live("t-verbs", ref);
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/t/t-verbs"), { headers: { cookie } })).text();
+    expect(html).toContain("<button type=\"submit\">hold next attempt</button>");
+    expect(html).toContain("retry becomes available after this attempt finishes");
+    expect(html).not.toContain('action="/t/t-verbs/requeue"');
+    // The attempts ledger row: chip, then one mono meta run with the
+    // unmeasured word for the live attempt.
+    expect(html).toContain("unmeasured so far");
   });
 });
