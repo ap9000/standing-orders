@@ -26,6 +26,7 @@ export type DoorRefusal =
   | "not-yours"
   | "ceiling-changed"
   | "not-pending"
+  | "session-ended"
   | "turn-not-answered"
   | "not-confirmable"
   | "stale"
@@ -56,15 +57,24 @@ function payloadStrings(payload: Record<string, unknown>, key: string): string[]
  * confirming` CAS; the primitive; `confirming → confirmed | refused`.
  */
 export function confirmMateProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date): DoorOutcome {
-  if (!isVerifiedApprover(who) || !reproveApprover(store, who).ok) {
-    return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
-  }
+  if (!isVerifiedApprover(who)) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
   return store.transact(() => {
+    // Re-proved INSIDE the transaction (ruling 7; slice-2 review finding 2):
+    // a rotation committed between a check outside and the act would let
+    // the old credential win the window.
+    if (!reproveApprover(store, who).ok) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" } as const;
     const proposal = store.getMateProposal(proposalId);
     if (proposal === null) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
     const thread = store.getMateThread(proposal.thread);
     if (thread === null || thread.approver !== who.name) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
-    if (proposal.ceilingDigest !== who.ceilingDigest) {
+    // The session that delegated this spend must still be live, minted by
+    // THIS generation, under THIS ceiling (finding 1): an expired session's
+    // cards are not confirmable from a cookie that outlived it.
+    const session = store.activeMateSession(who.name, now);
+    if (session === null || session.approverGeneration !== who.generation) {
+      return { ok: false, kind: proposal.kind, reason: "session-ended", said: "the mate session this was proposed in has ended — its cards cannot be confirmed" } as const;
+    }
+    if (proposal.ceilingDigest !== who.ceilingDigest || session.ceilingDigest !== who.ceilingDigest) {
       return { ok: false, kind: proposal.kind, reason: "ceiling-changed", said: "the admitted projects changed since this was proposed — it cannot be confirmed" } as const;
     }
     const turn = store.getMateTurn(proposal.turn);
@@ -85,8 +95,9 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
 
 /** The operator declines the card: `pending → dismissed`. */
 export function dismissMateProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date): boolean {
-  if (!isVerifiedApprover(who) || !reproveApprover(store, who).ok) return false;
+  if (!isVerifiedApprover(who)) return false;
   return store.transact(() => {
+    if (!reproveApprover(store, who).ok) return false;
     const proposal = store.getMateProposal(proposalId);
     const thread = proposal === null ? null : store.getMateThread(proposal.thread);
     if (proposal === null || thread === null || thread.approver !== who.name) return false;
@@ -128,9 +139,19 @@ function execute(store: Store, who: VerifiedApprover, proposal: MateProposal, no
   const ref = store.lookupRef(taskId);
   if (ref === null || !admitted(ref.repo)) return refuse("unknown-task", "no such task in your projects");
 
+  // The place the mate saw must be the place the task holds now (round-2
+  // ruling 10; slice-2 review finding 6): the revision alone misses a
+  // neighbour leaving the queue by a state change.
+  const placeUnchanged = (): boolean => {
+    const here = store.queuePosition(taskId);
+    const sawPosition = payloadNumber(payload, "position");
+    const sawColumn = payload["column"];
+    return here !== null && here.position === sawPosition && (here.column ?? null) === (typeof sawColumn === "string" ? sawColumn : null);
+  };
+
   if (kind === "next") {
     const sawRevision = payloadNumber(payload, "queueRevision");
-    if (sawRevision === null || sawRevision !== store.queueRevision()) return refuse("stale", "the queue moved since this was proposed — look again");
+    if (sawRevision === null || sawRevision !== store.queueRevision() || !placeUnchanged()) return refuse("stale", "the queue moved since this was proposed — look again");
     const moved = store.moveTaskNext(taskId, now);
     if (!moved.ok) return refuseFromReason(kind, moved.reason);
     return { ok: true, kind, said: `${taskId} moved to the front of its column`, taskId };
@@ -140,6 +161,7 @@ function execute(store: Store, who: VerifiedApprover, proposal: MateProposal, no
     const sawRevision = payloadNumber(payload, "queueRevision");
     const worker = payload["worker"];
     if (sawRevision === null || (worker !== null && typeof worker !== "string")) return refuse("stale", "this proposal is missing what it saw");
+    if (!placeUnchanged()) return refuse("stale", "the queue moved since this was proposed — look again");
     const moved = store.moveTask({ taskId, toRunner: worker as string | null, beforeTaskId: null, queueRevision: sawRevision }, now);
     if (!moved.ok) return refuseFromReason(kind, moved.reason);
     return { ok: true, kind, said: worker === null ? `${taskId} released to the shared queue` : `${taskId} reserved for ${worker as string}`, taskId };

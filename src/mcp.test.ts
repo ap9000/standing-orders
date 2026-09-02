@@ -413,7 +413,7 @@ describe("the MCP stdio server", () => {
       },
       {
         name: "recap",
-        description: "How things stand per repository in your allowlist, counts and ids: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, finished, failed. Pass `since` (an ISO timestamp) to count only what changed after it.",
+        description: "How things stand per repository in your allowlist, counts and ids: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, finished, failed. Pass `since` (an ISO timestamp) to count only decisions, incidents, and attempts newer than it, to the hour; queued work and scopes awaiting approval always count.",
         inputSchema: { type: "object", properties: { since: { type: "string", maxLength: 30 } }, additionalProperties: false },
       },
       {
@@ -423,7 +423,7 @@ describe("the MCP stdio server", () => {
       },
       {
         name: "queue",
-        description: "One repository's queue by column — the shared column, then each worker's reserved column — each in dispatch order, with the queue revision.",
+        description: "One repository's queue by column — the shared column, then each worker's reserved column — each in dispatch order.",
         inputSchema: { type: "object", properties: { repo: { type: "string", minLength: 1, maxLength: 800 } }, required: ["repo"], additionalProperties: false },
       },
       {

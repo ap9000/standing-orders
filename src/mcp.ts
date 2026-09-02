@@ -209,7 +209,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "recap",
-    description: "How things stand per repository in your allowlist, counts and ids: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, finished, failed. Pass `since` (an ISO timestamp) to count only what changed after it.",
+    description: "How things stand per repository in your allowlist, counts and ids: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, finished, failed. Pass `since` (an ISO timestamp) to count only decisions, incidents, and attempts newer than it, to the hour; queued work and scopes awaiting approval always count.",
     inputSchema: { type: "object", properties: { since: { type: "string", maxLength: 30 } }, additionalProperties: false },
     handle: (ctx, args) => {
       const since = args["since"];
@@ -227,12 +227,16 @@ const TOOLS: Tool[] = [
   },
   {
     name: "queue",
-    description: "One repository's queue by column — the shared column, then each worker's reserved column — each in dispatch order, with the queue revision.",
+    description: "One repository's queue by column — the shared column, then each worker's reserved column — each in dispatch order.",
     inputSchema: { type: "object", properties: { repo: { type: "string", minLength: 1, maxLength: 800 } }, required: ["repo"], additionalProperties: false },
     handle: (ctx, args) => {
       const repo = str(args, "repo", 800);
       if (repo === null || !ctx.who.repos.includes(repo)) return { ok: false, message: "not-found: that repository is not in your allowlist" };
-      return { ok: true, body: { repo, ...queueOver(ctx.store, repo, ctx.now) } as unknown as Json };
+      // The installation-wide revision stays home (slice-2 review, finding
+      // 12): a coordinator cannot move queues, and the counter would tell it
+      // about repos it may not see.
+      const { queueRevision: _revision, ...columns } = queueOver(ctx.store, repo, ctx.now);
+      return { ok: true, body: { repo, ...columns } as unknown as Json };
     },
   },
   {

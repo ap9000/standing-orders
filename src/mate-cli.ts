@@ -59,8 +59,9 @@ function keyFor(config: ChatConfig, databaseFile: string, env: Record<string, st
 }
 
 /** One line per proposal, numbered in thread order, for the operator to name. */
-export function proposalLines(proposals: readonly MateProposal[], repos: readonly string[]): string[] {
+export function proposalLines(proposals: readonly MateProposal[], repos: readonly string[], ordinal: (proposal: MateProposal) => number = (_p) => 0): string[] {
   return proposals.map((one, index) => {
+    const number = ordinal(one) || index + 1;
     const payload = one.payload;
     const t = (key: string): string => (typeof payload[key] === "string" ? (payload[key] as string) : "");
     const repoLabel = (() => {
@@ -83,7 +84,7 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
                   ? `rewrite the scope of ${t("task")} (then approve it: standing-orders task approve ${t("task")})`
                   : `cancel ${t("task")}: ${t("reason")} (arm it yourself: standing-orders task cancel ${t("task")})`;
     const state = one.state === "pending" ? "" : ` [${one.state}${one.outcome !== null && typeof (one.outcome as { said?: unknown }).said === "string" ? `: ${(one.outcome as { said: string }).said}` : ""}]`;
-    return `  ${index + 1}. ${what}${state}`;
+    return `  ${number}. ${what}${state}`;
   });
 }
 
@@ -144,6 +145,12 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   store.sweepStaleMateTurns(now);
   store.sweepMateThreads(now);
   let session = store.activeMateSession(who.name, now);
+  const credentialKey = credentialKeyOf(config.provider, key);
+  if (session !== null && session.credentialKey !== credentialKey) {
+    // A session minted under another provider key cannot be spent by this
+    // one (slice-2 review, finding 9): say so, never loop on `not-yours`.
+    return refuse("key-mismatch", "the live mate session was minted under a different provider key — use that key, or end the session with --end and mint a new one");
+  }
   if (session !== null && session.ceilingDigest !== who.ceilingDigest) {
     store.endMateSession(session.id, who.name, now);
     store.closeMateThreadsFor(who.name, now);
@@ -157,7 +164,6 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     if (!Number.isInteger(hours) || hours < 1 || hours > 24) return refuse("usage", "--hours is a whole number, 1 to 24", MATE_CLI_EXIT.usage);
     const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
     const expiresAt = new Date(now.getTime() + hours * 3_600_000);
-    const credentialKey = credentialKeyOf(config.provider, key);
     const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${expiresAt.toISOString()}\n${who.ceilingDigest}`).digest("hex");
     const id = store.mintMateSession(
       { approver: who.name, approverGeneration: who.generation, credentialKey, ceilingMicrousd, ceilingDigest: who.ceilingDigest, termsDigest, expiresAt },
@@ -173,11 +179,27 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   const thread = store.openMateThread(who.name, who.ceilingDigest, now).thread;
 
   const pendingProposals = (): MateProposal[] => store.listMateProposals(thread.id, ["pending"]);
+  // Ordinals are assigned once per proposal and never reused within this
+  // run (slice-2 review, finding 4): `confirm 2` means the card printed as
+  // 2, whatever the console did to its neighbours meanwhile.
+  const ordinals = new Map<number, number>();
+  const ordinalOf = (proposal: MateProposal): number => {
+    const known = ordinals.get(proposal.id);
+    if (known !== undefined) return known;
+    const next = ordinals.size + 1;
+    ordinals.set(proposal.id, next);
+    return next;
+  };
+  const byOrdinal = (ordinal: number): MateProposal | null => {
+    for (const [id, n] of ordinals) if (n === ordinal) return store.getMateProposal(id);
+    return null;
+  };
   const printProposals = (): void => {
     const rows = pendingProposals();
     if (rows.length === 0) return;
     say("proposals — `confirm N`, `dismiss N`, `open N`:");
-    for (const line of proposalLines(rows, repos)) say(line);
+    for (const row of rows) ordinalOf(row);
+    for (const line of proposalLines(rows, repos, ordinalOf)) say(line);
   };
 
   const turn = async (message: string): Promise<MateTurnOutcome> => {
@@ -190,7 +212,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   };
   const report = (outcome: MateTurnOutcome): void => {
     if (outcome.ok) {
-      emit({ ok: true, turn: outcome.turn, reply: outcome.reply, activity: outcome.activity, steps: outcome.steps, settledMicrousd: outcome.settledMicrousd, proposals: pendingProposals().map(one => ({ id: one.id, kind: one.kind, payload: one.payload })) });
+      emit({ ok: true, turn: outcome.turn, reply: outcome.reply, activity: outcome.activity, steps: outcome.steps, settledMicrousd: outcome.settledMicrousd, proposals: pendingProposals().map(one => ({ id: one.id, ordinal: ordinalOf(one), kind: one.kind, payload: one.payload })) });
       say(`  ${outcome.activity}`);
       say(outcome.reply);
       printProposals();
@@ -224,10 +246,14 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     now = clock();
     const act = /^(confirm|dismiss|open)\s+([0-9]{1,3})$/i.exec(line);
     if (act !== null) {
-      const index = Number(act[2]) - 1;
-      const proposal = pendingProposals()[index];
-      if (proposal === undefined) {
-        say(`no pending proposal ${act[2]}`);
+      for (const row of pendingProposals()) ordinalOf(row);
+      const proposal = byOrdinal(Number(act[2]));
+      if (proposal === null) {
+        say(`no proposal ${act[2]}`);
+        continue;
+      }
+      if (proposal.state !== "pending" && (act[1] as string).toLowerCase() !== "open") {
+        say(`proposal ${act[2]} is ${proposal.state}${proposal.outcome !== null && typeof (proposal.outcome as { said?: unknown }).said === "string" ? `: ${(proposal.outcome as { said: string }).said}` : ""}`);
         continue;
       }
       const verb = (act[1] as string).toLowerCase();

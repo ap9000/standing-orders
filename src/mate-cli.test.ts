@@ -103,7 +103,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
       () => answer([{ type: "tool_use", id: "c1", name: "propose_next", input: { task: "b" } }, { type: "tool_use", id: "c2", name: "propose_hold", input: { task: "a", reason: "later" } }]),
       () => text("Two proposals."),
     );
-    const code = await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--ceiling-usd", "20", "--hours", "2"], ["what next?", "proposals", "open 2", "confirm 1", "confirm 1", "dismiss 1", "confirm 9", "end"]);
+    const code = await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--ceiling-usd", "20", "--hours", "2"], ["what next?", "proposals", "open 2", "confirm 1", "confirm 1", "dismiss 1", "confirm 9", "confirm 2", "end"]);
     expect(code).toBe(0);
     const printed = out();
     expect(printed).toContain("up to $20.00 until 2026-09-02 14:00Z");
@@ -112,10 +112,10 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     expect(printed).toContain("2. hold a: later");
     expect(printed).toContain("a · task a · queued");
     expect(printed).toContain("b moved to the front of its column");
-    // After the first confirm, the numbering re-counts the pending cards: `confirm 1` is now the hold.
+    // Ordinals are stable for the run (slice-2 review, finding 4): 1 stays the confirmed move, 2 stays the hold.
+    expect(printed).toContain("proposal 1 is confirmed: b moved to the front of its column");
+    expect(printed).toContain("no proposal 9");
     expect(printed).toContain("a held: later");
-    expect(printed).toContain("no pending proposal 1");
-    expect(printed).toContain("no pending proposal 9");
     expect(printed).toContain("the session is over and the thread is forgotten");
     const store = openStore(db);
     expect(store.queuePosition("b")?.position).toBe(1);
@@ -123,6 +123,22 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     expect(store.activeMateSession("alex", T0)).toBeNull();
     expect(store.listMateMessages(1, 10)).toEqual([]);
     store.close();
+  });
+
+  test("without --repo the ceiling is the enrolled registry beside the database, never the opened-project history", async () => {
+    const { saveRepos } = await import("./repos.js");
+    await saveRepos(join(dir, "repos.json"), [repo]);
+    script.push(() => text("all quiet in r1."));
+    expect(await run(["chat", "--as", "alex", "--token", token, "--say", "how are things?"])).toBe(0);
+    expect(out()).toContain("over r1 repo");
+    expect(out()).toContain("all quiet in r1.");
+  });
+
+  test("a live session minted under another provider key refuses in words rather than looping", async () => {
+    script.push(() => text("hi"));
+    expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--say", "hi"])).toBe(0);
+    expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--say", "hi", "--json"], [], { ANTHROPIC_API_KEY: "sk-other" })).toBe(3);
+    expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "key-mismatch" });
   });
 
   test("--end ends a live session; a stale card refuses in words; a password-class act points at its ceremony", async () => {

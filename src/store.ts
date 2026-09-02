@@ -6279,6 +6279,12 @@ export class Store {
    */
   revokeDerivedAuthority(approver: string, by: string, now: Date): void {
     const stamp = now.toISOString();
+    // The mate (ruling 10; slice-2 review finding 1): a credential rotation
+    // or a revocation ends every session the old standing minted, its live
+    // turns (charged whole), and its thread with every proposal in it.
+    this.failLiveMateTurnsFor(approver, by === "credential-rotation" ? "rotated" : "revoked", now);
+    this.endMateSessionsFor(approver, by, now);
+    this.closeMateThreadsFor(approver, now);
     const bindings = this.db
       .prepare("SELECT id FROM telegram_binding WHERE approver = ? AND revoked_at IS NULL")
       .all(approver)
@@ -6507,11 +6513,6 @@ export class Store {
         this.reconcileIntentsForMode(String(mode["repo"]), null, now);
       }
       this.revokeDerivedAuthority(name, by, now);
-      // Ruling 10: an approver's standing ends every mate session it minted,
-      // its thread, and any turn in flight (charged whole — finding 5).
-      this.failLiveMateTurnsFor(name, "revoked", now);
-      this.endMateSessionsFor(name, by, now);
-      this.closeMateThreadsFor(name, now);
       return {
         ok: true as const,
         modesRevoked: modes.length,
@@ -12876,7 +12877,9 @@ export class Store {
     now: Date,
   ): number {
     return this.transact(() => {
-      // One live session per approver: minting ends the previous one.
+      // One live session per approver: minting ends the previous one and
+      // fences any turn still in flight under it (slice-2 review, finding 7).
+      this.failLiveMateTurnsFor(args.approver, "superseded", now);
       this.db
         .prepare("UPDATE mate_session SET ended_at = ?, ended_by = ? WHERE approver = ? AND ended_at IS NULL")
         .run(now.toISOString(), args.approver, args.approver);

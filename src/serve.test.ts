@@ -6953,6 +6953,30 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain('class="thread"');
   });
 
+  test("a viewer sees no mint card and cannot mint; a stale-ceiling GET writes nothing", async () => {
+    const cookie = await login();
+    const csrf = csrfFrom(await page(cookie));
+    // A viewer, joined through the real invite road.
+    const invite = store.mintInvite("viewer", "alex", clockNow);
+    const joined = await fetch(url(`/join/${invite.token}`), { method: "POST", headers: { origin: base }, body: new URLSearchParams({ name: "vic", password: "watching-only-1" }), redirect: "manual" });
+    expect(joined.status).toBe(303);
+    const viewerCookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] as string;
+    const viewerPage = await (await fetch(url("/chat"), { headers: { cookie: viewerCookie } })).text();
+    expect(viewerPage).not.toContain('action="/chat/mate/mint"');
+    const viewerCsrf = /name="csrf" value="([0-9a-f]{64})"/.exec(viewerPage)?.[1] ?? csrf;
+    const viewerMint = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { cookie: viewerCookie, origin: base }, body: new URLSearchParams({ csrf: viewerCsrf, "ceiling-usd": "5", hours: "1", token: "watching-only-1" }), redirect: "manual" });
+    expect(viewerMint.status).toBe(403);
+    expect(store.activeMateSession("vic", clockNow)).toBeNull();
+    // The approver's session, minted under a different repo order than the server holds: the page says so and changes nothing.
+    await mint(cookie);
+    const live = store.activeMateSession("alex", clockNow)!;
+    store.handle.prepare("UPDATE mate_session SET ceiling_digest = ? WHERE id = ?").run("f".repeat(64), live.id);
+    const html = await page(cookie);
+    expect(html).toContain("the admitted projects changed since your mate session was minted");
+    expect(html).toContain('action="/chat/mate/mint"');
+    expect(store.activeMateSession("alex", clockNow)).not.toBeNull();
+  });
+
   test("a refused turn is said once on the thread; a bearer caller and a viewer have no mate", async () => {
     const cookie = await login();
     const csrf = await mint(cookie);

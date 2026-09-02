@@ -361,8 +361,9 @@ Agents — which provider and model each phase runs on
       --model <m> --weekly-usd <n> [--daily-turns <n>] --as <you> --token <t>
       the fleet chat engine: a direct no-tool API call; the key rides the
       serve environment, the ceiling is enforced in integer micro-dollars
-  standing-orders chat --as <you> --token <t> [--repo <path>…]
-      [--say "…"] [--end] [--ceiling-usd <n>] [--hours <n>] [--json]
+  standing-orders chat --as <you> [--repo <path>…] [--say "…"] [--end]
+      [--ceiling-usd <n>] [--hours <n>] [--json]   (password at the prompt;
+      --token <t> only for scripts — it lands in shell history)
       the mate: one conversation across your projects, the same thread the
       console shows; the password mints a spending session once; it reads
       and proposes, you confirm cards (confirm N / dismiss N / open N)
@@ -8865,11 +8866,21 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
   const { store, write, json } = context;
   const credentials = await askCredentials(flags, context);
   if (credentials === null) {
-    return fail(write, json, "chat", "usage", "the mate takes `--as <you> --token <t>` — the password mints the session once", EXIT.usage);
+    return fail(write, json, "chat", "usage", "the mate takes your name and password — `--as <you>` and the hidden prompt; `--token <t>` only where a script must (it lands in shell history)", EXIT.usage);
   }
   const ceilingGiven = text(flags, "ceiling-usd");
   const hoursGiven = text(flags, "hours");
-  const repos = context.repoList !== undefined && context.repoList.length > 0 ? context.repoList : store.listProjects().map(one => one.path);
+  // The ceiling: the `--repo` list, or the ENROLLED registry beside the
+  // database (slice-2 review, finding 5) — never the opened-project history.
+  // An unreadable registry refuses rather than inventing a ceiling.
+  let repos: string[];
+  if (context.repoList !== undefined && context.repoList.length > 0) {
+    repos = context.repoList;
+  } else {
+    const loaded = await loadRepos(join(dirname(context.databaseFile), "repos.json")).catch(() => ({ error: "unreadable" }));
+    if ("error" in loaded) return fail(write, json, "chat", "registry", "the enrolled-project registry could not be read — name projects with --repo", EXIT.refused);
+    repos = loaded.repos;
+  }
   const result = await runMateCli({
     store,
     databaseFile: context.databaseFile,

@@ -1793,15 +1793,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       // before, plus the card that mints a session.
       const mateSession = enabled.ok && who.role === "approver" ? store.activeMateSession(who.name, now) : null;
       const principal = enabled.ok && who.role === "approver" ? matePrincipal(who) : null;
-      if (enabled.ok && mateSession !== null && principal !== null) {
-        if (mateSession.ceilingDigest !== principal.ceilingDigest) {
-          store.endMateSession(mateSession.id, who.name, now);
-          store.closeMateThreadsFor(who.name, now);
-          mateSaid.set(who.name, "the admitted projects changed — that session ended; mint a new one");
-        } else {
+      // A session under another ceiling is not continuable from here; a GET
+      // writes nothing (slice-2 review, finding 7) — the mint card below
+      // starts a new conversation, and minting ends the old session.
+      const ceilingStale = enabled.ok && mateSession !== null && principal !== null && mateSession.ceilingDigest !== principal.ceilingDigest;
+      if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
+        {
           const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-          const said = mateSaid.get(who.name) ?? null;
-          mateSaid.delete(who.name);
+          const said = takeMateNote(who.session.csrf, mateSession.id);
           return sendScreen(
             response,
             200,
@@ -1846,7 +1845,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           }),
           openrouterModels: (await chatCatalog())?.map(one => one.id) ?? null,
           csrf: who.session.csrf,
-          problem: url.searchParams.get("said") ?? mateSaid.get(who.name) ?? null,
+          problem:
+            url.searchParams.get("said") ??
+            (ceilingStale ? "the admitted projects changed since your mate session was minted — start a new conversation below; that ends the old one" : null) ??
+            takeMateNote(who.session.csrf, null),
           ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled.config.weeklyCeilingMicrousd) } : {}),
         }),
       );
@@ -2001,9 +2003,26 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   const chatFetcher = options.chatFetcher ?? fetch;
   const chatEnv = options.chatEnv ?? process.env;
-  /** The mate's last non-answer per approver (a refusal or a failed turn),
-   * shown once on the thread; the rows carry everything else. */
-  const mateSaid = new Map<string, string>();
+  /** The mate's last non-answer per BROWSER session (keyed by its csrf —
+   * never by name, so two browsers on one account do not read each other's
+   * notes), bound to the mate turn it came from so a note from a session
+   * that has since ended never shows; bounded; read once. */
+  const mateSaid = new Map<string, { turn: number | null; message: string }>();
+  function noteMate(csrf: string, turn: number | null, message: string): void {
+    if (mateSaid.size >= 500) {
+      const oldest = mateSaid.keys().next().value;
+      if (oldest !== undefined) mateSaid.delete(oldest);
+    }
+    mateSaid.set(csrf, { turn, message });
+  }
+  function takeMateNote(csrf: string, liveSession: number | null): string | null {
+    const noted = mateSaid.get(csrf);
+    if (noted === undefined) return null;
+    mateSaid.delete(csrf);
+    if (noted.turn === null) return noted.message;
+    const turn = store.getMateTurn(noted.turn);
+    return turn !== null && turn.session === liveSession ? noted.message : null;
+  }
   /** The session-layer principal (ruling 3): cookie, csrf, and role were
    * proved at the edge; the row and the generation are re-proved here. */
   function matePrincipal(who: Who & { via: "cookie" }): VerifiedApprover | null {
@@ -4149,7 +4168,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         now,
       );
       store.openMateThread(who.name, verified.who.ceilingDigest, now);
-      mateSaid.delete(who.name);
+      mateSaid.delete(who.session.csrf);
       return redirect(response, "/chat");
     }
     if (url.pathname === "/chat/mate/end") {
@@ -4159,7 +4178,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       store.failLiveMateTurnsFor(who.name, "ended", now);
       store.endMateSessionsFor(who.name, who.name, now);
       store.closeMateThreadsFor(who.name, now);
-      mateSaid.delete(who.name);
+      mateSaid.delete(who.session.csrf);
       return redirect(response, "/chat");
     }
     const mateProposal = /^\/chat\/proposal\/([0-9]{1,15})\/(confirm|dismiss)$/.exec(url.pathname);
@@ -4169,7 +4188,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
       const id = Number(mateProposal[1]);
       if (mateProposal[2] === "dismiss") {
-        if (!dismissMateProposal(store, principal, id, now)) mateSaid.set(who.name, "that proposal was already acted on");
+        if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
         return redirect(response, "/chat");
       }
       const outcome = confirmMateProposal(store, principal, id, now);
@@ -4197,9 +4216,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
         void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, fetcher: chatFetcher, clock })
           .then(outcome => {
-            if (!outcome.ok) mateSaid.set(who.name, outcome.message);
+            if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
-          .catch(() => mateSaid.set(who.name, "the turn failed unexpectedly"));
+          .catch(() => noteMate(who.session.csrf, null, "the turn failed unexpectedly"));
         return redirect(response, "/chat");
       }
       // The password, typed again, on EVERY message (v2 ruling 2): chat is

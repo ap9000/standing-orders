@@ -154,6 +154,40 @@ Codex read commit 749d328 against this spec and found 3 critical, 8 high,
 14. **The tests cover the dangerous cases** named above, including the
     OpenRouter loop and a revocation during the model's answer. (finding 14)
 
+## Round-3 rulings (slices 2–4 review, 2026-09-02: twelve findings, all closed)
+
+1. **A card dies with its session.** `confirmMateProposal` requires a LIVE
+   mate session minted by the principal's generation under the card's
+   ceiling; an expired session's cards refuse `session-ended` although the
+   cookie still stands. A credential rotation runs the same cascade as a
+   revocation (`revokeDerivedAuthority`): live turns fail charged whole,
+   sessions end, threads and proposals are deleted. (finding 1)
+2. **Standing is re-proved INSIDE the confirm transaction.** (finding 2)
+3. **The ceiling digest is ordered.** `rN` is an index; the same repos in
+   another order are another ceiling. (finding 3)
+4. **REPL ordinals are assigned once per run and never reused**; an acted
+   card answers in words by its number. (finding 4)
+5. **The CLI's default ceiling is the enrolled registry** (`repos.json`
+   beside the database), never the opened-project history; an unreadable
+   registry refuses. (finding 5)
+6. **The place is part of the CAS**: `next` and `reserve` confirm only when
+   the task's position and column are those the mate saw, in addition to
+   the revision. (finding 6)
+7. **Minting fences the previous session's in-flight turn** (charged
+   whole); a ceiling change is stated on GET and acted on only by the
+   POST that mints a new session. (finding 7)
+8. **`since` is defined**: decisions, incidents, and attempts newer than
+   it, inclusive to the hour; queued work and scopes awaiting approval are
+   standing and always count. (finding 8)
+9. **A live session under another provider key refuses `key-mismatch`**
+   in words. (finding 9)
+10. **The password belongs at the hidden prompt**; `--token` is documented
+    for scripts only. (finding 10)
+11. **The console's last-said note is keyed by browser session, bound to
+    the turn's session, read once, bounded.** (finding 11)
+12. **Coordinators never see the installation-wide queue revision.**
+    (finding 12)
+
 ## 0. Hard boundaries
 
 - **No new authority.** Every proposal executes through an existing door:

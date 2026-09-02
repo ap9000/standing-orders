@@ -412,7 +412,9 @@ describe("the mate's turn", () => {
     const live = session();
     const narrowed = principal("alex", [INSIDE]);
     expect(narrowed.ceilingDigest).not.toBe(who.ceilingDigest);
-    expect(ceilingDigestOf([OTHER, INSIDE])).toBe(who.ceilingDigest);
+    // Order is part of the ceiling: rN is an index (slice-2 review, finding 3).
+    expect(ceilingDigestOf([OTHER, INSIDE])).not.toBe(who.ceilingDigest);
+    expect(ceilingDigestOf([INSIDE, OTHER])).toBe(who.ceilingDigest);
     expect(await turn("hello", scripted([text("hi")]).fetcher, { who: narrowed, session: live })).toMatchObject({ ok: false, refused: "ceiling-changed" });
     // The thread under the old ceiling closes when a new ceiling opens one, and its pending proposals expire.
     const old = thread();

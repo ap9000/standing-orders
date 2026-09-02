@@ -29,9 +29,11 @@ export type VerifiedApprover = {
   readonly ceilingDigest: string;
 };
 
-/** The chat ceiling digest (fleet chat v13): sorted admitted repos, hashed. */
+/** The mate's ceiling digest: the admitted repos IN ORDER, hashed — `rN`
+ * is an index, so two surfaces naming the same repos in a different order
+ * hold different ceilings (slice-2 review, finding 3). */
 export function ceilingDigestOf(repos: readonly string[]): string {
-  return createHash("sha256").update([...repos].sort().join("\n")).digest("hex");
+  return createHash("sha256").update(repos.join("\n")).digest("hex");
 }
 
 /** Every principal this process minted. Membership IS the brand at runtime. */

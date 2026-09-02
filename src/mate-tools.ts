@@ -168,7 +168,9 @@ export function labelRepos<T>(value: T, label: (index: number) => string): T {
 }
 
 export function recapOver(store: Store, repos: readonly string[], now: Date, since: string | null): Record<string, unknown> {
-  const horizonHours = since === null ? Infinity : Math.max(0, (now.getTime() - Date.parse(since)) / 3_600_000);
+  // Ages arrive rounded to the hour, so the horizon is inclusive by half an
+  // hour: a row newer than `since` is never dropped (finding 8).
+  const horizonHours = since === null ? Infinity : Math.max(0, (now.getTime() - Date.parse(since)) / 3_600_000) + 0.5;
   const snapshot = store.chatSnapshot(repos, now);
   const recent = <T extends { ageHours: number }>(rows: T[]): T[] => rows.filter(one => one.ageHours <= horizonHours);
   const tasks = recent(snapshot.tasks);
@@ -234,7 +236,7 @@ export const MATE_TOOLS: MateTool[] = [
   {
     name: "recap",
     description:
-      "How things stand per project, counts and ids only: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, what finished and what failed. Pass `since` (an ISO timestamp) to count only what changed after it. Call this first when asked how things stand.",
+      "How things stand per project, counts and ids only: what waits on the operator (decisions, incidents, scopes awaiting approval), what runs, what is queued, what finished and what failed. Pass `since` (an ISO timestamp) to count only decisions, incidents, and attempts newer than it, to the hour; queued work and scopes awaiting approval are current standing and always count. Call this first when asked how things stand.",
     inputSchema: schema({ since: { type: "string", maxLength: 30 } }),
     handle: (ctx, args) => {
       const since = args["since"];
