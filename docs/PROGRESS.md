@@ -1,5 +1,30 @@
 # Progress
 
+**2026-09-02 — The mate v3: suggested answers, and proposals over the
+MCP gateway; one review round, ten findings closed.** Spec
+`docs/mate-arc.md` §9, two rule changes stated: the mate (and a
+coordinator) may read a decision's consequences through `get_decision` —
+never the recap or the builder's recommendation — and may then
+`propose_answer`; coordinators gain the seven propose tools over the
+gateway. `6af6f18`: schema v33 (`answer` joins `mate_proposal` by an exact
+copy-rename; `coordinator_proposal`), `src/coordinator-proposals.ts`
+(token re-authenticated inside the transaction, the hourly window shared
+with filing, at most 20 pending per credential, seven-day expiry, expiry
+on revoke), the shared executor behind both confirm doors, the answer
+card (question, every option WITH its consequence, the builder's
+recommendation beside the proposer's pick; an irreversible option
+confirms only with the existing `confirm=yes` field — a checkbox, `confirm
+N yes`, `--yes`), coordinator cards on `/chat` and the task page with
+`POST /proposals/:id/confirm|dismiss`, and `standing-orders proposals`.
+Codex found ten (four high), all closed in the commit after: the executor
+private and self-proving, the window shared both ways, seven days at the
+door, the answer's full context printed in both terminals before any
+confirm, `duplicate` as `already-answered`, reading proved (get_decision in
+an earlier step or earlier on the connection), "open" derived from the
+deadline, union and array arguments parsed at the protocol layer, an
+exact v33 recognizer with a migration test, backslashes refused in
+`return`. Suite 1627.
+
 **2026-09-02 — The mate lands: one conversation across every project,
 from the console and the terminal, four slices, three review rounds,
 forty-one findings closed.** Spec `docs/mate-arc.md` (v2 after a
