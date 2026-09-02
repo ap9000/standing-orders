@@ -63,10 +63,11 @@ scope semantics rather than inventing new defaults:
   (serve.ts:6586), so it can never disappear with workbench's hidden list pane. `Chrome`
   gains an explicit surface-scope field ("all" | "project" | "board-all"), because
   `Chrome.project` alone cannot distinguish `/board?scope=all` (serve.ts:6192).
-- Ownership: it REPLACES the desktop sidebar workspace card, and on mobile the sticky
-  project pill's `/projects` link is REMOVED (the pill either goes away or becomes inert
-  text at that breakpoint) — one visible `/projects` link per breakpoint, and it lives in
-  the scope bar. The "switch project" copy survives verbatim inside the bar so
+- Ownership: it REPLACES the desktop sidebar workspace card. One visible `/projects`
+  link per breakpoint: on desktop it lives in the scope bar; on a phone (≤760px, amended
+  by the 2026-09-01 mobile pass) the scope bar is hidden and the sticky header pill IS
+  the scope row — project name, the three counts, and the link — so the phone header is
+  one row instead of three. The "switch project" copy survives verbatim inside the bar so
   serve.test.ts:1432 keeps passing unmodified.
 - Display + navigation only: the bar's `/projects` link is a GET navigation. Project
   switching remains the existing POST + CSRF flows (`/projects/select` serve.ts:3169,

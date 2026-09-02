@@ -5989,19 +5989,28 @@ const STYLE = `
     .mobile-top {
       display: flex; align-items: center; gap: .5rem; position: sticky; top: 0; z-index: 30;
       background: var(--background); border-bottom: 1px solid var(--border);
-      padding: .5rem .75rem;
+      padding: calc(.375rem + env(safe-area-inset-top, 0rem)) .75rem .375rem;
     }
+    /* One header row: the pill carries scope, counts, and the switch. */
+    .scope-bar { display: none; }
     .mobile-top .brand-mini { font-weight: 600; font-size: .9375rem; text-decoration: none; color: var(--foreground); font-family: var(--font-mono); }
     .mobile-top .project-pill {
-      flex: 1; min-width: 0; display: flex; align-items: center; gap: .375rem;
-      border: 1px solid var(--border); border-radius: 999px; background: var(--card);
-      padding: .375rem .75rem; text-decoration: none; color: var(--foreground);
-      font-size: .875rem; font-weight: 500;
+      flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: .0625rem;
+      border: 1px solid var(--border); border-radius: 1.375rem; background: var(--card);
+      min-height: 2.75rem; padding: .25rem .875rem; text-decoration: none; color: var(--foreground);
+      font-size: .875rem; font-weight: 500; line-height: 1.25;
     }
+    .mobile-top .project-pill:active { background: var(--muted); }
+    .mobile-top .pill-status {
+      display: flex; gap: .5rem; overflow: hidden; white-space: nowrap;
+      font-family: var(--font-mono); font-size: .6875rem; font-weight: 500;
+      color: var(--muted-foreground); font-variant-numeric: tabular-nums;
+    }
+    .mobile-top .pill-status .hot { color: var(--brand); }
     .mobile-top .project-pill .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .mobile-top .mobile-new {
       flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
-      min-height: 2.5rem; padding: 0 .875rem; border-radius: 999px;
+      min-height: 2.75rem; padding: 0 .875rem; border-radius: 999px;
       background: var(--secondary); border: 1px solid var(--border); color: var(--foreground);
       font-weight: 500; font-size: .875rem; text-decoration: none;
     }
@@ -6205,6 +6214,15 @@ const STYLE = `
     .lanes .lane { min-height: 0; }
   }
   .runner-note { width: 100%; }
+  .queue-handle {
+    display: inline-flex; align-items: center; justify-content: center; flex: none;
+    width: 2rem; height: 2rem; margin: -.375rem .125rem -.375rem -.5rem; vertical-align: middle;
+    color: var(--muted-foreground); cursor: grab; user-select: none; touch-action: none; border-radius: calc(var(--radius) - 4px);
+  }
+  .queue-handle svg { width: 1.125rem; height: 1.125rem; }
+  .queue-handle:active { cursor: grabbing; background: var(--muted); }
+  .icon-button, .inline button.icon-button { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 2.75rem; min-width: 2.75rem; padding: 0; }
+  .icon-button svg { width: 1rem; height: 1rem; }
   .queue-card p { margin: 0; }
   .queue-card a { text-decoration: none; }
   .queue-card a:hover { text-decoration: underline; }
@@ -6234,7 +6252,31 @@ button { min-height: 44px; }
   form.card button[type=submit], form > button[type=submit] { width: 100%; }
   input[type=text], input[type=password] { width: 100%; max-width: 100%; box-sizing: border-box; }
   main { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
+  /* A decision option on a phone: the answer is the full-width thumb
+     target; its recommendation and consequence share the line beneath. */
+  .decide-option > button { flex: 0 0 100%; width: 100%; }
+  .decide-option .badge { flex: none; }
+  .decide-option .meta { flex: 1 1 10rem; }
+  /* A queue card's controls read as one row under the id: to-front · reserve (stretching) · move. */
+  .queue-card p.row.meta { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+  .queue-card p.row.meta > .mono { flex: 0 0 100%; }
+  .queue-card .inline { margin: 0; display: inline-flex; align-items: center; gap: .375rem; }
+  .queue-card .inline:last-child { flex: 1 1 auto; min-width: 0; }
+  .queue-card .inline > button[type=submit]:not(.icon-button) { width: auto; }
+  .queue-card .inline select { flex: 1 1 6rem; min-width: 0; width: auto; min-height: 2.75rem; margin: 0; }
+  .queue-card .mono { overflow-wrap: anywhere; }
+  .queue-card .row + .row { margin-top: .5rem; }
+  /* The title sits beside the grip and wraps within its own box; the
+     chips flow after it, never above the name. */
+  .queue-card p.row > a:first-of-type { flex: 1 1 12rem; min-width: 0; }
 }
+.next-pager { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem .75rem; margin: 0 0 .75rem; }
+.next-pager .skip {
+  margin-left: auto; display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem;
+  padding: 0 .875rem; border: 1px solid var(--border); border-radius: 999px;
+  text-decoration: none; color: var(--foreground); background: var(--card);
+}
+.next-pager .skip:hover { border-color: color-mix(in srgb, var(--border) 60%, var(--muted-foreground)); }
 
 /* Motion: only where a human caused the change — navigation, presses,
    overlays. Liveness swaps stay instant; the pulse dot is the one "alive"
@@ -6636,8 +6678,13 @@ function shell(
   const head = [
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8">`,
-    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
+    // viewport-fit=cover is what makes env(safe-area-inset-*) non-zero on a
+    // notched phone; without it the tab bar sits under the home indicator.
+    `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`,
     `<meta name="theme-color" content="#0f171f">`,
+    `<meta name="mobile-web-app-capable" content="yes">`,
+    `<meta name="apple-mobile-web-app-capable" content="yes">`,
+    `<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">`,
     // Live status with zero JavaScript: the page asks the browser to fetch
     // it again. Only ever on read-only briefing pages — a refresh on a page
     // with a form would eat what somebody was typing.
@@ -6679,11 +6726,11 @@ function shell(
   // switching projects stays the POST + CSRF /projects flow.
   const effectiveScope: "all" | "project" | "board-all" =
     chrome.scope ?? (chrome.project === null ? "all" : "project");
-  const scopeStatus = chrome.projectPeek === null || chrome.projectPeek === undefined || effectiveScope !== "project"
+  const scopeCounts = chrome.projectPeek === null || chrome.projectPeek === undefined || effectiveScope !== "project"
     ? ""
-    : `<span class="scope-status">` +
-      (chrome.projectPeek.waiting > 0 ? `<span class="hot">${chrome.projectPeek.waiting} needs you</span>` : `<span>0 needs you</span>`) +
-      `<span>${chrome.projectPeek.running} live</span><span>${chrome.projectPeek.queued} queued</span></span>`;
+    : (chrome.projectPeek.waiting > 0 ? `<span class="hot">${chrome.projectPeek.waiting} needs you</span>` : `<span>0 needs you</span>`) +
+      `<span>${chrome.projectPeek.running} live</span><span>${chrome.projectPeek.queued} queued</span>`;
+  const scopeStatus = scopeCounts === "" ? "" : `<span class="scope-status">${scopeCounts}</span>`;
   // No "scope" label word: in this product "scope" names a task's approved
   // terms — the bar just states which projects the screen is showing.
   const scopeBar =
@@ -6752,11 +6799,13 @@ function shell(
   const mobileTop = [
     `<header class="mobile-top">`,
     `<a class="brand-mini" href="/">s·o</a>`,
-    // Inert on purpose: the scope bar below is the one /projects link in
-    // chrome per breakpoint (portfolio arc §1); the pill just names scope.
-    `<span class="project-pill"><span class="name">${
+    // On a phone the pill IS the scope row (mobile pass): the project's
+    // name, its three counts, and the one /projects link at that
+    // breakpoint — the scope bar hides below 760px so the header is one
+    // row, not three. Desktop keeps the scope bar's link and hides this.
+    `<a class="project-pill" href="/projects"><span class="name">${
       effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "all projects"
-    }</span></span>`,
+    }</span>${scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`}</a>`,
     `<a class="mobile-new" href="/tasks/new">+ task</a>`,
     `</header>`,
   ].join("");
@@ -8919,6 +8968,18 @@ function projectsPage(
  * front of a partition, so the handler resolves it (slice 1b, fix 1). */
 const QUEUE_FRONT = "__TOP__";
 
+/** Drawn, one stroke weight, like the tab bar's icons — never a glyph. */
+const GRIP_ICON =
+  `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">` +
+  `<circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/>` +
+  `<circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>`;
+const TO_FRONT_ICON =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">` +
+  `<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>`;
+/** The drag grip: a 2rem touch-sized handle that owns its touches
+ * (touch-action: none), so a finger on it drags instead of scrolling. */
+const GRIP_HANDLE = `<span class="queue-handle" aria-hidden="true">${GRIP_ICON}</span>`;
+
 function queueCard(one: { id: string; title: string; approved: boolean; blockers: number; taken: boolean }, csrf: string, revision: number, queueRevision: number, workers: { name: string; retired: boolean }[], column: string): string {
   // Presentation over queueScoped()'s shape only: state, scope, blockers,
   // and the reservation owner. Money is not in this query and is not
@@ -8942,7 +9003,7 @@ function queueCard(one: { id: string; title: string; approved: boolean; blockers
     : `<form method="post" action="/queue/move" class="inline">${hidden}` +
       `<input type="hidden" name="column" value="${escape(column)}">` +
       `<input type="hidden" name="before" value="${QUEUE_FRONT}">` +
-      `<button type="submit" aria-label="move to the front">▲</button></form>` +
+      `<button type="submit" class="icon-button" aria-label="move to the front">${TO_FRONT_ICON}</button></form>` +
       `<form method="post" action="/queue/move" class="inline">${hidden}` +
       `<select name="column" aria-label="reserve for">` +
       `<option value="anyone"${column === "anyone" ? " selected" : ""}>anyone</option>` +
@@ -8950,7 +9011,7 @@ function queueCard(one: { id: string; title: string; approved: boolean; blockers
       `</select><button type="submit">move</button></form>`;
   return (
     `<div class="card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}">` +
-    `<p class="row">${one.taken ? "" : `<span class="queue-handle" style="cursor:grab;user-select:none" aria-hidden="true">≡ </span>`}` +
+    `<p class="row">${one.taken ? "" : `${GRIP_HANDLE}`}` +
     `<a href="${taskHref(one.id)}">${escape(one.title)}</a>${chips}</p>` +
     `<p class="row meta"><span class="mono">${escape(one.id)}</span> ${controls}</p>` +
     `</div>`
@@ -9056,7 +9117,7 @@ function fleetBody(
       .map(
         one =>
           `<div class="lane-card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}">` +
-          `<p class="row">${one.taken ? "" : `<span class="queue-handle" style="cursor:grab;user-select:none" aria-hidden="true">≡ </span>`}` +
+          `<p class="row">${one.taken ? "" : `${GRIP_HANDLE}`}` +
           `<a href="${taskHref(one.id)}">${escape(one.title)}</a></p>` +
           `<p class="row meta"><span class="mono">${escape(one.id)}</span>${chip(one.repo)}` +
           `${one.approved ? "" : ` <span class="badge">unapproved scope</span>`}` +
@@ -9079,7 +9140,7 @@ function fleetBody(
     .map(
       one =>
         `<div class="lane-card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}">` +
-        `<p class="row">${one.taken ? "" : `<span class="queue-handle" style="cursor:grab;user-select:none" aria-hidden="true">≡ </span>`}` +
+        `<p class="row">${one.taken ? "" : `${GRIP_HANDLE}`}` +
         `<a href="${taskHref(one.id)}">${escape(one.title)}</a></p>` +
         `<p class="row meta"><span class="mono">${escape(one.id)}</span>${chip(one.repo)}` +
         `${one.approved ? "" : ` <span class="badge">unapproved scope</span>`}` +
@@ -10965,8 +11026,8 @@ function nextPage(chrome: Chrome, data: {
 
   const skipHref = `/next?skip=${encodeURIComponent([...data.skipped, item.key].join(","))}`;
   const header =
-    `<p class="meta">${data.remaining === 1 ? "the last thing waiting on you" : `1 of ${data.remaining} waiting on you`}` +
-    ` · <a href="${skipHref}">not now — next \u2192</a></p>`;
+    `<p class="meta next-pager"><span>${data.remaining === 1 ? "the last thing waiting on you" : `1 of ${data.remaining} waiting on you`}</span>` +
+    `<a class="skip" href="${skipHref}">not now — next \u2192</a></p>`;
 
   let card = "";
   if (item.kind === "decision") {

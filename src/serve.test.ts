@@ -5688,10 +5688,13 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     expect(queueBar).toContain("main");
     expect(queueBar).not.toContain("all projects");
 
-    // The mobile pill is inert — the scope bar owns the chrome's one
-    // /projects link per breakpoint.
-    expect(home).toContain('<span class="project-pill">');
-    expect(home).not.toContain('<a class="project-pill"');
+    // One visible /projects link per breakpoint (portfolio arc §1, amended
+    // by the mobile pass): the scope bar's on desktop, the header pill's on
+    // a phone — where the scope bar hides and the pill carries the name,
+    // the counts, and the switch. Exactly those two links live in chrome.
+    expect(home).toContain('<a class="project-pill" href="/projects">');
+    expect(home).toContain('<span class="pill-status">');
+    expect((home.match(/href="\/projects"/g) ?? []).length).toBe(2);
 
     // The nav regroup: portfolio ADJACENT to inbox, above the work group
     // (commit-1 review, finding 5) — order, not mere presence.
@@ -6396,5 +6399,102 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // The attempts ledger row: chip, then one mono meta run with the
     // unmeasured word for the live attempt.
     expect(html).toContain("unmeasured so far");
+  });
+});
+
+
+describe("the phone shell (mobile pass): one header row, drawn controls, thumb-sized acts", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-08-11T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-phone-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the head declares the phone: safe-area viewport and standalone capability on both platforms", async () => {
+    const cookie = await login();
+    const html = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">');
+    expect(html).toContain('<meta name="mobile-web-app-capable" content="yes">');
+    expect(html).toContain('<meta name="apple-mobile-web-app-capable" content="yes">');
+  });
+
+  test("the header pill names the scope: project with counts when one is open, 'all projects' on the portfolio", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    const pill = /<a class="project-pill" href="\/projects">(.*?)<\/a>/s.exec(home)?.[1] ?? "";
+    expect(pill).toContain('<span class="name">main</span>');
+    expect(pill).toMatch(/<span class="pill-status">.*needs you.*live.*queued.*<\/span>/s);
+    const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
+    const wide = /<a class="project-pill" href="\/projects">(.*?)<\/a>/s.exec(portfolio)?.[1] ?? "";
+    expect(wide).toContain('<span class="name">all projects</span>');
+    expect(wide).not.toContain("pill-status");
+  });
+
+  test("queue cards carry drawn controls — a grip and a to-front arrow — never a glyph standing in for an icon", async () => {
+    store.createTask({ id: "t-q", title: "queued work" }, T0);
+    store.placeTask(store.refFor("built-in", "t-q").id, "/repo/main");
+    const cookie = await login();
+    const html = await (await fetch(url("/queue"), { headers: { cookie } })).text();
+    const card = /<div class="card queue-card" data-task="t-q".*?<\/div>/s.exec(html)?.[0] ?? "";
+    expect(card).toContain('<span class="queue-handle" aria-hidden="true"><svg');
+    expect(card).toContain('<button type="submit" class="icon-button" aria-label="move to the front"><svg');
+    expect(card).not.toContain("≡");
+    expect(card).not.toContain("▲");
+    expect(card).not.toContain('style="cursor:grab');
+    // The fleet's cards share the same grip.
+    const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
+    expect(fleet).toContain('<span class="queue-handle" aria-hidden="true"><svg');
+    expect(fleet).not.toContain("≡");
+  });
+
+  test("the one-at-a-time screen's 'not now' is a real control, beside its count", async () => {
+    store.createTask({ id: "t-n", title: "asks a question" }, T0);
+    const ref = store.refFor("built-in", "t-n").id;
+    store.placeTask(ref, "/repo/main");
+    const run = store.startRun({ taskRef: ref, leaseId: "lease-n", runner: "b1", branch: "standing-orders/t-n", worktree: "/pool/t-n", now: T0 });
+    store.saveDecision(
+      {
+        run, urgency: "blocking", recap: "why it stopped", question: "Which way?",
+        options: [{ id: "a", label: "A", consequence: "a", reversible: true }, { id: "b", label: "B", consequence: "b", reversible: true }],
+        recommendation: "a",
+      },
+      T0,
+    );
+    const cookie = await login();
+    const html = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    expect(html).toMatch(/<p class="meta next-pager"><span>[^<]*waiting on you<\/span><a class="skip" href="\/next\?skip=[^"]*">not now — next →<\/a><\/p>/);
   });
 });
