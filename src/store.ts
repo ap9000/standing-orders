@@ -6260,6 +6260,17 @@ export class Store {
               WHERE task_id = ?`,
           )
           .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis === undefined ? null : basis.modeDigest, taskId);
+        if (changed.changes > 0) {
+          // A fresh yes lifts the stale-approval hold and closes its page
+          // (setup review): the approval is what was stale, and it is new.
+          const ref = this.db.prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
+          if (ref !== undefined) {
+            this.db.prepare("DELETE FROM hold WHERE owner_kind = 'backoff' AND owner_id = ?").run(`stale:${Number(ref["id"])}`);
+            this.db
+              .prepare("UPDATE notification SET resolved_at = ? WHERE dedupe_key LIKE ? AND resolved_at IS NULL")
+              .run(now.toISOString(), `stale-approval:${Number(ref["id"])}:%`);
+          }
+        }
         return changed.changes > 0;
       }) === true
     );

@@ -6347,9 +6347,11 @@ async function runWatchLoop(args: {
           built++;
           progress(`watch: pass ${ticks} did work (${new Date().toISOString()})`);
         } else if (code === EXIT.failed) {
-          tickDidWork = true;
+          // A broken pass is NOT work (setup review): it must not re-spin
+          // the loop — the next look waits for the tick cadence or a wake,
+          // and the line says WHAT broke, from the pass's own envelope.
           brokeCount++;
-          progress(`watch: pass ${ticks} broke something — the run records have it`);
+          progress(`watch: pass ${ticks} — ${brokenWords(quiet)}`);
         }
       }
 
@@ -6443,6 +6445,19 @@ async function runWatchLoop(args: {
     return { ok: false, reason: "lease-lost", detail: `the watch lease for ${runner} on ${repo} stopped renewing — another process may have taken this worker over`, ticks, built, broke: brokeCount };
   }
   return { ok: true, ticks, built, broke: brokeCount, incarnation };
+}
+
+/** The failed and skipped entries of a quiet tick, as one line. */
+function brokenWords(lines: readonly string[]): string {
+  try {
+    const envelope = JSON.parse(lines[lines.length - 1] ?? "") as { dispatched?: { id: string; outcome: string; reason?: string; detail?: string }[] };
+    const failed = (envelope.dispatched ?? []).filter(one => one.outcome === "failed");
+    if (failed.length === 0) return "a pass broke something — the run records have it";
+    const named = failed.slice(0, 3).map(one => `${one.id} failed (${one.reason ?? "?"}${one.detail === undefined ? "" : `: ${one.detail}`})`);
+    return `${named.join("; ")}${failed.length > 3 ? `; and ${failed.length - 3} more` : ""}`;
+  } catch {
+    return "a pass broke something — the run records have it";
+  }
 }
 
 async function watchCommand(

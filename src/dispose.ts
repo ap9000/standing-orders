@@ -405,5 +405,40 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
   // invariants the dispatcher was supposed to uphold.
   if (leaseId !== undefined) release(store, leaseId, clock());
   store.finishRun(runId, { outcome: "refused", reason: result.reason, now: clock() });
+  if (result.reason === "stale-approval") {
+    // A deterministic refusal (setup review): the approval no longer
+    // matches the routing, and nothing about the next pass changes that.
+    // Retrying every pass wrote a thousand refused runs in minutes. So:
+    // release, record, HOLD the task under a backoff the approval door
+    // lifts, and page once per approval — the operator re-approves (or
+    // reconfigures the build agent) and the hold goes with the yes.
+    if (leaseId !== undefined) release(store, leaseId, clock());
+    store.finishRun(runId, { outcome: "refused", reason: "stale-approval", now: clock() });
+    const now = clock();
+    const scope = store.getScope(taskId);
+    store.holdOwned(
+      {
+        taskRef,
+        ownerKind: "backoff",
+        ownerId: `stale:${taskRef}`,
+        reason: "stale-approval — the approval no longer matches how builds are routed; approve the scope again on its page",
+        until: new Date(now.getTime() + 6 * 60 * 60_000),
+      },
+      now,
+    );
+    store.enqueueNotification(
+      {
+        dedupeKey: `stale-approval:${taskRef}:${scope?.approvedDigest ?? "none"}`,
+        kind: "stale-approval",
+        pushClass: "attention",
+        link: `/t/${encodeURIComponent(taskId)}`,
+        subject: `${taskId}: its approval no longer matches the build routing — approve it again`,
+        body: `${result.message}\nNothing runs on it until the scope is approved again; the hold lifts with the yes.`,
+      },
+      now,
+    );
+    return { kind: "skipped", reason: "stale-approval" as never };
+  }
+
   return { kind: "invariant", reason: result.reason };
 }
