@@ -1,6 +1,6 @@
 {
   "name": "standing-orders",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "A control plane for unattended coding agents — queue tasks, walk away, come back to pull requests. Agents build in leased worktrees, never touch your default branch, and interrupt you only for decisions that need a human.",
   "directories": {
     "doc": "docs"
