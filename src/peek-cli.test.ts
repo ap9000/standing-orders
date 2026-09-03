@@ -6,6 +6,8 @@ import { openStore, type Store } from "./store.js";
 import { openLiveLog, renderTranscriptLines } from "./live.js";
 import { composeFrame, elapsedWords, openInTmux, snapshotLiveRuns, stageWord } from "./peek-cli.js";
 import { runOperate, EXIT } from "./operate.js";
+import { acquire } from "./claim.js";
+import { register } from "./runner.js";
 
 const T0 = new Date("2026-09-03T01:00:00.000Z");
 
@@ -20,14 +22,22 @@ describe("peek: the terminal view over live agents", () => {
     store = openStore(db);
     store.createTask({ id: "t-1", title: "Harden webhook retries" }, T0);
     store.createTask({ id: "t-2", title: "Find out why login flakes", deliverable: "report" }, T0);
+    // The runner gate: registered, repo-bound, token-proved — a claim is real.
+    store.placeTask(store.refFor("built-in", "t-1").id, "/repo/main");
+    store.placeTask(store.refFor("built-in", "t-2").id, "/repo/main");
+    register(store, { name: "night-shift-1", host: "host", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok" });
   });
   afterEach(() => {
     store.close();
     rmSync(root, { recursive: true, force: true });
   });
 
-  const openRun = (task: string, role: "builder" | "scout", provider = "claude"): number =>
-    store.startRun({ taskRef: store.refFor("built-in", task).id, leaseId: `lease-${task}`, runner: "night-shift-1", role, provider, branch: `standing-orders/${task}`, worktree: `/pool/${task}`, now: T0 });
+  const openRun = (task: string, role: "builder" | "scout", provider = "claude"): number => {
+    const ref = store.refFor("built-in", task).id;
+    const taken = acquire(store, ref, "night-shift-1", { token: "tok", now: T0, ttlMs: 60 * 60_000 });
+    if (!taken.ok) throw new Error("claim failed");
+    return store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role, provider, branch: `standing-orders/${task}`, worktree: `/pool/${task}`, now: T0 });
+  };
 
   test("every provider's stream renders transcript lines: text and the kind of tool, never contents", () => {
     expect(renderTranscriptLines({ type: "thread.started", thread_id: "x" })).toEqual(["the agent session started"]);

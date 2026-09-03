@@ -10721,8 +10721,10 @@ export class Store {
     }
   }
 
-  /** Every run still open, oldest first, with its task's id and title — what `peek` watches. */
-  liveRuns(): (Run & { taskId: string; title: string; repo: string | null })[] {
+  /** Every run still open UNDER A LIVE LEASE, oldest first, with its task's
+   * id and title — what `peek` watches. An orphaned null-outcome run (a
+   * crashed worker's) is the reconciler's, not a pane. */
+  liveRuns(now: Date): (Run & { taskId: string; title: string; repo: string | null })[] {
     return this.db
       .prepare(
         `SELECT run.*, task_ref.external_id AS task_id, task_ref.repo AS task_repo, task.title AS task_title
@@ -10730,9 +10732,10 @@ export class Store {
            JOIN task_ref ON task_ref.id = run.task_ref
            LEFT JOIN task ON task_ref.backend = ? AND task.id = task_ref.external_id
           WHERE run.outcome IS NULL
+            AND EXISTS (SELECT 1 FROM claim WHERE claim.lease_id = run.lease_id AND claim.released_at IS NULL AND claim.expires_at > ?)
           ORDER BY run.id`,
       )
-      .all(BUILT_IN)
+      .all(BUILT_IN, now.toISOString())
       .map(row => ({
         ...readRun(row as Record<string, unknown>),
         taskId: String(row["task_id"]),

@@ -1540,6 +1540,53 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/peek") {
+      // The multiplexer in the console (peek): one pane per live run the
+      // ceiling admits, each fed by the run page's own transcript poller
+      // (the byte-offset JSON protocol — text into textContent, never
+      // markup). The pane SET is re-checked on a slow cadence; when it
+      // changes the page reloads rather than swapping pollers mid-flight.
+      const live = store.liveRuns(clock()).filter(run => runVisible(run));
+      if (url.searchParams.get("fragment") === "1") {
+        return respond(response, 200, "application/json", JSON.stringify({ runs: live.map(run => run.id) }));
+      }
+      const now = clock();
+      const panes = live.map(run => {
+        const window = options.localRunner === undefined ? null : readLiveWindow(evidenceRoot, run.id, 0);
+        const tail = window !== null && window.ok ? window.text.split("\n").filter(one => one !== "").slice(-40).join("\n") : "";
+        const stage = run.phase !== null ? run.phase.replace(/-/g, " ") : run.providerStartedAt === null ? "preparing workspace" : "the agent is working";
+        return [
+          `<section class="card peek-pane" data-run="${run.id}">`,
+          `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> <a href="${taskHref(run.taskId)}"><strong>${escape(run.title)}</strong></a>${projectChip(run.repo)} ` +
+            `<span class="right meta mono">${escape(run.runner)} \u00b7 ${escape(run.role)} \u00b7 ${escape(stage)} \u00b7 ${escape(relativeAge(run.startedAt, now))}</span></p>`,
+          options.localRunner === undefined
+            ? `<p class="meta">the transcript is readable on the machine that runs the worker \u2014 start the console there with <code>standing-orders up</code></p>`
+            : `<pre class="recap plan-doc live-pane" id="live-transcript-${run.id}" data-initial-offset="0">${escape(tail)}</pre><p class="meta" id="live-transcript-${run.id}-state"></p>`,
+          `</section>`,
+        ].join("\n");
+      });
+      const script =
+        (options.localRunner === undefined ? "" : live.map(run => transcriptScript(`/r/${run.id}`, `live-transcript-${run.id}`)).join("")) +
+        `(function(){var seen=${JSON.stringify(live.map(run => run.id))};function check(){if(document.hidden){setTimeout(check,12000);return;}` +
+        `fetch("/peek?fragment=1",{redirect:"manual",cache:"no-store"}).then(function(r){return r.ok?r.json():null;})` +
+        `.then(function(d){if(d&&Array.isArray(d.runs)&&JSON.stringify(d.runs)!==JSON.stringify(seen)){location.reload();return;}setTimeout(check,12000);})` +
+        `.catch(function(){setTimeout(check,12000);});}setTimeout(check,12000);})();`;
+      return sendScreen(
+        response,
+        200,
+        screen(
+          "peek",
+          [
+            `<h1>peek</h1>`,
+            panes.length === 0
+              ? `<p class="meta">no agent is working right now \u2014 this page follows them the moment one starts</p>`
+              : panes.join("\n"),
+          ].join("\n"),
+          { chrome: chromeFor(project, "runs"), functional: { script, fetches: true } },
+        ),
+      );
+    }
+
     if (url.pathname === "/fleet") {
       // Cross-project by design: which agent is on which project is the
       // question, so this screen is a survey — reads are still filtered
@@ -1621,6 +1668,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ["/workbench", "portfolio", "every project and live build in one place"],
           ["/routines", "routines", "scheduled tracks and their firings"],
           ["/done", "done", "what finished recently"],
+          ["/peek", "peek", "every live agent, what it is doing right now"],
           ["/activity", "activity", "the full ledger, newest first"],
           ["/review", "review queue", "published work waiting on review"],
           ["/tasks", "task list", "everything, filterable"],
@@ -1741,7 +1789,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             ? undefined
             : regionScript("run-facts", "facts", 10) +
               (options.localRunner === undefined ? "" : regionScript("run-peek", "peek", 15)) +
-              (options.localRunner === undefined || found.provider !== "claude" ? "" : transcriptScript()),
+              (options.localRunner === undefined ? "" : transcriptScript()),
           options.localRunner !== undefined,
           running,
           // Editor links (arc 6): three statements align or nothing renders —
@@ -7007,10 +7055,10 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
  * request in flight, visibility-paused, stops on `final`, and a `replaced`
  * answer restarts from zero with a visible line — never a silent re-read.
  */
-function transcriptScript(path?: string): string {
+function transcriptScript(path?: string, elementId = "live-transcript"): string {
   const base = path === undefined ? "location.pathname" : JSON.stringify(path);
   return (
-    `(function(){var out=document.getElementById("live-transcript");if(!out)return;` +
+    `(function(){var out=document.getElementById(${JSON.stringify(elementId)});if(!out)return;` +
     `var from=0,busy=false,stopped=false;` +
     `function near(){return out.scrollHeight-out.scrollTop-out.clientHeight<40;}` +
     `function go(){if(stopped)return;if(busy||document.hidden){later();return;}busy=true;` +
@@ -7023,7 +7071,7 @@ function transcriptScript(path?: string): string {
     `var stick=near();` +
     `if(typeof d.text==="string"&&d.text!==""){out.appendChild(document.createTextNode(d.text));if(stick)out.scrollTop=out.scrollHeight;}` +
     `if(typeof d.nextOffset==="number"&&d.nextOffset>=from){from=d.nextOffset;}` +
-    `if(d.final===true){stopped=true;var m=document.getElementById("live-transcript-state");` +
+    `if(d.final===true){stopped=true;var m=document.getElementById(${JSON.stringify(`${elementId}-state`)});` +
     `if(m)m.textContent="the agent finished — the record on this page is the story";return;}` +
     `later();})` +
     `.catch(function(){busy=false;later();});}` +
@@ -11366,7 +11414,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: R
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
-  return screen("builds", [`<h1>builds</h1><p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
+  return screen("builds", [`<h1>builds <a class="badge" href="/peek">peek at the live ones \u2192</a></h1><p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
 }
 
 /** What the run page shows of the terminal diff — verified bytes or a named problem, never silence. */

@@ -7244,3 +7244,75 @@ describe("the first account (setup review): sign up on the login page with the p
     await new Promise<void>(resolve => bare.close(() => resolve()));
   });
 });
+
+describe("/peek: every live agent in the console (peek)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken }), redirect: "manual" });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-serve-peek-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), localRunner: "night-shift-1" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("one pane per live run with its stage and transcript tail, a poller per pane, and the set of runs as a fragment; signed-out is a redirect", async () => {
+    const { openLiveLog } = await import("./live.js");
+    store.createTask({ id: "t-peek", title: "Harden webhook retries" }, T0);
+    const ref = store.refFor("built-in", "t-peek").id;
+    store.placeTask(ref, "/repo/main");
+    register(store, { name: "night-shift-1", host: "host", capacity: 2, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-peek" });
+    const taken = acquire(store, ref, "night-shift-1", { token: "tok-peek", now: new Date(), ttlMs: 60 * 60_000 });
+    if (!taken.ok) throw new Error("claim failed");
+    const run = store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role: "builder", provider: "codex", branch: "standing-orders/t-peek", worktree: "/pool/t-peek", now: new Date() });
+    store.setRunPhase(run, "agent-running");
+    const log = openLiveLog(evidenceRoot, run);
+    log?.observe({ type: "item.completed", item: { type: "agent_message", text: "Reading the retry loop now." } });
+    log?.observe({ type: "item.completed", item: { type: "command_execution", command: "cat secrets" } });
+    log?.close();
+
+    const anonymous = await fetch(`${base}/peek`, { redirect: "manual" });
+    expect(anonymous.status).toBe(303);
+
+    const cookie = await login();
+    const page = await (await fetch(`${base}/peek`, { headers: { cookie } })).text();
+    expect(page).toContain("Harden webhook retries");
+    expect(page).toContain("night-shift-1 · builder · agent running");
+    expect(page).toContain("Reading the retry loop now.");
+    expect(page).toContain("→ running a command");
+    expect(page).not.toContain("cat secrets");
+    expect(page).toContain(`id="live-transcript-${run}"`);
+    expect(page).toContain(`"/r/${run}"+"?fragment=transcript`);
+
+    const fragment = await (await fetch(`${base}/peek?fragment=1`, { headers: { cookie } })).json();
+    expect(fragment).toEqual({ runs: [run] });
+
+    // The run page of a non-claude run carries the transcript poller too.
+    const runPage = await (await fetch(`${base}/r/${run}`, { headers: { cookie } })).text();
+    expect(runPage).toContain("fragment=transcript");
+
+    store.finishRun(run, { outcome: "built", now: new Date() });
+    const empty = await (await fetch(`${base}/peek`, { headers: { cookie } })).text();
+    expect(empty).toContain("no agent is working right now");
+  });
+});

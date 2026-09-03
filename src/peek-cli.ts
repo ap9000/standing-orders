@@ -70,7 +70,7 @@ export function elapsedWords(startedAt: string, now: Date): string {
 /** One snapshot of every live run — the envelope's body, and the TUI's first frame. */
 export function snapshotLiveRuns(store: Store, root: string, now: Date, tails: Map<number, Tail> = new Map()): PeekPane[] {
   const panes: PeekPane[] = [];
-  for (const run of store.liveRuns()) {
+  for (const run of store.liveRuns(now)) {
     const previous = tails.get(run.id) ?? { offset: 0, lines: [], state: "not-yet" as const };
     const tail = advanceTail(root, run.id, previous);
     tails.set(run.id, tail);
@@ -92,7 +92,6 @@ export function snapshotLiveRuns(store: Store, root: string, now: Date, tails: M
   for (const id of [...tails.keys()]) {
     if (!panes.some(one => one.runId === id)) tails.delete(id);
   }
-  void now;
   return panes;
 }
 
