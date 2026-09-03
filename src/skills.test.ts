@@ -117,7 +117,7 @@ describe("binary-served guides (arc 5)", () => {
 
   test("skills list names every guide, text and envelope alike", async () => {
     expect(await main(["skills", "list"], write)).toBe(0);
-    for (const name of ["operating", "runner", "steering", "external-work", "tournaments"]) {
+    for (const name of ["operating", "runner", "steering", "external-work", "tournaments", "console"]) {
       expect(out()).toContain(name);
     }
     lines = [];

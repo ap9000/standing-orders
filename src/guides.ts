@@ -66,7 +66,14 @@ ${AUTHORITY_LINE}
   \`task assign <id> --runner <name> | --anyone\` (reserve for one worker).
 - See state: \`ready\`, \`task list\`, \`task show <id>\`, \`brief\` — all
   \`--json\`. \`ready\` rows carry \`reservedFor\`; each worker takes its own
-  reserved work first, then the shared queue.
+  reserved work first, then the shared queue. \`peek --json\` is a snapshot
+  of every live agent with its stage and transcript tail.
+- File a scout: \`task add "<question>" --report --json\` — a read-only
+  investigation whose deliverable is a report on the task page, never a
+  branch; its scope still needs the operator's yes.
+- When the person asks how to do something in the console or the
+  terminal, answer from the \`console\` guide (\`skills get console\`):
+  exact screens, exact verbs, and which acts are theirs alone.
 - Take work as a registered runner: \`claim <id> --runner <name> --token
   <t>\` → \`heartbeat <lease>\` while working → \`release <lease>\`. A
   replayed claim (same \`--key\`) answers with \`replayed: true\` — do not
@@ -221,7 +228,92 @@ covers scope and tournament together, on a joint fingerprint.
 `,
 };
 
-export const GUIDES: readonly Guide[] = [operating, runner, steering, externalWork, tournaments];
+
+const console_: Guide = {
+  name: "console",
+  title: "The console, the terminal, and how to point a person at them",
+  oneLiner: "every screen and verb an operator has, so you can say exactly where to click or what to run",
+  content: `# Pointing the operator
+
+You may be asked "how do I…" by the person who runs this plane. Answer
+with the exact screen or command below. Everything that decides — approve,
+answer, pick, mint, publish — is THEIRS; you describe the road, you never
+walk it for them.
+
+${AUTHORITY_LINE}
+
+## Install and sign-in
+
+- One command, inside the repository: \`npx standing-orders up\` (or
+  \`bunx standing-orders up\`; Node 22.13+ must be installed — Bun's own
+  runtime cannot host it). \`up\` mints the first login and prints it (saved
+  beside the database as \`up-login.txt\`), registers the machine as a
+  worker, runs the console, opens the browser. Later starts ask for the
+  password at most once and remember it on that machine.
+- From a phone over a tailnet: add \`--host 0.0.0.0 --allow-host
+  <name>:4180\`.
+- Console only, no worker: \`standing-orders serve --repo .\`. With no
+  account it prints a six-digit setup code and the login page offers
+  "create the first account". A second person joins by an invite link
+  from the people page — never another setup code.
+- If the inbox shows "Nothing will build: no worker is answering", tell
+  them to run \`standing-orders up\` on the machine that should build.
+
+## The console's screens (what each one is for)
+
+- **inbox** (\`/\`): everything waiting on a person — questions to answer,
+  scopes to approve, stalled tasks to retry, gaps to fill. \`/next\` walks
+  the same queue one card at a time.
+- **board** (\`/board\`): five lanes — needs you · queued · waiting ·
+  building · done recently. \`/queue\` is the dispatch order per worker
+  (drag to reorder, drag onto a worker to reserve).
+- **task page** (\`/t/<id>\`): the approval ceremony when a scope waits,
+  the acts bar (plan first, hold, retry, build next, cancel), scope,
+  attempts, decisions, and — for a scout task — the report with one-tap
+  follow-ups.
+- **build page** (\`/r/<run>\`): one attempt: stage, live transcript,
+  evidence, the diff, comments. **peek** (\`/peek\`): every live run at
+  once, transcripts following.
+- **chat** (\`/chat\`): the mate — a conversation across every project
+  that only PROPOSES (file, reorder, reserve, hold, rewrite a scope,
+  cancel, answer a decision); each proposal is a card the person
+  confirms. Coordinators over the MCP gateway propose the same way, and
+  their cards appear under "proposed by coordinators".
+- **settings** (\`/settings\`): alerts to this device, provider keys,
+  which messaging service pages, the Telegram bot token, and the Telegram
+  digest cadence (away mode).
+- Under **more**: activity, done, task list, review queue, routines,
+  fleet, system, requirements, people, operating mode.
+
+## The terminal's verbs worth naming to a person
+
+- \`standing-orders peek\`: one pane per live agent (digits focus, \`q\`
+  leaves); \`peek <run>\` follows one; \`peek --tmux\` opens a tmux window
+  per run.
+- \`standing-orders chat\`: the mate in the terminal (\`--say "…"\` for one
+  turn); \`standing-orders proposals\` lists and confirms coordinator
+  proposals.
+- \`standing-orders task add "<title>" --report\`: a SCOUT task — a
+  read-only investigation whose deliverable is a report, never a branch.
+  Approve its scope like any other; the report lands on the task page.
+- \`standing-orders bridge telegram digest --every 2h | --off\`: hold
+  routine facts and send them as one digest; decisions and anything that
+  needs a person now still page at once.
+- \`standing-orders decide <id> --choose <option>\`, \`task approve <id>
+  --digest <d> --yes\`: the operator's own ceremonies — you may name them,
+  never run them.
+
+## Words the console uses, so you use the same ones
+
+needs you · queued · waiting · building · done · failed; a *scope* is the
+contract a person approves; a *decision* is a typed question an agent
+parked; a *hold* pauses the next attempt; a *stale approval* means the
+approval no longer matches how builds are routed — approving again fixes
+it; a *scout* delivers a report; the *mate* proposes and never acts.
+`,
+};
+
+export const GUIDES: readonly Guide[] = [operating, runner, steering, externalWork, tournaments, console_];
 
 export function guideNamed(name: string): Guide | null {
   return GUIDES.find(one => one.name === name) ?? null;

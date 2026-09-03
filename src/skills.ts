@@ -39,7 +39,7 @@ export function skillContent(): string {
   if (operating === null) throw new Error("the operating guide is missing from the build");
   return `---
 name: standing-orders
-description: Operate this repository's unattended work queue via the standing-orders CLI. Use when asked to file or inspect tasks, check what is ready or blocked, read run results and briefs, or see what awaits a human decision. Not for pushing, merging, or approving anything — approvals are the operator's, always.
+description: Operate this repository's unattended work queue via the standing-orders CLI, and explain its console. Use when asked to file or inspect tasks (including scout tasks that deliver a report), check what is ready or blocked, peek at live agents, read run results and briefs, see what awaits a human decision, or tell the operator which screen or command does what. Not for pushing, merging, or approving anything — approvals are the operator's, always.
 ---
 
 <!-- ${MANAGED_MARK} -->

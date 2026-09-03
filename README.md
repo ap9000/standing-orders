@@ -42,6 +42,11 @@ password once and reuses everything.
 To reach it from your phone over a tailnet:
 `standing-orders up --host 0.0.0.0 --allow-host <your-machine>.ts.net:4180`.
 
+If the inbox says **Nothing will build: no worker is answering**, run
+`standing-orders up` on the machine that should build; `standing-orders
+runner register <name> --repo <path> --token-file <path>` is the long-hand
+road for a worker on another machine.
+
 If you would rather bring your own account name and password, start the
 console alone with `standing-orders serve --repo .`: with no account yet it
 prints a six-digit setup code, and the login page offers **create the
@@ -266,6 +271,25 @@ for (editing files, running a command, searching the code), never file
 contents or command lines, with credential-shaped lines redacted at
 write. Digits focus one pane, `a` shows them all, `q` leaves. Outside a
 terminal, or with `--json`, it prints one snapshot and exits.
+
+## The mate, and the gateway
+
+`/chat` in the console (or `standing-orders chat` in the terminal) is one
+conversation across every project you serve. The mate reads the fleet
+and **only proposes**: file a task (or a scout), move one to the front,
+reserve it for a worker, hold it, rewrite a scope, cancel, or suggest an
+answer to a parked decision. Every proposal is a card you confirm, with
+every consequence and the builder's recommendation shown beside the
+mate's pick; a scope the mate wrote never seals under an operating mode.
+It spends against a ceiling you set per session and never sees a path, a
+digest, or an account name.
+
+Coding agents you run elsewhere reach the same plane through the MCP
+gateway: `standing-orders mcp` serves a coordinator credential you mint,
+bound to named repositories, that can read the fleet, file quarantined
+proposals, and propose the same seven acts — `standing-orders proposals`
+and the task page are where you confirm them. Both roads keep the one
+rule: the plane never acts on a model's word.
 
 ## The console
 
