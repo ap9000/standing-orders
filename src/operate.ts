@@ -40,7 +40,7 @@ import {
   type Store,
   type TaskState,
 } from "./store.js";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, updateRepos, loadRepos } from "./repos.js";
@@ -314,6 +314,8 @@ External trackers — build what a tracker nominates, under local approvals
                                         and watches every named repository
                                         (none named: the current one).
                                         --no-open skips the browser;
+                                        --host 0.0.0.0 --allow-host name:port
+                                        reaches a phone over a tailnet;
                                         --runner names the worker;
                                         --editor vscode links changed files
                                         to VS Code on the device you browse
@@ -3943,6 +3945,7 @@ async function startConsole(options: {
   localRunner?: string;
   poolRoot: string;
   allowedHosts?: string[];
+  setupCode?: string;
   repos?: string[];
   projectRoots?: string[];
   publicUrl?: string;
@@ -3961,6 +3964,7 @@ async function startConsole(options: {
     ...(options.localRunner === undefined ? {} : { localRunner: options.localRunner }),
     poolRoot: options.poolRoot,
     ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
+    ...(options.setupCode === undefined ? {} : { setupCode: options.setupCode }),
     ...(options.repos === undefined ? {} : { repos: options.repos }),
     ...(options.projectRoots === undefined ? {} : { projectRoots: options.projectRoots }),
     ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
@@ -4018,10 +4022,14 @@ async function serveCommand(
     return fail(write, json, "serve", "usage", "--editor needs --runner <name> — links bind to the worktrees this machine's runner owns", EXIT.usage);
   }
 
+  // The first-account road (setup review): with no approver, the login
+  // page offers to create one, gated by this code — printed below, once.
+  const setupCode = store.listApprovers().length === 0 ? String(randomInt(100_000, 1_000_000)) : undefined;
   const console_ = await startConsole({
     context,
     host,
     port,
+    ...(setupCode === undefined ? {} : { setupCode }),
     ...(localRunner === undefined ? {} : { localRunner }),
     ...(publicUrl === undefined ? {} : { publicUrl }),
     ...(editor === undefined ? {} : { editorLinks: "vscode" as const }),
@@ -4034,9 +4042,14 @@ async function serveCommand(
   const server = console_.server;
   const actual = console_.port;
   if (json) {
-    write(envelopeJson({ ok: true, command: "serve", host, port: actual }));
+    write(envelopeJson({ ok: true, command: "serve", host, port: actual, ...(setupCode === undefined ? {} : { setupCode }) }));
+  } else if (setupCode !== undefined) {
+    write(`The console is on http://${host}:${actual}/`);
+    write(`No account yet. Open http://${host === "0.0.0.0" ? "localhost" : host}:${actual}/login and enter setup code ${setupCode} to create the first one.`);
+    write("Plain HTTP: keep it on localhost or a tailnet, and put TLS in front for anything else.");
+    write("Ctrl-C stops it.");
   } else {
-    write(`Decisions at http://${host}:${actual}/ — sign in with your approver name and token.`);
+    write(`The console is on http://${host}:${actual}/ — sign in with your username and password.`);
     write("Plain HTTP: keep it on localhost or a tailnet, and put TLS in front for anything else.");
     write("Ctrl-C stops it.");
   }
@@ -6714,6 +6727,13 @@ async function upCommand(
   if (runnerFlag !== undefined && !validRunnerName(runnerFlag)) {
     return fail(write, json, "up", "usage", `a worker name is 1–${RUNNER_NAME_MAX} characters with no control characters`, EXIT.usage);
   }
+  // --host / --allow-host (setup review): `up` reaches a phone over a
+  // tailnet exactly as `serve` does, so one process is the whole install.
+  const hostFlag = text(flags, "host") ?? "127.0.0.1";
+  if (!/^[A-Za-z0-9.:-]{1,253}$/.test(hostFlag)) {
+    return fail(write, json, "up", "usage", "--host is an address or a name", EXIT.usage);
+  }
+  const allowFlag = text(flags, "allow-host");
 
   const progress = (line: string): void => {
     if (json) process.stderr.write(`${line}\n`);
@@ -6883,8 +6903,9 @@ async function upCommand(
   try {
     console_ = await startConsole({
       context,
-      host: "127.0.0.1",
+      host: hostFlag,
       port,
+      ...(allowFlag === undefined ? {} : { allowedHosts: allowFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
       localRunner: runnerName,
       poolRoot: pool,
       repos,

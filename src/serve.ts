@@ -171,6 +171,14 @@ export type ServeOptions = {
   /** Extra Host values this server answers as (a Tailscale name, a LAN ip:port). */
   allowedHosts?: readonly string[];
   /**
+   * The first-account road (setup review): while NO approver exists, the
+   * login page offers "create the first account", gated by this code —
+   * printed once by the process that started the server, never stored.
+   * Five wrong codes close the road until the server restarts. The moment
+   * an approver exists, the page is the ordinary sign-in.
+   */
+  setupCode?: string;
+  /**
    * Where the Telegram bot token lives when set from here. Present = the
    * settings card renders; absent = no settings surface at all.
    */
@@ -380,6 +388,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
   const clock = options.clock ?? (() => new Date());
   const sessions = new Map<string, Session>();
+  /** Wrong setup codes left before the first-account road closes. */
+  let setupAttemptsLeft = 5;
   // The /join road's limiter (D6; Codex people round 1, finding 4):
   // PER-SOURCE buckets so one stranger cannot drain sign-up capacity for
   // everyone, under a global ceiling that bounds total KDF work. Spent
@@ -607,7 +617,55 @@ export function createDecisionServer(options: ServeOptions): Server {
     const who = identify(request, touch);
 
     if (url.pathname === "/login" && method === "GET") {
+      if (options.setupCode !== undefined && store.listApprovers().length === 0) {
+        return page(response, 200, signupPage(null, setupAttemptsLeft));
+      }
       return page(response, 200, loginPage(null));
+    }
+    if (url.pathname === "/signup" && method === "POST") {
+      // Only while the table is empty, only with the printed code, only
+      // five tries: the bootstrap door underneath is atomic, so two first
+      // visitors serialize to one owner.
+      if (options.setupCode === undefined || store.listApprovers().length > 0) {
+        return page(response, 409, loginPage("an account already exists — sign in"));
+      }
+      if (setupAttemptsLeft <= 0) {
+        return page(response, 403, signupPage("too many wrong codes — restart the server to get a fresh code", 0));
+      }
+      const body = await form(request);
+      const code = (body.get("code") ?? "").trim();
+      const name = (body.get("name") ?? "").trim();
+      const password = body.get("password") ?? "";
+      const given = Buffer.from(code.padEnd(64, " "), "utf8");
+      const wanted = Buffer.from(options.setupCode.padEnd(64, " "), "utf8");
+      if (code === "" || !timingSafeEqual(given, wanted)) {
+        setupAttemptsLeft -= 1;
+        return page(response, 403, signupPage("that is not the setup code the server printed", setupAttemptsLeft));
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+        return page(response, 400, signupPage("a username is letters, digits, dots, dashes — up to 64", setupAttemptsLeft));
+      }
+      if (password.length < 8) {
+        return page(response, 400, signupPage("a password is at least 8 characters", setupAttemptsLeft));
+      }
+      const made = store.bootstrapApproverIfNone(name, hashPassword(password), clock());
+      if (!made.ok) return page(response, 409, loginPage("an account already exists — sign in"));
+      const authenticated = authenticateAccount(store, name, password);
+      if (authenticated === null || !authenticated.ok) return page(response, 500, loginPage("the account was created but could not sign in — try again"));
+      const id = randomBytes(32).toString("hex");
+      sessions.set(id, {
+        name,
+        csrf: randomBytes(32).toString("hex"),
+        role: authenticated.role,
+        generation: authenticated.generation,
+        createdAt: Date.now(),
+        sawBoardAt: null,
+        lastSeen: Date.now(),
+        project: defaultProject,
+        projectRevision: 1,
+      });
+      response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`);
+      return redirect(response, "/");
     }
     if (url.pathname === "/login" && method === "POST") {
       const body = await form(request);
@@ -7399,7 +7457,31 @@ function loginPage(problem: string | null): string {
     `<button type="submit">sign in</button>`,
     "</form>",
     `</div>`,
-    `<p class="login-foot">no account? one is created where the server runs:<br><code>standing-orders approver add &lt;name&gt; --password &hellip;</code></p>`,
+    `<p class="login-foot">your login was shown when the console was first started, and saved beside its database as <code>up-login.txt</code>.<br>no account? ask whoever runs this console for an invite link.</p>`,
+    `</div></div>`,
+  ].join("\n"), { nav: false });
+}
+
+/** The first-account page (setup review): shown only while no approver exists. */
+function signupPage(problem: string | null, attemptsLeft: number): string {
+  return shell("standing-orders", [
+    `<div class="login-viewport"><div class="login-shell">`,
+    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
+    `<div class="login-card">`,
+    `<p><strong>create the first account</strong></p>`,
+    `<p class="meta">this console has no accounts yet. The terminal that started it printed a setup code; enter it here with the username and password you want.</p>`,
+    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
+    attemptsLeft <= 0
+      ? ""
+      : [
+          `<form method="post" action="/signup">`,
+          `<label>setup code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus></label>`,
+          `<label>username<input type="text" name="name" autocomplete="username"></label>`,
+          `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
+          `<button type="submit">create account and sign in</button>`,
+          "</form>",
+        ].join("\n"),
+    `</div>`,
     `</div></div>`,
   ].join("\n"), { nav: false });
 }

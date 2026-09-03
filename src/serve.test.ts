@@ -7168,3 +7168,79 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     expect(anonymous.status).toBe(401);
   });
 });
+
+describe("the first account (setup review): sign up on the login page with the printed code", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-serve-signup-"));
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), setupCode: "424242" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("no accounts: the login page offers to create one; a wrong code refuses; the right code creates it and signs in; then the road is closed", async () => {
+    const first = await (await fetch(`${base}/login`)).text();
+    expect(first).toContain("create the first account");
+    expect(first).toContain('action="/signup"');
+
+    const wrong = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "000000", name: "alex", password: "correct horse battery" }), redirect: "manual" });
+    expect(wrong.status).toBe(403);
+    expect(store.listApprovers()).toHaveLength(0);
+
+    const short = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "alex", password: "short" }), redirect: "manual" });
+    expect(short.status).toBe(400);
+
+    const made = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "alex", password: "correct horse battery" }), redirect: "manual" });
+    expect(made.status).toBe(303);
+    const cookie = (made.headers.get("set-cookie") ?? "").split(";")[0] as string;
+    expect(cookie).toMatch(/=[0-9a-f]{64}$/);
+    expect(store.listApprovers().map(one => one.name)).toEqual(["alex"]);
+    const home = await fetch(`${base}/`, { headers: { cookie }, redirect: "manual" });
+    expect(home.status).toBe(200);
+
+    // The road is closed the moment an account exists.
+    const again = await (await fetch(`${base}/login`)).text();
+    expect(again).not.toContain("create the first account");
+    expect(again).toContain("sign in");
+    const second = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "mallory", password: "correct horse battery" }), redirect: "manual" });
+    expect(second.status).toBe(409);
+    expect(store.listApprovers()).toHaveLength(1);
+  });
+
+  test("five wrong codes close the road until restart", async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const wrong = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "111111", name: "x", password: "correct horse battery" }), redirect: "manual" });
+      expect(wrong.status).toBe(403);
+    }
+    const closed = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "x", password: "correct horse battery" }), redirect: "manual" });
+    expect(closed.status).toBe(403);
+    expect(store.listApprovers()).toHaveLength(0);
+    const page = await (await fetch(`${base}/login`)).text();
+    expect(page).not.toContain('action="/signup"');
+  });
+
+  test("a server started without a setup code never offers sign-up", async () => {
+    const bare = createDecisionServer({ store, evidenceRoot, clock: () => new Date() });
+    await new Promise<void>(resolve => bare.listen(0, "127.0.0.1", resolve));
+    const address = bare.address();
+    const url = typeof address === "object" && address !== null ? `http://127.0.0.1:${address.port}` : "";
+    const page = await (await fetch(`${url}/login`)).text();
+    expect(page).not.toContain("create the first account");
+    const refused = await fetch(`${url}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "x", password: "correct horse battery" }), redirect: "manual" });
+    expect(refused.status).toBe(409);
+    await new Promise<void>(resolve => bare.close(() => resolve()));
+  });
+});

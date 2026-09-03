@@ -20,10 +20,33 @@ interrupted only for decisions that genuinely need a human.**
 
 </div>
 
+## Install
+
+```sh
+npm install -g standing-orders
+cd ~/code/your-app
+standing-orders up                     # console + worker, in one process
+```
+
+`up` prints your login once (and saves it beside the database as
+`up-login.txt`), opens the console in your browser, registers this machine
+as a worker, and watches the repository. Sign in with that login; from
+then on the console is the product. Starting it again later asks for your
+password once and reuses everything.
+
+To reach it from your phone over a tailnet:
+`standing-orders up --host 0.0.0.0 --allow-host <your-machine>.ts.net:4180`.
+
+If you would rather bring your own account name and password, start the
+console alone with `standing-orders serve --repo .`: with no account yet it
+prints a six-digit setup code, and the login page offers **create the
+first account** — enter the code, pick a username and password, and you are
+in. A second person joins by invite link from the people page, never by
+another setup code.
+
 ```sh
 npx standing-orders demo               # a seeded sandbox — see it working in 90 seconds, zero spend
 npx standing-orders                    # what's in flight across your repos — read-only, zero config
-npx standing-orders serve --repo .     # the whole queue, phone-first, on a local console
 npx standing-orders daemon install …   # the unattended loop, as an OS service — no crontab
 ```
 
