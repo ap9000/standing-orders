@@ -971,6 +971,15 @@ export function createDecisionServer(options: ServeOptions): Server {
           cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
           wizard: wizardSteps(now),
+          worker: (() => {
+            // The one fact the inbox must never hide (install review): with
+            // no worker answering, nothing here will ever build, and every
+            // approval below is a promise nobody is there to keep.
+            const runners = store.listRunners().filter(one => one.retiredAt === null);
+            const answering = runners.filter(one => runnerAlive(one, now));
+            const lastHeard = runners.map(one => one.heartbeatAt).sort().at(-1) ?? null;
+            return { answering: answering.length, registered: runners.length, lastHeard };
+          })(),
           now,
         }),
       );
@@ -7557,6 +7566,8 @@ function inboxPage(chrome: Chrome, data: {
   gaps: Gap[];
   /** The first-run checklist; null once the installation has succeeded once. */
   wizard: { done: boolean; title: string; detail: string }[] | null;
+  /** Whether any worker is answering right now — said at the top when none is. */
+  worker: { answering: number; registered: number; lastHeard: string | null };
   now: Date;
 }): Screen {
   /** The row's project, worn openly in the roll-up — null is UNPLACED,
@@ -7674,9 +7685,19 @@ function inboxPage(chrome: Chrome, data: {
         ).join(" \u00b7 ") +
         `</p></div>`;
 
+  const noWorker =
+    data.worker.answering > 0
+      ? ""
+      : `<div class="problem"><strong>Nothing will build: no worker is answering.</strong> ` +
+        (data.worker.registered === 0
+          ? `No machine is registered as a worker yet. `
+          : `${data.worker.registered} registered, last heard ${data.worker.lastHeard === null ? "never" : escape(when(data.worker.lastHeard))}. `) +
+        `On the machine that should build, run <span class="mono">standing-orders up</span> \u2014 it registers that machine and runs the worker beside the console. Approvals below wait until then.</div>`;
+
   return screen("inbox", [
     `<h1>inbox</h1>`,
     `<p class="meta">everything that waits on you \u2014 empty means the fleet is working</p>`,
+    noWorker,
     wizard,
     empty ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
     empty && data.wizard === null ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",

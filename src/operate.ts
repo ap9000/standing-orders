@@ -6697,9 +6697,26 @@ async function resolveUpApprover(
     passwordFile = loginFile;
   } else if (selected !== null && canPrompt) {
     const { askHidden } = await import("./prompt.js");
+    let remembered: string | null = null;
     for (let attempt = 1; attempt <= 3 && !verified; attempt += 1) {
       const typed = await askHidden(`password for ${selected} (${attempt}/3): `);
-      if (typed !== "" && authenticateApprover(store, selected, typed).ok) verified = true;
+      if (typed !== "" && authenticateApprover(store, selected, typed).ok) {
+        verified = true;
+        remembered = typed;
+      }
+    }
+    // Ask once, ever (install review): a login `up` just verified is
+    // written beside the database exactly as a fresh install's would have
+    // been — 0600, durable, this machine only — so the next start needs
+    // nothing typed. An account that predates `up` joins the same road.
+    if (verified && remembered !== null && readLoginFile(loginFile) === null) {
+      try {
+        writeLoginFileDurably(loginFile, selected, remembered);
+        passwordFile = loginFile;
+        notes.push(`remembered your login on this machine in ${UP_LOGIN_FILE} (owner-only) — the next \`up\` asks for nothing`);
+      } catch {
+        notes.push(`could not save your login beside the database — the next \`up\` will ask again`);
+      }
     }
     if (!verified) {
       notes.push(

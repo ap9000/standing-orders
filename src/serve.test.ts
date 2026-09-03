@@ -7316,3 +7316,52 @@ describe("/peek: every live agent in the console (peek)", () => {
     expect(empty).toContain("no agent is working right now");
   });
 });
+
+describe("the inbox says when nothing will build (install review)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken }), redirect: "manual" });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-serve-worker-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date() });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("no worker registered, a stale worker, and an answering worker each say the right thing", async () => {
+    const cookie = await login();
+    let inbox = await (await fetch(`${base}/`, { headers: { cookie } })).text();
+    expect(inbox).toContain("Nothing will build: no worker is answering.");
+    expect(inbox).toContain("No machine is registered as a worker yet.");
+    expect(inbox).toContain("standing-orders up");
+
+    register(store, { name: "old-1", host: "h", capacity: 1, repos: ["/repo/main"], now: new Date(Date.now() - 30 * 24 * 60 * 60_000), newToken: () => "tok-old" });
+    inbox = await (await fetch(`${base}/`, { headers: { cookie } })).text();
+    expect(inbox).toContain("Nothing will build: no worker is answering.");
+    expect(inbox).toContain("1 registered, last heard");
+
+    store.touchRunner("old-1", new Date());
+    inbox = await (await fetch(`${base}/`, { headers: { cookie } })).text();
+    expect(inbox).not.toContain("Nothing will build");
+  });
+});
