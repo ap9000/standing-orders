@@ -60,6 +60,62 @@ npx standing-orders                    # what's in flight across your repos — 
 npx standing-orders daemon install …   # the unattended loop, as an OS service — no crontab
 ```
 
+## Getting started
+
+Two roads to the same plane. Both start with `standing-orders up` running
+in the repository, which is the console and the worker in one process.
+
+### In the console
+
+1. **Sign in** with the login `up` printed. You land on the **inbox**:
+   everything that waits on you, and nothing else.
+2. **File a task** with **+ new task**: a title and a goal in plain words.
+   Tick **scout** if you want a report instead of a branch — a read-only
+   investigation that answers the goal as a question.
+3. **Approve it.** The task page opens on the approval ceremony: the exact
+   scope you are signing, the provider and model it will run on, and your
+   password. Nothing spends a token until this yes.
+4. **Watch it build.** The **board** moves the card to *building*; the
+   card's own page shows the stage and the live transcript; **peek**
+   (`/peek`, or *peek at the live ones →* on the builds page) shows every
+   live agent at once.
+5. **Answer when asked.** An agent that hits a judgement call parks a typed
+   decision — question, options, consequences, which are reversible. It
+   arrives in the inbox, on `/next`, and on your phone if Telegram is
+   paired; one tap answers it and the build resumes.
+6. **Collect the result.** A build lands in *done recently* with its diff;
+   a scout's report lands on its task page with follow-ups you can file
+   in one tap. Publishing to a branch and a pull request happens only
+   under a publication grant whose terms you approved on the **system**
+   page.
+
+Everything else is under **more**: the activity ledger, the review queue,
+routines (standing orders that file themselves on a schedule), the fleet,
+people (invite a second approver), the operating mode (a signed, expiring
+envelope that pre-approves your own filings), and **chat** — the mate, one
+conversation across every project, which only ever proposes.
+
+### In the terminal
+
+```sh
+standing-orders task add "Give outbound webhooks a bounded retry policy" --id retries --repo .
+standing-orders task scope retries --goal "Exponential backoff, dead-letter after 24h, no payload changes"
+standing-orders task show retries --json          # the scope's digest is what you sign
+standing-orders task approve retries --as you --digest <digest> --yes   # asks for your password
+
+standing-orders peek                               # one pane per live agent; q leaves
+standing-orders decide <id> --choose <option>      # answer a parked decision
+standing-orders task show retries                  # attempts, outcome, where the branch is
+
+standing-orders task add "Why does the login test flake?" --id flaky --report   # a scout
+standing-orders chat --say "what is waiting on me across every project?"       # the mate
+```
+
+Every command takes `--json` and answers with one envelope; every mutation
+takes `--key` so a retry never files twice. `standing-orders --help` and
+`standing-orders skills get console` are the live references — the second
+is what your coding agent reads when you ask it how something works.
+
 An agent that hits a judgement call **parks a typed decision instead of
 guessing** — answer it from the terminal, the console, or a Telegram tap,
 and the freed build resumes in seconds. Built work leaves only as a pushed
