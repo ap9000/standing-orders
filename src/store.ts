@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 33;
+export const SCHEMA_VERSION = 34;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -97,6 +97,9 @@ export type TaskRef = {
   plan: "requested" | "drafted" | null;
   /** Planning failures, counted apart from build strikes by design. */
   planStrikes: number;
+  /** What comes back (v34): a branch to publish, or a report to read.
+   * Set at filing and never rewritten — a scout's strikes are the task's. */
+  deliverable: "branch" | "report";
   /** The standing order this task is an instance of; null for one-off work. */
   routineId: number | null;
   /** The pinned agent, when a fire transaction stamped one. Authoritative. */
@@ -480,8 +483,9 @@ export type Run = {
   leaseId: string;
   runner: string;
   /** 'repair' = a resumed session mending its own park payload. Never
-   * 'driver'; see the DDL. 'reviewer' (v29) = an artifact-only pass. */
-  role: "builder" | "repair" | "planner" | "reviewer";
+   * 'driver'; see the DDL. 'reviewer' (v29) = an artifact-only pass.
+   * 'scout' (v34) = a read-only investigation whose deliverable is a report. */
+  role: "builder" | "repair" | "planner" | "reviewer" | "scout";
   /** Which harness ran it. History is 'claude' truthfully: nothing else ever spawned. */
   provider: string;
   parentRun: number | null;
@@ -742,7 +746,7 @@ export type Decision = {
 export type Artifact = {
   id: number;
   run: number;
-  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat" | "handoff" | "revision-brief" | "base-tree";
+  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat" | "handoff" | "revision-brief" | "base-tree" | "report";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -754,6 +758,14 @@ export type Artifact = {
   redacted: boolean;
   /** Typed verdict of the capture itself (v14); null on rows from before. */
   captureStatus: "ok" | "failed" | null;
+};
+
+/** The bridge's digest cadence (v34). everyMs null = every fact pages as it lands. */
+export type TelegramDigest = {
+  everyMs: number | null;
+  setBy: string | null;
+  setAt: string | null;
+  lastSentAt: string | null;
 };
 
 /** One Telegram chat allowed to answer as one approver. Revoked, never deleted. */
@@ -790,7 +802,7 @@ export type TelegramAction = {
 export type Incident = {
   id: number;
   run: number;
-  kind: "malformed-decision" | "attempts-exhausted" | "commit-failure" | "malformed-plan" | "plan-attempts-exhausted";
+  kind: "malformed-decision" | "attempts-exhausted" | "commit-failure" | "malformed-plan" | "plan-attempts-exhausted" | "malformed-report";
   createdAt: string;
   resolvedAt: string | null;
   resolvedBy: string | null;
@@ -947,6 +959,10 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- joined by exact cid, never parsed out of filed_via (which stays
   -- display-only). NULL is every other filer.
   coordinator_cid         TEXT REFERENCES coordinator_credential(cid),
+  -- The deliverable (v34, scout tasks): 'branch' is every task until now;
+  -- 'report' dispatches a scout — a read-only session whose whole output
+  -- is one report artifact. Stamped at filing, never rewritten.
+  deliverable             TEXT NOT NULL DEFAULT 'branch' CHECK (deliverable IN ('branch','report')),
   UNIQUE (backend, external_id)
 );
 
@@ -1517,7 +1533,9 @@ CREATE TABLE IF NOT EXISTS run (
   -- Deliberately NOT 'driver': the design's driver is the event-woken gate
   -- role that first exists at M4, and recording repair under that name now
   -- would make the two indistinguishable in every cost report afterwards.
-  role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner','reviewer')),
+  -- 'scout' (v34) reads a repository and delivers a report — its own word
+  -- so scouting spend never hides under planning or building.
+  role          TEXT NOT NULL DEFAULT 'builder' CHECK (role IN ('builder','repair','planner','reviewer','scout')),
   -- Which provider harness this attempt ran on (v9). The default is a
   -- truthful backfill for history: every run before v9 passed through the
   -- fixed claude gateway. New dispatches always supply it explicitly.
@@ -1567,6 +1585,10 @@ CREATE TABLE IF NOT EXISTS run (
   -- The validated terminal handoff's conclusion — bounded, typed at
   -- ingestion, and the only agent prose a PR body may quote.
   handoff       TEXT,
+  -- The fallback-chain and credential stamps (v30), inline since v34 —
+  -- the same columns ALTER appended on older files; the v34 rebuild
+  -- recognizes both placements as one shape.
+  chain_cycle INTEGER REFERENCES fallback_cycle(id), chain_index INTEGER, entry_digest TEXT, auth_mode TEXT, terminal_class TEXT,
   -- v29 (the reviewer role): artifact-only runs carry NO workspace,
   -- honestly — every other role requires both (exclusive, no sentinels).
   CHECK ((role = 'reviewer' AND branch IS NULL AND worktree IS NULL)
@@ -1625,7 +1647,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -1666,7 +1688,7 @@ CREATE TABLE IF NOT EXISTS run_decision (
 CREATE TABLE IF NOT EXISTS incident (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
-  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted')),
+  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted','malformed-report')),
   created_at  TEXT NOT NULL,
   resolved_at TEXT,
   resolved_by TEXT
@@ -1697,6 +1719,20 @@ CREATE TABLE IF NOT EXISTS notification (
   push_class      TEXT CHECK (push_class IN ('decision','pick','merge','attention')),
   link            TEXT
 );
+
+-- Away mode (v34, mate arc §10): the Telegram bridge's digest cadence.
+-- One row. every_ms NULL = off (every fact pages as it lands); set, the
+-- bridge holds ROUTINE rows unclaimed until the window elapses and sends
+-- them as one message — decisions and attention-class facts still page
+-- singly. last_sent_at anchors the window; it never deletes a row.
+CREATE TABLE IF NOT EXISTS telegram_digest (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  every_ms     INTEGER,
+  set_by       TEXT,
+  set_at       TEXT,
+  last_sent_at TEXT
+);
+INSERT OR IGNORE INTO telegram_digest (id, every_ms) VALUES (1, NULL);
 
 -- Permission to write to a tracker, one row per repository and backend.
 -- Absence of a row is denial; there is no wildcard and no inheritance.
@@ -3411,6 +3447,106 @@ function migrate(db: Database): void {
   addColumn(db, "run", "auth_mode", "TEXT");
   addColumn(db, "run", "terminal_class", "TEXT");
   rebuildQuotaForV30(db);
+  // v34 (scout tasks, Telegram digests): the deliverable column is
+  // additive; three CHECK widenings — run.role admits 'scout' (an exact
+  // recognizer over the v29+v30 shape), artifact.kind admits 'report',
+  // incident.kind admits 'malformed-report' (the recorded copy-rename
+  // recipe, with the FULL current column sets). telegram_digest arrives
+  // through the fresh SCHEMA's IF NOT EXISTS. The attention indexes are
+  // re-created after migration, as always.
+  addColumn(db, "task_ref", "deliverable", "TEXT NOT NULL DEFAULT 'branch' CHECK (deliverable IN ('branch','report'))");
+  rebuildRunForV34(db);
+  rebuildForV4(
+    db,
+    "artifact",
+    "'diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree'",
+    "'report'",
+    `CREATE TABLE artifact_next (
+       id             INTEGER PRIMARY KEY AUTOINCREMENT,
+       run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+       kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report')),
+       key            TEXT NOT NULL,
+       bytes_original INTEGER NOT NULL,
+       bytes_stored   INTEGER NOT NULL,
+       truncated      INTEGER NOT NULL DEFAULT 0,
+       sha256         TEXT NOT NULL,
+       capture        TEXT NOT NULL,
+       created_at     TEXT NOT NULL,
+       redacted       INTEGER NOT NULL DEFAULT 0,
+       capture_status TEXT CHECK (capture_status IN ('ok','failed'))
+     )`,
+    ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted", "capture_status"],
+  );
+  rebuildForV4(
+    db,
+    "incident",
+    "'malformed-plan','plan-attempts-exhausted'",
+    "'malformed-report'",
+    `CREATE TABLE incident_next (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+       kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted','malformed-report')),
+       created_at  TEXT NOT NULL,
+       resolved_at TEXT,
+       resolved_by TEXT
+     )`,
+    ["id", "run", "kind", "created_at", "resolved_at", "resolved_by"],
+  );
+}
+
+/** The v34 run shape: 'scout' joins the roles, and the v30 columns sit
+ * inline before the table CHECK (where ALTER put them on older files). */
+function V34_RUN_DDL(name: string): string {
+  return V29_RUN_DDL(name)
+    .replace("'builder','repair','planner','reviewer'", "'builder','repair','planner','reviewer','scout'")
+    .replace(
+      "    handoff       TEXT,\n    CHECK",
+      "    handoff       TEXT,\n    chain_cycle INTEGER REFERENCES fallback_cycle(id), chain_index INTEGER, entry_digest TEXT, auth_mode TEXT, terminal_class TEXT,\n    CHECK",
+    );
+}
+
+const V34_RUN_COLUMNS = [
+  "id", "task_ref", "lease_id", "runner", "scope_digest", "profile_digest", "provider_version", "role", "provider",
+  "parent_run", "session_id", "base_revision", "branch", "worktree", "model", "phase", "contestant", "outcome",
+  "reason", "committed", "attended_authorization", "started_at", "finished_at", "provider_started_at", "tokens_in",
+  "tokens_out", "cost_usd", "usage_json", "head_revision", "handoff", "chain_cycle", "chain_index", "entry_digest",
+  "auth_mode", "terminal_class",
+] as const;
+
+/**
+ * v34: run.role admits 'scout'. An EXACT recognizer, like v29's and v33's:
+ * the stored DDL must be the v29+v30 shape (either placement of the v30
+ * columns is the same shape) or already v34; anything else refuses rather
+ * than being guessed. Rows and ids are carried whole; foreign keys are
+ * checked before commit; the indexes return with the post-migration block.
+ */
+export function rebuildRunForV34(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  if (stored === canonicalDdl(V34_RUN_DDL("run"))) return;
+  if (stored !== canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL)) {
+    throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(V34_RUN_DDL("run_next"));
+      const names = V34_RUN_COLUMNS.join(", ");
+      db.exec(`INSERT INTO run_next (${names}) SELECT ${names} FROM run`);
+      db.exec("DROP TABLE run");
+      db.exec("ALTER TABLE run_next RENAME TO run");
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) throw new Error("foreign keys did not survive the run rebuild");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 /** v30: quota's PRIMARY KEY grows auth_mode + credential_fp (a subscription
@@ -3597,7 +3733,11 @@ function rebuildRunForV29(db: Database): void {
   // (chain_cycle … terminal_class), which ALTER appends after the CHECK.
   // Both are done shapes; only a pre-v29 (v28) table rebuilds. This mirrors
   // rebuildMergeBlockerForV29's old-plus-added-columns recognizer.
-  if (stored === canonicalDdl(V29_RUN_DDL("run")) || stored === canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL)) return;
+  if (
+    stored === canonicalDdl(V29_RUN_DDL("run")) ||
+    stored === canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL) ||
+    stored === canonicalDdl(V34_RUN_DDL("run"))
+  ) return;
   if (stored !== canonicalDdl(V28_RUN_DDL("run"))) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
   }
@@ -5882,7 +6022,7 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | null } = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
     this.once(mutation, "saveScope", () => this.transact(() => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -6036,7 +6176,7 @@ export class Store {
           // seals it. Only the password ceremony — which shows the operator
           // every word — approves it.
           const writtenByMate = this.db
-            .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ? AND proposed_via IN ('mate','coordinator')")
+            .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ? AND proposed_via IN ('mate','coordinator','scout')")
             .get(taskId);
           if (writtenByMate !== undefined) return false;
         }
@@ -8440,8 +8580,11 @@ export class Store {
        * same transaction as the create; there is no API to change it. */
       filedVia?: string;
       /** Who wrote the scope text (mate arc, ruling 2): a confirmed mate
-       * proposal stamps `mate`, and mode coverage then never seals it. */
-      proposedVia?: "mate" | "coordinator" | null;
+       * proposal stamps `mate`, and mode coverage then never seals it.
+       * 'scout' (v34) is a follow-up filed from a scout's report. */
+      proposedVia?: "mate" | "coordinator" | "scout" | null;
+      /** What comes back (v34): 'report' files a scout task. Immutable. */
+      deliverable?: "branch" | "report";
     },
     now: Date,
     cap = 500,
@@ -8481,6 +8624,9 @@ export class Store {
       const ref = this.refFor(BUILT_IN, id, "ours");
       if (spec.filedVia !== undefined) {
         this.db.prepare("UPDATE task_ref SET filed_via = ? WHERE id = ? AND filed_via IS NULL").run(spec.filedVia, ref.id);
+      }
+      if (spec.deliverable === "report") {
+        this.db.prepare("UPDATE task_ref SET deliverable = 'report' WHERE id = ?").run(ref.id);
       }
       // Placement happens BEFORE the scope exists, so the immutability guard
       // in placeTask never fires here — atomic create, place, then scope.
@@ -10349,7 +10495,7 @@ export class Store {
       now: Date;
     } & (
       | {
-          role?: "builder" | "repair" | "planner";
+          role?: "builder" | "repair" | "planner" | "scout";
           branch: string;
           worktree: string;
           parentRun?: number;
@@ -10776,6 +10922,40 @@ export class Store {
         `SELECT artifact.* FROM artifact
          JOIN run ON run.id = artifact.run
          WHERE run.task_ref = ? AND run.role = 'planner' AND artifact.kind = 'plan'
+         ORDER BY artifact.id DESC LIMIT 1`,
+      )
+      .get(taskRef);
+    return row === undefined ? null : readArtifact(row as Record<string, unknown>);
+  }
+
+  /** Mark a just-filed task a scout task (v34). Filing-time only: refused
+   * once a scope exists, a claim is live, or any run was recorded — the
+   * deliverable is what the approval promised. */
+  setDeliverable(taskRef: number, deliverable: "branch" | "report", now: Date): { ok: true } | { ok: false; reason: "scoped" | "live-claim" | "attempted" | "unknown-task" } {
+    return this.transact(() => {
+      const ref = this.db.prepare("SELECT external_id FROM task_ref WHERE id = ?").get(taskRef);
+      if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
+      if (this.db.prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ?").get(String(ref["external_id"])) !== undefined) {
+        return { ok: false as const, reason: "scoped" as const };
+      }
+      if (this.db.prepare("SELECT 1 AS hit FROM claim WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?").get(taskRef, now.toISOString()) !== undefined) {
+        return { ok: false as const, reason: "live-claim" as const };
+      }
+      if (this.db.prepare("SELECT 1 AS hit FROM run WHERE task_ref = ? LIMIT 1").get(taskRef) !== undefined) {
+        return { ok: false as const, reason: "attempted" as const };
+      }
+      this.db.prepare("UPDATE task_ref SET deliverable = ? WHERE id = ?").run(deliverable, taskRef);
+      return { ok: true as const };
+    });
+  }
+
+  /** The newest scout run's report for a task (v34), when one exists. */
+  latestReportArtifact(taskRef: number): Artifact | null {
+    const row = this.db
+      .prepare(
+        `SELECT artifact.* FROM artifact
+         JOIN run ON run.id = artifact.run
+         WHERE run.task_ref = ? AND run.role = 'scout' AND artifact.kind = 'report'
          ORDER BY artifact.id DESC LIMIT 1`,
       )
       .get(taskRef);
@@ -13747,6 +13927,8 @@ export class Store {
     title: string;
     repo: string | null;
     outcome: string;
+    /** The run's role — a scout's row says "report" where a build says PR. */
+    role: string;
     provider: string | null;
     model: string | null;
     startedAt: string;
@@ -13760,7 +13942,7 @@ export class Store {
       admitted === null ? "" : `AND (task_ref.repo IS NULL OR task_ref.repo IN (${admitted.map(() => "?").join(",")}))`;
     return this.db
       .prepare(
-        `SELECT run.id AS run_id, run.outcome, run.provider, run.model, run.cost_usd,
+        `SELECT run.id AS run_id, run.outcome, run.role, run.provider, run.model, run.cost_usd,
                 run.started_at, run.finished_at,
                 task_ref.external_id AS task_id, task_ref.repo AS task_repo, task.title AS title,
                 publication.pr_number, publication.pr_url
@@ -13780,6 +13962,7 @@ export class Store {
         title: row["title"] === null || row["title"] === undefined ? String(row["task_id"]) : String(row["title"]),
         repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
         outcome: String(row["outcome"]),
+        role: String(row["role"] ?? "builder"),
         provider: row["provider"] === null || row["provider"] === undefined ? null : String(row["provider"]),
         model: row["model"] === null || row["model"] === undefined ? null : String(row["model"]),
         startedAt: String(row["started_at"]),
@@ -14631,17 +14814,21 @@ export class Store {
    * lease on the act of sending; a deliverer that dies mid-send leaves rows
    * that unclaim themselves by expiry.
    */
-  claimDeliveries(owner: string, ttlMs: number, now: Date): Notification[] {
+  claimDeliveries(owner: string, ttlMs: number, now: Date, only: "all" | "urgent" = "all"): Notification[] {
     return this.transact(() => {
       const stamp = now.toISOString();
+      // `urgent` (v34, digests): only what must page NOW — a decision, or
+      // an attention-class fact. Routine rows stay unclaimed and pending
+      // until a pass asks for `all`; nothing about them is written here.
       const rows = this.db
         .prepare(
           `SELECT id FROM notification
             WHERE delivered_at IS NULL AND resolved_at IS NULL
               AND (claim_owner IS NULL OR claim_expires_at <= ?)
+              AND (? = 'all' OR dedupe_key LIKE 'decision:%' OR COALESCE(push_class, '') = 'attention')
             ORDER BY id`,
         )
-        .all(stamp)
+        .all(stamp, only)
         .map(row => Number(row["id"]));
       const expires = new Date(now.getTime() + ttlMs).toISOString();
       for (const id of rows) {
@@ -14683,6 +14870,43 @@ export class Store {
       )
       .run(stamp, outcome.error, id, owner);
     return Number(changes) > 0;
+  }
+
+  // ---- the Telegram digest (v34, away mode) --------------------------------
+
+  /** The digest cadence: null everyMs = off. */
+  telegramDigest(): TelegramDigest {
+    const row = this.db.prepare("SELECT every_ms, set_by, set_at, last_sent_at FROM telegram_digest WHERE id = 1").get();
+    return {
+      everyMs: row?.["every_ms"] === null || row?.["every_ms"] === undefined ? null : Number(row["every_ms"]),
+      setBy: row?.["set_by"] === null || row?.["set_by"] === undefined ? null : String(row["set_by"]),
+      setAt: row?.["set_at"] === null || row?.["set_at"] === undefined ? null : String(row["set_at"]),
+      lastSentAt: row?.["last_sent_at"] === null || row?.["last_sent_at"] === undefined ? null : String(row["last_sent_at"]),
+    };
+  }
+
+  /** Set (or clear, with null) the cadence. Turning it on starts the
+   * window NOW — nothing held before the choice is dumped at once. */
+  setTelegramDigest(everyMs: number | null, by: string, now: Date): void {
+    this.db
+      .prepare("UPDATE telegram_digest SET every_ms = ?, set_by = ?, set_at = ?, last_sent_at = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(last_sent_at, ?) END WHERE id = 1")
+      .run(everyMs, by, now.toISOString(), everyMs, now.toISOString());
+  }
+
+  markTelegramDigestSent(now: Date): void {
+    this.db.prepare("UPDATE telegram_digest SET last_sent_at = ? WHERE id = 1").run(now.toISOString());
+  }
+
+  /** Routine rows waiting for the next digest: pending, and not urgent. */
+  countRoutinePending(): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM notification
+          WHERE delivered_at IS NULL AND resolved_at IS NULL
+            AND NOT (dedupe_key LIKE 'decision:%' OR COALESCE(push_class, '') = 'attention')`,
+      )
+      .get();
+    return Number(row?.["n"] ?? 0);
   }
 
   // ---- web push (arc 3) ----------------------------------------------------
@@ -15416,6 +15640,7 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
         ? null
         : (String(row["plan"]) as "requested" | "drafted"),
     planStrikes: Number(row["plan_strikes"] ?? 0),
+    deliverable: row["deliverable"] === "report" ? "report" : "branch",
     strikes: Number(row["strikes"] ?? 0),
     routineId:
       row["routine_id"] === null || row["routine_id"] === undefined

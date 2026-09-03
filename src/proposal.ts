@@ -68,8 +68,11 @@ export type TaskProposalInput = {
   touches?: string[];
   /** Which door filed this: 'cli', 'console', 'intake', 'template:<name>'. */
   filedVia: string;
-  /** The scope text's author when it is the mate's (ruling 2): mode coverage never seals it. */
-  proposedVia?: "mate" | "coordinator";
+  /** The scope text's author when it is an LLM's (ruling 2; §10 for a
+   * scout's follow-up): mode coverage never seals it. */
+  proposedVia?: "mate" | "coordinator" | "scout";
+  /** What comes back (v34): 'report' files a scout task. Set once, at filing. */
+  deliverable?: "branch" | "report";
   /**
    * The caller's ceiling as canonical repo paths. undefined = the caller
    * genuinely has none (the CLI on the operator's own machine). A surface
@@ -197,6 +200,7 @@ export function fileTaskProposal(
       touches,
       filedVia: input.filedVia,
       proposedVia: input.proposedVia ?? null,
+      ...(input.deliverable === undefined ? {} : { deliverable: input.deliverable }),
     },
     now,
   );

@@ -144,7 +144,7 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
 
   const contest = facts.contest ?? null;
   if (facts.claim !== null) {
-    const doing = facts.claim.role === "planner" ? "planning — " : "";
+    const doing = facts.claim.role === "planner" ? "planning — " : facts.claim.role === "scout" ? "scouting — " : "";
     // A racing tournament wears its own chip: the operator should read
     // "several agents on this" where a lone build would name its runner.
     if (contest !== null && (contest.state === "dispatching" || contest.state === "racing")) {

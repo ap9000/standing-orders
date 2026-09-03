@@ -53,6 +53,8 @@ export type MateTurnInput = {
   message: string;
   fetcher?: typeof fetch;
   clock?: () => Date;
+  /** Where evidence lives — get_task reads a scout's report from here. */
+  evidenceRoot?: string;
 };
 
 export type MateRefusal =
@@ -293,7 +295,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     }
     history.push({ role: "assistant", text: answer.text, calls: answer.calls });
     for (const call of answer.calls) {
-      const outcome = executeMateTool({ store, who, now: clock(), draft, step: steps, readDecisions }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, step: steps, readDecisions, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });
     }

@@ -50,7 +50,7 @@ import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
-import { readVerifiedArtifact } from "./evidence.js";
+import { readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -105,6 +105,8 @@ import {
   finalizeParkFenced,
   finalizePlanFenced,
   finalizePlanFailureFenced,
+  finalizeScoutFenced,
+  finalizeScoutFailureFenced,
   type FailureClass,
   heartbeat,
   release,
@@ -167,9 +169,12 @@ import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, 
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
 import {
   build,
+  proveApprovedProfile,
   type Runner as CommandRunner,
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
+import { scout as scoutTask } from "./scout.js";
+import { profileDigestOf } from "./scope.js";
 import { reviewPass } from "./reviewer.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders } from "./exec.js";
@@ -488,13 +493,13 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
-  "command", "timeout-seconds", "stop-grace", "title", "name",
+  "command", "timeout-seconds", "stop-grace", "title", "name", "every",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
-  "no-open", "no-verify", "end",
+  "no-open", "no-verify", "end", "report", "off",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -1496,7 +1501,7 @@ async function mcpCommand(
         store.close();
         resolvePromise(code);
       },
-    }, undefined, enrolled);
+    }, undefined, enrolled, join(dirname(file), "evidence"));
     if (!outcome.ok) {
       reader.close();
       store.close();
@@ -1693,7 +1698,7 @@ async function buildCommand(
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "planned" | "parked" | "skipped" | "failed" | "contest" | "held" | "reviewed" | "review-failed";
+  outcome: "built" | "planned" | "reported" | "parked" | "skipped" | "failed" | "contest" | "held" | "reviewed" | "review-failed";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -2163,6 +2168,9 @@ async function tickCommand(
     // generic `unapproved` the round-5 review caught masking it.
     const scopeApproved = approvalOf(store.getScope(id)).approved;
     const wantsPlan = ref.plan === "requested" && !scopeApproved;
+    // A report task with an approved scope dispatches a SCOUT (mate arc
+    // §10): the same approval, the planner's read-only road, a report back.
+    const wantsScout = ref.deliverable === "report" && scopeApproved;
     let attendedDispatch: import("./store.js").AttendedAuthorization | null = null;
     if (!wantsPlan && !scopeApproved) {
       const open = store.openAuthorizationFor(ref.id);
@@ -2209,7 +2217,7 @@ async function tickCommand(
     // flags must not be able to shape it — so the terms are discovered
     // before any flag-shaped resolution runs, and a raced task's build
     // resolution ignores the flags outright.
-    const racedAhead = wantsPlan || attendedDispatch !== null ? null : store.activeTournamentTerms(ref.id);
+    const racedAhead = wantsPlan || wantsScout || attendedDispatch !== null ? null : store.activeTournamentTerms(ref.id);
     // The attended spec comes from the authorization's PINNED terms — the
     // courtesy half of the proof; the coordinator's transaction re-proves
     // byte-for-byte at the actual HEAD (v6 W1).
@@ -2303,7 +2311,7 @@ async function tickCommand(
     }
 
     const claimed = acquireIfReady(store, ref.id, runner, {
-      ...(wantsPlan ? { dispatchRole: "planner" as const } : {}),
+      ...(wantsPlan ? { dispatchRole: "planner" as const } : wantsScout ? { dispatchRole: "scout" as const } : {}),
       now: clock(),
       token,
       ttlMs: leaseTtlMs,
@@ -2677,6 +2685,130 @@ async function tickCommand(
         now: clock(),
       });
       dispatched.push({ id, outcome: "failed", reason: outcome.reason });
+      if (!sealedFailure.ok) release(store, lease, clock());
+      broke++;
+      continue;
+    }
+
+    if (wantsScout) {
+      // The scout's workspace is disposable and its branch namespace is
+      // its own (mate arc §10) — a later build starts from base with
+      // nothing a scouting session could have left as an ancestor.
+      const scoutBranch = `standing-orders-scout/${id}`;
+      const scopeRow = store.getScope(id);
+      // Approvals bind exact routing for a scout exactly as for a build:
+      // the pinned profile is proved BEFORE the workspace is leased.
+      const proof = proveApprovedProfile(scopeRow, null, {
+        provider: spec.provider,
+        model: spec.model ?? undefined,
+        maxTurns: undefined,
+        timeoutMs: undefined,
+        skipPermissions: false,
+      });
+      if (!proof.ok) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "skipped", reason: "stale-approval", detail: proof.message });
+        continue;
+      }
+      const scoutLeased = await worktrees.lease({
+        repo,
+        branch: scoutBranch,
+        runner,
+        taskRef: ref.id,
+        now: clock(),
+        base,
+      });
+      if (!scoutLeased.ok) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "failed", reason: scoutLeased.reason });
+        broke++;
+        continue;
+      }
+      const scoutRunId = store.startRun({
+        taskRef: ref.id,
+        leaseId: lease,
+        runner,
+        role: "scout",
+        provider: spec.provider,
+        branch: scoutBranch,
+        worktree: scoutLeased.worktree.path,
+        model: proof.effective.model,
+        now: clock(),
+      });
+      store.stampRun(scoutRunId, { scopeDigest: scopeRow?.approvedDigest ?? "", profileDigest: profileDigestOf(proof.effective.profile) });
+      const scoutAnswers = store
+        .answeredDecisionsFor(id, 5)
+        .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
+      const scouted = await scoutTask(store, {
+        taskId: id,
+        taskTitle: store.getTask(id)?.title ?? id,
+        goal: scopeRow?.goal ?? "",
+        outOfScope: scopeRow?.outOfScope ?? null,
+        taskRef: ref.id,
+        runner,
+        leaseId: lease,
+        runnerToken: token,
+        runId: scoutRunId,
+        worktree: scoutLeased.worktree.path,
+        branch: scoutBranch,
+        now: clock(),
+        clock,
+        evidenceRoot: context.evidenceRoot,
+        answers: scoutAnswers,
+        provider: spec.provider,
+        model: proof.effective.model,
+        ...(proof.effective.maxTurns === undefined ? {} : { maxTurns: proof.effective.maxTurns }),
+        timeoutMs: proof.effective.timeoutMs,
+        ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+        ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
+      });
+      await worktrees.release(scoutLeased.worktree.path, clock());
+
+      if (scouted.ok && "parked" in scouted) {
+        const sealed = finalizeParkFenced(store, {
+          leaseId: lease,
+          runId: scoutRunId,
+          taskId: id,
+          decision: scouted.parked.decision,
+          artifactIds: scouted.parked.artifactIds,
+          now: clock(),
+        });
+        if (sealed.ok) {
+          dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}` });
+          parked++;
+        } else {
+          dispatched.push({ id, outcome: "failed", reason: "fenced" });
+          broke++;
+        }
+        continue;
+      }
+      if (scouted.ok) {
+        const sealed = finalizeScoutFenced(store, {
+          leaseId: lease,
+          runId: scoutRunId,
+          taskId: id,
+          report: scouted.reported.report,
+          artifact: scouted.reported.artifact,
+          now: clock(),
+        });
+        if (sealed.ok) {
+          store.clearQuota(runner, spec.provider, spec.model ?? "");
+          dispatched.push({ id, outcome: "reported" });
+        } else {
+          dispatched.push({ id, outcome: "failed", reason: "fenced" });
+          broke++;
+        }
+        continue;
+      }
+      const sealedFailure = finalizeScoutFailureFenced(store, {
+        leaseId: lease,
+        runId: scoutRunId,
+        taskId: id,
+        kind: scouted.kind,
+        message: scouted.message,
+        now: clock(),
+      });
+      dispatched.push({ id, outcome: "failed", reason: scouted.reason });
       if (!sealedFailure.ok) release(store, lease, clock());
       broke++;
       continue;
@@ -3249,7 +3381,7 @@ async function tickCommand(
   // A pass whose only events were parks or drafted plans exits 0: nothing
   // broke, nothing needs code — the questions and the plan are in the
   // attention surface where they belong, which is the system working.
-  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "held")) {
+  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held")) {
     return succeed(write, json, "tick", { considered, dispatched, routines }, summary);
   }
   if (considered === 0) {
@@ -6904,12 +7036,17 @@ async function upCommand(
  *   bridge telegram unpair --as <you> --token <approver-token>
  *   bridge telegram token [<bot-token>|--clear]   set the credential file
  *   bridge telegram status
+ *   bridge telegram digest [--every 30m|2h|24h | --off]   away mode: routine facts batch, decisions still page
  *
  * The bot token comes from ${TOKEN_ENV} or the credential file this command
  * writes (0600, beside the database). Cron the pass right after tick; a
  * second concurrent pass loses the poll lease and reports `bridge-busy`,
  * which is the fences working, not an error to fix.
  */
+function digestWords(everyMs: number): string {
+  return everyMs % 3_600_000 === 0 ? `${everyMs / 3_600_000}h` : `${Math.round(everyMs / 60_000)}m`;
+}
+
 async function bridgeCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
@@ -6920,7 +7057,7 @@ async function bridgeCommand(
   if (demoFence !== null) return demoFence;
   const [channel, action] = positional;
   if (channel !== "telegram") {
-    return fail(write, json, "bridge", "usage", "`standing-orders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
+    return fail(write, json, "bridge", "usage", "`standing-orders bridge telegram [pair|unpair|token|status|digest]`", EXIT.usage);
   }
 
   if (action === "token") {
@@ -6949,11 +7086,45 @@ async function bridgeCommand(
     ]);
   }
 
+  if (action === "digest") {
+    // Away mode (mate arc §10): the cadence, or off. A closed shape of
+    // durations — minutes or hours — never a free number.
+    const every = text(flags, "every");
+    if (flags.has("off")) {
+      store.setTelegramDigest(null, "cli", clock());
+      return succeed(write, json, "bridge digest", { everyMs: null }, () => ["Digest off — every fact pages as it lands."]);
+    }
+    if (every === undefined) {
+      const current = store.telegramDigest();
+      const held = store.countRoutinePending();
+      return succeed(write, json, "bridge digest", { ...current, held }, () => [
+        current.everyMs === null
+          ? "Digest off — every fact pages as it lands. `bridge telegram digest --every 2h` turns it on."
+          : `Digest every ${digestWords(current.everyMs)}; ${held} routine fact(s) held; next no earlier than ${
+              current.lastSentAt === null ? "the next bridge pass" : new Date(new Date(current.lastSentAt).getTime() + current.everyMs).toISOString()
+            }.`,
+      ]);
+    }
+    const parsed = /^([1-9][0-9]{0,3})(m|h)$/.exec(every);
+    if (parsed === null) {
+      return fail(write, json, "bridge digest", "usage", "--every takes minutes or hours: 30m, 2h, 24h — or --off", EXIT.usage);
+    }
+    const everyMs = Number(parsed[1]) * (parsed[2] === "h" ? 3_600_000 : 60_000);
+    if (everyMs < 5 * 60_000 || everyMs > 7 * 24 * 3_600_000) {
+      return fail(write, json, "bridge digest", "usage", "the digest cadence is between 5 minutes and 7 days", EXIT.usage);
+    }
+    store.setTelegramDigest(everyMs, "cli", clock());
+    return succeed(write, json, "bridge digest", { everyMs }, () => [
+      `Digest every ${digestWords(everyMs)}. Routine facts are held and sent together; decisions and anything that needs you now still page at once.`,
+    ]);
+  }
+
   const source = loadBotToken(process.env, context.telegramTokenFile);
 
   if (action === "status") {
     const binding = source === null ? null : store.liveTelegramBinding(source.botId);
     const pending = store.listNotifications("pending").length;
+    const digest = store.telegramDigest();
     if (json) {
       write(
         envelopeJson(
@@ -6964,6 +7135,7 @@ async function bridgeCommand(
             paired: binding !== null,
             approver: binding?.approver ?? null,
             outboxPending: pending,
+            digest: { everyMs: digest.everyMs, lastSentAt: digest.lastSentAt, held: digest.everyMs === null ? 0 : store.countRoutinePending() },
           },
         ),
       );
@@ -6974,6 +7146,7 @@ async function bridgeCommand(
       : `Token ${redactToken(source.token)} (${source.source}), bot ${source.botId}.`);
     write(binding === null ? "No chat is paired." : `Paired: chat answers as ${binding.approver}.`);
     write(`Outbox pending: ${pending}.`);
+    write(digest.everyMs === null ? "Digest off." : `Digest every ${digestWords(digest.everyMs)}; ${store.countRoutinePending()} routine fact(s) held.`);
     return EXIT.ok;
   }
 
@@ -7826,6 +7999,12 @@ async function addTask(
   }
 
   store.stampFiledVia(store.refFor(BUILT_IN, id).id, "cli");
+  // --report (v34): a scout task — what comes back is a report, not a
+  // branch. Stamped at filing; the deliverable never changes afterwards.
+  if (flags.has("report")) {
+    const marked = store.setDeliverable(store.refFor(BUILT_IN, id).id, "report", now);
+    if (!marked.ok) return fail(write, json, "task add", marked.reason, "the deliverable is set at filing only", EXIT.refused);
+  }
 
   // Placement is explicit, never inferred from where the command happened to
   // run: a task filed from the wrong directory would silently bind to it.
@@ -7847,7 +8026,7 @@ async function addTask(
       repo: placedIn === undefined ? null : resolve(placedIn),
       ...(link === null ? {} : { links: { task: link } }),
     },
-    () => [`Queued ${outcome.task.id} — ${outcome.task.title}`, ...(link === null ? [] : [`  ${link}`])],
+    () => [`Queued ${outcome.task.id} — ${outcome.task.title}${flags.has("report") ? " (a scout task: it delivers a report)" : ""}`, ...(link === null ? [] : [`  ${link}`])],
   );
 }
 
@@ -8093,11 +8272,22 @@ function showTask(positional: readonly string[], context: Context): number {
     scope,
     approval: approvalOf(scope),
     runs: store.runsFor(ref.id),
+    deliverable: ref.deliverable,
+    report: readVerifiedReport(store, context.evidenceRoot, ref.id),
   };
 
   return succeed(write, json, "task show", detail, () => [
-    `${task.id}  ${task.state}`,
+    `${task.id}  ${task.state}${ref.deliverable === "report" ? "  (scout — delivers a report)" : ""}`,
     `  ${task.title}`,
+    ...(detail.report === null
+      ? []
+      : detail.report.ok
+        ? [
+            `  report: ${detail.report.report.title} (run ${detail.report.run})`,
+            `    ${detail.report.report.summary}`,
+            ...detail.report.report.followUps.map((one, index) => `    follow-up ${index + 1}: ${one.title}`),
+          ]
+        : [`  report: ${detail.report.problem} (run ${detail.report.run})`]),
     ...(detail.blockedBy.length > 0 ? [`  waits for ${detail.blockedBy.join(", ")}`] : []),
     ...(detail.position === null
       ? []
@@ -8978,6 +9168,7 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
     ceilingUsd: ceilingGiven === undefined ? undefined : Number(ceilingGiven),
     hours: hoursGiven === undefined ? undefined : Number(hoursGiven),
     ...(context.mateSeams === undefined ? {} : { seams: { ...context.mateSeams, clock: context.mateSeams.clock ?? context.clock } }),
+    ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
   });
   return result.code;
 }

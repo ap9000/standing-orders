@@ -31,6 +31,7 @@ import {
 import { join, sep } from "node:path";
 import { LIMITS } from "./decision.js";
 import { PLAN_LIMITS } from "./plan.js";
+import { parseReport, REPORT_LIMITS, type ParsedReport } from "./scout-report.js";
 import type { Artifact, Store } from "./store.js";
 import type { ExecResult } from "./exec.js";
 import { encodeBaseTreeSnapshot, parseBaseTreeSnapshot, type BaseTreeEntry } from "./peek.js";
@@ -43,6 +44,8 @@ export const HANDOFF_PREFIX = "STANDING-ORDERS-DONE-";
 export const PLAN_PREFIX = "STANDING-ORDERS-PLAN-";
 /** The reviewer's comment mailbox (v29): its only legitimate output. */
 export const REVIEW_PREFIX = "STANDING-ORDERS-REVIEW-";
+/** The scout's terminal handoff (v34): the report, its only deliverable. */
+export const REPORT_PREFIX = "STANDING-ORDERS-REPORT-";
 export const MAILBOX_SUFFIX = ".json";
 
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
@@ -57,6 +60,7 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   "base-tree": 4 * 1024 * 1024,
   handoff: 32 * 1024,
   "revision-brief": 64 * 1024,
+  report: REPORT_LIMITS.payload,
 };
 
 export function evidenceRoot(home: string): string {
@@ -90,6 +94,7 @@ export function looksLikeProtocolFile(name: string): boolean {
       name.startsWith(HANDOFF_PREFIX) ||
       name.startsWith(PLAN_PREFIX) ||
       name.startsWith(REVIEW_PREFIX) ||
+      name.startsWith(REPORT_PREFIX) ||
       name.startsWith("NIGHTORDERS-")) &&
     name.endsWith(MAILBOX_SUFFIX)
   );
@@ -105,6 +110,10 @@ export function planFileName(): string {
 
 export function reviewFileName(): string {
   return `${REVIEW_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
+}
+
+export function reportFileName(): string {
+  return `${REPORT_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 /**
@@ -150,6 +159,29 @@ export function readMailbox(
   } finally {
     closeSync(fd);
   }
+}
+
+/** A scout's report as a surface reads it (mate arc §10): the newest
+ * scout run's artifact, VERIFIED before a byte is parsed, then parsed with
+ * the same 422 rule that admitted it. null = no report; a problem names
+ * why an existing artifact cannot be shown rather than showing nothing. */
+export type ReportView =
+  | { ok: true; run: number; report: ParsedReport }
+  | { ok: false; run: number; problem: string };
+
+export function readVerifiedReport(store: Store, root: string, taskRef: number): ReportView | null {
+  const artifact = store.latestReportArtifact(taskRef);
+  if (artifact === null) return null;
+  let verified: ReturnType<typeof readVerifiedArtifact>;
+  try {
+    verified = readVerifiedArtifact(root, artifact);
+  } catch {
+    return { ok: false, run: artifact.run, problem: "the report file could not be read" };
+  }
+  if (!verified.ok) return { ok: false, run: artifact.run, problem: `the report does not verify (${verified.problem})` };
+  const parsed = parseReport(verified.content.toString("utf8"));
+  if (!parsed.ok) return { ok: false, run: artifact.run, problem: "the stored report is not a report this build can read" };
+  return { ok: true, run: artifact.run, report: parsed.report };
 }
 
 /**

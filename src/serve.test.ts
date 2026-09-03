@@ -7034,3 +7034,119 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect([401, 403]).toContain(bearer.status);
   });
 });
+
+describe("scout tasks and the digest card on the console (mate arc §10)", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let dir: string;
+  let approverToken: string;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(`${base}/login`, {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    dir = mkdtempSync(join(tmpdir(), "standing-orders-serve-scout-"));
+    evidenceRoot = join(dir, "evidence");
+    mkdirSync(evidenceRoot, { recursive: true });
+    writeFileSync(join(dir, "telegram-token"), "777000:AAExampleExampleExample123\n", { mode: 0o600 });
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), telegramTokenFile: join(dir, "telegram-token") });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the new-task form files a scout; the task page says so; the report renders verified and a follow-up files with the scout's authorship", async () => {
+    const cookie = await login();
+    const form = await (await fetch(`${base}/tasks/new`, { headers: { cookie } })).text();
+    expect(form).toContain('name="scout"');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(form)?.[1] ?? "";
+    const revision = /name="projectRevision" value="(\d+)"/.exec(form)?.[1] ?? "0";
+    const filed = await fetch(`${base}/tasks/add`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, projectRevision: revision, title: "why does login flake", goal: "find out", repo: "/repo/main", scout: "1" }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    const taskId = /\/t\/([^/?]+)/.exec(filed.headers.get("location") ?? "")?.[1] ?? "";
+    const ref = store.refFor("built-in", taskId);
+    expect(ref.deliverable).toBe("report");
+    let page = await (await fetch(`${base}/t/${taskId}`, { headers: { cookie } })).text();
+    expect(page).toContain(">scout<");
+    expect(page).toContain("delivers a report, never a branch");
+
+    // The report lands as evidence; the page renders it only once verified.
+    const run = store.startRun({ taskRef: ref.id, leaseId: "scout-lease", runner: "b", role: "scout", branch: "standing-orders-scout/x", worktree: "/pool/scout", now: new Date() });
+    const report = { title: "The cookie races the assertion", summary: "The read wins under load.", report: "## Findings\nAsync cookie in src/session.ts.\n", followUps: [{ title: "Await the cookie", goal: "Wait for it before asserting." }] };
+    const content = Buffer.from(JSON.stringify(report, null, 2), "utf8");
+    const { mkdirSync: mkdirS, writeFileSync: writeS } = await import("node:fs");
+    mkdirS(join(evidenceRoot, String(run)), { recursive: true });
+    writeS(join(evidenceRoot, String(run), "report.json"), content);
+    store.saveArtifact({ run, kind: "report", key: `${run}/report.json`, bytesOriginal: content.length, bytesStored: content.length, truncated: false, sha256: createHash("sha256").update(content).digest("hex"), capture: "scout handoff (verified tree)" }, new Date());
+    store.finishRun(run, { outcome: "built", reason: "report-delivered", now: new Date() });
+    page = await (await fetch(`${base}/t/${taskId}`, { headers: { cookie } })).text();
+    expect(page).toContain("The cookie races the assertion");
+    expect(page).toContain("Async cookie in src/session.ts.");
+    expect(page).toContain("file this follow-up");
+
+    // A tampered file never renders: the problem is named instead.
+    writeS(join(evidenceRoot, String(run), "report.json"), content.toString("utf8").replace("Async", "Sync"));
+    const tampered = await (await fetch(`${base}/t/${taskId}`, { headers: { cookie } })).text();
+    expect(tampered).not.toContain("cookie in src/session.ts");
+    expect(tampered).toContain("does not verify");
+    const noFile = await fetch(`${base}/t/${taskId}/follow-up`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, index: "0" }), redirect: "manual" });
+    expect(noFile.status).toBe(409);
+    writeS(join(evidenceRoot, String(run), "report.json"), content);
+
+    // The follow-up files through the one door: same repo, the scout's authorship.
+    const followUp = await fetch(`${base}/t/${taskId}/follow-up`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, index: "0" }), redirect: "manual" });
+    expect(followUp.status).toBe(303);
+    const filedId = /\/t\/([^/?]+)/.exec(followUp.headers.get("location") ?? "")?.[1] ?? "";
+    expect(store.getTask(filedId)?.title).toBe("Await the cookie");
+    expect(store.refFor("built-in", filedId).repo).toBe("/repo/main");
+    expect(store.handle.prepare("SELECT proposed_via FROM task_scope WHERE task_id = ?").get(filedId)?.["proposed_via"]).toBe("scout");
+    const missing = await fetch(`${base}/t/${taskId}/follow-up`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, index: "7" }), redirect: "manual" });
+    expect(missing.status).toBe(409);
+  });
+
+  test("the digest card sets the cadence from a closed list; the choice lands in the store and says so", async () => {
+    const cookie = await login();
+    let page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain("telegram digest");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] ?? "";
+    const bad = await fetch(`${base}/settings/telegram-digest`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, every: "17" }), redirect: "manual" });
+    expect(bad.status).toBe(400);
+    const saved = await fetch(`${base}/settings/telegram-digest`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, every: "240" }), redirect: "manual" });
+    expect(saved.status).toBe(303);
+    expect(store.telegramDigest()).toMatchObject({ everyMs: 4 * 3_600_000, setBy: "alex" });
+    page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain('value="240" selected');
+    expect(page).toContain("0 routine fact(s) held");
+    const off = await fetch(`${base}/settings/telegram-digest`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, every: "off" }), redirect: "manual" });
+    expect(off.status).toBe(303);
+    expect(store.telegramDigest().everyMs).toBeNull();
+    const anonymous = await fetch(`${base}/settings/telegram-digest`, { method: "POST", body: new URLSearchParams({ every: "60" }) });
+    expect(anonymous.status).toBe(401);
+  });
+});

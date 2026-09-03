@@ -793,3 +793,147 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
     expect(String(acks.pop()?.params["text"] ?? "")).toContain("expired");
   });
 });
+
+describe("away mode: the digest cadence (mate arc §10)", () => {
+  let store: Store;
+  let taskRef: number;
+
+  const scripted = () => {
+    const calls: { method: string; params: Record<string, unknown> }[] = [];
+    let failSends = false;
+    let nextMessageId = 500;
+    const transport: TelegramTransport = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "getUpdates") return { ok: true, result: [] };
+      if (method === "sendMessage") {
+        if (failSends) return { ok: false, description: "scripted outage" };
+        return { ok: true, result: { message_id: nextMessageId++ } };
+      }
+      return { ok: true, result: true };
+    };
+    return { transport, calls, setFail: (on: boolean) => { failSends = on; } };
+  };
+
+  const pair = async (script: ReturnType<typeof scripted>) => {
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, T0);
+    const pairing = scriptedTransport();
+    pairing.updates.push([privatePair(1, code)]);
+    const passed = await bridgePass(store, { botId: BOT, transport: pairing.transport, clock: () => later(1_000) });
+    expect(passed).toMatchObject({ ok: true, report: { paired: 1 } });
+    void script;
+  };
+
+  const decision = (): number => {
+    const run = store.startRun({ taskRef, leaseId: `lease-${Math.random()}`, runner: "b", branch: "standing-orders/t-1", worktree: "/pool/t-1", now: T0 });
+    const id = store.saveDecision(
+      { run, urgency: "blocking", recap: "r", question: "Open or closed?", options: [{ id: "open", label: "Open", consequence: "c", reversible: true }, { id: "closed", label: "Closed", consequence: "c", reversible: true }], recommendation: "open" },
+      T0,
+    );
+    store.enqueueNotification({ dedupeKey: `decision:${id}`, kind: "decision", subject: "t-1 parked a decision", body: "q" }, T0);
+    return id;
+  };
+
+  const texts = (script: ReturnType<typeof scripted>): string[] =>
+    script.calls.filter(one => one.method === "sendMessage").map(one => String(one.params["text"]));
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  test("off by default: every fact pages as it lands", async () => {
+    const script = scripted();
+    await pair(script);
+    expect(store.telegramDigest().everyMs).toBeNull();
+    store.enqueueNotification({ dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged." }, T0);
+    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(2_000) });
+    expect(passed).toMatchObject({ ok: true, report: { sent: 1 } });
+    expect(texts(script).some(one => one.startsWith("t-1 merged"))).toBe(true);
+    expect(store.listNotifications("pending")).toHaveLength(0);
+  });
+
+  test("with a cadence: routine facts are held unclaimed while a decision and an attention fact page singly; the window elapses and ONE digest carries the routine rows", async () => {
+    const script = scripted();
+    await pair(script);
+    store.setTelegramDigest(60 * 60_000, "alex", later(2_000));
+    expect(store.telegramDigest()).toMatchObject({ everyMs: 3_600_000, setBy: "alex" });
+
+    store.enqueueNotification({ dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged.\nsecond line" }, later(3_000));
+    store.enqueueNotification({ dedupeKey: "report:1:1", kind: "report-ready", subject: "t-1: report ready", body: "The cookie races." }, later(3_000));
+    store.enqueueNotification({ dedupeKey: "stalled:1", kind: "attempts-exhausted", pushClass: "attention", link: "/r/1", subject: "t-1 stalled", body: "three failures" }, later(3_000));
+    const decisionId = decision();
+
+    // Inside the window: the decision and the attention fact go out; the
+    // routine rows stay pending and UNCLAIMED.
+    const first = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    expect(first).toMatchObject({ ok: true, report: { sent: 2 } });
+    const sent = texts(script);
+    expect(sent.some(one => one.startsWith("t-1 stalled"))).toBe(true);
+    expect(sent.some(one => one.includes("Open or closed?"))).toBe(true);
+    expect(sent.some(one => one.includes("t-1 merged"))).toBe(false);
+    expect(store.countRoutinePending()).toBe(2);
+    expect(store.listNotifications("pending").map(one => one.dedupeKey).sort()).toEqual(["merge:1", "report:1:1"]);
+    expect(store.handle.prepare("SELECT claim_owner FROM notification WHERE dedupe_key = 'merge:1'").get()?.["claim_owner"]).toBeNull();
+    void decisionId;
+
+    // Still inside the window: nothing more goes out.
+    const second = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(30 * 60_000) });
+    expect(second).toMatchObject({ ok: true, report: { sent: 0 } });
+
+    // The window elapses: one digest, both routine rows finalized with the
+    // same receipt, the anchor moved.
+    const before = script.calls.length;
+    const third = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(61 * 60_000) });
+    expect(third).toMatchObject({ ok: true, report: { sent: 2, digests: 1 } });
+    const digestSends = script.calls.slice(before).filter(one => one.method === "sendMessage");
+    expect(digestSends).toHaveLength(1);
+    const digest = String(digestSends[0]?.params["text"]);
+    expect(digest).toContain("digest — 2 routine fact(s)");
+    expect(digest).toContain("• t-1 merged");
+    expect(digest).toContain("    PR #4 merged.");
+    expect(digest).not.toContain("second line");
+    expect(digest).toContain("• t-1: report ready");
+    expect(digestSends[0]?.params["reply_markup"]).toBeUndefined();
+    expect(store.listNotifications("pending")).toHaveLength(0);
+    const receipts = store.listNotifications("all").filter(one => one.kind === "merge" || one.kind === "report-ready").map(one => one.receipt);
+    expect(new Set(receipts).size).toBe(1);
+    expect(store.telegramDigest().lastSentAt).toBe(later(61 * 60_000).toISOString());
+  });
+
+  test("a failed digest leaves every row pending and the anchor alone; the next pass sends it whole", async () => {
+    const script = scripted();
+    await pair(script);
+    store.setTelegramDigest(30 * 60_000, "alex", later(2_000));
+    store.enqueueNotification({ dedupeKey: "merge:1", kind: "merge", subject: "t-1 merged", body: "PR #4 merged." }, later(3_000));
+    script.setFail(true);
+    const broken = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(31 * 60_000) });
+    expect(broken).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(broken.ok && broken.report.problems.some(one => one.includes("digest of 1"))).toBe(true);
+    expect(store.listNotifications("pending")).toHaveLength(1);
+    expect(store.telegramDigest().lastSentAt).toBe(later(2_000).toISOString());
+    script.setFail(false);
+    const mended = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(32 * 60_000) });
+    expect(mended).toMatchObject({ ok: true, report: { sent: 1, digests: 1 } });
+    expect(store.listNotifications("pending")).toHaveLength(0);
+  });
+
+  test("a routine row resolved while held never enters a digest; turning the digest off releases everything at the next pass", async () => {
+    const script = scripted();
+    await pair(script);
+    store.setTelegramDigest(60 * 60_000, "alex", later(2_000));
+    store.enqueueNotification({ dedupeKey: "gap:/r:secret:X", kind: "gap", subject: "X blocks work", body: "set it" }, later(3_000));
+    store.enqueueNotification({ dedupeKey: "merge:2", kind: "merge", subject: "t-1 merged", body: "PR #5 merged." }, later(3_000));
+    store.handle.prepare("UPDATE notification SET resolved_at = ? WHERE dedupe_key = 'gap:/r:secret:X'").run(later(4_000).toISOString());
+    store.setTelegramDigest(null, "alex", later(5_000));
+    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(6_000) });
+    expect(passed).toMatchObject({ ok: true, report: { sent: 1 } });
+    expect(texts(script).some(one => one.includes("X blocks work"))).toBe(false);
+    expect(texts(script).some(one => one.startsWith("t-1 merged"))).toBe(true);
+  });
+});

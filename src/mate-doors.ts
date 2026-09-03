@@ -200,6 +200,7 @@ function executeProposal(
         goal,
         outOfScope: payloadString(payload, "not"),
         touches: payloadStrings(payload, "touches"),
+        ...(payload["report"] === true ? { deliverable: "report" as const } : {}),
         filedVia: "mate",
         proposedVia: "mate",
         admittedRepos: [...actor.repos],

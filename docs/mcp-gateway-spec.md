@@ -125,7 +125,7 @@ in the MCP module.
 | `get_task` | scope words incl. fallback chain + approval standing + filer provenance, attempt ledger (outcome words, provider/model, duration), current wait. Costs: integer micro-USD + coverage words, never floats, never lying sums. Evidence: opaque artifact id, content hash, byte size, capture status, media type — no paths, no bodies. |
 | `list_repos` | allowlist ∩ enrolled projects, scope/mode standing in words. |
 | `get_contract` | a NEW narrow MCP-contract guide (tools, lifecycle, admission promise). The general agent guide is not served. |
-| `file_proposal` | the one write. Input: `repo` (REQUIRED, non-empty, ∈ allowlist), `title`, `intent`, `idempotency_key` (required, 8–64 chars). Calls the door; **the door is also amended: an omitted or empty repo while a ceiling exists refuses** (`proposal.ts` today lets empty repo bypass the ceiling — closed in this arc, with its own test). Returns ref + admission road in words. |
+| `file_proposal` | the one write. Input: `repo` (REQUIRED, non-empty, ∈ allowlist), `title`, `intent`, `idempotency_key` (required, 8–64 chars), optional `deliverable` (`branch` \| `report` — a scout task, mate arc §10). Calls the door; **the door is also amended: an omitted or empty repo while a ceiling exists refuses** (`proposal.ts` today lets empty repo bypass the ceiling — closed in this arc, with its own test). Returns ref + admission road in words. |
 
 ### Idempotency (MCP-specific, not `Store.replay`)
 

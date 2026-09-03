@@ -50,6 +50,7 @@ import {
 import type { ParsedDecision, Problem } from "./decision.js";
 import { digestOf } from "./scope.js";
 import type { ParsedPlan } from "./plan.js";
+import type { ParsedReport } from "./scout-report.js";
 
 
 export type Claim = {
@@ -382,7 +383,7 @@ export function acquireIfReady(
     model?: string;
     /** What this dispatch is FOR. Re-proved inside the transaction — the
      * caller's survey is not trusted (Codex planning review, finding 2). */
-    dispatchRole?: "builder" | "planner";
+    dispatchRole?: "builder" | "planner" | "scout";
   },
 ): AcquireResult | NotReady {
   const role = options.dispatchRole ?? "builder";
@@ -416,6 +417,21 @@ export function acquireIfReady(
       }
       if (approvedScope !== undefined) {
         return { ok: false as const, reason: "not-ready" as const, message: "the scope is already approved — nothing left to plan" };
+      }
+    }
+    // The deliverable is re-read here (v34): a scout dispatches exactly on
+    // a report task with an approved scope, and a builder never on one —
+    // the caller's survey chose the role, the row proves it.
+    if (role === "scout" || role === "builder") {
+      const deliverable = store.refForId(taskRef)?.deliverable ?? "branch";
+      if (role === "scout" && deliverable !== "report") {
+        return { ok: false as const, reason: "not-ready" as const, message: "this task delivers a branch — a scout has nothing to report on it" };
+      }
+      if (role === "builder" && deliverable === "report") {
+        return { ok: false as const, reason: "not-ready" as const, message: "this task delivers a report — a scout, never a builder, takes it" };
+      }
+      if (role === "scout" && approvedScope === undefined) {
+        return { ok: false as const, reason: "not-ready" as const, message: "the scope is not approved" };
       }
     }
     let attendedAuthority = false;
@@ -1592,6 +1608,204 @@ export function finalizePlanFailureFenced(
         dedupeKey: `plan-run:${runId}:failed`,
         kind: "plan-failed",
         subject: `${taskId}: planning attempt failed, retry ${strikes}/${MAX_PLAN_STRIKES}`,
+        body: `${oneLine(message, 200)}\nNext attempt no earlier than ${until.toISOString()}.`,
+      },
+      now,
+    );
+    return { ok: true as const, disposition: "backoff" as const, strikes };
+  });
+}
+
+export type ScoutFinalize = { ok: true } | { ok: false; reason: "fenced" | "unknown" };
+
+/**
+ * Seal a successful scouting run (mate arc §10): the report artifact, the
+ * run outcome, the task's terminal state, and the page to the operator
+ * exist together or — if the lease was superseded — not at all. Nothing
+ * here touches a branch, a publication, or a scope: the deliverable is
+ * the artifact, and the task is done the moment it verifies.
+ */
+export function finalizeScoutFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    report: ParsedReport;
+    /** The already-captured report file, described; null when the capture
+     * itself failed (the run still finishes, the page says the report is missing). */
+    artifact: {
+      key: string;
+      bytesOriginal: number;
+      bytesStored: number;
+      truncated: boolean;
+      sha256: string;
+      capture: string;
+    } | null;
+    now: Date;
+  },
+): ScoutFinalize {
+  const { leaseId, runId, taskId, report, now } = args;
+  const db = store.handle;
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a report seals exactly one`);
+    }
+    if (run.role !== "scout") {
+      throw new Error(`run ${runId} is a ${run.role} run — only scout runs deliver reports`);
+    }
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'completed'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+    if (args.artifact !== null) {
+      store.saveArtifact({ run: runId, kind: "report", ...args.artifact }, now);
+    }
+    store.resetStrikes(run.taskRef);
+    store.finishRun(runId, { outcome: "built", reason: args.artifact === null ? "report-delivered (capture failed)" : "report-delivered", now });
+    const done = store.setTaskState(taskId, "done", now);
+    if (!done.ok) {
+      // A mirror the tracker closed meanwhile: the report stands as evidence
+      // on the run; the task keeps the tracker's word for its state.
+      store.finishRun(runId, { outcome: "built", reason: `report-delivered (task ${done.reason})`, now });
+    }
+    store.enqueueNotification(
+      {
+        dedupeKey: `report:${run.taskRef}:${runId}`,
+        kind: "report-ready",
+        subject: `${taskId}: report ready — ${oneLine(report.title, 120)}`,
+        body: `${oneLine(report.summary, 300)}\nRead it on the task page${report.followUps.length > 0 ? `; ${report.followUps.length} follow-up(s) file with a tap` : ""}.`,
+      },
+      now,
+    );
+    return { ok: true as const };
+  });
+}
+
+export type ScoutFailureDisposition =
+  | { ok: true; disposition: "malformed-incident"; incidentId: number }
+  | { ok: true; disposition: "backoff"; strikes: number }
+  | { ok: true; disposition: "stalled"; incidentId: number; strikes: number }
+  | { ok: false; reason: "fenced" | "unknown" };
+
+/**
+ * The scout's fenced failure finalizer: the BUILDER's discipline, not the
+ * planner's — a scout task has no builder attempts, so its strikes are the
+ * task's own (three stall it, `task requeue` clears them), and a malformed
+ * report is a straight incident with no strike. Never a branch, never a
+ * repair session, never a commit.
+ */
+export function finalizeScoutFailureFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    kind: "malformed" | "failure";
+    message: string;
+    now: Date;
+  },
+): ScoutFailureDisposition {
+  const { leaseId, runId, taskId, kind, message, now } = args;
+  const db = store.handle;
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a failure seals exactly one`);
+    }
+    if (run.role !== "scout") {
+      throw new Error(`run ${runId} is a ${run.role} run — this finalizer seals scout attempts only`);
+    }
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'released'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+    store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? "malformed-report" : oneLine(message, 120), now });
+
+    if (kind === "malformed") {
+      const incidentId = store.createIncident({ run: runId, kind: "malformed-report" }, now);
+      store.holdOwned(
+        {
+          taskRef: run.taskRef,
+          ownerKind: "incident",
+          ownerId: String(incidentId),
+          reason: "malformed-report — the scout's payload failed validation",
+          until: null,
+        },
+        now,
+      );
+      store.enqueueNotification(
+        {
+          dedupeKey: `malformed-report:${runId}`,
+          kind: "malformed-report",
+          pushClass: "attention",
+          link: `/r/${runId}`,
+          subject: `${taskId}: the scout's report failed validation`,
+          body: `${oneLine(message, 300)}\nResolve the incident to let scouting retry.`,
+        },
+        now,
+      );
+      return { ok: true as const, disposition: "malformed-incident" as const, incidentId };
+    }
+
+    const strikes = store.addStrike(run.taskRef);
+    if (strikes >= MAX_STRIKES) {
+      const incidentId = store.createIncident({ run: runId, kind: "attempts-exhausted" }, now);
+      store.holdOwned(
+        {
+          taskRef: run.taskRef,
+          ownerKind: "incident",
+          ownerId: String(incidentId),
+          reason: `attempts-exhausted — ${strikes} consecutive scouting failures`,
+          until: null,
+        },
+        now,
+      );
+      db.prepare("UPDATE task SET state = 'failed', updated_at = ? WHERE id = ?").run(now.toISOString(), taskId);
+      store.enqueueNotification(
+        {
+          dedupeKey: `stalled:${run.taskRef}`,
+          kind: "attempts-exhausted",
+          pushClass: "attention",
+          link: `/r/${runId}`,
+          subject: `${taskId} stalled after ${strikes} straight scouting failures`,
+          body: `Last failure: ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`standing-orders task requeue ${taskId}\`.`,
+        },
+        now,
+      );
+      return { ok: true as const, disposition: "stalled" as const, incidentId, strikes };
+    }
+
+    const wait = BACKOFF_MS[Math.min(strikes, BACKOFF_MS.length) - 1] as number;
+    const until = new Date(now.getTime() + wait);
+    store.holdOwned(
+      {
+        taskRef: run.taskRef,
+        ownerKind: "backoff",
+        ownerId: String(run.taskRef),
+        reason: `scout retry ${strikes}/${MAX_STRIKES} — backing off ${Math.round(wait / 60_000)}m`,
+        until,
+      },
+      now,
+    );
+    store.enqueueNotification(
+      {
+        dedupeKey: `run:${runId}:failed`,
+        kind: "scout-failed",
+        subject: `${taskId}: scouting attempt failed, retry ${strikes}/${MAX_STRIKES}`,
         body: `${oneLine(message, 200)}\nNext attempt no earlier than ${until.toISOString()}.`,
       },
       now,

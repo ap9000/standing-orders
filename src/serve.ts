@@ -49,7 +49,7 @@ import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, 
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { EVIDENCE_CAPS, readVerifiedArtifact, storeEvidence, writeEvidenceFile, scanForSecrets } from "./evidence.js";
+import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -1906,10 +1906,17 @@ export function createDecisionServer(options: ServeOptions): Server {
             mode: readAuthMode(provider as "claude"),
             subscriptionCapable: SUBSCRIPTION_CAPABLE[provider as "claude"],
           }));
+      const telegramConfigured = loadBotToken(process.env, options.telegramTokenFile) !== null;
+      const digest = telegramConfigured
+        ? (() => {
+            const cadence = store.telegramDigest();
+            return { everyMs: cadence.everyMs, lastSentAt: cadence.lastSentAt, held: store.countRoutinePending() };
+          })()
+        : null;
       return sendScreen(
         response,
         200,
-        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys),
+        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys, digest),
       );
     }
 
@@ -2608,6 +2615,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
         planDocument: ref === null ? null : planDocumentOf(ref.id),
+        deliverable: ref?.deliverable ?? "branch",
+        report: ref === null ? null : readVerifiedReport(store, evidenceRoot, ref.id),
         revision,
         repo: ref?.repo ?? null,
         filedVia: store.filedViaOf(taskId),
@@ -3272,6 +3281,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, "/settings");
     }
 
+    if (url.pathname === "/settings/telegram-digest" && options.telegramTokenFile !== undefined) {
+      // The cadence is a closed list of minutes — never a free number from
+      // a form; "off" clears it. Any approver session may set it.
+      const wanted = (body.get("every") ?? "").trim();
+      const allowed: Record<string, number | null> = { off: null, "30": 30, "60": 60, "240": 240, "720": 720, "1440": 1440 };
+      if (!(wanted in allowed)) return refuse(response, who, 400, "the digest cadence is one of the listed choices", "/settings");
+      const minutes = allowed[wanted] ?? null;
+      store.setTelegramDigest(minutes === null ? null : minutes * 60_000, who.name, now);
+      return redirect(response, `/settings?said=${encodeURIComponent(minutes === null ? "digest off — every fact pages as it lands" : `digest every ${minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`} — decisions still page at once`)}`);
+    }
+
     if (url.pathname === "/settings/provider-key" || url.pathname === "/settings/provider-key-clear") {
       // The central gate already required an ACTIVE approver; the value is
       // write-only from here — status pages say set/not-set, never bytes.
@@ -3450,6 +3470,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ...(goal === "" ? {} : { goal }),
           outOfScope: notThis === "" ? null : notThis,
           touches: touchesGiven,
+          ...(body.get("scout") === "1" ? { deliverable: "report" as const } : {}),
           filedVia: "console",
           ...(admitted === null ? {} : { admittedRepos: admitted }),
         },
@@ -3914,7 +3935,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer|follow-up)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -4247,7 +4268,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return redirect(response, `/chat?said=${encodeURIComponent(`a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`)}`);
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, fetcher: chatFetcher, clock })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, fetcher: chatFetcher, clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
@@ -5213,6 +5234,33 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         // Allow-listed return only — never an arbitrary URL from the form.
         return redirect(response, body.get("return") === "inbox" ? "/" : body.get("return") === "next" ? "/next" : taskHref(taskId));
+      }
+      case "follow-up": {
+        // A scout's proposed follow-up, filed by the operator's tap (mate
+        // arc §10): the ONE filing door, this task's repository, the scope
+        // text stamped as the scout's — mode coverage never seals it.
+        const indexRaw = body.get("index") ?? "";
+        if (!/^[0-9]{1,2}$/.test(indexRaw)) return taskScreen(response, who, taskId, "which follow-up?", 400);
+        const view = readVerifiedReport(store, evidenceRoot, ref.id);
+        if (view === null || !view.ok) return taskScreen(response, who, taskId, "this task has no report to file from", 409);
+        const followUp = view.report.followUps[Number(indexRaw)];
+        if (followUp === undefined) return taskScreen(response, who, taskId, "the report proposes no such follow-up", 409);
+        if (ref.repo === null) return taskScreen(response, who, taskId, "this task has no repository — file the follow-up by hand", 409);
+        if (!visible(ref.repo)) return taskScreen(response, who, taskId, "that repository is outside what this server shows", 403);
+        const filed = fileTaskProposal(
+          store,
+          {
+            title: followUp.title,
+            repo: ref.repo,
+            goal: followUp.goal,
+            filedVia: "console",
+            proposedVia: "scout",
+            ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
+          },
+          now,
+        );
+        if (!filed.ok) return taskScreen(response, who, taskId, `not filed: ${filed.message}`, filed.reason === "backlog-full" ? 429 : 400);
+        return redirect(response, taskHref(filed.id));
       }
       case "plan": {
         // The operator's explicit ask, refused transactionally when the
@@ -8229,7 +8277,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   let what: string;
   if (view.kind === "task") {
     what =
-      `<strong>file ${escape(text("title"))}</strong> in <span class="mono">${escape(repoId)}</span><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
+      `<strong>file ${escape(text("title"))}</strong> in <span class="mono">${escape(repoId)}</span>${payload["report"] === true ? ` <span class="badge">scout — delivers a report, never a branch</span>` : ""}<p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
       (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`) +
       (Array.isArray(payload["touches"]) && payload["touches"].length > 0 ? `<p class="meta">touches: ${escape((payload["touches"] as string[]).join(", "))}</p>` : "");
   } else if (view.kind === "next") {
@@ -9007,7 +9055,7 @@ function portfolioOverview(data: {
   runs24: (Run & { taskId: string })[];
   live: { taskId: string; runner: string; claimedAt: string; expiresAt: string; model: string | null; repo: string | null }[];
   ledger: {
-    runId: number; taskId: string; title: string; repo: string | null; outcome: string;
+    runId: number; taskId: string; title: string; repo: string | null; outcome: string; role: string;
     provider: string | null; model: string | null; startedAt: string; ranMinutes: number | null;
     costUsd: number | null; prNumber: number | null; prUrl: string | null;
   }[];
@@ -9148,6 +9196,7 @@ function portfolioOverview(data: {
       one =>
         `<p class="row"><a href="/r/${one.runId}">${escape(one.title)}</a>${projectChip(one.repo)} ` +
         `<span class="badge ${chipClass(one.outcome)}">${escape(one.outcome)}</span> ` +
+        `${one.role === "scout" ? `<a class="badge" href="${taskHref(one.taskId)}#report">report</a> ` : ""}` +
         `<span class="mono meta">${one.provider === null ? "" : escape(one.provider)}${one.model === null ? "" : ` · ${escape(one.model)}`}` +
         `${one.ranMinutes === null ? "" : ` · ${one.ranMinutes}m`}` +
         ` · ${one.costUsd === null ? "unmeasured" : `$${one.costUsd.toFixed(2)}`}` +
@@ -10113,6 +10162,7 @@ function newTaskPage(
     `<label>title<input type="text" name="title" placeholder="Add a sliding-window rate limiter to the public API"></label>`,
     `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
       `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
+    `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="scout" value="1" style="margin-top:.35rem"><span>scout <span class="meta">— deliver a report instead of a branch: a read-only session investigates the goal as a question and writes up what it found; nothing in the repository changes</span></span></label>`,
     `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
     candidates.length === 0
       ? ""
@@ -10135,6 +10185,9 @@ function taskBody(data: {
   strikes: number;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
+  /** v34: what this task delivers, and the scout's report when one exists. */
+  deliverable?: "branch" | "report";
+  report?: ReportView | null;
   revision?: RevisionView | null;
   publication?: Publication | null;
   repo: string | null;
@@ -10333,6 +10386,38 @@ function taskBody(data: {
             : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
           `</div>`,
         ].join("\n");
+
+  // The scout's report (mate arc §10): title, summary, the document inert,
+  // and each follow-up as a filing the operator makes with one tap. A
+  // report that exists but cannot be verified is a named problem, never a
+  // blank — the same rule as the revision brief.
+  const reportCard =
+    data.report === null || data.report === undefined
+      ? data.deliverable === "report"
+        ? `<div class="card"><p><strong>scout task</strong> <span class="meta">delivers a report, never a branch — a read-only session investigates the goal and its report appears here when it finishes</span></p></div>`
+        : ""
+      : !data.report.ok
+        ? `<div class="card"><p><strong>the report</strong></p><p class="meta">${escape(data.report.problem)} · <a href="/r/${data.report.run}">run ${data.report.run}</a></p></div>`
+        : [
+            `<div class="card report">`,
+            `<p><strong>${escape(data.report.report.title)}</strong> <span class="meta">the scout's report · <a href="/r/${data.report.run}">run ${data.report.run}</a></span></p>`,
+            `<p class="report-summary">${escape(data.report.report.summary)}</p>`,
+            `<pre class="recap plan-doc">${escape(data.report.report.report)}</pre>`,
+            ...(data.report.report.followUps.length === 0
+              ? []
+              : [
+                  `<p><strong>follow-ups the scout proposes</strong> <span class="meta">each files as a task in this repository; its scope still needs your approval</span></p>`,
+                  ...data.report.report.followUps.map(
+                    (one, index) =>
+                      `<div class="follow-up"><p><strong>${escape(one.title)}</strong></p><p class="meta">${escape(one.goal)}</p>` +
+                      (data.csrf === "" || data.repo === null
+                        ? `<p class="meta">${data.repo === null ? "this task has no repository — file it by hand" : ""}</p>`
+                        : `<form method="post" action="${taskHref(task.id)}/follow-up" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="index" value="${index}"><button type="submit">file this follow-up</button></form>`) +
+                      `</div>`,
+                  ),
+                ]),
+            `</div>`,
+          ].join("\n");
 
   // The plan a planner drafted, when one exists: rendered inert above the
   // approval it proposes. The scope stays the contract; this is the road.
@@ -10843,7 +10928,7 @@ function taskBody(data: {
           : data.filedVia === null || data.filedVia === undefined
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
-      }</p>`,
+      }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
     `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
     approveForm === "" ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
@@ -10934,6 +11019,7 @@ function taskBody(data: {
             ? ` · CI ${data.publication.lastCheckState} at last observation`
             : " · no checks observed"
         }</span></p>`,
+    section("report", reportCard, true),
     section("attempts", runs, true, data.runs.length),
     section("spend", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
@@ -11091,6 +11177,7 @@ const INCIDENT_WORDS: Record<string, string> = {
   "commit-failure": "the commit failed",
   "malformed-plan": "the plan was malformed",
   "plan-attempts-exhausted": "planning failed too many times",
+  "malformed-report": "the scout's report was malformed",
 };
 
 function incidentWords(kind: string): string {
@@ -11107,6 +11194,7 @@ const EVIDENCE_WORDS: Record<string, string> = {
   "base-tree": "the starting-point file list",
   handoff: "the agent's conclusion",
   "revision-brief": "the revision brief",
+  report: "the scout's report",
 };
 
 function evidenceWords(kind: string): string {
@@ -11709,7 +11797,39 @@ function settingsPage(
   messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
   push: { available: boolean; devices: PushSubscription[] } | null = null,
   providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean }[] | null = null,
+  digest: { everyMs: number | null; lastSentAt: string | null; held: number } | null = null,
 ): Screen {
+  const digestCard =
+    digest === null || csrf === ""
+      ? ""
+      : [
+          "<h2>telegram digest</h2>",
+          `<p class="meta">away mode: routine facts (merges, reports, retries, plans ready) are held and sent as one digest on this cadence. A decision and anything that needs a person now still page the moment they land.</p>`,
+          `<form method="post" action="/settings/telegram-digest" class="card">`,
+          `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+          `<label>send a digest<select name="every">` +
+            [
+              ["off", "off — every fact pages as it lands"],
+              ["30", "every 30 minutes"],
+              ["60", "every hour"],
+              ["240", "every 4 hours"],
+              ["720", "every 12 hours"],
+              ["1440", "once a day"],
+            ]
+              .map(([value, label]) => {
+                const selected = value === "off" ? digest.everyMs === null : digest.everyMs === Number(value) * 60_000;
+                return `<option value="${value}"${selected ? " selected" : ""}>${label}</option>`;
+              })
+              .join("") +
+            `</select></label>`,
+          `<p class="meta">${
+            digest.everyMs === null
+              ? "off"
+              : `${digest.held} routine fact(s) held · next digest ${digest.lastSentAt === null ? "at the next bridge pass" : `no earlier than ${escape(new Date(new Date(digest.lastSentAt).getTime() + digest.everyMs).toISOString())}`}`
+          }</p>`,
+          `<button type="submit">save</button>`,
+          `</form>`,
+        ].join("\n");
   const keysCard =
     providerKeys === null || csrf === ""
       ? ""
@@ -11835,6 +11955,7 @@ function settingsPage(
     pushCard,
     keysCard,
     messagingCard,
+    digestCard,
     "<h2>telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,
     problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,

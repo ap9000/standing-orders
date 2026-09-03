@@ -78,6 +78,8 @@ type ToolContext = {
   now: Date;
   /** Decisions this connection read with get_decision — propose_answer needs one. */
   readDecisions: Set<number>;
+  /** Where evidence lives, when the launcher knows — get_task reads a scout's report from here. */
+  evidenceRoot?: string;
 };
 
 type Tool = {
@@ -93,7 +95,7 @@ const CONTRACT_GUIDE = [
   "standing-orders MCP contract.",
   "You hold a coordinator credential: you may READ the plane inside your repo allowlist, and FILE proposals — nothing else.",
   "A filed proposal is an ordinary unapproved task: it is quarantined from planning, claiming, and running until the operator signs its scope in a password ceremony that shows them who asked. Modes never auto-admit coordinator filings.",
-  "file_proposal requires an idempotency_key (8-64 printable chars, unique per request): replaying the same key+request returns the original task; the same key with a different request refuses.",
+  "file_proposal requires an idempotency_key (8-64 printable chars, unique per request): replaying the same key+request returns the original task; the same key with a different request refuses. deliverable 'report' files a scout task: a read-only investigation whose only output is a report on the task page, never a branch.",
   "You are rate-limited per hour and capped on outstanding unapproved filings. Refusals say the limit and the road in words.",
   "recap, list_decisions, get_decision, and queue are the plane's own read queries (shared with the operator's mate). get_decision shows each option's consequence, never the builder's recommendation.",
   "propose_next, propose_reserve, propose_hold, propose_unhold, propose_scope, propose_cancel, and propose_answer write a PROPOSAL row and nothing else: an approver confirms it on the console or the CLI, and a stale one refuses there. Proposals share your hourly filing rate and hold at most 20 pending per credential; they expire after seven days.",
@@ -200,7 +202,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "get_task",
-    description: "One task's scope standing, filer provenance, and attempt ledger. A ref outside your allowlist answers not-found.",
+    description: "One task's deliverable (branch or report), scope standing, filer provenance, attempt ledger, and — for a finished scout — the report's title, summary, and follow-ups. A ref outside your allowlist answers not-found.",
     inputSchema: {
       type: "object",
       properties: { ref: { type: "string", minLength: 1, maxLength: 64 } },
@@ -210,7 +212,7 @@ const TOOLS: Tool[] = [
     handle: (ctx, args) => {
       const ref = str(args, "ref", 64);
       if (ref === null) return { ok: false, message: "ref is a task id, 1-64 characters" };
-      const detail = taskDetailFor(ctx.store, ctx.who, ref);
+      const detail = taskDetailFor(ctx.store, ctx.who, ref, ctx.evidenceRoot);
       if (detail === null) return { ok: false, message: `not-found: no task \`${ref}\` in your repositories` };
       return { ok: true, body: detail as unknown as Json };
     },
@@ -299,6 +301,7 @@ const TOOLS: Tool[] = [
         title: { type: "string", minLength: 1, maxLength: 200 },
         intent: { type: "string", maxLength: 2000 },
         idempotency_key: { type: "string", minLength: 8, maxLength: 64 },
+        deliverable: { type: "string", enum: ["branch", "report"] },
       },
       required: ["repo", "title", "idempotency_key"],
       additionalProperties: false,
@@ -308,6 +311,7 @@ const TOOLS: Tool[] = [
       const title = str(args, "title", 200);
       const key = str(args, "idempotency_key", 64);
       const intent = typeof args["intent"] === "string" ? args["intent"] : undefined;
+      const deliverable = args["deliverable"] === "report" ? ("report" as const) : args["deliverable"] === "branch" ? ("branch" as const) : undefined;
       if (repo === null || title === null || key === null) {
         return { ok: false, message: "file_proposal needs repo, title, and idempotency_key (8-64 chars)" };
       }
@@ -316,7 +320,7 @@ const TOOLS: Tool[] = [
       const outcome = fileCoordinatorProposal(
         ctx.store,
         ctx.token,
-        { repo, title, ...(intent === undefined ? {} : { intent }), idempotencyKey: key },
+        { repo, title, ...(intent === undefined ? {} : { intent }), ...(deliverable === undefined ? {} : { deliverable }), idempotencyKey: key },
         ctx.now,
       );
       if (!outcome.ok) return { ok: false, message: outcome.message };
@@ -377,6 +381,7 @@ export function serveMcp(
   io: McpIo,
   clock: () => Date = () => new Date(),
   enrolled: readonly string[] | null = null,
+  evidenceRoot?: string,
 ): McpOutcome {
   /** Per connection: which decisions this credential read in full (v3). */
   const readDecisions = new Set<number>();
@@ -467,7 +472,7 @@ export function serveMcp(
       error(id, -32602, invalid);
       return;
     }
-    const answered = tool.handle({ store, who: session.who, token, enrolled, now: clock(), readDecisions }, args);
+    const answered = tool.handle({ store, who: session.who, token, enrolled, now: clock(), readDecisions, ...(evidenceRoot === undefined ? {} : { evidenceRoot }) }, args);
     if (!answered.ok) {
       respond(id, era, { content: [{ type: "text", text: answered.message }], isError: true }, false);
       return;

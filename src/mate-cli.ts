@@ -37,6 +37,8 @@ export type MateCliInput = {
   ceilingUsd: number | undefined;
   hours: number | undefined;
   seams?: MateCliSeams;
+  /** Where evidence lives — a scout's report reads from here. */
+  evidenceRoot?: string;
 };
 
 export type MateCliResult = { code: number; reason?: string; message?: string };
@@ -90,7 +92,7 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
     })();
     const what =
       one.kind === "task"
-        ? `file "${t("title")}" in ${repoLabel}`
+        ? `file "${t("title")}" in ${repoLabel}${payload["report"] === true ? " (a scout task — it delivers a report, never a branch)" : ""}`
         : one.kind === "next"
           ? `move ${t("task")} to the front (was ${String(payload["position"] ?? "?")} of ${String(payload["of"] ?? "?")})`
           : one.kind === "reserve"
@@ -235,7 +237,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       const outcome: MateTurnOutcome = { ok: false, refused: "session-ended", message: "this mate session has ended — run chat again to mint one" };
       return outcome;
     }
-    return runMateTurn({ store, who, session: live, thread, config, key, message, ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), clock });
+    return runMateTurn({ store, who, session: live, thread, config, key, message, ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), clock });
   };
   const report = (outcome: MateTurnOutcome): void => {
     if (outcome.ok) {

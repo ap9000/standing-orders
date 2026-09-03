@@ -14,7 +14,7 @@ import type { Store, MateProposalKind } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import type { MateToolSchema } from "./converse.js";
 import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
-import { scanForSecrets } from "./evidence.js";
+import { readVerifiedReport, scanForSecrets } from "./evidence.js";
 
 export const MATE_MAX_PROPOSALS_PER_TURN = 5;
 
@@ -28,9 +28,26 @@ export type MateToolContext = {
    * an answer may be proposed only for a decision read in an EARLIER step (v3 review, finding 6). */
   step: number;
   readDecisions: Map<number, number>;
+  /** Where evidence lives, when the surface knows — a scout's report reads from here. */
+  evidenceRoot?: string;
 };
 
 export type MateToolResult = { ok: true; body: unknown } | { ok: false; message: string };
+
+/** The report a scout delivered, for get_task: title, summary, follow-ups —
+ * verified before it is read; the document itself stays on the task page. */
+export function reportSummaryFor(
+  store: Store,
+  evidenceRoot: string | undefined,
+  taskRef: number,
+): { title: string; summary: string; followUps: { title: string; goal: string }[] } | { problem: string } | null {
+  if (store.latestReportArtifact(taskRef) === null) return null;
+  if (evidenceRoot === undefined) return { problem: "a report exists, but this surface cannot read evidence" };
+  const view = readVerifiedReport(store, evidenceRoot, taskRef);
+  if (view === null) return null;
+  if (!view.ok) return { problem: view.problem };
+  return { title: view.report.title, summary: view.report.summary, followUps: view.report.followUps };
+}
 
 const REPO_ID = /^r[0-9]{1,3}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -308,7 +325,7 @@ export const MATE_TOOLS: MateTool[] = [
   {
     name: "get_task",
     description:
-      "One task: its state, scope standing (none / not approved / rewritten since approval / approved), queue place, holds, attempts, and its own open decisions. Never its scope text or paths.",
+      "One task: its state, deliverable (branch or report), scope standing (none / not approved / rewritten since approval / approved), queue place, holds, attempts, its own open decisions, and — for a finished scout — the report's title, summary, and follow-ups. Never its scope text or paths.",
     inputSchema: schema({ task: TASK_ARG }, ["task"]),
     handle: (ctx, args) => {
       const taskId = taskIdOf(args);
@@ -327,6 +344,8 @@ export const MATE_TOOLS: MateTool[] = [
           task: taskId,
           title: task.title,
           state: task.state,
+          deliverable: ctx.store.refForId(ref.id)?.deliverable ?? "branch",
+          report: reportSummaryFor(ctx.store, ctx.evidenceRoot, ref.id),
           scope: scopeStandingOf(ctx.store, taskId),
           queue: position === null ? null : { position: position.position, of: position.total, column: position.column ?? "shared" },
           holds: holds.map(one => ({ owner: one.ownerKind, reason: one.reason })),
@@ -370,9 +389,9 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_task",
-    description: "Propose filing a new task. It becomes a card the operator confirms; nothing is filed until then, and a filed task still needs its scope approved.",
+    description: "Propose filing a new task. It becomes a card the operator confirms; nothing is filed until then, and a filed task still needs its scope approved. report: true proposes a SCOUT task — a read-only investigation whose only deliverable is a report, never a branch.",
     inputSchema: schema(
-      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 } },
+      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, report: { type: "boolean" } },
       ["repo", "title", "goal"],
     ),
     handle: (ctx, args) => {
@@ -383,9 +402,11 @@ export const MATE_TOOLS: MateTool[] = [
       if (not === undefined) return { ok: false, message: "not is plain text ≤2000" };
       const touches = readTouches(args["touches"]);
       if (touches === null) return { ok: false, message: "touches is up to 50 plain paths" };
-      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches });
+      if (args["report"] !== undefined && typeof args["report"] !== "boolean") return { ok: false, message: "report is true or false" };
+      const report = args["report"] === true;
+      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches, report });
       if (id === null) return tooMany();
-      return { ok: true, body: { proposal: id, kind: "task", repo: args["repo"], awaiting: "the operator's confirmation" } };
+      return { ok: true, body: { proposal: id, kind: "task", repo: args["repo"], deliverable: report ? "report" : "branch", awaiting: "the operator's confirmation" } };
     },
   },
   {

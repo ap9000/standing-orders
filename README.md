@@ -208,6 +208,13 @@ when a bot token is configured: a tap on your phone answers the decision,
 the answer wakes the loop, and the freed task resumes — phone to build,
 no timer in between.
 
+**Away mode.** `standing-orders bridge telegram digest --every 2h` (or
+`--off`, or the console's settings card) holds routine facts — merges,
+reports, retries, plans ready — and sends them as one digest on that
+cadence. A decision, and anything that needs a person now (a stalled
+task, a malformed payload, a gap that blocks work), still pages the
+moment it lands. `bridge telegram status` says how many facts are held.
+
 A chat is not a person: pairing binds one private chat and one immutable
 Telegram user id to one approver credential. Buttons carry opaque one-time
 tokens whose meaning lives in the local database — a stolen bot token can
@@ -296,6 +303,14 @@ Everything below ships in 0.4.0:
   worker under one signed ceiling, each with its own model and
   permission posture chosen at mint, the whole execution profile under
   the signature.
+- **Scout tasks** — `task add … --report` (or the "scout" checkbox, or
+  the mate's `propose_task` with `report: true`) files a task whose
+  deliverable is a report, never a branch: once its scope is approved,
+  a read-only session investigates the goal as a question and hands
+  back a title, a summary, a document, and up to five follow-ups, each
+  of which files as a task with one tap. The workspace is proven
+  untouched before a byte of the report is read; a scout that changed
+  anything gets nothing ingested.
 
 ## Writing to a tracker you already have
 

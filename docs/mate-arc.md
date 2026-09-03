@@ -407,8 +407,8 @@ chat --say "…"` runs one turn and exits with the proposals listed.
 
 ## 8. Deferred
 
-Scout tasks (report-shaped deliverable), Telegram digests, project-level
-standing notes, propose-* over the MCP gateway for coordinators, voice.
+Project-level standing notes, voice. (Scout tasks and Telegram digests
+landed in v4, §10; proposals over the gateway in v3, §9.)
 
 ## 9. v3 (2026-09-02): suggested answers, and proposals over the gateway
 
@@ -462,3 +462,105 @@ the mode seal refuses it exactly as it refuses the mate's.
 kind for either door under `{ name, repos }` taken from a
 `VerifiedApprover` — never a structural caller object.
 
+
+## 10. v4 (2026-09-02): scout tasks, and Telegram digests
+
+Both were deferred in §8; the operator asked for them. No rule changes:
+a scout reads and never writes, exactly like the planner, and a digest
+is the outbox's cadence, never its content.
+
+### Scout tasks
+
+**A task's deliverable is `branch` or `report`.** `task_ref.deliverable`
+(v34, default `branch`) is set at filing — `task add --report`, the
+console's "scout" checkbox on the new-task form, `propose_task
+{report: true}` from the mate, `file_proposal {deliverable: "report"}`
+over the gateway — and never changes afterwards: a filing is a promise
+about what comes back, and rewriting it after somebody approved the scope
+would approve something else. A scout task is otherwise an ordinary task:
+its scope is written and approved through the same ceremony (the yes is
+the spend authorization, and the approval binds routing exactly as it
+does for a build), it queues, holds, reserves, and chains the same way,
+and modes cover it under the same rail.
+
+**The scout run** (`run.role = 'scout'`, its own word in every cost
+report — recording a scout as a planner or a builder would make the
+three indistinguishable afterwards) rides the planner's road: a
+disposable worktree on `standing-orders-scout/<id>`, plan-mode
+permissions, the clean-tree proof BEFORE any payload is read (branch
+unmoved, HEAD unmoved, nothing foreign in the tree), one park mailbox for
+a question the operator answers like any decision, and a terminal
+protocol file `STANDING-ORDERS-REPORT-<nonce>.json`:
+
+```
+{ "title": "≤200", "summary": "≤1000, one paragraph",
+  "report": "markdown, ≤64 KiB",
+  "followUps": [{ "title": "≤200", "goal": "≤2000" }] (≤5) }
+```
+
+parsed with the 422 rule (fail closed, every problem at once, caps and
+control characters refused). The whole payload is ONE evidence artifact
+(`kind = 'report'`, `report.json`, sha256-verified before a byte renders);
+the run finishes `built / report-delivered`; the task is `done`; the
+outbox carries `report-ready` with the summary — routine, no push class.
+No branch is kept, nothing publishes, nothing merges: a scout's branch
+namespace is its own, so a later build starts from base with nothing a
+scouting session could have left as an ancestor.
+
+**Failure is the builder's discipline, not the planner's.** A scout task
+has no builder attempts, so its strikes ARE the task's strikes: a failed
+scouting run takes a strike and a doubling backoff; three consecutive
+stall the task (`attempts-exhausted`, the task `failed`, a page); a
+malformed report is a straight incident (`malformed-report`, v34) with a
+hold, no strike — the protocol failed, not the weather. `task requeue`
+clears all of it, as for a build.
+
+**Where the report shows.** The task page renders the title, the summary,
+the document (inert, like the plan), and each follow-up as a card with
+"file this follow-up": `POST /t/:id/follow-up {index}` files a task in the
+same repository through the one filing door with `filed_via = 'console'`
+and `proposed_via = 'scout'` — the scope text is an LLM's, so **mode
+coverage never seals it** (the same rule as the mate's and a
+coordinator's; the seal's refusal list grows by one word). The portfolio
+ledger row for a scout run says `report` and links the task. `task show`
+prints the title and summary. `get_task` (mate and gateway) gains
+`report: {title, summary, followUps} | null` — through `mateView` for the
+mate, so a path typed into a summary is scrubbed like everything else.
+The board says "scouting" where it would say "planning".
+
+### Telegram digests
+
+**Away mode is a cadence on the bridge.** `telegram_digest` (v34, one
+row) holds `every_ms` (null = off, today's behavior), who set it, when,
+and `last_sent_at`. Set from the CLI — `bridge telegram digest --every
+30m|2h|24h` / `--off` — or the console's settings card; `bridge telegram
+status` and the card both say the cadence, how many routine facts are
+held, and the earliest next digest.
+
+**What still pages singly.** A decision (`dedupe_key = decision:<id>`,
+buttons and all) and every `attention`-class fact (incidents, stalls,
+commit failures, gaps that block work, malformed payloads) go out the
+moment the bridge sees them, digest or no digest — those are the wedge
+alarms. Everything else is routine (merges, publications, `plan-ready`,
+`report-ready`, a retry's backoff note, the answered-decision echo) and is
+HELD in the outbox — unclaimed, `delivered_at IS NULL` — until the cadence
+elapses. `claimDeliveries` takes an `only` argument (`all` | `urgent`);
+the bridge asks for `urgent` while a digest window is open and `all` once
+it has elapsed.
+
+**The digest itself** is one plain message (split at Telegram's ceiling
+like every long text): a header with the count and the window, then one
+line per fact — subject, then its body's first line, indented — in id
+order. Every batched row is finalized with the same receipt in the same
+pass; a transport failure finalizes them all failed and leaves
+`last_sent_at` alone, so the next pass tries again. A row resolved while
+held (a decision answered, a gap filled) never enters a digest —
+`resolved_at` already excludes it from claiming. The webhook mirrors
+(Slack, Discord) and `outbox deliver --cmd` are untouched: the cadence is
+Telegram's.
+
+**At most one digest per window, and nothing on an empty window.** The
+window is measured from `last_sent_at`; a routine fact arriving after a
+long quiet goes out at the next pass, not after another full interval.
+Turning the digest off flushes nothing by itself — the next pass claims
+everything, as today.

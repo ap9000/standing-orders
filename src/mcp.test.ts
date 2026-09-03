@@ -272,6 +272,26 @@ describe("the MCP stdio server", () => {
     expect(h.last()["error"]).toBeUndefined();
   });
 
+  test("file_proposal with deliverable 'report' files a scout task; get_task says so (v34)", () => {
+    const h = harness(store, token);
+    h.send({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { _meta: modernMeta, name: "file_proposal", arguments: { repo: REPO, title: "Why is login flaky?", intent: "Find out", idempotency_key: "key-scout-0001", deliverable: "report" } },
+    });
+    const body = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
+    expect(store.refFor("built-in", String(body["ref"])).deliverable).toBe("report");
+    h.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { _meta: modernMeta, name: "get_task", arguments: { ref: String(body["ref"]) } } });
+    const detail = JSON.parse(String(((h.last()["result"] as Record<string, unknown>)["content"] as { text: string }[])[0]?.text)) as Record<string, unknown>;
+    expect(detail["deliverable"]).toBe("report");
+    expect(detail["report"]).toBeNull();
+    // An unknown deliverable is a protocol error (the schema is the parser).
+    h.send({
+      jsonrpc: "2.0", id: 3, method: "tools/call",
+      params: { _meta: modernMeta, name: "file_proposal", arguments: { repo: REPO, title: "x", idempotency_key: "key-scout-0002", deliverable: "essay" } },
+    });
+    expect(h.last()["error"]).toBeDefined();
+  });
+
   test("reads are allowlist-scoped: a foreign task answers not-found; status counts only this credential's repos", () => {
     // A task in a repo OUTSIDE the allowlist, via a second coordinator.
     const other = mintCoordinator(store, { name: "other-bot", repos: ["/repo/other"], by: "alex", now: T0 });
@@ -398,7 +418,7 @@ describe("the MCP stdio server", () => {
       },
       {
         name: "get_task",
-        description: "One task's scope standing, filer provenance, and attempt ledger. A ref outside your allowlist answers not-found.",
+        description: "One task's deliverable (branch or report), scope standing, filer provenance, attempt ledger, and — for a finished scout — the report's title, summary, and follow-ups. A ref outside your allowlist answers not-found.",
         inputSchema: {
           type: "object",
           properties: { ref: { type: "string", minLength: 1, maxLength: 64 } },
@@ -481,6 +501,7 @@ describe("the MCP stdio server", () => {
             title: { type: "string", minLength: 1, maxLength: 200 },
             intent: { type: "string", maxLength: 2000 },
             idempotency_key: { type: "string", minLength: 8, maxLength: 64 },
+            deliverable: { type: "string", enum: ["branch", "report"] },
           },
           required: ["repo", "title", "idempotency_key"],
           additionalProperties: false,

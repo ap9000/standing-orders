@@ -19,6 +19,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { canonicalRepos } from "./runner.js";
 import { fileTaskProposal } from "./proposal.js";
 import { describeScope } from "./scope.js";
+import { reportSummaryFor } from "./mate-tools.js";
 import type { Store } from "./store.js";
 
 declare const verifiedCoordinatorBrand: unique symbol;
@@ -232,14 +233,14 @@ export type FileOutcome =
 export function fileCoordinatorProposal(
   store: Store,
   token: string,
-  input: { repo: string; title: string; intent?: string; idempotencyKey: string },
+  input: { repo: string; title: string; intent?: string; idempotencyKey: string; deliverable?: "branch" | "report" },
   now: Date,
 ): FileOutcome {
   if (!KEY.test(input.idempotencyKey)) {
     return { ok: false, reason: "bad-key", message: "idempotency_key is 8–64 printable ASCII characters" };
   }
   const digest = createHash("sha256")
-    .update(JSON.stringify({ repo: input.repo, title: input.title, intent: input.intent ?? null }), "utf8")
+    .update(JSON.stringify({ repo: input.repo, title: input.title, intent: input.intent ?? null, ...(input.deliverable === undefined ? {} : { deliverable: input.deliverable }) }), "utf8")
     .digest("hex");
 
   return store.transact(() => {
@@ -309,6 +310,7 @@ export function fileCoordinatorProposal(
         title: input.title,
         repo: input.repo,
         ...(input.intent === undefined ? {} : { goal: input.intent }),
+        ...(input.deliverable === undefined ? {} : { deliverable: input.deliverable }),
         filedVia: `mcp:${who.name}`,
         admittedRepos: who.repos,
       },
@@ -459,8 +461,12 @@ export function taskDetailFor(
   store: Store,
   who: VerifiedCoordinator,
   taskId: string,
+  evidenceRoot?: string,
 ): {
   ref: string; title: string; state: string; repo: string;
+  deliverable: "branch" | "report";
+  /** A finished scout's report (mate arc §10); null when there is none. */
+  report: { title: string; summary: string; followUps: { title: string; goal: string }[] } | { problem: string } | null;
   filedBy: string | null;
   scope: { sealed: boolean; goal: string | null; words: string[] };
   waits: string[];
@@ -530,11 +536,14 @@ export function taskDetailFor(
             captureStatus: one["capture_status"] === null ? null : String(one["capture_status"]),
             mediaType: MEDIA_BY_KIND[String(one["kind"])] ?? "text/plain",
           }));
+  const deliverable = store.refForId(rid)?.deliverable ?? "branch";
   return {
     ref: String(row["tid"]),
     title: String(row["title"]),
     state: String(row["state"]),
     repo: String(row["repo"]),
+    deliverable,
+    report: reportSummaryFor(store, evidenceRoot, rid),
     filedBy: store.coordinatorProvenanceOf(taskId)?.label ?? null,
     scope: {
       sealed: store.scopeSealed(taskId),

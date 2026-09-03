@@ -173,6 +173,8 @@ export type BridgeReport = {
   problems: string[];
   /** Free-text notes captured as drafts. */
   noted?: number;
+  /** Digests sent this pass (away mode). */
+  digests?: number;
 };
 
 type Effect = () => Promise<void>;
@@ -366,7 +368,18 @@ async function deliverOutbox(
   report: BridgeReport,
 ): Promise<void> {
   const binding = store.liveTelegramBinding(botId);
-  const claimed = store.claimDeliveries(owner, DELIVERY_CLAIM_MS, clock());
+  // Away mode (mate arc §10): with a cadence set, routine rows stay
+  // unclaimed until the window elapses; decisions and attention-class
+  // facts are claimed and paged every pass. The window is measured from
+  // the last digest actually sent — an empty window sends nothing and
+  // does not move the anchor.
+  const digest = store.telegramDigest();
+  const now = clock();
+  const digestDue =
+    digest.everyMs === null ||
+    digest.lastSentAt === null ||
+    now.getTime() >= new Date(digest.lastSentAt).getTime() + digest.everyMs;
+  const claimed = store.claimDeliveries(owner, DELIVERY_CLAIM_MS, now, digestDue ? "all" : "urgent");
   if (claimed.length === 0) return;
   if (binding === null) {
     // Nothing to send to. The rows stay pending (claims lapse), and the
@@ -378,12 +391,69 @@ async function deliverOutbox(
     return;
   }
 
-  for (const row of claimed) {
+  const singly = digest.everyMs === null ? claimed : claimed.filter(row => isUrgent(row));
+  const batched = digest.everyMs === null ? [] : claimed.filter(row => !isUrgent(row));
+
+  for (const row of singly) {
     const outcome = await deliverOne(store, botId, binding, transport, row, clock);
     const finalized = store.finalizeDelivery(row.id, owner, outcome, clock());
     if (outcome.ok && finalized) report.sent++;
     if (!outcome.ok) report.problems.push(`notification ${row.id}: ${outcome.error}`);
   }
+
+  if (batched.length === 0) return;
+  // One digest for every routine row this pass claimed: one receipt each,
+  // the anchor moved only when every part arrived. A transport failure
+  // finalizes them all failed and leaves the anchor alone — the next pass
+  // tries the whole digest again.
+  const outcome = await deliverDigest(botId, binding, transport, batched, digest.lastSentAt, clock);
+  for (const row of batched) {
+    const finalized = store.finalizeDelivery(row.id, owner, outcome, clock());
+    if (outcome.ok && finalized) report.sent++;
+  }
+  if (outcome.ok) {
+    store.markTelegramDigestSent(clock());
+    report.digests = (report.digests ?? 0) + 1;
+  } else {
+    report.problems.push(`digest of ${batched.length} notification(s): ${outcome.error}`);
+  }
+}
+
+/** What pages singly whatever the cadence: a decision, or an attention-class fact. */
+function isUrgent(notification: Notification): boolean {
+  return /^decision:\d+$/.test(notification.dedupeKey) || notification.pushClass === "attention";
+}
+
+/** The digest text: a header with the count and the window, then one
+ * fact per entry — its subject, then its body's first line, indented.
+ * Plain text, no buttons: nothing in a digest is tappable. */
+export function digestText(rows: readonly Notification[], since: string | null, now: Date): string {
+  const window = since === null ? "" : ` since ${since.slice(0, 16).replace("T", " ")}`;
+  const lines = [`digest — ${rows.length} routine fact(s)${window} (as of ${now.toISOString().slice(0, 16).replace("T", " ")})`, ""];
+  for (const row of rows) {
+    lines.push(`• ${row.subject}`);
+    const first = row.body.split("\n").map(one => one.trim()).find(one => one !== "");
+    if (first !== undefined) lines.push(`    ${first.length > 200 ? `${first.slice(0, 200)}…` : first}`);
+  }
+  return lines.join("\n");
+}
+
+async function deliverDigest(
+  botId: string,
+  binding: TelegramBinding,
+  transport: TelegramTransport,
+  rows: readonly Notification[],
+  since: string | null,
+  clock: () => Date,
+): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> {
+  const parts = split(digestText(rows, since, clock()));
+  let last: string | null = null;
+  for (const part of parts) {
+    const sent = await send(transport, binding.chatId, part);
+    if (!sent.ok) return { ok: false, error: sent.error };
+    last = sent.messageId;
+  }
+  return { ok: true, receipt: receiptFor(botId, binding.chatId, last) };
 }
 
 async function deliverOne(
