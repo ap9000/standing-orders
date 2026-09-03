@@ -1191,6 +1191,25 @@ export function createDecisionServer(options: ServeOptions): Server {
         // same ceiling, no shell, no scripts (finding 2).
         return respond(response, 200, "text/html; charset=utf-8", body);
       }
+      if (url.searchParams.get("view") === "order") {
+        // The board's ORDER view (operator request): the same screen, flipped
+        // to dispatch order with the queue's drag handles. Reordering and
+        // reserving are scheduling, not authority, so this is the one view
+        // where a drag does anything; the state view stays a view.
+        const csrf = who.via === "cookie" ? who.session.csrf : "";
+        const revision = who.via === "cookie" ? who.session.projectRevision : 0;
+        const region = queueRegionFor(project, csrf, revision, now);
+        return sendScreen(
+          response,
+          200,
+          screen("board", [
+            `<h1>board</h1>`,
+            `<p class="meta board-view"><a href="/board">state</a> \u00b7 <strong>order</strong> <span class="meta">\u2014 drag to reorder, or onto a worker to reserve; the state view is where cards move on their own</span></p>`,
+            `<div id="queue-region">${region}</div>`,
+            `<p class="meta" id="queue-region-stamp"></p>`,
+          ].join("\n"), { chrome: chromeFor(project, "board"), functional: { script: queueScript(), fetches: true } }),
+        );
+      }
       const regionBody = `<div id="board-region">${body}</div><p class="meta" id="board-region-stamp"></p>`;
       return sendScreen(
         response,
@@ -1507,29 +1526,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/queue") {
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const revision = who.via === "cookie" ? who.session.projectRevision : 0;
-      const now = clock();
-      const tasks = store.queueScoped(project, now);
-      const owned = new Set(tasks.map(one => one.assignedRunner).filter((one): one is string => one !== null));
       // Column headers read one thing beyond the queue snapshot: live claims
-      // in THIS project, per worker. That count and the worker's unattended
-      // capacity are different scopes (the capacity is global; attended
-      // claims may exceed it), so the header names both and never a ratio.
-      const building = new Map<string, number>();
-      for (const claim of store.liveClaims(project, now)) {
-        building.set(claim.runner, (building.get(claim.runner) ?? 0) + 1);
-      }
-      // Columns: active workers, plus retired workers that still own tasks.
-      const workers = store
-        .listRunners()
-        .filter(one => one.retiredAt === null || owned.has(one.name))
-        .map(one => ({
-          name: one.name,
-          retired: one.retiredAt !== null,
-          note: one.queueNote ?? null,
-          capacity: one.capacity,
-          building: building.get(one.name) ?? 0,
-        }));
-      const body = queueBody(tasks, workers, csrf, revision, store.queueRevision());
+      // in THIS project, per worker (the capacity is global; attended claims
+      // may exceed it), so the header names both and never a ratio.
+      const body = queueRegionFor(project, csrf, revision, clock());
       if (url.searchParams.get("fragment") === "1") {
         return respond(response, 200, "text/html; charset=utf-8", body);
       }
@@ -5661,6 +5661,30 @@ export function createDecisionServer(options: ServeOptions): Server {
     return null;
   }
 
+  /** The queue as a region: dispatch order per column, drag handles and
+   * all — the /queue page's body, and the board's "order" view (the one
+   * place dragging exists, because reordering and reserving are scheduling,
+   * never authority). */
+  function queueRegionFor(project: string | null, csrf: string, revision: number, now: Date): string {
+    const tasks = store.queueScoped(project, now);
+    const owned = new Set(tasks.map(one => one.assignedRunner).filter((one): one is string => one !== null));
+    const building = new Map<string, number>();
+    for (const claim of store.liveClaims(project, now)) {
+      building.set(claim.runner, (building.get(claim.runner) ?? 0) + 1);
+    }
+    const workers = store
+      .listRunners()
+      .filter(one => one.retiredAt === null || owned.has(one.name))
+      .map(one => ({
+        name: one.name,
+        retired: one.retiredAt !== null,
+        note: one.queueNote ?? null,
+        capacity: one.capacity,
+        building: building.get(one.name) ?? 0,
+      }));
+    return queueBody(tasks, workers, csrf, revision, store.queueRevision());
+  }
+
   /** The newest plan document for a task, verified before a byte renders. */
   function planDocumentOf(taskRef: number): string | null {
     const artifact = store.latestPlanArtifact(taskRef);
@@ -8075,6 +8099,7 @@ function boardBody(
 
   return [
     `<h1>board</h1>`,
+    data.all ? "" : `<p class="meta board-view"><strong>state</strong> \u00b7 <a href="/board?view=order">order \u2192</a> <span class="meta">drag to reorder, or to reserve a task for one worker</span></p>`,
     deltaLine,
     toggle,
     `<div class="board">`,

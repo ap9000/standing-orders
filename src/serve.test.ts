@@ -7365,3 +7365,56 @@ describe("the inbox says when nothing will build (install review)", () => {
     expect(inbox).not.toContain("Nothing will build");
   });
 });
+
+describe("the board's order view (operator request): the one place a drag does anything", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let evidenceRoot: string;
+  let approverToken: string;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken }), redirect: "manual" });
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-serve-order-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    store.createTask({ id: "t-order-1", title: "first in line" }, T0);
+    store.createTask({ id: "t-order-2", title: "second in line" }, T0);
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date() });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the state view links to order; the order view carries the queue's drag handles and its poller; state stays a view", async () => {
+    const cookie = await login();
+    const state = await (await fetch(`${base}/board`, { headers: { cookie } })).text();
+    expect(state).toContain('href="/board?view=order"');
+    expect(state).not.toContain('class="queue-handle"');
+
+    const order = await (await fetch(`${base}/board?view=order`, { headers: { cookie } })).text();
+    expect(order).toContain("<h1>board</h1>");
+    expect(order).toContain('<a href="/board">state</a>');
+    expect(order).toContain("first in line");
+    expect(order).toContain("second in line");
+    expect(order).toContain('class="queue-handle"');
+    expect(order).toContain('id="queue-region"');
+    expect(order).toContain("/queue?fragment=1");
+    // The queue page itself is unchanged: same region, same handles.
+    const queue = await (await fetch(`${base}/queue`, { headers: { cookie } })).text();
+    expect(queue).toContain('class="queue-handle"');
+  });
+});
