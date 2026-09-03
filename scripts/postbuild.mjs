@@ -22,8 +22,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 await copyFile(resolve(root, "src", "supervisor.mjs"), resolve(root, "dist", "supervisor.mjs"));
 
 if (process.platform !== "win32") {
-  const cli = resolve(root, "dist", "cli.js");
-  const stats = await stat(cli);
-  const wanted = stats.mode | EXECUTABLE_BITS;
-  if (wanted !== stats.mode) await chmod(cli, wanted);
+  for (const name of ["bin.js", "cli.js"]) {
+    const file = resolve(root, "dist", name);
+    const stats = await stat(file);
+    const wanted = stats.mode | EXECUTABLE_BITS;
+    if (wanted !== stats.mode) await chmod(file, wanted);
+  }
 }

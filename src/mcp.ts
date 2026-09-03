@@ -24,6 +24,7 @@
  * refusals are successful `tools/call` results with `isError: true`.
  */
 
+import { PACKAGE_VERSION } from "./version.js";
 import type { Store } from "./store.js";
 import {
   authenticateCoordinator,
@@ -595,7 +596,7 @@ export function serveMcp(
       respond(id, "legacy", {
         protocolVersion: LEGACY,
         capabilities: { tools: {} },
-        serverInfo: { name: "standing-orders", version: "0.4.0" },
+        serverInfo: { name: "standing-orders", version: PACKAGE_VERSION },
       }, false);
       return;
     }
@@ -615,7 +616,7 @@ export function serveMcp(
         protocolVersion: MODERN,
         supportedVersions: [MODERN, LEGACY],
         capabilities: { tools: {} },
-        _meta: { [META_SERVER]: { name: "standing-orders", version: "0.4.0" } },
+        _meta: { [META_SERVER]: { name: "standing-orders", version: PACKAGE_VERSION } },
         ...(toolsPayload() as Record<string, Json>),
       }, true);
       return;

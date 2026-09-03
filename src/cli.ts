@@ -32,6 +32,7 @@ import {
   type BackendKind,
 } from "./graph.js";
 import { openStore, databasePath, type Store } from "./store.js";
+import { PACKAGE_VERSION } from "./version.js";
 import type { BackendGrant } from "./grant.js";
 import { runOperate, OPERATE_HELP, type OperateOptions } from "./operate.js";
 import { renderReport, renderPulls, renderGraph, type PullGroup, type RemoteMap } from "./render.js";
@@ -288,6 +289,10 @@ export async function main(
   write: Write = line => console.log(line),
   mainOptions: MainOptions = {},
 ): Promise<number> {
+  if (argv[0] === "--version" || argv[0] === "-v") {
+    write(PACKAGE_VERSION);
+    return 0;
+  }
   const extracted = extractOutputFlag(argv);
   if ("error" in extracted) {
     write(extracted.error);
@@ -1483,6 +1488,12 @@ function hushExperimentalSqlite(): void {
     if (type === "ExperimentalWarning" && text.includes("SQLite")) return;
     (original as (...args: unknown[]) => void)(warning, ...rest);
   }) as typeof process.emitWarning;
+}
+
+/** The process entry the bin calls: the SQLite notice hushed, the exit code set. */
+export async function runCliProcess(argv: readonly string[]): Promise<void> {
+  hushExperimentalSqlite();
+  process.exitCode = await main(argv);
 }
 
 if (isDirectInvocation(import.meta.url, process.argv[1])) {

@@ -22,11 +22,16 @@ interrupted only for decisions that genuinely need a human.**
 
 ## Install
 
+One command, from inside the repository you want built:
+
 ```sh
-npm install -g standing-orders
-cd ~/code/your-app
-standing-orders up                     # console + worker, in one process
+npx standing-orders up          # or: bunx standing-orders up
 ```
+
+That is the install and the setup. It needs Node 22.13 or newer on the
+machine (Bun's runtime has no `node:sqlite`; `bunx` hands the shebang to
+Node, so it works too). `npm install -g standing-orders` gives you the
+bare `standing-orders` command for later.
 
 `up` prints your login once (and saves it beside the database as
 `up-login.txt`), opens the console in your browser, registers this machine

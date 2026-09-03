@@ -523,7 +523,7 @@ describe("the MCP stdio server", () => {
         result: {
           protocolVersion: LEGACY,
           capabilities: { tools: {} },
-          serverInfo: { name: "standing-orders", version: "0.4.0" },
+          serverInfo: { name: "standing-orders", version: "0.4.1" },
         },
       }),
     );
@@ -550,7 +550,7 @@ describe("the MCP stdio server", () => {
           protocolVersion: MODERN,
           supportedVersions: [MODERN, LEGACY],
           capabilities: { tools: {} },
-          _meta: { "io.modelcontextprotocol/serverInfo": { name: "standing-orders", version: "0.4.0" } },
+          _meta: { "io.modelcontextprotocol/serverInfo": { name: "standing-orders", version: "0.4.1" } },
           tools,
           resultType: "complete",
           ttlMs: 0,
