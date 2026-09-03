@@ -1,5 +1,32 @@
 # Progress
 
+**2026-09-02 — The mate v4: scout tasks, and Telegram digests; one
+review round, twelve findings closed.** Spec `docs/mate-arc.md` §10, no
+rule changes. `e7e480c`: `task_ref.deliverable` (v34, set at filing by
+`task add --report`, the console's scout checkbox, `propose_task
+{report: true}`, `file_proposal {deliverable: "report"}`), the scout
+run (`run.role = 'scout'`) on the planner's read-only road with the
+clean-tree proof before any payload is read, `STANDING-ORDERS-REPORT-`
+parsed with the 422 rule into ONE verified `report` artifact, the task
+done and `report-ready` routine, the builder's failure discipline plus a
+`malformed-report` incident, the report on the task page with one-tap
+follow-ups (`proposed_via = 'scout'`, never mode-sealed), `task show`,
+the ledger, `get_task` (evidence root threaded through the mate and
+gateway contexts), the board; `telegram_digest` with `bridge telegram
+digest --every|--off`, the settings card, `claimDeliveries(only)` —
+decisions and attention-class facts page singly, routine rows are held
+unclaimed and go out as one digest. Schema v34: an exact run
+recognizer with the v30 columns inline. Codex found twelve (eight
+high), all closed in `9d08c8b`: capture failure is a failed attempt, the
+deliverable rides the filing's transaction, scout checkouts are per
+attempt and discarded, the tree proof sees ignored and staged writes
+(shared with the planner), the digest finalizes in one transaction,
+gaps and failed publications are attention-class, artifact and incident
+widen by exact recognizers, credential shapes are redacted from every
+report field, both ceremonies say the yes buys a report, follow-ups are
+idempotent, caps are bytes, a malformed park is a `malformed-decision`.
+Suite 1651.
+
 **2026-09-02 — The mate v3: suggested answers, and proposals over the
 MCP gateway; one review round, ten findings closed.** Spec
 `docs/mate-arc.md` §9, two rule changes stated: the mate (and a
