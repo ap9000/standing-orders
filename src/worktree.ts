@@ -328,6 +328,28 @@ export class WorktreePool {
    * ours: a row for a directory that is no longer there, which happens when a
    * machine is reimaged or a pool root is deleted between runs.
    */
+  /**
+   * Remove a released checkout and its branch (v4 review, finding 3): the
+   * read-only roles' workspaces are disposable, so the next attempt starts
+   * from the requested base instead of whatever the last one saw. Refused
+   * while a process holds the directory; a failure leaves the checkout
+   * where `worktrees` can see it rather than pretending it is gone.
+   */
+  async discard(path: string, now: Date): Promise<{ ok: true } | { ok: false; message: string }> {
+    const existing = this.store.getWorktree(path);
+    if (existing === null) return { ok: false, message: `${path} is not a worktree we made` };
+    if (existing.releasedAt === null) return { ok: false, message: `${path} is still leased — release it first` };
+    const occupied = this.inUse(path);
+    if (occupied.held) return { ok: false, message: `${path} is being used by process ${occupied.by} — leaving it alone` };
+    const removed = await this.git(existing.repo, ["worktree", "remove", "--force", path]);
+    if (removed.code !== 0) return { ok: false, message: `git worktree remove: ${removed.stderr.trim() || `exit ${removed.code}`}` };
+    // The branch is disposable too; a failure here is bookkeeping, not custody.
+    await this.git(existing.repo, ["branch", "-D", existing.branch]);
+    this.store.forgetWorktree(path);
+    void now;
+    return { ok: true };
+  }
+
   async orphans(
     repo: string,
   ): Promise<{ ok: true; untracked: string[]; missing: string[] } | { ok: false; message: string }> {

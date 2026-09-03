@@ -564,3 +564,53 @@ window is measured from `last_sent_at`; a routine fact arriving after a
 long quiet goes out at the next pass, not after another full interval.
 Turning the digest off flushes nothing by itself — the next pass claims
 everything, as today.
+
+### Round-5 rulings (the v4 Codex review, 2026-09-02): twelve findings
+
+1. **A report that is not captured is a failed attempt.** `writeEvidenceFile`
+   failing returns `capture-failed` from the scout; the finalizer requires
+   the artifact; the task stays queued with a strike. A task whose sole
+   deliverable does not exist is not done.
+2. **The deliverable rides the filing's transaction.** `createTask` stamps
+   it; `setDeliverable` is gone — there is no API to change a deliverable
+   after filing. `task add --report` on a tracker backend refuses up front.
+3. **Scout checkouts are disposable, and now actually disposed.** One
+   branch per attempt (`standing-orders-scout/<id>/<nonce>`), leased from
+   base, and `WorktreePool.discard` removes the checkout and the branch
+   after the run; a checkout that could not be discarded is said on the
+   tick outcome. A parked scout resumes against today's base.
+4. **The clean-tree proof sees ignored writes and staged protocol files.**
+   `src/tree-proof.ts`, shared by the scout and the planner: ignored paths
+   are snapshotted before the agent and any new one is foreign; a protocol
+   file is admitted only as plain untracked. Stated residual: git collapses
+   ignored directories, so a write INTO a directory ignored before the
+   agent ran (a dependency tree the setup command produced) is not seen.
+5. **The digest's boundary is the bridge lease plus one transaction.** Two
+   bridges never deliver concurrently for one bot — the poll lease already
+   serializes them, exactly as for single pages. Every batched row and the
+   anchor are now finalized in ONE transaction; a claim that lapsed during
+   a slow send is reported ("may be sent again"), never swallowed. A crash
+   between send and finalize re-sends, as it does for singles — duplicate
+   over loss, unchanged.
+6. **Gaps that block work and failed publications are attention-class.**
+   Both stamp `pushClass: "attention"` at enqueue, so they page singly
+   under any cadence.
+7. **Substrings are not recognizers, here either.** `rebuildArtifactForV34`
+   and `rebuildIncidentForV34` are exact copy-renames over the known v17
+   and v7 shapes; a lookalike refuses. (The older `rebuildForV4` calls
+   remain what they were for their own eras.)
+8. **Credential shapes never leave the repository boundary.** Every report
+   field is scanned with the diff capture's detector and redacted line by
+   line before the artifact is written; the artifact says `redacted`; the
+   outbox row carries the redacted summary.
+9. **The ceremony says what the yes buys.** Both approval cards — the task
+   page and `/next` — say a scout task authorizes a read-only session and
+   a report, no branch.
+10. **"File this follow-up" is idempotent by construction.** The filing's
+    id derives from the source task, the report's run, and the follow-up's
+    place; a retried tap lands on the task the first one filed.
+11. **Caps are bytes; a summary is one paragraph.** `REPORT_LIMITS` are
+    UTF-8 bytes; a blank line inside the summary refuses.
+12. **A malformed park mailbox is a `malformed-decision`.** The scout AND
+    the planner finalizers take which payload broke; the incident and the
+    page name it. The planner's own taxonomy was wrong the same way.

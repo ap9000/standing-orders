@@ -24,6 +24,8 @@ export type ReportParseResult =
   | { ok: true; report: ParsedReport }
   | { ok: false; problems: ReportProblem[] };
 
+/** Caps are BYTES of UTF-8 (v4 review, finding 11): a 64 KiB report is
+ * 64 KiB whatever script it is written in. */
 export const REPORT_LIMITS = {
   payload: 96 * 1024,
   title: 200,
@@ -54,8 +56,8 @@ function prose(value: unknown, field: string, cap: number, problems: ReportProbl
     problems.push({ reason: `bad-${field}`, message: `${field} must be a string (got ${describe(value)})` });
     return null;
   }
-  if (value.length > cap) {
-    problems.push({ reason: `${field}-too-long`, message: `${field} is over ${cap} characters` });
+  if (Buffer.byteLength(value, "utf8") > cap) {
+    problems.push({ reason: `${field}-too-long`, message: `${field} is over ${cap} bytes` });
     return null;
   }
   if (hasForbiddenControls(value)) {
@@ -86,6 +88,11 @@ export function parseReport(raw: string): ReportParseResult {
   const document = prose(body["report"], "report", REPORT_LIMITS.document, problems);
   if (title !== null && /[\n\r]/.test(title)) {
     problems.push({ reason: "title-multiline", message: "title must be one line" });
+  }
+  // One paragraph: the summary is what the operator reads first, on a
+  // phone, in a digest line — a blank line inside it is a second paragraph.
+  if (summary !== null && /\n[ \t]*\n/.test(summary)) {
+    problems.push({ reason: "summary-paragraphs", message: "summary is one paragraph — no blank lines" });
   }
 
   const followUps: { title: string; goal: string }[] = [];

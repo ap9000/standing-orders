@@ -923,6 +923,21 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     expect(store.listNotifications("pending")).toHaveLength(0);
   });
 
+  test("a gap that blocks work and a failed publication are attention-class: they page singly under any cadence (v4 review, finding 6)", async () => {
+    const script = scripted();
+    await pair(script);
+    store.setTelegramDigest(24 * 60 * 60_000, "alex", later(2_000));
+    store.enqueueNotification({ dedupeKey: "gap:/r:secret:X", kind: "gap", pushClass: "attention", link: "/caps", subject: "X blocks work in /r", body: "set it" }, later(3_000));
+    store.enqueueNotification({ dedupeKey: "publication:1:failed", kind: "publication-failed", pushClass: "attention", link: "/r/1", subject: "publication of run #1 gave up", body: "why" }, later(3_000));
+    store.enqueueNotification({ dedupeKey: "merge:9", kind: "merge", subject: "t-1 merged", body: "PR #9 merged." }, later(3_000));
+    const passed = await bridgePass(store, { botId: BOT, transport: script.transport, clock: () => later(10_000) });
+    expect(passed).toMatchObject({ ok: true, report: { sent: 2 } });
+    expect(texts(script).some(one => one.startsWith("X blocks work"))).toBe(true);
+    expect(texts(script).some(one => one.startsWith("publication of run #1"))).toBe(true);
+    expect(texts(script).some(one => one.includes("t-1 merged"))).toBe(false);
+    expect(store.countRoutinePending()).toBe(1);
+  });
+
   test("a routine row resolved while held never enters a digest; turning the digest off releases everything at the next pass", async () => {
     const script = scripted();
     await pair(script);

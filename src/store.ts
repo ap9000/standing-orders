@@ -3456,42 +3456,98 @@ function migrate(db: Database): void {
   // re-created after migration, as always.
   addColumn(db, "task_ref", "deliverable", "TEXT NOT NULL DEFAULT 'branch' CHECK (deliverable IN ('branch','report'))");
   rebuildRunForV34(db);
-  rebuildForV4(
-    db,
-    "artifact",
-    "'diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree'",
-    "'report'",
-    `CREATE TABLE artifact_next (
-       id             INTEGER PRIMARY KEY AUTOINCREMENT,
-       run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-       kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report')),
-       key            TEXT NOT NULL,
-       bytes_original INTEGER NOT NULL,
-       bytes_stored   INTEGER NOT NULL,
-       truncated      INTEGER NOT NULL DEFAULT 0,
-       sha256         TEXT NOT NULL,
-       capture        TEXT NOT NULL,
-       created_at     TEXT NOT NULL,
-       redacted       INTEGER NOT NULL DEFAULT 0,
-       capture_status TEXT CHECK (capture_status IN ('ok','failed'))
-     )`,
-    ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted", "capture_status"],
-  );
-  rebuildForV4(
-    db,
-    "incident",
-    "'malformed-plan','plan-attempts-exhausted'",
-    "'malformed-report'",
-    `CREATE TABLE incident_next (
-       id          INTEGER PRIMARY KEY AUTOINCREMENT,
-       run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
-       kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted','malformed-report')),
-       created_at  TEXT NOT NULL,
-       resolved_at TEXT,
-       resolved_by TEXT
-     )`,
-    ["id", "run", "kind", "created_at", "resolved_at", "resolved_by"],
-  );
+  rebuildArtifactForV34(db);
+  rebuildIncidentForV34(db);
+}
+
+/** The v17 artifact shape — what every v17..v33 database carries (the
+ * fresh DDL canonicalizes to it too). */
+function V17_ARTIFACT_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree')),
+    key            TEXT NOT NULL,
+    bytes_original INTEGER NOT NULL,
+    bytes_stored   INTEGER NOT NULL,
+    truncated      INTEGER NOT NULL DEFAULT 0,
+    sha256         TEXT NOT NULL,
+    capture        TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    redacted       INTEGER NOT NULL DEFAULT 0,
+    capture_status TEXT CHECK (capture_status IN ('ok','failed'))
+  )`;
+}
+function V34_ARTIFACT_DDL(name: string): string {
+  return V17_ARTIFACT_DDL(name).replace("'revision-brief','base-tree'", "'revision-brief','base-tree','report'");
+}
+const ARTIFACT_COLUMNS = ["id", "run", "kind", "key", "bytes_original", "bytes_stored", "truncated", "sha256", "capture", "created_at", "redacted", "capture_status"] as const;
+
+/** The v7 incident shape — every v7..v33 database, and the fresh DDL. */
+function V7_INCIDENT_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted')),
+    created_at  TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT
+  )`;
+}
+function V34_INCIDENT_DDL(name: string): string {
+  return V7_INCIDENT_DDL(name).replace("'plan-attempts-exhausted'", "'plan-attempts-exhausted','malformed-report'");
+}
+const INCIDENT_COLUMNS = ["id", "run", "kind", "created_at", "resolved_at", "resolved_by"] as const;
+
+/**
+ * One exact copy-rename (v4 review, finding 7 — substrings are not
+ * recognizers): the stored DDL must equal the known old shape or the
+ * target, canonicalized; anything else refuses. Rows and ids are carried
+ * whole; foreign keys are checked before commit.
+ */
+function rebuildExact(
+  db: Database,
+  table: string,
+  oldDdl: (name: string) => string,
+  targetDdl: (name: string) => string,
+  columns: readonly string[],
+): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  if (stored === canonicalDdl(targetDdl(table))) return;
+  if (stored !== canonicalDdl(oldDdl(table))) {
+    throw new Error(`the ${table} table's DDL is not a shape this migration knows — refusing to rebuild it`);
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(targetDdl(`${table}_next`));
+      const names = columns.join(", ");
+      db.exec(`INSERT INTO ${table}_next (${names}) SELECT ${names} FROM ${table}`);
+      db.exec(`DROP TABLE ${table}`);
+      db.exec(`ALTER TABLE ${table}_next RENAME TO ${table}`);
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) throw new Error(`foreign keys did not survive the ${table} rebuild`);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+/** v34: artifact.kind admits 'report'. */
+export function rebuildArtifactForV34(db: Database): void {
+  rebuildExact(db, "artifact", V17_ARTIFACT_DDL, V34_ARTIFACT_DDL, ARTIFACT_COLUMNS);
+}
+
+/** v34: incident.kind admits 'malformed-report'. */
+export function rebuildIncidentForV34(db: Database): void {
+  rebuildExact(db, "incident", V7_INCIDENT_DDL, V34_INCIDENT_DDL, INCIDENT_COLUMNS);
 }
 
 /** The v34 run shape: 'scout' joins the roles, and the v30 columns sit
@@ -4715,7 +4771,7 @@ export class Store {
    * `TaskRef` cannot be claimed, held, or scheduled — it would be work the
    * control plane can see and never act on.
    */
-  createTask(spec: { id: string; title: string }, now: Date, mutation: Mutation = {}): Task {
+  createTask(spec: { id: string; title: string; deliverable?: "branch" | "report" }, now: Date, mutation: Mutation = {}): Task {
     return this.once(mutation, "createTask", () =>
       // Both rows or neither, and the comment above is why: this used to be
       // two unwrapped statements, and the first real database caught it. A
@@ -4733,7 +4789,12 @@ export class Store {
         )
         .run(spec.id, spec.title, stamp, stamp);
       // Created here, so it is ours — the one place that is true by construction.
-      this.refFor(BUILT_IN, spec.id, "ours");
+      const ref = this.refFor(BUILT_IN, spec.id, "ours");
+      // The deliverable (v34) lands in the SAME transaction as the filing,
+      // and there is no API to change it afterwards.
+      if (spec.deliverable === "report") {
+        this.db.prepare("UPDATE task_ref SET deliverable = 'report' WHERE id = ?").run(ref.id);
+      }
       this.bumpWake();
       return {
         id: spec.id,
@@ -8620,13 +8681,10 @@ export class Store {
         return { ok: false as const, reason: "duplicate" as const };
       }
 
-      this.createTask({ id, title: spec.title.trim() }, now);
+      this.createTask({ id, title: spec.title.trim(), ...(spec.deliverable === undefined ? {} : { deliverable: spec.deliverable }) }, now);
       const ref = this.refFor(BUILT_IN, id, "ours");
       if (spec.filedVia !== undefined) {
         this.db.prepare("UPDATE task_ref SET filed_via = ? WHERE id = ? AND filed_via IS NULL").run(spec.filedVia, ref.id);
-      }
-      if (spec.deliverable === "report") {
-        this.db.prepare("UPDATE task_ref SET deliverable = 'report' WHERE id = ?").run(ref.id);
       }
       // Placement happens BEFORE the scope exists, so the immutability guard
       // in placeTask never fires here — atomic create, place, then scope.
@@ -10926,27 +10984,6 @@ export class Store {
       )
       .get(taskRef);
     return row === undefined ? null : readArtifact(row as Record<string, unknown>);
-  }
-
-  /** Mark a just-filed task a scout task (v34). Filing-time only: refused
-   * once a scope exists, a claim is live, or any run was recorded — the
-   * deliverable is what the approval promised. */
-  setDeliverable(taskRef: number, deliverable: "branch" | "report", now: Date): { ok: true } | { ok: false; reason: "scoped" | "live-claim" | "attempted" | "unknown-task" } {
-    return this.transact(() => {
-      const ref = this.db.prepare("SELECT external_id FROM task_ref WHERE id = ?").get(taskRef);
-      if (ref === undefined) return { ok: false as const, reason: "unknown-task" as const };
-      if (this.db.prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ?").get(String(ref["external_id"])) !== undefined) {
-        return { ok: false as const, reason: "scoped" as const };
-      }
-      if (this.db.prepare("SELECT 1 AS hit FROM claim WHERE task_ref = ? AND released_at IS NULL AND expires_at > ?").get(taskRef, now.toISOString()) !== undefined) {
-        return { ok: false as const, reason: "live-claim" as const };
-      }
-      if (this.db.prepare("SELECT 1 AS hit FROM run WHERE task_ref = ? LIMIT 1").get(taskRef) !== undefined) {
-        return { ok: false as const, reason: "attempted" as const };
-      }
-      this.db.prepare("UPDATE task_ref SET deliverable = ? WHERE id = ?").run(deliverable, taskRef);
-      return { ok: true as const };
-    });
   }
 
   /** The newest scout run's report for a task (v34), when one exists. */
@@ -14895,6 +14932,21 @@ export class Store {
 
   markTelegramDigestSent(now: Date): void {
     this.db.prepare("UPDATE telegram_digest SET last_sent_at = ? WHERE id = 1").run(now.toISOString());
+  }
+
+  /** Every batched row finalized delivered AND the anchor moved, in ONE
+   * transaction (v4 review, finding 5): a digest is either recorded whole
+   * or not at all. Rows whose claim lapsed meanwhile are reported, not
+   * silently skipped. */
+  finalizeDigest(ids: readonly number[], owner: string, receipt: string | null, now: Date): { finalized: number; lapsed: number } {
+    return this.transact(() => {
+      let finalized = 0;
+      for (const id of ids) {
+        if (this.finalizeDelivery(id, owner, { ok: true, receipt }, now)) finalized++;
+      }
+      this.markTelegramDigestSent(now);
+      return { finalized, lapsed: ids.length - finalized };
+    });
   }
 
   /** Routine rows waiting for the next digest: pending, and not urgent. */

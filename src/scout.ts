@@ -34,6 +34,8 @@ import {
 } from "./evidence.js";
 import type { Runner } from "./builder.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
+import { proveTreeUntouched, snapshotIgnored } from "./tree-proof.js";
+import { redactSecretLines, scanForSecrets } from "./evidence.js";
 
 const GIT = "git";
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
@@ -76,11 +78,13 @@ export type ReportArtifact = {
   truncated: boolean;
   sha256: string;
   capture: string;
+  /** True when credential-shaped lines were redacted before storage (v4 review, finding 8). */
+  redacted: boolean;
 };
 
 export type ScoutOutcome =
   | { ok: true; parked: { decision: ParsedDecision; artifactIds: number[] } }
-  | { ok: true; reported: { report: ParsedReport; artifact: ReportArtifact | null } }
+  | { ok: true; reported: { report: ParsedReport; artifact: ReportArtifact } }
   | {
       ok: false;
       /** malformed → straight incident; everything else → a strike. */
@@ -186,6 +190,13 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
   const mailbox = mailboxName();
   const reportFile = reportFileName();
   quarantineMailboxes(worktree, root, request.runId);
+  // The "before" of the clean-tree proof: ignored paths the checkout
+  // already carried (a setup command's dependency tree, say). Anything
+  // ignored that is NOT in this set afterwards is the scout's.
+  const ignoredBefore = await snapshotIgnored(git, worktree);
+  if (ignoredBefore === null) {
+    return { ok: false, kind: "failure", reason: "git", message: `could not read the tree state in ${worktree}` };
+  }
 
   const clock = request.clock ?? (() => now);
   const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
@@ -287,17 +298,13 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
       message: `HEAD moved from ${baseRevision.slice(0, 12)} — a scout never commits; nothing it wrote is ingested`,
     };
   }
-  const status = await git(GIT, ["--no-optional-locks", "-c", "core.quotePath=false", "status", "--porcelain"], { cwd: worktree });
-  if (status.code !== 0) {
+  const proof = await proveTreeUntouched(git, worktree, { ignoredBefore, protocolFiles: [mailbox, reportFile], marker: LEASE_MARKER });
+  if (!proof.ok && proof.reason === "git") {
     return { ok: false, kind: "failure", reason: "git", message: `could not read the tree state in ${worktree}` };
   }
-  const foreign = status.stdout
-    .split("\n")
-    .filter(line => line.trim() !== "")
-    .map(line => line.slice(3))
-    .filter(path => path !== mailbox && path !== reportFile && path !== LEASE_MARKER);
-  if (foreign.length > 0) {
+  if (!proof.ok) {
     quarantineMailboxes(worktree, root, request.runId);
+    const foreign = proof.foreign;
     return {
       ok: false,
       kind: "failure",
@@ -346,25 +353,64 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
     };
   }
 
+  // Credential shapes never leave the repository boundary (v4 review,
+  // finding 8): a scout that quotes a key it found has the line redacted
+  // in every field BEFORE the report is stored, paged, or shown — the
+  // same high-confidence detector the diff capture uses.
+  const { report, redacted } = redactReport(parsed.report);
+
   // The whole VALIDATED payload is the artifact: re-serialized from the
   // parsed shape, so what the page renders is exactly what passed the
-  // parser — never the raw bytes with fields the parser ignored.
-  let artifact: ReportArtifact | null = null;
+  // parser — never the raw bytes with fields the parser ignored. A capture
+  // that fails is a FAILED attempt (v4 review, finding 1): the report is
+  // the deliverable, and a task whose deliverable does not exist is not
+  // done.
   try {
-    const content = Buffer.from(JSON.stringify(parsed.report, null, 2), "utf8");
+    const content = Buffer.from(JSON.stringify(report, null, 2), "utf8");
     const key = writeEvidenceFile(root, request.runId, "report.json", content);
-    artifact = {
-      key,
-      bytesOriginal: content.length,
-      bytesStored: content.length,
-      truncated: false,
-      sha256: createHash("sha256").update(content).digest("hex"),
-      capture: "scout handoff (verified tree)",
+    return {
+      ok: true,
+      reported: {
+        report,
+        artifact: {
+          key,
+          bytesOriginal: content.length,
+          bytesStored: content.length,
+          truncated: false,
+          sha256: createHash("sha256").update(content).digest("hex"),
+          capture: "scout handoff (verified tree)",
+          redacted,
+        },
+      },
     };
-  } catch {
-    artifact = null;
+  } catch (error) {
+    return {
+      ok: false,
+      kind: "failure",
+      reason: "capture-failed",
+      message: `the report could not be stored as evidence (${error instanceof Error ? error.message : String(error)}) — nothing is done until it is`,
+    };
   }
-  return { ok: true, reported: { report: parsed.report, artifact } };
+}
+
+/** Redact credential-shaped lines in every field; say whether any were. */
+function redactReport(report: ParsedReport): { report: ParsedReport; redacted: boolean } {
+  let redacted = false;
+  const clean = (text: string): string => {
+    const hits = scanForSecrets(text);
+    if (hits.length === 0) return text;
+    redacted = true;
+    return redactSecretLines(text, hits);
+  };
+  return {
+    report: {
+      title: clean(report.title),
+      summary: clean(report.summary),
+      report: clean(report.report),
+      followUps: report.followUps.map(one => ({ title: clean(one.title), goal: clean(one.goal) })),
+    },
+    redacted,
+  };
 }
 
 function cleanup(worktree: string, names: readonly string[]): void {

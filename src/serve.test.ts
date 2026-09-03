@@ -7095,6 +7095,8 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     let page = await (await fetch(`${base}/t/${taskId}`, { headers: { cookie } })).text();
     expect(page).toContain(">scout<");
     expect(page).toContain("delivers a report, never a branch");
+    // Said INSIDE the ceremony: the yes buys a report, not a branch.
+    expect(page).toContain("approving sends a read-only session");
 
     // The report lands as evidence; the page renders it only once verified.
     const run = store.startRun({ taskRef: ref.id, leaseId: "scout-lease", runner: "b", role: "scout", branch: "standing-orders-scout/x", worktree: "/pool/scout", now: new Date() });
@@ -7128,6 +7130,22 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     expect(store.handle.prepare("SELECT proposed_via FROM task_scope WHERE task_id = ?").get(filedId)?.["proposed_via"]).toBe("scout");
     const missing = await fetch(`${base}/t/${taskId}/follow-up`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, index: "7" }), redirect: "manual" });
     expect(missing.status).toBe(409);
+    // Idempotent (v4 review, finding 10): the same tap again lands on the same task, no twin.
+    const again = await fetch(`${base}/t/${taskId}/follow-up`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, index: "0" }), redirect: "manual" });
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe(followUp.headers.get("location"));
+    expect(store.listTasksScoped(null, undefined, 100, null).filter(one => one.title === "Await the cookie")).toHaveLength(1);
+  });
+
+  test("the /next ceremony says the yes buys a report, not a branch (v4 review, finding 9)", async () => {
+    const cookie = await login();
+    const form = await (await fetch(`${base}/tasks/new`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(form)?.[1] ?? "";
+    const revision = /name="projectRevision" value="(\d+)"/.exec(form)?.[1] ?? "0";
+    await fetch(`${base}/tasks/add`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, projectRevision: revision, title: "scout me", goal: "find out", repo: "/repo/main", scout: "1" }), redirect: "manual" });
+    const next = await (await fetch(`${base}/next`, { headers: { cookie } })).text();
+    expect(next).toContain("approve exactly this:");
+    expect(next).toContain("a read-only session investigates this goal and delivers a report");
   });
 
   test("the digest card sets the cadence from a closed list; the choice lands in the store and says so", async () => {

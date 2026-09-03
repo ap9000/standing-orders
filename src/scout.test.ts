@@ -19,6 +19,7 @@ import { register } from "./runner.js";
 import { fileTaskProposal } from "./proposal.js";
 import { parseReport, REPORT_LIMITS } from "./scout-report.js";
 import { readVerifiedReport } from "./evidence.js";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import type { Runner } from "./builder.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
@@ -49,6 +50,18 @@ describe("the report parser (422 rule)", () => {
     const controls = parseReport(JSON.stringify({ title: "t", summary: "s\u001b[31m", report: "r" }));
     expect(controls.ok).toBe(false);
     expect(parseReport("not json").ok).toBe(false);
+  });
+
+  test("caps are bytes, not characters; a summary is one paragraph (v4 review, findings 11)", () => {
+    // 30,000 CJK characters are ~90 KiB: under the character count, over the byte cap.
+    const cjk = "漢".repeat(30_000);
+    const overBytes = parseReport(JSON.stringify({ title: "t", summary: "s", report: cjk }));
+    expect(overBytes.ok).toBe(false);
+    if (!overBytes.ok) expect(overBytes.problems.map(one => one.reason)).toContain("report-too-long");
+    const twoParagraphs = parseReport(JSON.stringify({ title: "t", summary: "first.\n\nsecond.", report: "r" }));
+    expect(twoParagraphs.ok).toBe(false);
+    if (!twoParagraphs.ok) expect(twoParagraphs.problems.map(one => one.reason)).toContain("summary-paragraphs");
+    expect(parseReport(JSON.stringify({ title: "t", summary: "one line,\nwrapped.", report: "r" })).ok).toBe(true);
   });
 });
 
@@ -110,6 +123,60 @@ describe("scout tasks, against real git", () => {
         }),
       );
     }
+    return { ...OK, stdout: SAID };
+  };
+
+  /** A scout that quotes a credential it found: redacted before anything stores or pages it. */
+  const leakingAgent: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+    prompts.push(prompt);
+    const name = REPORT_FILE.exec(prompt)?.[0];
+    if (name !== undefined && cwd !== "") {
+      await writeFile(
+        join(cwd, name),
+        JSON.stringify({
+          title: "A key sits in the fixture",
+          summary: "The fixture carries AKIAIOSFODNN7EXAMPLE in plain text.",
+          report: "## Finding\nline one\nthe key AKIAIOSFODNN7EXAMPLE again\nline three\n",
+          followUps: [],
+        }),
+      );
+    }
+    return { ...OK, stdout: SAID };
+  };
+
+  /** A scout that writes an IGNORED file: invisible to plain status, foreign to the proof. */
+  const ignoredVandal: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+    const name = REPORT_FILE.exec(prompt)?.[0];
+    if (cwd !== "") {
+      mkdirSync(join(cwd, "build"), { recursive: true });
+      await writeFile(join(cwd, "build", "out.txt"), "generated\n");
+      if (name !== undefined) await writeFile(join(cwd, name), JSON.stringify({ title: "t", summary: "s", report: "r" }));
+    }
+    return { ...OK, stdout: SAID };
+  };
+
+  /** A scout that STAGES its own report: cleanup would leave it in the index. */
+  const stagingVandal: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+    const name = REPORT_FILE.exec(prompt)?.[0];
+    if (cwd !== "" && name !== undefined) {
+      await writeFile(join(cwd, name), JSON.stringify({ title: "t", summary: "s", report: "r" }));
+      await exec("git", ["add", "-f", name], { cwd });
+    }
+    return { ...OK, stdout: SAID };
+  };
+
+  /** A scout whose park mailbox is not a decision. */
+  const malformedParker: Runner = async (_file, args, options) => {
+    const cwd = options?.cwd ?? "";
+    const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+    const name = PARK_FILE.exec(prompt)?.[0];
+    if (name !== undefined && cwd !== "") await writeFile(join(cwd, name), JSON.stringify({ question: 7 }));
     return { ...OK, stdout: SAID };
   };
 
@@ -207,8 +274,13 @@ describe("scout tasks, against real git", () => {
     expect(ready).toBeDefined();
     expect(ready?.pushClass).toBeNull();
     expect(ready?.body).toContain("the session cookie");
-    // No builder branch was ever created; the scout's disposable one is its own namespace.
+    // No builder branch was ever created; the scout's disposable checkout
+    // and branch are gone after the run (v4 review, finding 3).
     expect((await git(["rev-parse", "--verify", "--quiet", "refs/heads/standing-orders/flaky"])).code).not.toBe(0);
+    const branches = (await git(["branch", "--list", "standing-orders-scout/*"])).stdout.trim();
+    expect(branches).toBe("");
+    expect(store.listWorktrees().filter(one => one.branch.startsWith("standing-orders-scout/"))).toHaveLength(0);
+    expect(existsSync(join(pool, "flaky"))).toBe(false);
     expect(store.pendingPublications()).toHaveLength(0);
 
     // The follow-up files through the one door with the scout's authorship — mode coverage never seals it.
@@ -238,7 +310,78 @@ describe("scout tasks, against real git", () => {
     expect(store.getTask("flaky")?.state).toBe("queued");
     expect(store.latestReportArtifact(ref.id)).toBeNull();
     expect(store.activeHolds(ref.id, T0).some(one => one.ownerKind === "backoff")).toBe(true);
-    expect(store.setDeliverable(ref.id, "branch", T0)).toEqual({ ok: false, reason: "scoped" });
+    store.close();
+    // No API changes a deliverable after filing; --report on a tracker backend refuses up front.
+    await run(["task", "add", "x", "--backend", "github-issues", "--report", "--json"], reportingAgent);
+    expect(payload()).toMatchObject({ ok: false, reason: "usage" });
+  });
+
+  test("the proof sees ignored writes and staged protocol files (v4 review, finding 4)", async () => {
+    const { runnerToken } = await setup();
+    // A committed .gitignore: the ignored write is invisible to plain status.
+    await writeFile(join(repo, ".gitignore"), "build/\n");
+    await git(["add", ".gitignore"]);
+    await git(["commit", "-qm", "ignore build"]);
+    const ignored = await tick(runnerToken, ignoredVandal);
+    expect(ignored).toBe(EXIT.failed);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "flaky", outcome: "failed", reason: "dirty-tree" }));
+    const staged = await tick(runnerToken, stagingVandal, new Date(T0.getTime() + 5 * 60_000));
+    expect(staged).toBe(EXIT.failed);
+    expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "flaky", outcome: "failed", reason: "dirty-tree" }));
+    const store = openStore(db);
+    expect(store.latestReportArtifact(store.refFor("built-in", "flaky").id)).toBeNull();
+    expect(store.refFor("built-in", "flaky").strikes).toBe(2);
+    store.close();
+  });
+
+  test("a report that cannot be stored is a failed attempt, never a finished task (v4 review, finding 1)", async () => {
+    const { runnerToken } = await setup();
+    const evidence = join(base, "evidence");
+    mkdirSync(evidence, { recursive: true });
+    chmodSync(evidence, 0o500);
+    try {
+      const failed = await tick(runnerToken, reportingAgent);
+      expect(failed).toBe(EXIT.failed);
+      expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "flaky", outcome: "failed", reason: "capture-failed" }));
+      const store = openStore(db);
+      expect(store.getTask("flaky")?.state).toBe("queued");
+      expect(store.refFor("built-in", "flaky").strikes).toBe(1);
+      expect(store.listNotifications("all").some(one => one.kind === "report-ready")).toBe(false);
+      store.close();
+    } finally {
+      chmodSync(evidence, 0o700);
+    }
+  });
+
+  test("a credential the scout quotes is redacted before it is stored or paged (v4 review, finding 8)", async () => {
+    const { runnerToken } = await setup();
+    const reported = await tick(runnerToken, leakingAgent);
+    expect(reported).toBe(EXIT.ok);
+    const store = openStore(db);
+    const ref = store.refFor("built-in", "flaky");
+    const artifact = store.latestReportArtifact(ref.id);
+    expect(artifact?.redacted).toBe(true);
+    const view = readVerifiedReport(store, join(base, "evidence"), ref.id);
+    expect(view !== null && view.ok).toBe(true);
+    if (view !== null && view.ok) {
+      expect(view.report.summary).not.toContain("AKIAIOSFODNN7EXAMPLE");
+      expect(view.report.report).not.toContain("AKIAIOSFODNN7EXAMPLE");
+      expect(view.report.report).toContain("line one");
+    }
+    const ready = store.listNotifications("all").find(one => one.kind === "report-ready");
+    expect(ready?.body).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    store.close();
+  });
+
+  test("a malformed park mailbox is a malformed-decision incident, not a malformed report (v4 review, finding 12)", async () => {
+    const { runnerToken } = await setup();
+    const failed = await tick(runnerToken, malformedParker);
+    expect(failed).toBe(EXIT.failed);
+    const store = openStore(db);
+    const kinds = store.openIncidents().map(one => one.kind);
+    expect(kinds).toContain("malformed-decision");
+    expect(kinds).not.toContain("malformed-report");
+    expect(store.listNotifications("all").some(one => one.kind === "malformed-decision")).toBe(true);
     store.close();
   });
 

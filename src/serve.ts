@@ -954,6 +954,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
           item, scope,
           planDocument: ref !== null && ref.plan === "drafted" ? planDocumentOf(ref.id) : null,
+          deliverable: ref?.deliverable ?? "branch",
           csrf, nonce, remaining: remaining.length, skipped: [...skipped], now,
         }));
       }
@@ -5247,9 +5248,16 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (followUp === undefined) return taskScreen(response, who, taskId, "the report proposes no such follow-up", 409);
         if (ref.repo === null) return taskScreen(response, who, taskId, "this task has no repository — file the follow-up by hand", 409);
         if (!visible(ref.repo)) return taskScreen(response, who, taskId, "that repository is outside what this server shows", 403);
+        // Idempotent by construction (v4 review, finding 10): the filing's
+        // id is derived from the source task, the report's run, and the
+        // follow-up's place — a retried POST lands on the task the first
+        // one filed instead of minting a twin.
+        const followUpId = `${taskId.slice(0, 40)}-r${view.run}-f${Number(indexRaw) + 1}`;
+        if (store.getTask(followUpId) !== null) return redirect(response, taskHref(followUpId));
         const filed = fileTaskProposal(
           store,
           {
+            id: followUpId,
             title: followUp.title,
             repo: ref.repo,
             goal: followUp.goal,
@@ -5259,7 +5267,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           },
           now,
         );
-        if (!filed.ok) return taskScreen(response, who, taskId, `not filed: ${filed.message}`, filed.reason === "backlog-full" ? 429 : 400);
+        if (!filed.ok) {
+          if (filed.reason === "duplicate") return redirect(response, taskHref(followUpId));
+          return taskScreen(response, who, taskId, `not filed: ${filed.message}`, filed.reason === "backlog-full" ? 429 : 400);
+        }
         return redirect(response, taskHref(filed.id));
       }
       case "plan": {
@@ -10479,6 +10490,12 @@ function taskBody(data: {
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
           `<p class="ceremony-head"><strong>This task is waiting on you — approve exactly this:</strong> <a href="#scope">edit instead →</a></p>`,
+          // The deliverable INSIDE the ceremony (mate arc §10): a yes on a
+          // scout task authorizes a read-only session and a report, never
+          // a branch — said where the signature is given.
+          data.deliverable === "report"
+            ? `<p class="meta"><span class="badge">scout</span> approving sends a read-only session to investigate this goal and deliver a report — no branch, nothing changes in the repository</p>`
+            : "",
           // The filer INSIDE the ceremony (MCP spec v6): a coordinator's
           // request is signed knowing whose it is — and until this
           // signature, nothing plans, claims, or runs it.
@@ -11985,6 +12002,8 @@ function nextPage(chrome: Chrome, data: {
     | null;
   scope: Scope | null;
   planDocument: string | null;
+  /** v34: said inside the ceremony when the yes buys a report, not a branch. */
+  deliverable?: "branch" | "report";
   csrf: string;
   nonce: string;
   remaining: number;
@@ -12030,6 +12049,7 @@ function nextPage(chrome: Chrome, data: {
       `<input type="hidden" name="digest" value="${escape(item.approval.digest)}">` +
       `<input type="hidden" name="return" value="next">` +
       `<p><strong>approve exactly this:</strong></p>` +
+      (data.deliverable === "report" ? `<p class="meta"><span class="badge">scout</span> a read-only session investigates this goal and delivers a report — no branch, nothing changes in the repository</p>` : "") +
       (scope === null ? "" : profileWords(scope)) +
       `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? item.approval.goal)}</p>` +
       `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +

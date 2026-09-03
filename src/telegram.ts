@@ -407,14 +407,16 @@ async function deliverOutbox(
   // finalizes them all failed and leaves the anchor alone — the next pass
   // tries the whole digest again.
   const outcome = await deliverDigest(botId, binding, transport, batched, digest.lastSentAt, clock);
-  for (const row of batched) {
-    const finalized = store.finalizeDelivery(row.id, owner, outcome, clock());
-    if (outcome.ok && finalized) report.sent++;
-  }
   if (outcome.ok) {
-    store.markTelegramDigestSent(clock());
+    // Rows and anchor in ONE transaction (v4 review, finding 5). A claim
+    // that lapsed during a slow send is said, not swallowed: that row was
+    // sent here and will be sent again by whoever re-claimed it.
+    const done = store.finalizeDigest(batched.map(row => row.id), owner, outcome.receipt, clock());
+    report.sent += done.finalized;
     report.digests = (report.digests ?? 0) + 1;
+    if (done.lapsed > 0) report.problems.push(`digest: ${done.lapsed} row(s) lost their claim mid-send and may be sent again`);
   } else {
+    for (const row of batched) store.finalizeDelivery(row.id, owner, outcome, clock());
     report.problems.push(`digest of ${batched.length} notification(s): ${outcome.error}`);
   }
 }

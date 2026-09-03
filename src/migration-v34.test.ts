@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { rebuildRunForV34 } from "./store.js";
+import { rebuildArtifactForV34, rebuildIncidentForV34, rebuildRunForV34 } from "./store.js";
 
 /** The v29 run shape after v30's ALTER ADD COLUMNs — exactly what every
  * v30..v33 database carries (SQLite appends the columns before the CHECK). */
@@ -72,5 +72,73 @@ describe("schema v34: 'scout' joins run.role by an exact copy-rename", () => {
     db.exec(V29_PLUS_V30.replace("handoff       TEXT,", "handoff       TEXT, extra TEXT,"));
     expect(() => rebuildRunForV34(db)).toThrow(/not a shape this migration knows/);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'run'").get()).toBeDefined();
+  });
+});
+
+const V17_ARTIFACT = `CREATE TABLE artifact (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree')),
+    key            TEXT NOT NULL,
+    bytes_original INTEGER NOT NULL,
+    bytes_stored   INTEGER NOT NULL,
+    truncated      INTEGER NOT NULL DEFAULT 0,
+    sha256         TEXT NOT NULL,
+    capture        TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    redacted       INTEGER NOT NULL DEFAULT 0,
+    capture_status TEXT CHECK (capture_status IN ('ok','failed'))
+  )`;
+const V7_INCIDENT = `CREATE TABLE incident (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted')),
+    created_at  TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT
+  )`;
+
+describe("schema v34: artifact.kind and incident.kind widen by EXACT recognizers (v4 review, finding 7)", () => {
+  const fresh = () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec("CREATE TABLE run (id INTEGER PRIMARY KEY AUTOINCREMENT)");
+    db.exec("INSERT INTO run DEFAULT VALUES");
+    return db;
+  };
+
+  test("artifact: rows kept, 'report' admitted, idempotent; a lookalike shape refuses", () => {
+    const db = fresh();
+    db.exec(V17_ARTIFACT);
+    db.exec("INSERT INTO artifact (id, run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at, capture_status) VALUES (4, 1, 'plan', 'k', 1, 1, 's', 'c', 'x', 'ok')");
+    expect(() => db.exec("INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at) VALUES (1, 'report', 'k', 1, 1, 's', 'c', 'x')")).toThrow();
+    rebuildArtifactForV34(db);
+    expect(db.prepare("SELECT id, kind, capture_status FROM artifact").all()).toEqual([{ id: 4, kind: "plan", capture_status: "ok" }]);
+    db.exec("INSERT INTO artifact (run, kind, key, bytes_original, bytes_stored, sha256, capture, created_at) VALUES (1, 'report', 'k', 1, 1, 's', 'c', 'x')");
+    const ddl = String(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'artifact'").get()?.["sql"]);
+    rebuildArtifactForV34(db);
+    expect(String(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'artifact'").get()?.["sql"])).toBe(ddl);
+
+    // A table that merely CONTAINS the word 'report' in an unrelated column
+    // is not the target shape — and not the old one either: refuse.
+    const other = fresh();
+    other.exec(V17_ARTIFACT.replace("capture_status TEXT", "note TEXT DEFAULT 'report', capture_status TEXT"));
+    expect(() => rebuildArtifactForV34(other)).toThrow(/not a shape this migration knows/);
+  });
+
+  test("incident: rows kept, 'malformed-report' admitted, idempotent; a lookalike shape refuses", () => {
+    const db = fresh();
+    db.exec(V7_INCIDENT);
+    db.exec("INSERT INTO incident (id, run, kind, created_at) VALUES (2, 1, 'malformed-plan', 'x')");
+    rebuildIncidentForV34(db);
+    expect(db.prepare("SELECT id, kind FROM incident").all()).toEqual([{ id: 2, kind: "malformed-plan" }]);
+    db.exec("INSERT INTO run DEFAULT VALUES");
+    db.exec("INSERT INTO incident (run, kind, created_at) VALUES (2, 'malformed-report', 'x')");
+    const ddl = String(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'incident'").get()?.["sql"]);
+    rebuildIncidentForV34(db);
+    expect(String(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'incident'").get()?.["sql"])).toBe(ddl);
+    const other = fresh();
+    other.exec(V7_INCIDENT.replace("resolved_by TEXT", "resolved_by TEXT, note TEXT DEFAULT 'malformed-report'"));
+    expect(() => rebuildIncidentForV34(other)).toThrow(/not a shape this migration knows/);
   });
 });

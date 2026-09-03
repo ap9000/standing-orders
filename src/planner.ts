@@ -36,6 +36,7 @@ import {
 } from "./evidence.js";
 import type { Runner } from "./builder.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
+import { proveTreeUntouched, snapshotIgnored } from "./tree-proof.js";
 
 const GIT = "git";
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
@@ -204,6 +205,12 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
   const mailbox = mailboxName();
   const planFile = planFileName();
   quarantineMailboxes(worktree, root, request.runId);
+  // The "before" of the clean-tree proof (v4 review, finding 4 — shared
+  // with the scout): ignored paths the checkout already carried.
+  const ignoredBefore = await snapshotIgnored(git, worktree);
+  if (ignoredBefore === null) {
+    return { ok: false, kind: "failure", reason: "git", message: `could not read the tree state in ${worktree}` };
+  }
 
   const clock = request.clock ?? (() => now);
   const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
@@ -326,22 +333,14 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       message: `HEAD moved from ${baseRevision.slice(0, 12)} — a planner never commits; nothing it wrote is ingested`,
     };
   }
-  const status = await git(
-    GIT,
-    ["--no-optional-locks", "-c", "core.quotePath=false", "status", "--porcelain"],
-    { cwd: worktree },
-  );
-  if (status.code !== 0) {
+  // The pool's lease marker lives in every leased worktree; the builder
+  // excludes it from commits, and the proof admits it untracked here.
+  const proof = await proveTreeUntouched(git, worktree, { ignoredBefore, protocolFiles: [mailbox, planFile], marker: LEASE_MARKER });
+  if (!proof.ok && proof.reason === "git") {
     return { ok: false, kind: "failure", reason: "git", message: `could not read the tree state in ${worktree}` };
   }
-  const foreign = status.stdout
-    .split("\n")
-    .filter(line => line.trim() !== "")
-    .map(line => line.slice(3))
-    // The pool's lease marker lives in every leased worktree; the builder
-    // excludes it from commits, and the planner's proof excludes it here.
-    .filter(path => path !== mailbox && path !== planFile && path !== LEASE_MARKER);
-  if (foreign.length > 0) {
+  if (!proof.ok) {
+    const foreign = proof.foreign;
     quarantineMailboxes(worktree, root, request.runId);
     return {
       ok: false,

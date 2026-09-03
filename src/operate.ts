@@ -2340,6 +2340,10 @@ async function tickCommand(
             {
               dedupeKey: `gap:${home}:${parsed.kind}:${parsed.name}`,
               kind: "gap",
+              // A gap that blocks work wants a person NOW (v4 review,
+              // finding 6): it pages singly whatever the digest cadence.
+              pushClass: "attention",
+              link: "/caps",
               subject: `${key} blocks work in ${home}`,
               body: `${id} (and possibly others) cannot dispatch: ${claimed.message}. \`standing-orders gaps --repo ${home}\``,
             },
@@ -2681,6 +2685,7 @@ async function tickCommand(
         runId: planRunId,
         taskId: id,
         kind: outcome.kind,
+        ...(outcome.kind === "malformed" ? { malformed: outcome.reason === "malformed-decision" ? ("decision" as const) : ("plan" as const) } : {}),
         message: outcome.message,
         now: clock(),
       });
@@ -2694,7 +2699,10 @@ async function tickCommand(
       // The scout's workspace is disposable and its branch namespace is
       // its own (mate arc §10) — a later build starts from base with
       // nothing a scouting session could have left as an ancestor.
-      const scoutBranch = `standing-orders-scout/${id}`;
+      // One branch per ATTEMPT (v4 review, finding 3): a fresh checkout
+      // from base every time, and the checkout discarded after — a parked
+      // scout resumes against today's base, not the tree it parked on.
+      const scoutBranch = `standing-orders-scout/${id}/${randomBytes(4).toString("hex")}`;
       const scopeRow = store.getScope(id);
       // Approvals bind exact routing for a scout exactly as for a build:
       // the pinned profile is proved BEFORE the workspace is leased.
@@ -2763,6 +2771,10 @@ async function tickCommand(
         ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
       });
       await worktrees.release(scoutLeased.worktree.path, clock());
+      const discarded = await worktrees.discard(scoutLeased.worktree.path, clock());
+      // A checkout that could not be discarded is SAID on the outcome —
+      // never silently kept; `standing-orders worktrees` lists it.
+      const leftover = discarded.ok ? {} : { detail: `checkout kept: ${discarded.message}` };
 
       if (scouted.ok && "parked" in scouted) {
         const sealed = finalizeParkFenced(store, {
@@ -2774,10 +2786,10 @@ async function tickCommand(
           now: clock(),
         });
         if (sealed.ok) {
-          dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}` });
+          dispatched.push({ id, outcome: "parked", reason: `decision:${sealed.decisionId}`, ...leftover });
           parked++;
         } else {
-          dispatched.push({ id, outcome: "failed", reason: "fenced" });
+          dispatched.push({ id, outcome: "failed", reason: "fenced", ...leftover });
           broke++;
         }
         continue;
@@ -2793,9 +2805,9 @@ async function tickCommand(
         });
         if (sealed.ok) {
           store.clearQuota(runner, spec.provider, spec.model ?? "");
-          dispatched.push({ id, outcome: "reported" });
+          dispatched.push({ id, outcome: "reported", ...leftover });
         } else {
-          dispatched.push({ id, outcome: "failed", reason: "fenced" });
+          dispatched.push({ id, outcome: "failed", reason: "fenced", ...leftover });
           broke++;
         }
         continue;
@@ -2805,10 +2817,11 @@ async function tickCommand(
         runId: scoutRunId,
         taskId: id,
         kind: scouted.kind,
+        ...(scouted.kind === "malformed" ? { malformed: scouted.reason === "malformed-decision" ? ("decision" as const) : ("report" as const) } : {}),
         message: scouted.message,
         now: clock(),
       });
-      dispatched.push({ id, outcome: "failed", reason: scouted.reason });
+      dispatched.push({ id, outcome: "failed", reason: scouted.reason, ...leftover });
       if (!sealedFailure.ok) release(store, lease, clock());
       broke++;
       continue;
@@ -7927,6 +7940,12 @@ async function addTask(
   if (badText !== null) return fail(write, json, "task add", badText.reason, badText.message, EXIT.usage);
 
   const backendName = text(flags, "backend") ?? BUILT_IN;
+  // A scout task lives in the built-in backend (v4 review, finding 2):
+  // the deliverable is a column on OUR task_ref, stamped in the same
+  // transaction as the filing — a tracker's item has no such promise.
+  if (flags.has("report") && backendName !== BUILT_IN) {
+    return fail(write, json, "task add", "usage", "--report files a scout task in the built-in backend only — drop --backend", EXIT.usage);
+  }
   if (backendName !== BUILT_IN) {
     const repo = repoFrom(flags);
     const backend = openBackend(backendName, store, repo);
@@ -7989,7 +8008,10 @@ async function addTask(
     "task add",
     () => {
       if (store.getTask(id) !== null) return { ok: false as const };
-      return { ok: true as const, task: store.createTask({ id, title }, now) };
+      // The deliverable rides the SAME transaction as the filing (v4
+      // review, finding 2): a crash can never leave a scout ask as a
+      // branch task.
+      return { ok: true as const, task: store.createTask({ id, title, ...(flags.has("report") ? { deliverable: "report" as const } : {}) }, now) };
     },
     result => result.ok,
   );
@@ -7999,12 +8021,6 @@ async function addTask(
   }
 
   store.stampFiledVia(store.refFor(BUILT_IN, id).id, "cli");
-  // --report (v34): a scout task — what comes back is a report, not a
-  // branch. Stamped at filing; the deliverable never changes afterwards.
-  if (flags.has("report")) {
-    const marked = store.setDeliverable(store.refFor(BUILT_IN, id).id, "report", now);
-    if (!marked.ok) return fail(write, json, "task add", marked.reason, "the deliverable is set at filing only", EXIT.refused);
-  }
 
   // Placement is explicit, never inferred from where the command happened to
   // run: a task filed from the wrong directory would silently bind to it.

@@ -447,6 +447,9 @@ function concede(
       {
         dedupeKey: `publication:${publication.id}:failed`,
         kind: "publication-failed",
+        // A person is needed now (v4 review, finding 6): never a digest.
+        pushClass: "attention",
+        link: `/r/${publication.run}`,
         subject: `publication of run #${publication.run} gave up`,
         body: `After ${MAX_PUBLISH_ATTEMPTS} attempts: ${why}. The commit ${publication.headSha} is safe locally; nothing was lost, nothing more will be pushed.`,
       },

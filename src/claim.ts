@@ -1510,6 +1510,8 @@ export function finalizePlanFailureFenced(
     runId: number;
     taskId: string;
     kind: "malformed" | "failure";
+    /** Which payload was malformed (v4 review, finding 12): the mailbox is a `malformed-decision`. */
+    malformed?: "decision" | "plan";
     message: string;
     now: Date;
   },
@@ -1534,27 +1536,28 @@ export function finalizePlanFailureFenced(
       store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
       return refusal(db, leaseId);
     }
-    store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? "malformed-plan" : oneLine(message, 120), now });
+    const malformedKind = args.malformed === "decision" ? "malformed-decision" : "malformed-plan";
+    store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? malformedKind : oneLine(message, 120), now });
 
     if (kind === "malformed") {
-      const incidentId = store.createIncident({ run: runId, kind: "malformed-plan" }, now);
+      const incidentId = store.createIncident({ run: runId, kind: malformedKind }, now);
       store.holdOwned(
         {
           taskRef: run.taskRef,
           ownerKind: "incident",
           ownerId: String(incidentId),
-          reason: "malformed-plan — the planner's payload failed validation",
+          reason: `${malformedKind} — the planner's ${args.malformed === "decision" ? "question" : "plan"} failed validation`,
           until: null,
         },
         now,
       );
       store.enqueueNotification(
         {
-          dedupeKey: `malformed-plan:${runId}`,
-          kind: "malformed-plan",
+          dedupeKey: `${malformedKind}:${runId}`,
+          kind: malformedKind,
           pushClass: "attention",
           link: `/r/${runId}`,
-          subject: `${taskId}: the planner's plan failed validation`,
+          subject: `${taskId}: the planner's ${args.malformed === "decision" ? "question" : "plan"} failed validation`,
           body: `${oneLine(message, 300)}\nResolve the incident to let planning retry.`,
         },
         now,
@@ -1632,8 +1635,9 @@ export function finalizeScoutFenced(
     runId: number;
     taskId: string;
     report: ParsedReport;
-    /** The already-captured report file, described; null when the capture
-     * itself failed (the run still finishes, the page says the report is missing). */
+    /** The already-captured report file, described. Required: a report
+     * that was not captured is a FAILED attempt, never a finished task
+     * (v4 review, finding 1). */
     artifact: {
       key: string;
       bytesOriginal: number;
@@ -1641,7 +1645,8 @@ export function finalizeScoutFenced(
       truncated: boolean;
       sha256: string;
       capture: string;
-    } | null;
+      redacted: boolean;
+    };
     now: Date;
   },
 ): ScoutFinalize {
@@ -1665,11 +1670,9 @@ export function finalizeScoutFenced(
       store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
       return refusal(db, leaseId);
     }
-    if (args.artifact !== null) {
-      store.saveArtifact({ run: runId, kind: "report", ...args.artifact }, now);
-    }
+    store.saveArtifact({ run: runId, kind: "report", ...args.artifact }, now);
     store.resetStrikes(run.taskRef);
-    store.finishRun(runId, { outcome: "built", reason: args.artifact === null ? "report-delivered (capture failed)" : "report-delivered", now });
+    store.finishRun(runId, { outcome: "built", reason: "report-delivered", now });
     const done = store.setTaskState(taskId, "done", now);
     if (!done.ok) {
       // A mirror the tracker closed meanwhile: the report stands as evidence
@@ -1709,6 +1712,10 @@ export function finalizeScoutFailureFenced(
     runId: number;
     taskId: string;
     kind: "malformed" | "failure";
+    /** Which payload was malformed (v4 review, finding 12): the park
+     * mailbox is a `malformed-decision` incident, the handoff a
+     * `malformed-report` one — the taxonomy says what actually broke. */
+    malformed?: "decision" | "report";
     message: string;
     now: Date;
   },
@@ -1733,27 +1740,28 @@ export function finalizeScoutFailureFenced(
       store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
       return refusal(db, leaseId);
     }
-    store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? "malformed-report" : oneLine(message, 120), now });
+    const malformedKind = args.malformed === "decision" ? "malformed-decision" : "malformed-report";
+    store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? malformedKind : oneLine(message, 120), now });
 
     if (kind === "malformed") {
-      const incidentId = store.createIncident({ run: runId, kind: "malformed-report" }, now);
+      const incidentId = store.createIncident({ run: runId, kind: malformedKind }, now);
       store.holdOwned(
         {
           taskRef: run.taskRef,
           ownerKind: "incident",
           ownerId: String(incidentId),
-          reason: "malformed-report — the scout's payload failed validation",
+          reason: `${malformedKind} — the scout's ${args.malformed === "decision" ? "question" : "report"} failed validation`,
           until: null,
         },
         now,
       );
       store.enqueueNotification(
         {
-          dedupeKey: `malformed-report:${runId}`,
-          kind: "malformed-report",
+          dedupeKey: `${malformedKind}:${runId}`,
+          kind: malformedKind,
           pushClass: "attention",
           link: `/r/${runId}`,
-          subject: `${taskId}: the scout's report failed validation`,
+          subject: `${taskId}: the scout's ${args.malformed === "decision" ? "question" : "report"} failed validation`,
           body: `${oneLine(message, 300)}\nResolve the incident to let scouting retry.`,
         },
         now,
