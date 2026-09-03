@@ -239,6 +239,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("mcp", "serve the MCP gateway over stdio — the coordinator credential is the only key it accepts"),
   operator("cap add", "record a capability"),
   operator("outbox deliver", "deliver queued notifications"),
+  operator("peek", "watch live agents in the terminal — one pane per open run; --tmux opens a window per run"),
   operator("incident resolve", "resolve an incident"),
   operator("decide", "read and ANSWER parked decisions — answering is a person's act"),
   operator("routine add", "file a standing order"),

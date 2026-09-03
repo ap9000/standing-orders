@@ -226,6 +226,7 @@ export const OPERATE_COMMANDS = new Set([
   "cap",
   "gaps",
   "outbox",
+  "peek",
   "brief",
   "decide",
   "incident",

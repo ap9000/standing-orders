@@ -88,6 +88,30 @@ export function renderTranscriptLines(event: Record<string, unknown>): string[] 
   if (type === "system" && String(event["subtype"] ?? "") === "init") {
     return ["the agent session started"];
   }
+  // Codex-shaped streams (peek): a thread starts, items complete.
+  if (type === "thread.started") return ["the agent session started"];
+  if (type === "item.completed") {
+    const item = event["item"] as Record<string, unknown> | undefined;
+    const kind = item === undefined ? "" : String(item["type"] ?? "");
+    if (kind === "agent_message") {
+      const text = item?.["text"];
+      return typeof text === "string" ? text.split("\n").filter(one => one.trim() !== "") : [];
+    }
+    if (kind === "command_execution") return ["→ running a command"];
+    if (kind === "file_change") return ["→ editing files"];
+    if (kind === "web_search") return ["→ looking something up"];
+    return [];
+  }
+  // Gemini-shaped streams (peek): whole assistant messages, never deltas.
+  if (type === "init") return ["the agent session started"];
+  if (type === "message" && String(event["role"] ?? "") === "assistant" && event["delta"] !== true) {
+    const content = event["content"];
+    return typeof content === "string" ? content.split("\n").filter(one => one.trim() !== "") : [];
+  }
+  if (type === "tool_call" || type === "tool_use") {
+    const name = event["name"] ?? (event["tool"] as Record<string, unknown> | undefined)?.["name"];
+    return [TOOL_HEADLINES.get(typeof name === "string" ? name : "") ?? TOOL_HEADLINE_GENERIC];
+  }
   if (type !== "assistant") return [];
   // Top-level only: a subagent's words are not this run's transcript.
   const parent = event["parent_tool_use_id"];

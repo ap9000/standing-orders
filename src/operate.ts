@@ -173,11 +173,12 @@ import {
   type Runner as CommandRunner,
 } from "./builder.js";
 import { plan as planTask } from "./planner.js";
+import { attachTmux, elapsedWords, openInTmux, PEEK_TAIL_LINES, runPeek, snapshotLiveRuns } from "./peek-cli.js";
 import { scout as scoutTask } from "./scout.js";
 import { profileDigestOf } from "./scope.js";
 import { reviewPass } from "./reviewer.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
-import { run, terminateLiveProviders } from "./exec.js";
+import { run, terminateLiveProviders, run as execRun } from "./exec.js";
 import { readPulls } from "./pulls.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
@@ -400,6 +401,11 @@ Agents — which provider and model each phase runs on
   Pass flags still win for one pass: --provider/--model,
   --plan-provider/--plan-model, --repair-model. A routine instance is
   pinned at fire time and ignores all of them.
+  standing-orders peek [<run-id>] [--tmux]  watch live agents: one pane per
+                                        open run — stage, clock, and what
+                                        the agent is saying; digits focus,
+                                        q leaves; --tmux opens a window per
+                                        run in a real tmux session
   standing-orders brief [--repo <path>] [--local] [--since <iso>]
                                         the report: recent runs, gaps,
                                         PRs (--local skips the network and
@@ -495,13 +501,13 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
-  "command", "timeout-seconds", "stop-grace", "title", "name", "every",
+  "command", "timeout-seconds", "stop-grace", "title", "name", "every", "lines",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
-  "no-open", "no-verify", "end", "report", "off",
+  "no-open", "no-verify", "end", "report", "off", "tmux",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -708,6 +714,8 @@ async function dispatch(
       return gapsCommand(flags, context);
     case "outbox":
       return outboxCommand(positional, flags, context);
+    case "peek":
+      return peekCommand(positional, flags, context);
     case "brief":
       return briefCommand(flags, context);
     case "decide":
@@ -7620,6 +7628,60 @@ async function publishCommand(
  * Exit 0 when everything pending delivered (or nothing was pending);
  * 1 when any delivery failed — a broken channel is breakage, not a "no".
  */
+/**
+ * `standing-orders peek [<run>] [--tmux] [--lines <n>]` — watch live agents
+ * in the terminal: one pane per open run with its stage and transcript
+ * tail; a run id follows that one until it finishes; --tmux opens a real
+ * tmux session with a window per run. Outside a TTY or under --json: one
+ * snapshot, enveloped. A look, never a write.
+ */
+async function peekCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [given] = positional;
+  let runId: number | undefined;
+  if (given !== undefined) {
+    if (!/^[1-9][0-9]{0,14}$/.test(given)) return fail(write, json, "peek", "usage", "`standing-orders peek [<run-id>] [--tmux]`", EXIT.usage);
+    runId = Number(given);
+    if (store.getRun(runId) === null) return fail(write, json, "peek", "unknown-run", `no run #${runId}`, EXIT.refused);
+  }
+  const linesGiven = text(flags, "lines");
+  const lines = linesGiven === undefined ? 12 : Number(linesGiven);
+  if (!Number.isInteger(lines) || lines < 1 || lines > PEEK_TAIL_LINES) {
+    return fail(write, json, "peek", "usage", `--lines is a whole number from 1 to ${PEEK_TAIL_LINES}`, EXIT.usage);
+  }
+  const interactive = !json && process.stdout.isTTY === true && process.stdin.isTTY === true;
+
+  if (flags.has("tmux")) {
+    if (!interactive) return fail(write, json, "peek", "usage", "--tmux needs a terminal", EXIT.usage);
+    const panes = snapshotLiveRuns(store, context.evidenceRoot, clock());
+    const opened = await openInTmux(panes, [process.execPath, process.argv[1] ?? "standing-orders", ...(text(flags, "db") === undefined ? [] : ["--db", text(flags, "db") as string])], async (file, args) => {
+      const answer = await execRun(file, args);
+      return { code: answer.code, stderr: answer.stderr };
+    });
+    if (!opened.ok) return fail(write, json, "peek", "tmux", opened.message, EXIT.refused);
+    return attachTmux();
+  }
+
+  if (!interactive) {
+    const panes = snapshotLiveRuns(store, context.evidenceRoot, clock()).filter(one => runId === undefined || one.runId === runId);
+    const body = panes.map(one => ({ ...one, lines: one.lines.slice(-lines) }));
+    return succeed(write, json, "peek", { runs: body }, () =>
+      body.length === 0
+        ? ["No agent is working right now."]
+        : body.flatMap(one => [
+            `#${one.runId} ${one.title} — ${one.runner} · ${one.role} · ${one.phase} · ${elapsedWords(one.startedAt, clock())}`,
+            ...(one.lines.length === 0 ? ["    (no transcript yet)"] : one.lines.map(line => `    ${line}`)),
+            "",
+          ]),
+    );
+  }
+  return runPeek(store, context.evidenceRoot, { ...(runId === undefined ? {} : { runId }), io: { stdout: process.stdout, stdin: process.stdin }, clock });
+}
+
 async function outboxCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,

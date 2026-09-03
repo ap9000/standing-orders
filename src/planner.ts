@@ -36,6 +36,7 @@ import {
 } from "./evidence.js";
 import type { Runner } from "./builder.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
+import { openLiveLog } from "./live.js";
 import { proveTreeUntouched, snapshotIgnored } from "./tree-proof.js";
 
 const GIT = "git";
@@ -238,6 +239,9 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
     pulseTimer.unref?.();
   }
 
+  // The live window (peek): the same transcript file the builder keeps,
+  // so `standing-orders peek` and the run page can watch this session too.
+  const liveLog = openLiveLog(root, request.runId);
   let invoked;
   try {
     invoked = await invokeAgent(
@@ -259,10 +263,18 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
           ? { startSessionId: randomUUID() }
           : {}),
       },
-      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
+      {
+        cwd: worktree,
+        timeoutMs,
+        omitEnv: AGENT_ENV_DENYLIST,
+        ...(agent === undefined ? {} : { runner: agent }),
+        clock,
+        ...(liveLog === null ? {} : { onStreamEvent: (event: Record<string, unknown>) => liveLog.observe(event) }),
+      },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
+    liveLog?.close();
   }
 
   // The gateway's value-shaped refusals (Phase 3 B5/C1): both consume the

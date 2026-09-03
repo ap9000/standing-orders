@@ -484,6 +484,13 @@ export function runStreamJsonl(
             lastMessage = line;
           }
         }
+        if (options.onStreamEvent !== undefined) {
+          try {
+            options.onStreamEvent(event);
+          } catch {
+            // Observational only: a broken listener never touches the run.
+          }
+        }
       } catch {
         // Not JSON: not an event; dropped.
       }
@@ -633,6 +640,13 @@ export function runGeminiStreamJsonl(
           // A full (non-delta) assistant message replaces the buffer.
           message = content;
           messageTruncated = Buffer.byteLength(message, "utf8") > JSONL_LINE_CAP;
+        }
+      }
+      if (options.onStreamEvent !== undefined) {
+        try {
+          options.onStreamEvent(event);
+        } catch {
+          // Observational only: a broken listener never touches the run.
         }
       }
     };

@@ -979,9 +979,9 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // below. Repair and planner briefs never consume steering.
   const steering = store.attachSteerNotes(taskRef, request.runId, clock());
   // The live window (arc 1): display state beside the run, never evidence.
-  // Claude's streaming transport is the only one that emits events; a file
-  // that cannot open is a null, and a null never costs a build.
-  const liveLog = provider === "claude" ? openLiveLog(root, request.runId) : null;
+  // Every streaming transport emits events now (peek); a file that cannot
+  // open is a null, and a null never costs a build.
+  const liveLog = openLiveLog(root, request.runId);
   const briefText = brief(scope as Scope, branch, mailbox, done, answers, planDocument, revisionBrief, previousHandoff, steering);
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the

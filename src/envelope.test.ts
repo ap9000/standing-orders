@@ -142,6 +142,7 @@ describe("the machine envelope", () => {
       cap: ["list", "--json"],
       gaps: ["--json"],
       outbox: ["list", "--json"],
+      peek: ["--json"],
       brief: ["--json"],
       decide: ["--json"],
       incident: ["list", "--json"],

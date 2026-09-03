@@ -252,6 +252,21 @@ confirmation tap. Rotating your approver credential strands the chat and
 every outstanding button, and the bot token itself is stripped from every
 agent's environment.
 
+## Peeking at the agents
+
+```sh
+standing-orders peek            # one pane per live run: stage, clock, what the agent is saying
+standing-orders peek 42         # follow one run until it finishes
+standing-orders peek --tmux     # a real tmux session, one window per run
+```
+
+The panes tail each run's live transcript, the same file the console's
+run page follows: the text the agent said and the kind of tool it reached
+for (editing files, running a command, searching the code), never file
+contents or command lines, with credential-shaped lines redacted at
+write. Digits focus one pane, `a` shows them all, `q` leaves. Outside a
+terminal, or with `--json`, it prints one snapshot and exits.
+
 ## The console
 
 `standing-orders serve --repo <path>` is no longer just the decision view — it

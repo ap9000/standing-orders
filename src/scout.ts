@@ -34,6 +34,7 @@ import {
 } from "./evidence.js";
 import type { Runner } from "./builder.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
+import { openLiveLog } from "./live.js";
 import { proveTreeUntouched, snapshotIgnored } from "./tree-proof.js";
 import { redactSecretLines, scanForSecrets } from "./evidence.js";
 
@@ -222,6 +223,9 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
     pulseTimer.unref?.();
   }
 
+  // The live window (peek): the same transcript file the builder keeps,
+  // so `standing-orders peek` and the run page can watch this session too.
+  const liveLog = openLiveLog(root, request.runId);
   let invoked;
   try {
     invoked = await invokeAgent(
@@ -239,10 +243,18 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
         resumeSession: null,
         ...(auditOf(request.provider ?? "claude").sessionIdentity === "minted" ? { startSessionId: randomUUID() } : {}),
       },
-      { cwd: worktree, timeoutMs, omitEnv: AGENT_ENV_DENYLIST, ...(agent === undefined ? {} : { runner: agent }), clock },
+      {
+        cwd: worktree,
+        timeoutMs,
+        omitEnv: AGENT_ENV_DENYLIST,
+        ...(agent === undefined ? {} : { runner: agent }),
+        clock,
+        ...(liveLog === null ? {} : { onStreamEvent: (event: Record<string, unknown>) => liveLog.observe(event) }),
+      },
     );
   } finally {
     if (pulseTimer !== undefined) clearInterval(pulseTimer);
+    liveLog?.close();
   }
 
   if (invoked.kind === "refused") {

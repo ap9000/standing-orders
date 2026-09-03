@@ -10721,6 +10721,26 @@ export class Store {
     }
   }
 
+  /** Every run still open, oldest first, with its task's id and title — what `peek` watches. */
+  liveRuns(): (Run & { taskId: string; title: string; repo: string | null })[] {
+    return this.db
+      .prepare(
+        `SELECT run.*, task_ref.external_id AS task_id, task_ref.repo AS task_repo, task.title AS task_title
+           FROM run
+           JOIN task_ref ON task_ref.id = run.task_ref
+           LEFT JOIN task ON task_ref.backend = ? AND task.id = task_ref.external_id
+          WHERE run.outcome IS NULL
+          ORDER BY run.id`,
+      )
+      .all(BUILT_IN)
+      .map(row => ({
+        ...readRun(row as Record<string, unknown>),
+        taskId: String(row["task_id"]),
+        title: row["task_title"] === null || row["task_title"] === undefined ? String(row["task_id"]) : String(row["task_title"]),
+        repo: row["task_repo"] === null || row["task_repo"] === undefined ? null : String(row["task_repo"]),
+      }));
+  }
+
   getRun(id: number): Run | null {
     const row = this.db.prepare("SELECT * FROM run WHERE id = ?").get(id);
     return row === undefined ? null : readRun(row);
