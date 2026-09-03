@@ -24,6 +24,18 @@ export function ask(question: string): Promise<string> {
 }
 
 /** Like ask, but what is typed never echoes — passwords live here. */
+/**
+ * Raw-mode input is not text: a terminal with bracketed paste on wraps a
+ * pasted password in ESC[200~ … ESC[201~, and any arrow or function key
+ * arrives as an escape sequence. Every CSI/SS3 sequence is dropped whole,
+ * so a pasted secret compares equal to a typed one (setup review: the
+ * hidden prompt refused every pasted password on iTerm and Terminal.app).
+ */
+export function sanitizeHiddenInput(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\u001bO[@-~]/g, "").replace(/\u001b/g, "");
+}
+
 export function askHidden(question: string): Promise<string> {
   process.stdout.write(question);
   const stdin = process.stdin;
@@ -39,7 +51,7 @@ export function askHidden(question: string): Promise<string> {
       process.stdout.write("\n");
     };
     const onData = (chunk: Buffer): void => {
-      const text = chunk.toString("utf8");
+      const text = sanitizeHiddenInput(chunk.toString("utf8"));
       for (const ch of text) {
         if (ch === "\r" || ch === "\n" || ch === "\u0004") {
           finish();

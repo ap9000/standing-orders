@@ -45,7 +45,7 @@ import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from 
 import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, updateRepos, loadRepos } from "./repos.js";
 import { pushPass } from "./push.js";
-import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, mkdirSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
@@ -421,7 +421,7 @@ The outbox — facts that want a person, durably
                                         exit 0 delivered receipts, 1 any fail
 
 Runners — the machines that may be given work
-  standing-orders runner register <name> [--capacity <n>]
+  standing-orders runner register <name> [--capacity <n>] [--token-file <path>]
                                         mints a token, shown once
   standing-orders runner list               who is registered, and answering
   standing-orders runner heartbeat <name> --token <token>
@@ -1169,6 +1169,14 @@ async function runnerCommand(
     if (repos.length === 0) {
       return fail(write, json, "runner register", "usage", "--repo names at least one repository this runner may build — authority binds at the mint", EXIT.usage);
     }
+    // --token-file (setup review): the token lands 0600 in the file a
+    // watch will read, and is never printed — one command from password to
+    // a worker, no paste step. The file must not already exist: a second
+    // mint never silently overwrites a credential a running watch holds.
+    const tokenFile = text(flags, "token-file");
+    if (tokenFile !== undefined && existsSync(tokenFile)) {
+      return fail(write, json, "runner register", "token-file-exists", `${tokenFile} already exists — remove it first if that worker is gone, or name another file`, EXIT.refused);
+    }
     const { runner, token, reclaimed } = register(store, {
       name,
       host: hostname(),
@@ -1177,13 +1185,21 @@ async function runnerCommand(
       now,
       mutation: mutationFrom(flags, now),
     });
+    if (tokenFile !== undefined) {
+      try {
+        writeFileSync(tokenFile, `${token}\n`, { mode: 0o600, flag: "wx" });
+        chmodSync(tokenFile, 0o600);
+      } catch (error) {
+        return fail(write, json, "runner register", "token-file", `registered ${runner.name}, but the token could not be written to ${tokenFile} (${describe(error)}) — register again with a writable path`, EXIT.failed, { runner, reclaimed });
+      }
+    }
 
-    return succeed(write, json, "runner register", { runner, token, reclaimed }, () => [
+    return succeed(write, json, "runner register", { runner, ...(tokenFile === undefined ? { token } : { tokenFile }), reclaimed }, () => [
       `Registered ${runner.name} on ${runner.host}, capacity ${runner.capacity}.`,
       "",
-      `  token  ${token}`,
-      "",
-      "That token is shown once and is not stored — only a hash of it is.",
+      ...(tokenFile === undefined
+        ? [`  token  ${token}`, "", "That token is shown once and is not stored — only a hash of it is."]
+        : [`  token written to ${tokenFile} (owner-only) — \`standing-orders watch --runner ${runner.name} --token-file ${tokenFile} --repo <path>\` uses it.`, "", "The token is not stored anywhere else — only a hash of it is."]),
       "If it is lost, register again to mint a new one.",
       // Taking work back from the previous holder of this name is a side
       // effect somebody should hear about, not one they discover later from a
