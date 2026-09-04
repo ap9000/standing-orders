@@ -677,6 +677,18 @@ type Context = {
   maxHeldSessions?: number;
 };
 
+
+/**
+ * The enrolled-project registry lives beside the database — the same rule
+ * as evidence and the bot token — so an isolated installation (`--db` in a
+ * sandbox, a test's temp dir) never enrolls into the person's real
+ * ~/.config/standing-orders/repos.json (2026-09-03: `up` tests had left
+ * 888 dead temp paths there).
+ */
+function registryPathOf(context: { databaseFile: string }): string {
+  return join(dirname(context.databaseFile), "repos.json");
+}
+
 async function dispatch(
   command: string,
   positional: readonly string[],
@@ -1505,7 +1517,7 @@ async function mcpCommand(
   // REFUSES rather than inventing an empty or full answer (fail-closed).
   let enrolled: string[] | null = null;
   try {
-    const loaded = await loadRepos(configPath(process.env, homedir()));
+    const loaded = await loadRepos(registryPathOf({ databaseFile: file }));
     if (!("error" in loaded)) enrolled = loaded.repos;
   } catch {
     enrolled = null;
@@ -4041,7 +4053,7 @@ async function serveCommand(
     ...(localRunner === undefined ? {} : { localRunner }),
     ...(publicUrl === undefined ? {} : { publicUrl }),
     ...(editor === undefined ? {} : { editorLinks: "vscode" as const }),
-    registryPath: configPath(process.env, homedir()),
+    registryPath: registryPathOf(context),
     poolRoot,
     ...(allow === undefined ? {} : { allowedHosts: allow.split(",") }),
     ...(repoFlag === undefined ? {} : { repos: repoFlag.split(",").map(one => one.trim()).filter(one => one !== "") }),
@@ -6903,7 +6915,7 @@ async function upCommand(
       // The locked registry primitive (onboarding findings 9/17/25): a
       // refusal here also retires the runner this start just registered —
       // never today's silent empty-registry fallback.
-      const enrolled = await updateRepos(configPath(process.env, homedir()), current => addRepos(current, repos));
+      const enrolled = await updateRepos(registryPathOf(context), current => addRepos(current, repos));
       if (!enrolled.ok) {
         retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
         return fail(write, json, "up", "registry", `${enrolled.message} — nothing started`, EXIT.refused);
@@ -6958,7 +6970,7 @@ async function upCommand(
           return answer.code === 0 ? answer.stdout.trim() : null;
         },
       },
-      registryPath: configPath(process.env, homedir()),
+      registryPath: registryPathOf(context),
       ...(text(flags, "project-root") === undefined ? {} : { projectRoots: [text(flags, "project-root") as string] }),
       ...(text(flags, "public-url") === undefined ? {} : { publicUrl: text(flags, "public-url") as string }),
       ...(text(flags, "editor") === undefined ? {} : { editorLinks: "vscode" as const }),
