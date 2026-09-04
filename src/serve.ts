@@ -6338,6 +6338,15 @@ const STYLE = `
     font-family: var(--font-mono);
   }
   .scope-status .hot { color: var(--brand); font-weight: 500; }
+  .scope-status a { color: inherit; text-decoration: none; }
+  .scope-status a:hover { text-decoration: underline; }
+  /* A project card's name and counts are forms or links dressed as text and chips. */
+  .project-card button.project-name, .project-card a.project-name {
+    all: unset; cursor: pointer; font-weight: 600; color: var(--foreground);
+  }
+  .project-card a.project-name:hover, .project-card button.project-name:hover { text-decoration: underline; }
+  .project-card button.badge { min-height: auto; box-shadow: none; cursor: pointer; }
+  .project-card button.badge:hover, .project-card a.badge:hover { border-color: var(--input); }
   .side nav { display: flex; flex-direction: column; gap: .125rem; }
   /* Inline decision options: neutral buttons — the card's amber outline is
    * the attention signal; recommendation is a neutral badge, never amber. */
@@ -7312,11 +7321,18 @@ function shell(
   // switching projects stays the POST + CSRF /projects flow.
   const effectiveScope: "all" | "project" | "board-all" =
     chrome.scope ?? (chrome.project === null ? "all" : "project");
-  const scopeCounts = chrome.projectPeek === null || chrome.projectPeek === undefined || effectiveScope !== "project"
+  const peekCounts = chrome.projectPeek === null || chrome.projectPeek === undefined || effectiveScope !== "project" ? null : chrome.projectPeek;
+  const scopeCounts = peekCounts === null
     ? ""
-    : (chrome.projectPeek.waiting > 0 ? `<span class="hot">${chrome.projectPeek.waiting} needs you</span>` : `<span>0 needs you</span>`) +
-      `<span>${chrome.projectPeek.running} live</span><span>${chrome.projectPeek.queued} queued</span>`;
-  const scopeStatus = scopeCounts === "" ? "" : `<span class="scope-status">${scopeCounts}</span>`;
+    : (peekCounts.waiting > 0 ? `<span class="hot">${peekCounts.waiting} needs you</span>` : `<span>0 needs you</span>`) +
+      `<span>${peekCounts.running} live</span><span>${peekCounts.queued} queued</span>`;
+  // On a desk each count is the road to what it counts; inside the phone
+  // pill's summary they stay text, since the pill itself is the switcher.
+  const scopeStatus = peekCounts === null
+    ? ""
+    : `<span class="scope-status">` +
+      (peekCounts.waiting > 0 ? `<a class="hot" href="/">${peekCounts.waiting} needs you</a>` : `<a href="/">0 needs you</a>`) +
+      `<a href="/runs">${peekCounts.running} live</a><a href="/board?view=order">${peekCounts.queued} queued</a></span>`;
   const scopeName = effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "all projects";
   // The switcher (board pass): the scope's name opens a menu of every
   // enrolled project — one tap to open one, or to widen to all — as plain
@@ -9853,12 +9869,16 @@ function projectsPage(
                   `</div>`,
                 ].join("\n"),
           ].join("\n");
-  const openForm = (path: string, label: string): string =>
+  // Opening a project is a POST (the session's scope changes); a card's
+  // name and counts are the same form, returning to the screen that count
+  // names — so every number on this page is a road, not a fact to admire.
+  const openForm = (path: string, label: string, returnTo = "/", className?: string): string =>
     [
       `<form method="post" action="/projects/open" class="inline">`,
       `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
       `<input type="hidden" name="path" value="${escape(path)}">`,
-      `<button type="submit">${escape(label)}</button>`,
+      `<input type="hidden" name="return" value="${escape(returnTo)}">`,
+      `<button type="submit"${className === undefined ? "" : ` class="${className}"`}>${escape(label)}</button>`,
       `</form>`,
     ].join("");
 
@@ -9866,24 +9886,31 @@ function projectsPage(
   // peek — what waits on a person, what is queued or running, what built
   // in the last day — and the open action. A vertical stack that reads on
   // a phone, not a dense row.
-  const peekChips = (peek: ProjectPeek | null): string => {
+  const peekChips = (path: string, peek: ProjectPeek | null): string => {
     if (peek === null) return `<span class="meta">not scanned</span>`;
+    const isOpen = open !== null && open === path;
+    const chip = (text: string, href: string, cls: string): string =>
+      isOpen ? `<a class="badge ${cls}" href="${href}">${text}</a>` : openForm(path, text, href, `badge ${cls}`);
     const bits: string[] = [];
-    if (peek.waiting > 0) bits.push(`<span class="badge">${peek.waiting} waiting on you</span>`);
-    if (peek.running > 0) bits.push(`<span class="badge badge-running">${peek.running} running</span>`);
-    if (peek.queued > 0) bits.push(`<span class="badge">${peek.queued} queued</span>`);
-    if (peek.doneRecently > 0) bits.push(`<span class="badge badge-done">${peek.doneRecently} built today</span>`);
+    if (peek.waiting > 0) bits.push(chip(`${peek.waiting} waiting on you`, "/", "badge-open"));
+    if (peek.running > 0) bits.push(chip(`${peek.running} running`, "/runs", "badge-running"));
+    if (peek.queued > 0) bits.push(chip(`${peek.queued} queued`, "/board?view=order", "badge-queued"));
+    if (peek.doneRecently > 0) bits.push(chip(`${peek.doneRecently} built today`, "/done", "badge-done"));
     return bits.length === 0 ? `<span class="meta">quiet — nothing queued or waiting</span>` : bits.join(" ");
   };
   const projectCard = (one: { path: string; name: string; note: string; peek: ProjectPeek | null }): string =>
     [
       `<div class="card project-card">`,
-      `<div class="row"><strong>${escape(one.name)}</strong>`,
+      `<div class="row">${
+        open !== null && open === one.path
+          ? `<a class="project-name" href="/"><strong>${escape(one.name)}</strong></a>`
+          : openForm(one.path, one.name, "/", "project-name")
+      }`,
       `<span class="right">${
         open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "open \u2192")
       }</span></div>`,
       `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(one.path)}</p>`,
-      `<p class="row" style="gap:.35rem;flex-wrap:wrap">${peekChips(one.peek)}</p>`,
+      `<p class="row" style="gap:.35rem;flex-wrap:wrap">${peekChips(one.path, one.peek)}</p>`,
       `<p class="meta">${escape(one.note)}</p>`,
       `</div>`,
     ].join("\n");

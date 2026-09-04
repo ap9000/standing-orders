@@ -6646,6 +6646,16 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(board).toContain('details.switcher[open]');
   });
 
+  test("a project card that is not open is itself the open form: the name returns home, and it carries the session's token", async () => {
+    const cookie = await login();
+    const projects = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+    const csrf = csrfOf(projects);
+    const beta = repoB.split("/").pop() as string;
+    expect(projects).toContain(
+      `<form method="post" action="/projects/open" class="inline"><input type="hidden" name="csrf" value="${csrf}"><input type="hidden" name="path" value="${repoB}"><input type="hidden" name="return" value="/"><button type="submit" class="project-name">${beta}</button></form>`,
+    );
+  });
+
   test("opening a project returns to the screen the switch was made on — a same-site path only", async () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
@@ -7541,6 +7551,24 @@ describe("the reduction pass (Laws of UX): four rows and a more group, five tabs
     }
     const order = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(order).toContain('<a href="/board" class="active">');
+  });
+
+  test("every count is a road: the header's counts, and a project card's name and chips, open what they count", async () => {
+    parkOne();
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(home).toContain('<span class="scope-status"><a class="hot" href="/">1 needs you</a><a href="/runs">');
+    expect(home).toMatch(/<a href="\/board\?view=order">\d+ queued<\/a><\/span>/);
+    // The phone pill keeps plain text inside its summary — the pill is the switcher.
+    const pill = /<details class="project-pill switcher"><summary>(.*?)<\/summary>/s.exec(home)?.[1] ?? "";
+    expect(pill).toContain('<span class="hot">1 needs you</span>');
+    expect(pill).not.toContain("<a ");
+    const projects = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+    const start = projects.indexOf('<div class="card project-card">');
+    expect(start).toBeGreaterThan(0);
+    const card = projects.slice(start, start + 1500);
+    expect(card).toContain('<a class="project-name" href="/"><strong>main</strong></a>');
+    expect(card).toContain('<a class="badge badge-open" href="/">1 waiting on you</a>');
   });
 
   test("amber lives in exactly two kinds of place: the needs-you count and the act that resolves a screen — never a card, a frame, or a seal", async () => {
