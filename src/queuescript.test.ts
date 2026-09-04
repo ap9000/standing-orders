@@ -99,7 +99,7 @@ describe("queueScript, executed", () => {
     dropTwoOnOne();
     await flush();
     expect(document.querySelector(".queue-problem")).toBeNull();
-    expect(navigated).toEqual(["/queue"]);
+    expect(navigated).toEqual(["/board?view=order"]);
   });
 
   test("a login bounce goes to the login page, never inline", async () => {

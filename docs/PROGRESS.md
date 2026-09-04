@@ -1,5 +1,33 @@
 # Progress
 
+**2026-09-03 — The reduction pass, improvements 1 and 3 by hand: four
+rows and a more group, one accent in two places.** The Mobbin study
+(Linear web and mobile, Vercel, Railway, Supabase, GitHub) settled both.
+The rail is `inbox · board · builds · projects` with `+ new task`, then a
+dim **more** group drawn from ONE list (`moreRows`) that `/menu` draws
+too, so desk and phone never disagree; the phone tab bar is the same four
+and more, and its inbox tab wears a dot, not a number. The queue is the
+board's order view: `GET /queue` answers 303 to `/board?view=order` (the
+fragment the view polls still serves; every `/queue/move` and
+`/queue/note` return lands there; the `g q` shortcut and the palette
+follow); done, review, and activity are views on the builds screen, with
+a strip under each `<h1>` and the builds row lit. The scope bar's second
+"switch project →" road and the pill's "manage projects →" row are gone —
+the pill is the switcher, and the projects row/tab is the one road to
+`/projects`. Amber now lives on exactly two kinds of thing: the needs-you
+count (rail badge, tab dot, lane-header dot, pill count, portfolio
+metric, workspace bar segment) and the act that resolves a screen (the
+approve button); decide cards, the ceremony frame, attention lane cards,
+hot workspace cards, the seal, the parked chip, the mate's own bubbles,
+and the picked answer are neutral. The queue's explainer disclosure went
+with the page (§2, in part). Tests: the reduction-pass describe pins the
+rail's four hrefs in order, the foot's rows, the five tabs and the dot,
+`/menu`'s rows, the 303, the builds strip on all four views, and — from
+the served stylesheet — the exact set of selectors that may name
+`var(--brand)`. `docs/DESIGN-SYSTEM.md` §1 and §3 and the console guide
+say the new rule. Not touched: §2 (helper prose) beyond the queue page,
+§4–§7. Suite 92 files / 1668 tests.
+
 **2026-09-02 — The mate v4: scout tasks, and Telegram digests; one
 review round, twelve findings closed.** Spec `docs/mate-arc.md` §10, no
 rule changes. `e7e480c`: `task_ref.deliverable` (v34, set at filing by

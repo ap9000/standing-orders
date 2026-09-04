@@ -17,6 +17,13 @@ percent on builds, no select-then-confirm decision screen.
 
 ## 1. Five destinations
 
+**Shipped by hand, 2026-09-03** (`moreRows`, `buildsViews`, `QUEUE_VIEW`
+in `src/serve.ts`; the reduction-pass describe in `src/serve.test.ts`).
+The phone tab's badge became a dot after the Mobbin study (Linear Mobile);
+done, review, and activity became a view strip on builds rather than rows
+under more; the pill's "manage projects →" row went with the scope bar's
+link, since the projects row/tab is the road.
+
 **Finding (Hick, Pareto).** Fourteen sidebar rows: inbox, portfolio, board,
 queue, builds, fleet, then eight text rows under "more". The operator's
 whole job is three verbs — answer a question, approve a scope, retry a
@@ -76,6 +83,11 @@ explanation.
   directly under their `<h1>`; the ceremony line is still asserted.
 
 ## 3. One accent, one place
+
+**Shipped by hand, 2026-09-03.** Amber selectors are pinned as an exact
+set by the reduction-pass describe; `.badge-parked`, `.seal`, the mate's
+`.msg.op`, and `.answer-options li.picked` went neutral too. The lane
+header's dot and count carry the colour for the cards beneath.
 
 **Finding (Von Restorff).** Every needs-you card, every ceremony frame,
 every count, the project pill's counts, the inbox badge — all amber.

@@ -16,9 +16,12 @@ same commit.
   Dark is the default scene (an operator after hours); light follows the
   device (a phone in daylight). Every token has a value in both; no rule may
   name a color that only exists in one.
-- **Amber means one thing.** `--brand` marks work that waits on a person — a
-  card's outline, a count, a chip, the approve act — and nothing else. A
-  recommended option is never amber; a selected row is never blue.
+- **Amber means one thing, in two places.** `--brand` marks what waits on a
+  person: the needs-you count (rail badge, tab dot, lane-header dot, the
+  pill's count) and the one act that resolves a screen (approve, answer,
+  retry). Cards, ceremony frames, seals, and chips are neutral — the header
+  above a card carries the colour for it (reduction pass §3). A recommended
+  option is never amber; a selected row is never blue.
 - **Two faces, strictly cast.** IBM Plex Sans is the human voice: titles,
   sentences, section headers, chips. IBM Plex Mono is every machine fact:
   ids, workers, models, clocks, dollars, digests, tokens. Mono is never a
@@ -65,11 +68,11 @@ ring at 2px offset on buttons and links; a ring-colored border with a soft
 
 | Component | Console (CSS) | Package (`design/src`) | Rule |
 |---|---|---|---|
-| Status chip | `.badge` + `.badge-open` (amber), `-running`, `-done`, `-failed` | `StatusChip` | sans 11px pill; a state word wears a dot before it, a neutral fact (project, routine) does not |
-| Attention card | `.decide-card`, `.lane-attention .lane-card`, `.workspace-card.hot` | `AttentionCard` | amber outline on the whole card, never a stripe |
+| Status chip | `.badge` + `.badge-open`, `-parked` (neutral), `-running`, `-done`, `-failed`; `.count.badge-open` (amber, the needs-you count only) | `StatusChip` | sans 11px pill; a state word wears a dot before it, a neutral fact (project, routine) does not |
+| Attention card | `.decide-card`, `.lane-attention .lane-card`, `.workspace-card.hot` | `AttentionCard` | neutral border; the lane header's amber dot and count say "needs you" for every card beneath |
 | Row | `.row` (2.25rem, hairline below, hover fill) | `LedgerRow` | title · mono facts · chip at the end |
 | Facts | `.facts` (`.fact > .k + .v`) | `KeyValueRow` | dim mono key, ink mono value |
-| Seal | `.seal` | `DigestSeal` | the signed digest, mono, boxed in amber |
+| Seal | `.seal` | `DigestSeal` | the signed digest, mono, boxed in the hairline |
 | Card | `.card` | `Card` | surface, hairline, 0.5rem radius, faint shadow; never nested |
 | Buttons | `button` (secondary), `form.card > [type=submit]` (primary), `.approve-form [type=submit]` (amber), `.danger` | `Button` | one primary per form; approve is the only amber verb |
 | Fields | `input`, `textarea`, `select` | `Input` | surface-colored, hairline, hover darkens, focus halo |

@@ -265,15 +265,21 @@ ${AUTHORITY_LINE}
   scopes to approve, stalled tasks to retry, gaps to fill. \`/next\` walks
   the same queue one card at a time.
 - **board** (\`/board\`): five lanes — needs you · queued · waiting ·
-  building · done recently. \`/queue\` is the dispatch order per worker
-  (drag to reorder, drag onto a worker to reserve).
+  building · done recently. Its *order* view (\`/board?view=order\`) is
+  the dispatch order per worker (drag to reorder, drag onto a worker to
+  reserve); \`/queue\` redirects there.
 - **task page** (\`/t/<id>\`): the approval ceremony when a scope waits,
   the acts bar (plan first, hold, retry, build next, cancel), scope,
   attempts, decisions, and — for a scout task — the report with one-tap
   follow-ups.
-- **build page** (\`/r/<run>\`): one attempt: stage, live transcript,
-  evidence, the diff, comments. **peek** (\`/peek\`): every live run at
-  once, transcripts following.
+- **builds** (\`/runs\`): every attempt, newest first, with three views
+  beside it — done (\`/done\`), review (\`/review\`, published work
+  waiting on a person), activity (\`/activity\`, the ledger). **build
+  page** (\`/r/<run>\`): one attempt: stage, live transcript, evidence,
+  the diff, comments. **peek** (\`/peek\`): every live run at once,
+  transcripts following.
+- **projects** (\`/projects\`): enrol, open, or switch repositories; the
+  project name in the header is the one-tap switcher on every screen.
 - **chat** (\`/chat\`): the mate — a conversation across every project
   that only PROPOSES (file, reorder, reserve, hold, rewrite a scope,
   cancel, answer a decision); each proposal is a card the person
@@ -282,8 +288,12 @@ ${AUTHORITY_LINE}
 - **settings** (\`/settings\`): alerts to this device, provider keys,
   which messaging service pages, the Telegram bot token, and the Telegram
   digest cadence (away mode).
-- Under **more**: activity, done, task list, review queue, routines,
-  fleet, system, requirements, people, operating mode.
+- The rail is four rows — inbox · board · builds · projects — and a
+  **more** group: portfolio, task list, fleet, routines, system,
+  requirements, people, operating mode, settings. On a phone the same
+  five sit in the tab bar and more is \`/menu\`. Amber appears only on
+  what needs a person: the inbox count and the one act that resolves a
+  screen (approve, answer, retry).
 
 ## The terminal's verbs worth naming to a person
 

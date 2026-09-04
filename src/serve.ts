@@ -1245,7 +1245,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const rankB = rankOf(b.failing, b.publication.lastCheckState);
           return rankA !== rankB ? rankA - rankB : a.publication.updatedAt.localeCompare(b.publication.updatedAt);
         });
-      return sendScreen(response, 200, reviewPage(chromeFor(project, "review"), rows, now));
+      return sendScreen(response, 200, reviewPage(chromeFor(project, "runs"), rows, now));
     }
 
     if (url.pathname === "/activity") {
@@ -1253,7 +1253,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        homePage(chromeFor(project, "activity"), {
+        homePage(chromeFor(project, "runs"), {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           taskCount: store.listTasksScoped(project, undefined, 1, null).length,
           repo: project,
@@ -1280,7 +1280,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        donePage(chromeFor(project, "done"), store.listCompletedWorkScoped(project, 50), pr => store.ciFailureObserved(pr)),
+        donePage(chromeFor(project, "runs"), store.listCompletedWorkScoped(project, 50), pr => store.ciFailureObserved(pr)),
       );
     }
 
@@ -1345,7 +1345,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        screen("mode", [`<h1>operating mode</h1>`, current, signForm].join("\n"), { chrome: chromeFor(project, "menu") }),
+        screen("mode", [`<h1>operating mode</h1>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
       );
     }
 
@@ -1529,24 +1529,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       // Column headers read one thing beyond the queue snapshot: live claims
       // in THIS project, per worker (the capacity is global; attended claims
       // may exceed it), so the header names both and never a ratio.
-      const body = queueRegionFor(project, csrf, revision, clock());
       if (url.searchParams.get("fragment") === "1") {
-        return respond(response, 200, "text/html; charset=utf-8", body);
+        return respond(response, 200, "text/html; charset=utf-8", queueRegionFor(project, csrf, revision, clock()));
       }
-      return sendScreen(
-        response,
-        200,
-        screen("queue", [
-          `<h1>queue</h1>`,
-          `<p class="hint">drag to reorder, or to reserve a task for one worker</p>`,
-          `<details class="meta"><summary>how a worker takes from here</summary>` +
-            `<p>a free worker takes the top card of its own column first, then the top of the shared queue. ` +
-            `a reservation keeps other workers off a task; it does not occupy capacity. ` +
-            `a card marked <em>being taken</em> already has a worker on it and keeps its claim whatever is dragged.</p></details>`,
-          `<div id="queue-region">${body}</div>`,
-          `<p class="meta" id="queue-region-stamp"></p>`,
-        ].join("\n"), { chrome: chromeFor(project, "queue"), functional: { script: queueScript(), fetches: true } }),
-      );
+      // The queue is the board's order view (reduction pass §1): the URL
+      // keeps answering, as a redirect, so nothing anyone bookmarked 404s.
+      return redirect(response, QUEUE_VIEW);
     }
 
     if (url.pathname === "/peek") {
@@ -1671,36 +1659,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/menu") {
       // The phone's overflow drawer as an honest page: every destination
       // the bottom bar does not carry, one tap away, no JavaScript.
-      const rows = (
-        [
-          ["/fleet", "fleet", "who is working, and on what"],
-          ["/workbench", "portfolio", "every project and live build in one place"],
-          ["/routines", "routines", "scheduled tracks and their firings"],
-          ["/done", "done", "what finished recently"],
-          ["/peek", "peek", "every live agent, what it is doing right now"],
-          ["/activity", "activity", "the full ledger, newest first"],
-          ["/review", "review queue", "published work waiting on review"],
-          ["/tasks", "task list", "everything, filterable"],
-          ["/system", "system", "workers, providers, and grants"],
-          ["/caps", "requirements", "tools and credentials builds need"],
-          ["/projects", "switch project", "open another enrolled repository"],
-          ["/people", "people", "who can sign in, and what they have done"],
-          ["/mode", "operating mode", "the signed posture this repository runs under"],
-          ["/settings", "settings", "alerts, messaging, credentials"],
-        ] as const
-      )
-        .map(
-          ([href, label, hint]) =>
-            `<a class="menu-row" href="${href}"><strong>${label}</strong><span class="meta">${hint}</span></a>`,
-        )
+      const chrome = chromeFor(project, "menu");
+      const rows = moreRows(chrome)
+        .map(row => `<a class="menu-row" href="${row.href}"><strong>${row.label}</strong><span class="meta">${row.hint}</span></a>`)
         .join("\n");
-      return page(
-        response,
-        200,
-        shell("menu", [`<h1>more</h1>`, `<div class="menu-list">${rows}</div>`].join("\n"), {
-          chrome: chromeFor(project, "menu"),
-        }),
-      );
+      return page(response, 200, shell("menu", [`<h1>more</h1>`, `<div class="menu-list">${rows}</div>`].join("\n"), { chrome }));
     }
 
     const run = /^\/r\/([0-9]{1,15})$/.exec(url.pathname);
@@ -2400,7 +2363,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const entries: { label: string; href: string }[] = [
       { label: "inbox", href: "/" },
       { label: "board", href: "/board?scope=all" },
-      { label: "queue", href: "/queue" },
+      { label: "queue", href: QUEUE_VIEW },
       { label: "workbench", href: "/workbench" },
       { label: "routines", href: "/routines" },
       { label: "done", href: "/done" },
@@ -3632,16 +3595,16 @@ export function createDecisionServer(options: ServeOptions): Server {
         const worker = (body.get("runner") ?? "").trim();
         const note = (body.get("note") ?? "").trim();
         if (note.length > 200 || hasForbiddenControls(note)) {
-          return refuse(response, who, 400, "that note will not render, so it will not store", "/queue");
+          return refuse(response, who, 400, "that note will not render, so it will not store", QUEUE_VIEW);
         }
         const set = store.setRunnerQueueNote(worker, note === "" ? null : note);
-        if (!set.ok) return refuse(response, who, 404, "no such worker", "/queue");
-        return redirect(response, body.get("from") === "fleet" ? "/fleet" : "/queue");
+        if (!set.ok) return refuse(response, who, 404, "no such worker", QUEUE_VIEW);
+        return redirect(response, body.get("from") === "fleet" ? "/fleet" : QUEUE_VIEW);
       }
       if (who.via === "cookie") {
         const seen = body.get("projectRevision");
         if (seen !== null && seen !== String(who.session.projectRevision)) {
-          return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", "/queue");
+          return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", QUEUE_VIEW);
         }
       }
       // A drag posts in place (fetch) when it can; the page re-renders its
@@ -3649,7 +3612,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const inPlace = body.get("respond") === "fragment";
       const fromFleet = who.via === "cookie" && body.get("projectRevision") === null;
       const respondMove = (status: number, message: string): void => {
-        if (!inPlace) return status === 409 ? refuse(response, who, 409, message, "/queue") : redirect(response, "/queue");
+        if (!inPlace) return status === 409 ? refuse(response, who, 409, message, QUEUE_VIEW) : redirect(response, QUEUE_VIEW);
         respond(response, status, "text/plain; charset=utf-8", message);
       };
       const moveReason = (reason: string): string =>
@@ -3814,7 +3777,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<div class="sticky-actions"><button type="submit">sign it</button></div>` +
           `</form>` +
           `<p class="meta"><a href="/mode">back — sign nothing</a></p>`;
-        return sendScreen(response, 200, screen("mode", bodyHtml, { chrome: chromeFor(project, "menu") }));
+        return sendScreen(response, 200, screen("mode", bodyHtml, { chrome: chromeFor(project, "mode") }));
       }
 
       // /mode/sign: the fixed expiry rides the form; the digest is
@@ -6174,10 +6137,12 @@ const STYLE = `
     background: var(--destructive-soft); color: var(--destructive);
     border-color: color-mix(in srgb, var(--destructive) 35%, transparent);
   }
-  /* "open" is a neutral fact (an open PR, an open decision); the AMBER
-     form of it is the attention count — the number that waits on you. */
-  .badge-open { color: var(--foreground); }
-  .count.badge-open, .badge-parked {
+  /* "open" and "parked" are neutral facts (an open PR, a parked decision);
+     the AMBER form is the attention count — the number that waits on you.
+     One accent, two places (reduction pass §3): the needs-you count and
+     the act that resolves the screen. Cards, frames, and seals are neutral. */
+  .badge-open, .badge-parked { color: var(--foreground); }
+  .count.badge-open {
     background: var(--brand-soft); color: var(--brand);
     border-color: color-mix(in srgb, var(--brand) 35%, transparent);
   }
@@ -6207,16 +6172,16 @@ const STYLE = `
   a.row { text-decoration: none; }
   a.row:hover { background: var(--muted); }
 
-  /* A parked decision is the page's reason to exist: the whole card wears
-     the amber-tinted state outline — never a stripe on one edge — with the
-     question in full weight and the whole card the tap target. */
+  /* A parked decision: the question in full weight, the whole card the
+     tap target, the neutral border — the "needs you" header above it
+     carries the colour for every card beneath. */
   .decide-card {
-    display: block; border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--border));
+    display: block; border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--card); padding: .875rem 1.125rem; margin: .625rem 0;
     text-decoration: none; transition: border-color .15s;
   }
-  .decide-card:hover { border-color: color-mix(in srgb, var(--brand) 60%, var(--border)); }
+  .decide-card:hover { border-color: color-mix(in srgb, var(--border) 55%, var(--muted-foreground)); }
   .decide-card .q { font-weight: 600; margin: 0 0 .25rem; }
 
   /* Buttons: secondary by default (surface + hairline); a form's one
@@ -6236,9 +6201,8 @@ const STYLE = `
     background: color-mix(in srgb, var(--primary) 85%, var(--background)); border-color: color-mix(in srgb, var(--primary) 85%, var(--background));
   }
   /* The approve act is the one amber verb: it resolves what waits on you.
-     A ceremony form wears the same full amber-tinted outline as the other
-     waits-on-you surfaces; a danger act stays red even inside one. */
-  .approve-form { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
+     The ceremony's frame is neutral so the button is the only warm thing
+     in it; a danger act stays red even inside one. */
   .approve-form button[type=submit], .approve-form .sticky-actions button[type=submit] {
     background: var(--brand); color: var(--brand-foreground); border-color: var(--brand); font-weight: 600;
   }
@@ -6316,8 +6280,8 @@ const STYLE = `
   .card.picked { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); }
   .seal {
     display: inline-block; font-family: var(--font-mono); font-size: .75rem;
-    background: var(--muted); border: 1px solid color-mix(in srgb, var(--brand) 30%, var(--border));
-    color: var(--brand); border-radius: calc(var(--radius) - 4px); padding: .25rem .625rem;
+    background: var(--muted); border: 1px solid var(--border);
+    color: var(--foreground); border-radius: calc(var(--radius) - 4px); padding: .25rem .625rem;
     font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
   }
 
@@ -6331,7 +6295,8 @@ const STYLE = `
   }
   .side .brand { padding: .125rem .5rem .625rem; font-size: .9375rem; height: auto; }
   /* The scope bar: one hairline row, the single scope truth on every
-   * screen. Amber never appears here except the needs-you count. */
+   * screen; its name is the switcher. Amber never appears here except
+   * the needs-you count. */
   .scope-bar {
     display: flex; align-items: baseline; gap: .625rem; flex-wrap: wrap;
     padding: .5rem 1.25rem; border-bottom: 1px solid var(--border);
@@ -6367,8 +6332,6 @@ const STYLE = `
     display: block; margin-top: .25rem; padding: .625rem .75rem; border-top: 1px solid var(--border);
     font-size: .75rem; color: var(--muted-foreground); text-decoration: none;
   }
-  .scope-bar .switch { margin-left: auto; font-size: .75rem; color: var(--muted-foreground); text-decoration: none; }
-  .scope-bar .switch:hover { color: var(--foreground); }
   .scope-status {
     display: flex; gap: .5rem; flex-wrap: wrap;
     color: var(--muted-foreground); font-size: .6875rem; font-variant-numeric: tabular-nums;
@@ -6376,7 +6339,6 @@ const STYLE = `
   }
   .scope-status .hot { color: var(--brand); font-weight: 500; }
   .side nav { display: flex; flex-direction: column; gap: .125rem; }
-  .side nav .nav-group { display: flex; flex-direction: column; gap: .125rem; margin: 0 0 .375rem; }
   /* Inline decision options: neutral buttons — the card's amber outline is
    * the attention signal; recommendation is a neutral badge, never amber. */
   .decide-options { margin-top: .5rem; display: flex; flex-direction: column; gap: .375rem; }
@@ -6564,8 +6526,11 @@ const STYLE = `
     .tabbar a .glyph { display: flex; align-items: center; justify-content: center; height: 1.125rem; }
     .tabbar a .glyph svg { width: 1rem; height: 1rem; }
     .tabbar a.active { color: var(--foreground); }
-    .tabbar a .count { position: absolute; transform: translate(0.9rem, -0.35rem); }
     .tabbar a { position: relative; }
+    .tabbar a .dot-badge {
+      position: absolute; top: .3125rem; left: calc(50% + .375rem);
+      width: .375rem; height: .375rem; border-radius: 9999px; background: var(--brand);
+    }
     .content > main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
   }
 
@@ -6676,8 +6641,6 @@ const STYLE = `
     border-radius: calc(var(--radius) - 2px); padding: .5rem .625rem; margin-top: .5rem;
   }
   .lane-card:hover { border-color: color-mix(in srgb, var(--border) 55%, var(--muted-foreground)); }
-  .lane-attention .lane-card { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
-  .lane-attention .lane-card:hover { border-color: color-mix(in srgb, var(--brand) 60%, var(--border)); }
   .lane-card .id { display: block; font-family: var(--font-mono); font-size: .6875rem; color: var(--muted-foreground); margin-bottom: .125rem; overflow-wrap: anywhere; }
   .lane-card .t { display: block; font-size: .8125rem; font-weight: 500; line-height: 1.35; }
   .lane-card .dot { margin-right: .4rem; }
@@ -6730,18 +6693,17 @@ const STYLE = `
   .command-metric.live .label::before { background: var(--running); }
   .workspace-pulse { margin: .4rem 0 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); gap: .625rem; }
   /* The workspace card: name and status word, four counts, the same counts
-     as a bar, and the one tap to its board. Amber outline only when it
-     needs a person. */
+     as a bar, and the one tap to its board. Neutral border always; the
+     needs-you count and the bar's segment carry the accent. */
   .workspace-card {
     padding: .75rem .9rem; border: 1px solid var(--border);
     border-radius: calc(var(--radius) - 2px); background: var(--card); font-size: .8125rem; min-width: 0;
   }
-  .workspace-card.hot { border-color: color-mix(in srgb, var(--brand) 35%, var(--border)); }
   /* the mate's thread (mate arc §5) */
   .thread { display: flex; flex-direction: column; gap: 0.75rem; margin: 1rem 0; }
   .thread .msg { max-width: 46rem; padding: 0.6rem 0.85rem; border-radius: 0.75rem; border: 1px solid var(--border); }
   .thread .msg p { margin: 0.25rem 0; }
-  .thread .msg.op { align-self: flex-end; background: color-mix(in srgb, var(--brand) 12%, var(--surface)); }
+  .thread .msg.op { align-self: flex-end; background: var(--muted); }
   .thread .msg.mate { align-self: flex-start; background: var(--surface); }
   .thread .activity { font-size: 0.8rem; opacity: 0.7; }
   .thread .proposal { margin: 0.5rem 0 0; }
@@ -6756,7 +6718,7 @@ const STYLE = `
   button.quiet { background: transparent; color: var(--fg-muted); border-color: var(--border); }
   .answer-options { list-style: none; padding: 0; margin: 0.4rem 0; }
   .answer-options li { padding: 0.35rem 0.6rem; border-left: 3px solid var(--border); margin: 0.25rem 0; }
-  .answer-options li.picked { border-left-color: var(--brand); }
+  .answer-options li.picked { border-left-color: var(--foreground); }
   .proposal label.arm { display: inline-flex; gap: 0.35rem; align-items: center; margin-right: 0.5rem; font-size: 0.85rem; }
   .coordinator-proposals .card { margin: 0.5rem 0; }
   .workspace-head { display: flex; align-items: center; gap: .5rem; min-width: 0; }
@@ -6966,7 +6928,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "menu" | "none";
+  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -7210,7 +7172,7 @@ function chromeScript(): string {
     `if(ev.key==="?"){toggleHelp();ev.preventDefault();return;}` +
     `if(ev.key==="j"||ev.key==="k"){rove(ev.key==="j"?1:-1,ev);return;}` +
     `if(pending==="g"){pending=null;` +
-    `var map={b:"/board",i:"/",w:"/workbench",r:"/routines",d:"/done",q:"/queue",f:"/fleet",t:"/tasks",a:"/activity",p:"/projects"};` +
+    `var map={b:"/board",i:"/",w:"/workbench",r:"/routines",d:"/done",q:"/board?view=order",f:"/fleet",t:"/tasks",a:"/activity",p:"/projects"};` +
     `if(map[ev.key]){go(map[ev.key]);ev.preventDefault();}return;}` +
     `if(ev.key==="g"){pending="g";setTimeout(function(){pending=null;},800);}});` +
     `})();`
@@ -7388,33 +7350,24 @@ function shell(
       ? `<details class="switcher"><summary class="name">${scopeName}${CHEVRON_ICON}</summary>${switcherMenu("")}</details>`
       : `<span class="name">${scopeName}</span>`) +
     scopeStatus +
-    `<a class="switch" href="/projects">switch project →</a></div>`;
+    `</div>`;
   const side = [
     `<aside class="side">`,
     `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
     `<nav>`,
+    // Four destinations and a more group (reduction pass §1): the rail is
+    // the operator's three verbs — answer, approve, retry — plus where the
+    // work is and where it builds. Everything else is a dim text row.
     item("inbox", "/", "inbox", chrome.inboxCount),
-    item("workbench", "/workbench", "portfolio"),
-    `<div class="nav-group"><span class="nav-label">work</span>`,
     item("board", "/board", "board"),
-    item("queue", "/queue", "queue"),
-    `</div>`,
     item("runs", "/runs", "builds"),
-    item("fleet", "/fleet", "fleet"),
+    item("projects", "/projects", "projects"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
     `<span class="grow"></span>`,
     `<nav class="foot">`,
     `<span class="nav-label">more</span>`,
-    item("activity", "/activity", "activity"),
-    item("review", "/review", "review queue"),
-    ...(chrome.chat === true ? [item("chat", "/chat", "chat")] : []),
-    item("work", "/tasks", "task list"),
-    item("routines", "/routines", "routines"),
-    item("done", "/done", "done"),
-    item("system", "/system", "system"),
-    item("caps", "/caps", "requirements"),
-    ...(chrome.settings ? [item("settings", "/settings", "settings")] : []),
+    ...moreRows(chrome).map(row => item(row.key, row.href, row.label)),
     `</nav>`,
     `</aside>`,
   ].join("\n");
@@ -7453,7 +7406,7 @@ function shell(
     canSwitch
       ? `<details class="project-pill switcher"><summary><span class="name">${scopeName}${CHEVRON_ICON}</span>${
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
-        }</summary>${switcherMenu(`<a class="manage" href="/projects">manage projects →</a>`)}</details>`
+        }</summary>${switcherMenu("")}</details>`
       : `<a class="project-pill" href="/projects"><span class="name">${scopeName}</span>${
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
         }</a>`,
@@ -7467,19 +7420,21 @@ function shell(
   const TAB_ICONS = {
     inbox: icon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
     board: icon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
-    queue: icon(`<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>`),
     runs: icon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
+    projects: icon(FOLDER_PATHS),
     menu: icon(`<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`),
   } as const;
   const tab = (key: keyof typeof TAB_ICONS & Chrome["active"], href: string, label: string, count?: number): string =>
+    // A phone tab says THAT something waits, with a dot; the number is on
+    // the inbox itself (Linear Mobile's rule — the count is one tap away).
     `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}><span class="glyph">${TAB_ICONS[key]}</span>${label}` +
-    `${count !== undefined && count > 0 ? `<span class="count badge badge-open">${count}</span>` : ""}</a>`;
+    `${count !== undefined && count > 0 ? `<span class="dot-badge" role="img" aria-label="${count} waiting"></span>` : ""}</a>`;
   const tabbar = [
     `<nav class="tabbar">`,
     tab("inbox", "/", "inbox", chrome.inboxCount),
     tab("board", "/board", "board"),
-    tab("queue", "/queue", "queue"),
     tab("runs", "/runs", "builds"),
+    tab("projects", "/projects", "projects"),
     tab("menu", "/menu", "more"),
     `</nav>`,
   ].join("");
@@ -8141,6 +8096,7 @@ function donePage(
           .join("\n");
   return screen("done", [
     `<h1>done</h1>`,
+    buildsViews("done"),
     `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, what it cost, and its pull request</p>`,
     list,
   ].join("\n"), { chrome });
@@ -8950,6 +8906,7 @@ function homePage(chrome: Chrome, data: {
 
   return screen("activity", [
     `<h1>activity</h1>`,
+    buildsViews("activity"),
     data.repo === null
       ? ""
       : `<p class="meta"><strong>${escape(projectName(data.repo))}</strong> — the last 24 hours, honestly labeled: a rolling window, whatever your hours are</p>`,
@@ -10010,14 +9967,51 @@ const TO_FRONT_ICON =
  * wear an icon each; the foot's list stays text, the way Linear's does. */
 const strokeIcon = (paths: string): string =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+/** Where the queue lives now: the board, flipped to dispatch order. */
+const QUEUE_VIEW = "/board?view=order";
+const FOLDER_PATHS = `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`;
 const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
   inbox: strokeIcon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
-  workbench: strokeIcon(`<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>`),
   board: strokeIcon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
-  queue: strokeIcon(`<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>`),
   runs: strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
-  fleet: strokeIcon(`<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>`),
+  projects: strokeIcon(FOLDER_PATHS),
 };
+
+/**
+ * The more group (reduction pass §1): every destination the four primary
+ * rows do not carry — ONE list, drawn as the rail's dim foot on a desk and
+ * as /menu's rows on a phone, so the two never disagree. activity, done,
+ * and the review queue are views of builds, not rows; the queue is the
+ * board's order view; peek hangs off builds.
+ */
+function moreRows(chrome: Pick<Chrome, "chat" | "settings">): { key: Chrome["active"]; href: string; label: string; hint: string }[] {
+  return [
+    { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
+    { key: "work", href: "/tasks", label: "task list", hint: "everything, filterable" },
+    { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
+    { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
+    ...(chrome.chat === true ? [{ key: "chat" as const, href: "/chat", label: "chat", hint: "the mate \u2014 a conversation that proposes, never acts" }] : []),
+    { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
+    { key: "caps", href: "/caps", label: "requirements", hint: "tools and credentials builds need" },
+    { key: "people", href: "/people", label: "people", hint: "who can sign in, and what they have done" },
+    { key: "mode", href: "/mode", label: "operating mode", hint: "the signed posture this repository runs under" },
+    ...(chrome.settings ? [{ key: "settings" as const, href: "/settings", label: "settings", hint: "alerts, messaging, credentials" }] : []),
+  ];
+}
+
+/** The builds screen's views (reduction pass §1): done, the review queue,
+ * and activity are ways of looking at builds, not destinations. */
+function buildsViews(current: "builds" | "done" | "review" | "activity"): string {
+  const views: [typeof current, string, string][] = [
+    ["builds", "/runs", "builds"],
+    ["done", "/done", "done"],
+    ["review", "/review", "review"],
+    ["activity", "/activity", "activity"],
+  ];
+  return `<p class="meta board-view">${views
+    .map(([key, href, label]) => (key === current ? `<strong>${label}</strong>` : `<a href="${href}">${label}</a>`))
+    .join(" \u00b7 ")}</p>`;
+}
 
 const CHEVRON_ICON =
   `<svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">` +
@@ -10317,7 +10311,7 @@ export function queueScript(): string {
     `var kind=(r.headers&&r.headers.get?r.headers.get("content-type"):"")||"";` +
     `if(r.status===409&&kind.indexOf("text/plain")===0){return r.text().then(function(text){return problem(drag.task,text)?false:null;});}` +
     `return null;})` +
-    `.then(function(t){if(t===false)return;if(t&&!paused()){region.innerHTML=t;last=Date.now();}else if(t===null){location.href="/queue";}})` +
+    `.then(function(t){if(t===false)return;if(t&&!paused()){region.innerHTML=t;last=Date.now();}else if(t===null){location.href="/board?view=order";}})` +
     `.catch(function(){})` +
     `.then(function(){tell();});});` +
     `})();`
@@ -10929,7 +10923,7 @@ function taskBody(data: {
         : "";
   const queueRow =
     data.position !== null && data.position !== undefined && task.state === "queued"
-      ? prop("queue", `${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} · <a href="/queue">reorder</a>`)
+      ? prop("queue", `${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${escape(data.position.column)}'s queue`} · <a href="/board?view=order">reorder</a>`)
       : "";
   const scopeRow =
     scope === null
@@ -11309,6 +11303,7 @@ function reviewPage(
           .join("\n");
   return screen("review queue", [
     `<h1>review queue</h1>`,
+    buildsViews("review"),
     `<p class="hint">published work waiting for review, oldest first — merging happens on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
     list,
   ].join("\n"), { chrome });
@@ -11460,7 +11455,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: R
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
-  return screen("builds", [`<h1>builds <a class="badge" href="/peek">peek at the live ones \u2192</a></h1><p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
+  return screen("builds", [`<h1>builds <a class="badge" href="/peek">peek at the live ones \u2192</a></h1>`, buildsViews("builds"), `<p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
 }
 
 /** What the run page shows of the terminal diff — verified bytes or a named problem, never silence. */

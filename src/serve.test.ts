@@ -1430,11 +1430,11 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
     expect(home).toContain('class="side"');
-    expect(home).toContain("switch project");
+    expect(home).toContain('<a href="/projects"><span class="glyph"><svg');
     expect(home).toContain("+ new task");
     // The sole configured repo opened itself — no forced detour.
     expect(home).toContain("inbox");
-    expect(home).toContain(">done<");
+    expect(home).toContain(">builds<");
   });
 
   test("a task outside the ceiling does not exist: page, mutations, list", async () => {
@@ -5676,9 +5676,12 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
   });
 
   const scopeBarOf = (html: string): string => {
-    const match = /<div class="scope-bar">.*?<a class="switch"[^>]*>[^<]*<\/a><\/div>/s.exec(html);
-    if (match === null) throw new Error("no scope bar on the page");
-    return match[0];
+    // The bar runs from its opening tag to the page body (main, or the
+    // split of a master-detail page) — it nests the switcher's own divs.
+    const start = html.indexOf('<div class="scope-bar">');
+    if (start < 0) throw new Error("no scope bar on the page");
+    const ends = [html.indexOf("<main>", start), html.indexOf('<div class="split">', start)].filter(one => one > start);
+    return html.slice(start, Math.min(...ends));
   };
 
   test("the scope bar states each surface's scope: portfolio all-project, queue project-bound", async () => {
@@ -5691,7 +5694,8 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     // The bar's NAME is the summary of the switcher (board pass); the menu
     // beneath lists every project and "all projects" as plain POST forms.
     expect(homeBar).toContain('<details class="switcher"><summary class="name">main<svg');
-    expect(homeBar).toContain("switch project");
+    // The pill IS the switcher (reduction pass §1): no second road beside it.
+    expect(homeBar).not.toContain("switch project");
     expect(homeBar).toContain('<form method="post" action="/projects/open">');
 
     // The portfolio is all-project even while a project is open.
@@ -5705,19 +5709,21 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     expect(queueBar).toContain('<summary class="name">main<svg');
 
     // One visible /projects link per breakpoint (portfolio arc §1, amended
-    // by the mobile pass): the scope bar's on desktop, the header pill's on
-    // a phone — where the scope bar hides and the pill carries the name,
-    // the counts, and the switch. Exactly those two links live in chrome.
+    // by the mobile pass, then the reduction pass): the rail's projects row
+    // on desktop, the projects tab on a phone — where the scope bar hides
+    // and the pill carries the name, the counts, and the switch. Exactly
+    // those two links live in chrome.
     expect(home).toContain('<details class="project-pill switcher"><summary><span class="name">main<svg');
     expect(home).toContain('<span class="pill-status">');
     expect((home.match(/href="\/projects"/g) ?? []).length).toBe(2);
 
-    // The nav regroup: portfolio ADJACENT to inbox, above the work group
-    // (commit-1 review, finding 5) — order, not mere presence.
+    // The rail (reduction pass §1): four rows, then the more group where
+    // the portfolio now lives — order, not mere presence.
     expect(home).toContain(">portfolio<");
-    expect(home).toContain('class="nav-group"');
-    expect(home.indexOf(">portfolio<")).toBeLessThan(home.indexOf('class="nav-group"'));
-    expect(home.indexOf(">inbox<")).toBeLessThan(home.indexOf(">portfolio<"));
+    expect(home.indexOf(">inbox<")).toBeLessThan(home.indexOf(">board<"));
+    expect(home.indexOf(">board<")).toBeLessThan(home.indexOf(">builds<"));
+    expect(home.indexOf(">builds<")).toBeLessThan(home.indexOf(">projects<"));
+    expect(home.indexOf('<nav class="foot">')).toBeLessThan(home.indexOf(">portfolio<"));
 
     // Fleet and the rolled-up board are all-project; the scoped board is not.
     const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
@@ -6014,7 +6020,7 @@ describe("the queue (portfolio arc, slice 1b): move-to-front resolved server-sid
 
     const moved = await frontForm(cookie, csrf(page), "t-c", "anyone", before);
     expect(moved.status).toBe(303);
-    expect(moved.headers.get("location")).toBe("/queue");
+    expect(moved.headers.get("location")).toBe("/board?view=order");
     // The asserted ORDER: t-c now leads its own partition; the repo-less
     // card's partition is untouched; the revision moved exactly once.
     expect(partition("/repo/main", null)).toEqual(["t-c", "t-b"]);
@@ -6132,7 +6138,8 @@ describe("the queue (portfolio arc, slice 1b): move-to-front resolved server-sid
     expect(html).not.toMatch(/\$\s?\d/);
     // The shared column in plain words; the claim primitive folded away.
     expect(html).toContain("workers take from here when their column is empty");
-    expect(html).toMatch(/<details[^>]*>\s*<summary>how a worker takes from here<\/summary>/);
+    // No explainer disclosure on the screen (reduction pass §2).
+    expect(html).not.toContain("how a worker takes from here");
     // Card chips over the existing snapshot shape: state and reservation owner.
     expect(html).toContain('<span class="badge">queued</span>');
     expect(html).toContain('<span class="badge">reserved for builder-1</span>');
@@ -6514,8 +6521,8 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa">');
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
     expect(html).toMatch(/<a href="\/"[^>]*><span class="glyph"><svg/);
-    expect(html).toMatch(/<a href="\/workbench"><span class="glyph"><svg/);
-    expect(html).toMatch(/<a href="\/activity">activity<\/a>/);
+    expect(html).toMatch(/<a href="\/runs"><span class="glyph"><svg/);
+    expect(html).toMatch(/<a href="\/workbench">portfolio<\/a>/);
     // Section headers speak sans; the state chips wear a dot before the word.
     expect(html).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
     expect(html).toContain(".badge-running::before, .badge-parked::before, .count.badge-open::before {");
@@ -6624,15 +6631,16 @@ describe("the project switcher (board pass): one tap from any screen, forms with
   test("every served project is one form in the menu, each carrying the token and this screen as the return", async () => {
     const cookie = await login();
     const board = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
-    const bar = /<div class="scope-bar">.*?<a class="switch"/s.exec(board)?.[0] ?? "";
+    const bar = board.slice(board.indexOf('<div class="scope-bar">'), board.indexOf("<main>"));
     expect(bar).toContain('<summary class="name">all projects<svg');
     expect(bar).toContain('<button type="submit" class="current" aria-current="true">all projects</button>');
     for (const repo of [repoA, repoB]) {
       expect(bar).toContain(`<form method="post" action="/projects/open"><input type="hidden" name="csrf" value="${csrfOf(board)}"><input type="hidden" name="return" value="/board?scope=all"><input type="hidden" name="path" value="${repo}"><button type="submit">${repo.split("/").pop()}</button></form>`);
     }
-    // The phone pill carries the same menu, plus the one road to /projects.
+    // The phone pill carries the same menu; the road to /projects is the
+    // projects row (desktop) and the projects tab (phone) — one each.
     expect(board).toContain('<details class="project-pill switcher"><summary>');
-    expect(board).toContain('<a class="manage" href="/projects">manage projects →</a>');
+    expect(board).not.toContain("manage projects");
     expect((board.match(/href="\/projects"/g) ?? []).length).toBe(2);
     // The chrome layer folds an open switcher on an outside tap.
     expect(board).toContain('details.switcher[open]');
@@ -7416,5 +7424,155 @@ describe("the board's order view (operator request): the one place a drag does a
     // The queue page itself is unchanged: same region, same handles.
     const queue = await (await fetch(`${base}/queue`, { headers: { cookie } })).text();
     expect(queue).toContain('class="queue-handle"');
+  });
+});
+
+describe("the reduction pass (Laws of UX): four rows and a more group, five tabs, one accent in two places", () => {
+  let store: Store;
+  let server: Server;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-08-11T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  /** One parked decision: the inbox has something that waits. */
+  const parkOne = (): void => {
+    store.createTask({ id: "t-ask", title: "asks a question" }, T0);
+    const ref = store.refFor("built-in", "t-ask").id;
+    store.placeTask(ref, "/repo/main");
+    const run = store.startRun({ taskRef: ref, leaseId: "lease-ask", runner: "b1", branch: "standing-orders/t-ask", worktree: "/pool/t-ask", now: T0 });
+    store.saveDecision(
+      {
+        run, urgency: "blocking", recap: "why it stopped", question: "Which way?",
+        options: [{ id: "a", label: "A", consequence: "a", reversible: true }, { id: "b", label: "B", consequence: "b", reversible: true }],
+        recommendation: "a",
+      },
+      T0,
+    );
+  };
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-reduction-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main" });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the rail is inbox · board · builds · projects and a dim more group; the tab bar is the same four and more; the queue and the switch link are gone from chrome", async () => {
+    parkOne();
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    const side = /<aside class="side">(.*?)<\/aside>/s.exec(home)?.[1] ?? "";
+    const primary = /<nav>(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
+    expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/", "/board", "/runs", "/projects"]);
+    // The count rides the inbox row only.
+    expect(primary).toMatch(/<a href="\/" class="active" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
+    const foot = /<nav class="foot">(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
+    expect([...foot.matchAll(/<a href="([^"]+)">([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+      "portfolio /workbench",
+      "task list /tasks",
+      "fleet /fleet",
+      "routines /routines",
+      "chat /chat",
+      "system /system",
+      "requirements /caps",
+      "people /people",
+      "operating mode /mode",
+    ]);
+    expect(foot).not.toContain("<svg");
+    expect(side).not.toContain('href="/queue"');
+    expect(home).not.toContain("switch project");
+
+    const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(home)?.[1] ?? "";
+    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/", "/board", "/runs", "/projects", "/menu"]);
+    // A phone tab says THAT something waits — a dot, never a number.
+    expect(tabbar).toContain('<span class="dot-badge" role="img" aria-label="1 waiting"></span>');
+    expect(tabbar).not.toContain("badge-open");
+
+    // /menu draws the same more group, nothing else.
+    const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
+    const rows = [...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1]);
+    expect(rows).toEqual(["/workbench", "/tasks", "/fleet", "/routines", "/chat", "/system", "/caps", "/people", "/mode"]);
+  });
+
+  test("every retired destination still answers: the queue redirects to the board's order view; done, review, and activity are views of builds", async () => {
+    const cookie = await login();
+    const queue = await fetch(url("/queue"), { headers: { cookie }, redirect: "manual" });
+    expect(queue.status).toBe(303);
+    expect(queue.headers.get("location")).toBe("/board?view=order");
+    // The fragment the order view polls is still served.
+    expect((await fetch(url("/queue?fragment=1"), { headers: { cookie } })).status).toBe(200);
+    for (const [path, current] of [["/done", "done"], ["/review", "review"], ["/activity", "activity"], ["/runs", "builds"]] as const) {
+      const html = await (await fetch(url(path), { headers: { cookie } })).text();
+      expect(html).toContain('<a href="/runs" class="active">');
+      const strip = /<p class="meta board-view">(.*?)<\/p>/s.exec(html)?.[1] ?? "";
+      expect(strip).toContain(`<strong>${current}</strong>`);
+      for (const other of ["builds", "done", "review", "activity"].filter(one => one !== current)) {
+        expect(strip).toContain(`>${other}</a>`);
+      }
+    }
+    for (const path of ["/workbench", "/tasks", "/fleet", "/projects", "/menu", "/board?view=order"]) {
+      expect((await fetch(url(path), { headers: { cookie } })).status).toBe(200);
+    }
+    const order = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
+    expect(order).toContain('<a href="/board" class="active">');
+  });
+
+  test("amber lives in exactly two kinds of place: the needs-you count and the act that resolves a screen — never a card, a frame, or a seal", async () => {
+    parkOne();
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    // The page's stylesheet is the longest style block (a noscript fallback carries a one-liner).
+    const css = [...home.matchAll(/<style>(.*?)<\/style>/gs)].map(m => m[1] as string).sort((a, b) => b.length - a.length)[0]?.replace(/\/\*.*?\*\//gs, "") ?? "";
+    const amber = new Set<string>();
+    for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if ((rule[2] as string).includes("var(--brand)")) amber.add((rule[1] as string).trim().replace(/\s+/g, " "));
+    }
+    expect([...amber].sort()).toEqual(
+      [
+        ".count.badge-open",
+        ".approve-form button[type=submit], .approve-form .sticky-actions button[type=submit]",
+        ".approve-form button[type=submit]:hover, .approve-form .sticky-actions button[type=submit]:hover",
+        ".scope-status .hot",
+        ".mobile-top .pill-status .hot",
+        ".tabbar a .dot-badge",
+        ".lane-attention h2::before",
+        ".command-metric.attention .label::before",
+        ".workspace-stats .pulse-stat.hot b",
+        ".workspace-bar .seg.attention",
+      ].sort(),
+    );
+    // The card that waits is on the page, in the neutral border.
+    expect(home).toContain('class="decide-card"');
+    expect(css).toMatch(/\.decide-card \{\s*display: block; border: 1px solid var\(--border\);/);
+    expect(css).toMatch(/\.approve-form \{ margin: \.75rem 0; \}/);
+    expect(css).not.toContain(".lane-attention .lane-card {");
+    expect(css).not.toContain(".workspace-card.hot {");
+    expect(css).toMatch(/\.seal \{[^}]*border: 1px solid var\(--border\);[^}]*color: var\(--foreground\)/s);
   });
 });
