@@ -2883,6 +2883,7 @@ async function tickCommand(
       taskRef: ref.id,
       now: clock(),
       ...(exists.code === 0 ? {} : { base }),
+      reclaim: { evidenceRoot: context.evidenceRoot },
     });
     if (!leased.ok) {
       // The task is fine; this machine's pool is not. Hand the claim back so
@@ -3145,6 +3146,7 @@ async function tickCommand(
       taskRef: pending.taskRef,
       now: clock(),
       ...(exists.code === 0 ? {} : { base }),
+      reclaim: { evidenceRoot: context.evidenceRoot },
     });
     if (!leased.ok) {
       release(store, lease, clock());
@@ -6358,6 +6360,7 @@ async function runWatchLoop(args: {
       // spins when the sequence moved, a timer came due, or work just
       // finished, so this IS the schedule.
       let tickDidWork = false;
+      let tickBroke = false;
       {
         lastTick = now;
         quiet.length = 0;
@@ -6373,6 +6376,7 @@ async function runWatchLoop(args: {
           // the loop — the next look waits for the tick cadence or a wake,
           // and the line says WHAT broke, from the pass's own envelope.
           brokeCount++;
+          tickBroke = true;
           progress(`watch: pass ${ticks} — ${brokenWords(quiet)}`);
         }
       }
@@ -6435,7 +6439,11 @@ async function runWatchLoop(args: {
 
       // Work-conserving: if the world moved while we worked — or we just
       // finished something that may have freed a dependent — go again now.
-      if (tickDidWork || store.wakeSeq() !== seqBefore) continue;
+      // A BROKEN pass moves the sequence itself (it claimed and handed back)
+      // and must not count as the world moving, or the loop spins on its own
+      // failure without a pause (2026-09-04: 331,000 passes on one dirty
+      // checkout). The next look waits for the cadence or a real wake.
+      if (tickDidWork || (!tickBroke && store.wakeSeq() !== seqBefore)) continue;
 
       // Idle: doze in short steps until the sequence moves, a timer comes
       // due, a signal lands, or the trial window (--for) ends. Reading one

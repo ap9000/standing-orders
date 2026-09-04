@@ -389,4 +389,36 @@ describe("the pool, against real git", () => {
     expect(dirty).toMatchObject({ ok: false, reason: "dirty" });
     expect(existsSync(join(leased.worktree.path, "scratch.txt"))).toBe(true);
   });
+
+  test("a task's own leftover is kept as a patch and the tree reset for the retry; another task's, or a lease without reclaim, still refuses", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const evidence = join(base, "evidence");
+    store.createTask({ id: "t-own", title: "the task whose leftover this is" }, T0);
+    store.createTask({ id: "t-other", title: "another task" }, T0);
+    const own = store.refFor("built-in", "t-own").id;
+    const other = store.refFor("built-in", "t-other").id;
+    const first = await pool.lease({ repo, branch: "feat/again", base: "main", runner: "builder-1", taskRef: own, now: T0 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    await writeFile(join(first.worktree.path, "README.md"), "hello\nchanged by a dying attempt\n");
+    await writeFile(join(first.worktree.path, "new-file.ts"), "export const x = 1;\n");
+    expect(await pool.release(first.worktree.path, later(1_000))).toMatchObject({ ok: false, reason: "dirty" });
+
+    // Without reclaim, or for another task: kept for a person, as before.
+    expect(await pool.lease({ repo, branch: "feat/again", runner: "builder-1", taskRef: own, now: later(2_000) })).toMatchObject({ ok: false, reason: "dirty" });
+    expect(await pool.lease({ repo, branch: "feat/again", runner: "builder-1", taskRef: other, now: later(2_000), reclaim: { evidenceRoot: evidence } })).toMatchObject({ ok: false, reason: "dirty" });
+
+    const again = await pool.lease({ repo, branch: "feat/again", runner: "builder-1", taskRef: own, now: later(3_000), reclaim: { evidenceRoot: evidence } });
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.reclaimed).toBeDefined();
+    const patch = await import("node:fs/promises").then(fs => fs.readFile(again.reclaimed as string, "utf8"));
+    expect(patch).toContain("changed by a dying attempt");
+    expect(patch).toContain("export const x = 1;");
+    // The tree is back at HEAD and clean; the lease note is still ours.
+    expect(await import("node:fs/promises").then(fs => fs.readFile(join(again.worktree.path, "README.md"), "utf8"))).toBe("hello\n");
+    expect(existsSync(join(again.worktree.path, "new-file.ts"))).toBe(false);
+    expect(existsSync(join(again.worktree.path, ".standing-orders-lease"))).toBe(true);
+    expect((await pool.release(again.worktree.path, later(4_000))).ok).toBe(true);
+  });
 });

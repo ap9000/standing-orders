@@ -7037,6 +7037,12 @@ export class Store {
     });
   }
 
+  /** The last run that lived in this checkout — whose evidence a reclaimed leftover joins. */
+  latestRunInWorktree(path: string): number | null {
+    const row = this.db.prepare("SELECT id FROM run WHERE worktree = ? ORDER BY id DESC LIMIT 1").get(path) as { id: number } | undefined;
+    return row === undefined ? null : Number(row.id);
+  }
+
   getWorktree(path: string): WorktreeRow | null {
     const row = this.db.prepare("SELECT * FROM worktree WHERE path = ?").get(path);
     return row === undefined ? null : readWorktree(row);

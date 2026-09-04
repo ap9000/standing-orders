@@ -24,7 +24,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Store, WorktreeRow } from "./store.js";
@@ -49,10 +49,18 @@ export type LeaseRequest = {
   now: Date;
   /** Branch to create from, when the branch does not exist yet. */
   base?: string;
+  /**
+   * Reclaim this task's OWN leftover: when the checkout was released dirty
+   * by a finished attempt of the same task (not a dead runner's, not
+   * another task's), keep what it left as a patch under the last run's
+   * evidence and reset the tree for the next attempt. Without this a
+   * failed attempt's half-edit blocks every retry forever.
+   */
+  reclaim?: { evidenceRoot: string };
 };
 
 export type LeaseResult =
-  | { ok: true; worktree: WorktreeRow; created: boolean }
+  | { ok: true; worktree: WorktreeRow; created: boolean; reclaimed?: string }
   | { ok: false; reason: LeaseFailure; message: string };
 
 export type LeaseFailure = "held" | "dirty" | "git" | "unverified" | "unknown-runner" | "in-use";
@@ -201,17 +209,29 @@ export class WorktreePool {
     // A directory that came back from a dead runner is unverified: what is in
     // it describes a process that stopped without saying why. Checked before
     // reuse, never assumed.
+    let reclaimed: string | undefined;
     if (existing !== null && !existing.verified && existing.releasedAt !== null) {
       const dirty = await this.isDirty(path);
       if (dirty === null) {
         return { ok: false, reason: "git", message: `${path} could not be inspected` };
       }
       if (dirty) {
-        return {
-          ok: false,
-          reason: "dirty",
-          message: `${path} has uncommitted or untracked work from a previous run — look before reusing it`,
-        };
+        // The task's own leftover, from an attempt that finished and said
+        // so: kept as evidence, then cleared, so the retry starts from the
+        // branch and not from a half-edit. Anything else stays for a person.
+        const own = request.reclaim !== undefined && request.taskRef !== undefined && existing.taskRef === request.taskRef;
+        if (!own) {
+          return {
+            ok: false,
+            reason: "dirty",
+            message: `${path} has uncommitted or untracked work from a previous run — look before reusing it`,
+          };
+        }
+        const kept = await this.keepLeftover(path, (request.reclaim as { evidenceRoot: string }).evidenceRoot, request.now);
+        if (!kept.ok) return { ok: false, reason: "git", message: kept.message };
+        const reset = await this.resetTree(path);
+        if (!reset.ok) return { ok: false, reason: "git", message: reset.message };
+        reclaimed = kept.file;
       }
     }
 
@@ -258,7 +278,52 @@ export class WorktreePool {
     }
 
     this.store.saveWorktree(row);
-    return { ok: true, worktree: row, created };
+    return { ok: true, worktree: row, created, ...(reclaimed === undefined ? {} : { reclaimed }) };
+  }
+
+  /**
+   * Preserve a dirty tree's work as one patch — tracked changes against
+   * HEAD, then each untracked file against nothing — under the evidence of
+   * the last run that lived in this checkout (or a leftover folder when no
+   * run is on record). Nothing is deleted here.
+   */
+  private async keepLeftover(path: string, evidenceRoot: string, now: Date): Promise<{ ok: true; file: string } | { ok: false; message: string }> {
+    const status = await this.runner(GIT, [...READ_ONLY, "status", "--porcelain", "--untracked-files=all"], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (status.code !== 0) return { ok: false, message: `${path} could not be inspected before reclaiming it` };
+    const untracked = status.stdout
+      .split("\n")
+      .filter(line => line.startsWith("?? ") && !line.trimEnd().endsWith(MARKER))
+      .map(line => line.slice(3).trim());
+    const tracked = await this.runner(GIT, [...READ_ONLY, "diff", "--binary", "HEAD"], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (tracked.code !== 0) return { ok: false, message: `${path}: git diff failed while reclaiming (${firstLine(tracked.stderr)})` };
+    const parts = [tracked.stdout];
+    for (const file of untracked) {
+      // --no-index exits 1 when the sides differ; that is the expected answer.
+      const one = await this.runner(GIT, [...READ_ONLY, "diff", "--binary", "--no-index", "--", "/dev/null", file], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+      if (one.code > 1) return { ok: false, message: `${path}: ${file} could not be captured (${firstLine(one.stderr)})` };
+      parts.push(one.stdout);
+    }
+    const lastRun = this.store.latestRunInWorktree(path);
+    const dir = lastRun === null ? join(evidenceRoot, "leftover") : join(evidenceRoot, String(lastRun));
+    const file = join(dir, lastRun === null ? `${now.toISOString().replace(/[:.]/g, "-")}.patch` : "leftover.patch");
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(file, `# leftover from ${path}\n# kept ${now.toISOString()} before the tree was reset for the next attempt\n` + parts.join(""), { mode: 0o600 });
+    } catch (error) {
+      return { ok: false, message: `${path}: the leftover could not be written to ${file} (${error instanceof Error ? error.message : String(error)})` };
+    }
+    return { ok: true, file };
+  }
+
+  /** Back to HEAD, untracked gone, our lease note kept; proven clean after. */
+  private async resetTree(path: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const checkout = await this.runner(GIT, ["checkout", "--", "."], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (checkout.code !== 0) return { ok: false, message: `${path}: git checkout failed while resetting (${firstLine(checkout.stderr)})` };
+    const clean = await this.runner(GIT, ["clean", "-fd", "-e", MARKER], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (clean.code !== 0) return { ok: false, message: `${path}: git clean failed while resetting (${firstLine(clean.stderr)})` };
+    const dirty = await this.isDirty(path);
+    if (dirty !== false) return { ok: false, message: `${path} is still not clean after the reset — leaving it for a person` };
+    return { ok: true };
   }
 
   /** Leave a note naming the process holding this checkout. */

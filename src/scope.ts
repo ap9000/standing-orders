@@ -79,7 +79,11 @@ function sameDigest(left: string, right: string): boolean {
  * shapes (finding 20) — they never enter a digest.
  */
 export const CLAUDE_LIMITS = {
-  maxTurns: 40,
+  // Turns are agentic round-trips (each tool call is one). A task that reads
+  // its way through a real codebase before editing spends 40 on reading
+  // alone (2026-09-04, run 1394 died at exactly 40 with two files edited);
+  // the wall clock is the ceiling that means something.
+  maxTurns: 200,
   repairMaxTurns: 4,
   timeoutSeconds: 1800,
   repairTimeoutSeconds: 300,
