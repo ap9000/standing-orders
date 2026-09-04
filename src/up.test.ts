@@ -135,6 +135,21 @@ describe("standing-orders up", () => {
     expect(named.startsWith(normalizeRunnerName(hostname()).slice(0, 8))).toBe(true);
   });
 
+  test("the remembered login answers for every operator verb: after one up, register and approve ask for nothing", async () => {
+    expect(await up()).toBe(0);
+    const tokenFile = join(base, "w2-token");
+    lines = [];
+    const registered = await runOperate("runner", ["register", "w2", "--repo", repo, "--token-file", tokenFile, "--json"], line => lines.push(line), { databaseFile: db });
+    expect(registered).toBe(0);
+    expect(envelope()).toMatchObject({ ok: true, command: "runner register" });
+    expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+    // A different --as than the remembered name is not answered by the file.
+    lines = [];
+    const other = await runOperate("runner", ["register", "w3", "--repo", repo, "--as", "somebody-else", "--json"], line => lines.push(line), { databaseFile: db });
+    expect(other).not.toBe(0);
+    expect(envelope()).toMatchObject({ ok: false });
+  });
+
   test("the minted approver defaults to the operating-system user", async () => {
     await up([], PORT + 5);
     const expected = process.env["USER"] ?? process.env["USERNAME"] ?? "operator";

@@ -9338,6 +9338,18 @@ async function askCredentials(
 ): Promise<{ name: string; token: string } | null> {
   let name = text(flags, "as");
   let token = text(flags, "token");
+  // The login `up` remembered beside the database (owner-only, this
+  // machine) answers for every operator verb, not only for `up` — the
+  // person proved it once; asking again on each act was the friction
+  // that pushed people back to the console. Flags still win, and a
+  // different --as than the remembered name still asks.
+  if (token === undefined) {
+    const remembered = readLoginFile(join(dirname(context.databaseFile), UP_LOGIN_FILE));
+    if (remembered !== null && (name === undefined || name === remembered.name)) {
+      name = remembered.name;
+      token = remembered.password;
+    }
+  }
   if ((name === undefined || token === undefined) && interactive() && !context.json) {
     name ??= await ask("username: ");
     token ??= await askHidden("password: ");
