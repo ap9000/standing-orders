@@ -15,10 +15,10 @@ export interface AttentionCardProps {
 }
 
 /**
- * Attention card — the "waits on you" surface. The whole card wears an
- * amber-tinted outline — never a stripe on one edge — the accent doing its only
- * job: marking work that cannot proceed without the user. At most a handful of
- * these exist at once; everything else on screen stays ink.
+ * Attention card — the "waits on you" surface. The card wears the neutral
+ * hairline (reduction pass §3): the header above it — a dot and a count —
+ * says "needs you" for every card beneath, and the accent is spent on the
+ * one action that resolves it. Everything else on screen stays ink.
  */
 export function AttentionCard({ title, meta, children, action, className }: AttentionCardProps) {
   return (

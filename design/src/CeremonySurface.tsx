@@ -22,10 +22,11 @@ export interface CeremonySurfaceProps {
 
 /**
  * Ceremony surface — the console's pattern for an APPROVAL: a password that
- * resolves work waiting on the user. The whole card wears the amber-tinted
- * outline (never an edge stripe), the terms restated, the digest rendered as a
- * seal, then the password and a single amber action. Credential and
- * configuration forms are ordinary neutral cards, not ceremonies.
+ * resolves work waiting on the user. The card's frame is neutral so the
+ * action is the only warm thing in it (reduction pass §3): the terms
+ * restated, the digest rendered as a seal, then the password and a single
+ * amber action. Credential and configuration forms are ordinary neutral
+ * cards, not ceremonies.
  */
 export function CeremonySurface({
   title,
