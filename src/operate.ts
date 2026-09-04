@@ -4001,7 +4001,10 @@ async function startConsole(options: {
   });
   const bound = server.address();
   const port = typeof bound === "object" && bound !== null ? bound.port : options.port;
-  return { server, port, url: `http://${options.host}:${port}/` };
+  // A bind-everywhere address is not a place a browser can go: the URL
+  // we print and open names localhost, which the console always admits.
+  const shown = options.host === "0.0.0.0" || options.host === "::" ? "localhost" : options.host;
+  return { server, port, url: `http://${shown}:${port}/` };
 }
 
 async function serveCommand(
@@ -5928,8 +5931,7 @@ async function routineCommand(
     }
     case "approve": {
       let saw = text(flags, "digest");
-      let asWho = text(flags, "as");
-      let token = text(flags, "token");
+      let { name: asWho, token } = credentialsFrom(flags, context);
       let confirmedAloud = false;
       if ((!flags.has("yes") || saw === undefined || asWho === undefined || token === undefined) && interactive() && !json) {
         write(`Approving ${name} makes it a STANDING order:`);
@@ -9078,8 +9080,7 @@ async function approveTask(
   }
 
   let saw = text(flags, "digest");
-  let asWho = text(flags, "as");
-  let token = text(flags, "token");
+  let { name: asWho, token } = credentialsFrom(flags, context);
 
   let confirmedAloud = false;
   // At a terminal, approval is a conversation, not flag assembly: the scope
@@ -9332,17 +9333,18 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
   return result.code;
 }
 
-async function askCredentials(
+/**
+ * --as/--token, else the login `up` remembered beside the database
+ * (owner-only, this machine). The person proved it once; asking again on
+ * each act was the friction that pushed people back to the console. Flags
+ * win, and a different --as than the remembered name is not answered.
+ */
+function credentialsFrom(
   flags: Map<string, string | true>,
-  context: Context,
-): Promise<{ name: string; token: string } | null> {
+  context: { databaseFile: string },
+): { name: string | undefined; token: string | undefined } {
   let name = text(flags, "as");
   let token = text(flags, "token");
-  // The login `up` remembered beside the database (owner-only, this
-  // machine) answers for every operator verb, not only for `up` — the
-  // person proved it once; asking again on each act was the friction
-  // that pushed people back to the console. Flags still win, and a
-  // different --as than the remembered name still asks.
   if (token === undefined) {
     const remembered = readLoginFile(join(dirname(context.databaseFile), UP_LOGIN_FILE));
     if (remembered !== null && (name === undefined || name === remembered.name)) {
@@ -9350,6 +9352,14 @@ async function askCredentials(
       token = remembered.password;
     }
   }
+  return { name, token };
+}
+
+async function askCredentials(
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<{ name: string; token: string } | null> {
+  let { name, token } = credentialsFrom(flags, context);
   if ((name === undefined || token === undefined) && interactive() && !context.json) {
     name ??= await ask("username: ");
     token ??= await askHidden("password: ");

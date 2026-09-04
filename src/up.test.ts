@@ -143,6 +143,18 @@ describe("standing-orders up", () => {
     expect(registered).toBe(0);
     expect(envelope()).toMatchObject({ ok: true, command: "runner register" });
     expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+    // The scripted approval (--yes --digest) is answered by the file too.
+    lines = [];
+    expect(await runOperate("task", ["add", "remembered work", "--id", "t-remembered", "--repo", repo, "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    const configured = openStore(db);
+    configured.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date());
+    configured.close();
+    lines = [];
+    expect(await runOperate("task", ["scope", "t-remembered", "--goal", "a goal", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    const digest = String((envelope()["scope"] as Record<string, unknown>)["digest"]);
+    lines = [];
+    expect(await runOperate("task", ["approve", "t-remembered", "--yes", "--digest", digest, "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    expect(envelope()).toMatchObject({ ok: true, command: "task approve" });
     // A different --as than the remembered name is not answered by the file.
     lines = [];
     const other = await runOperate("runner", ["register", "w3", "--repo", repo, "--as", "somebody-else", "--json"], line => lines.push(line), { databaseFile: db });
