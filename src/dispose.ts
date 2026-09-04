@@ -379,6 +379,12 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
             : result.reason === "commit-failure"
               ? "commit-failure"
               : "unknown";
+    // The attempt's ending, in words, on the run itself: the class is what
+    // the strikes count, the message is what a person reads (an agent's
+    // own verdict was already recorded by the builder under the same key).
+    if (result.reason !== "agent-reported" && result.message.trim() !== "") {
+      store.recordOutcomeFacts(runId, { handoff: result.message });
+    }
     if (leaseId === undefined) {
       store.finishRun(runId, { outcome: "failed", reason: result.reason, now: clock() });
       return { kind: "failed", failureClass, disposition: null, strikes: null, sealed: false };

@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { agentExitWords } from "./builder.js";
 import { openStore, type Store } from "./store.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
@@ -2010,5 +2011,16 @@ describe("the gemini repair road: native resume since S1 (Phase 3 A8/B8/C4, upda
     const child = store.runsFor(taskRef).find(r => r.role === "repair");
     expect(child).toMatchObject({ provider: "gemini", outcome: "built" });
     expect(child?.sessionId).toBe(buildId);
+  });
+});
+
+describe("agentExitWords: a non-zero agent exit says what ended it", () => {
+  test("the harness's ending names the ceiling, the turn count, or the error; the spoken message, stderr, and the exit code stand in, in that order", () => {
+    expect(agentExitWords({ code: 1, stderr: "", finalMessage: null, ending: { subtype: "error_max_turns", turns: 40 } }))
+      .toBe("the agent ran out of turns after 40 turns — the ceiling ended it before it wrote its handoff (error_max_turns)");
+    expect(agentExitWords({ code: 1, stderr: "", finalMessage: "boom\nmore", ending: { subtype: "error_during_execution", turns: 3 } }))
+      .toBe("the agent stopped on an error after 3 turns: boom (error_during_execution)");
+    expect(agentExitWords({ code: 2, stderr: "stderr says why", finalMessage: null, ending: null })).toBe("stderr says why");
+    expect(agentExitWords({ code: 7, stderr: "", finalMessage: null })).toBe("exit 7");
   });
 });

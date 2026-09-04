@@ -3066,6 +3066,7 @@ async function tickCommand(
           reason: disposition.sealed
             ? `${disposition.failureClass}${disposition.disposition === "backoff" ? ` — retry ${disposition.strikes}/3` : disposition.disposition === "stalled" ? " — stalled" : ""}`
             : "fenced",
+          ...(result.ok ? {} : { detail: result.message.slice(0, 200) }),
           worktree: leased.worktree.path,
         });
         broke++;

@@ -16,7 +16,7 @@
  * (`adapterFor`), and only builder/planner import `invokeAgent`.
  */
 
-import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner } from "./provider.js";
+import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner, type AgentEnding } from "./provider.js";
 import { readProviderKey, readAuthMode, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { classifyTerminal } from "./exhaustion.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
@@ -45,6 +45,8 @@ export type AgentOutcome = {
   sessionId: string | null;
   /** The agent's spoken conclusion — diagnostics, never the handoff. */
   finalMessage: string | null;
+  /** The harness's own account of the ending, when its dialect has one. */
+  ending?: AgentEnding | null;
   usage: ProviderUsage;
   /**
    * The harness never came up: the provider has an init signal, it was not
@@ -326,6 +328,7 @@ export async function invokeAgent(
       notFound: result.notFound,
       sessionId: envelope.sessionId,
       finalMessage: envelope.finalMessage,
+      ending: envelope.ending ?? null,
       usage: {
         tokensIn: envelope.tokensIn,
         tokensOut: envelope.tokensOut,

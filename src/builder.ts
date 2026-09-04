@@ -1170,7 +1170,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     };
   }
   if (result.code !== 0) {
-    return { ok: false, reason: "agent", message: firstLine(result.stderr) || `exit ${result.code}` };
+    return { ok: false, reason: "agent", message: agentExitWords(result) };
   }
 
   // The claim is re-proved *after* the agent, synchronously, whatever the
@@ -1966,6 +1966,27 @@ function envelope(stdout: string): { summary: string; sessionId?: string } {
     // session nobody can name simply cannot be resumed.
     return { summary: "unattended build" };
   }
+}
+
+/**
+ * What a non-zero agent exit means, in words a person can act on: the
+ * harness's own result line names the ending (a turn ceiling, an error
+ * during execution) and how many turns it took; only when it said nothing
+ * do stderr or the bare exit code stand in. Two attempts died at exactly
+ * the ceiling on 2026-09-04 and the ledger said "unknown" — the fact was
+ * in the stream all along.
+ */
+export function agentExitWords(outcome: { code: number; stderr: string; finalMessage: string | null; ending?: { subtype: string | null; turns: number | null } | null }): string {
+  const subtype = outcome.ending?.subtype ?? null;
+  const turns = outcome.ending?.turns ?? null;
+  const said = outcome.finalMessage === null || outcome.finalMessage.trim() === "" ? null : firstLine(outcome.finalMessage);
+  const after = turns === null ? "" : ` after ${turns} turn${turns === 1 ? "" : "s"}`;
+  if (subtype === "error_max_turns") return `the agent ran out of turns${after} — the ceiling ended it before it wrote its handoff (error_max_turns)`;
+  if (subtype === "error_max_budget_usd") return `the agent ran out of budget${after} (error_max_budget_usd)`;
+  if (subtype === "error_during_execution") return `the agent stopped on an error${after}${said === null ? "" : `: ${said}`} (error_during_execution)`;
+  if (subtype !== null && subtype !== "success") return `the agent ended with ${subtype}${after}${said === null ? "" : `: ${said}`}`;
+  const fallback = firstLine(outcome.stderr);
+  return said ?? (fallback !== "" ? fallback : `exit ${outcome.code}`);
 }
 
 function firstLine(text: string): string {

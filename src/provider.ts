@@ -77,11 +77,17 @@ export type ProviderRunner = (
   options?: RunOptions,
 ) => Promise<ExecResult>;
 
+/** The harness's own account of how a turn ended. */
+export type AgentEnding = { subtype: string | null; turns: number | null };
+
 /** What every envelope normalizes to, whatever dialect produced it. */
 export type ParsedEnvelope = {
   sessionId: string | null;
   /** The agent's spoken conclusion — diagnostics only, never the handoff. */
   finalMessage: string | null;
+  /** How the harness said the turn ended (claude: the result's subtype and
+   * turn count) — absent on dialects that carry no such record. */
+  ending?: AgentEnding | null;
   tokensIn: number | null;
   tokensOut: number | null;
   costUsd: number | null;
@@ -201,6 +207,7 @@ type ClaudeResultShape = {
   total_cost_usd?: unknown;
   is_error?: unknown;
   subtype?: unknown;
+  num_turns?: unknown;
   origin?: unknown;
 };
 
@@ -227,6 +234,10 @@ function claudeEnvelopeOf(
     sessionId:
       typeof result?.session_id === "string" ? result.session_id : sessionFromInit,
     finalMessage: typeof result?.result === "string" ? result.result : null,
+    ending: result === null ? null : {
+      subtype: typeof result.subtype === "string" ? result.subtype : null,
+      turns: typeof result.num_turns === "number" && result.num_turns >= 0 ? result.num_turns : null,
+    },
     tokensIn: typeof input === "number" && input >= 0 ? input : null,
     tokensOut: typeof output === "number" && output >= 0 ? output : null,
     costUsd: typeof cost === "number" && cost >= 0 ? cost : null,
