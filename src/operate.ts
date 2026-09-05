@@ -4732,7 +4732,10 @@ async function modeCommand(
   if (action === undefined || !(MODE_ACTIONS as readonly string[]).includes(action)) {
     return fail(write, json, "mode", "usage", `unknown \`mode ${action ?? ""}\` — try ${MODE_ACTIONS.join(", ")}`, EXIT.usage);
   }
-  const repo = text(flags, "repo");
+  const repoGiven = text(flags, "repo");
+  // The same canonical string every other road stores for the repository
+  // (a symlinked path — /var vs /private/var — must name the same mode).
+  const repo = repoGiven === undefined ? undefined : canonicalProject(repoGiven) ?? resolve(repoGiven);
   if (repo === undefined) {
     return fail(write, json, "mode", "usage", "`mode` needs --repo <canonical path> — a mode is per-repository", EXIT.usage);
   }
@@ -8921,8 +8924,7 @@ function scopeTask(
   // MODE'S SIGNER and their live mode auto-approves filings, the scope
   // seals in the same transaction it files — plain scopes only, and the
   // ledger shows the mode provenance. Anonymous filings never auto-seal.
-  const asGiven = text(flags, "as");
-  const tokenGiven = text(flags, "token");
+  const { name: asGiven, token: tokenGiven } = credentialsFrom(flags, context);
   const actor =
     asGiven !== undefined && tokenGiven !== undefined && authenticateApprover(store, asGiven, tokenGiven).ok
       ? asGiven

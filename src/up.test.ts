@@ -155,6 +155,18 @@ describe("standing-orders up", () => {
     lines = [];
     expect(await runOperate("task", ["approve", "t-remembered", "--yes", "--digest", digest, "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
     expect(envelope()).toMatchObject({ ok: true, command: "task approve" });
+    // Under a signed hands-off mode, the remembered login is the mode's
+    // signer for the CLI's scope filing too: the scope seals escalated
+    // permissions and auto-approves, exactly as the console's form does.
+    lines = [];
+    expect(await runOperate("mode", ["set", "--repo", repo, "--name", "hands-off", "--days", "1", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    lines = [];
+    expect(await runOperate("task", ["add", "hands-off work", "--id", "t-hands-off", "--repo", repo, "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    lines = [];
+    expect(await runOperate("task", ["scope", "t-hands-off", "--goal", "a goal", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    const sealed = envelope()["scope"] as Record<string, unknown>;
+    expect((sealed["profile"] as Record<string, unknown>)["permissionArgv"]).toBe("bypassPermissions");
+    expect(sealed["approvedBy"]).toBe(name);
     // A different --as than the remembered name is not answered by the file.
     lines = [];
     const other = await runOperate("runner", ["register", "w3", "--repo", repo, "--as", "somebody-else", "--json"], line => lines.push(line), { databaseFile: db });
