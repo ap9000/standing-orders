@@ -166,7 +166,7 @@ describe("standing-orders up", () => {
     expect(await runOperate("task", ["scope", "t-hands-off", "--goal", "a goal", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
     const sealed = envelope()["scope"] as Record<string, unknown>;
     expect((sealed["profile"] as Record<string, unknown>)["permissionArgv"]).toBe("bypassPermissions");
-    expect(sealed["approvedBy"]).toBe(name);
+    expect(envelope()["approvedUnderMode"]).toBe(true);
     // A different --as than the remembered name is not answered by the file.
     lines = [];
     const other = await runOperate("runner", ["register", "w3", "--repo", repo, "--as", "somebody-else", "--json"], line => lines.push(line), { databaseFile: db });
