@@ -6457,9 +6457,12 @@ async function runWatchLoop(args: {
           lastReconcile + reconcileEveryMs,
           deadline ?? Number.MAX_SAFE_INTEGER,
         ) - Date.now();
-      const step = Math.max(50, Math.min(500, idleUntil));
+      // Doze for the WHOLE idle window, waking early only for a signal or a
+      // sequence move — not for one 500ms step and then another pass
+      // (2026-09-05: that read as two ticks a second, all night, with
+      // nothing to do). The 50ms poll is what keeps a stop prompt.
       const seqIdle = store.wakeSeq();
-      const dozeUntil = Date.now() + Math.max(step, 0);
+      const dozeUntil = Date.now() + Math.max(idleUntil, 0);
       while (!stopping() && Date.now() < dozeUntil && store.wakeSeq() === seqIdle) {
         await sleep(50);
       }
