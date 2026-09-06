@@ -109,7 +109,6 @@ export async function invokeAgent(
   }
 
   const adapter = adapterFor(spec.provider);
-  const argv = adapter.argv({ ...invocation, model: spec.model });
   const timeoutMs = adapter.clampTimeout(
     invocation.phase,
     options.timeoutMs ?? 30 * 60_000,
@@ -231,6 +230,19 @@ export async function invokeAgent(
   stopPoll.unref();
   let result: Awaited<ReturnType<ProviderRunner>>;
   try {
+    // Tell the agent the SAME clock the transport enforces, after preflight.
+    // In particular, a provider's tighter cap must not silently consume the
+    // time it expected to spend validating and writing its completion record.
+    const budgetedBrief = invocation.phase !== "build" ? invocation.brief : [
+      invocation.brief,
+      "",
+      "Execution clock (set by Standing Orders):",
+      `This attempt has at most ${Math.floor(timeoutMs / 1000)} seconds from launch and will be stopped around ${new Date(clock().getTime() + timeoutMs).toISOString()}.`,
+      "Start by checking the existing worktree diff; interrupted work may already be present. Preserve it and continue from the actual state.",
+      "Reserve time for required checks and your terminal completion record. Report the commands and their actual results.",
+      "If a required check cannot finish, write a failed completion record describing the blocker and remaining work before the clock ends. Never call unfinished validation completed.",
+    ].join("\n");
+    const argv = adapter.argv({ ...invocation, brief: budgetedBrief, model: spec.model });
     result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
     onSpawn: pid => { childPid = pid; runOptions.onSpawn?.(pid); },

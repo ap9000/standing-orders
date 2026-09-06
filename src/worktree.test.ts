@@ -390,7 +390,13 @@ describe("the pool, against real git", () => {
     expect(existsSync(join(leased.worktree.path, "scratch.txt"))).toBe(true);
   });
 
-  test.each(["stopped", "handoff-incomplete"])("%s resumes the same tracked and untracked work, with a recovery patch", async reason => {
+  test.each([
+    ["interrupted", "stopped"],
+    ["interrupted", "handoff-incomplete"],
+    ["interrupted", "timeout"],
+    ["failed", "timeout"],
+    ["failed", "retryable-infra"],
+  ] as const)("%s/%s resumes the same tracked and untracked work, with a recovery patch", async (outcome, reason) => {
     const pool = new WorktreePool(store, { root: join(base, "pool") });
     store.createTask({ id: "t-resume", title: "Recover this work" }, T0);
     const taskRef = store.refFor("built-in", "t-resume").id;
@@ -399,7 +405,7 @@ describe("the pool, against real git", () => {
     const runId = store.startRun({ taskRef, leaseId: "interrupted", runner: "builder-1", branch: "feat/resume", worktree: first.worktree.path, now: T0 });
     await writeFile(join(first.worktree.path, "README.md"), "preserved edits\n");
     await writeFile(join(first.worktree.path, "new.ts"), "preserved new file\n");
-    store.finishRun(runId, { outcome: "interrupted", reason, now: later(1_000) });
+    store.finishRun(runId, { outcome, reason, now: later(1_000) });
     await pool.release(first.worktree.path, later(1_000));
     const second = await pool.lease({ repo, branch: "feat/resume", runner: "builder-1", taskRef, now: later(2_000), reclaim: { evidenceRoot: join(base, "evidence") } });
     if (!second.ok) throw new Error(second.message);

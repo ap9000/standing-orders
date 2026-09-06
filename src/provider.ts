@@ -309,11 +309,12 @@ function claudeParse(stdout: string): ParsedEnvelope {
  */
 const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string[] => [
   "exec",
+  // Sandbox belongs to exec; the resume subcommand rejects this option.
+  "--sandbox",
+  "workspace-write",
   ...(invocation.resumeSession === null ? [] : ["resume", invocation.resumeSession]),
   "--json",
   "--skip-git-repo-check",
-  "--sandbox",
-  "workspace-write",
   ...(invocation.model === null ? [] : ["-m", invocation.model]),
   ...extra,
   invocation.brief,
@@ -589,6 +590,13 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
   openrouter: {
     binary: "codex",
     argv: codexArgv([
+      // This is a project build transport, not the operator's interactive
+      // desktop session. Inheriting its connected apps can exceed a model's
+      // tool limit (Grok rejected 618 tools) and exposes unrelated services.
+      // Keep execpolicy rules and workspace-write; do not alter saved config.
+      "--ignore-user-config",
+      "--disable", "apps",
+      "--disable", "plugins",
       "-c",
       `model_provider=${toml(OPENROUTER_PROVIDER_KEY)}`,
       "-c",
@@ -698,9 +706,9 @@ const AUDITS: Record<ProviderId, ProviderAudit> = {
     sessionIdentity: "announced",
     terminalContract: "none",
     isolation: { flag: "--ephemeral", resumeSafe: false, enforced: false },
-    // The constant -c overrides pin the model provider per invocation, so
-    // user config cannot reroute the spend — but the file still loads.
-    configSurface: ["~/.codex/config.toml (model_provider pinned per invocation)", "repository AGENTS.md"],
+    // User config and app/plugin tools are disabled for this transport;
+    // repository instructions and execution rules still apply.
+    configSurface: ["repository AGENTS.md", "user and project execpolicy rules"],
   },
   gemini: {
     transport: "streaming-jsonl",

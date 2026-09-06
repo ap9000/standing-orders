@@ -111,6 +111,29 @@ describe("the invocation gateway", () => {
     expect(stampAtSpawn).toBe(T0.toISOString());
   });
 
+  test.each([
+    ["claude", 1_800_000], ["codex", 1_200_000], ["openrouter", 1_200_000],
+  ] as const)("%s tells the builder the actual enforced clock and preserves its scope", async (provider, expectedMs) => {
+    store.createTask({ id: "clock-task", title: "clock task" }, T0);
+    const id = store.startRun({
+      taskRef: claimTask(store, "clock-task", "clock-lease"), leaseId: "clock-lease", runner: RUNNER,
+      provider, branch: "b", worktree: "/w", now: T0,
+    });
+    await invokeRan(store, id, { provider, model: null }, { ...ASK, brief: "Exact approved scope\nDo not publish." }, {
+      clock: () => T0, timeoutMs: 1_800_000,
+      runner: async (_file, argv, options) => {
+        expect(options?.timeoutMs).toBe(expectedMs);
+        const prompt = argv.find(arg => arg.startsWith("Exact approved scope\n"));
+        expect(prompt).toContain("Exact approved scope\nDo not publish.");
+        expect(prompt).toContain(`${expectedMs / 1000} seconds`);
+        expect(prompt).toContain(new Date(T0.getTime() + expectedMs).toISOString());
+        expect(prompt).toContain("interrupted work may already be present");
+        expect(prompt).toContain("Never call unfinished validation completed");
+        return OK;
+      },
+    });
+  });
+
   test("usage is read off every completed process, nonzero exits included", async () => {
     const envelope = JSON.stringify({
       result: "half done, then it broke",

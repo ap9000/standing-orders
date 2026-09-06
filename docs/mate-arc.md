@@ -664,12 +664,15 @@ never a second store.
    mate fetches state through its own tools and would ignore the filter.
 5. **Read a proposal as a card.** A task proposal names its project the way
    you name it, states its goal and what is out of scope, and does nothing.
-   Review task saves one draft and opens its approval page directly.
-   **Nothing runs until you approve.** Back to chat returns to the same
-   conversation.
+   Review task saves one draft and opens compact inline review in Chat —
+   exact scope, execution settings, and the existing approval door (CSRF,
+   nonce, digest, password preference). **Nothing runs until you approve
+   that digest.** Asking a question is not an approval. The full task page
+   remains as a fallback; publication stays there.
 6. **Watch it move without leaving.** A confirmed card grows a state badge
-   and one relevant next action. Progress updates automatically; typing a
-   message prevents refreshes from disrupting your draft.
+   (queued, running, needs input, built locally, and the rest) and a link
+   to the actual build, question, or result. Progress updates automatically;
+   typing a message prevents refreshes from disrupting your draft.
 
 ## What is deliberate
 

@@ -1153,7 +1153,7 @@ export type CapturedBuild = {
  * a run completes through THIS function or not at all.
  */
 export async function settleProviderOutcome(captured: CapturedBuild, result: AgentOutcome): Promise<BuildResult> {
-  const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, clock } = captured;
+  const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, root, mailbox, done, clock } = captured;
   if (request.shouldStop?.() === true || store.runStopRequested(request.runId)) {
     await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
     return { ok: false, reason: "stopped", message: `Stopped by the operator. Work is preserved uncommitted in ${worktree}.` };
@@ -1165,7 +1165,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     return {
       ok: false,
       reason: "timeout",
-      message: `the builder ran past ${Math.round(timeoutMs / 60_000)} minutes and was stopped — whatever it wrote is still in ${worktree}`,
+      message: `the builder reached its time limit and was stopped — whatever it wrote is still in ${worktree}`,
     };
   }
   if (result.initFailed) {

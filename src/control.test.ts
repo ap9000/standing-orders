@@ -40,7 +40,7 @@ describe("operator control", () => {
     expect(store.activeHolds(b.taskRef, NOW)).toHaveLength(0);
   });
 
-  test.each(["stopped", "handoff-incomplete"] as const)("%s preserves strikes, releases the lease, and waits for resume", reason => {
+  test.each(["stopped", "handoff-incomplete", "timeout"] as const)("%s preserves strikes, releases the lease, and waits for resume", reason => {
     const a = started("a");
     store.addStrike(a.taskRef);
     const disposition = disposeBuildOutcome({ store, policy: "tick", ...a, runner: "worker", repo: "/repo", branch: "work/a", origin: "ours", provider: "claude", model: null, worktreePath: "/work", clock: () => NOW },

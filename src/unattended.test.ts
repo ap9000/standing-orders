@@ -4,7 +4,7 @@
  *
  * One fake-clocked unattended stretch against real git: clean builds, a stated
  * no-change, a park answered by a person mid-stretch, three strikes and an
- * authenticated requeue, a transient timeout that backs off and recovers,
+ * authenticated requeue, a timeout that preserves work and waits for resume,
  * a dependency chain, a scope approved while the stretch runs, and a
  * duplicate pass that finds nothing to do twice. The zero-token invariant
  * is asserted as arithmetic: provider spawns == runs stamped before
@@ -93,7 +93,7 @@ describe("the night: twelve tasks, one fake clock", () => {
       return { ...OK, code: 1, stderr: "the model refused to cooperate" };
     }
 
-    // t-08 times out once — infrastructure, not the work — then recovers.
+    // t-08 times out once — preserve work and wait for explicit resume.
     if (taskId === "t-08" && !failuresSoFar.has("t-08")) {
       failuresSoFar.set("t-08", 1);
       return { ...OK, code: 124, timedOut: true };
@@ -173,8 +173,8 @@ describe("the night: twelve tasks, one fake clock", () => {
       run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--max", "12", "--json"], at(minutes));
 
     // -- The night, tick by tick, the clock advancing between.
-    await tick(0);      // most build; t-05 no-change; t-06 parks; t-07 and t-08 strike once and back off
-    await tick(3);      // backoffs (1m) lapsed: t-08 recovers, t-07 strikes again; t-09 follows t-01
+    await tick(0);      // most build; t-05 no-change; t-06 parks; t-07 backs off; t-08 pauses
+    await tick(3);      // t-08 stays paused; t-07 strikes again; t-09 follows t-01
     await run(["decide", "--json"], at(4));
     const decisionId = payload().waiting[0].id as number;
     await run(["decide", String(decisionId), "--choose", "tenant", "--as", "alex", "--token", approverToken], at(4));
@@ -185,16 +185,23 @@ describe("the night: twelve tasks, one fake clock", () => {
     const mid = openStore(db);
     const stalled = mid.openIncidents().find(one => one.taskId === "t-07");
     expect(stalled?.kind).toBe("attempts-exhausted");
+    const timedOutRef = mid.lookupRef("t-08")!;
+    expect(mid.getTask("t-08")?.state).toBe("queued");
+    expect(timedOutRef.strikes).toBe(0);
+    expect(mid.runsFor(timedOutRef.id)).toHaveLength(1);
+    expect(mid.runsFor(timedOutRef.id)[0]).toMatchObject({ outcome: "interrupted", reason: "timeout" });
+    expect(mid.activeHolds(timedOutRef.id, at(12))).toHaveLength(1);
     mid.close();
 
     // -- The person, briefly awake: requeue the stall, approve the late scope.
     await run(["task", "requeue", "t-07", "--as", "alex", "--token", approverToken, "--json"], at(15));
     expect(payload().ok).toBe(true);
+    expect(await run(["task", "resume", "t-08", "--as", "alex", "--token", approverToken, "--json"], at(15))).toBe(EXIT.ok);
     await run(["task", "approve", "t-10", "--json"], at(15));
     const digest10 = payload().scope.digest as string;
     await run(["task", "approve", "t-10", "--yes", "--digest", digest10, "--as", "alex", "--token", approverToken], at(15));
 
-    await tick(16);     // t-07 (strikes reset) and t-10 build
+    await tick(16);     // t-07 (strikes reset), resumed t-08, and t-10 build
 
     // -- Duplicate pass: an empty queue refuses, idempotently — twice.
     expect(await tick(20)).toBe(EXIT.refused);

@@ -1,5 +1,18 @@
 # Progress
 
+**2026-09-06 — Task review and progress stay inside unified Chat.** Confirming
+a Chat proposal no longer sends the operator to a separate task screen.
+`/chat` restates the exact scope and execution settings in a compact
+keyboard-accessible review, posts through the existing `/t/:id/approve`
+door (CSRF, nonce, digest, approval-password preference), and returns to
+the same conversation. Stale or changed digests are refused; asking a
+question never approves; publication stays on the task page. Queued,
+running, needs-input, and built-locally states link to the real build,
+question, or result, with the dedicated task page as fallback. HTTP and
+browser-DOM regressions cover proposal → inline review → approval →
+progress, stale refusal, multi-project focus, and conversation retention.
+
+
 **2026-09-03 — The reduction pass, improvements 1 and 3 by hand: four
 rows and a more group, one accent in two places.** The Mobbin study
 (Linear web and mobile, Vercel, Railway, Supabase, GitHub) settled both.

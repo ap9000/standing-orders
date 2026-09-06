@@ -6305,15 +6305,14 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // Honesty lines preserved verbatim from the run page.
     expect(html).toContain("display only");
 
-    // The Claude-only transcript limitation is kept: a codex build gets the
-    // peek and the stated limit, not an empty transcript.
+    // Every streaming transport feeds the same sanitized live log.
     const ref2 = seed("t-codex", "built by codex");
     const run2 = live("t-codex", ref2, "codex");
     const codex = await (await fetch(url("/t/t-codex"), { headers: { cookie } })).text();
     expect(codex).toContain(`build #${run2} · night-shift-1 · running`);
-    expect(codex).toContain("the live transcript needs the claude harness for now");
-    expect(codex).not.toContain('id="live-transcript"');
-    expect(codex).not.toContain("?fragment=transcript");
+    expect(codex).not.toContain("the live transcript needs the claude harness for now");
+    expect(codex).toContain('id="live-transcript"');
+    expect(codex).toContain(`"/r/${run2}"+"?fragment=transcript&from="`);
 
     // The workbench's selected-task pane carries no run pollers, so the
     // panel there is the static line with the door — never an empty
@@ -7336,7 +7335,7 @@ describe("/peek: every live agent in the console (peek)", () => {
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
-  test("one pane per live run with its stage and transcript tail, a poller per pane, and the set of runs as a fragment; signed-out is a redirect", async () => {
+  test.each(["codex", "openrouter", "gemini"] as const)("%s live activity appears on the run page and peek, using the authenticated sanitized stream", async provider => {
     const { openLiveLog } = await import("./live.js");
     store.createTask({ id: "t-peek", title: "Harden webhook retries" }, T0);
     const ref = store.refFor("built-in", "t-peek").id;
@@ -7344,7 +7343,7 @@ describe("/peek: every live agent in the console (peek)", () => {
     register(store, { name: "night-shift-1", host: "host", capacity: 2, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-peek" });
     const taken = acquire(store, ref, "night-shift-1", { token: "tok-peek", now: new Date(), ttlMs: 60 * 60_000 });
     if (!taken.ok) throw new Error("claim failed");
-    const run = store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role: "builder", provider: "codex", branch: "standing-orders/t-peek", worktree: "/pool/t-peek", now: new Date() });
+    const run = store.startRun({ taskRef: ref, leaseId: taken.claim.leaseId, runner: "night-shift-1", role: "builder", provider, branch: "standing-orders/t-peek", worktree: "/pool/t-peek", now: new Date() });
     store.setRunPhase(run, "agent-running");
     const log = openLiveLog(evidenceRoot, run);
     log?.observe({ type: "item.completed", item: { type: "agent_message", text: "Reading the retry loop now." } });
@@ -7370,6 +7369,32 @@ describe("/peek: every live agent in the console (peek)", () => {
     // The run page of a non-claude run carries the transcript poller too.
     const runPage = await (await fetch(`${base}/r/${run}`, { headers: { cookie } })).text();
     expect(runPage).toContain("fragment=transcript");
+    expect(runPage).toContain('id="live-transcript"');
+    expect(runPage).not.toContain("the live transcript needs the claude harness");
+    const transcript = await (await fetch(`${base}/r/${run}?fragment=transcript&from=0`, { headers: { cookie } })).json();
+    expect(transcript.text).toContain("Reading the retry loop now.");
+    expect(transcript.text).toContain("→ running a command");
+    expect(transcript.text).not.toContain("cat secrets");
+    // The initially rendered tail must not be appended again by its first
+    // poll. Execute the actual generated browser script against the DOM.
+    const { Window } = await import("happy-dom");
+    const browser = new Window();
+    try {
+      browser.document.body.innerHTML = page;
+      const pane = browser.document.getElementById(`live-transcript-${run}`)!;
+      expect(Number(pane.getAttribute("data-initial-offset"))).toBe(transcript.nextOffset);
+      const requested: string[] = [];
+      browser.fetch = async input => {
+        requested.push(String(input));
+        return new browser.Response(JSON.stringify({ text: "Next update\n", nextOffset: transcript.nextOffset + 12, final: true }), { status: 200 });
+      };
+      const script = [...browser.document.querySelectorAll("script")].find(one => one.textContent.includes(`var out=document.getElementById("live-transcript-${run}")`))!;
+      browser.eval(script.textContent);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(requested.filter(path => path.includes("fragment=transcript"))).toEqual([`/r/${run}?fragment=transcript&from=${transcript.nextOffset}`]);
+      expect(pane.textContent.match(/Reading the retry loop now\./g)).toHaveLength(1);
+      expect(pane.textContent).toContain("\nNext update\n");
+    } finally { await browser.happyDOM.abort(); }
 
     store.finishRun(run, { outcome: "built", now: new Date() });
     const empty = await (await fetch(`${base}/peek`, { headers: { cookie } })).text();

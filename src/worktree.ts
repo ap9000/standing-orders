@@ -216,9 +216,9 @@ export class WorktreePool {
         return { ok: false, reason: "git", message: `${path} could not be inspected` };
       }
       if (dirty) {
-        // The task's own leftover, from an attempt that finished and said
-        // so: kept as evidence, then cleared, so the retry starts from the
-        // branch and not from a half-edit. Anything else stays for a person.
+        // The task's own leftover is saved as recovery evidence. Interrupted
+        // and infrastructure-failed attempts keep their edits for continuation;
+        // other failed attempts retain the cold-retry behavior below.
         const own = request.reclaim !== undefined && request.taskRef !== undefined && existing.taskRef === request.taskRef;
         if (!own) {
           return {
@@ -230,8 +230,12 @@ export class WorktreePool {
         const kept = await this.keepLeftover(path, (request.reclaim as { evidenceRoot: string }).evidenceRoot, request.now);
         if (!kept.ok) return { ok: false, reason: "git", message: kept.message };
         const previous = this.store.runsFor(request.taskRef!).find(one => one.worktree === path && one.role !== "repair");
-        const resumePreserved = previous !== undefined && previous.taskRef === request.taskRef && previous.outcome === "interrupted" &&
-          (previous.reason === "stopped" || previous.reason === "handoff-incomplete");
+        const resumePreserved = previous !== undefined && previous.taskRef === request.taskRef && (
+          (previous.outcome === "interrupted" && ["stopped", "handoff-incomplete", "timeout"].includes(previous.reason ?? "")) ||
+          // Older releases recorded timeouts as failed/retryable-infra.
+          // Recover those edits too; branch/HEAD/approval proofs still apply.
+          (previous.outcome === "failed" && ["timeout", "retryable-infra"].includes(previous.reason ?? ""))
+        );
         if (!resumePreserved) {
           const reset = await this.resetTree(path);
           if (!reset.ok) return { ok: false, reason: "git", message: reset.message };

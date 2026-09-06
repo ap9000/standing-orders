@@ -13,7 +13,7 @@ const createDecisionServer = (options: Parameters<typeof createServer>[0]) => cr
 });
 import { addDesktopProjects, readDesktopConfig, writeDesktopConfig } from "./desktop-host.js";
 import { register } from "./runner.js";
-import { acquire } from "./claim.js";
+import { acquire, release } from "./claim.js";
 
 const temporary = () => realpathSync(mkdtempSync(join(tmpdir(), "so-projects-")));
 const git = (root: string, name: string) => { const repo = join(root, name); mkdirSync(repo); execFileSync("git", ["init", "-q", repo]); return repo; };
@@ -127,6 +127,57 @@ test("shared project journey: multi-select, review, persist without losing sessi
     const created = store.listTasks().find(one => one.title === "A feature in the third project")!;
     expect(store.lookupRef(created.id)?.repo).toBe(c); expect(store.getScope(created.id)?.approvedAt).toBeNull();
     const refreshed = await get("/workbench?fragment=projects"); expect(refreshed).toContain("A feature in the third project"); expect(refreshed).toContain("Needs you"); expect(refreshed).not.toContain("<html");
+    const projectCard = (html: string) => [...parse(html).querySelectorAll(".workspace-card")].find(card => card.querySelector(".workspace-name")?.textContent === "empty-project")!;
+    const pending = projectCard(refreshed);
+    expect(pending.querySelector(".setup-actions .primary")?.textContent).toBe("Review task");
+    expect(pending.querySelector(".setup-actions .primary")?.getAttribute("href")).toBe(`/t/${created.id}`);
+    expect(pending.querySelector(".project-next-step")?.textContent).toContain("needs your approval before it can run");
+    expect(pending.querySelector(".project-next-step")?.textContent).not.toContain("Ready when you are");
+    expect(pending.querySelector(".project-details button")?.textContent).toBe("Start session");
+    const approval = formData(await get(`/t/${created.id}`), "form#approve"); approval.set("token", op.token);
+    expect((await post(`/t/${created.id}/approve`, approval)).status).toBe(303);
+    const approved = projectCard(await get("/workbench?fragment=projects"));
+    expect(approved.querySelector(".setup-actions .primary")?.textContent).toBe("Start session");
+    // Live work wins over a paused local launcher; progress links target the run.
+    register(store, { name: "remote-builder", host: "elsewhere", capacity: 1, repos: [c], now, newToken: () => "runner-token" });
+    const held = acquire(store, store.lookupRef(created.id)!.id, "remote-builder", { token: "runner-token", now, ttlMs: 60_000 });
+    if (!held.ok) throw new Error("fixture claim");
+    const run = store.startRun({ taskRef: store.lookupRef(created.id)!.id, leaseId: held.claim.leaseId, runner: "remote-builder", branch: "work", worktree: join(root, "work"), now });
+    const active = projectCard(await get("/workbench?fragment=projects"));
+    expect(active.querySelector(".workspace-head .badge")?.textContent).toBe("Working");
+    expect(active.querySelector(".setup-actions .primary")?.textContent).toBe("View progress");
+    expect(active.querySelector(".setup-actions .primary")?.getAttribute("href")).toBe(`/r/${run}`);
+    expect(active.querySelector(".project-task")?.getAttribute("href")).toBe(`/r/${run}`);
+    expect(active.querySelector(".project-task")?.textContent).not.toContain("remote-builder");
+    store.finishRun(run, { outcome: "failed", now }); release(store, held.claim.leaseId, now);
+    const failed = projectCard(await get("/workbench?fragment=projects"));
+    expect(failed.querySelector(".setup-actions .primary")?.textContent).toBe("Review failed build");
+    expect(failed.querySelector(".setup-actions .primary")?.getAttribute("href")).toBe(`/r/${run}`);
+    expect(failed.querySelector(".project-next-step")?.textContent).toContain("Your session is on");
+    expect(failed.querySelector(".workspace-head .badge")?.textContent).toBe("Attempt failed");
+    store.retireRunner("remote-builder", now);
+    const failedPaused = projectCard(await get("/workbench?fragment=projects"));
+    expect(failedPaused.querySelector(".project-next-step")?.textContent).toContain("Session paused");
+    register(store, { name: "retry-builder", host: "elsewhere", capacity: 1, repos: [c], now, newToken: () => "retry-token" });
+    const retryClaim = acquire(store, store.lookupRef(created.id)!.id, "retry-builder", { token: "retry-token", now, ttlMs: 60_000 });
+    if (!retryClaim.ok) throw new Error("retry claim");
+    const retry = store.startRun({ taskRef: store.lookupRef(created.id)!.id, leaseId: retryClaim.claim.leaseId, runner: "retry-builder", branch: "work", worktree: join(root, "work"), now });
+    expect(store.pauseInterruptedRun(retry, "timeout", "The time limit was reached.", now)).toBe(true);
+    const timedOut = projectCard(await get("/workbench?fragment=projects"));
+    expect(timedOut.querySelector(".workspace-head .badge")?.textContent).toBe("Task paused");
+    expect(timedOut.querySelector(".setup-actions .primary")?.textContent).toBe("Review paused task");
+    expect(timedOut.querySelector(".setup-actions .primary")?.getAttribute("href")).toBe(`/t/${created.id}`);
+    expect(await get(`/t/${created.id}`)).toContain("Time limit reached — work preserved");
+    store.unhold(store.lookupRef(created.id)!.id);
+    const decision = store.saveDecision({ run, urgency: "blocking", recap: "Choose the approach", question: "Which layout should we use?", options: [
+      { id: "panel", label: "Panel", consequence: "Keep the chat visible", reversible: true },
+      { id: "page", label: "Page", consequence: "Open a separate screen", reversible: true },
+    ], recommendation: "panel" }, now);
+    const blocked = projectCard(await get("/workbench?fragment=projects"));
+    expect(blocked.querySelector(".setup-actions .primary")?.textContent).toBe("Answer question");
+    expect(blocked.querySelector(".setup-actions .primary")?.getAttribute("href")).toBe(`/d/${decision}`);
+    expect(blocked.querySelector(".project-task")?.getAttribute("href")).toBe(`/d/${decision}`);
+    expect(blocked.querySelector(".project-next-step")?.textContent).toContain("Which layout should we use?");
     expect(changes).toHaveLength(3);
     // Ordinary root-scoped web connections can use the same multi-select UI without desktop enrollment authority.
     const scoped = createDecisionServer({ store, projectRoots: [root], evidenceRoot: join(root, "evidence") });

@@ -47,7 +47,7 @@ describe("argv dialects", () => {
     expect(argv).not.toContain("--ephemeral");
 
     const resumed = adapterFor("codex").argv({ ...ASK, resumeSession: "thread-1" });
-    expect(resumed.slice(0, 3)).toEqual(["exec", "resume", "thread-1"]);
+    expect(resumed.slice(0, 5)).toEqual(["exec", "--sandbox", "workspace-write", "resume", "thread-1"]);
   });
 
   test("openrouter rides codex under a private provider key, TOML-quoted, key shell-excluded", () => {
@@ -59,6 +59,15 @@ describe("argv dialects", () => {
     expect(joined).toContain(`env_key="${OPENROUTER_ENV_KEY}"`);
     // The model's own shells never inherit the key — only the transport.
     expect(joined).toContain(`shell_environment_policy.exclude=["${OPENROUTER_ENV_KEY}"]`);
+    for (const resumeSession of [null, "thread-1"]) {
+      const invocation = adapterFor("openrouter").argv({ ...ASK, resumeSession });
+      expect(invocation).toContain("--ignore-user-config");
+      expect(invocation.join(" ")).toContain("--disable apps --disable plugins");
+      expect(invocation).toEqual(expect.arrayContaining(["--sandbox", "workspace-write"]));
+      expect(invocation).not.toContain("--ignore-rules");
+      expect(invocation).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    }
+    expect(adapterFor("codex").argv(ASK)).not.toContain("--ignore-user-config");
   });
 });
 

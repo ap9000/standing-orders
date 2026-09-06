@@ -309,7 +309,9 @@ function disposeSettledOutcome(context: DisposeContext, result: BuildResult): Di
 
   // ---- refusals and failures -----------------------------------------------
 
-  if (result.reason === "stopped" || result.reason === "handoff-incomplete") {
+  // A hard time limit is an interrupted attempt, not transient infrastructure
+  // to retry automatically. Keep the work and require an explicit resume.
+  if (result.reason === "stopped" || result.reason === "handoff-incomplete" || result.reason === "timeout") {
     if (policy === "tick") {
       if (!store.pauseInterruptedRun(runId, result.reason, result.message, clock())) {
         store.finishRun(runId, { outcome: "refused", reason: "fenced", now: clock() });
@@ -397,7 +399,7 @@ function disposeSettledOutcome(context: DisposeContext, result: BuildResult): Di
         ? "agent-reported"
         : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
           ? "no-op"
-          : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "provider-unattested" || result.reason === "provider-protocol"
+          : result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "provider-unattested" || result.reason === "provider-protocol"
             ? "retryable-infra"
             : result.reason === "commit-failure"
               ? "commit-failure"

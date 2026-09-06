@@ -62,9 +62,20 @@ test("a chat suggestion becomes one unapproved task, returns its review, and pre
     const confirmation = f.fields(page, action); expect((await f.post(action, confirmation)).status).toBe(303); expect(f.store.listTasks()).toHaveLength(1);
     await f.post(action, confirmation); expect(f.store.listTasks()).toHaveLength(1);
     const task = f.store.listTasks()[0]!; const scope = f.store.getScope(task.id)!; expect(scope).toMatchObject({ approvedAt: null, outOfScope: "Keep navigation unchanged." });
-    const reviewPath = `/t/${task.id}`; const review = await (await f.get(reviewPath)).text(); const approval = f.fields(review, reviewPath + "/approve");
-    expect((await f.post(reviewPath + "/approve", approval)).status).toBe(303); expect(f.store.getScope(task.id)?.approvedAt).not.toBeNull();
-    const returned = await (await f.get()).text(); expect(returned).toContain("Add a contact form to Website"); expect(returned).not.toContain("still needs your approval");
+    const chat = await (await f.get()).text();
+    const review = f.parse(chat);
+    expect(review.querySelector("textarea[name=message]")).not.toBeNull();
+    const approveAction = `/t/${task.id}/approve`;
+    const approval = f.fields(chat, approveAction);
+    expect(approval.digest).toBe(scope.digest);
+    expect(approval.return).toBe("chat");
+    expect(review.querySelector(`aside[aria-label="Review task"]`)?.textContent).toContain("Add name, email and message fields.");
+    expect(review.querySelector(`aside[aria-label="Review task"]`)?.textContent).toContain("Keep navigation unchanged.");
+    const fallback = await (await f.get(`/t/${task.id}`)).text();
+    expect(f.parse(fallback).querySelector(`form[action="${approveAction}"]`)).not.toBeNull();
+    expect(fallback).toContain("← Back to chat");
+    expect((await f.post(approveAction, approval)).status).toBe(303); expect(f.store.getScope(task.id)?.approvedAt).not.toBeNull();
+    const returned = await (await f.get()).text(); expect(returned).toContain("Add a contact form to Website"); expect(returned).toContain("Queued"); expect(returned).not.toContain("Awaiting approval");
     const statusBefore = await (await f.get("/chat?fragment=chat-status")).text();
     register(f.store, { name: "fixture", host: "here", repos: f.repos, now: new Date(), newToken: () => "fixture-token" });
     const ref = f.store.lookupRef(task.id)!;
@@ -73,9 +84,20 @@ test("a chat suggestion becomes one unapproved task, returns its review, and pre
     const run = f.store.startRun({ taskRef: ref.id, leaseId: claim.claim.leaseId, runner: "fixture", branch: "standing-orders/chat", worktree: join(f.repos[0]!, "test-worktree"), now: new Date() });
     expect(await (await f.get("/chat?fragment=chat-status")).text()).not.toBe(statusBefore);
     expect(f.parse(await (await f.get()).text()).querySelector('.chat-progress')?.textContent).toContain("Running");
+    const decisionId = f.store.saveDecision({
+      run, urgency: "blocking", recap: "Choose what to do", question: "Continue?",
+      recommendation: "continue", options: [{ id: "continue", label: "Continue", consequence: "Resume work", reversible: true }],
+    }, new Date());
+    const needs = f.parse(await (await f.get()).text()).querySelector(".chat-progress")?.textContent;
+    expect(needs).toContain("Needs input");
+    expect(needs).toContain("Answer the question");
+    expect(f.parse(await (await f.get()).text()).querySelector(`.chat-progress a[href="/d/${decisionId}"]`)).not.toBeNull();
+    expect(f.store.answerDecision({ id: decisionId, choice: "continue", by: "tester", via: "web" }, new Date()).ok).toBe(true);
     f.store.finishRun(run, { outcome: "built", committed: true, now: new Date() }); f.store.setTaskState(task.id, "done", new Date());
-    const completed = f.parse(await (await f.get()).text()).querySelector('.chat-progress')?.textContent;
+    const completedPage = f.parse(await (await f.get()).text());
+    const completed = completedPage.querySelector(".chat-progress")?.textContent;
     expect(completed).toContain("Built locally"); expect(completed).toContain("Review result");
+    expect(completedPage.querySelector(`.chat-progress a[href="/r/${run}"]`)).not.toBeNull();
     expect(f.prompts[0]).toContain("r1"); expect(f.prompts[0]).not.toContain(f.repos[0]);
   } finally { await f.close(); }
 });
@@ -90,5 +112,71 @@ test("revocation during the post-answer account check discards the answer", asyn
     const turn = f.store.recentMateTurns("tester", 1)[0]!;
     expect(turn.state).toBe("failed"); expect(f.store.listTasks()).toHaveLength(0);
     expect(f.store.listMateMessages(turn.thread, 40).some(message => message.role === "assistant")).toBe(false);
+  } finally { await f.close(); }
+});
+
+test("the browser retains a typed draft through approval and project focus, and clears it only when sending", async () => {
+  const f = await fixture(); const browsers: Window[] = [];
+  const boot = (html: string, saved: [string, string][] = []) => {
+    const browser = new Window(); browsers.push(browser);
+    browser.document.body.innerHTML = html;
+    for (const [key, value] of saved) browser.sessionStorage.setItem(key, value);
+    browser.fetch = async () => new browser.Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    const script = [...browser.document.querySelectorAll('script')].find(one => one.textContent.includes('standing-orders-chat-draft:'))!;
+    expect(script).toBeTruthy(); browser.eval(script.textContent);
+    return browser;
+  };
+  const stored = (browser: Window): [string, string][] => Array.from({ length: browser.sessionStorage.length }, (_, i) => {
+    const key = browser.sessionStorage.key(i)!; return [key, browser.sessionStorage.getItem(key)!];
+  });
+  try {
+    f.setAnswer({ chatEnvelope: 1, reply: "Review this task.", proposals: [{ kind: "task", repoId: "r1", title: "Contact form", goal: "Add a contact form", outOfScope: null, touches: [] }] });
+    const fields = f.fields(await (await f.get()).text(), '/chat');
+    await f.post('/chat', { ...fields, message: 'Add a contact form' }); await f.settled();
+    const page = await (await f.get()).text();
+    const confirm = f.parse(page).querySelector('form[action$="/confirm"]')!.getAttribute('action')!;
+    await f.post(confirm, f.fields(page, confirm));
+    const task = f.store.listTasks()[0]!; const action = `/t/${task.id}/approve`;
+    const review = await (await f.get()).text(); const first = boot(review);
+    const input = first.document.querySelector<HTMLTextAreaElement>('textarea[name="message"]')!;
+    input.value = 'Also keep the mobile layout readable'; input.dispatchEvent(new first.Event('input', { bubbles: true }));
+    first.document.querySelector(`form[action="${action}"]`)!.dispatchEvent(new first.Event('submit', { bubbles: true, cancelable: true }));
+    expect(stored(first).map(([, value]) => value)).toEqual([input.value]);
+    const approval = f.fields(review, action); expect(approval).not.toHaveProperty('token');
+    expect((await f.post(action, approval)).headers.get('location')).toBe('/chat');
+    const second = boot(await (await f.get()).text(), stored(first));
+    expect(second.document.querySelector<HTMLTextAreaElement>('textarea[name="message"]')!.value).toBe(input.value);
+    await f.post('/chat/focus', { csrf: fields.csrf!, repo: f.repos[1]! });
+    const third = boot(await (await f.get()).text(), stored(second));
+    const draft = third.document.querySelector<HTMLTextAreaElement>('textarea[name="message"]')!;
+    expect(draft.value).toBe(input.value);
+    expect(third.document.querySelector('.chat-chip[aria-current="true"]')?.textContent).toBe('Mobile app');
+    const form = draft.form!; const prevent = (event: Event) => event.preventDefault();
+    form.addEventListener('submit', prevent, { once: true });
+    form.dispatchEvent(new third.Event('submit', { bubbles: true, cancelable: true })); await Promise.resolve();
+    expect(stored(third)).toHaveLength(1);
+    form.dispatchEvent(new third.Event('submit', { bubbles: true, cancelable: true })); await Promise.resolve();
+    expect(stored(third)).toHaveLength(0);
+  } finally { for (const browser of browsers) await browser.happyDOM.abort(); await f.close(); }
+});
+
+test("a task with additional plan terms falls back to full review instead of signing hidden terms", async () => {
+  const f = await fixture(); try {
+    f.setAnswer({ chatEnvelope: 1, reply: "Review this task.", proposals: [{ kind: "task", repoId: "r1", title: "Plan a form", goal: "Add a contact form", outOfScope: null, touches: [] }] });
+    const fields = f.fields(await (await f.get()).text(), '/chat');
+    await f.post('/chat', { ...fields, message: 'Add a contact form' }); await f.settled();
+    const page = await (await f.get()).text();
+    const confirm = f.parse(page).querySelector('form[action$="/confirm"]')!.getAttribute('action')!;
+    await f.post(confirm, f.fields(page, confirm));
+    const task = f.store.listTasks()[0]!;
+    const oldApproval = f.fields(await (await f.get()).text(), `/t/${task.id}/approve`);
+    expect(f.store.requestPlan(f.store.lookupRef(task.id)!.id, new Date()).ok).toBe(true);
+    const refused = await f.post(`/t/${task.id}/approve`, oldApproval);
+    expect(refused.headers.get('location')).toContain('additional%20terms');
+    const review = f.parse(await (await f.get()).text());
+    expect(review.querySelector(`form[action="/t/${task.id}/approve"]`)).toBeNull();
+    expect(review.querySelector('.chat-review')?.textContent).toContain('remaining settings and terms');
+    expect(review.querySelector(`.chat-review a[href="/t/${task.id}"]`)).not.toBeNull();
+    expect(f.store.getScope(task.id)?.approvedAt).toBeNull();
   } finally { await f.close(); }
 });

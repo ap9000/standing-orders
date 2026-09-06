@@ -256,10 +256,15 @@ setup is needed. All projects is the default. Project chips change focus
 without clearing the conversation.
 
 The assistant can summarize recorded project status and propose tasks. Review
-task opens the existing approval screen directly, and Back to chat returns to
-the thread. Approved tasks show current progress and a result link there.
-Chat does not browse project files or run commands; builders do that only
-after task approval. API chat remains available under its settings fold.
+task files a draft and opens compact inline review in Chat: the exact scope,
+execution settings, and the same approval door as the task page, including
+your approval-password preference. Approving binds that digest; asking another
+question does not. Publication stays on the task page. Queued, running, needs
+input, and built-locally states update in the conversation with links to the
+build, question, or result. Draft messages survive approval and project
+changes in the same tab. Plans, revisions, and comparison terms use the full
+task page so all terms are visible. Builders change project code only after
+task approval. API chat remains available under its settings fold.
 
 The local conversation window lasts 12 hours and the thread has the existing
 24-hour retention limit. Ending the conversation deletes its history. Usage

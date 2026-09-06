@@ -8636,7 +8636,7 @@ export class Store {
       this.db.prepare("UPDATE claim SET released_at = ?, released_by = 'operator-interruption' WHERE lease_id = ? AND released_at IS NULL")
         .run(now.toISOString(), run.leaseId);
       if (!this.activeHolds(run.taskRef, now).some(hold => hold.ownerKind === "operator")) {
-        this.hold(run.taskRef, reason === "stopped" ? "Stopped; resume when ready" : "Work preserved; completion needs repair", null, now);
+        this.hold(run.taskRef, reason === "stopped" ? "Stopped; resume when ready" : reason === "timeout" ? "Time limit reached; work preserved. Review before resuming." : "Work preserved; completion needs repair", null, now);
       }
       this.recordOutcomeFacts(runId, { handoff: message });
       this.finishRun(runId, { outcome: "interrupted", reason, now });

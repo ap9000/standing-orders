@@ -169,6 +169,7 @@ describe("the unified chat — one conversation across every project", () => {
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "fixture", T0);
   });
 
   afterEach(async () => {
@@ -423,7 +424,7 @@ describe("the unified chat — one conversation across every project", () => {
       ok(
         cliEnvelope(
           reply("I propose one task.", [
-            { kind: "task", repoId: "r2", title: "Deflake the webhook test", goal: "Pin the clock in the retry test.", outOfScope: null, touches: [] },
+            { kind: "task", repoId: "r2", title: "Deflake the webhook test", goal: "Pin the clock in the retry test.", outOfScope: "Do not rewrite the handler.", touches: ["src/webhooks.ts"] },
           ]),
         ),
       );
@@ -443,19 +444,109 @@ describe("the unified chat — one conversation across every project", () => {
 
     const confirmed = await post(cookie, `/chat/proposal/${(pending[0] as { id: number }).id}/confirm`, { csrf, confirm: "yes" });
     expect(confirmed.status).toBe(303);
+    expect(confirmed.headers.get("location")).toBe("/chat");
 
     const resolved = threadProposals(["confirmed"]) as { outcome: Record<string, unknown> | null }[];
     expect(resolved).toHaveLength(1);
     const filed = resolved[0]?.outcome?.["taskId"];
     expect(typeof filed).toBe("string");
 
-    // Progress lives in the conversation, and the scope still needs approving.
+    // Asking another question is not an approval.
+    assistantStdout = () => ok(cliEnvelope(reply("Which change did you mean?")));
+    await post(cookie, "/chat", { csrf, message: "should I also rewrite the handler?" });
+    await settle();
+    expect(store.getScope(String(filed))?.approvedAt).toBeNull();
+
     const after = await get(cookie);
-    expect(after).toContain("Review and approve");
-    expect(after).toContain(String(filed));
+    expect(after).toContain("the webhook test keeps flaking in beta");
+    expect(after).toContain("Awaiting approval");
+    expect(after).toContain("Pin the clock in the retry test.");
+    expect(after).toContain("Do not rewrite the handler.");
+    expect(after).toContain("src/webhooks.ts");
+    expect(after).toContain("Claude");
+    expect(after).toContain("sonnet");
+    expect(after).toContain(`action="/t/${filed}/approve"`);
+    expect(after).toContain('name="return" value="chat"');
+    expect(after).toContain("Open full task page");
+    expect(after).toContain('id="chat-file"');
+    expect(after).toMatch(/<label class="chat-composer-field">Message<textarea name="message"/);
     const task = store.getTask(String(filed));
     expect(task).not.toBeNull();
-    expect(after).toContain("Awaiting approval");
+    const fallback = await get(cookie, `/t/${filed}`);
+    expect(fallback).toContain("Approve task");
+    expect(fallback).toContain("← Back to chat");
+  });
+
+  test("inline review approves the exact digest and then shows real progress in Chat", async () => {
+    assistantStdout = () =>
+      ok(
+        cliEnvelope(
+          reply("I propose one task.", [
+            { kind: "task", repoId: "r1", title: "Add a contact form", goal: "Add name, email and message fields.", outOfScope: "Keep navigation unchanged.", touches: [] },
+          ]),
+        ),
+      );
+    const { cookie, csrf } = await conversing();
+    await post(cookie, "/chat", { csrf, message: "Add a contact form to alpha" });
+    await settle();
+    const pending = threadProposals(["pending"]) as { id: number }[];
+    expect((await post(cookie, `/chat/proposal/${pending[0]!.id}/confirm`, { csrf })).status).toBe(303);
+    const filed = String((threadProposals(["confirmed"])[0] as { outcome: { taskId: string } }).outcome.taskId);
+    const review = await get(cookie);
+    const nonce = /name="nonce" value="([^"]+)"/.exec(review)?.[1];
+    const digest = /name="digest" value="([^"]+)"/.exec(review)?.[1];
+    expect(nonce).toBeTruthy();
+    expect(digest).toBe(store.getScope(filed)?.digest);
+
+    const stale = await post(cookie, `/t/${filed}/approve`, { csrf, nonce: nonce!, digest: "not-the-digest", token: approverToken, return: "chat" });
+    expect(stale.status).toBe(303);
+    expect(stale.headers.get("location")).toContain("stale");
+    expect(store.getScope(filed)?.approvedAt).toBeNull();
+    const kept = await get(cookie, stale.headers.get("location")!);
+    expect(kept).toContain("Add a contact form to alpha");
+    expect(kept).toContain("that approval form is stale — read it again");
+    expect(kept).toContain("Awaiting approval");
+
+    const fresh = await get(cookie);
+    const freshNonce = /name="nonce" value="([^"]+)"/.exec(fresh)?.[1];
+    const freshDigest = /name="digest" value="([^"]+)"/.exec(fresh)?.[1];
+    const approved = await post(cookie, `/t/${filed}/approve`, { csrf, nonce: freshNonce!, digest: freshDigest!, token: approverToken, return: "chat" });
+    expect(approved.status).toBe(303);
+    expect(approved.headers.get("location")).toBe("/chat");
+    expect(store.getScope(filed)?.approvedAt).not.toBeNull();
+    expect(store.getScope(filed)?.approvedDigest).toBe(freshDigest);
+
+    const queued = await get(cookie);
+    expect(queued).toContain("Add a contact form to alpha");
+    expect(queued).toContain("Queued");
+    expect(queued).not.toContain("Awaiting approval");
+    expect(queued).toMatch(/<label class="chat-composer-field">Message<textarea name="message"/);
+  });
+
+  test("changing project focus keeps the conversation, the draft composer, and inline review", async () => {
+    assistantStdout = () =>
+      ok(
+        cliEnvelope(
+          reply("I propose one task.", [
+            { kind: "task", repoId: "r2", title: "Deflake the webhook test", goal: "Pin the clock in the retry test.", outOfScope: null, touches: [] },
+          ]),
+        ),
+      );
+    const { cookie, csrf } = await conversing();
+    await post(cookie, "/chat", { csrf, message: "the webhook test keeps flaking in beta" });
+    await settle();
+    const pending = threadProposals(["pending"]) as { id: number }[];
+    await post(cookie, `/chat/proposal/${pending[0]!.id}/confirm`, { csrf });
+    const focused = await post(cookie, "/chat/focus", { csrf, repo: repoA });
+    expect(focused.status).toBe(303);
+    const html = await get(cookie);
+    expect(html).toContain("the webhook test keeps flaking in beta");
+    expect(html).toContain("Deflake the webhook test");
+    expect(html).toContain("Awaiting approval");
+    expect(html).toContain(`action="/t/`);
+    expect(html).toContain("/approve");
+    expect(html).toMatch(/<label class="chat-composer-field">Message<textarea name="message"/);
+    expect(html).toContain('aria-current="true"');
   });
 
   test("a draft naming a project outside the ceiling is dropped whole", async () => {
