@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 34;
+export const SCHEMA_VERSION = 38;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2009,6 +2009,13 @@ CREATE TABLE IF NOT EXISTS approver (
   generation      INTEGER NOT NULL DEFAULT 1
 );
 
+-- Account-specific confirmation preferences, shared by desktop and browser sessions.
+CREATE TABLE IF NOT EXISTS approval_preference (
+  name TEXT PRIMARY KEY REFERENCES approver(name),
+  password_required INTEGER NOT NULL DEFAULT 1 CHECK (password_required IN (0,1)),
+  updated_at TEXT NOT NULL
+);
+
 -- One Telegram chat speaking as one approver. Bindings are never deleted:
 -- revocation is a stamp, because "who could answer as whom, when" is an
 -- audit question a DELETE cannot answer. The partial unique index is the
@@ -2050,6 +2057,78 @@ CREATE TABLE IF NOT EXISTS telegram_update (
   update_id  INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL,
   result     TEXT NOT NULL
+);
+
+-- Conversational messages are committed with the inbound cursor, then answered
+-- outside the poll loop. Delivery retries reuse the answer, never another turn.
+CREATE TABLE IF NOT EXISTS telegram_chat_request (
+  update_id INTEGER PRIMARY KEY,
+  binding INTEGER NOT NULL REFERENCES telegram_binding(id),
+  message_id TEXT NOT NULL,
+  reply_to TEXT,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','ready','sent')),
+  owner TEXT,
+  lease_until TEXT,
+  reply TEXT,
+  parts_sent INTEGER NOT NULL DEFAULT 0,
+  thread INTEGER REFERENCES mate_thread(id),
+  ceiling_digest TEXT
+);
+CREATE INDEX IF NOT EXISTS telegram_chat_pending ON telegram_chat_request(binding, state, update_id);
+-- v38: delivery progress and media remain separate from the durable question.
+CREATE TABLE IF NOT EXISTS telegram_chat_detail (
+  request INTEGER PRIMARY KEY REFERENCES telegram_chat_request(update_id) ON DELETE CASCADE,
+  progress_message TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_problem TEXT,
+  turn INTEGER,
+  attachment_json TEXT,
+  focus_repo TEXT
+);
+CREATE TABLE IF NOT EXISTS telegram_chat_card (
+  token TEXT PRIMARY KEY,
+  binding INTEGER NOT NULL REFERENCES telegram_binding(id),
+  proposal INTEGER NOT NULL REFERENCES mate_proposal(id) ON DELETE CASCADE,
+  operation TEXT NOT NULL CHECK(operation IN ('confirm','dismiss')),
+  message_id TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  UNIQUE(binding, proposal, operation)
+);
+CREATE TABLE IF NOT EXISTS chat_preferences (
+  approver TEXT PRIMARY KEY,
+  retention_days INTEGER NOT NULL DEFAULT 90 CHECK(retention_days IN (1,30,90,365)),
+  focus_repo TEXT
+);
+CREATE TABLE IF NOT EXISTS telegram_chat_confirmation (
+  update_id INTEGER PRIMARY KEY,
+  token TEXT NOT NULL REFERENCES telegram_chat_card(token) ON DELETE CASCADE,
+  binding INTEGER NOT NULL REFERENCES telegram_binding(id),
+  message_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  result TEXT,
+  delivered INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS chat_context (
+  approver TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  note TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(approver, repo)
+);
+CREATE TABLE IF NOT EXISTS chat_turn_focus (
+  turn INTEGER PRIMARY KEY REFERENCES mate_turn(id) ON DELETE CASCADE,
+  repo TEXT
+);
+CREATE TABLE IF NOT EXISTS telegram_notification_message (
+  binding INTEGER NOT NULL REFERENCES telegram_binding(id),
+  message_id TEXT NOT NULL,
+  notification INTEGER NOT NULL REFERENCES notification(id) ON DELETE CASCADE,
+  PRIMARY KEY(binding, message_id, notification)
 );
 
 -- Opaque one-tap actions. callback_data carries only the random token; what
@@ -2631,6 +2710,14 @@ CREATE TABLE IF NOT EXISTS held_session (
   end_reason            TEXT
 );
 
+-- v35: an operator's stop is bound to an exact run. A successor attempt
+-- never inherits the request; the operator hold prevents automatic retry.
+CREATE TABLE IF NOT EXISTS run_stop (
+  run INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  requested_by TEXT NOT NULL,
+  requested_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS task_by_state ON task (state);
 CREATE INDEX IF NOT EXISTS edge_by_blocker ON task_edge (blocker);
 CREATE INDEX IF NOT EXISTS claim_by_task ON claim (task_ref, lease_generation DESC);
@@ -2688,6 +2775,7 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
 
   const db = connect(file);
+  db.exec("PRAGMA busy_timeout = 5000");
   // THE EPOCH, BEFORE ANY DDL (implementation review, finding 3): even
   // the fresh-SCHEMA exec below adds this build's new tables and indexes
   // to an old database, so the sentinel commits FIRST — a non-migrating
@@ -2703,6 +2791,10 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   }
   db.exec(SCHEMA);
   migrate(db);
+  // Existing local conversations adopt the new retention default before any
+  // reader sweeps history. Explicit preferences are never overwritten.
+  db.prepare("INSERT OR IGNORE INTO chat_preferences(approver) SELECT DISTINCT approver FROM mate_session WHERE credential_key = ?")
+    .run(createHash("sha256").update("standing-orders/chat/local-account/v1").digest("hex"));
   // Attention/history indexes come AFTER migration: on a database whose
   // constrained tables still carry a pre-rebuild shape, creating a partial
   // index first would fail with a raw SQL error instead of the migration's
@@ -2798,7 +2890,7 @@ export function openStoreNoMigrate(
   const db = connect(file);
   // The same referential law every migrating connection gets from SCHEMA —
   // this door never execs SCHEMA, so the pragma is explicit (review f9).
-  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000");
   let seen: number | null = null;
   try {
     const row = db.prepare("SELECT version FROM schema_version").get();
@@ -6219,22 +6311,22 @@ export class Store {
    * approved profile — one UPDATE, no re-resolution, so what is sealed is
    * exactly what the signed digest was bound to. Returns false when the
    * scope vanished mid-ceremony. */
-  sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}, basis?: { kind: "mode"; modeDigest: string }): boolean {
+  sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}, basis?: { kind: "mode"; modeDigest: string } | { kind: "session" }): boolean {
     return (
       this.once(mutation, "sealScopeApproval", () => {
         // THE COORDINATOR QUARANTINE, enforced in the primitive (MCP spec
         // v6, round-3 f1): mode coverage never admits a coordinator-filed
         // task — console, CLI `task scope`, and direct callers alike hit
-        // this wall. The promise to the operator is a fresh password
-        // ceremony that shows WHO asked; only `basis: password` seals it.
-        if (basis !== undefined) {
+        // this wall. The operator must explicitly confirm a fresh review
+        // that shows WHO asked, with a password or their opted-in session.
+        if (basis?.kind === "mode") {
           const filedByCoordinator = this.db
             .prepare("SELECT 1 AS hit FROM task_ref WHERE backend = ? AND external_id = ? AND coordinator_cid IS NOT NULL")
             .get(BUILT_IN, taskId);
           if (filedByCoordinator !== undefined) return false;
           // THE MATE QUARANTINE (mate arc, ruling 2): a scope a confirmed
           // mate proposal wrote is model-authored text; mode coverage never
-          // seals it. Only the password ceremony — which shows the operator
+          // seals it. Only explicit confirmation — which shows the operator
           // every word — approves it.
           const writtenByMate = this.db
             .prepare("SELECT 1 AS hit FROM task_scope WHERE task_id = ? AND proposed_via IN ('mate','coordinator','scout')")
@@ -6259,7 +6351,7 @@ export class Store {
                     approval_kind = CASE WHEN proposed_chain_json IS NOT NULL THEN 'chain' ELSE 'profile' END
               WHERE task_id = ?`,
           )
-          .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis === undefined ? null : basis.modeDigest, taskId);
+          .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis?.kind === "mode" ? basis.modeDigest : null, taskId);
         if (changed.changes > 0) {
           // A fresh yes lifts the stale-approval hold and closes its page
           // (setup review): the approval is what was stale, and it is new.
@@ -6353,6 +6445,18 @@ export class Store {
       generation: Number(row["generation"]),
       revokedAt: row["revoked_at"] === null || row["revoked_at"] === undefined ? null : String(row["revoked_at"]),
     };
+  }
+
+  approvalPasswordRequired(name: string): boolean {
+    const row = this.db.prepare("SELECT password_required FROM approval_preference WHERE name = ?").get(name);
+    return row === undefined || Number(row["password_required"]) !== 0;
+  }
+
+  setApprovalPasswordRequired(name: string, required: boolean, now: Date): void {
+    const account = this.accountOf(name);
+    if (account === null || account.role !== "approver" || account.revokedAt !== null) throw new Error("An active approver account is required.");
+    this.db.prepare(`INSERT INTO approval_preference (name, password_required, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET password_required=excluded.password_required, updated_at=excluded.updated_at`).run(name, required ? 1 : 0, now.toISOString());
   }
 
   // ---- operating modes (v29, the modes chain) ---------------------------
@@ -8483,6 +8587,64 @@ export class Store {
    */
   hasLiveClaim(taskRef: number, now: Date): boolean {
     return this.currentLiveLease(taskRef, now) !== null;
+  }
+
+  stopRequest(runId: number): { by: string; at: string } | null {
+    const row = this.db.prepare("SELECT requested_by, requested_at FROM run_stop WHERE run = ?").get(runId);
+    return row === undefined ? null : { by: String(row["requested_by"]), at: String(row["requested_at"]) };
+  }
+
+  /** Repair turns inherit their parent's stop; unrelated runs do not. */
+  runStopRequested(runId: number): boolean {
+    const row = this.db.prepare(`WITH RECURSIVE ancestry(id, parent_run, role) AS (
+      SELECT id, parent_run, role FROM run WHERE id = ?
+      UNION SELECT r.id, r.parent_run, r.role FROM run r JOIN ancestry a ON r.id = a.parent_run WHERE a.role = 'repair'
+    ) SELECT 1 AS requested FROM ancestry a JOIN run_stop s ON s.run = a.id LIMIT 1`).get(runId);
+    return row !== undefined;
+  }
+
+  requestRunStop(runId: number, by: string, now: Date):
+    | { ok: true; taskId: string }
+    | { ok: false; reason: "unknown-run" | "not-running" | "contest-open" } {
+    return this.transact(() => {
+      const run = this.getRun(runId);
+      if (run === null) return { ok: false as const, reason: "unknown-run" as const };
+      const ref = this.refForId(run.taskRef);
+      if (ref === null) return { ok: false as const, reason: "unknown-run" as const };
+      if (this.stopRequest(runId) !== null) return { ok: true as const, taskId: ref.externalId };
+      if (run.outcome !== null || this.currentLiveLease(run.taskRef, now) !== run.leaseId) {
+        return { ok: false as const, reason: "not-running" as const };
+      }
+      if (this.openContestFor(run.taskRef) !== null) return { ok: false as const, reason: "contest-open" as const };
+      this.db.prepare("INSERT INTO run_stop (run, requested_by, requested_at) VALUES (?, ?, ?)")
+        .run(runId, by, now.toISOString());
+      // Keep any existing operator hold and its explanation intact.
+      if (!this.activeHolds(run.taskRef, now).some(hold => hold.ownerKind === "operator")) {
+        this.hold(run.taskRef, `Stopped by ${by}; resume when ready`, null, now);
+      }
+      this.addRunNote(runId, by, "Stop requested. Work will be preserved and the task will stay paused.", now);
+      this.bumpWake();
+      return { ok: true as const, taskId: ref.externalId };
+    });
+  }
+
+  /** An interrupted attempt is neither a success nor an agent failure. */
+  pauseInterruptedRun(runId: number, reason: string, message: string, now: Date): boolean {
+    return this.transact(() => {
+      const run = this.getRun(runId);
+      if (run === null || run.outcome !== null || this.currentLiveLease(run.taskRef, now) !== run.leaseId) return false;
+      this.db.prepare("UPDATE claim SET released_at = ?, released_by = 'operator-interruption' WHERE lease_id = ? AND released_at IS NULL")
+        .run(now.toISOString(), run.leaseId);
+      if (!this.activeHolds(run.taskRef, now).some(hold => hold.ownerKind === "operator")) {
+        this.hold(run.taskRef, reason === "stopped" ? "Stopped; resume when ready" : "Work preserved; completion needs repair", null, now);
+      }
+      this.recordOutcomeFacts(runId, { handoff: message });
+      this.finishRun(runId, { outcome: "interrupted", reason, now });
+      const ref = this.refForId(run.taskRef);
+      if (ref !== null) this.db.prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
+        .run(now.toISOString(), ref.externalId);
+      return true;
+    });
   }
 
   /**
@@ -12288,6 +12450,17 @@ export class Store {
 
   // ---- telegram ------------------------------------------------------------
 
+  telegramPairingPending(codeHash: string, now: Date): boolean {
+    return this.db.prepare(`SELECT 1 FROM telegram_pairing p JOIN approver a ON a.name = p.approver
+      AND a.generation = p.approver_generation AND a.revoked_at IS NULL AND a.role = 'approver'
+      WHERE p.code_hash = ? AND p.consumed_at IS NULL AND p.expires_at > ?`).get(codeHash, now.toISOString()) !== undefined;
+  }
+
+  cancelTelegramPairing(codeHash?: string): void {
+    if (codeHash === undefined) this.db.prepare("DELETE FROM telegram_pairing WHERE consumed_at IS NULL").run();
+    else this.db.prepare("DELETE FROM telegram_pairing WHERE code_hash = ? AND consumed_at IS NULL").run(codeHash);
+  }
+
   /** Mint a pairing code's record. The code itself was shown once; this is its hash. */
   createTelegramPairing(
     pairing: { codeHash: string; approver: string; by: string; ttlMs: number },
@@ -13313,6 +13486,12 @@ export class Store {
    * deleted; the thread row stays as closed metadata (when, whose). */
   closeMateThreadsFor(approver: string, now: Date): number {
     return this.transact(() => {
+      // Include questions still queued behind another turn, before they have a
+      // thread id. Forgetting the conversation must not start one afterwards.
+      this.db.prepare("DELETE FROM telegram_chat_request WHERE binding IN (SELECT id FROM telegram_binding WHERE approver = ?)").run(approver);
+      this.db.prepare("DELETE FROM chat_context WHERE approver = ?").run(approver);
+      this.db.prepare("DELETE FROM mate_message WHERE thread IN (SELECT id FROM mate_thread WHERE approver = ?)").run(approver);
+      this.db.prepare("DELETE FROM mate_proposal WHERE thread IN (SELECT id FROM mate_thread WHERE approver = ?)").run(approver);
       const rows = this.db.prepare("SELECT id FROM mate_thread WHERE approver = ? AND closed_at IS NULL").all(approver);
       for (const row of rows) {
         const id = Number(row["id"]);
@@ -13348,11 +13527,14 @@ export class Store {
       }));
   }
 
-  /** Transcripts live 24 hours (ruling 11); pending proposals expire with them, in one write. */
+  /** Local chat has configurable history; old/API conversations retain the 24h default.
+   * Proposal validity stays short even when the discussion is retained. */
   sweepMateThreads(now: Date): { messages: number; proposals: number } {
     return this.transact(() => {
       const cutoff = new Date(now.getTime() - 24 * 3_600_000).toISOString();
-      const messages = this.db.prepare("DELETE FROM mate_message WHERE created_at < ?").run(cutoff);
+      this.db.prepare("DELETE FROM telegram_chat_request WHERE state = 'sent' AND created_at < ?").run(cutoff);
+      const messages = this.db.prepare(`DELETE FROM mate_message WHERE julianday(created_at) < julianday(?) -
+        COALESCE((SELECT p.retention_days FROM mate_thread t JOIN chat_preferences p ON p.approver = t.approver WHERE t.id = mate_message.thread), 1)`).run(now.toISOString());
       const proposals = this.db
         .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE state IN ('drafting','pending') AND created_at < ?")
         .run(now.toISOString(), cutoff);
@@ -14325,13 +14507,18 @@ export class Store {
     const waiting = this.countInboxScoped(repo, now).count;
     const q = this.db
       .prepare(
-        `SELECT
-           SUM(CASE WHEN task.state = 'queued' THEN 1 ELSE 0 END) AS queued,
-           SUM(CASE WHEN task.state = 'running' THEN 1 ELSE 0 END) AS running
+        `WITH activity AS (
+         SELECT task.state, EXISTS (
+           SELECT 1 FROM run JOIN claim ON claim.lease_id = run.lease_id
+            WHERE run.task_ref = task_ref.id AND run.outcome IS NULL
+              AND claim.released_at IS NULL AND claim.expires_at > ?
+         ) AS live
            FROM task JOIN task_ref ON task_ref.backend = 'built-in' AND task_ref.external_id = task.id
-          WHERE task_ref.repo = ?`,
+          WHERE task_ref.repo = ?)
+         SELECT SUM(CASE WHEN state = 'queued' AND live = 0 THEN 1 ELSE 0 END) AS queued,
+                SUM(live) AS running FROM activity`,
       )
-      .get(repo) as { queued: number | null; running: number | null };
+      .get(now.toISOString(), repo) as { queued: number | null; running: number | null };
     const since = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
     const done = this.db
       .prepare(
@@ -16160,7 +16347,7 @@ function readScope(row: Record<string, unknown>): Scope {
     approvalBasis:
       row["approval_basis"] === null || row["approval_basis"] === undefined
         ? null
-        : (String(row["approval_basis"]) as "password" | "mode"),
+        : (String(row["approval_basis"]) as "password" | "mode" | "session"),
     modeDigest: row["mode_digest"] === null || row["mode_digest"] === undefined ? null : String(row["mode_digest"]),
     approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
     approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),

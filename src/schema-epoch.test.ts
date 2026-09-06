@@ -75,7 +75,7 @@ describe("the non-migrating door", () => {
         prepare: sql => real.prepare(sql),
         close: () => real.close(),
         exec: sql => {
-          if (versionAtFirstExec === null) {
+          if (versionAtFirstExec === null && !/^PRAGMA busy_timeout/.test(sql)) {
             const peek = new DatabaseSync(path);
             const row = peek.prepare("SELECT version FROM schema_version").get();
             versionAtFirstExec = row === undefined ? Number.NaN : Number(row["version"]);

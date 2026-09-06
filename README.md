@@ -62,6 +62,10 @@ npx standing-orders daemon install …   # the unattended loop, as an OS service
 
 ## Getting started
 
+For a local macOS app with repository selection, background worker controls,
+and Keychain sign-in, build the [native control app](docs/control-app.md) with
+`npm run desktop`. It shares the console and database used by the CLI.
+
 Two roads to the same plane. Both start with `standing-orders up` running
 in the repository, which is the console and the worker in one process.
 
@@ -263,7 +267,13 @@ The Telegram bridge closes the loop without a terminal: a parked decision
 arrives as a message with one button per option, and a tap answers it
 through the same authenticated path as the CLI and the web view — the hold
 lifts, and the next pass resumes the task with the answer in the agent's
-brief. No LLM is anywhere in this path.
+brief. Decision buttons don't use an LLM.
+
+When the app's console service is running, you can also ask ordinary questions
+in Telegram or reply to an alert. Your connected Claude Code account answers
+in the same conversation shown in **Chat** in the app and web console.
+Questions don't approve work; proposed tasks remain available for review in
+Chat. Connection or conversation-authorization problems get a visible reply.
 
 Setup, once:
 

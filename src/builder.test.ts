@@ -804,7 +804,7 @@ describe("what the builder does afterwards", () => {
     if (!result.ok) expect(result.message).toContain("vitest is missing");
   });
 
-  test("a missing handoff is a protocol failure, never a guess", async () => {
+  test("a missing handoff with changed files preserves work for completion repair", async () => {
     const silent: Runner = async () => ({ ...OK, stdout: AGENT_SAID });
     const result = await withGit(async (_f, args) => {
       if (args.includes("symbolic-ref")) return symref(args);
@@ -813,8 +813,17 @@ describe("what the builder does afterwards", () => {
       return { ...OK };
     }, silent);
 
+    expect(result).toMatchObject({ ok: false, reason: "handoff-incomplete" });
+    if (!result.ok) expect(result.message).toContain("Work is preserved");
+  });
+
+  test("a missing handoff with an empty tree remains a failed attempt", async () => {
+    const result = await withGit(async (_f, args) => {
+      if (args.includes("symbolic-ref")) return symref(args);
+      if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+      return { ...OK };
+    }, async () => ({ ...OK, stdout: AGENT_SAID }));
     expect(result).toMatchObject({ ok: false, reason: "no-op" });
-    if (!result.ok) expect(result.message).toContain("without writing its handoff");
   });
 
   test("an agent that commits for itself is refused — the machine commits", async () => {

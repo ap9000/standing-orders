@@ -83,7 +83,7 @@ describe("spec validation", () => {
     expect(reportsCost("codex")).toBe(false);
     expect(reportsCost("openrouter")).toBe(false);
     expect(inspectionOf("codex").identityProbe).toEqual(["login", "status"]);
-    expect(inspectionOf("claude").identityProbe).toBeNull();
+    expect(inspectionOf("claude").identityProbe).toEqual(["auth", "status", "--json"]);
     expect(inspectionOf("openrouter").requiresEnv).toBe(OPENROUTER_ENV_KEY);
   });
 });

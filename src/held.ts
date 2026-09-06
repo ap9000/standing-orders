@@ -214,6 +214,7 @@ export class HeldSessionCoordinator {
       phase: "build",
       model: captured.effective.model,
       maxTurns: captured.effective.maxTurns ?? 40,
+      ...(captured.effective.profile.provider !== "claude" || captured.effective.profile.allowedTools === undefined ? {} : { allowedTools: captured.effective.profile.allowedTools }),
       permissionMode: "acceptEdits",
       skipPermissions: captured.effective.skipPermissions,
       resumeSession: null,
@@ -410,6 +411,10 @@ export class HeldSessionCoordinator {
     controller.timers.push(expiry);
 
     const lapse = setInterval(() => {
+      if (args.store.runStopRequested(args.runId)) {
+        void this.fence(args, "stopped");
+        return;
+      }
       const live = args.store.readAuthorization(args.authorization.id);
       if (live === null || live.closedAt !== null) {
         void this.fence(args, live?.endReason === "revoked" ? "revoked" : "lapsed");
@@ -727,6 +732,11 @@ export class HeldSessionCoordinator {
       }
     }
     store.finishRun(args.runId, { outcome: "interrupted", reason, now: args.clock() });
+    if (reason === "stopped") {
+      const run = store.getRun(args.runId);
+      const ref = run === null ? null : store.refForId(run.taskRef);
+      if (ref !== null && store.getTask(ref.externalId)?.state === "running") store.setTaskState(ref.externalId, "queued", args.clock());
+    }
     store.closeHeldFencing(args.runId, fencer, reason, args.clock());
     store.closeAuthorization(args.authorization.id, reason, args.clock());
     // The worktree is PRESERVED on interruption (released to the pool

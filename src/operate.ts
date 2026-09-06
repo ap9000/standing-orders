@@ -26,6 +26,8 @@
  */
 
 import { homedir, hostname, tmpdir } from "node:os";
+import { stopTaskRun, resumeTaskWork } from "./control.js";
+import { DesktopWorkers, type LocalControl } from "./desktop-workers.js";
 import { dirname, join, resolve } from "node:path";
 import {
   openStore,
@@ -76,13 +78,14 @@ import {
   type FollowReport,
   type TelegramTransport,
 } from "./telegram.js";
+import { consoleTelegramChatEnabled } from "./telegram-connection.js";
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
 import { ask, askHidden, confirm, interactive } from "./prompt.js";
 import { runMateCli, answerContextLines, type MateCliSeams } from "./mate-cli.js";
 import { confirmCoordinatorProposal, dismissCoordinatorProposal } from "./mate-doors.js";
 import { verifyApproverByPassword } from "./principal.js";
-import { canonicalProject, projectName } from "./project.js";
+import { canonicalProject, projectName, resolveCeiling, rowVisible } from "./project.js";
 import { tally, spendLine } from "./summary.js";
 import {
   bodyHashOf,
@@ -165,6 +168,7 @@ import { planTournament, planComparison, contestNoun, jointApprovalDigest, admit
 import { priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
+import { signInFacts } from "./provider-connection.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
 import {
@@ -225,6 +229,8 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task add <title>          queue work
   standing-orders task list [--state <s>]   everything, or one state
   standing-orders task show <id>
+  standing-orders task stop <id>            stop this build and preserve work
+  standing-orders task resume <id>          continue paused work
   standing-orders task state <id> <state>   queued|running|done|failed|cancelled
   standing-orders task block <id> --on <id> <id> waits for <on>
   standing-orders task unblock <id> --on <id>  stop waiting for <on>
@@ -475,7 +481,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
-  "review",
+  "review", "stop", "resume",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -3966,6 +3972,7 @@ async function startConsole(options: {
   host: string;
   port: number;
   localRunner?: string;
+  localControl?: LocalControl;
   poolRoot: string;
   allowedHosts?: string[];
   setupCode?: string;
@@ -3985,6 +3992,7 @@ async function startConsole(options: {
     telegramTokenFile: context.telegramTokenFile,
     configDir: dirname(context.databaseFile),
     ...(options.localRunner === undefined ? {} : { localRunner: options.localRunner }),
+    ...(options.localControl === undefined ? {} : { localControl: options.localControl }),
     poolRoot: options.poolRoot,
     ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
     ...(options.setupCode === undefined ? {} : { setupCode: options.setupCode }),
@@ -4051,12 +4059,18 @@ async function serveCommand(
   // The first-account road (setup review): with no approver, the login
   // page offers to create one, gated by this code — printed below, once.
   const setupCode = store.listApprovers().length === 0 ? String(randomInt(100_000, 1_000_000)) : undefined;
+  // The browser can supervise workers in exactly the projects already
+  // authorized for this server. No worker starts until its button is used.
+  const controlled = resolveCeiling(repoFlag?.split(",").map(one => one.trim()).filter(Boolean) ?? [], rootFlag?.split(",").map(one => one.trim()).filter(Boolean) ?? []).ceiling;
+  const workers = controlled.repos.length === 0 && controlled.roots.length === 0 ? undefined : new DesktopWorkers(store, context.databaseFile,
+    () => [...new Set([...controlled.repos, ...[...store.knownRepos(), ...store.listProjects().map(one => one.path)].filter(repo => rowVisible(controlled, repo))])], undefined, poolRoot);
   const console_ = await startConsole({
     context,
     host,
     port,
     ...(setupCode === undefined ? {} : { setupCode }),
     ...(localRunner === undefined ? {} : { localRunner }),
+    ...(workers === undefined ? {} : { localControl: workers }),
     ...(publicUrl === undefined ? {} : { publicUrl }),
     ...(editor === undefined ? {} : { editorLinks: "vscode" as const }),
     registryPath: registryPathOf(context),
@@ -4081,7 +4095,12 @@ async function serveCommand(
   }
 
   await new Promise<void>(resolve => {
-    const stop = () => server.close(() => resolve());
+    let stopping = false;
+    const stop = () => {
+      if (stopping) return;
+      stopping = true;
+      void (async () => { await workers?.close(); server.close(() => resolve()); })();
+    };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   });
@@ -4436,7 +4455,10 @@ async function providersCommand(
       let identity: string | null = null;
       if (installed && facts.identityProbe !== null) {
         const asked = await probe(facts.binary, [...facts.identityProbe], { timeoutMs: 5_000, omitEnv: ALL_CREDENTIAL_ENV });
-        identity = asked.code === 0 ? (asked.stdout.trim().split("\n")[0] ?? null) : "not logged in";
+        if (id === "claude") {
+          const status = signInFacts(id, asked);
+          identity = status.state === "connected" ? "Signed in to Claude Code" : status.state === "signed-out" ? "not logged in" : "sign-in could not be checked";
+        } else identity = asked.code === 0 ? (asked.stdout.trim().split("\n")[0] ?? null) : "not logged in";
       }
       return { id, facts, version, installed, identity };
     }),
@@ -6296,6 +6318,7 @@ async function runWatchLoop(args: {
     const transport = context.telegramTransport ?? createTransport(followSource.token);
     const followerPrimary = effectivePrimary(process.env, dirname(context.databaseFile), true);
     follower = followBridge(store, {
+      chat: () => consoleTelegramChatEnabled(context.telegramTokenFile, followSource.botId),
       ...(followerPrimary.channel === "telegram" ? {} : { deliver: false }),
       botId: followSource.botId,
       transport,
@@ -7339,6 +7362,7 @@ async function bridgeCommand(
     if (!json) write(`Following bot ${source.botId} — taps apply as they arrive. Ctrl-C stops it.`);
     try {
       const report = await followBridge(store, {
+        chat: () => consoleTelegramChatEnabled(context.telegramTokenFile, source.botId),
         botId: source.botId,
         transport,
         signal: controller.signal,
@@ -7365,6 +7389,7 @@ async function bridgeCommand(
   }
 
   const passed = await bridgePass(store, {
+    chat: consoleTelegramChatEnabled(context.telegramTokenFile, source.botId),
     botId: source.botId,
     transport,
     clock,
@@ -8063,6 +8088,9 @@ function taskCommand(
       return approveTask(rest, flags, context);
     case "hold":
       return holdTask(rest, flags, context);
+    case "stop":
+    case "resume":
+      return controlTask(action, rest, flags, context);
     case "unhold":
       return unholdTask(rest, flags, context);
     case "require":
@@ -9467,6 +9495,23 @@ async function approverCommand(
   }
 
   return fail(write, json, "approver", "usage", `unknown \`approver ${action}\` — try list or add`, EXIT.usage);
+}
+
+async function controlTask(action: "stop" | "resume", positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json, clock } = context;
+  const id = positional[0];
+  if (id === undefined) return fail(write, json, `task ${action}`, "usage", `standing-orders task ${action} <id>`, EXIT.usage);
+  const actor = await askCredentials(flags, context);
+  if (actor === null || !authenticateApprover(store, actor.name, actor.token).ok) {
+    return fail(write, json, `task ${action}`, "unauthenticated", "Sign in as an operator to control this task.", EXIT.refused);
+  }
+  const result = action === "stop"
+    ? stopTaskRun(store, { taskId: id, by: actor.name, now: clock() })
+    : resumeTaskWork(store, id, clock());
+  if (!result.ok) return fail(write, json, `task ${action}`, result.reason, `Could not ${action}: ${result.reason}.`, EXIT.refused);
+  return succeed(write, json, `task ${action}`, { id, ...result }, () => [action === "stop"
+    ? `${id}: stop requested. Work will be preserved and the task will stay paused.`
+    : `${id}: resumed. The next worker continues under the existing approval.`]);
 }
 
 function holdTask(

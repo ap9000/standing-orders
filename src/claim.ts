@@ -1442,6 +1442,9 @@ export function finalizePlanFenced(
     if (run.role !== "planner") {
       throw new Error(`run ${runId} is a ${run.role} run — only planner runs draft plans`);
     }
+    if (store.runStopRequested(runId) && store.pauseInterruptedRun(runId, "stopped", "Stopped by the operator. Resume when ready.", now)) {
+      return { ok: false as const, reason: "fenced" as const };
+    }
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'completed'
@@ -1525,6 +1528,9 @@ export function finalizePlanFailureFenced(
     }
     if (run.role !== "planner") {
       throw new Error(`run ${runId} is a ${run.role} run — this finalizer seals planner attempts only`);
+    }
+    if (store.runStopRequested(runId) && store.pauseInterruptedRun(runId, "stopped", "Stopped by the operator. Resume when ready.", now)) {
+      return { ok: false as const, reason: "fenced" as const };
     }
     const { changes } = db
       .prepare(
@@ -1660,6 +1666,9 @@ export function finalizeScoutFenced(
     if (run.role !== "scout") {
       throw new Error(`run ${runId} is a ${run.role} run — only scout runs deliver reports`);
     }
+    if (store.runStopRequested(runId) && store.pauseInterruptedRun(runId, "stopped", "Stopped by the operator. Resume when ready.", now)) {
+      return { ok: false as const, reason: "fenced" as const };
+    }
     const { changes } = db
       .prepare(
         `UPDATE claim SET released_at = ?, released_by = 'completed'
@@ -1729,6 +1738,9 @@ export function finalizeScoutFailureFenced(
     }
     if (run.role !== "scout") {
       throw new Error(`run ${runId} is a ${run.role} run — this finalizer seals scout attempts only`);
+    }
+    if (store.runStopRequested(runId) && store.pauseInterruptedRun(runId, "stopped", "Stopped by the operator. Resume when ready.", now)) {
+      return { ok: false as const, reason: "fenced" as const };
     }
     const { changes } = db
       .prepare(

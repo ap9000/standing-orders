@@ -229,8 +229,13 @@ export class WorktreePool {
         }
         const kept = await this.keepLeftover(path, (request.reclaim as { evidenceRoot: string }).evidenceRoot, request.now);
         if (!kept.ok) return { ok: false, reason: "git", message: kept.message };
-        const reset = await this.resetTree(path);
-        if (!reset.ok) return { ok: false, reason: "git", message: reset.message };
+        const previous = this.store.runsFor(request.taskRef!).find(one => one.worktree === path && one.role !== "repair");
+        const resumePreserved = previous !== undefined && previous.taskRef === request.taskRef && previous.outcome === "interrupted" &&
+          (previous.reason === "stopped" || previous.reason === "handoff-incomplete");
+        if (!resumePreserved) {
+          const reset = await this.resetTree(path);
+          if (!reset.ok) return { ok: false, reason: "git", message: reset.message };
+        }
         reclaimed = kept.file;
       }
     }
@@ -308,7 +313,7 @@ export class WorktreePool {
     const file = join(dir, lastRun === null ? `${now.toISOString().replace(/[:.]/g, "-")}.patch` : "leftover.patch");
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      writeFileSync(file, `# leftover from ${path}\n# kept ${now.toISOString()} before the tree was reset for the next attempt\n` + parts.join(""), { mode: 0o600 });
+      writeFileSync(file, `# leftover from ${path}\n# kept ${now.toISOString()} before the next attempt\n` + parts.join(""), { mode: 0o600 });
     } catch (error) {
       return { ok: false, message: `${path}: the leftover could not be written to ${file} (${error instanceof Error ? error.message : String(error)})` };
     }

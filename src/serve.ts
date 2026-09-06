@@ -1,3 +1,4 @@
+import { decodeProjectMentions } from "./chat-projects.js";
 /**
  * The web console (§7, grown per the console review): the whole built-in
  * queue, visible and operable from a phone. `standing-orders serve` — node:http,
@@ -41,12 +42,21 @@
  * repo, only runs whose task belongs to that repo (or to no repo yet).
  */
 
+import { isWorkApprovalPath, sessionApprovalAllowed, withSessionApproval } from "./approval-session.js";
 import { listCoordinators } from "./coordinator.js";
+import { stopTaskRun, resumeTaskWork } from "./control.js";
+import { previewSetup, approveSetup, type SetupInputs } from "./control-setup.js";
+import { openRouterModelsCache, openRouterPicker, openRouterPickerScript } from "./openrouter-models.js";
+import { ASSISTANTS, modelChoices, detectPreparation, previewProjectInstructions, addProjectInstructions } from "./setup-guide.js";
+import type { LocalControl, WorkerState } from "./desktop-workers.js";
+import { previewExecutionChange, approveExecutionChange } from "./control-terms.js";
+import { previewDelivery, approveDelivery } from "./delivery.js";
+import { publishPass, type PublishExec } from "./publish.js";
 import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
@@ -130,6 +140,7 @@ import {
   authorizedProject,
   canonicalProject,
   isGitRepo,
+  projectSelection,
   projectName,
   sameRepo,
   resolveCeiling,
@@ -138,21 +149,40 @@ import {
 import { tally, spendLine } from "./summary.js";
 import { classify, holdOwnerWords } from "./board.js";
 import type { BoardCard } from "./board.js";
-import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
+import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, WEEKDAYS, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
+import { isProviderId, reportsCost, PROVIDER_IDS, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
-import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
+import { createConnectionChecker, type ProviderConnection } from "./provider-connection.js";
+import { composerSchedule, composerTemplate, routineNameFromDescription, scheduleFields } from "./task-composer.js";
+import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
-import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
+import { createTransport, hashTelegramStartCode, loadBotToken, mintPairingCode, PAIRING_TTL_MS, redactToken, saveBotToken, TOKEN_ENV, type TokenSource, type TelegramTransport } from "./telegram.js";
+import { TelegramConsole } from "./telegram-console.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
+import {
+  LOCAL_CREDENTIAL_KEY,
+  LOCAL_DAILY_TURNS,
+  LOCAL_SESSION_CEILING_MICROUSD,
+  LOCAL_SESSION_HOURS,
+  LOCAL_WEEKLY_CEILING_MICROUSD,
+  type LocalRunner,
+} from "./chat-assistant.js";
+import { chatPreference, setChatFocus, saveChatContext, focusFromMessage } from "./chat-context.js";
+import { decodeChatUpload, readTranscriptionKey, saveTranscriptionKey } from "./chat-media.js";
+import { runLocalChatTurn } from "./chat-session.js";
 
 export type ServeOptions = {
+  /** Explicit local installation authority; ordinary web servers keep their configured ceiling. */
+  projectManager?: { browseRoots: string[]; repos: () => string[]; add: (repos: string[]) => Promise<void> };
+  localControl?: LocalControl;
+  localRunners?: readonly string[];
+  desktopIdentity?: string;
   store: Store;
   evidenceRoot: string;
   clock?: () => Date;
@@ -180,9 +210,23 @@ export type ServeOptions = {
   setupCode?: string;
   /**
    * Where the Telegram bot token lives when set from here. Present = the
-   * settings card renders; absent = no settings surface at all.
+   * Telegram settings card renders; other settings remain available without it.
    */
   telegramTokenFile?: string;
+  /** Non-spending CLI identity probe; injectable so tests use fake accounts. */
+  connectionProbe?: typeof execRun;
+  /**
+   * The home directory the account check reads its auth-mode and key files
+   * from. Injectable for the same reason as the probe: without it a test
+   * asserting "the account can answer" would pass or fail on whether the
+   * machine running it happens to be in api-key mode.
+   */
+  connectionHome?: string;
+  /** Non-spending model discovery; injectable for offline UI tests. */
+  modelCatalogFetcher?: typeof fetch;
+  /** Injectable Telegram API, used by setup and the service-owned connection. */
+  telegramTransport?: (token: string) => TelegramTransport;
+  telegramIntervalMs?: number;
   /** Where messaging config files live (beside the database) — enables the
    * primary-messenger selector on the settings screen. */
   configDir?: string;
@@ -201,10 +245,21 @@ export type ServeOptions = {
    */
   repos?: readonly string[];
   projectRoots?: readonly string[];
-  /** Injected by tests: the fetch chat turns use, and where chat keys are
-   * read from (defaults to process.env). Chat never spawns anything. */
+  /** Injected by tests: the fetch API chat turns use, and where chat keys
+   * are read from (defaults to process.env). The API transport never
+   * spawns anything; the local assistant below is the only one that does. */
   chatFetcher?: typeof fetch;
   chatEnv?: Record<string, string | undefined>;
+  /**
+   * How the LOCAL assistant is run — the Claude Code account this computer
+   * is already signed in to. Injectable so tests script the harness without
+   * a network or a subscription; production uses exec.ts's `run`.
+   */
+  chatRunner?: LocalRunner;
+  /** An EMPTY directory the local assistant runs in, so no repository and
+   * no project instructions file are reachable from it. Defaults beside
+   * the config directory, then to a temporary directory. */
+  chatWorkspace?: string;
   /**
    * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
    * who starts serve names the runner this machine owns. This is documented
@@ -239,6 +294,7 @@ export type ServeOptions = {
   ghPreview?: typeof previewGithubRepo;
   ghClone?: typeof cloneGithubRepo;
   ghList?: typeof listGithubRepos;
+  publishExec?: PublishExec;
 };
 
 const SESSION_COOKIE = "standing-orders_session";
@@ -254,7 +310,7 @@ const RUNS_PAGE = 50;
 const TASK_STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
 
 /** Read-only fragment polls that must never refresh session activity (arc 1). */
-const NO_TOUCH_FRAGMENTS: ReadonlySet<string> = new Set(["1", "facts", "peek", "rail", "transcript"]);
+const NO_TOUCH_FRAGMENTS: ReadonlySet<string> = new Set(["1", "facts", "peek", "rail", "transcript", "task-status"]);
 
 // ---- the phone (arc 3): install assets, served BEFORE authentication — they
 // contain nothing secret, and a background service-worker update that met a
@@ -327,6 +383,7 @@ self.addEventListener("notificationclick", function (event) {
 `;
 
 type Session = {
+  projectAddition?: { nonce: string; repos: string[]; expiresAt: number };
   name: string;
   csrf: string;
   /** v29: the account's standing at login — the central gate reads it;
@@ -349,10 +406,17 @@ type Session = {
   /** Fleet chat (v13): drafts and the last reply live HERE and nowhere
    * durable — restart or logout loses them by design (v2 finding 12). */
   chat?: SessionChat;
+  /** Which project the chat is looking at, as a path inside the ceiling —
+   * absent or null means every project, which is the default. A VIEW
+   * filter chosen in this browser: it narrows what the assistant is shown
+   * and never widens what the session may reach. The conversation itself
+   * is untouched by it, so switching projects never loses the thread. */
+  chatFocus?: string | null;
   /** Editor links (arc 6): the SESSION's half of the activation — "this
    * browser runs on the machine that holds the worktrees" is a statement
    * only the person at the browser can make. Dies with the session. */
   editorLinks?: boolean;
+  telegramPairing?: { code: string; botId: string; username: string; expiresAt: number };
 };
 
 type ChatCandidate = {
@@ -388,6 +452,29 @@ export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
   const clock = options.clock ?? (() => new Date());
   const sessions = new Map<string, Session>();
+  const telegram = options.telegramTokenFile === undefined || store.isDemo() ? null : new TelegramConsole(store, {
+    tokenFile: options.telegramTokenFile,
+    ...(options.configDir === undefined ? {} : { configDir: options.configDir }),
+    ...(options.telegramTransport === undefined ? {} : { transport: options.telegramTransport }),
+    ...(options.telegramIntervalMs === undefined ? {} : { intervalMs: options.telegramIntervalMs }),
+    chat: {
+      repos: () => ceiling.repos,
+      evidenceRoot,
+      cwd: () => chatWorkspace(),
+      unavailable: async () => {
+        const state = await localAssistantState(true);
+        return state.ok ? null : "I can't reach your chat assistant. Open Chat in Standing Orders to check your projects and Claude Code connection, then ask again here.";
+      },
+      recheckAccount: async () => {
+        const state = await connectionStatus("claude", true);
+        return state.state !== "signed-out" && state.state !== "not-installed";
+      },
+      ...(options.chatRunner === undefined ? {} : { runner: options.chatRunner }),
+    },
+    clock,
+  });
+  let closing = false;
+  let telegramChanging = false;
   /** Wrong setup codes left before the first-account road closes. */
   let setupAttemptsLeft = 5;
   // The /join road's limiter (D6; Codex people round 1, finding 4):
@@ -440,7 +527,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     options.projectRoots ?? [],
   );
   /** The project every fresh session opens with: the sole configured repo, else none. */
-  const defaultProject = ceiling.repos.length === 1 && ceiling.roots.length === 0 ? ceiling.repos[0] as string : null;
+  let defaultProject = ceiling.repos.length === 1 && ceiling.roots.length === 0 ? ceiling.repos[0] as string : null;
 
   /** No ceiling configured at all: the legacy trust-everything mode, named. */
   const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
@@ -450,11 +537,13 @@ export function createDecisionServer(options: ServeOptions): Server {
    * enumerate themselves; root ceilings enumerate the STORED repos that
    * pass the ceiling (Codex roll-up review, finding 11); unscoped = null. */
   const admissionList = (): string[] | null =>
-    unscopedMode ? null : ceiling.roots.length === 0 ? [...ceiling.repos] : store.knownRepos().filter(visible);
+    unscopedMode ? null : ceiling.roots.length === 0 ? [...ceiling.repos] : [...new Set([...store.knownRepos(), ...store.listProjects().map(one => one.path)])].filter(visible);
+  const localRunnerMatches = (name: string | null): boolean => name !== null && (name === options.localRunner || (options.localRunners ?? []).includes(name) || (options.localControl?.status() ?? []).some(one => one.runner === name));
   /** The task behind a resource, for the ceiling check; null = no ref (visible). */
   const taskRepoOf = (taskRef: number): string | null => store.refForId(taskRef)?.repo ?? null;
 
   const server = createServer((request, response) => {
+    if (closing) return respond(response, 503, "text/plain; charset=utf-8", "The service is restarting. Try again in a moment.");
     void handle(request, response).catch(error => {
       if (process.env["STANDING_ORDERS_SERVE_DEBUG"] === "1") console.error("SERVE ERROR:", error);
       if (!response.headersSent) {
@@ -464,6 +553,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
     });
   });
+  server.once("listening", () => telegram?.start());
+  // Finish/abort the bridge before callers close the shared database.
+  const closeHttp = server.close.bind(server);
+  server.close = (callback?: (error?: Error) => void): Server => {
+    closing = true;
+    void (telegram?.close() ?? Promise.resolve()).then(() => closeHttp(callback));
+    return server;
+  };
 
   // --public-url (arc 3): validated to EXACTLY an https origin. Its host
   // joins the allowed set, its origin authorizes POSTs, and cookies turn
@@ -508,7 +605,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (!type.startsWith("application/x-www-form-urlencoded")) {
       return { status: 415, message: "forms only" };
     }
-    for (const field of ["csrf", "token", "digest", "nonce", "confirm"]) {
+    for (const field of ["csrf", "token", "bot-token", "digest", "nonce", "confirm", "fingerprint", "run", "repo", "model", "posture", "tools", "turns", "minutes", "preparation", "saved-command", "custom-model", "seconds", "approval-password", "approval-password-mode", "approval-preference-present", "previous-required"]) {
       if (body.getAll(field).length > 1) {
         return { status: 400, message: `duplicated ${field} field` };
       }
@@ -563,7 +660,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * that is a refusal, not a fallback.
    */
   function projectOf(who: Who, request: IncomingMessage): string | null | undefined {
-    if (who.via === "cookie") return who.session.project;
+    if (who.via === "cookie") return who.session.project === null || visible(who.session.project) ? who.session.project : undefined;
     const header = request.headers["x-standing-orders-project"];
     if (header === undefined) return defaultProject;
     if (Array.isArray(header)) return undefined;
@@ -572,9 +669,20 @@ export function createDecisionServer(options: ServeOptions): Server {
     return canonical;
   }
 
+  const connectionStatus = createConnectionChecker({
+    ...(options.connectionProbe ? { probe: options.connectionProbe } : {}),
+    ...(options.connectionHome === undefined ? {} : { home: options.connectionHome }),
+  });
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!allowedHost(request.headers.host)) {
       return respond(response, 421, "text/plain; charset=utf-8", "wrong host");
+    }
+    if (options.projectManager !== undefined) {
+      const managed = options.projectManager.repos();
+      if (managed.length === 0) throw new Error("No projects are configured for this installation.");
+      ceiling.repos = resolveCeiling(managed, []).ceiling.repos;
+      defaultProject = ceiling.repos.length === 1 ? ceiling.repos[0]! : null;
     }
 
     const url = new URL(request.url ?? "/", "http://placeholder");
@@ -585,6 +693,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const method = request.method ?? "GET";
+    if (method === "GET" && url.pathname === "/desktop/health" && options.desktopIdentity !== undefined) {
+      response.setHeader("cache-control", "no-store");
+      return respond(response, 200, "application/json", JSON.stringify({ identity: options.desktopIdentity }));
+    }
     // The install assets (arc 3): pre-auth by design; nothing secret rides
     // them, and each carries nosniff + its own conservative caching/CSP.
     if (method === "GET") {
@@ -665,7 +777,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         projectRevision: 1,
       });
       response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`);
-      return redirect(response, "/");
+      return redirect(response, "/workbench");
     }
     if (url.pathname === "/login" && method === "POST") {
       const body = await form(request);
@@ -692,7 +804,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         "Set-Cookie",
         `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`,
       );
-      return redirect(response, "/");
+      return redirect(response, "/workbench");
     }
 
     if (url.pathname === "/logout" && method === "POST") {
@@ -769,7 +881,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         "Set-Cookie",
         `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`,
       );
-      return redirect(response, "/");
+      return redirect(response, "/workbench");
     }
 
     if (who === null) {
@@ -781,6 +893,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const requestFacts = {
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
+      who,
     };
     if (method === "GET") return void (await requestContext.run(requestFacts, () => handleGet(url, who, request, response)));
     if (method === "POST") return requestContext.run(requestFacts, () => handlePost(url, who, request, response));
@@ -796,6 +909,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       return refuse(response, who, 403, "that project is outside what this server was configured to show");
     }
 
+    if (url.pathname === "/control") {
+      const repo = url.searchParams.get("repo") ?? undefined;
+      if (repo !== undefined && !(admissionList() ?? []).includes(repo)) return refuse(response, who, 404, "Choose a project available in this console.", "/control");
+      const checks = url.searchParams.get("check") === "1" ? await options.localControl?.check?.() : undefined;
+      return sendScreen(response, 200, await controlScreen(who, undefined, checks, { repo, provider: url.searchParams.get("provider") ?? undefined }));
+    }
+    if (url.pathname === "/control/connection") {
+      const provider = url.searchParams.get("provider") ?? "claude";
+      if (!isProviderId(provider) || who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to connect an assistant.", "/control");
+      const account = await connectionStatus(provider, url.searchParams.get("check-connection") === "1");
+      const mode = account.mode;
+      const repo = url.searchParams.get("repo") ?? project ?? "";
+      const task = url.searchParams.get("task") ?? "";
+      const back = `/control?repo=${encodeURIComponent(repo)}&provider=${provider}${task ? `&task=${encodeURIComponent(task)}` : ""}`;
+      const facts = keyStatus(provider);
+      return sendScreen(response, 200, screen("Connect your assistant", `<div class="setup-flow"><p><a href="${escape(back)}">← Back to setup</a></p><h1>${account.state === "connected" ? `${escape(ASSISTANTS[provider].name)} is connected` : `Connect ${escape(ASSISTANTS[provider].name)}`}</h1>${connectionWords(provider, account, options.localControl?.host)}<p><a href="${escape(back)}&amp;check-connection=1#assistant">Check again</a></p>` +
+        `<p class="hint">Choose the account this computer uses for your tasks.</p><form method="post" action="/settings/provider-key" class="card"><input type="hidden" name="csrf" value="${escape(who.session.csrf)}"><input type="hidden" name="provider" value="${provider}"><input type="hidden" name="return" value="setup"><input type="hidden" name="repo" value="${escape(repo)}"><input type="hidden" name="resume-task" value="${escape(task)}">` +
+        (SUBSCRIPTION_CAPABLE[provider] ? `<label>How would you like to connect?<select name="auth-mode"><option value="subscription"${mode === "subscription" ? " selected" : ""}>Use the sign-in already on this computer</option><option value="api-key"${mode === "api-key" ? " selected" : ""}>Use an API key</option></select></label><p class="meta">The existing sign-in option uses your installed ${escape(ASSISTANTS[provider].name)} app's account. It does not sign in a new account.</p>` : `<input type="hidden" name="auth-mode" value="api-key">`) +
+        `<label>API key <span class="meta">${SUBSCRIPTION_CAPABLE[provider] ? "(only needed when you choose API key)" : ""}</span><input type="password" name="value" autocomplete="off"></label>` +
+        `<p class="meta">${facts.set ? "An API key is already saved. Leave this blank to keep it." : "Keys are stored privately on this computer and are never displayed."}</p><button class="primary">Save connection</button></form></div>`, { chrome: chromeFor(project, "setup") }));
+    }
+
     // Nothing open and more than one thing to choose: land on the opener.
     // Decisions and their evidence stay reachable — answering must never be
     // blocked by project state — and the opener itself must not loop.
@@ -806,7 +941,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
       url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
-      url.pathname !== "/fleet" &&
+      url.pathname !== "/fleet" && url.pathname !== "/tasks/new" && url.pathname !== "/chat" && !url.pathname.startsWith("/chat/") &&
+      url.pathname !== "/routines" && !/^\/routines\/[0-9]+$/.test(url.pathname) &&
       url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
@@ -820,8 +956,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       // Directory NAMES only, never file contents; symlinks are resolved
       // and re-checked so a link cannot walk out of the fence.
       if (who.via !== "cookie") return refuse(response, who, 403, "browsing feeds a browser session's act");
+      if (options.projectManager !== undefined && who.role !== "approver") return refuse(response, who, 403, "Ask an approver to add projects.", "/projects");
       const browseRoots =
-        ceiling.roots.length > 0 ? [...ceiling.roots] : unscopedMode ? [realpathSync(homedir())] : [];
+        options.projectManager !== undefined ? options.projectManager.browseRoots.map(canonicalProject).filter((one): one is string => one !== null) : ceiling.roots.length > 0 ? [...ceiling.roots] : unscopedMode ? [realpathSync(homedir())] : [];
       if (browseRoots.length === 0) {
         return refuse(response, who, 404, "this server was configured with an explicit repo list — the openable projects are all on the projects page", "/projects");
       }
@@ -861,13 +998,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        browsePage(chromeFor(who.session.project, "projects"), {
+        browsePage(chromeFor(who.session.project, "projects", undefined, "all"), {
           at: canonical,
           root,
           roots: browseRoots,
           parent,
           entries,
           csrf,
+          selected: url.searchParams.getAll("selected").slice(0, 50),
         }),
       );
     }
@@ -1058,6 +1196,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         .slice(0, 5)
         .map(one => ({ taskId: one.taskId, title: one.title, outcome: one.outcome, repo: one.repo }));
       const selected = url.searchParams.get("t");
+      const projectPaths = [...new Set([...ceiling.repos, ...store.listProjects().map(one => one.path), ...store.knownRepos()])].filter(visible);
+      const workers = options.localControl?.status() ?? [];
+      const projectOverview = portfolioProjects({
+        projects: projectPaths.map(repo => ({ repo, configured: (() => { const choice = resolvePhaseAgent(store, "build", repo, {}); return choice.ok && choice.spec.model !== null && choice.spec.model !== ""; })(),
+          worker: workers.find(one => one.repo === repo) ?? null,
+          remoteHost: store.listRunners().find(one => runnerAlive(one, now) && one.repos.includes(repo) && !workers.some(worker => worker.runner === one.name))?.host ?? null })),
+        cards, done, csrf: who.via === "cookie" ? who.session.csrf : "", canAct: who.role === "approver", saturated: snapshot.saturated,
+      });
+      if (url.searchParams.get("fragment") === "projects") return respond(response, 200, "text/html; charset=utf-8", projectOverview);
       const rail = workbenchRail({ attention, building, waiting, queued, done, selected, saturated: snapshot.saturated });
       if (url.searchParams.get("fragment") === "rail") {
         // The rail alone: same auth, same ceiling, no shell, no scripts.
@@ -1090,9 +1237,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       let detail = portfolioOverview({
         attention, building, waiting, queued, done, saturated: snapshot.saturated,
         decisions, approvals, requeueables, cancelledBlockers, gaps,
-        gapsProject: project, runs24, live, ledger, csrf, now,
+        gapsProject: project, runs24, live, ledger, csrf, now, projectOverview,
       }) +
-        `<div class="workbench-mobile-rail">${rail}</div>`;
+        (cards.length === 0 && done.length === 0 ? "" : `<div class="workbench-mobile-rail">${rail}</div>`);
       if (selected !== null) {
         const view = taskViewData(selected, who, null);
         detail = view === null
@@ -1102,11 +1249,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        screen("portfolio", detail, {
+        screen("Overview", detail, {
           chrome: chromeFor(
             project,
             "workbench",
-            `<div id="wb-rail">${rail}</div><p class="meta" id="wb-rail-stamp"></p>`,
+            selected === null ? undefined : `<div id="wb-rail">${rail}</div><p class="meta" id="wb-rail-stamp"></p>`,
             "all",
           ),
           functional: {
@@ -1114,7 +1261,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             // task's pane may carry a password ceremony, and sensitive
             // pages gain no new scripts (commit-1 review, finding 1).
             script:
-              regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30) +
+              (selected === null ? regionScript("portfolio-projects", "projects", 10) : regionScript("wb-rail", "rail", building.length > 0 ? 10 : 30)) +
               (selected === null && decisions.length > 0 ? decisionAnswerScript() : ""),
             fetches: true,
           },
@@ -1203,7 +1350,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           response,
           200,
           screen("board", [
-            `<h1>board</h1>`,
+            `<h1>Board</h1>`,
             `<p class="meta board-view"><a href="/board">state</a> \u00b7 <strong>order</strong> <span class="meta">\u2014 drag to reorder, or onto a worker to reserve; the state view is where cards move on their own</span></p>`,
             `<div id="queue-region">${region}</div>`,
             `<p class="meta" id="queue-region-stamp"></p>`,
@@ -1263,7 +1410,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           stranded: store.strandedTasks(project),
           gaps: project === null ? null : computeGaps(store, project, now),
           outboxPending: store.listNotifications("pending").length,
-          settings: options.telegramTokenFile !== undefined,
+          settings: true,
           building: store.liveClaims(project, now),
           runners: store.listRunners(),
           heldSessions: new Map(store.openHeldSessions().reduce((by, one) => by.set(one.runner, (by.get(one.runner) ?? 0) + 1), new Map<string, number>())),
@@ -1629,17 +1776,26 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/tasks/new") {
-      const csrf = who.via === "cookie" ? who.session.csrf : "";
-      const revision = who.via === "cookie" ? who.session.projectRevision : 0;
-      const chainable = store
-        .listTasksScoped(project, undefined, 100, null)
-        .filter(one => one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
-        .map(one => ({ id: one.id, title: one.title }));
-      return sendScreen(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable));
+      const draft = composerTemplate(url.searchParams.get("template"));
+      if (url.searchParams.has("routine")) {
+        const routine = store.getRoutine(Number(url.searchParams.get("routine")));
+        if (routine === null || !visible(routine.repo)) return refuse(response, who, 404, "No such recurring task.");
+        if (routine.approvedAt !== null) return refuse(response, who, 409, "This recurring task has already been approved.", routineHref(routine.id));
+        const schedule = parseSchedule(routine.schedule);
+        for (const [key, value] of Object.entries({ repo: routine.repo, request: routine.goal, not: routine.outOfScope ?? "", touches: routine.touches.join(", "), ceiling: routine.costCeilingUsd === null ? "" : String(routine.costCeilingUsd), "routine-id": String(routine.id), "routine-digest": routine.digest, ...(schedule === null ? {} : scheduleFields(schedule)) })) draft.set(key, value);
+      }
+      for (const key of ["repo", "repeat"]) if (url.searchParams.has(key)) draft.set(key, url.searchParams.get(key)!);
+      return sendScreen(response, 200, taskComposer(who, null, draft));
     }
 
     const task = matchTaskPath(url.pathname, "");
     if (task !== null) {
+      if (url.searchParams.get("fragment") === "task-status") {
+        const data = taskViewData(task.taskId, who, null);
+        if (data === null) return refuse(response, who, 404, "No such task.");
+        response.setHeader("cache-control", "no-store");
+        return respond(response, 200, "application/json", JSON.stringify({ status: taskStatusToken(data) }));
+      }
       return taskScreen(response, who, task.taskId, null, 200);
     }
 
@@ -1687,7 +1843,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const peeked = await peekFragment(
           found.id,
           who.session.csrf,
-          options.editorLinks !== undefined && found.runner === options.localRunner && who.session.editorLinks === true,
+          options.editorLinks !== undefined && localRunnerMatches(found.runner) && who.session.editorLinks === true,
         );
         response.setHeader("cache-control", "no-store");
         if (peeked.retryAfter !== undefined) response.setHeader("retry-after", String(peeked.retryAfter));
@@ -1769,7 +1925,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           // and the session's own device-side yes.
           options.editorLinks !== undefined &&
           options.localRunner !== undefined &&
-          found.runner === options.localRunner &&
+          localRunnerMatches(found.runner) &&
           who.via === "cookie" &&
           who.session.editorLinks === true &&
           // A reviewer run (v29) never had a checkout — no files to open.
@@ -1778,7 +1934,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             : null,
           options.editorLinks !== undefined &&
           options.localRunner !== undefined &&
-          found.runner === options.localRunner &&
+          localRunnerMatches(found.runner) &&
           who.via === "cookie"
             ? { on: who.session.editorLinks === true }
             : null,
@@ -1856,6 +2012,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       }));
     }
 
+    if (url.pathname === "/chat/settings" || url.pathname === "/chat/history") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to manage your conversation.");
+      const pref = chatPreference(store, who.name);
+      const selected = url.searchParams.get("repo") ?? pref.focus ?? ceiling.repos[0] ?? "";
+      const repo = ceiling.repos.includes(selected) ? selected : ceiling.repos[0] ?? "";
+      const csrf = `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">`;
+      if (url.pathname === "/chat/history") {
+        const principal = matePrincipal(who);
+        if (principal === null) return refuse(response, who, 403, "Sign in again.");
+        const query = (url.searchParams.get("q") ?? "").slice(0, 120);
+        store.sweepMateThreads(now);
+        const rows = store.raw().prepare(`SELECT m.*, f.repo AS focus FROM mate_message m JOIN mate_thread t ON t.id=m.thread LEFT JOIN chat_turn_focus f ON f.turn=m.turn
+          WHERE t.approver=? AND t.ceiling_digest=? AND t.closed_at IS NULL AND instr(lower(m.text),lower(?)) > 0 ORDER BY m.id DESC LIMIT 100`).all(who.name, principal.ceilingDigest, query);
+        return sendScreen(response, 200, screen("Conversation history", `<h1>Conversation history</h1><p><a href="/chat">← Back to Chat</a></p><form method="get" action="/chat/history"><label>Find a discussion<input type="search" name="q" maxlength="120" value="${escape(query)}" placeholder="Search your messages"></label><button>Search</button></form><p class="meta">Newest ${rows.length} matching messages · retained for ${pref.days} days</p>` +
+          rows.map(row => `<article class="msg ${row["role"] === "operator" ? "op" : "mate"}"><p class="meta">${row["role"] === "operator" ? "You" : "Assistant"} · ${escape(String(row["created_at"]).slice(0,16).replace("T"," "))} UTC${row["focus"] && ceiling.repos.includes(String(row["focus"])) ? ` · ${escape(projectName(String(row["focus"])))}` : ""}</p><p style="white-space:pre-wrap">${escape(decodeProjectMentions(String(row["text"]), ceiling.repos))}</p></article>`).join(""), { chrome: chromeFor(project, "chat") }));
+      }
+      const note = store.raw().prepare("SELECT note FROM chat_context WHERE approver=? AND repo=?").get(who.name, repo)?.["note"] ?? "";
+      return sendScreen(response, 200, screen("Chat settings", `<h1>Memory and project context</h1><p><a href="/chat">← Back to Chat</a></p><p>Keep discussions across days and save the context you want the assistant to use. Desktop, web, and Telegram share these settings.</p>` +
+        `<form method="get" action="/chat/settings"><label>Project<select name="repo">${ceiling.repos.map(path => `<option value="${escape(path)}"${path === repo ? " selected" : ""}>${escape(projectName(path))}</option>`).join("")}</select></label><button>Open project context</button></form>` +
+        `<form method="post" action="/chat/settings" class="card">${csrf}<input type="hidden" name="repo" value="${escape(repo)}"><label>Keep conversation history<select name="retention-days">${[1,30,90,365].map(days => `<option value="${days}"${days === pref.days ? " selected" : ""}>${days === 1 ? "1 day" : `${days} days`}</option>`).join("")}</select></label><label>Context for ${escape(projectName(repo))}<textarea name="context" rows="6" maxlength="4000" placeholder="Goals, decisions, preferences, and useful background…">${escape(String(note))}</textarea></label><p class="meta">Project context stays until you clear it or forget the conversation. It does not authorize tasks or approvals.</p><button class="primary">Save context and history settings</button></form><p><a href="/chat/history">Find earlier messages</a></p>`, { chrome: chromeFor(project, "chat") }));
+    }
+
     if (url.pathname === "/chat") {
       // Cookie sessions only (Codex v3 review, change 7): drafts live in
       // THIS session's memory; a bearer caller has nowhere to keep them.
@@ -1868,44 +2046,112 @@ export function createDecisionServer(options: ServeOptions): Server {
       // Pending cards, and the recently answered ones so the door's words are read (last 30).
       const coordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos: [...ceiling.repos], states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
       const enabled = chatEnablement();
+      const local = await localAssistantState(url.searchParams.get("check-connection") === "1");
       const pending = store.liveChatTurnFor(who.name);
       const latched = enabled.ok ? store.latchedChatTurns(enabled.credentialKey) : [];
-      // The mate (mate arc §5): while a mate session is live, /chat IS the
-      // thread — the same rows the CLI reads. Without one, fleet chat as
-      // before, plus the card that mints a session.
-      const mateSession = enabled.ok && who.role === "approver" ? store.activeMateSession(who.name, now) : null;
-      const principal = enabled.ok && who.role === "approver" ? matePrincipal(who) : null;
+      const projects: ChatProject[] = ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo), path: repo }));
+      // The focus is a view filter: a path the ceiling still admits, or
+      // nothing. A repo that left the ceiling silently widens back to all.
+      const savedFocus = chatPreference(store, who.name).focus;
+      const focus = savedFocus !== null && ceiling.repos.includes(savedFocus) ? savedFocus : null;
+      // While a conversation is live, /chat IS the thread — the same rows
+      // the CLI reads. Which assistant continues it is decided by the
+      // credential the window was minted under, never re-chosen mid-life.
+      const mateSession = who.role === "approver" ? store.activeMateSession(who.name, now) : null;
+      const sessionIsLocal = mateSession !== null && mateSession.credentialKey === LOCAL_CREDENTIAL_KEY;
+      // Whether a NEW message can go out — not whether the conversation
+      // exists. A five-second sign-in probe that timed out must never make
+      // a live thread disappear behind the start card, because starting a
+      // new conversation ENDS the old one: a slow subprocess would become
+      // lost work. The thread renders; only the composer is withheld.
+      const canSend = sessionIsLocal ? local.ok : enabled.ok;
+      const principal = mateSession !== null && who.role === "approver" ? matePrincipal(who) : null;
       // A session under another ceiling is not continuable from here; a GET
-      // writes nothing (slice-2 review, finding 7) — the mint card below
-      // starts a new conversation, and minting ends the old session.
-      const ceilingStale = enabled.ok && mateSession !== null && principal !== null && mateSession.ceilingDigest !== principal.ceilingDigest;
-      if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
-        {
-          const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-          const said = takeMateNote(who.session.csrf, mateSession.id);
-          return sendScreen(
-            response,
-            200,
-            matePage(chromeFor(project, "chat"), {
-              session: mateSession,
-              messages: store.listMateMessages(opened.thread.id, 40),
-              proposals: store.listMateProposals(opened.thread.id),
-              decisions: decisionsFor(store, [...store.listMateProposals(opened.thread.id), ...coordinatorRows]),
-              coordinatorProposals: coordinatorRows,
-              pending: store.liveMateTurnFor(who.name),
-              latched,
-              recent: store.recentMateTurns(who.name, 5),
-              config: enabled.config,
-              turnsToday: store.chatTurnsToday(who.name, now),
-              weeklySpent: store.chatWeeklySpendMicrousd(enabled.credentialKey, now),
-              repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
-              csrf: who.session.csrf,
-              problem: url.searchParams.get("said") ?? said,
-              now,
-            }),
-          );
+      // writes nothing (slice-2 review, finding 7) — the start card below
+      // begins a new conversation, and that ends the old one.
+      const ceilingStale = mateSession !== null && principal !== null && mateSession.ceilingDigest !== principal.ceilingDigest;
+      const livePending = who.role === "approver" ? store.liveMateTurnFor(who.name) : null;
+      const status: ChatStatus = chatStatusFor({
+        local,
+        apiReady: enabled.ok,
+        working: livePending !== null,
+        live: mateSession === null ? null : sessionIsLocal ? "local" : "api",
+      });
+      if (mateSession !== null && principal !== null && !ceilingStale) {
+        const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
+        const said = takeMateNote(who.session.csrf, mateSession.id);
+        const proposalRows = store.listMateProposals(opened.thread.id);
+        // Progress, read once for the whole thread: a confirmed card says
+        // where its task got to without leaving the conversation.
+        const taskStates = new Map<string, string>();
+        for (const one of proposalRows) {
+          const filed = one.outcome !== null && typeof one.outcome["taskId"] === "string" ? (one.outcome["taskId"] as string) : null;
+          if (filed === null || taskStates.has(filed)) continue;
+          const task = store.getTask(filed);
+          if (task !== null) {
+            const ref = store.lookupRef(filed);
+            if (ref === null || !visible(ref.repo)) continue;
+            const scope = store.getScope(filed);
+            const runs = store.runsFor(ref.id);
+            const built = runs.find(run => run.outcome === "built" && run.committed);
+            const publication = built === undefined ? null : store.publicationForRun(built.id);
+            const state = runs.some(run => runIsLive(run)) ? "Running" :
+              task.state === "done" ? publication?.remoteState === "MERGED" ? "Merged" : publication?.state === "opened" ? "PR open" : built !== undefined ? "Built locally" : "Completed" :
+              task.state === "cancelled" ? "Cancelled" : store.activeHolds(ref.id, now).some(hold => hold.ownerKind === "operator") ? "Paused" :
+              scope === null || scope.approvedAt === null || scope.approvedDigest !== scope.digest ? "Awaiting approval" :
+              task.state === "queued" ? "Queued" : task.state === "failed" ? "Needs attention" : task.state;
+            taskStates.set(filed, state);
+          }
         }
+        const messages = store.listMateMessages(opened.thread.id, 40);
+        const turnProjects = new Map(store.raw().prepare("SELECT f.turn, f.repo FROM chat_turn_focus f JOIN mate_turn t ON t.id=f.turn WHERE t.thread=?").all(opened.thread.id)
+          .map(row => [Number(row["turn"]), row["repo"] == null ? null : String(row["repo"])]));
+        const statusToken = createHash("sha256").update(JSON.stringify([messages.map(message => message.id), [...taskStates], livePending?.id ?? null, canSend, focus])).digest("hex");
+        if (url.searchParams.get("fragment") === "chat-status") {
+          return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: statusToken }));
+        }
+        return sendScreen(
+          response,
+          200,
+          matePage(chromeFor(project, "chat"), {
+            session: mateSession,
+            messages,
+            turnProjects,
+            statusToken,
+            proposals: proposalRows,
+            decisions: decisionsFor(store, [...proposalRows, ...coordinatorRows]),
+            coordinatorProposals: coordinatorRows,
+            pending: livePending,
+            latched: sessionIsLocal ? [] : latched,
+            recent: store.recentMateTurns(who.name, 5),
+            config: sessionIsLocal || !enabled.ok ? null : enabled.config,
+            turnsToday: store.chatTurnsToday(who.name, now),
+            // The meter reads the credential the conversation actually
+            // runs on — the API key's spend is not this window's story.
+            weeklySpent: sessionIsLocal
+              ? store.chatWeeklySpendMicrousd(LOCAL_CREDENTIAL_KEY, now)
+              : enabled.ok
+                ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now)
+                : 0,
+            weeklyCeiling: sessionIsLocal ? LOCAL_WEEKLY_CEILING_MICROUSD : null,
+            dailyTurns: sessionIsLocal ? LOCAL_DAILY_TURNS : null,
+            canSend,
+            repoLabels: projects.map(one => ({ id: one.id, label: one.label })),
+            projects,
+            focus,
+            status,
+            taskStates,
+            csrf: who.session.csrf,
+            problem: url.searchParams.get("said") ?? said,
+            now,
+          }),
+        );
       }
+      // No conversation yet (or one this console can no longer continue):
+      // the start card, and the API adapter's own screen behind it.
+      const startable = who.role === "approver" && (local.ok || enabled.ok);
+      const historyPrincipal = who.role === "approver" ? matePrincipal(who) : null;
+      const retainedThread = historyPrincipal === null ? undefined : store.raw().prepare("SELECT id FROM mate_thread WHERE approver=? AND ceiling_digest=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1").get(who.name, historyPrincipal.ceilingDigest);
       return sendScreen(
         response,
         200,
@@ -1917,7 +2163,14 @@ export function createDecisionServer(options: ServeOptions): Server {
           recent: store.recentChatTurns(who.name, 10),
           turnsToday: store.chatTurnsToday(who.name, now),
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
-          repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
+          repoLabels: projects.map(one => ({ id: one.id, label: one.label })),
+          projects,
+          focus,
+          status,
+          localReady: local.ok,
+          quickStart: local.ok && who.role === "approver" && !store.approvalPasswordRequired(who.name),
+          retainedMessages: retainedThread === undefined ? [] : store.listMateMessages(Number(retainedThread["id"]), 40),
+          apiMint: enabled.ok && who.role === "approver" ? mateMintCard(who.session.csrf, { kind: "api", weeklyCeilingMicrousd: enabled.config.weeklyCeilingMicrousd }) : "",
           config: store.getChatConfig(),
           keyFacts: (["anthropic-api", "openrouter-api"] as const).map(one => {
             const found = chatKeyFor(one);
@@ -1927,13 +2180,22 @@ export function createDecisionServer(options: ServeOptions): Server {
               tail: found === null || found.source === "environment" ? null : redactToken(found.key),
             };
           }),
-          openrouterModels: (await chatCatalog())?.map(one => one.id) ?? null,
+          openrouterModels: local.ok ? null : (await chatCatalog())?.map(one => one.id) ?? null,
           csrf: who.session.csrf,
           problem:
             url.searchParams.get("said") ??
-            (ceilingStale ? "the admitted projects changed since your mate session was minted — start a new conversation below; that ends the old one" : null) ??
+            (ceilingStale ? "the admitted projects changed since your conversation was started — start a new one below; that ends the old one" : null) ??
             takeMateNote(who.session.csrf, null),
-          ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled.config.weeklyCeilingMicrousd) } : {}),
+          ...(startable
+            ? {
+                mateMint: mateMintCard(
+                  who.session.csrf,
+                  local.ok
+                    ? { kind: "local" as const, hours: LOCAL_SESSION_HOURS, ceilingMicrousd: LOCAL_SESSION_CEILING_MICROUSD }
+                    : { kind: "api" as const, weeklyCeilingMicrousd: enabled.ok ? enabled.config.weeklyCeilingMicrousd : 0 },
+                ),
+              }
+            : {}),
           ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now) } : {}),
         }),
       );
@@ -1961,6 +2223,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       return routinePage(response, who, routine.id, null, 200);
     }
 
+    if (url.pathname === "/settings/telegram" && options.telegramTokenFile !== undefined) {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to connect Telegram.", "/settings");
+      const source = loadBotToken(process.env, options.telegramTokenFile);
+      const binding = source === null ? null : store.liveTelegramBinding(source.botId);
+      const pending = who.session.telegramPairing;
+      const active = pending !== undefined && pending.botId === source?.botId && store.telegramPairingPending(hashTelegramStartCode(pending.botId, pending.code), clock());
+      const connection = telegram?.status();
+      const problem = connection?.problem;
+      const body = binding !== null
+        ? `<h1>Telegram is connected</h1><p>Ask questions about your projects and respond to alerts as <strong>${escape(binding.approver)}</strong>.</p><p>${connection?.enabled ? "The connection stays active while the Standing Orders service is running. You can close this page." : "Enable the background connection in Settings to keep Telegram connected from this app."}</p><a class="button-link" href="/settings#telegram">Back to settings</a>`
+        : active && pending !== undefined
+          ? `<p class="eyebrow">FINISH IN TELEGRAM</p><h1>Connect your Telegram account</h1><p>Open <strong>@${escape(pending.username)}</strong> and tap <strong>Start</strong>. This private chat will let you ask questions, receive updates, and answer decisions as <strong>${escape(who.name)}</strong>.</p><p><a class="button-link" target="_blank" rel="noopener noreferrer" href="https://t.me/${pending.username}?start=${pending.code}">Open Telegram</a></p><p role="status">Waiting for you to tap Start in Telegram…</p><p class="meta">This link expires in ${Math.max(1, Math.ceil((pending.expiresAt - clock().getTime()) / 60_000))} minutes. This page checks automatically.</p><a href="/settings#telegram">Back to settings</a>`
+          : `<h1>Get a new Telegram connection link</h1><p>This link expired or was replaced. Return to settings to connect again.</p><a class="button-link" href="/settings#telegram">Back to settings</a>`;
+      return sendScreen(response, 200, screen("Connect Telegram", `<section class="card setup-flow">${body}${problem ? `<p role="status">${escape(problem)}</p>` : ""}</section>`, {
+        chrome: chromeFor(project, "settings"), forceSensitive: true,
+        ...(active && binding === null ? { refreshSeconds: 3 } : {}),
+      }));
+    }
+    if (url.pathname === "/settings" && options.telegramTokenFile === undefined) {
+      const message = url.searchParams.get("said");
+      return sendScreen(response, 200, settingsPage(chromeFor(project, "settings"), null, false, who.via === "cookie" ? who.session.csrf : "", message));
+    }
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
       const existing = loadBotToken({}, options.telegramTokenFile);
       const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
@@ -1977,15 +2261,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       };
       const providerKeys = who.role !== "approver"
         ? null
-        : (PROVIDER_IDS as readonly string[]).map(provider => ({
+        : await Promise.all(PROVIDER_IDS.map(async provider => ({
             provider,
             envName: PROVIDER_KEY_ENV[provider as "claude"],
             ...keyStatus(provider as "claude"),
             ambient: (process.env[PROVIDER_KEY_ENV[provider as "claude"]] ?? "") !== "",
             mode: readAuthMode(provider as "claude"),
             subscriptionCapable: SUBSCRIPTION_CAPABLE[provider as "claude"],
-          }));
-      const telegramConfigured = loadBotToken(process.env, options.telegramTokenFile) !== null;
+            connection: await connectionStatus(provider, url.searchParams.get("check-connection") === provider),
+          })));
+      const telegramSource = loadBotToken(process.env, options.telegramTokenFile);
+      const telegramConfigured = telegramSource !== null;
+      const telegramPaired = telegramSource !== null && store.liveTelegramBinding(telegramSource.botId) !== null;
       const digest = telegramConfigured
         ? (() => {
             const cadence = store.telegramDigest();
@@ -1995,7 +2282,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys, digest),
+        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys, digest, telegramSettingsCard(who), telegramPaired),
       );
     }
 
@@ -2027,66 +2314,113 @@ export function createDecisionServer(options: ServeOptions): Server {
     return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
   }
 
-  /**
-   * The first-run checklist (adoption track, step 3) — derived from live
-   * state on every render, never a stored cursor, and retired PERMANENTLY
-   * by the first-success installation fact (Codex adoption review,
-   * finding 14). Every step is either something this console already has
-   * authority for, or the exact command where the CLI owns the act — the
-   * checklist instructs, it never gains authority (finding e).
-   */
+  function taskComposer(who: Who, problem: string | null = null, draft = new URLSearchParams()): Screen {
+    const project = who.via === "cookie" ? who.session.project : defaultProject;
+    const candidates = store.listTasksScoped(project, undefined, 100, null)
+      .filter(one => one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
+      .map(one => ({ id: one.id, title: one.title }));
+    return newTaskPage(chromeFor(project, "tasks"), project, who.via === "cookie" ? who.session.csrf : "",
+      who.via === "cookie" ? who.session.projectRevision : 0, problem, candidates, draft);
+  }
+
+  /** Starting a session hands off to work in that project, including saved drafts. */
+  function enterProjectTask(who: Extract<Who, { via: "cookie" }>, repo: string, resumeTask: string | null): string {
+    store.upsertProject(repo, projectName(repo), clock());
+    who.session.project = repo;
+    who.session.projectRevision++;
+    return resumeTask && store.lookupRef(resumeTask)?.repo === repo ? taskHref(resumeTask) : "/tasks/new";
+  }
+
+  function startProjectSession(repo: string, by: string): { ok: boolean; message: string } {
+    const worker = options.localControl?.status().find(one => one.repo === repo);
+    if (worker?.state === "stopping") return { ok: false, message: "Wait for the session to finish pausing, then try again." };
+    // An existing local or remote session already serves this project.
+    if (worker?.state === "running" || store.listRunners().some(one => runnerAlive(one, clock()) && one.repos.includes(repo))) return { ok: true, message: "Your session is ready." };
+    // A web console without local supervision can still open the composer.
+    if (worker === undefined) return { ok: true, message: "Project settings saved." };
+    return options.localControl!.change(repo, "start", by);
+  }
+
+  /** One setup surface for the desktop window and the browser. */
+  const loadOpenRouterModels = openRouterModelsCache(options.modelCatalogFetcher ?? fetch);
+
+  async function controlScreen(who: Who, message?: string, checks?: string[], selection: { repo?: string | undefined; provider?: string | undefined; inputs?: SetupInputs; task?: string | undefined } = {}): Promise<Screen> {
+    const csrf = who.via === "cookie" ? who.session.csrf : "";
+    const project = who.via === "cookie" ? who.session.project : defaultProject;
+    const repos = admissionList() ?? [];
+    const repo = repos.find(one => one === selection.repo) ?? repos.find(one => one === project) ?? repos[0];
+    const returnTask = selection.task ?? new URL(requestContext.getStore()?.returnTo ?? "/", "http://localhost").searchParams.get("task");
+    const controlUrl = (path: string, provider?: string) => `${path}?repo=${encodeURIComponent(repo ?? "")}${provider === undefined ? "" : `&provider=${provider}`}${returnTask ? `&task=${encodeURIComponent(returnTask)}` : ""}`;
+    const header = `<div class="setup-flow"><p class="eyebrow">PROJECT SETUP</p><h1>${repo === undefined ? "Choose your project" : `Set up ${escape(projectName(repo))}`}</h1><p class="hint">Choose your assistant once. Start a session, then tell it what you want done.</p>` +
+      (message === undefined ? "" : `<div class="card setup-feedback" role="status">${escape(message)}</div>`) +
+      (repos.length < 2 ? "" : `<nav class="setup-projects" aria-label="Project to set up">${repos.map(one => `<a href="/control?repo=${encodeURIComponent(one)}"${one === repo ? ` aria-current="page"` : ""}>${escape(projectName(one))}</a>`).join("")}</nav>`);
+    if (repo === undefined) return screen("Project setup", header + `<section class="card"><h2>Add a project to get started</h2><p>Choose a project folder in the app, or open an available project below.</p><a class="button-link primary" href="/projects">Choose a project</a></section></div>`, { chrome: chromeFor(project, "setup") });
+    const worker = options.localControl?.status().find(one => one.repo === repo);
+    const elsewhere = store.listRunners().find(one => runnerAlive(one, clock()) && one.repos.includes(repo) && one.name !== worker?.runner);
+    const setup = store.liveWorktreeSetup(repo);
+    const configured = resolvePhaseAgent(store, "build", repo, {});
+    const current = configured.ok ? configured.spec : { provider: "claude" as const, model: null };
+    const provider = isProviderId(selection.provider ?? "") ? selection.provider as typeof current.provider : current.provider;
+    const names = ASSISTANTS[provider];
+    const account = who.role === "approver" ? await connectionStatus(provider, new URL(requestContext.getStore()?.returnTo ?? "/", "http://localhost").searchParams.get("check-connection") === "1") : null;
+    const model = selection.inputs?.model ?? (provider === current.provider ? current.model : null);
+    const choices = modelChoices(provider, model, options.connectionHome);
+    const routerCatalog = provider === "openrouter" && who.role === "approver"
+      ? await loadOpenRouterModels(readProviderKey("openrouter", options.connectionHome) ?? process.env.OPENROUTER_API_KEY ?? null,
+        new URL(requestContext.getStore()?.returnTo ?? "/", "http://localhost").searchParams.get("refresh-models") === "1") : null;
+    const suggested = detectPreparation(repo);
+    const selectedPreparation = selection.inputs?.command ?? setup?.command ?? null;
+    const saved = store.phaseConfig(repo, "build") !== null;
+    const prepMode = selectedPreparation !== null ? selectedPreparation === "" ? "none" : "current" : saved ? "none" : suggested === null ? "none" : "auto";
+    const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="repo" value="${escape(repo)}">${returnTask === null ? "" : `<input type="hidden" name="resume-task" value="${escape(returnTask)}">`}`;
+    const grant = store.publicationGrantFor(repo);
+    let instructions: ReturnType<typeof previewProjectInstructions>;
+    try { instructions = previewProjectInstructions(repo); }
+    catch { instructions = { ok: false, message: "This project folder is unavailable. Reconnect it before adding instructions." }; }
+    const ready = current.model !== null && current.model !== "";
+    const running = worker?.state === "running" || elsewhere !== undefined;
+    const setupForm = who.role !== "approver" ? `<p class="card">You can view setup. An approver can change these settings.</p>` :
+      (ready ? `<details class="card setup-section saved-assistant" id="assistant"${selection.provider !== undefined || selection.inputs !== undefined ? " open" : ""}><summary>Assistant & settings <span class="meta">${escape(ASSISTANTS[current.provider].name)} · ${escape(current.model ?? "")}</span></summary>` : `<section class="card setup-section" id="assistant"><div class="setup-heading"><div><h2>Choose your assistant</h2><p class="meta">Use the coding assistant you already work with.</p></div></div>`) +
+      `<nav class="assistant-picker" aria-label="AI assistant">${PROVIDER_IDS.map(id => `<a href="${controlUrl("/control", id)}" class="assistant-choice"${provider === id ? ` aria-current="page"` : ""}><strong>${ASSISTANTS[id].name}</strong><span>${ASSISTANTS[id].description}</span></a>`).join("")}</nav>` +
+      `<div class="assistant-account"><div><strong>${escape(names.name)} account</strong>${account === null ? "" : connectionWords(provider, account, options.localControl?.host)}</div><div class="account-actions"><a class="button-link secondary" href="${controlUrl("/control/connection", provider)}">${account?.state === "connected" || account?.state === "key-present" ? "Manage connection" : "Connect account"}</a><a class="meta" href="${controlUrl("/control", provider)}&amp;check-connection=1#assistant">Check again</a></div></div>` +
+      `<form method="post" action="/control/setup-preview">${hidden}<input type="hidden" name="after-setup" value="${ready && !returnTask ? "settings" : "session"}"><input type="hidden" name="provider" value="${provider}">` +
+      (routerCatalog === null ? `<label>Model<select name="model">${choices.map((one, i) => `<option value="${escape(one.value)}"${one.value === model || (model === null && i === 0) ? " selected" : ""}>${escape(one.label)}</option>`).join("")}<option value="__custom__"${choices.length === 0 ? " selected" : ""}>Choose a different model</option></select></label>` : openRouterPicker(routerCatalog, model, controlUrl("/control", provider) + "&refresh-models=1#assistant")) +
+      `<details class="setup-advanced"${choices.length === 0 && !(routerCatalog?.ok && routerCatalog.models.length > 0) ? " open" : ""}><summary>Project preparation & advanced settings</summary><p class="meta">We prepare a separate working copy automatically before each task.</p>` +
+      `<label>Project preparation<select name="preparation">` +
+      (selectedPreparation ? `<option value="current"${prepMode === "current" ? " selected" : ""}>Keep the saved preparation</option>` : "") +
+      (suggested === null ? "" : `<option value="auto"${prepMode === "auto" ? " selected" : ""}>${escape(suggested.label)} — detected</option>`) +
+      `<option value="none"${prepMode === "none" ? " selected" : ""}>No preparation needed</option><option value="custom">Use a custom preparation</option></select></label>` +
+      `<p class="meta">${suggested === null ? "No standard dependency setup was detected. You can continue without one." : `Detected ${escape(suggested.evidence)}. The next screen shows exactly what will run.`}</p>` +
+      `<label>Different model ID <span class="meta">(optional; overrides the choice above)</span><input name="custom-model" value="" placeholder="Exact model name"></label>` +
+      `<input type="hidden" name="saved-command" value="${escape(selectedPreparation ?? "")}"><label>Custom preparation command<textarea name="command" rows="2" placeholder="Only needed for custom preparation"></textarea></label>` +
+      `<label>Preparation time limit<select name="seconds">${[300, 600, 900, 1800, 3600, ...((setup?.timeoutMs ?? 300000) % 1000 === 0 ? [(setup?.timeoutMs ?? 300000) / 1000] : [])].filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => a - b).map(seconds => `<option value="${seconds}"${String(seconds) === (selection.inputs?.seconds ?? String((setup?.timeoutMs ?? 300000) / 1000)) ? " selected" : ""}>${seconds / 60} minutes</option>`).join("")}</select></label></details>` +
+      `<details class="setup-preferences"><summary>Approval preferences</summary><input type="hidden" name="approval-preference-present" value="1">${approvalToggle(store.approvalPasswordRequired(who.name))}</details><div class="setup-actions"><button class="primary">Review session setup</button></div></form>${ready ? "</details>" : "</section>"}`;
+    const work = !ready ? `<p class="setup-next-note meta">Confirm your setup, then go straight to your task.</p>` : `<section class="card setup-section" id="worker"><div class="setup-heading"><div><h2>${running ? "Your session is ready" : "Start your session"}</h2><p class="meta">Your assistant works through approved tasks in the background.</p></div><span class="badge">${running ? "Running" : worker?.state === "stopping" ? "Stopping" : "Stopped"}</span></div>` +
+      `<p>${options.localControl === undefined ? `Work runs on its connected computer. <a href="/fleet">View connected computers</a>.` : `Runs on <strong>${escape(options.localControl.host)}</strong>. You can close this window while it works.`}</p>` +
+      (worker?.state === "error" ? `<p class="problem">${escape(worker.detail)}</p>` : "") +
+      (worker === undefined || who.role !== "approver" ? "" : elsewhere !== undefined && worker.state !== "running" ? `<p class="meta">Already running on ${escape(elsewhere.host)}. Manage that worker from its console.</p>` :
+        `<form method="post" action="/control/worker" class="inline">${hidden}<input type="hidden" name="action" value="${worker.state === "running" ? "stop" : "start"}"><button${worker.state === "stopping" || (!ready && worker.state !== "running") ? " disabled" : ""}${worker.state === "running" ? "" : ` class="primary"`}>${worker.state === "running" ? "Pause session" : worker.state === "stopping" ? "Pausing…" : "Start session"}</button></form>`) +
+      (!ready ? `<p class="meta">Save your assistant and model above to enable your worker.</p>` : "") +
+      (!running || who.via !== "cookie" || who.role !== "approver" ? "" : `<form method="post" action="/projects/open" class="setup-actions">${hidden}<input type="hidden" name="path" value="${escape(repo)}"><input type="hidden" name="return" value="/tasks/new"><button${running ? ` class="primary"` : ""}>New task →</button></form>`) + `<p class="meta">You approve each task before it starts. Pausing a session keeps unfinished work.</p>` +
+      (options.localControl?.check === undefined ? "" : `<p><a href="${controlUrl("/control")}&check=1">Check this computer</a></p>`) +
+      (checks === undefined ? "" : `<div class="setup-checks" role="status"><h3>Computer check</h3><ul>${checks.map(one => `<li>${escape(one)}</li>`).join("")}</ul><p class="meta">This checks installed tools. Your assistant account is managed under Connect or change account.</p></div>`) + `</section>`;
+    const optional = `<details class="card setup-optional"><summary>Project instructions <span class="meta">— optional${instructions.ok && instructions.installed ? " · added" : ""}</span></summary><p>Help coding assistants understand this project's task queue. This adds a small instructions file to the project; it does not start work or approve tasks.</p>` +
+      (!instructions.ok ? `<p class="meta">${escape(instructions.message)}</p>` : who.role !== "approver" ? "" : `<form method="post" action="/control/instructions-preview">${hidden}<button>${instructions.installed ? "Review project instructions" : "Add project instructions"}</button></form>`) + `</details>`;
+    const publication = grant === null ? "" : `<details class="card"><summary>GitHub publishing permissions</summary><p>May ${escape(grant.capabilities.join(", "))} for <strong>${escape(grant.githubRepo)}</strong>, from <code>${escape(grant.headPrefix)}*</code> into <code>${escape(grant.base)}</code>.</p>` +
+      (who.role !== "approver" ? "" : `<form method="post" action="/control/publication-revoke">${hidden}<input type="hidden" name="grant" value="${grant.id}"><button>Revoke future publication</button></form>`) + `</details>`;
+    return screen("Project setup", header + (ready ? work + setupForm : setupForm + work) + optional + publication + `<p class="meta"><a href="/projects">Manage projects</a> · <a href="/fleet">Worker activity</a></p></div>`, { chrome: chromeFor(project, "setup"), ...(routerCatalog === null ? {} : { functional: { script: openRouterPickerScript() } }) });
+  }
+
   function wizardSteps(now: Date): { done: boolean; title: string; detail: string }[] | null {
     if (store.firstSuccessAt(now) !== null) return null;
     const repos = admissionList() ?? [];
-    const setupDone = repos.filter(one => store.liveWorktreeSetup(one) !== null).length;
-    const skillDone = repos.filter(one =>
-      existsSync(join(one, ".claude", "skills", "standing-orders", "SKILL.md")),
-    ).length;
-    const counted = (done: number): string =>
-      repos.length <= 1 ? "" : ` (${done} of ${repos.length} repos)`;
+    const configured = repos.filter(repo => { const agent = resolvePhaseAgent(store, "build", repo, {}); return agent.ok && agent.spec.model !== null && agent.spec.model !== ""; });
+    const answering = store.listRunners().some(one => runnerAlive(one, now) && (unscopedMode || one.repos.some(repo => repos.includes(repo))));
     return [
-      {
-        done: !unscopedMode,
-        title: "name what this console may see",
-        detail: unscopedMode
-          ? `no ceiling is configured — this server currently shows everything. Restart it naming the repos: <code>standing-orders serve --repo &lt;path&gt; --port …</code>`
-          : repos.length === 0
-            ? `the ceiling is configured but empty — no repository is visible here`
-            : `ceiling: ${repos.map(one => escape(projectName(one))).join(", ")}`,
-      },
-      {
-        // A fact about THIS DATABASE only: binaries and authentication live
-        // on the worker's machine, which may not be this one — the console
-        // never claims to have checked them (finding 15).
-        done: store.hasPhaseConfig(),
-        title: "route the spend to a provider",
-        detail: store.hasPhaseConfig()
-          ? `spend routing is configured in this database. Binary and authentication facts stay machine-side: run <code>standing-orders providers</code> where the workers run`
-          : `nothing routes builds to a provider yet: <code>standing-orders config set build --provider claude --as &lt;you&gt; --token &lt;t&gt;</code> — then check <code>standing-orders providers</code> on the worker's machine (installed, configured, historically-successful, and authenticated are four separate facts there)`,
-      },
-      {
-        done: repos.length > 0 && setupDone === repos.length,
-        title: "say how a fresh checkout gets ready",
-        detail:
-          setupDone > 0
-            ? `setup command set${counted(setupDone)}`
-            : `agents build in throwaway workspaces; give them the preparation step: <code>standing-orders setup set --repo &lt;path&gt; --command "npm ci"</code>`,
-      },
-      {
-        done: repos.length > 0 && skillDone === repos.length,
-        title: "teach the repo's agents this queue exists",
-        detail:
-          skillDone > 0
-            ? `skill installed${counted(skillDone)}`
-            : `<code>standing-orders skills install --repo &lt;path&gt;</code> previews; add <code>--yes</code> to write the skill file`,
-      },
-      {
-        done: store.hasAnyWork(),
-        title: "file the first standing order",
-        detail: store.hasAnyWork()
-          ? `work is filed — approve its scope and the machine takes it from there`
-          : `start from a template below, capture a one-off task underneath, or browse <a href="/routines">routines</a>`,
-      },
+      { done: repos.length > 0, title: "Choose a project", detail: repos.length > 0 ? repos.map(projectName).map(escape).join(", ") : `<a href="/projects">Choose a project folder</a>` },
+      { done: repos.length > 0 && configured.length === repos.length, title: "Set up your assistant", detail: `<a href="/control#assistant">Choose your assistant and project preparation</a>` },
+      { done: answering, title: "Start your worker", detail: `<a href="/control#worker">${answering ? "Your worker is ready" : "Start the background worker"}</a>` },
+      { done: store.hasAnyWork(), title: "Create your first task", detail: store.hasAnyWork() ? `Your task is ready to review. <a href="/board">Open your tasks</a>` : `<a href="/tasks/new">Describe what you want done</a>` },
     ];
   }
 
@@ -2133,14 +2467,26 @@ export function createDecisionServer(options: ServeOptions): Server {
     | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; keySource: "environment" | "stored"; price: import("./converse.js").ModelPrice; credentialKey: string }
     | { ok: false; code: "demo" | "unscoped" | "roots" | "unresolved" | "empty" | "unconfigured" | "unpriced" | "no-key"; why: string };
 
+  /**
+   * The ceiling conditions chat needs WHOEVER answers it: a real database,
+   * an explicit repo list, and something inside it. Shared by the API
+   * adapter and the local account so the two can never disagree about what
+   * this console is allowed to talk about.
+   */
+  function chatCeilingProblem(): { code: "demo" | "unscoped" | "roots" | "unresolved" | "empty"; why: string } | null {
+    if (store.isDemo()) return { code: "demo", why: "this is a demo database — chat spends money and refuses it" };
+    if (unscopedMode) return { code: "unscoped", why: "chat needs an explicit ceiling: restart serve naming repos with --repo" };
+    if (ceiling.roots.length > 0) return { code: "roots", why: "chat refuses root-derived ceilings — name each repo explicitly with --repo" };
+    if (unresolvedRepos.length > 0) return { code: "unresolved", why: "a --repo path did not resolve at startup — fix it and restart before chat will run" };
+    if (ceiling.repos.length === 0) return { code: "empty", why: "the ceiling is empty — chat has nothing it may see" };
+    return null;
+  }
+
   /** Every condition re-proved per request — the render and the POST each
    * ask again; nothing is cached into authority. */
   function chatEnablement(): ChatEnablement {
-    if (store.isDemo()) return { ok: false, code: "demo", why: "this is a demo database — chat spends money and refuses it" };
-    if (unscopedMode) return { ok: false, code: "unscoped", why: "chat needs an explicit ceiling: restart serve naming repos with --repo" };
-    if (ceiling.roots.length > 0) return { ok: false, code: "roots", why: "chat refuses root-derived ceilings — name each repo explicitly with --repo" };
-    if (unresolvedRepos.length > 0) return { ok: false, code: "unresolved", why: "a --repo path did not resolve at startup — fix it and restart before chat will run" };
-    if (ceiling.repos.length === 0) return { ok: false, code: "empty", why: "the ceiling is empty — chat has nothing it may see" };
+    const ceilingProblem = chatCeilingProblem();
+    if (ceilingProblem !== null) return { ok: false, code: ceilingProblem.code, why: ceilingProblem.why };
     const config = store.getChatConfig();
     if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: standing-orders config set chat" };
     const price = priceForConfig(config);
@@ -2148,6 +2494,45 @@ export function createDecisionServer(options: ServeOptions): Server {
     const key = chatKeyFor(config.provider);
     if (key === null) return { ok: false, code: "no-key", why: `no ${config.provider} key — paste one below (stored 0600 beside the database, never in it), or export ${CHAT_KEY_ENV[config.provider]} in the serve environment` };
     return { ok: true, config, key: key.key, keySource: key.source, price, credentialKey: credentialKeyOf(config.provider, key.key) };
+  }
+
+  // ---- the local assistant (unified chat) ---------------------------------
+
+  /**
+   * The empty directory the local assistant runs in. Created once, mode
+   * 0700, and never written to: it exists so the harness starts somewhere
+   * with no repository, no project instructions file, and nothing to read.
+   */
+  let chatWorkspacePath: string | null = null;
+  function chatWorkspace(): string {
+    if (chatWorkspacePath !== null) return chatWorkspacePath;
+    const chosen =
+      options.chatWorkspace ??
+      (options.configDir === undefined ? mkdtempSync(join(tmpdir(), "standing-orders-chat-")) : join(options.configDir, "chat-workspace"));
+    try {
+      mkdirSync(chosen, { recursive: true, mode: 0o700 });
+      // `mode` applies only to a directory this call CREATES, so an
+      // existing one is narrowed explicitly rather than assumed.
+      chmodSync(chosen, 0o700);
+    } catch {
+      // Already there and unchangeable, or unwritable. Not swallowed: the
+      // turn checks the directory exists and says so in its own words.
+    }
+    chatWorkspacePath = chosen;
+    return chosen;
+  }
+
+  /**
+   * Can the already-connected account answer? Re-asked per request; the
+   * check itself is the existing non-spending one, cached for 30 seconds
+   * and shared while in flight, and it never starts an agent task.
+   */
+  async function localAssistantState(fresh = false): Promise<ChatAccountState> {
+    const ceilingProblem = chatCeilingProblem();
+    if (ceilingProblem !== null) return { ok: false, why: ceilingProblem.why, account: null };
+    const account = await connectionStatus("claude", fresh);
+    if (account.state === "connected") return { ok: true, account };
+    return { ok: false, why: localAccountWhy(account), account };
   }
 
   /**
@@ -2365,17 +2750,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       { label: "board", href: "/board?scope=all" },
       { label: "queue", href: QUEUE_VIEW },
       { label: "workbench", href: "/workbench" },
-      { label: "routines", href: "/routines" },
+      { label: "Routines", href: "/routines" },
       { label: "done", href: "/done" },
       { label: "review queue", href: "/review" },
-      { label: "task list", href: "/tasks" },
-      { label: "fleet", href: "/fleet" },
+      { label: "Tasks", href: "/tasks" },
+      { label: "Agents", href: "/fleet" },
       { label: "activity", href: "/activity" },
-      { label: "system", href: "/system" },
+      { label: "System", href: "/system" },
       { label: "builds", href: "/runs" },
-      { label: "requirements", href: "/caps" },
+      { label: "Requirements", href: "/caps" },
       { label: "projects", href: "/projects" },
-      ...(options.telegramTokenFile !== undefined ? [{ label: "settings", href: "/settings" }] : []),
+      { label: "Settings", href: "/settings" },
     ];
     const open = store.paletteTasks(project, 201, admitted).filter(one => one.repo === null || visible(one.repo));
     for (const one of open.slice(0, 200)) {
@@ -2416,11 +2801,57 @@ export function createDecisionServer(options: ServeOptions): Server {
    * push enrollment — neither reads the fields); the chrome additions
    * are what sensitivity strips.
    */
+  function telegramSettingsCard(who: Who): string {
+    if (options.telegramTokenFile === undefined) return "";
+    const source = loadBotToken(process.env, options.telegramTokenFile);
+    const binding = source === null ? null : store.liveTelegramBinding(source.botId);
+    const connection = telegram?.status();
+    const prefix = `<section class="settings-section" id="telegram"><div class="section-heading"><span class="service-icon" aria-hidden="true">${strokeIcon(`<path d="m21 3-7 18-4-7-7-4 18-7Z"/><path d="m10 14 5-5"/>`)}</span><div><h2>Telegram</h2><p class="meta">Chat, updates, and approvals, wherever you are.</p></div></div>`;
+    if (store.isDemo()) return prefix + `<p>Telegram stays disconnected in this demo. Connect it when setting up your own workspace.</p></section>`;
+    if (who.via !== "cookie" || who.role !== "approver") return prefix + `<p>An approver can connect Telegram from this page.</p></section>`;
+    const csrf = `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">`;
+    const password = `<label>Your password<input type="password" name="token" autocomplete="current-password" required></label>`;
+    const pending = who.session.telegramPairing;
+    const pendingActive = pending !== undefined && pending.botId === source?.botId && store.telegramPairingPending(hashTelegramStartCode(pending.botId, pending.code), clock());
+    const problem = connection?.problem ? `<p role="status">${escape(connection.problem)}</p>` : "";
+    const saved = source === null ? "Bot token: not set" : `Bot token saved ${escape(redactToken(source.token))}${source.source === "env" ? " · managed by this installation" : ""}`;
+    if (binding !== null) return prefix + `<div class="connection-status"><div><strong>${connection?.username ? `@${escape(connection.username)}` : "Telegram chat"}</strong><p class="meta">Connected as ${escape(binding.approver)}</p></div><span class="badge ${connection?.enabled ? "badge-done" : ""}">${connection?.enabled ? "Connected" : "Paired"}</span></div><p class="meta">${connection?.enabled ? "Stays connected when you close the app." : "Enable the background connection to receive updates."}</p>${problem}` +
+      (connection?.enabled ? "" : `<form method="post" action="/settings/telegram-connect">${csrf}${password}<button class="primary">Enable Telegram connection</button></form>`) +
+      `<p><a href="/chat/settings">Memory and project context</a> · <a href="/chat/history">Conversation history</a></p>` +
+      `<details><summary>Voice notes</summary><p>Transcribe voice notes with OpenAI, then answer using your connected Claude account. Audio is sent to OpenAI; separate API usage charges apply.</p><p class="meta">${readTranscriptionKey(options.configDir ?? dirname(options.telegramTokenFile)) === null ? "Not connected" : "Transcription enabled"}</p><form method="post" action="/settings/telegram-voice">${csrf}<label>OpenAI API key<input type="password" name="transcription-key" autocomplete="off" placeholder="Paste a key to enable voice"></label><div class="acts"><button name="action" value="save">Enable voice notes</button><button name="action" value="disable" class="quiet">Disable</button></div></form></details>` +
+      `<details><summary>Disconnect Telegram</summary><p>This stops updates and replies from the connected chat.</p><form method="post" action="/settings/telegram-disconnect">${csrf}${password}<button class="danger">Disconnect Telegram</button></form></details></section>`;
+    return prefix + `<ol><li>Create a bot with <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">BotFather</a>, then copy the bot token it gives you.</li><li>Connect your bot below.</li><li>Open Telegram and tap Start. We'll confirm when you're connected.</li></ol><p class="meta">${saved}</p>${problem}` +
+      (pendingActive ? `<p><a class="button-link" href="/settings/telegram">Finish connecting in Telegram</a></p>` : "") +
+      `<form method="post" action="/settings/telegram-connect">${csrf}` +
+      (source?.source === "env" ? "" : `<label>${source === null ? "Bot token from BotFather" : "Replace bot token (optional)"}<input type="password" name="bot-token" autocomplete="off"${source === null ? " required" : ""}></label>`) +
+      `${password}<p class="meta">Confirm once to let your Telegram account receive updates and answer requests as you.</p><button class="primary">${pendingActive ? "Create a new connection link" : "Connect Telegram"}</button></form></section>`;
+  }
+
   function sendScreen(response: ServerResponse, status: number, s: Screen): void {
-    const sensitive =
+    let sensitive =
       s.forceSensitive === true ||
       SENSITIVE_INPUT.test(s.body) ||
       (s.chrome?.listPane !== undefined && SENSITIVE_INPUT.test(s.chrome.listPane));
+    const browserRequest = requestContext.getStore();
+    const browserWho = browserRequest?.who;
+    if (browserWho?.via === "cookie" && browserWho.role === "approver") {
+      const required = store.approvalPasswordRequired(browserWho.name);
+      if (s.title === "settings") {
+        const saved = new URL(browserRequest?.returnTo ?? "/settings", "http://local").searchParams.get("approvals") === "saved";
+        s = { ...s, body: s.body.replace("<!-- approval-preferences -->", approvalPreferenceCard(required, browserWho.session.csrf, saved)) };
+      }
+      if (!required) s = { ...s, body: s.body.replace(/<form\b[^>]*>[\s\S]*?<\/form>/g, form => {
+        const action = /\baction="([^"]+)"/.exec(form)?.[1];
+        if (action === undefined || !isWorkApprovalPath(action)) return form;
+        const isApprovalInput = (html: string) => /<input\b[^>]*\bname="token"/.test(html) && /\btype="password"/.test(html);
+        const simplified = form
+          .replace(/<label\b[^>]*>[\s\S]*?<\/label>/g, label => isApprovalInput(label) ? "" : label)
+          .replace(/<input\b[^>]*>/g, input => isApprovalInput(input) ? "" : input);
+        return simplified === form ? form : simplified.replace("</form>", `<p class="meta">Confirming as ${escape(browserWho.name)} with your signed-in session.</p></form>`);
+      }) };
+    }
+    if (s.title === "settings") s = { ...s, body: s.body.replace("<!-- approval-preferences -->", `<section class="settings-section" id="approval-preferences"><h2>Approval preferences</h2><p class="meta">Sign in as an approver to manage approval preferences.</p></section>`) };
+    sensitive = sensitive || SENSITIVE_INPUT.test(s.body);
     const chromeLayer = !sensitive && s.chrome !== undefined;
     const functional = s.functional?.script ?? "";
     // Sensitive pages strip the palette and keys but keep the MINIMAL beat
@@ -2501,9 +2932,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         return rows;
       })(),
       ...(facts === undefined ? {} : { csrf: facts.csrf, returnTo: facts.returnTo }),
+      ...(options.projectManager === undefined || facts?.who.role === "approver" ? {
+        addProjectsHref: options.projectManager !== undefined || ceiling.roots.length > 0 || unscopedMode ? "/projects/browse" : "/projects#add-projects",
+      } : {}),
       inboxCount: badge.count,
       inboxSaturated: badge.saturated,
-      settings: options.telegramTokenFile !== undefined,
+      settings: true,
       ...(store.isDemo() ? { demo: true } : {}),
       ...(liveMode === null || liveModeTerms === null
         ? {}
@@ -2626,7 +3060,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return sendScreen(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, unscopedMode, ceiling.roots.length > 0 || unscopedMode, onboardState, peeks),
+      projectsPage(chromeFor(open, "projects", undefined, "all"), recent, [...candidates], open, csrf, problem, unscopedMode, options.projectManager !== undefined || ceiling.roots.length > 0 || unscopedMode, onboardState, peeks),
     );
   }
 
@@ -2722,6 +3156,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return open === null ? null : { id: open.id, state: open.state, agents: store.contestants(open.id).length, kind: open.kind };
         })(),
         claimed: ref === null ? false : store.hasLiveClaim(ref.id, now),
+        stopRequested: ref !== null && store.runsFor(ref.id).some(one => one.outcome === null && store.runStopRequested(one.id)),
         // The chain, both directions of trust: blockers outside the ceiling
         // are named but wear no state and no link (same redaction the board
         // applies to blockerState).
@@ -2753,6 +3188,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         position: store.queuePosition(taskId),
         mirror: store.mirrorByTask(taskId),
         scope,
+        projectConfigured: (() => { if (ref?.repo == null) return false; const agent = resolvePhaseAgent(store, "build", ref.repo, {}); return agent.ok && !!agent.spec.model; })(),
         raceTerms,
         approvalDigest,
         spendDefaults: store.getSpendDefaults(),
@@ -2761,11 +3197,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           // OBSERVED CI state (audit SD-5): the reviewer learns PR and CI
           // here instead of spelunking run pages.
           if (ref === null) return null;
-          for (const one of store.runsFor(ref.id)) {
-            const found = store.publicationForRun(one.id);
-            if (found !== null) return found;
-          }
-          return null;
+          const built = store.runsFor(ref.id).find(one => one.outcome === "built" && one.committed);
+          return built === undefined ? null : store.publicationForRun(built.id);
         })(),
         runs: ref === null ? [] : store.runsFor(ref.id),
         decisions: ref === null ? [] : store.decisionsForTask(ref.id),
@@ -2844,6 +3277,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     taskId: string,
     problem: string | null,
     status: number,
+    steeringDraft?: string,
   ): void {
     const data = taskViewData(taskId, who, problem);
     if (data === null) return refuse(response, who, 404, "no such task", "/tasks");
@@ -2855,7 +3289,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         paneProject === null && !unscopedMode
           ? chromeFor(paneProject, "tasks")
           : chromeFor(paneProject, "tasks", taskListPane(paneProject, taskId)),
-        data,
+        { ...data, ...(steeringDraft === undefined ? {} : { steeringDraft }) },
       ),
     );
   }
@@ -2968,7 +3402,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const row = store.getWorktree(run.worktree);
     if (row === null || row.taskRef !== run.taskRef) return { ok: false, message: "the checkout is not where the record says" };
-    if (row.runner !== options.localRunner) {
+    if (!localRunnerMatches(row.runner)) {
       return { ok: false, message: "this build runs on another machine — open the console there to watch it", final: true };
     }
     // Adoption-path rows can carry no epoch (round-3 finding 37): no fence,
@@ -3212,7 +3646,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             return routinePage(response, who, routineId, "that approval form is stale — read it again", 409);
           }
         }
-        if (token === "") {
+        if (token === "" && !sessionApprovalAllowed(store, who.name)) {
           return routinePage(response, who, routineId, "approval requires your password, typed again", 400);
         }
         const approved = approveRoutine(store, routineId, who.name, now, digest, token);
@@ -3238,7 +3672,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // re-proved its credential on this very request.
         if (who.via === "cookie") {
           const token = body.get("token") ?? "";
-          if (token === "") {
+          if (token === "" && !sessionApprovalAllowed(store, who.name)) {
             return routinePage(response, who, routineId, "run now requires your password, typed again", 400);
           }
           const authenticated = authenticateApprover(store, who.name, token);
@@ -3315,7 +3749,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> {
-    const body = await form(request);
+    const body = await form(request, url.pathname === "/chat" && who.role === "approver" ? 8_000_000 : BODY_CAP);
 
     // The attended beat answers BEFORE the shared mutation guard (v28): it
     // carries no parameters, so there is no csrf token to check — its OWN
@@ -3343,10 +3777,172 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 403, "your login can watch, not act — ask an approver to upgrade you");
       }
     }
+    if (who.via === "cookie" && isWorkApprovalPath(url.pathname) && !store.approvalPasswordRequired(who.name)) {
+      const verified = verifyApproverStanding(store, who.name, who.session.generation, admissionList() ?? []);
+      if (!verified.ok) return refuse(response, who, 403, "Sign in again to approve this action.");
+      return withSessionApproval(store, verified.who, () => handleAuthorizedPost(url, who, request, response, body));
+    }
+    return handleAuthorizedPost(url, who, request, response, body);
+  }
+
+  async function handleAuthorizedPost(url: URL, who: Who, request: IncomingMessage, response: ServerResponse, body: URLSearchParams): Promise<void> {
     const now = clock();
     // Any accepted mutation may change what the inbox owes; the badge
     // re-counts within five seconds either way, this just makes it exact.
     bustBadge();
+
+    if (url.pathname === "/chat/settings") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Sign in to manage chat settings.");
+      const repo = body.get("repo") ?? "";
+      if (!ceiling.repos.includes(repo) || ["repo","context","retention-days"].some(key => body.getAll(key).length !== 1) ||
+        !saveChatContext(store, who.name, repo, body.get("context") ?? "", Number(body.get("retention-days")), now)) {
+        return refuse(response, who, 400, "Choose a project and history duration, and keep context under 4,000 characters without credentials.", "/chat/settings");
+      }
+      return redirect(response, `/chat/settings?repo=${encodeURIComponent(repo)}`);
+    }
+    if (url.pathname === "/settings/telegram-voice" && options.telegramTokenFile !== undefined) {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Sign in to configure voice notes.");
+      const action = body.get("action");
+      if (!["save","disable"].includes(action ?? "") || body.getAll("action").length !== 1 || body.getAll("transcription-key").length > 1) return refuse(response, who, 400, "Choose enable or disable.", "/settings#telegram");
+      try { saveTranscriptionKey(options.configDir ?? dirname(options.telegramTokenFile), action === "disable" ? null : (body.get("transcription-key") ?? "").trim()); }
+      catch { return refuse(response, who, 400, "Enter a valid OpenAI API key to enable transcription.", "/settings#telegram"); }
+      return redirect(response, "/settings#telegram");
+    }
+
+    if (url.pathname === "/settings/approval-password") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Change this preference while signed in to the app.", "/settings");
+      const previous = store.approvalPasswordRequired(who.name);
+      if (body.get("previous-required") !== String(previous)) return refuse(response, who, 409, "Your approval preference changed. Reload settings.", "/settings");
+      if (body.has("approval-password") && body.get("approval-password") !== "required") return refuse(response, who, 400, "Choose how to confirm approvals.", "/settings");
+      // Confirm a relaxation once. Enabling the password again needs only the existing session.
+      if (previous && !authenticateApprover(store, who.name, body.get("token") ?? "").ok) return refuse(response, who, 403, "Confirm this change with your current password.", "/settings");
+      store.setApprovalPasswordRequired(who.name, body.get("approval-password") === "required", now);
+      return redirect(response, "/settings?approvals=saved#approval-preferences");
+    }
+
+    if (url.pathname === "/projects/add-preview" || url.pathname === "/projects/add-confirm") {
+      if (who.via !== "cookie" || store.isDemo()) return refuse(response, who, 403, "Sign in to add your own projects.", "/projects");
+      const allowed = async (repo: string): Promise<boolean> => await authorizedProject(ceiling, repo) ||
+        (options.projectManager?.browseRoots ?? []).some(root => {
+          const canonical = canonicalProject(root);
+          return canonical !== null && repo.startsWith(canonical + "/");
+        });
+      try {
+        if (url.pathname.endsWith("add-preview")) {
+          const paths = [...body.getAll("paths"), ...(body.get("pathsText") ?? "").split(/\r?\n/).map(one => one.trim()).filter(Boolean)];
+          if (paths.length === 0 || paths.length > 50) throw new Error("Choose between 1 and 50 project folders.");
+          for (const path of paths) {
+            const canonical = canonicalProject(path);
+            if (canonical === null || !await allowed(canonical)) throw new Error("A selected folder is unavailable or outside this computer's project access.");
+          }
+          const repos = await projectSelection(paths);
+          for (const repo of repos) if (!await allowed(repo)) throw new Error("A selected Git project is outside this computer's project access.");
+          const nonce = randomBytes(24).toString("hex");
+          who.session.projectAddition = { nonce, repos, expiresAt: Date.now() + 10 * 60_000 };
+          return sendScreen(response, 200, screen("Add projects", `<div class="setup-flow"><h1>Add ${repos.length} project${repos.length === 1 ? "" : "s"}</h1><p>These projects will appear together in your overview. Set up and start each project's worker when you are ready.</p><div class="card">${repos.map(repo => `<p><strong>${escape(projectName(repo))}</strong><br><span class="meta">${escape(repo)}</span></p>`).join("")}<form method="post" action="/projects/add-confirm"><input type="hidden" name="csrf" value="${escape(who.session.csrf)}"><input type="hidden" name="nonce" value="${nonce}"><label>Confirm with your password<input type="password" name="token" autocomplete="current-password" required></label><div class="setup-actions"><button class="primary">Add projects</button><a href="/projects">Cancel</a></div></form></div></div>`, { chrome: chromeFor(who.session.project, "projects", undefined, "all"), forceSensitive: true }));
+        }
+        const pending = who.session.projectAddition;
+        delete who.session.projectAddition;
+        if (pending === undefined || pending.nonce !== body.get("nonce") || pending.expiresAt < Date.now()) return refuse(response, who, 409, "This selection has expired. Choose your projects again.", "/projects");
+        if (!authenticateApprover(store, who.name, body.get("token") ?? "").ok) return refuse(response, who, 403, "The password did not match. Choose your projects again.", "/projects");
+        const repos = await projectSelection(pending.repos);
+        if (JSON.stringify(repos) !== JSON.stringify(pending.repos)) throw new Error("A project moved since you reviewed it. Choose your projects again.");
+        for (const repo of repos) if (!await allowed(repo)) throw new Error("A selected project is no longer available to this console.");
+        if (options.projectManager !== undefined) {
+          await options.projectManager.add(repos);
+          ceiling.repos = resolveCeiling(options.projectManager.repos(), []).ceiling.repos;
+        }
+        store.transact(() => { for (const repo of repos) store.upsertProject(repo, projectName(repo), now); });
+        return redirect(response, "/workbench");
+      } catch (error) {
+        return void projectsScreen(response, who, error instanceof Error ? error.message : "The projects could not be added.", 400);
+      }
+    }
+
+    if (url.pathname === "/control/publication-revoke") {
+      const repo = body.get("repo") ?? "";
+      if (!(admissionList() ?? []).includes(repo)) return refuse(response, who, 404, "Choose an enrolled repository.");
+      const revoked = store.transact(() => {
+        const grant = store.publicationGrantFor(repo);
+        if (grant === null || String(grant.id) !== body.get("grant")) return false;
+        store.revokePublicationGrant(repo, who.name, now);
+        return true;
+      });
+      return sendScreen(response, revoked ? 200 : 409, await controlScreen(who, revoked ? "Future publication permission revoked. Existing pull requests remain on GitHub." : "The grant changed. Review it again."));
+    }
+    if (url.pathname === "/control/worker") {
+      const repo = body.get("repo") ?? "";
+      const action = body.get("action");
+      if (!visible(repo) || options.localControl === undefined || !options.localControl.status().some(one => one.repo === repo)) return refuse(response, who, 404, "No controllable worker for this repository on this host.");
+      if (action !== "start" && action !== "stop") return refuse(response, who, 400, "Choose start or stop.");
+      if (action === "start" && !(await isGitRepo(repo))) return refuse(response, who, 409, "Reconnect this project folder before starting a session.", "/control");
+      const changed = action === "start" ? startProjectSession(repo, who.name) : options.localControl.change(repo, action, who.name);
+      if (changed.ok && action === "start" && who.via === "cookie") return redirect(response, enterProjectTask(who, repo, body.get("resume-task")));
+      if (changed.ok && body.get("return") === "overview") return redirect(response, "/workbench");
+      return sendScreen(response, changed.ok ? 200 : 409, await controlScreen(who, changed.message, undefined, { repo, task: body.get("resume-task") ?? undefined }));
+    }
+    if (url.pathname === "/control/instructions-preview" || url.pathname === "/control/instructions-approve") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Review project instructions in the app.", "/control");
+      const repo = body.get("repo") ?? "";
+      if (!(admissionList() ?? []).includes(repo)) return refuse(response, who, 404, "Choose an available project.", "/control");
+      if (store.isDemo()) return sendScreen(response, 409, await controlScreen(who, "This is a demo. Add project instructions when setting up your own project.", undefined, { repo }));
+      const preview = previewProjectInstructions(repo);
+      if (!preview.ok) return sendScreen(response, 409, await controlScreen(who, preview.message, undefined, { repo }));
+      if (url.pathname.endsWith("instructions-approve")) {
+        if (!consumeApprovalNonce(body.get("nonce") ?? "", who.name, `instructions-${repo}`, preview.fingerprint)) return refuse(response, who, 409, "The instructions changed or this review was already used. Review them again.", "/control");
+        if (!authenticateApprover(store, who.name, body.get("token") ?? "").ok) return refuse(response, who, 403, "Your password is required to add project instructions.", "/control");
+        const installed = addProjectInstructions(repo, body.get("fingerprint") ?? "");
+        return sendScreen(response, installed.ok ? 200 : 409, await controlScreen(who, installed.ok ? "Project instructions added. Your assistants can now find the task queue." : installed.message, undefined, { repo }));
+      }
+      return sendScreen(response, 200, screen("Review project instructions", `<div class="setup-flow"><p><a href="/control?repo=${encodeURIComponent(repo)}">← Back to setup</a></p><h1>Add project instructions</h1><p>This adds instructions for assistants working in <strong>${escape(projectName(repo))}</strong>. It does not approve tasks or change your other project instructions.</p><details class="card"><summary>Review the file</summary><p class="mono">.claude/skills/standing-orders/SKILL.md</p><pre class="mono" style="white-space:pre-wrap;max-height:24rem;overflow:auto">${escape(preview.content)}</pre></details>` +
+        `<form class="card" method="post" action="/control/instructions-approve"><input type="hidden" name="csrf" value="${escape(who.session.csrf)}"><input type="hidden" name="repo" value="${escape(repo)}"><input type="hidden" name="fingerprint" value="${preview.fingerprint}"><input type="hidden" name="nonce" value="${mintApprovalNonce(who.name, `instructions-${repo}`, preview.fingerprint)}"><label>Your password<input type="password" name="token" autocomplete="current-password" required></label><button class="primary">Add instructions to project</button></form></div>`, { chrome: chromeFor(who.session.project, "setup") }));
+    }
+    if (url.pathname === "/control/setup-preview" || url.pathname === "/control/setup-approve") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Review setup in the console.");
+      const repo = body.get("repo") ?? "";
+      if (!(admissionList() ?? []).includes(repo)) return refuse(response, who, 404, "Choose an enrolled repository.");
+      const preparation = body.get("preparation");
+      const detection = preparation === "auto" ? detectPreparation(repo) : null;
+      if (preparation === "auto" && detection === null) return sendScreen(response, 409, await controlScreen(who, "The project's dependency files changed. Choose preparation again.", undefined, { repo }));
+      if (preparation !== null && !["auto", "none", "custom", "current"].includes(preparation)) return refuse(response, who, 400, "Choose how to prepare this project.", "/control");
+      const inputs: SetupInputs = { provider: body.get("provider") ?? "", model: body.get("custom-model")?.trim() || body.get("model") || "", command: preparation === "auto" ? detection!.command : preparation === "none" ? "" : preparation === "current" ? body.get("saved-command") ?? "" : body.get("command") ?? "", seconds: body.get("seconds") ?? "" };
+      if (inputs.model === "__custom__") return sendScreen(response, 400, await controlScreen(who, "Choose a model, or enter a different model in Advanced settings.", undefined, { repo, provider: inputs.provider, task: body.get("resume-task") ?? undefined }));
+      if (preparation === "custom" && inputs.command.trim() === "") return sendScreen(response, 400, await controlScreen(who, "Add your custom preparation in Advanced settings, or choose No preparation needed.", undefined, { repo, provider: inputs.provider, inputs, task: body.get("resume-task") ?? undefined }));
+      const passwordRequired = store.approvalPasswordRequired(who.name);
+      const requestedPreference = body.get("approval-password-mode") ?? (body.get("approval-preference-present") === "1" ? body.get("approval-password") === "required" ? "required" : "session" : passwordRequired ? "required" : "session");
+      if (!["required", "session"].includes(requestedPreference)) return refuse(response, who, 400, "Choose how to confirm approvals.", "/control");
+      const afterSetup = body.get("after-setup") ?? "settings";
+      if (afterSetup !== "settings" && afterSetup !== "session") return refuse(response, who, 400, "Choose whether to save settings or start a session.", "/control");
+      const resumeTask = body.get("resume-task") ?? "";
+      const preview = previewSetup(store, repo, inputs);
+      if (!preview.ok) return sendScreen(response, 400, await controlScreen(who, preview.message, undefined, { repo, provider: inputs.provider, inputs, task: body.get("resume-task") ?? undefined }));
+      const confirmationDigest = createHash("sha256").update(JSON.stringify({ setup: preview.fingerprint, requestedPreference, passwordRequired, afterSetup, resumeTask })).digest("hex");
+      if (url.pathname.endsWith("setup-approve")) {
+        if (!consumeApprovalNonce(body.get("nonce") ?? "", who.name, `setup-${repo}`, confirmationDigest)) return refuse(response, who, 409, "Setup changed or this preview was already used. Review it again.", "/control");
+        if (afterSetup === "session" && !(await isGitRepo(repo))) return refuse(response, who, 409, "Reconnect this project folder before starting a session.", "/control");
+        const approved = store.transact(() => {
+          const result = approveSetup(store, repo, inputs, body.get("fingerprint") ?? "", who.name, body.get("token") ?? "", now);
+          if (result.ok) store.setApprovalPasswordRequired(who.name, requestedPreference === "required", now);
+          return result;
+        });
+        if (approved.ok && afterSetup === "session") {
+          const started = startProjectSession(repo, who.name);
+          if (started.ok) return redirect(response, enterProjectTask(who, repo, resumeTask));
+          return sendScreen(response, 409, await controlScreen(who, `Settings saved, but your session could not start. ${started.message}`, undefined, { repo, task: resumeTask }));
+        }
+        if (approved.ok && resumeTask && store.lookupRef(resumeTask)?.repo === repo) return redirect(response, taskHref(resumeTask));
+        return sendScreen(response, approved.ok ? 200 : 409, await controlScreen(who, approved.ok ? "Project settings saved." : approved.message, undefined, { repo, provider: approved.ok ? undefined : inputs.provider, task: body.get("resume-task") ?? undefined }));
+      }
+      const fields = { ...inputs, repo, "after-setup": afterSetup, "resume-task": resumeTask, "approval-password-mode": requestedPreference, csrf: who.session.csrf, fingerprint: preview.fingerprint, nonce: mintApprovalNonce(who.name, `setup-${repo}`, confirmationDigest) };
+      const startsLocal = afterSetup === "session" && options.localControl?.status().some(one => one.repo === repo && one.state !== "running") && !store.listRunners().some(one => runnerAlive(one, now) && one.repos.includes(repo));
+      const nextStep = afterSetup === "settings" ? "Saves your preferences for new tasks." : startsLocal ? "Start the session and open your task. It can pick up tasks you've already approved. New tasks still need your approval." : "Save your setup and open your task. New tasks still need your approval.";
+      return sendScreen(response, 200, screen("Review your setup", `<div class="setup-flow"><p class="eyebrow">REVIEW YOUR CHOICES</p><h1>${afterSetup === "session" ? `Ready to work on ${escape(projectName(repo))}?` : `Save settings for ${escape(projectName(repo))}?`}</h1><div class="card"><h2>Your assistant</h2><p><strong>${escape(ASSISTANTS[preview.provider].name)}</strong> · ${escape(preview.model)}</p><p class="meta">New tasks use this choice. Already approved tasks keep their settings.</p><h2>Project preparation</h2>` +
+        `<p>${preview.command === "" ? "No preparation needed." : `Before a task starts, we'll prepare its separate working copy. This may install dependencies and run the project's install scripts.`}</p>` +
+        (preview.command === "" ? "" : `<p><code>${escape(preview.command)}</code> · up to ${preview.seconds / 60} minutes</p>`) + `</div>` +
+        `<form class="card" method="post" action="/control/setup-approve">${Object.entries(fields).map(([key, value]) => `<input type="hidden" name="${key}" value="${escape(value)}">`).join("")}` +
+        `<p><strong>Approval passwords: ${requestedPreference === "required" ? "On" : "Off"}</strong></p><p class="meta">${requestedPreference === "required" ? "Confirm work approvals with your password." : "Confirm work approvals with your signed-in session."} This is your preference across all projects in the app and web.</p>` +
+        `<label>${passwordRequired && requestedPreference === "session" ? "Confirm once with your password" : "Your password"}<input name="token" type="password" autocomplete="current-password" required></label><p class="meta">${nextStep}</p><div class="setup-actions"><button class="primary">${afterSetup === "settings" ? "Save settings" : startsLocal ? "Start session →" : "Continue to task →"}</button><a href="/control?repo=${encodeURIComponent(repo)}&provider=${preview.provider}${resumeTask ? `&amp;task=${encodeURIComponent(resumeTask)}` : ""}">Back</a></div></form></div>`, { chrome: chromeFor(who.session.project, "setup") }));
+    }
 
     if (url.pathname === "/settings/messaging" && options.configDir !== undefined && options.telegramTokenFile !== undefined) {
       const wanted = (body.get("primary") ?? "").trim();
@@ -3368,7 +3964,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!(wanted in allowed)) return refuse(response, who, 400, "the digest cadence is one of the listed choices", "/settings");
       const minutes = allowed[wanted] ?? null;
       store.setTelegramDigest(minutes === null ? null : minutes * 60_000, who.name, now);
-      return redirect(response, `/settings?said=${encodeURIComponent(minutes === null ? "digest off — every fact pages as it lands" : `digest every ${minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`} — decisions still page at once`)}`);
+      return redirect(response, `/settings?said=${encodeURIComponent(minutes === null ? "Routine updates will arrive immediately." : `digest every ${minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`} · requests for your input still arrive immediately`)}`);
     }
 
     if (url.pathname === "/settings/provider-key" || url.pathname === "/settings/provider-key-clear") {
@@ -3376,6 +3972,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       // write-only from here — status pages say set/not-set, never bytes.
       const provider = body.get("provider") ?? "";
       if (!isProviderId(provider)) return refuse(response, who, 400, "unknown provider", "/settings");
+      const connectionSaved = async (message: string) => { await connectionStatus(provider, true); return body.get("return") === "setup"
+        ? sendScreen(response, 200, await controlScreen(who, message, undefined, { provider, repo: body.get("repo") ?? undefined, task: body.get("resume-task") ?? undefined }))
+        : redirect(response, `/settings?said=${encodeURIComponent(message)}`); };
       if (url.pathname === "/settings/provider-key-clear") {
         const cleared = clearProviderKey(provider);
         const clearedMode = readAuthMode(provider);
@@ -3412,16 +4011,58 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (modeChanged) setAuthMode(provider, wantedMode as AuthMode);
       const modeNote = modeChanged ? ` \u00b7 ${provider} now uses ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}` : "";
       if (value === "") {
-        return redirect(response, `/settings?said=${encodeURIComponent(modeChanged ? `${provider} now uses ${wantedMode === "api-key" ? "the API key" : "its own subscription / login"}` : `no change — ${provider} already uses ${currentMode === "api-key" ? "the API key" : "its own subscription / login"}`)}`);
+        return connectionSaved(modeChanged ? `${ASSISTANTS[provider].name} now uses ${wantedMode === "api-key" ? "the API key" : "your existing sign-in"}.` : `No changes needed. ${ASSISTANTS[provider].name} uses ${currentMode === "api-key" ? "the API key" : "your existing sign-in"}.`);
       }
       saveProviderKey(provider, value); // known plausible
       // Verify right now, so a paste gets an immediate yes/no instead of a
       // failed build later. A stored-but-unreachable key still says so.
       const verdict = await verifyProviderKey(provider, value);
       const stored = `the ${provider} key is stored`;
-      return redirect(response, `/settings?said=${encodeURIComponent((verdict.ok ? `${stored} and verified — it works` : `${stored}. ${verdictWords(provider, verdict)}`) + modeNote)}`);
+      return connectionSaved((verdict.ok ? `${stored} and verified — it works` : `${stored}. ${verdictWords(provider, verdict)}`) + modeNote);
     }
 
+    if (["/settings/telegram-connect", "/settings/telegram-disconnect"].includes(url.pathname) && options.telegramTokenFile !== undefined && telegram !== null) {
+      if (who.via !== "cookie" || store.isDemo()) return refuse(response, who, 403, "Sign in to connect your Telegram account.", "/settings#telegram");
+      if (!authenticateApprover(store, who.name, body.get("token") ?? "").ok) return refuse(response, who, 403, "Confirm this account connection with your password.", "/settings#telegram");
+      if (telegramChanging) return refuse(response, who, 409, "Telegram setup is already changing. Try again in a moment.", "/settings#telegram");
+      telegramChanging = true;
+      try {
+        const source = loadBotToken(process.env, options.telegramTokenFile);
+        if (url.pathname.endsWith("telegram-disconnect")) {
+          await telegram.disable();
+          store.cancelTelegramPairing();
+          if (source !== null) store.unpairTelegram(source.botId, who.name, clock());
+          delete who.session.telegramPairing;
+          return redirect(response, "/settings?said=Telegram%20disconnected.#telegram");
+        }
+        const value = (body.get("bot-token") ?? "").trim();
+        if (source?.source === "env" && value !== "") return refuse(response, who, 400, "This installation manages the bot token. Connect using its saved bot.", "/settings#telegram");
+        const candidate = value === "" ? source : loadBotToken({ [TOKEN_ENV]: value }, options.telegramTokenFile);
+        if (candidate === null) return refuse(response, who, 400, "Paste the bot token provided by BotFather.", "/settings#telegram");
+        const transport = (options.telegramTransport ?? (token => createTransport(token, 10_000)))(candidate.token);
+        const me = await transport("getMe", {});
+        const bot = me.result as { id?: unknown; username?: unknown; is_bot?: unknown } | undefined;
+        if (!me.ok || bot?.is_bot !== true || String(bot.id) !== candidate.botId || typeof bot.username !== "string" || !/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(bot.username)) {
+          return refuse(response, who, 400, "We couldn't verify this bot. Check the token from BotFather and your internet connection, then try again.", "/settings#telegram");
+        }
+        const verified = verifyApproverStanding(store, who.name, who.session.generation, admissionList() ?? []);
+        if (!verified.ok) return refuse(response, who, 403, "Sign in again to connect Telegram.", "/settings#telegram");
+        if (value === "" && loadBotToken(process.env, options.telegramTokenFile)?.token !== candidate.token) return refuse(response, who, 409, "The saved bot changed. Review Telegram settings again.", "/settings#telegram");
+        if (source !== null && source.botId !== candidate.botId && store.liveTelegramBinding(source.botId) !== null) return refuse(response, who, 409, "Disconnect the current Telegram chat before changing bots.", "/settings#telegram");
+        if (value !== "") saveBotToken(options.telegramTokenFile, candidate.token);
+        await telegram.enable({ botId: candidate.botId, username: bot.username });
+        if (!verifyApproverStanding(store, who.name, who.session.generation, admissionList() ?? []).ok) return refuse(response, who, 403, "Sign in again to connect Telegram.", "/settings#telegram");
+        if (store.liveTelegramBinding(candidate.botId) !== null) return redirect(response, "/settings/telegram");
+        const previous = who.session.telegramPairing;
+        if (previous !== undefined) store.cancelTelegramPairing(hashTelegramStartCode(previous.botId, previous.code));
+        const code = mintPairingCode();
+        store.createTelegramPairing({ codeHash: hashTelegramStartCode(candidate.botId, code), approver: who.name, by: who.name, ttlMs: PAIRING_TTL_MS }, clock());
+        who.session.telegramPairing = { code, botId: candidate.botId, username: bot.username, expiresAt: clock().getTime() + PAIRING_TTL_MS };
+        return redirect(response, "/settings/telegram");
+      } catch {
+        return refuse(response, who, 502, "Telegram couldn't connect. Check your connection and try again.", "/settings#telegram");
+      } finally { telegramChanging = false; }
+    }
     if (url.pathname === "/settings/telegram-token" && options.telegramTokenFile !== undefined) {
       const value = body.get("token") ?? "";
       const saved = saveBotToken(options.telegramTokenFile, value);
@@ -3429,7 +4070,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const existing = loadBotToken({}, options.telegramTokenFile);
         const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
         const csrf = who.via === "cookie" ? who.session.csrf : "";
-        return sendScreen(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message));
+        return sendScreen(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message, null, null, null, null, telegramSettingsCard(who)));
       }
       return redirect(response, "/settings");
     }
@@ -3491,11 +4132,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.via === "cookie") {
         const seen = body.get("projectRevision");
         if (seen !== null && seen !== String(who.session.projectRevision)) {
+          if (body.get("composer") === "1") return sendScreen(response, 409, taskComposer(who, "You switched projects in another tab. Check the selected project, then review your task again.", body));
           return refuse(response, who, 409, "the open project changed since this form was rendered — reload and try again", "/tasks");
         }
       }
+      const composing = body.get("composer") === "1";
+      // Browsers encode textarea newlines as CRLF. Store canonical LF so
+      // ordinary multiline descriptions pass the same text validation.
+      const description = (body.get("request") ?? "").replace(/\r\n/g, "\n").trim();
+      if (composing && description === "") return sendScreen(response, 400, taskComposer(who, "Describe what you want done.", body));
       const id = (body.get("id") ?? "").trim();
-      const title = body.get("title") ?? "";
+      // Derive only the display name; the complete description remains the
+      // exact proposal that the user reviews and approves.
+      const firstLine = description.split(/\r?\n/, 1)[0] ?? "";
+      const generatedTitle = firstLine.length > 96 ? firstLine.slice(0, 93).trimEnd() + "…" : firstLine;
+      const title = (body.get("title") ?? "").trim() || (composing ? generatedTitle : "");
       // The EFFECTIVE placement (repo onboarding, findings 15/35): the
       // trimmed, nonempty posted repo, else the open project — an empty
       // input falls through correctly. In root mode the effective path is
@@ -3509,12 +4160,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       // finding 1): the form's `required` is a courtesy, not the guard — a
       // direct POST with no project open must not mint an unplaced task
       // under a ceiling. Unscoped mode keeps its historic unplaced filings.
-      if (!unscopedMode && effective === "") {
+      if ((!unscopedMode || composing) && effective === "") {
         const csrf = who.via === "cookie" ? who.session.csrf : "";
         return sendScreen(
           response,
           400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project),
+          composing ? taskComposer(who, "Choose a project for this task.", body) : tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project),
         );
       }
       let repo = effective;
@@ -3527,18 +4178,41 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(
             response,
             403,
-            tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project),
+            composing ? taskComposer(who, "Choose an available project for this task.", body) : tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project),
           );
         }
         repo = canonical;
         admitted = [canonical];
       }
-      const goal = (body.get("goal") ?? "").trim();
-      const notThis = (body.get("not") ?? "").trim();
+      const goal = composing ? description : (body.get("goal") ?? "").replace(/\r\n/g, "\n").trim();
+      const notThis = (body.get("not") ?? "").replace(/\r\n/g, "\n").trim();
       const touchesGiven = (body.get("touches") ?? "")
         .split(/[\n,]/)
         .map(one => one.trim())
         .filter(one => one !== "");
+      if (composing) {
+        const recurrence = composerSchedule(body);
+        if (!recurrence.ok) return sendScreen(response, 400, taskComposer(who, recurrence.message, body));
+        const editing = body.get("routine-id");
+        if (editing && recurrence.schedule === null) return sendScreen(response, 400, taskComposer(who, "This is a recurring draft. Choose a repeat schedule, or create a separate one-off task.", body));
+        if (recurrence.schedule !== null) {
+          if (body.get("scout") === "1" || body.get("after")) return sendScreen(response, 400, taskComposer(who, "Research-only tasks and dependencies are available for tasks that run once. Choose Once, or remove those options.", body));
+          if (title.length > 200) return sendScreen(response, 400, taskComposer(who, "Keep the task name under 200 characters.", body));
+          const stem = routineNameFromDescription(title || description);
+          const original = editing ? store.getRoutine(Number(editing)) : null;
+          if (editing && (original === null || !visible(original.repo) || original.repo !== repo || original.approvedAt !== null || original.digest !== body.get("routine-digest"))) return sendScreen(response, 409, taskComposer(who, "This recurring task changed. Reopen it before editing.", body));
+          const name = original?.name ?? (store.routineByName(stem) === null ? stem : `${stem}-${randomBytes(3).toString("hex")}`);
+          const limit = (body.get("ceiling") ?? "").trim();
+          const made = fileRoutineProposal(store, {
+            name, repo, goal, outOfScope: notThis || null, touches: touchesGiven, requirements: [],
+            schedule: recurrence.schedule, costCeilingUsd: limit === "" ? null : Number(limit), filedVia: "console",
+            ...(admitted === null ? {} : { admittedRepos: admitted }),
+          }, now, original === null ? undefined : { id: original.id, digest: body.get("routine-digest")! });
+          if (!made.ok) return sendScreen(response, made.reason === "duplicate" ? 409 : 400, taskComposer(who, made.message, body));
+          if (rootMode) store.upsertProject(repo, projectName(repo), now);
+          return redirect(response, routineHref(made.id));
+        }
+      }
       // One filing door for every surface (Codex adoption review, finding 7).
       const made = fileTaskProposal(
         store,
@@ -3560,7 +4234,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           made.reason === "backlog-full" ? 429 : 400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project),
+          composing ? taskComposer(who, made.message, body) : tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project),
         );
       }
       // A proved root-mode placement joins the project table (finding 15):
@@ -3701,7 +4375,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/fleet/runner/register") {
       if (who.via !== "cookie") return refuse(response, who, 403, "runner registration is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "registering a worker takes your password, typed again", "/fleet");
       }
       const name = (body.get("name") ?? "").trim();
@@ -3793,7 +4467,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 409, "the terms moved while you were reading — read them again", "/mode");
       }
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "signing a mode takes your password, typed again", "/mode");
       }
       store.signMode(
@@ -3826,7 +4500,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const token = body.get("token") ?? "";
       // RAISING authority is a password ceremony (the doctrine): adding a
       // person to the instance is exactly that.
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "making an invite takes your password, typed again", "/people");
       }
       const role = body.get("role") === "approver" ? ("approver" as const) : ("viewer" as const);
@@ -3852,7 +4526,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/people/invite-revoke") {
       if (who.via !== "cookie") return refuse(response, who, 403, "inviting is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "cancelling an invite takes your password, typed again", "/people");
       }
       const id = Number(body.get("id") ?? "");
@@ -3863,7 +4537,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/people/revoke") {
       if (who.via !== "cookie") return refuse(response, who, 403, "removing a person is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "removing a person takes your password, typed again", "/people");
       }
       const name = (body.get("name") ?? "").trim();
@@ -3886,7 +4560,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/fleet/runner/retire") {
       if (who.via !== "cookie") return refuse(response, who, 403, "runner retirement is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "retiring a worker takes your password, typed again", "/fleet");
       }
       const name = (body.get("name") ?? "").trim();
@@ -3988,7 +4662,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // POST minted. The store consumes the nonce conditionally inside the
       // same transaction that moves the tournament — replay finds it gone.
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return contestScreen(response, who, contestId, "that decision takes your password, typed again", 403);
       }
       const nonceValue = body.get("nonce") ?? "";
@@ -4014,7 +4688,47 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer|follow-up)$");
+    const deliveryAct = matchTaskPath(url.pathname, "/(publish-preview|publish-confirm)$");
+    if (deliveryAct !== null) {
+      const taskId = deliveryAct.taskId;
+      const ref = store.lookupRef(taskId);
+      if (who.via !== "cookie" || ref?.repo == null || !visible(ref.repo)) return refuse(response, who, 403, "Open this task in its console to publish it.");
+      if (store.isDemo()) return taskScreen(response, who, taskId, "The demo cannot publish. In your repository, this opens a review of the exact commit and GitHub destination.", 409);
+      const runId = Number(body.get("run"));
+      const grant = store.publicationGrantFor(ref.repo);
+      const terms = { githubRepo: body.get("github") ?? grant?.githubRepo ?? "", remote: body.get("remote") ?? grant?.remote ?? "origin", base: body.get("base") ?? grant?.base ?? "main", headPrefix: body.get("prefix") ?? grant?.headPrefix ?? "standing-orders/" };
+      if (terms.githubRepo === "" && deliveryAct.verb === "publish-preview") {
+        const remote = await (options.publishExec ?? execRun)("git", ["remote", "get-url", "origin"], { cwd: ref.repo, timeoutMs: 5000 });
+        const match = /github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(remote.stdout.trim());
+        const base = await (options.publishExec ?? execRun)("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: ref.repo, timeoutMs: 5000 });
+        return sendScreen(response, 200, screen("Publish build", `<h1>Publish build</h1><form method="post" action="${taskHref(taskId)}/publish-preview">` +
+          `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}"><input type="hidden" name="run" value="${runId}">` +
+          `<label>GitHub repository<input name="github" value="${escape(match?.[1] ?? "")}" placeholder="owner/repository" required></label>` +
+          `<label>Remote<input name="remote" value="origin" required></label><label>Base branch<input name="base" value="${escape(base.code === 0 ? base.stdout.trim().replace(/^origin\//, "") : "main")}" required></label>` +
+          `<label>Allowed branch prefix<input name="prefix" value="standing-orders/" required></label><button type="submit">Review publication</button></form>`, { chrome: chromeFor(ref.repo, "tasks") }));
+      }
+      const preview = previewDelivery(store, taskId, runId, terms);
+      if (!preview.ok) return taskScreen(response, who, taskId, preview.message, 409);
+      const key = `publish-${runId}`;
+      if (deliveryAct.verb === "publish-confirm") {
+        if (!consumeApprovalNonce(body.get("nonce") ?? "", who.name, key, preview.fingerprint)) return taskScreen(response, who, taskId, "The publication preview expired or changed. Review it again.", 409);
+        const approved = approveDelivery(store, { taskId, runId, terms, fingerprint: body.get("fingerprint") ?? "", by: who.name, token: body.get("token") ?? "", now });
+        if (!approved.ok) return taskScreen(response, who, taskId, approved.message, 409);
+        const report = await publishPass(store, { repo: approved.repo, runId, clock, ...(options.publishExec === undefined ? {} : { exec: options.publishExec }) });
+        return taskScreen(response, who, taskId, report.problems.length === 0 ? null : report.problems.join(" "), report.problems.length === 0 ? 200 : 409);
+      }
+      const nonce = mintApprovalNonce(who.name, key, preview.fingerprint);
+      return sendScreen(response, 200, screen("Review publication", [
+        `<h1>Review publication</h1><p>Push commit <code>${escape(preview.run.headRevision!)}</code> on <code>${escape(preview.run.branch!)}</code> to <strong>${escape(preview.grant.githubRepo)}</strong> through remote <code>${escape(preview.grant.remote)}</code>, and open a ${preview.grant.draft ? "draft " : ""}pull request against <code>${escape(preview.grant.base)}</code>.</p>`,
+        `<p><a href="/r/${runId}#review">Review the diff</a></p>`,
+        preview.newGrant ? `<p>This also grants future publication of this repository's Standing Orders tasks under <code>${escape(preview.grant.headPrefix)}*</code>. Merging stays manual. You can revoke the grant.</p>` : `<p>The existing repository publication grant applies.</p>`,
+        `<form method="post" action="${taskHref(taskId)}/publish-confirm"><input type="hidden" name="csrf" value="${escape(who.session.csrf)}"><input type="hidden" name="run" value="${runId}"><input type="hidden" name="nonce" value="${nonce}"><input type="hidden" name="fingerprint" value="${preview.fingerprint}">`,
+        ...Object.entries({ github: terms.githubRepo, remote: terms.remote, base: terms.base, prefix: terms.headPrefix }).map(([name, value]) => `<input type="hidden" name="${name}" value="${escape(value)}">`),
+        `<label>Operator password<input name="token" type="password" autocomplete="current-password" required></label><button type="submit">${preview.newGrant ? "Grant publication and open PR" : "Push and open PR"}</button> <a href="${taskHref(taskId)}">Back to task</a></form>`,
+      ].join("\n"), { chrome: chromeFor(ref.repo, "tasks") }));
+    }
+
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|stop|resume|settings-preview|settings-approve|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer|follow-up)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -4075,7 +4789,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // (finding 22/33) — the record is consumed from the RETURNED live
       // session, synchronously, before the first await.
       const password = body.get("token") ?? "";
-      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+      if (!authenticateApprover(store, who.name, password).ok) {
         return projectsScreen(response, who, "cloning takes your password, typed again", 403);
       }
       const cookieId = /(?:^|;\s*)standing-orders_session=([0-9a-f]{64})/.exec(request.headers.cookie ?? "")?.[1];
@@ -4144,7 +4858,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.via !== "cookie") return refuse(response, who, 403, "push enrollment is a browser session's act");
       if (store.isDemo()) return refuse(response, who, 403, "the sandbox never pushes");
       const password = body.get("token") ?? "";
-      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+      if (!authenticateApprover(store, who.name, password).ok) {
         return redirect(response, `/settings?said=${encodeURIComponent("enrolling this device takes your password, typed again")}`);
       }
       const endpoint = body.get("endpoint") ?? "";
@@ -4194,7 +4908,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // touches a form or this database — environment only.
       if (who.via !== "cookie") return refuse(response, who, 403, "chat setup is a browser surface");
       const password = body.get("token") ?? "";
-      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+      if (!authenticateApprover(store, who.name, password).ok) {
         return redirect(response, `/chat?said=${encodeURIComponent("configuring chat spend takes your password, typed again")}`);
       }
       if (body.get("off") === "1") {
@@ -4255,9 +4969,70 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     // ---- the mate (mate arc §5) ------------------------------------------
+    /**
+     * Which project the conversation is looking at. A VIEW filter held in
+     * this browser session: it narrows what the assistant is SHOWN and can
+     * never widen what the session may reach, so a path the ceiling does
+     * not admit is not an error — it simply widens back to every project.
+     * The thread is untouched, so switching never loses the conversation.
+     */
+    if (url.pathname === "/chat/focus") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
+      // The field is named `repo` so it inherits the duplicated-field guard
+      // every other repo-bearing form has. Empty means every project.
+      const chosen = body.get("repo") ?? "";
+      if (chosen !== "" && !ceiling.repos.includes(chosen)) {
+        return refuse(response, who, 400, "Choose a project available in this conversation.", "/chat");
+      }
+      who.session.chatFocus = chosen === "" ? null : chosen;
+      setChatFocus(store, who.name, who.session.chatFocus);
+      return redirect(response, "/chat");
+    }
     if (url.pathname === "/chat/mate/mint") {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const local = await localAssistantState(true);
       const enabled = chatEnablement();
+      if (!local.ok && !enabled.ok) {
+        // The ceiling refusal is shared and outranks both; otherwise the
+        // adapter's own reason is the one a settings form can act on.
+        return redirect(response, `/chat?said=${encodeURIComponent(local.account === null ? local.why : enabled.why)}`);
+      }
+      // The password, or the signed-in session where the approval
+      // preference allows it — the same road every other work approval
+      // takes, so a conversation is never a ritual the rest of the console
+      // has already dropped.
+      const token = body.get("token") ?? "";
+      const verified =
+        token === "" && sessionApprovalAllowed(store, who.name)
+          ? verifyApproverStanding(store, who.name, who.session.generation, ceiling.repos)
+          : verifyApproverByPassword(store, who.name, token, ceiling.repos);
+      if (local.ok && body.get("transport") !== "api") {
+        // The local account's window has FIXED terms: a subscription has no
+        // per-message wallet, so there is no dial to invent and no
+        // worst-case to reserve. The ceiling below is a meter, not a purse.
+        if (!verified.ok) {
+          return redirect(response, `/chat?said=${encodeURIComponent("starting a conversation takes your password, typed again")}`);
+        }
+        const expiresAt = new Date(now.getTime() + LOCAL_SESSION_HOURS * 3_600_000);
+        const termsDigest = createHash("sha256")
+          .update(`local\n${LOCAL_SESSION_CEILING_MICROUSD}\n${expiresAt.toISOString()}\n${verified.who.ceilingDigest}`)
+          .digest("hex");
+        store.mintMateSession(
+          {
+            approver: who.name,
+            approverGeneration: verified.who.generation,
+            credentialKey: LOCAL_CREDENTIAL_KEY,
+            ceilingMicrousd: LOCAL_SESSION_CEILING_MICROUSD,
+            ceilingDigest: verified.who.ceilingDigest,
+            termsDigest,
+            expiresAt,
+          },
+          now,
+        );
+        store.openMateThread(who.name, verified.who.ceilingDigest, now);
+        mateSaid.delete(who.session.csrf);
+        return redirect(response, "/chat");
+      }
       if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
       // The one password ceremony of a conversation (§1): it restates the
       // terms — this much, until then, over these projects — and mints the
@@ -4270,7 +5045,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!Number.isInteger(hours) || hours < 1 || hours > 24) {
         return redirect(response, `/chat?said=${encodeURIComponent("a session lasts a whole number of hours, 1 to 24")}`);
       }
-      const verified = verifyApproverByPassword(store, who.name, body.get("token") ?? "", ceiling.repos);
       if (!verified.ok) return redirect(response, `/chat?said=${encodeURIComponent("minting a session takes your password, typed again")}`);
       const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
       const expiresAt = new Date(now.getTime() + hours * 3_600_000);
@@ -4308,6 +5082,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, "/chat");
       }
       if (!outcome.ok && outcome.reason === "needs-confirm") noteMate(who.session.csrf, null, outcome.said);
+      if (outcome.ok && outcome.kind === "task" && outcome.taskId !== null && store.activeMateSession(who.name, now)?.credentialKey === LOCAL_CREDENTIAL_KEY) {
+        return redirect(response, taskHref(outcome.taskId));
+      }
       return redirect(response, "/chat");
     }
     // Coordinator proposals (mate arc v3): confirmed by any approver whose
@@ -4333,12 +5110,80 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     if (url.pathname === "/chat") {
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
+      let mateSession = who.role === "approver" ? store.activeMateSession(who.name, now) : null;
+      if (mateSession === null && who.role === "approver" && !store.approvalPasswordRequired(who.name)) {
+        if (!(body.get("message") ?? "").trim() && body.get("attachment")) {
+          const media = body.getAll("attachment").length === 1 ? decodeChatUpload(body.get("attachment")!) : null;
+          if (media?.ok) body.set("message", "Please help me understand this attachment.");
+          else return redirect(response, `/chat?said=${encodeURIComponent(media && !media.ok ? media.message : "Choose one attachment.")}`);
+        }
+        const message = (body.get("message") ?? "").trim();
+        if (!message || message.length > MATE_MESSAGE_MAX_CHARS || scanForSecrets(message).length > 0) {
+          return redirect(response, `/chat?said=${encodeURIComponent("Enter a message without passwords or API keys.")}`);
+        }
+        const local = await localAssistantState(true);
+        const verified = verifyApproverStanding(store, who.name, who.session.generation, ceiling.repos);
+        if (local.ok && verified.ok) {
+          const expiresAt = new Date(now.getTime() + LOCAL_SESSION_HOURS * 3_600_000);
+          const termsDigest = createHash("sha256").update(`local\n${LOCAL_SESSION_CEILING_MICROUSD}\n${expiresAt.toISOString()}\n${verified.who.ceilingDigest}`).digest("hex");
+          store.mintMateSession({ approver: who.name, approverGeneration: verified.who.generation, credentialKey: LOCAL_CREDENTIAL_KEY,
+            ceilingMicrousd: LOCAL_SESSION_CEILING_MICROUSD, ceilingDigest: verified.who.ceilingDigest, termsDigest, expiresAt }, now);
+          store.openMateThread(who.name, verified.who.ceilingDigest, now);
+          mateSession = store.activeMateSession(who.name, now);
+        }
+      }
+      // Which assistant continues a conversation was decided when the
+      // window was minted and is never re-chosen mid-life: the credential
+      // on the session says who answers, so a message cannot silently
+      // change hands — or billing road — between one turn and the next.
+      if (mateSession !== null && mateSession.credentialKey === LOCAL_CREDENTIAL_KEY) {
+        const principal = matePrincipal(who);
+        if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
+        // Asked FRESH, not from the 30-second cache: this is the moment
+        // money and the operator's project state would leave the machine.
+        const local = await localAssistantState(true);
+        if (!local.ok) return redirect(response, `/chat?said=${encodeURIComponent(local.why)}`);
+        if (body.getAll("attachment").length > 1) return refuse(response, who, 400, "Choose one attachment.", "/chat");
+        const upload = body.get("attachment") ? decodeChatUpload(body.get("attachment")!) : null;
+        if (upload !== null && !upload.ok) return redirect(response, `/chat?said=${encodeURIComponent(upload.message)}`);
+        const message = (body.get("message") ?? "").trim() || (upload?.ok ? "Please help me understand this attachment." : "");
+        if (message === "" || message.length > MATE_MESSAGE_MAX_CHARS) {
+          return redirect(response, `/chat?said=${encodeURIComponent(`a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`)}`);
+        }
+        const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
+        const focusRepo = focusFromMessage(store, who.name, message, ceiling.repos);
+        void runLocalChatTurn({
+          store,
+          who: principal,
+          session: mateSession,
+          thread: opened.thread,
+          message,
+          ...(upload?.ok ? { attachmentText: upload.text, attachments: upload.content } : {}),
+          focusRepo,
+          evidenceRoot,
+          cwd: chatWorkspace(),
+          // The sign-in is asked AGAIN when the answer comes back: a turn
+          // can outlive the account that started it. Only a POSITIVE lapse
+          // counts — a probe that merely timed out is not evidence, and
+          // discarding a paid-for answer over it would be the worse error.
+          recheckAccount: async () => {
+            const again = await connectionStatus("claude", true);
+            return again.state !== "signed-out" && again.state !== "not-installed";
+          },
+          clock,
+          ...(options.chatRunner === undefined ? {} : { runner: options.chatRunner }),
+        })
+          .then(outcome => {
+            if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
+          })
+          .catch(() => noteMate(who.session.csrf, null, "the turn failed unexpectedly"));
+        return redirect(response, "/chat");
+      }
       const enabled = chatEnablement();
       if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
       // A live mate session: the message is a mate turn — no password, the
       // session's ceremony already covered it (§1); the engine refuses on
       // its own terms and the thread shows why.
-      const mateSession = who.role === "approver" ? store.activeMateSession(who.name, now) : null;
       if (mateSession !== null) {
         const principal = matePrincipal(who);
         if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
@@ -4357,7 +5202,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The password, typed again, on EVERY message (v2 ruling 2): chat is
       // spend, and a seven-day cookie is not a spend credential.
       const password = body.get("token") ?? "";
-      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+      if (!authenticateApprover(store, who.name, password).ok) {
         return redirect(response, `/chat?said=${encodeURIComponent("chat spends — your password, typed again, with every message")}`);
       }
       const message = (body.get("message") ?? "").trim();
@@ -4422,7 +5267,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const candidate = chat?.candidates.get(key);
       // The filing act creates durable rows from model text: password again.
       const password = body.get("token") ?? "";
-      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+      if (!authenticateApprover(store, who.name, password).ok) {
         return redirect(response, `/chat?said=${encodeURIComponent("filing a draft takes your password, typed again")}`);
       }
       if (chat === undefined || candidate === undefined) {
@@ -4497,7 +5342,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const turn = store.getChatTurn(Number(chatAckPost[1]));
       if (turn === null) return refuse(response, who, 404, "no such turn", "/chat");
       const password = body.get("token") ?? "";
-      if (password === "" || !authenticateApprover(store, who.name, password).ok) {
+      if (!authenticateApprover(store, who.name, password).ok) {
         return refuse(response, who, 403, "acknowledging unknown spend takes your password", "/chat");
       }
       const nonce = body.get("nonce") ?? "";
@@ -5130,7 +5975,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const token = body.get("token") ?? "";
     let basis: { kind: "mode"; digest: string } | undefined;
-    if (token === "") {
+    if (token === "" && !sessionApprovalAllowed(store, who.name)) {
       // Quick mint (C2/M4): no password typed — valid ONLY when a live
       // mode with quickMint was signed by THIS session's person. The mint
       // transaction re-proves it; this pre-check only shapes the refusal.
@@ -5192,6 +6037,46 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     switch (verb) {
+      case "settings-preview":
+      case "settings-approve": {
+        if (who.via !== "cookie") return refuse(response, who, 403, "Review execution settings in the console.", taskHref(taskId));
+        const inputs = { model: body.get("model") ?? "", turns: body.get("turns") ?? "200", minutes: body.get("minutes") ?? "30", posture: body.get("posture") ?? "safe", tools: body.get("tools") ?? "" };
+        const preview = previewExecutionChange(store, taskId, inputs, now);
+        if (!preview.ok) return taskScreen(response, who, taskId, preview.message, 409);
+        const nonceKey = `settings-${taskId}`;
+        if (verb === "settings-approve") {
+          if (!consumeApprovalNonce(body.get("nonce") ?? "", who.name, nonceKey, preview.fingerprint)) {
+            return taskScreen(response, who, taskId, "These settings changed or the preview expired. Review them again.", 409);
+          }
+          const approved = approveExecutionChange(store, { taskId, inputs, fingerprint: body.get("fingerprint") ?? "", by: who.name, token: body.get("token") ?? "", resume: true, now });
+          if (!approved.ok) return taskScreen(response, who, taskId, approved.message, 409);
+          return redirect(response, taskHref(taskId));
+        }
+        const nonce = mintApprovalNonce(who.name, nonceKey, preview.fingerprint);
+        return sendScreen(response, 200, screen("Review execution settings", [
+          `<h1>Review execution settings</h1><p>${escape(store.getTask(taskId)?.title ?? taskId)}</p>`,
+          `<h2>Goal</h2><p>${escape(preview.scope.goal)}</p><p><strong>Out of scope:</strong> ${escape(preview.scope.outOfScope ?? "None specified")}</p><p><strong>Paths:</strong> ${escape(preview.scope.touches.join(", ") || "No path list")}</p>`,
+          `<h2>Current settings</h2>${profileWords(preview.scope)}`,
+          `<h2>New settings</h2>${profileWords({ ...preview.scope, profile: preview.profile, profileState: "resolved" })}`,
+          `<p>Approving replaces the previous approval and resumes this task under these exact settings. Other holds still apply.</p>`,
+          `<form method="post" action="${taskHref(taskId)}/settings-approve">`,
+          `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}"><input type="hidden" name="nonce" value="${escape(nonce)}"><input type="hidden" name="fingerprint" value="${preview.fingerprint}">`,
+          ...Object.entries(inputs).map(([key, value]) => `<input type="hidden" name="${key}" value="${escape(value)}">`),
+          `<label>Operator password<input type="password" name="token" autocomplete="current-password" required></label><button type="submit">Approve settings and resume</button> <a href="${taskHref(taskId)}">Back to task</a></form>`,
+        ].join("\n"), { chrome: chromeFor(ref.repo, "tasks") }));
+      }
+      case "stop": {
+        const runId = Number(body.get("run"));
+        if (!Number.isSafeInteger(runId) || runId <= 0) return taskScreen(response, who, taskId, "Choose the live build to stop.", 400);
+        const result = stopTaskRun(store, { taskId, runId, by: who.name, now });
+        if (!result.ok) return taskScreen(response, who, taskId, `Could not stop this build: ${result.reason}.`, 409);
+        return redirect(response, taskHref(taskId));
+      }
+      case "resume": {
+        const result = resumeTaskWork(store, taskId, now);
+        if (!result.ok) return taskScreen(response, who, taskId, result.reason === "still-stopping" ? "The build is still stopping. Resume once it has finished." : `Could not resume: ${result.reason}.`, 409);
+        return redirect(response, taskHref(taskId));
+      }
       case "steer": {
         // Steering is a browser session's act, explicitly (arc 1 v2 §3):
         // identify() accepts bearer credentials generically, and those are
@@ -5210,7 +6095,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 : filed.reason === "invalid-note"
                   ? (filed.problem ?? "that note will not store")
                   : "no such task";
-          return taskScreen(response, who, taskId, said, 400);
+          return taskScreen(response, who, taskId, said, 400, body.get("note") ?? "");
         }
         return redirect(response, taskHref(taskId));
       }
@@ -5281,7 +6166,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // Authenticated like every approving act: the session alone may
         // read; resuming external work takes the password, typed again.
         const token = (body.get("token") ?? "").trim();
-        const authenticated = token !== "" ? authenticateApprover(store, who.name, token) : null;
+        const authenticated = token !== "" || sessionApprovalAllowed(store, who.name) ? authenticateApprover(store, who.name, token) : null;
         if (authenticated === null || !authenticated.ok) {
           return taskScreen(response, who, taskId, "reopening takes your password, typed again", 403);
         }
@@ -5449,8 +6334,8 @@ export function createDecisionServer(options: ServeOptions): Server {
               : null;
           const proposed = proposeGuarded(store, {
             taskId,
-            goal: body.get("goal") ?? "",
-            outOfScope: body.get("not") ?? null,
+            goal: (body.get("goal") ?? "").replace(/\r\n/g, "\n"),
+            outOfScope: body.get("not")?.replace(/\r\n/g, "\n") ?? null,
             touches: (body.get("touches") ?? "").split(/[\n,]/),
             ...(budgetUsd !== null
               ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
@@ -5533,7 +6418,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             return taskScreen(response, who, taskId, "that approval form is stale — read it again", 409);
           }
         }
-        if (token === "") {
+        if (token === "" && !sessionApprovalAllowed(store, who.name)) {
           return taskScreen(response, who, taskId, "approval requires your password, typed again", 400);
         }
         // A revision approves ONLY against a brief that still verifies
@@ -5873,9 +6758,23 @@ export function editorFileHref(worktree: string, path: string, line?: number | n
 /** The execution profile in plain words (v24): what the password signs
  * says WHAT RUNS — provider, exact model, permissions, and the real
  * bounds — or says honestly that it cannot yet. */
-function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion" | "proposedChainJson">): string {
+function connectionLabel(account: ProviderConnection): string {
+  return ({ connected: "Connected", "signed-out": "Not signed in", "not-installed": "App not found", unverified: "Not verified", "key-present": "API key available", "missing-key": "API key needed" })[account.state];
+}
+function connectionWords(provider: ProviderId, account: ProviderConnection, host?: string): string {
+  const name = ASSISTANTS[provider].name;
+  const detail = account.state === "connected" ? [account.email, account.plan, account.method].filter((one): one is string => !!one).map(escape).join(" · ") || `Your ${escape(name)} sign-in is available.` :
+    account.state === "signed-out" ? `Sign in to ${escape(name)} on the computer running your tasks, then check again.` :
+    account.state === "not-installed" ? `${escape(name)} could not be found on this computer.` :
+    account.state === "key-present" ? "API key authentication is selected. Saving a key also checks it with the provider." :
+    account.state === "missing-key" ? "Add an API key, or choose your existing sign-in if available." :
+    "We couldn't confirm the sign-in. Check again after signing in or updating the assistant.";
+  return `<p class="account-status"><span class="badge ${account.state === "connected" ? "badge-done" : ""}">${connectionLabel(account)}</span></p><p class="meta">${detail}</p><p class="meta account-checked">Checked on ${escape(host ?? "the computer running this console")} · <time datetime="${escape(account.checkedAt)}">${escape(new Date(account.checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</time></p>`;
+}
+
+function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion" | "proposedChainJson">, concise = false): string {
   if (scope.profileState === "unresolved") {
-    return `<p class="meta"><strong>filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}. Restate the scope to fix it.</p>`;
+    return `<p class="meta">Review the model in Execution settings, or configure this repository in <a href="/control">Sessions</a> and save the scope again.</p><details><summary>Why approval is unavailable</summary><p class="meta"><strong>filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}.</p></details>`;
   }
   const profile = scope.profile ?? null;
   if (profile === null) {
@@ -5906,7 +6805,15 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
               }`,
           )
           .join("; ")}</p>`;
-  return base + chainLine;
+  const toolWords = profile.provider !== "claude" ? "" :
+    `<p class="meta">Permissions: <strong>${profile.permissionArgv === "bypassPermissions" ? "all tools run without approval" : "file edits accepted; other tools follow permission rules"}</strong></p>` +
+    ((profile.allowedTools?.length ?? 0) === 0 ? "" : `<p>Additional tools allowed without prompting:</p><ul>${profile.allowedTools!.map(tool => `<li><code>${escape(tool)}</code></li>`).join("")}</ul>`);
+  if (concise) {
+    const access = profile.provider === "claude" ? "" : `<p class="meta">Permissions: <strong>${profile.provider === "gemini" ? profile.approvalArgv === "yolo" ? "all tools run without approval" : "file edits accepted; other tools refused" : "can edit its separate working copy"}</strong></p>`;
+    return `<dl class="task-run-summary"><div><dt>Assistant</dt><dd>${escape(ASSISTANTS[profile.provider].name)} · ${escape(profile.model)}</dd></div><div><dt>Time per attempt</dt><dd>Up to ${Math.round(profile.timeoutSeconds / 60)} minutes</dd></div></dl>` +
+      toolWords + access + chainLine + `<details class="task-run-details"><summary>Run details</summary>${base}</details>`;
+  }
+  return base + toolWords + chainLine;
 }
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
@@ -5920,22 +6827,37 @@ function escape(text: string): string {
 }
 
 /**
- * The Operations Ledger: the design system Alex approved in Figma and the
- * design/ shadcn package, carried as pure CSS on server-rendered HTML.
- * Deliberately not the React library: the console ships zero dependencies
- * and zero page JavaScript under a CSP that forbids scripts, and a look is
- * not worth that posture. One committed dark theme — no light variant, and
- * `color-scheme: dark` says so to the browser.
+ * Shared desktop and web design system, carried as CSS on server-rendered
+ * HTML. Light and dark surfaces use the same layout, with glass restricted
+ * to navigation, overlays and key panels. No runtime styling dependency.
  */
 const STYLE = `
-/* The Console — the design system, v2 (2026-09-02). The bar is Linear and
-   Vercel: quiet density, an identifier and a status on every row, mono for
-   every machine fact, one neutral ramp that renders dark or light from the
-   same token names, and exactly one accent — amber — which means "waits on
-   you" and nothing else. Run states are dots and quiet tinted chips, never
-   whole surfaces. Zero dependencies, zero page JS beyond the nonce'd chrome
-   layer. IBM Plex stays the voice: already vendored, already licensed, and
-   its sans/mono pairing is the product's own. */
+/* Guided setup shared by native and web. */
+.setup-flow { max-width: 880px; margin: 0 auto; padding-bottom: 2rem; }
+.setup-flow h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.2; }
+.setup-flow .eyebrow { font-size: .7rem; letter-spacing: .12em; color: var(--muted-foreground); margin-bottom: .7rem; }
+.setup-section { padding: 1.5rem; margin-top: 1.4rem; }
+.setup-heading { display: flex; align-items: flex-start; gap: .85rem; margin-bottom: 1.2rem; }
+.setup-heading h2 { margin: 0 0 .3rem; font-size: 1.1rem; }
+.setup-heading p { margin: 0; }
+.setup-heading .badge { margin-left: auto; }
+.setup-number { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 1.8rem; height: 1.8rem; border: 1px solid var(--border); border-radius: 50%; font-size: .85rem; }
+.setup-divider { margin-top: 1.8rem; border-top: 1px solid var(--border); padding-top: 1.4rem; }
+.assistant-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; margin-bottom: 1rem; }
+.assistant-choice { display: flex; flex-direction: column; gap: .5rem; padding: 1rem; border: 1px solid var(--border); border-radius: .5rem; text-decoration: none; min-width: 0; }
+.assistant-choice span { font-size: .78rem; line-height: 1.45; color: var(--muted-foreground); }
+.assistant-choice[aria-current="page"] { border-color: var(--foreground); background: var(--secondary); box-shadow: inset 0 0 0 1px var(--foreground); }
+.setup-actions { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-top: 1.25rem; }
+.setup-advanced, .setup-optional { margin-top: 1rem; }
+.setup-advanced summary, .setup-optional summary { cursor: pointer; }
+.setup-projects { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.setup-projects a { padding: .45rem .75rem; border: 1px solid var(--border); border-radius: 1rem; text-decoration: none; }
+.setup-projects [aria-current="page"] { border-color: var(--foreground); }
+.setup-feedback { border-left: 3px solid var(--foreground); }
+@media (max-width: 700px) { .assistant-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); } .setup-section { padding: 1rem; } }
+
+/* Shared app and web design tokens. Neutral surfaces, lavender actions,
+   amber attention and green success. No new dependencies or page scripts. */
   @font-face {
     font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400;
     font-display: swap; src: url("/fonts/plex-sans-400.woff2") format("woff2");
@@ -5964,18 +6886,18 @@ const STYLE = `
     color-scheme: light dark;
     /* Dark: the after-hours scene. A true neutral ramp with a whisper of
      * cool, Vercel's grays with Linear's temperature. */
-    --background: #0b0c0e;
-    --foreground: #ededef;
-    --card: #121316;
-    --muted: #1a1c20;
-    --muted-foreground: #8b919c;
-    --border: #24272d;
+    --background: #111216;
+    --foreground: #eeeef2;
+    --card: #191a20;
+    --muted: #24252d;
+    --muted-foreground: #a0a2af;
+    --border: #2c2e38;
     --input: #3a3e46;
-    --primary: #ededef;
-    --primary-foreground: #0b0c0e;
-    --secondary: #1a1c20;
+    --primary: #c2baff;
+    --primary-foreground: #211c40;
+    --secondary: #24252d;
     --secondary-foreground: #ededef;
-    --accent: #1a1c20;
+    --accent: #24252d;
     --destructive: #f06a5e;
     --destructive-strong: #f06a5e;
     --destructive-soft: color-mix(in srgb, #f06a5e 12%, transparent);
@@ -5990,10 +6912,10 @@ const STYLE = `
     --brand: #f5a524;
     --brand-foreground: #201503;
     --brand-soft: color-mix(in srgb, #f5a524 12%, transparent);
-    --radius: 0.5rem;
+    --radius: 0.625rem;
     --shadow: 0 1px 2px 0 rgb(0 0 0 / .4);
     --shadow-overlay: 0 4px 12px -2px rgb(0 0 0 / .5), 0 16px 40px -12px rgb(0 0 0 / .7);
-    --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "IBM Plex Sans", sans-serif;
     --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: light) {
@@ -6008,8 +6930,8 @@ const STYLE = `
       --muted-foreground: #64697a;
       --border: #e4e5e9;
       --input: #c4c7cf;
-      --primary: #171717;
-      --primary-foreground: #fafafa;
+      --primary: #6253c6;
+      --primary-foreground: #ffffff;
       --secondary: #f1f2f4;
       --secondary-foreground: #171717;
       --accent: #f1f2f4;
@@ -6062,13 +6984,13 @@ const STYLE = `
   }
   .topbar nav a:hover { color: var(--foreground); }
   main { max-width: 44rem; margin-inline: auto; padding: 1.75rem 1.25rem 4rem; }
-  h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 .25rem; line-height: 1.3; }
+  h1 { font-size: 1.625rem; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 .25rem; line-height: 1.3; }
   h1 .meta { font-weight: 400; letter-spacing: 0; }
   /* Section headers speak in the human voice (mono is for machine facts
      only): small, semibold, dim — Linear's "In Progress 5" register. */
   h2 {
     font-size: 0.8125rem; font-weight: 600; letter-spacing: -0.005em;
-    color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);
+    color: var(--foreground); margin: 2rem 0 .75rem; font-family: var(--font-sans);
   }
   a { color: var(--foreground); text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
   a:hover { text-decoration-color: var(--muted-foreground); }
@@ -6078,7 +7000,7 @@ const STYLE = `
 
   .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
   .meta a { color: var(--muted-foreground); }
-  .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: -.375rem 0 .625rem; }
+  .hint { font-size: 0.75rem; color: var(--muted-foreground); margin: .375rem 0 .875rem; }
   .eyebrow {
     display: block; color: var(--muted-foreground); font-size: .625rem;
     font-weight: 500; letter-spacing: .08em; line-height: 1.3; text-transform: uppercase;
@@ -6151,6 +7073,9 @@ const STYLE = `
     border-color: color-mix(in srgb, var(--running) 35%, transparent);
   }
   .badge-cut { background: var(--muted); }
+  /* Waiting its turn: dimmer than running, quieter than open — already
+     referenced by the project peek and by a chat card's task progress. */
+  .badge-queued { background: var(--muted); color: var(--muted-foreground); }
 
   .card {
     border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
@@ -6286,7 +7211,7 @@ const STYLE = `
   }
 
   /* The workspace shell: sidebar + content, an optional list pane between. */
-  .app { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
+  .app { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: 100vh; }
   .side {
     border-right: 1px solid var(--border);
     background: var(--background);
@@ -6314,7 +7239,9 @@ const STYLE = `
     position: absolute; top: calc(100% + .375rem); left: 0; z-index: 40; min-width: 15rem; max-width: 22rem;
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
     box-shadow: var(--shadow-overlay); padding: .375rem; display: flex; flex-direction: column; gap: .125rem;
+    max-height: min(32rem, calc(100dvh - 8rem));
   }
+  .switcher-projects { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   .switcher-menu form { margin: 0; }
   .switcher-menu button {
     display: flex; align-items: center; gap: .5rem; width: 100%; text-align: left; margin: 0;
@@ -6328,10 +7255,12 @@ const STYLE = `
     transform: rotate(45deg) translateY(-.125rem);
   }
   .switcher-menu button:hover { background: var(--muted); }
-  .switcher-menu .manage {
-    display: block; margin-top: .25rem; padding: .625rem .75rem; border-top: 1px solid var(--border);
-    font-size: .75rem; color: var(--muted-foreground); text-decoration: none;
-  }
+  .switcher-actions { flex: none; border-top: 1px solid var(--border); margin-top: .25rem; padding-top: .375rem; }
+  .switcher-actions a { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; padding: .625rem .75rem; border-radius: .375rem; text-decoration: none; font-size: .8125rem; }
+  .switcher-actions a:hover { background: var(--muted); }
+  .switcher-actions .add-projects { color: var(--primary); font-weight: 600; }
+  .switcher-actions svg { width: 1rem; height: 1rem; flex: none; }
+  .switcher-actions .manage { color: var(--muted-foreground); }
   .scope-status {
     display: flex; gap: .5rem; flex-wrap: wrap;
     color: var(--muted-foreground); font-size: .6875rem; font-variant-numeric: tabular-nums;
@@ -6385,7 +7314,7 @@ const STYLE = `
   }
   .content .new-task:hover { background: color-mix(in srgb, var(--secondary) 70%, var(--border)); }
   .content { min-width: 0; }
-  .content > main { max-width: 52rem; margin: 0; padding: 1.5rem 2rem 4rem; }
+  .content > main { max-width: 76rem; margin: 0 auto; padding: 2rem 2.5rem 4rem; }
 
   /* Banners: honest labels, quiet strips. */
   .banner {
@@ -6419,7 +7348,9 @@ const STYLE = `
   #wb-rail-stamp { padding: 0 .75rem; }
   .workbench-mobile-rail, .workbench-mobile-back { display: none; }
   /* The task page (slice 1c): main column beside a rail; one column narrow. */
-  .task-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 19rem); gap: 0 2rem; align-items: start; }
+  .task-regions { display:flex; gap:24px; padding:12px 0 24px; border-bottom:1px solid var(--border); margin-bottom:24px; }
+.control-region { margin-bottom:32px; }
+.task-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 19rem); gap: 0 2rem; align-items: start; }
   /* The task page (task page pass): eyebrow, title, the acts in one row,
      then folding sections; the rail is the property list. */
   .task-eyebrow { margin: 0 0 .25rem; }
@@ -6680,7 +7611,7 @@ const STYLE = `
     display: flex; align-items: flex-start; justify-content: space-between;
     gap: 1rem; margin-bottom: 1.1rem;
   }
-  .control-room-head h1 { font-size: 1.375rem; margin-top: .08rem; }
+  .control-room-head h1 { font-size: 1.75rem; margin-top: .08rem; }
   .control-room-head .actions { display: flex; gap: .45rem; flex-wrap: wrap; justify-content: flex-end; }
   .control-room-head .actions a { text-decoration: none; }
   .command-metrics {
@@ -6700,10 +7631,26 @@ const STYLE = `
   .command-metric .detail { display: block; color: var(--muted-foreground); font-size: .6875rem; margin-top: .18rem; }
   .command-metric.attention .label::before { background: var(--brand); }
   .command-metric.live .label::before { background: var(--running); }
-  .workspace-pulse { margin: .4rem 0 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); gap: .625rem; }
+  .workspace-pulse { margin: .4rem 0 1.5rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: .625rem; }
   /* The workspace card: name and status word, four counts, the same counts
      as a bar, and the one tap to its board. Neutral border always; the
      needs-you count and the bar's segment carry the accent. */
+  .folder-row, .project-worker { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:.6rem 0; border-bottom:1px solid var(--border); }
+  .project-selection-actions { position:sticky; top:0; z-index:2; background:var(--card); padding:.6rem 0; margin-bottom:.6rem; border-bottom:1px solid var(--border); }
+  .approval-toggle { display:flex; gap:.75rem; align-items:flex-start; margin:1.2rem 0; }
+  .approval-toggle input { appearance:none; width:2.6rem; height:1.5rem; flex:none; margin:.15rem 0 0; border:1px solid var(--input); border-radius:999px; background:var(--muted); cursor:pointer; position:relative; }
+  .approval-toggle input::before { content:""; position:absolute; width:1rem; height:1rem; left:.2rem; top:.2rem; border-radius:50%; background:var(--muted-foreground); }
+  .approval-toggle input:checked { background:var(--primary); border-color:var(--primary); }
+  .approval-toggle input:checked::before { left:1.3rem; background:var(--primary-foreground); }
+  .approval-toggle input:focus-visible { outline:2px solid var(--ring); outline-offset:3px; }
+  .folder-choice { display:flex; align-items:center; gap:.7rem; margin:0; }
+  .folder-choice input { width:auto; }
+  .project-path { overflow-wrap:anywhere; font-size:.72rem; }
+  .project-task { display:flex; flex-direction:column; gap:.25rem; padding:.6rem 0; border-top:1px solid var(--border); text-decoration:none; }
+  .project-worker { margin-top:.8rem; border-top:1px solid var(--border); border-bottom:0; }
+  .overview-totals { margin:1rem 0; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
+  @media(max-width:760px) { .overview-totals { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  .overview-totals strong { font-size:1.5rem; }
   .workspace-card {
     padding: .75rem .9rem; border: 1px solid var(--border);
     border-radius: calc(var(--radius) - 2px); background: var(--card); font-size: .8125rem; min-width: 0;
@@ -6713,18 +7660,84 @@ const STYLE = `
   .thread .msg { max-width: 46rem; padding: 0.6rem 0.85rem; border-radius: 0.75rem; border: 1px solid var(--border); }
   .thread .msg p { margin: 0.25rem 0; }
   .thread .msg.op { align-self: flex-end; background: var(--muted); }
-  .thread .msg.mate { align-self: flex-start; background: var(--surface); }
+  .thread .msg.mate { align-self: flex-start; background: var(--card); }
   .thread .activity { font-size: 0.8rem; opacity: 0.7; }
   .thread .proposal { margin: 0.5rem 0 0; }
   .thread .proposal .acts { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
-  .thread .proposal.confirmed { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
-  .thread .proposal.refused { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
-  .thread .proposal .done { color: var(--ok); }
-  .thread .proposal .refused { color: var(--danger); }
+  .thread .proposal.confirmed { border-color: color-mix(in srgb, var(--success) 45%, var(--border)); }
+  .thread .proposal.refused { border-color: color-mix(in srgb, var(--destructive) 45%, var(--border)); }
+  .thread .proposal .done { color: var(--success); }
+  .thread .proposal .refused { color: var(--destructive); }
   .composer textarea { width: 100%; }
+  /* the unified chat: one conversation across every project.
+     Restraint is the rule here — one translucent layer on the two pieces
+     that float over the thread (the status line, the composer), and plain
+     borders everywhere else. Glass on every surface is glass nowhere. */
+  .chat-page { max-width: 52rem; margin: 0 auto; }
+  .chat-head { margin-bottom: 1rem; }
+  .chat-head h1 { margin-bottom: .35rem; }
+  .chat-lead { max-width: 44rem; margin: 0; }
+  .chat-status {
+    display: flex; align-items: flex-start; gap: .75rem; margin: 1rem 0;
+    padding: .6rem 0; border: 0; background: none;
+  }
+  .chat-status-words { min-width: 0; flex: 1 1 auto; }
+  .chat-status-words p { margin: .15rem 0 0; }
+  .chat-status-dot { flex: none; width: .55rem; height: .55rem; margin-top: .45rem; border-radius: 50%; background: var(--muted-foreground); }
+  .chat-status-ok .chat-status-dot { background: var(--success); }
+  .chat-status-warn .chat-status-dot { background: var(--destructive); }
+  .chat-status-busy .chat-status-dot { background: var(--running); }
+  .chat-status-action { flex: none; align-self: center; font-size: .8125rem; white-space: nowrap; }
+  .chat-chips { display: flex; flex-wrap: wrap; gap: .375rem; margin: 0 0 1rem; }
+  .chat-chip-form { margin: 0; display: inline-flex; }
+  .chat-chip {
+    width: auto; min-height: 2rem; padding: .3rem .7rem; font-size: .8125rem; font-weight: 500;
+    border: 1px solid var(--border); border-radius: 2rem; background: transparent; color: var(--muted-foreground);
+  }
+  .chat-chip:hover { color: var(--foreground); background: var(--secondary); }
+  .chat-chip.current { color: var(--primary-foreground); background: var(--primary); border-color: var(--primary); }
+  .chat-chip-id { font-family: var(--font-mono); font-size: .6875rem; opacity: .7; margin-right: .35rem; }
+  .chat-meter { margin: 0 0 1rem; }
+  .chat-card-project { font-weight: 600; }
+  .chat-progress { margin-top: .35rem; }
+  .chat-composer {
+    position: relative; margin-top: 1.5rem; padding: 1rem; border-radius: 1rem;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / .05), 0 12px 40px rgb(0 0 0 / .08);
+    background: color-mix(in srgb, var(--card) 82%, transparent);
+    -webkit-backdrop-filter: saturate(140%) blur(12px); backdrop-filter: saturate(140%) blur(12px);
+  }
+  .chat-composer-field { font-weight: 500; }
+  .chat-composer textarea {
+    margin-top: .5rem; min-height: 7rem; resize: vertical; padding: .85rem 1rem; background: var(--background); font-size: 1rem; line-height: 1.6;
+    border: 1px solid var(--input); border-radius: calc(var(--radius) - 2px);
+  }
+  .chat-empty { padding: 3rem 0 2rem; }
+  .chat-empty h2 { font-size: 1.65rem; letter-spacing: -.035em; margin: 0 0 .5rem; }
+  .chat-page .thread { gap: 1.5rem; margin: 1.5rem 0; }
+  .chat-page .thread .msg { max-width: 100%; line-height: 1.7; }
+  .chat-page .thread .msg.mate { align-self: stretch; padding: 0; border: 0; background: none; }
+  .chat-page .thread .msg.op { max-width: 85%; border-radius: 1rem 1rem .3rem 1rem; }
+  .chat-page .thread .activity { font-family: inherit; font-size: .75rem; }
+  .chat-composer textarea:focus-visible { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent); }
+  .chat-composer-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; margin-top: .625rem; }
+  .chat-composer-foot .meta { min-width: 0; }
+  .chat-composer-foot button { width: auto; min-width: 6rem; }
+  .chat-working { display: flex; align-items: center; gap: .5rem; }
+  .chat-offline { border-color: color-mix(in srgb, var(--destructive) 35%, var(--border)); }
+  .chat-offline p { margin: .2rem 0; }
+  .chat-settings { margin-top: 1.5rem; }
+  .chat-settings > summary { font-size: .8125rem; color: var(--muted-foreground); cursor: pointer; }
+  @media (max-width: 640px) {
+    .chat-composer { position: static; }
+    .chat-composer-foot button { width: 100%; }
+    .chat-status { flex-wrap: wrap; }
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    .chat-status, .chat-composer { background: var(--card); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  }
   .mate-terms { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; }
   .mate-terms .inline-field { white-space: nowrap; }
-  button.quiet { background: transparent; color: var(--fg-muted); border-color: var(--border); }
+  button.quiet { background: transparent; color: var(--muted-foreground); border-color: var(--border); }
   .answer-options { list-style: none; padding: 0; margin: 0.4rem 0; }
   .answer-options li { padding: 0.35rem 0.6rem; border-left: 3px solid var(--border); margin: 0.25rem 0; }
   .answer-options li.picked { border-left-color: var(--foreground); }
@@ -6933,11 +7946,348 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
   }
   .sticky-actions button { margin: 0; }
 }
+/* Project management uses the same multi-project grid as Overview. */
+.project-catalog { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
+.project-catalog .project-card { margin: 0; }
+.project-card > .row:first-child { border: 0; padding: 0 0 .75rem; }
+.project-counts { gap: .375rem; flex-wrap: wrap; border: 0; padding: .875rem 0; }
+.project-counts .inline { margin: 0; }
+.project-card .project-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+#add-projects { scroll-margin-top: 1.5rem; }
+/* First-run and task entry: one decision at a time. */
+.project-next-step { padding: 1.5rem 0 .5rem; max-width: 38rem; }
+.project-next-step h3 { font-size: 1.25rem; letter-spacing: -.02em; margin: 0 0 .5rem; }
+.project-next-step p { color: var(--muted-foreground); margin: 0; line-height: 1.65; max-width: 34rem; }
+.workspace-card .project-details { border: 0; border-top: 1px solid var(--border); background: transparent; padding: .75rem 0 0; margin: 1.5rem 0 0; }
+.project-details summary { min-height: 0; padding: .25rem 0; font-weight: 400; font-size: .75rem; }
+.project-details form { margin-top: .75rem; }
+.workspace-card .setup-actions > .button-link { margin-left: 0; color: var(--primary-foreground); font-size: .875rem; }
+.workspace-card .setup-actions { justify-content: flex-start; }
+.workspace-card.needs-setup { padding: 1.5rem; }
+.project-count-summary { margin: 1rem 0 .25rem; }
+.task-compose, .task-review { max-width: 46rem; margin: .75rem auto 3rem; }
+.task-compose > h1 { font-size: clamp(1.6rem, 3vw, 2rem); line-height: 1.25; max-width: 36rem; }
+.task-compose > .hint { margin: .875rem 0 2rem; max-width: 35rem; line-height: 1.65; }
+.task-composer { padding: 1.5rem; }
+.composer-project { max-width: 20rem; margin-top: 0; margin-bottom: 1.5rem; }
+.composer-label { margin-bottom: .625rem; }
+.task-composer textarea[name=request] { min-height: 11rem; font-size: 1rem; line-height: 1.65; padding: .875rem 1rem; background: var(--background); border: 1px solid var(--input); box-shadow: inset 0 1px 2px rgb(0 0 0 / .06); border-radius: .625rem; resize: vertical; }
+.task-composer textarea[name=request]:hover { border-color: var(--muted-foreground); }
+.task-composer textarea[name=request]:focus-visible { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent); }
+.composer-suggestions { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem .625rem; margin: .5rem 0 1.5rem; font-size: .75rem; }
+.composer-suggestions a { border: 1px solid var(--border); border-radius: 2rem; padding: .3rem .625rem; color: var(--muted-foreground); text-decoration: none; }
+.composer-suggestions a:hover { color: var(--foreground); background: var(--secondary); }
+.composer-template-note { margin-top: -.75rem; font-size: .75rem; }
+.composer-schedule { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .75rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+.composer-schedule label { margin: 0; flex: 1 1 8rem; font-size: .75rem; min-width: 0; }
+.composer-schedule > label:first-child { flex: 0 1 14rem; }
+.composer-schedule input, .composer-schedule select { min-height: 2.5rem; font-size: .8125rem; }
+.composer-schedule input[type=time] { display: block; width: 100%; box-sizing: border-box; margin-top: .35rem; padding: .5rem .75rem; background: var(--background); color: var(--foreground); border: 1px solid var(--input); border-radius: .5rem; font-family: inherit; }
+.composer-schedule .schedule-zone { flex: 1 1 100%; max-width: 24rem; }
+.task-composer:not(:has([name=repeat] option[value=weekly]:checked)) .schedule-weekday,
+.task-composer:not(:has([name=repeat] option[value=daily]:checked, [name=repeat] option[value=weekly]:checked)) :is(.schedule-clock,.schedule-zone),
+.task-composer:not(:has([name=repeat] option[value=custom]:checked)) .schedule-interval,
+.task-composer:has([name=repeat] option[value=once]:checked) .recurring-options,
+.task-composer:not(:has([name=repeat] option[value=once]:checked)) .once-options { display: none; }
+.money-input { display: flex; align-items: center; gap: .625rem; max-width: 14rem; }
+.money-input span { color: var(--muted-foreground); }
+.routine-list { max-width: 46rem; margin: 0 auto 3rem; }
+.routine-review-card { padding: 1.5rem; }
+.routine-terms h2 { font-size: .875rem; margin: 0 0 .75rem; }
+.routine-description { white-space: pre-wrap; font-size: 1rem; line-height: 1.7; margin: 0 0 1.5rem; overflow-wrap: anywhere; }
+.routine-review-facts { display: grid; gap: .875rem; margin: 0; }
+.routine-review-facts > div { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 1rem; font-size: .8125rem; }
+.routine-review-facts dt { color: var(--muted-foreground); }
+.routine-review-facts dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.routine-terms > .meta { font-size: .75rem; margin-top: 1.25rem; }
+.routine-review .routine-review-card .approve-form { padding: 1.25rem 0 0; margin: 1.25rem 0 0; border: 0; border-top: 1px solid var(--border); box-shadow: none; background: none; backdrop-filter: none; border-radius: 0; }
+.routine-time-details { padding: 0; margin: .75rem 0 0; border: 0; background: transparent; font-size: .75rem; }
+@media (max-width: 600px) {
+  .routine-review-card { padding: 1.125rem; }
+  .routine-review-facts > div { grid-template-columns: 1fr; gap: .25rem; }
+}
+.composer-options { border: 0; padding: 0; background: transparent; margin: 1rem 0; }
+.composer-options > summary { display: inline-flex; gap: .375rem; }
+.composer-options > summary::before { content: "+"; }
+.composer-options[open] > summary::before { content: "−"; }
+.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-top: 1px solid var(--border); padding-top: 1.25rem; }
+.composer-footer button { margin: 0; flex: none; }
+.check-option { display: flex; gap: .625rem; align-items: flex-start; }
+.check-option input { margin-top: .3rem; }
+.eyebrow { font-size: .6875rem; letter-spacing: .1em; color: var(--muted-foreground); font-weight: 500; }
+.assistant-account { display: flex; align-items: center; gap: 1rem; justify-content: space-between; padding: 1rem; border: 1px solid var(--border); border-radius: .5rem; margin: 1.25rem 0; }
+.assistant-account p { margin: .25rem 0 0; }
+.assistant-account .button-link { flex: none; }
+.saved-assistant > summary { color: var(--foreground); }
+.saved-assistant > summary .meta { display: block; margin-top: .375rem; font-weight: 400; }
+.setup-next-note { padding-left: .25rem; margin: 1.25rem 0 2rem; }
+.setup-preferences { margin-top: 1rem; }
+.account-actions { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; flex-shrink: 0; }
+.assistant-account .account-status { margin: .5rem 0; }
+.account-checked { font-size: .75rem; }
+.task-review > h1 { font-size: 1.75rem; line-height: 1.3; margin-bottom: 1.75rem; }
+.task-review .approve-form { max-width: none; padding: 1.5rem; }
+.task-review .recap { font-size: 1rem; line-height: 1.7; color: var(--foreground); }
+.task-review .ceremony-head { margin-bottom: 1.5rem; }
+.task-review .sticky-actions { position: static; margin-top: 1.5rem; padding: 0; border: 0; background: none; }
+.task-run-summary { margin: 1.25rem 0; font-size: .8125rem; }
+.task-run-summary > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .25rem 1rem; margin: .625rem 0; }
+.task-run-summary dt { color: var(--muted-foreground); }
+.task-run-summary dd { margin: 0; color: var(--foreground); font-weight: 500; }
+.task-run-details { margin-top: 1rem; }
+.task-review .task-edit { margin-top: 1.25rem; }
+.task-more { border: 0; padding: .25rem 0; background: transparent; margin-top: 1.25rem; }
+.task-more[open] { border-top: 1px solid var(--border); padding-top: .75rem; }
+.task-boundaries { margin: 1.25rem 0; }
+@media (max-width: 760px) {
+  .task-compose, .task-review { margin-top: 0; }
+  .task-composer, .task-review .approve-form { padding: 1.125rem; }
+  .composer-footer { align-items: stretch; flex-direction: column-reverse; }
+  .composer-footer button { width: 100%; }
+  .assistant-account { align-items: flex-start; flex-direction: column; }
+  .workspace-card.needs-setup { padding: 1.25rem; }
+}
+/* Shared layout and control rhythm. */
+h3 { font-size: .875rem; font-weight: 600; margin: 1.5rem 0 .5rem; }
+body { overflow-wrap: break-word; }
+button, .button-link { white-space: normal; }
+button:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; }
+button.primary, form.card button.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+button.primary:hover, .button-link:hover { background: color-mix(in srgb, var(--primary) 88%, var(--foreground)); }
+.button-link.secondary, button.secondary, form.card button.secondary { background: var(--card); color: var(--foreground); border-color: var(--input); font-weight: 500; }
+.button-link.secondary:hover, button.secondary:hover { background: var(--muted); }
+form > button, form > details > button { margin-top: 1rem; }
+form.inline > button, form.setup-actions > button, .switcher-menu form > button { margin-top: 0; }
+.form-actions { display: flex; align-items: center; gap: .625rem; margin-top: 1.25rem; }
+.card { padding: 1.25rem; box-shadow: none; }
+.card > p + form { margin-top: 1rem; }
+label { line-height: 1.5; }
+input[type=text], input[type=password], input[type=number], input[type=url], input[type=email], textarea, select { min-height: 2.5rem; background: var(--background); }
+select:not([multiple]) {
+  appearance: none; -webkit-appearance: none; padding-right: 2.5rem;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted-foreground) 50%), linear-gradient(135deg, var(--muted-foreground) 50%, transparent 50%);
+  background-position: calc(100% - 17px) center, calc(100% - 12px) center;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+textarea { resize: vertical; min-height: 7rem; }
+fieldset { border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+legend { padding: 0 .5rem; color: var(--muted-foreground); }
+pre { max-width: 100%; overflow-x: auto; }
+.page-heading { margin-bottom: 2rem; }
+.page-heading p { margin-top: .5rem; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: .875rem; margin-bottom: 1.25rem; }
+.section-heading h2 { margin: 0; }
+.section-heading p { margin: .375rem 0 0; }
+.notice { border: 1px solid var(--border); background: var(--muted); border-radius: var(--radius); padding: .875rem 1rem; margin: 1rem 0; }
+.empty-note { color: var(--muted-foreground); background: var(--background); border: 1px dashed var(--border); border-radius: var(--radius); padding: 1rem; margin-top: 1rem; }
+.skip-link { position: fixed; top: -5rem; left: 1rem; z-index: 100; background: var(--primary); color: var(--primary-foreground); padding: .75rem; border-radius: var(--radius); }
+.skip-link:focus { top: 1rem; }
+.side { background: color-mix(in srgb, var(--card) 55%, var(--background)); padding: 1.25rem .75rem; }
+.side .brand { font-size: .9375rem; padding: .125rem .625rem 1.25rem; }
+.side .brand .dot, .login-shell h1 .dot { width: auto; height: auto; color: var(--primary); }
+.side nav a { min-height: 2.25rem; padding: .5rem .625rem; }
+.side nav a.active { background: color-mix(in srgb, var(--primary) 10%, var(--card)); }
+.side .grow { min-height: 2rem; }
+.side .new-task { min-height: 2.375rem; display: flex; justify-content: center; align-items: center; margin: 1rem .375rem 0; }
+.side .foot { border-top: 1px solid var(--border); padding-top: .625rem; }
+.nav-more { margin: 0; padding: 0; border: 0; background: transparent; }
+.nav-more summary { padding: .5rem .625rem; }
+.nav-more[open] { padding-bottom: 0; }
+.scope-bar { position: relative; z-index: 30; align-items: center; min-height: 3.25rem; padding-inline: 2.5rem; }
+.scope-bar .switcher { background: transparent; border: 0; padding: 0; margin: 0; }
+.scope-bar .switcher summary { font-size: .8125rem; color: var(--foreground); gap: .5rem; padding: .375rem .625rem; border: 1px solid var(--glass-edge); border-radius: .5rem; background: var(--glass-surface); }
+.scope-bar .switcher summary:hover { background: var(--muted); }
+.scope-bar .switcher[open] { padding-bottom: 0; }
+/* Settings: readable sections and compact, explicit connected states. */
+.settings-layout { display: grid; grid-template-columns: 10rem minmax(0, 42rem); gap: 2rem; align-items: start; }
+.settings-nav { position: sticky; top: 1.5rem; display: flex; flex-direction: column; gap: .25rem; }
+.settings-nav a { padding: .625rem .75rem; border-radius: .375rem; text-decoration: none; color: var(--muted-foreground); font-size: .8125rem; }
+.settings-nav a:hover, .settings-layout:not(:has(:target)) .settings-nav a:first-child,
+.settings-layout:has(#telegram:target) a[href="#telegram"],
+.settings-layout:has(#notifications:target) a[href="#notifications"],
+.settings-layout:has(#providers:target) a[href="#providers"],
+.settings-layout:has(#approval-preferences:target) a[href="#approval-preferences"] { color: var(--foreground); background: var(--muted); }
+.settings-content { min-width: 0; }
+.settings-section { border: 1px solid var(--border); border-radius: .75rem; padding: 1.5rem; background: var(--card); margin: 0 0 1.5rem; scroll-margin-top: 1.5rem; }
+.settings-section > h2 { font-size: 1rem; margin: 0 0 .5rem; }
+.settings-section .section-heading { justify-content: flex-start; }
+.settings-section .section-heading h2 { font-size: 1rem; }
+.settings-section .card { background: transparent; box-shadow: none; padding: 0; border: 0; margin: 1.25rem 0; }
+.settings-section h3 { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 1.5rem; }
+.settings-section details { background: transparent; margin-top: 1.25rem; }
+.settings-section li { margin: .75rem 0; padding-left: .25rem; }
+.settings-section ol { padding-left: 1.25rem; color: var(--muted-foreground); }
+.service-icon { display: flex; align-items: center; justify-content: center; width: 2.75rem; height: 2.75rem; flex: none; border-radius: .75rem; background: var(--running-soft); color: var(--running); }
+.service-icon svg { width: 1.375rem; height: 1.375rem; }
+.connection-status { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding: 1rem; margin: 1.25rem 0 .75rem; background: var(--background); border: 1px solid var(--border); border-radius: .5rem; }
+.connection-status p { margin: .25rem 0 0; }
+.channel-choice { display: flex; align-items: center; gap: .75rem; padding: .875rem; border: 1px solid var(--border); border-radius: .5rem; margin-top: .625rem; cursor: pointer; }
+.channel-choice:has(:checked) { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--card)); }
+.channel-choice input { width: 1rem; height: 1rem; margin: 0; flex: none; }
+.channel-choice > span { min-width: 0; }
+.channel-choice .meta { display: block; font-weight: 400; margin-top: .25rem; }
+.channel-choice .badge { margin-left: auto; }
+.provider-settings { padding: 0 1rem; }
+.provider-settings > summary { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: 1rem 0; }
+.provider-settings > summary::after { content: "+"; margin-left: auto; }
+.provider-settings[open] > summary::after { content: "−"; }
+.provider-name { color: var(--foreground); font-weight: 600; }
+.provider-settings > summary .meta { flex-basis: 100%; order: 1; }
+/* Project overview: equal cards, readable titles and stable action rows. */
+.overview-totals { gap: 0; border: 1px solid var(--border); border-radius: .75rem; overflow: hidden; margin: 1.75rem 0 2rem; }
+.overview-totals .stat-card { border: 0; border-radius: 0; border-right: 1px solid var(--border); padding: 1.125rem 1.25rem; background: transparent; }
+.overview-totals .stat-card:last-child { border-right: 0; }
+.overview-totals .k { color: var(--muted-foreground); font-size: .75rem; font-weight: 500; }
+.overview-totals strong { display: block; font-size: 1.875rem; letter-spacing: -.035em; margin-top: .5rem; font-variant-numeric: tabular-nums; }
+.workspace-pulse { gap: 1rem; }
+.workspace-card { display: flex; flex-direction: column; padding: 1.25rem; border-radius: .75rem; }
+.workspace-head { flex-wrap: wrap; gap: .625rem; }
+.workspace-head .workspace-name { font-family: var(--font-sans); font-size: .9375rem; }
+.workspace-head .badge { margin-left: auto; }
+.project-avatar { display: inline-flex; justify-content: center; align-items: center; width: 1.875rem; height: 1.875rem; flex: none; border-radius: .5rem; background: color-mix(in srgb, var(--primary) 12%, var(--card)); color: var(--primary); font-weight: 600; }
+.workspace-card .project-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: .625rem 0 .375rem; }
+.workspace-card .setup-actions { margin-top: auto; padding-top: 1.25rem; gap: .5rem; }
+.workspace-card .setup-actions .inline { margin: 0; }
+.workspace-card .setup-actions > a { margin-left: auto; color: var(--muted-foreground); font-size: .75rem; }
+.workspace-card .project-worker { padding-bottom: 0; margin-top: 1rem; }
+.workspace-card .project-worker form { margin: 0; }
+.project-task { padding: .875rem 0; }
+.project-task strong { font-weight: 500; }
+.project-task:hover strong { color: var(--primary); }
+.badge-attention { color: var(--warning); background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 30%, var(--border)); }
+/* Task details and setup use the same heading and form scale. */
+.task-regions { gap: 1.5rem; padding: 0; margin: 1.25rem 0 1.75rem; }
+.task-regions a { padding: .75rem 0; text-decoration: none; font-size: .8125rem; color: var(--muted-foreground); }
+.task-regions a:hover { color: var(--foreground); box-shadow: inset 0 -2px var(--primary); }
+.task-rail { padding-left: 1.25rem; border-left: 1px solid var(--border); }
+.setup-flow h1 { font-size: clamp(1.5rem, 2.2vw, 1.875rem); }
+.setup-heading h2 { color: var(--foreground); }
+.assistant-choice[aria-current="page"] { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: color-mix(in srgb, var(--primary) 6%, var(--card)); }
+.setup-number { background: var(--muted); }
+.login-intro { text-align: center; color: var(--muted-foreground); margin: .5rem 0 2rem; }
+.login-card h2 { font-size: 1.125rem; margin: 0 0 .375rem; }
+.login-card form { margin-top: 1.5rem; }
+main:has(.login-viewport) { max-width: none; padding: 0; }
+.login-shell { max-width: 25rem; }
+/* Frosted surfaces: a quiet tint, a reflected edge and shallow depth.
+   Keep dense task rows and fields solid; avoid stacks of expensive blur. */
+:root {
+  --glass-surface: rgb(27 28 35 / .82);
+  --glass-chrome: rgb(21 22 29 / .88);
+  --glass-overlay: rgb(31 32 41 / .94);
+  --glass-edge: rgb(218 220 255 / .13);
+  --glass-reflection: rgb(238 238 255 / .07);
+  --glass-highlight: rgb(242 240 255 / .09);
+  --glass-shadow: 0 4px 8px -6px rgb(0 0 0 / .5), 0 16px 36px -24px rgb(0 0 0 / .6);
+  --ambient-cool: rgb(130 119 204 / .11);
+  --ambient-blue: rgb(97 135 174 / .06);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --glass-surface: rgb(255 255 255 / .82);
+    --glass-chrome: rgb(248 248 252 / .88);
+    --glass-overlay: rgb(255 255 255 / .95);
+    --glass-edge: rgb(99 99 133 / .17);
+    --glass-reflection: rgb(255 255 255 / .68);
+    --glass-highlight: rgb(255 255 255 / .9);
+    --glass-shadow: 0 4px 8px -6px rgb(46 38 81 / .12), 0 16px 36px -24px rgb(46 38 81 / .2);
+    --ambient-cool: rgb(158 140 213 / .1);
+    --ambient-blue: rgb(122 173 204 / .06);
+  }
+}
+body {
+  background-image: radial-gradient(ellipse 75rem 45rem at 12% 0%, var(--ambient-cool), transparent 70%),
+    radial-gradient(ellipse 55rem 40rem at 100% 25rem, var(--ambient-blue), transparent 70%);
+  background-repeat: no-repeat;
+}
+.settings-section, .workspace-card, .project-card, .setup-section, .login-card, .overview-totals, .task-composer, .task-review .approve-form {
+  background-color: var(--card);
+  background-image: linear-gradient(135deg, var(--glass-reflection), transparent 44%);
+  border-color: var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), var(--glass-shadow);
+}
+.side, .scope-bar, .mobile-top, .tabbar {
+  background-color: var(--background);
+  background-image: linear-gradient(120deg, var(--glass-reflection), transparent 70%);
+  border-color: var(--glass-edge);
+}
+.side { box-shadow: inset -1px 0 0 rgb(255 255 255 / .025); }
+.scope-bar, .mobile-top { box-shadow: inset 0 1px 0 var(--glass-highlight); }
+.tabbar { box-shadow: inset 0 1px 0 var(--glass-highlight), 0 -8px 24px -20px rgb(0 0 0 / .4); }
+.switcher-menu, .palette, .kbd-help {
+  background-color: var(--card);
+  background-image: linear-gradient(135deg, var(--glass-reflection), transparent 60%);
+  border-color: var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow-overlay);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .settings-section, .workspace-card, .project-card, .setup-section, .login-card, .overview-totals, .task-composer, .task-review .approve-form {
+    background-color: var(--glass-surface);
+    -webkit-backdrop-filter: blur(16px) saturate(115%);
+    backdrop-filter: blur(16px) saturate(115%);
+  }
+  .side, .scope-bar, .mobile-top, .tabbar {
+    background-color: var(--glass-chrome);
+    -webkit-backdrop-filter: blur(20px) saturate(120%);
+    backdrop-filter: blur(20px) saturate(120%);
+  }
+  .switcher-menu, .palette, .kbd-help {
+    background-color: var(--glass-overlay);
+    -webkit-backdrop-filter: blur(24px) saturate(115%);
+    backdrop-filter: blur(24px) saturate(115%);
+  }
+}
+.side nav a.active {
+  background-image: linear-gradient(120deg, rgb(255 255 255 / .05), transparent);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), inset 0 0 0 1px var(--glass-edge);
+}
+/* Let the popup blur the page behind it. A filtered parent would confine
+   its backdrop to the header and anchor the phone's fixed sheet there. */
+.scope-bar:has(.switcher[open]), .mobile-top:has(.switcher[open]) {
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+button.primary, form.card button.primary, .button-link:not(.secondary), .side .new-task {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .12), transparent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .2), 0 2px 3px rgb(0 0 0 / .08);
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  body { background-image: none; }
+  .settings-section, .workspace-card, .project-card, .setup-section, .login-card, .overview-totals,
+  .side, .scope-bar, .mobile-top, .tabbar, .switcher-menu, .palette, .kbd-help {
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+    background: var(--card); border-color: var(--input); box-shadow: none;
+  }
+}
+@media (max-width: 1100px) {
+  .settings-layout { grid-template-columns: 1fr; gap: 1rem; }
+  .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; margin-bottom: .5rem; border-bottom: 1px solid var(--border); padding-bottom: .75rem; }
+}
+@media (max-width: 980px) {
+  .task-rail { border-left: 0; padding-left: 0; order: 0; border-top: 1px solid var(--border); margin-top: 1.5rem; }
+}
+@media (max-width: 760px) {
+  .content > main, .split > .detail > main { padding: 1.5rem 1rem calc(5.5rem + env(safe-area-inset-bottom, 0rem)); }
+  .settings-section, .workspace-card { padding: 1.125rem; }
+  .settings-section { scroll-margin-top: 5.5rem; }
+  .mobile-top details.project-pill, .mobile-top details.project-pill[open] { border: 0; background: transparent; margin: 0; padding: 0; }
+  .settings-nav { gap: .125rem; }
+  .settings-nav a { padding: .625rem; }
+  .overview-totals .stat-card { border-bottom: 1px solid var(--border); }
+  .overview-totals .stat-card:nth-child(even) { border-right: 0; }
+  .overview-totals .stat-card:nth-last-child(-n+2) { border-bottom: 0; }
+  .tabbar a { font-family: var(--font-sans); }
+  .channel-choice { flex-wrap: wrap; }
+  .channel-choice > span:not(.badge) { flex: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}
+
 `;
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
-  active: "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "mode" | "menu" | "none";
+  active: "setup" | "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "projects" | "settings" | "chat" | "people" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -6970,6 +8320,8 @@ type Chrome = {
   csrf?: string;
   /** Where a switch made on this screen returns to. */
   returnTo?: string;
+  /** Destination for adding projects within this server's browse authority. */
+  addProjectsHref?: string;
 };
 
 /**
@@ -7038,12 +8390,12 @@ function regionScript(regionId: string, fragmentName: string, everySeconds: numb
     `function tell(){if(!stamp)return;var s=Math.round((Date.now()-last)/1000);` +
     `stamp.textContent=wait>${ms}?"stale — retrying ("+s+"s old)":"updated "+s+"s ago";}` +
     `setInterval(tell,1000);` +
-    `function cycle(){if(document.hidden||busy){setTimeout(cycle,wait);return;}busy=true;` +
+    `function cycle(){if(document.hidden||busy||region.contains(document.activeElement)){setTimeout(cycle,wait);return;}busy=true;` +
     `var q=location.search?location.search+"&fragment="+${JSON.stringify(fragmentName)}:"?fragment="+${JSON.stringify(fragmentName)};` +
     `fetch(${target},{redirect:"manual",cache:"no-store"})` +
     `.then(function(r){if(r.type==="opaqueredirect"||r.status===401||r.status===403){location.href="/login";return null;}` +
     `return r.ok?r.text():null;})` +
-    `.then(function(t){if(t){var kept=keep();region.innerHTML=t;restore(kept);last=Date.now();wait=${ms};}else{wait=Math.min(wait*2,${ms}*8);}})` +
+    `.then(function(t){if(t){if(region.contains(document.activeElement))return;var kept=keep();region.innerHTML=t;restore(kept);last=Date.now();wait=${ms};}else{wait=Math.min(wait*2,${ms}*8);}})` +
     `.catch(function(){wait=Math.min(wait*2,${ms}*8);})` +
     // A fragment that marks itself final stops the poller: a finished or
     // abandoned build must not be fetched every beat forever.
@@ -7274,7 +8626,7 @@ function shell(
     // viewport-fit=cover is what makes env(safe-area-inset-*) non-zero on a
     // notched phone; without it the tab bar sits under the home indicator.
     `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`,
-    `<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0c0e">`,
+    `<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#111216">`,
     `<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa">`,
     `<meta name="mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-capable" content="yes">`,
@@ -7310,7 +8662,7 @@ function shell(
 
   const chrome = options.chrome;
   const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
-    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
+    `<a href="${href}"${chrome.active === key ? ' class="active" aria-current="page"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
     `${NAV_ICONS[key] === undefined ? "" : `<span class="glyph">${NAV_ICONS[key]}</span>`}${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
@@ -7341,14 +8693,14 @@ function shell(
   // request without a cookie session.
   const canSwitch =
     options.sensitive !== true && chrome.csrf !== undefined && chrome.csrf !== "" && chrome.projects !== undefined;
-  const switcherMenu = (foot: string): string => {
+  const switcherMenu = (): string => {
     if (!canSwitch) return "";
     const hidden =
       `<input type="hidden" name="csrf" value="${escape(chrome.csrf as string)}">` +
-      `<input type="hidden" name="return" value="${escape(chrome.returnTo ?? "/")}">`;
+      `<input type="hidden" name="return" value="${escape(chrome.active === "workbench" || chrome.active === "projects" ? "/board" : chrome.returnTo ?? "/")}">`;
     const allCurrent = effectiveScope !== "project";
     const rows = [
-      `<form method="post" action="/projects/select">${hidden}<input type="hidden" name="path" value="">` +
+      `<form method="post" action="/projects/select"><input type="hidden" name="csrf" value="${escape(chrome.csrf as string)}"><input type="hidden" name="return" value="/workbench"><input type="hidden" name="path" value="">` +
         `<button type="submit"${allCurrent ? ' class="current" aria-current="true"' : ""}>all projects</button></form>`,
       ...(chrome.projects ?? []).map(
         one =>
@@ -7356,34 +8708,45 @@ function shell(
           `<button type="submit"${!allCurrent && chrome.project === one.path ? ' class="current" aria-current="true"' : ""}>${escape(one.name)}</button></form>`,
       ),
     ];
-    return `<div class="switcher-menu" role="menu">${rows.join("")}${foot}</div>`;
+    const actions = `<div class="switcher-actions">` +
+      (chrome.addProjectsHref === undefined ? "" : `<a class="add-projects" href="${escape(chrome.addProjectsHref)}">${strokeIcon('<path d="M12 5v14M5 12h14"/>')}Add projects</a>`) +
+      `<a class="manage" href="/projects">Manage projects</a></div>`;
+    return `<div class="switcher-menu" role="group" aria-label="Project switcher"><div class="switcher-projects">${rows.join("")}</div>${actions}</div>`;
   };
   // No "scope" label word: in this product "scope" names a task's approved
   // terms — the bar just states which projects the screen is showing.
   const scopeBar =
     `<div class="scope-bar">` +
     (canSwitch
-      ? `<details class="switcher"><summary class="name">${scopeName}${CHEVRON_ICON}</summary>${switcherMenu("")}</details>`
+      ? `<details class="switcher"><summary class="name">${scopeName}${CHEVRON_ICON}</summary>${switcherMenu()}</details>`
       : `<span class="name">${scopeName}</span>`) +
     scopeStatus +
     `</div>`;
   const side = [
     `<aside class="side">`,
-    `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
+    `<a class="brand" href="/workbench">standing<span class="dot">·</span>orders</a>`,
     `<nav>`,
     // Four destinations and a more group (reduction pass §1): the rail is
     // the operator's three verbs — answer, approve, retry — plus where the
     // work is and where it builds. Everything else is a dim text row.
-    item("inbox", "/", "inbox", chrome.inboxCount),
-    item("board", "/board", "board"),
-    item("runs", "/runs", "builds"),
-    item("projects", "/projects", "projects"),
+    item("workbench", "/workbench", "Overview"),
+    // Chat is a destination, not an appendix: it is the one place the whole
+    // fleet can be asked about in words, so it sits in the rail rather than
+    // in the dim group below (unified chat).
+    ...(chrome.chat === true ? [item("chat", "/chat", "Chat")] : []),
+    item("inbox", "/", "Inbox", chrome.inboxCount),
+    item("board", "/board", "Board"),
+    item("runs", "/runs", "Builds"),
+    item("projects", "/projects", "Projects"),
+    item("setup", "/control", "Sessions"),
     `</nav>`,
-    `<a class="new-task" href="/tasks/new">+ new task</a>`,
+    `<a class="new-task" href="/tasks/new">+ New task</a>`,
     `<span class="grow"></span>`,
     `<nav class="foot">`,
-    `<span class="nav-label">more</span>`,
-    ...moreRows(chrome).map(row => item(row.key, row.href, row.label)),
+    ...moreRows(chrome).filter(row => ["work", "routines", "settings"].includes(row.key)).map(row => item(row.key, row.href, row.label)),
+    `<details class="nav-more"${["fleet", "system", "caps", "people", "mode"].includes(chrome.active) ? " open" : ""}><summary>More</summary>`,
+    ...moreRows(chrome).filter(row => ["fleet", "system", "caps", "people", "mode"].includes(row.key)).map(row => item(row.key, row.href, row.label)),
+    `</details>`,
     `</nav>`,
     `</aside>`,
   ].join("\n");
@@ -7402,10 +8765,10 @@ function shell(
   // can never disappear with a responsive pane (portfolio arc §1).
   const content =
     chrome.listPane === undefined
-      ? `<div class="content">${demoBanner}${scopeBar}<main>${body}</main></div>`
+      ? `<div class="content">${demoBanner}${scopeBar}<main id="main-content">${body}</main></div>`
       : `<div class="content">${demoBanner}${scopeBar}<div class="split">` +
         `<div class="list-pane">${chrome.listPane}</div>` +
-        `<div class="detail"><main>${body}</main></div>` +
+        `<div class="detail"><main id="main-content">${body}</main></div>` +
         `</div></div>`;
 
   // The phone chrome (arc 4): a top bar with the project one tap from
@@ -7414,7 +8777,7 @@ function shell(
   // these only below 760px; desktop keeps the sidebar untouched.
   const mobileTop = [
     `<header class="mobile-top">`,
-    `<a class="brand-mini" href="/">s·o</a>`,
+    `<a class="brand-mini" href="/workbench">s·o</a>`,
     // On a phone the pill IS the scope row (mobile pass): the project's
     // name, its three counts, and the one /projects link at that
     // breakpoint — the scope bar hides below 760px so the header is one
@@ -7422,7 +8785,7 @@ function shell(
     canSwitch
       ? `<details class="project-pill switcher"><summary><span class="name">${scopeName}${CHEVRON_ICON}</span>${
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
-        }</summary>${switcherMenu("")}</details>`
+        }</summary>${switcherMenu()}</details>`
       : `<a class="project-pill" href="/projects"><span class="name">${scopeName}</span>${
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
         }</a>`,
@@ -7436,6 +8799,7 @@ function shell(
   const TAB_ICONS = {
     inbox: icon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
     board: icon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
+    chat: icon(`<path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7A8.4 8.4 0 0 1 4 11.5 8.5 8.5 0 0 1 8.7 3.9a8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z"/>`),
     runs: icon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
     projects: icon(FOLDER_PATHS),
     menu: icon(`<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`),
@@ -7443,19 +8807,20 @@ function shell(
   const tab = (key: keyof typeof TAB_ICONS & Chrome["active"], href: string, label: string, count?: number): string =>
     // A phone tab says THAT something waits, with a dot; the number is on
     // the inbox itself (Linear Mobile's rule — the count is one tap away).
-    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}><span class="glyph">${TAB_ICONS[key]}</span>${label}` +
+    `<a href="${href}"${chrome.active === key ? ' class="active" aria-current="page"' : ""}><span class="glyph">${TAB_ICONS[key]}</span>${label}` +
     `${count !== undefined && count > 0 ? `<span class="dot-badge" role="img" aria-label="${count} waiting"></span>` : ""}</a>`;
   const tabbar = [
     `<nav class="tabbar">`,
-    tab("inbox", "/", "inbox", chrome.inboxCount),
-    tab("board", "/board", "board"),
-    tab("runs", "/runs", "builds"),
-    tab("projects", "/projects", "projects"),
-    tab("menu", "/menu", "more"),
+    tab("chat", "/chat", "Chat"),
+    tab("inbox", "/", "Inbox", chrome.inboxCount),
+    tab("board", "/board", "Board"),
+
+    tab("projects", "/projects", "Projects"),
+    tab("menu", "/menu", "More"),
     `</nav>`,
   ].join("");
 
-  return [head, `<div class="app">`, side, mobileTop, content, tabbar, `</div>`, tail].join("\n");
+  return [head, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app">`, side, mobileTop, content, tabbar, `</div>`, tail].join("\n");
 }
 
 
@@ -7471,11 +8836,12 @@ function joinFormPage(token: string, problem: string | null, name: string): stri
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
     `<p class="meta hint">you were invited \u2014 pick a name and a password to sign in</p>`,
-    `<div class="login-card">`,
+    `<p class="login-intro">Your projects. Moving forward.</p><div class="login-card">`,
+    `<h2>Welcome back</h2><p class="meta">Sign in to your workspace.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/join/${escape(token)}">`,
-    `<label>username<input type="text" name="name" autocomplete="username" value="${escape(name)}" autofocus></label>`,
-    `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
+    `<label>Username<input type="text" name="name" autocomplete="username" value="${escape(name)}" autofocus></label>`,
+    `<label>Password<input type="password" name="password" autocomplete="new-password"></label>`,
     `<button type="submit">create my sign-in</button>`,
     "</form>",
     `</div>`,
@@ -7501,15 +8867,16 @@ function loginPage(problem: string | null): string {
   return shell("standing-orders", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
-    `<div class="login-card">`,
+    `<p class="login-intro">Your projects. Moving forward.</p><div class="login-card">`,
+    `<h2>Welcome back</h2><p class="meta">Sign in to your workspace.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
-    `<label>username<input type="text" name="name" autocomplete="username" autofocus></label>`,
-    `<label>password<input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">sign in</button>`,
+    `<label>Username<input type="text" name="name" autocomplete="username" autofocus></label>`,
+    `<label>Password<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">Sign in</button>`,
     "</form>",
     `</div>`,
-    `<p class="login-foot">your login was shown when the console was first started, and saved beside its database as <code>up-login.txt</code>.<br>no account? ask whoever runs this console for an invite link.</p>`,
+    `<p class="login-foot">Need access? Ask the person who set up Standing Orders for an invitation.</p>`,
     `</div></div>`,
   ].join("\n"), { nav: false });
 }
@@ -7528,8 +8895,8 @@ function signupPage(problem: string | null, attemptsLeft: number): string {
       : [
           `<form method="post" action="/signup">`,
           `<label>setup code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus></label>`,
-          `<label>username<input type="text" name="name" autocomplete="username"></label>`,
-          `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
+          `<label>Username<input type="text" name="name" autocomplete="username"></label>`,
+          `<label>Password<input type="password" name="password" autocomplete="new-password"></label>`,
           `<button type="submit">create account and sign in</button>`,
           "</form>",
         ].join("\n"),
@@ -7661,8 +9028,7 @@ function inboxPage(chrome: Chrome, data: {
     data.wizard === null
       ? ""
       : `<div class="card">` +
-        `<p><strong>Getting started</strong> <span class="meta">\u2014 disappears after the first successful run</span></p>` +
-        `<p class="meta">or run <span class="mono">standing-orders up</span> in a repository \u2014 it starts the console and a worker for you.</p>` +
+        `<h2>Getting started</h2><p class="hint">A few choices and you're ready. Set up your project here, then tell your assistant what to do.</p><p><a class="button-link primary" href="/control">Set up my project →</a></p>` +
         data.wizard
           .map(
             step =>
@@ -7670,15 +9036,7 @@ function inboxPage(chrome: Chrome, data: {
               `<span class="meta">${step.detail}</span></p>`,
           )
           .join("\n") +
-        `<p class="meta">templates \u2014 edit, then approve; nothing a template files carries authority: ` +
-        TEMPLATES.map(one =>
-          one.kind === "routine"
-            ? `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`
-            : one.kind === "task"
-              ? `<a href="/tasks?template=${escape(one.name)}">${escape(one.name)}</a>`
-              : `<span title="a recipe \u2014 walk it in the terminal: standing-orders template show ${escape(one.name)}">${escape(one.name)} (recipe)</span>`,
-        ).join(" \u00b7 ") +
-        `</p></div>`;
+        `<details class="setup-optional"><summary>Need an idea for your first task?</summary><p><a href="/tasks?template=lint-sweep">Clean up code style</a> · <a href="/routines?template=nightly-deps">Keep dependencies up to date</a></p></details></div>`;
 
   const noWorker =
     data.worker.answering > 0
@@ -7687,12 +9045,12 @@ function inboxPage(chrome: Chrome, data: {
         (data.worker.registered === 0
           ? `No machine is registered as a worker yet. `
           : `${data.worker.registered} registered, last heard ${data.worker.lastHeard === null ? "never" : escape(when(data.worker.lastHeard))}. `) +
-        `On the machine that should build, run <span class="mono">standing-orders up</span> \u2014 it registers that machine and runs the worker beside the console. Approvals below wait until then.</div>`;
+        `<a href="/control#worker">Start or reconnect your worker →</a> Your approved tasks will wait until a worker is ready.</div>`;
 
   return screen("inbox", [
-    `<h1>inbox</h1>`,
+    `<h1>Inbox</h1>`,
     `<p class="meta">everything that waits on you \u2014 empty means the fleet is working</p>`,
-    noWorker,
+    data.wizard === null ? noWorker : "",
     wizard,
     empty ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
     empty && data.wizard === null ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
@@ -7707,16 +9065,15 @@ function inboxPage(chrome: Chrome, data: {
     // Quick capture: the shortest path from "I want this done" to the
     // approve card — title and goal here, the yes on the next screen. The
     // one-shot form posts to the same guarded handler as the full page.
-    data.rollup ? "" : `<h2>capture new work</h2>`,
+    data.rollup ? "" : `<h2>New task</h2>`,
     data.rollup ? "" : `<form method="post" action="/tasks/add" class="card">`,
     ...(data.rollup
       ? []
       : [
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="projectRevision" value="${data.revision}">`,
-          `<label>what should get done<input type="text" name="title" placeholder="task title" maxlength="200"></label>`,
-          `<label>what success looks like <span class="meta">(becomes the scope you approve on the next screen)</span><textarea name="goal" rows="2"></textarea></label>`,
-          `<button type="submit">queue it \u2192 approve its scope next</button>`,
+          `<input type="hidden" name="composer" value="1"><label>What would you like to get done?<textarea name="request" rows="4" maxlength="2000" required placeholder="Describe the change and the result you want"></textarea></label>`,
+          `<button type="submit" class="primary">Review task →</button>`,
           `</form>`,
         ]),
   ].join("\n"), {
@@ -7817,7 +9174,7 @@ function systemPage(chrome: Chrome, data: {
     `</div>`;
 
   return screen("system", [
-    `<h1>system</h1>`,
+    `<h1>System</h1>`,
     `<p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p>`,
     agentsCard,
     cards.length === 0
@@ -8069,7 +9426,7 @@ function boardBody(
         `</p>`;
 
   return [
-    `<h1>board</h1>`,
+    `<h1>Board</h1>`,
     data.all ? "" : `<p class="meta board-view"><strong>state</strong> \u00b7 <a href="/board?view=order">order \u2192</a> <span class="meta">drag to reorder, or to reserve a task for one worker</span></p>`,
     deltaLine,
     toggle,
@@ -8111,7 +9468,7 @@ function donePage(
           })
           .join("\n");
   return screen("done", [
-    `<h1>done</h1>`,
+    `<h1>Done</h1>`,
     buildsViews("done"),
     `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, what it cost, and its pull request</p>`,
     list,
@@ -8191,6 +9548,131 @@ function chatMoney(microusd: number | null): string {
   return microusd === null ? "unknown" : `$${(microusd / 1_000_000).toFixed(2)}`;
 }
 
+/** One project as the chat knows it: the opaque id the model sees, the
+ * name the operator reads, and the path the focus form posts back. */
+type ChatProject = { id: string; label: string; path: string };
+
+/**
+ * The assistant's state, said once at the top of the page in words a
+ * person can act on. Never inferred from a saved key: `connected` means a
+ * live, non-spending check of THIS computer's sign-in said so.
+ */
+type ChatStatus = {
+  tone: "ok" | "busy" | "warn";
+  title: string;
+  detail: string;
+  action?: { href: string; label: string };
+};
+
+/**
+ * What a live, non-spending check said about this computer's Claude Code
+ * sign-in — and, when it cannot answer, why, in words to act on.
+ */
+type ChatAccountState =
+  | { ok: true; account: ProviderConnection }
+  | { ok: false; why: string; account: ProviderConnection | null };
+
+/** Why an account that is not `connected` cannot answer, in words the
+ * person reading them can act on. Never a guess: a saved API key is not
+ * a subscription sign-in, and this says so. */
+function localAccountWhy(account: ProviderConnection): string {
+  if (account.state === "not-installed") return "Claude Code is not installed on this computer, so there is no account to answer with.";
+  if (account.state === "signed-out") return "This computer's Claude Code account is signed out. Sign in again, then check the connection.";
+  if (account.state === "key-present" || account.state === "missing-key") {
+    return "Claude Code on this computer is set to use an API key rather than an account sign-in, so chat uses the API adapter below.";
+  }
+  return "The Claude Code sign-in on this computer could not be checked just now.";
+}
+
+/** The account named the way a person would name it. */
+function localAccountWords(account: ProviderConnection): string {
+  const parts = [account.email, account.plan].filter((one): one is string => typeof one === "string" && one !== "");
+  return parts.length === 0 ? "Your signed-in Claude Code account answers here." : `Signed in as ${parts.join(" · ")}.`;
+}
+
+/** Where the operator goes to make the console ask the account again. */
+const CHAT_RECHECK = { href: "/chat?check-connection=1", label: "Check again" } as const;
+
+/**
+ * The one sentence at the top of the page: who is answering, and how it is
+ * doing. Working outranks everything — a person watching a turn wants to
+ * know it is still going, not be told again which account they use. After
+ * that the LIVE conversation's own transport wins, because that is the one
+ * the next message will actually travel down; only with no conversation
+ * yet does this describe what is merely available.
+ */
+function chatStatusFor(args: {
+  local: ChatAccountState;
+  apiReady: boolean;
+  working: boolean;
+  live: "local" | "api" | null;
+}): ChatStatus {
+  if (args.working) {
+    return { tone: "busy", title: "Working…", detail: "Your assistant is answering. This page brings the answer back on its own." };
+  }
+  if (args.live === "local") {
+    return args.local.ok
+      ? { tone: "ok", title: "Connected", detail: localAccountWords(args.local.account) }
+      : { tone: "warn", title: "Your Claude Code account cannot answer", detail: args.local.why, action: CHAT_RECHECK };
+  }
+  if (args.live === "api") {
+    return { tone: "ok", title: "Answering through your API key", detail: "This conversation bills the key configured below, and reserves its worst case before every message." };
+  }
+  if (args.local.ok) {
+    return { tone: "ok", title: "Claude Code account connected", detail: localAccountWords(args.local.account) };
+  }
+  if (args.apiReady) {
+    // The local account's reason is deliberately NOT repeated here: "Claude
+    // Code is not installed… Start the conversation below" reads as a
+    // contradiction. What is ready is what gets said.
+    return { tone: "ok", title: "Ready through your API key", detail: "Your configured API key answers here. Start the conversation below." };
+  }
+  return { tone: "warn", title: "No assistant is connected", detail: args.local.why, action: CHAT_RECHECK };
+}
+
+function chatStatusCard(status: ChatStatus): string {
+  return (
+    `<div class="chat-status chat-status-${escape(status.tone)}" role="status">` +
+    `<span class="chat-status-dot" aria-hidden="true"></span>` +
+    `<div class="chat-status-words"><strong>${escape(status.title)}</strong><p class="meta">${escape(status.detail)}</p></div>` +
+    (status.action === undefined
+      ? ""
+      : `<a class="chat-status-action" href="${escape(status.action.href)}">${escape(status.action.label)}</a>`) +
+    `</div>`
+  );
+}
+
+/**
+ * The project chips. Choosing one narrows what the assistant is shown and
+ * what this page highlights; it is a POST because it writes to the browser
+ * session, and it returns to /chat — the conversation is never touched, so
+ * switching projects never loses it.
+ */
+function chatChips(csrf: string, projects: readonly ChatProject[], focus: string | null): string {
+  if (projects.length === 0) return "";
+  const chip = (path: string, label: string, id: string | null): string => {
+    const current = focus === (path === "" ? null : path);
+    return (
+      `<form method="post" action="/chat/focus" class="chat-chip-form">` +
+      `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+      `<input type="hidden" name="repo" value="${escape(path)}">` +
+      `<button type="submit" class="chat-chip${current ? " current" : ""}"${current ? ' aria-current="true"' : ""}>` +
+      escape(label) +
+      `</button></form>`
+    );
+  };
+  return (
+    `<div class="chat-chips" role="group" aria-label="Projects this conversation covers">` +
+    chip("", "All projects", null) +
+    projects.map(one => chip(one.path, one.label, one.id)).join("") +
+    `</div>`
+  );
+}
+
+/** The page's one-line explanation of what this conversation can do. */
+const CHAT_LEAD =
+  "One conversation for your projects. Ask a question or describe what you’d like to get done.";
+
 function chatPage(chrome: Chrome, data: {
   enabled: { ok: true } & Record<string, unknown> | { ok: false; why: string };
   pending: ChatTurn | null;
@@ -8207,6 +9689,18 @@ function chatPage(chrome: Chrome, data: {
   openrouterModels: string[] | null;
   csrf: string;
   problem: string | null;
+  /** Every project this console serves, in ceiling order. */
+  projects: ChatProject[];
+  /** The project the chips highlight; null = every project (the default). */
+  focus: string | null;
+  /** Said once, at the top: which assistant answers and how it is doing. */
+  status: ChatStatus;
+  /** The local Claude Code account can answer — the API furniture below is
+   * then settings, not the way in. */
+  localReady: boolean;
+  quickStart: boolean;
+  retainedMessages: MateMessage[];
+  apiMint: string;
   /** The card that mints a mate session (mate arc §5), approvers only. */
   mateMint?: string;
   /** Pending coordinator proposals as cards (mate arc v3), approvers only. */
@@ -8254,10 +9748,55 @@ function chatPage(chrome: Chrome, data: {
     ].join("\n");
   };
   const parts: string[] = [
-    "<h1>chat</h1>",
-    `<p class="meta">ask about your fleet in plain language — it reads a limited summary of the projects this console serves and can draft work; drafts have no authority, live only in this browser session, and are filed and approved by you like everything else</p>`,
+    `<div class="chat-page">`,
+    `<header class="chat-head"><h1>Chat</h1><p class="meta chat-lead">${escape(CHAT_LEAD)}</p></header>`,
+    chatStatusCard(data.status),
+    // Only the local adapter's one-pass prompt can honour a focus, so the
+    // chips are drawn only where they will do something (see `matePage`).
+    data.localReady ? chatChips(data.csrf, data.projects, data.focus) : "",
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
+  // An unacknowledged unknown-cost turn is said on EVERY road into this
+  // page, not only the API one: it blocks the credential it was spent on
+  // and the person who has to clear it must be able to find out why.
+  for (const turn of data.latched) {
+    parts.push(
+      `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
+        `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> before asking again</div>`,
+    );
+  }
+  if (data.retainedMessages.length) parts.push(`<div class="thread">${data.retainedMessages.map(message => `<div class="msg ${message.role === "operator" ? "op" : "mate"}"><p style="white-space:pre-wrap">${escape(decodeProjectMentions(message.text, data.projects.map(one => one.path)))}</p></div>`).join("")}</div>`);
+  if (data.quickStart) parts.push(chatWelcomeComposer(data.csrf, data.retainedMessages.length === 0));
+  else if (data.mateMint !== undefined) parts.push(data.mateMint);
+  parts.push(`<p class="meta"><a href="/chat/settings">Memory and project context</a> · <a href="/chat/history">Conversation history</a></p>`);
+  if (data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
+  // The local account can answer on its own: the API adapter's settings
+  // stay reachable, but they are no longer the road in.
+  if (data.localReady) {
+    // A fleet-chat turn under the API adapter can still be in flight while
+    // the local account is the road in; it must not vanish just because a
+    // different assistant is available.
+    if (data.pending !== null) {
+      parts.push(
+        `<div class="card chat-working" role="status"><p><strong>Working…</strong> ` +
+          `<span class="meta">turn #${data.pending.id}, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`,
+      );
+      parts.push(`</div>`);
+      return screen("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
+    }
+    // The API adapter stays configurable from here even when it has never
+    // been set up: this is the only screen that can turn it on, and hiding
+    // the form behind "already configured" would strand it for good.
+    parts.push(
+      `<details class="chat-settings"><summary>Answer through an API key instead</summary>`,
+      `<p class="meta">A direct API key is an alternative to the account above — it bills separately and reserves its worst-case spend before every message.</p>`,
+      data.apiMint,
+      configForm(data.config),
+      `</details>`,
+    );
+    parts.push(`</div>`);
+    return screen("chat", parts.join("\n"), { chrome, functional: { script: chatUploadScript() } });
+  }
   if (!data.enabled.ok) {
     parts.push(`<div class="card"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`);
     // The ceiling refusals need a restart to fix; configuration does not —
@@ -8266,6 +9805,7 @@ function chatPage(chrome: Chrome, data: {
     if (code === "unconfigured" || code === "unpriced" || code === "no-key") {
       parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
     }
+    parts.push(`</div>`);
     return screen("chat", parts.join("\n"), { chrome });
   }
   const config = (data.enabled as unknown as { config: { provider: string; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
@@ -8275,17 +9815,10 @@ function chatPage(chrome: Chrome, data: {
       ` · repos: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
     `<p class="meta">what leaves this machine: task ids/titles/states, open questions and option labels, incident kinds, routine names/schedules, PR numbers and observed check states — deliberately, to the configured provider. Paths, branches, diffs, notes, decision details, and identities never do.</p>`,
   );
-  if (data.mateMint !== undefined) parts.push(data.mateMint);
-  if (data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
-  for (const turn of data.latched) {
-    parts.push(
-      `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
-        `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
-    );
-  }
   if (data.pending !== null) {
     parts.push(`<div class="card"><p><strong>asking…</strong> <span class="meta">turn #${data.pending.id}, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
+    parts.push(`</div>`);
     return screen("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
   }
   const last = data.chat?.lastTurn ?? null;
@@ -8318,12 +9851,11 @@ function chatPage(chrome: Chrome, data: {
     );
   }
   parts.push(
-    `<h2>ask</h2>`,
-    `<form method="post" action="/chat" class="card">`,
+    `<form method="post" action="/chat" class="card composer chat-composer">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<label>message<textarea name="message" rows="3" maxlength="2000"></textarea></label>`,
-    `<label>your password <span class="meta">(every message — chat spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">ask</button>`,
+    `<label class="chat-composer-field">Message<textarea name="message" rows="3" maxlength="2000" placeholder="How do things stand?"></textarea></label>`,
+    `<label>your password <span class="meta">(every message — this adapter spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+    `<div class="chat-composer-foot"><button type="submit" class="primary">Send</button></div>`,
     `</form>`,
   );
   parts.push(
@@ -8358,6 +9890,7 @@ function chatPage(chrome: Chrome, data: {
       );
     }
   }
+  parts.push(`</div>`);
   return screen("chat", parts.join("\n"), { chrome });
 }
 
@@ -8379,20 +9912,47 @@ function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string
   ].join("\n"), { chrome });
 }
 
-/** The card that starts a conversation: the one password ceremony (mate arc §1). */
-function mateMintCard(csrf: string, weeklyCeilingMicrousd: number): string {
+/**
+ * The card that starts a conversation — the ONE ceremony (mate arc §1).
+ *
+ * The password field is written unconditionally and REMOVED by `sendScreen`
+ * when the account's approval preference relaxes it, exactly as it is for
+ * every other work approval: `/chat/mate/mint` is on that list, so this
+ * card cannot drift from the rest of the console's ceremony.
+ */
+function chatAttachmentControl(): string {
+  return `<div class="chat-attachment"><label>Attach a file <input type="file" id="chat-file" accept="image/png,image/jpeg,image/webp,application/pdf,.txt,.md,.csv,.json,.log"></label><input type="hidden" name="attachment" id="chat-attachment"><span class="meta" id="chat-file-status">Images, PDF, or text · up to 5 MB · sent to your assistant</span><button type="button" id="chat-file-clear" class="quiet" hidden>Remove file</button></div>`;
+}
+
+function chatWelcomeComposer(csrf: string, empty = true): string {
+  return (empty ? `<div class="chat-empty"><h2>What would you like to work on?</h2><p class="meta">See what needs you, plan a feature, or start a task.</p></div>` : "") +
+    `<form method="post" action="/chat" class="card composer chat-composer"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    `<label class="chat-composer-field">Message<textarea name="message" rows="4" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="Ask about your projects or describe a task…"></textarea></label>` + chatAttachmentControl() +
+    `<div class="chat-composer-foot"><span class="meta">Tasks wait for your review.</span><button type="submit" class="primary">Send</button></div></form>`;
+}
+
+function mateMintCard(
+  csrf: string,
+  mode: { kind: "local"; hours: number; ceilingMicrousd: number } | { kind: "api"; weeklyCeilingMicrousd: number },
+): string {
+  const terms =
+    mode.kind === "local"
+      ? `<p class="meta">This window lasts ${mode.hours} hours and meters ${chatMoney(mode.ceilingMicrousd)} of the usage your Claude Code account reports. ` +
+        `Messages inside it need no further confirmation; every proposal still waits on a card.</p>`
+      : `<div class="mate-terms">` +
+        `<label>this conversation may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>` +
+        `<label>for <span class="inline-field"><input type="text" name="hours" inputmode="numeric" value="4" style="width:4rem"> hours</span></label>` +
+        `</div>` +
+        `<p class="meta">the weekly chat ceiling (${chatMoney(mode.weeklyCeilingMicrousd)}) still binds above it; every turn reserves its worst case first and is refused before it spends when either would be exceeded</p>`;
   return [
-    `<div class="card mate-mint">`,
-    `<p><strong>talk to the mate.</strong> <span class="meta">one conversation across every project this console serves — it reads, recaps, and proposes; you confirm each act on a card</span></p>`,
+    `<div class="card mate-mint chat-start">`,
+    `<p><strong>Start the conversation.</strong> <span class="meta">One thread across every project this console serves — it reads, recaps, and proposes; you confirm each act on a card.</span></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<div class="mate-terms">`,
-    `<label>this session may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
-    `<label>for <span class="inline-field"><input type="text" name="hours" inputmode="numeric" value="4" style="width:4rem"> hours</span></label>`,
-    `</div>`,
-    `<p class="meta">the weekly chat ceiling (${chatMoney(weeklyCeilingMicrousd)}) still binds above it; every turn reserves its worst case first and is refused before it spends when either would be exceeded</p>`,
-    `<label>your password <span class="meta">(once — this mints the session; messages need no password after)</span><input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">start the conversation</button>`,
+    `<input type="hidden" name="transport" value="${mode.kind}">`,
+    terms,
+    `<label>Your password <span class="meta">(once — messages after this need none)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit" class="primary">Start the conversation</button>`,
     `</form>`,
     `</div>`,
   ].join("\n");
@@ -8419,6 +9979,12 @@ type ProposalCardView = {
   by: { mate: true } | { mate: false; name: string; ago: string };
   /** Where confirm/dismiss post: `/chat/proposal` for the mate's, `/proposals` for a coordinator's. */
   actionBase: string;
+  /** Where the task this card filed has got to, when it filed one. Read
+   * from the store by the page, so progress is visible in the conversation
+   * itself rather than only on the task's own screen. */
+  taskState?: string | null;
+  /** The project this card would act in, in the operator's own words. */
+  projectName?: string;
 };
 
 /**
@@ -8435,16 +10001,20 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   const repoId = text("repoId");
   let what: string;
   if (view.kind === "task") {
+    // The project is named the way the operator names it — an opaque id
+    // alone is not a review, it is a riddle.
+    const where = view.projectName === undefined ? `<span class="mono">${escape(repoId)}</span>` : `<strong class="chat-card-project">${escape(view.projectName)}</strong>`;
     what =
-      `<strong>file ${escape(text("title"))}</strong> in <span class="mono">${escape(repoId)}</span>${payload["report"] === true ? ` <span class="badge">scout — delivers a report, never a branch</span>` : ""}<p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
-      (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`) +
+      `<strong>${escape(text("title"))}</strong> <span class="meta">· ${where}</span>${payload["report"] === true ? ` <span class="badge">scout — delivers a report, never a branch</span>` : ""}<p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
+      (text("not") === "" ? "" : `<p class="meta">Keep unchanged: ${escape(text("not"))}</p>`) +
       (Array.isArray(payload["touches"]) && payload["touches"].length > 0 ? `<p class="meta">touches: ${escape((payload["touches"] as string[]).join(", "))}</p>` : "");
   } else if (view.kind === "next") {
     what = `<strong>move <a href="${taskHref(task)}">${escape(task)}</a> to the front</strong> <span class="meta">(it was ${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))})</span>`;
   } else if (view.kind === "reserve") {
     what = `<strong>${payload["worker"] === null ? "release" : "reserve"} <a href="${taskHref(task)}">${escape(task)}</a>${payload["worker"] === null ? " to the shared queue" : ` for ${escape(text("worker"))}`}</strong>`;
   } else if (view.kind === "hold") {
-    what = `<strong>hold <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
+    what = `<strong>${typeof payload["stopRun"] === "number" ? "Stop build and pause" : "Pause future attempts for"} <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>` +
+      (typeof payload["stopRun"] === "number" ? `<p>Stop build #${escape(String(payload["stopRun"]))}, preserve its work, and keep the task paused until you resume.</p>` : `<p>A current run will finish. Future attempts stay paused.</p>`);
   } else if (view.kind === "unhold") {
     what = `<strong>release <a href="${taskHref(task)}">${escape(task)}</a> from its hold</strong>`;
   } else if (view.kind === "scope") {
@@ -8490,17 +10060,19 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
         : `<div class="acts">` +
           `<form method="post" action="${view.actionBase}/${view.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
           (irreversible ? `<label class="arm"><input type="checkbox" name="confirm" value="yes"> I understand this cannot be undone</label>` : "") +
-          `<button type="submit">confirm</button></form>` +
+          `<button type="submit"${view.kind === "task" ? ' class="primary"' : ""}>${view.kind === "task" ? "Review task" : "Confirm"}</button></form>` +
           `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>` +
           `</div>`;
   } else if (view.state === "pending") {
     acts = `<p class="meta">confirm or dismiss once the turn ends</p>`;
   } else if (view.state === "confirmed") {
     const filed = outcome !== null && typeof outcome.taskId === "string" ? outcome.taskId : null;
-    acts =
-      `<p class="meta done">${escape(said ?? "confirmed")}` +
-      (view.kind === "scope" && filed !== null ? ` — <a href="${taskHref(filed)}#approve">approve it</a>` : filed !== null && view.kind === "task" ? ` — <a href="${taskHref(filed)}">open it</a>` : "") +
-      `</p>`;
+    if (filed !== null && view.kind === "task" && view.taskState !== undefined && view.taskState !== null) {
+      const next = view.taskState === "Awaiting approval" ? "Review and approve" : ["Built locally", "PR open", "Merged", "Completed"].includes(view.taskState) ? "Review result" : "Open task";
+      acts = `<div class="chat-progress"><span class="badge">${escape(view.taskState)}</span> <a class="button-link" href="${taskHref(filed)}">${next} →</a></div>`;
+    } else {
+      acts = `<p class="meta done">${escape(said ?? "Confirmed")}${filed === null ? "" : ` — <a href="${taskHref(filed)}">Open task</a>`}</p>`;
+    }
   } else if (view.state === "refused") {
     acts = `<p class="meta refused">${escape(said ?? "refused")}</p>`;
   } else {
@@ -8509,8 +10081,32 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   return `<div class="card proposal ${escape(view.state)}"><p><span class="badge">${escape(view.kind)}</span> ${what}</p>${provenance}${acts}</div>`;
 }
 
-function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean, decision: Decision | null): string {
-  return proposalCard({ id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: true }, actionBase: "/chat/proposal" }, csrf, inert, decision);
+function mateProposalCard(
+  proposal: MateProposal,
+  csrf: string,
+  inert: boolean,
+  decision: Decision | null,
+  taskStates?: Map<string, string>,
+): string {
+  const filed = proposal.outcome !== null && typeof proposal.outcome["taskId"] === "string" ? (proposal.outcome["taskId"] as string) : null;
+  const state = filed === null || taskStates === undefined ? undefined : taskStates.get(filed);
+  const repo = typeof proposal.payload["repo"] === "string" ? (proposal.payload["repo"] as string) : null;
+  return proposalCard(
+    {
+      id: proposal.id,
+      kind: proposal.kind,
+      payload: proposal.payload,
+      state: proposal.state,
+      outcome: proposal.outcome,
+      by: { mate: true },
+      actionBase: "/chat/proposal",
+      ...(state === undefined ? {} : { taskState: state }),
+      ...(repo === null ? {} : { projectName: projectName(repo) }),
+    },
+    csrf,
+    inert,
+    decision,
+  );
 }
 
 function coordinatorProposalCard(proposal: CoordinatorProposal, csrf: string, now: Date, decision: Decision | null): string {
@@ -8540,9 +10136,20 @@ function coordinatorProposalsSection(proposals: readonly CoordinatorProposal[], 
   );
 }
 
+function chatProgressScript(statusToken: string): string {
+  return `(function(){var seen=${JSON.stringify(statusToken)},dirty=false;document.addEventListener('input',function(){dirty=true;});` +
+    `function poll(){if(document.hidden){setTimeout(poll,3000);return;}fetch('/chat?fragment=chat-status',{cache:'no-store',redirect:'manual'}).then(function(r){return r.ok&&r.headers.get('content-type').includes('application/json')?r.json():null;}).then(function(next){if(next&&next.status!==seen&&!dirty&&!String(window.getSelection())){location.reload();return;}setTimeout(poll,3000);}).catch(function(){setTimeout(poll,5000);});}setTimeout(poll,3000);})();`;
+}
+
+function chatUploadScript(): string {
+  return `(function(){var file=document.getElementById('chat-file'),value=document.getElementById('chat-attachment'),status=document.getElementById('chat-file-status'),clear=document.getElementById('chat-file-clear');if(!file||!value)return;var generation=0,reading=false;file.addEventListener('change',function(){var current=++generation;value.value='';var chosen=file.files[0];if(!chosen)return;if(chosen.size>5000000){status.textContent='Choose a file smaller than 5 MB.';file.value='';return;}reading=true;status.textContent='Preparing attachment…';var reader=new FileReader();reader.onload=function(){if(current!==generation)return;reading=false;value.value=JSON.stringify({name:chosen.name,mime:chosen.type,data:String(reader.result).split(',')[1]});status.textContent=chosen.name+' · ready to send';clear.hidden=false;};reader.onerror=function(){if(current!==generation)return;reading=false;status.textContent='Could not read that file. Please select it again.';};reader.readAsDataURL(chosen);});clear.addEventListener('click',function(){generation++;reading=false;file.value='';value.value='';clear.hidden=true;status.textContent='Images, PDF, or text · up to 5 MB · sent to your assistant';});file.form.addEventListener('submit',function(e){if(reading){e.preventDefault();status.textContent='Please wait for the attachment to finish preparing.';}});})();`;
+}
+
 function matePage(chrome: Chrome, data: {
+  statusToken: string;
   session: MateSession;
   messages: MateMessage[];
+  turnProjects: Map<number, string | null>;
   proposals: MateProposal[];
   /** The decisions the answer cards name. */
   decisions: Map<number, Decision>;
@@ -8550,21 +10157,57 @@ function matePage(chrome: Chrome, data: {
   pending: MateTurn | null;
   latched: ChatTurn[];
   recent: MateTurn[];
-  config: import("./store.js").ChatConfig;
+  /** The API adapter's terms; null when the local account is answering. */
+  config: import("./store.js").ChatConfig | null;
   turnsToday: number;
   weeklySpent: number;
+  /** The local account's rolling-week bound; null on the API road, whose
+   * bound comes from `config` instead. */
+  weeklyCeiling: number | null;
+  /** The local account's daily message bound; null on the API road. */
+  dailyTurns: number | null;
+  /** Can a NEW message go out? False leaves the thread whole and readable
+   * and withholds only the composer — a transport that cannot answer right
+   * now is not a reason to hide the conversation. */
+  canSend: boolean;
   repoLabels: { id: string; label: string }[];
+  /** Every project this console serves, for the chips. */
+  projects: ChatProject[];
+  /** The project the chips highlight; null = every project. */
+  focus: string | null;
+  /** Said once, at the top: which assistant answers and how it is doing. */
+  status: ChatStatus;
+  /** A confirmed card's filed task, and where that task has got to — the
+   * conversation shows progress without leaving it. */
+  taskStates: Map<string, string>;
   csrf: string;
   problem: string | null;
   now: Date;
 }): Screen {
+  const script = chatProgressScript(data.statusToken) + chatUploadScript();
+  const config = data.config;
+  const weeklyCeiling = config === null ? data.weeklyCeiling : config.weeklyCeilingMicrousd;
+  const dailyTurns = config === null ? data.dailyTurns : config.dailyTurns;
+  const meter =
+    `this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}` +
+    ` until ${escape(data.session.expiresAt.slice(11, 16))}Z` +
+    (weeklyCeiling === null ? "" : ` · this week ${chatMoney(data.weeklySpent)} of ${chatMoney(weeklyCeiling)}`) +
+    (dailyTurns === null ? "" : ` · ${data.turnsToday} of ${dailyTurns} messages today`) +
+    // A subscription reports an EQUIVALENT cost, and sometimes reports none
+    // at all. Saying so is the difference between a meter and a claim: a
+    // turn with no figure is marked in the thread and is not in this total,
+    // which makes the number a floor rather than the truth.
+    (config === null ? ` · counted from what your Claude Code account reported; turns it gave no figure for are marked in the thread and not counted here` : "");
   const parts: string[] = [
-    "<h1>chat</h1>",
-    `<p class="meta">the mate reads every project this console serves and proposes; nothing happens until you confirm a card. ` +
-      `<span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
-      ` · this session: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)} until ${escape(data.session.expiresAt.slice(11, 16))}Z` +
-      ` · this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)} · ${data.turnsToday} of ${data.config.dailyTurns} turns today</p>`,
-    `<p class="meta">projects: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
+    `<div class="chat-page chat-live">`,
+    `<header class="chat-head"><h1>Chat</h1><p class="meta chat-lead">${escape(CHAT_LEAD)}</p></header>`,
+    chatStatusCard(data.status),
+    // The chips narrow what the assistant is SHOWN, which only the local
+    // adapter's one-pass prompt can honour: the API mate fetches state
+    // through its own tools and would ignore the filter. An inert control
+    // is worse than no control, so it is not drawn on that road.
+    config === null ? chatChips(data.csrf, data.projects, data.focus) : "",
+
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -8582,44 +10225,86 @@ function matePage(chrome: Chrome, data: {
   const inert = data.pending !== null;
   parts.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now));
   parts.push(`<div class="thread">`);
-  if (data.messages.length === 0) parts.push(`<p class="meta">nothing said yet — ask how things stand.</p>`);
+  if (data.messages.length === 0) parts.push(`<div class="chat-empty"><h2>What would you like to work on?</h2><p class="meta">See what needs you, plan a feature, or start a task.</p></div>`);
   for (const message of data.messages) {
     if (message.role === "operator") {
-      parts.push(`<div class="msg op"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
+      const repo = message.turn === null ? undefined : data.turnProjects.get(message.turn);
+      const label = repo === null ? "All projects" : repo && data.projects.some(one => one.path === repo) ? projectName(repo) : null;
+      parts.push(`<div class="msg op">${label === null ? "" : `<p class="meta">${escape(label)}</p>`}<p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
       continue;
     }
     const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
     parts.push(
       `<div class="msg mate">` +
         (message.activity === null ? "" : `<p class="meta mono activity">${escape(message.activity)}</p>`) +
-        `<p style="white-space:pre-wrap">${escape(message.text)}</p>` +
-        cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null)).join("") +
+        `<p style="white-space:pre-wrap">${escape(config === null ? decodeProjectMentions(message.text, data.projects.map(one => one.path)) : message.text)}</p>` +
+        cards
+          .map(one =>
+            mateProposalCard(
+              one,
+              data.csrf,
+              inert,
+              data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null,
+              data.taskStates,
+            ),
+          )
+          .join("") +
         `</div>`,
     );
   }
   parts.push(`</div>`);
   if (data.pending !== null) {
-    parts.push(`<div class="card"><p><strong>thinking…</strong> <span class="meta">turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
-    return screen("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
+    // Working, said where the answer will appear — the question above it
+    // stays on screen, and the page brings the answer back itself.
+    parts.push(
+      `<div class="card chat-working" role="status"><p><strong>Working…</strong> ` +
+        `<span class="meta">${config === null ? "asking your Claude Code account" : `turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far, up to ${chatMoney(data.pending.reservedMicrousd)} reserved`} — this page refreshes itself</span></p></div>`,
+    );
+    parts.push(`</div>`);
+    return screen("chat", parts.join("\n"), { chrome, functional: { script, fetches: true } });
+  }
+  // The composer, or the reason there is not one. Either way the thread
+  // above stays exactly as it is: nothing about a transport being down
+  // makes what was already said less true or less worth reading.
+  if (data.canSend) {
+    const where =
+      config !== null
+        ? "Covering every project this console serves."
+        : data.focus === null
+          ? "Covering every project — pick one above to narrow it."
+          : `Focused on ${projectName(data.focus)} — pick All projects above to widen it.`;
+    parts.push(
+      `<form method="post" action="/chat" class="card composer chat-composer">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<label class="chat-composer-field">Message<textarea name="message" rows="3" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${escape(
+        config !== null || data.focus === null ? "How do things stand across my projects?" : `What should I do next in ${projectName(data.focus)}?`,
+      )}"></textarea></label>`,
+      config === null ? chatAttachmentControl() : "",
+      `<div class="chat-composer-foot"><span class="meta">${escape(where)}</span><button type="submit" class="primary">Send</button></div>`,
+      `</form>`,
+    );
+  } else {
+    parts.push(
+      `<div class="card chat-offline" role="status"><p><strong>${escape(data.status.title)}</strong></p>` +
+        `<p class="meta">${escape(data.status.detail)} Your conversation is kept — it can go on as soon as the assistant answers again.</p>` +
+        `<p class="meta"><a href="/chat?check-connection=1">Check again</a></p></div>`,
+    );
   }
   parts.push(
-    `<form method="post" action="/chat" class="card composer">`,
-    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<label>message<textarea name="message" rows="3" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="how do things stand?"></textarea></label>`,
-    `<button type="submit">send</button>`,
-    `</form>`,
-    `<details><summary class="meta">this session</summary>`,
-    `<p class="meta">minted ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · expires ${escape(data.session.expiresAt.slice(0, 16).replace("T", " "))}Z · the thread lives 24 hours and is deleted when the session ends</p>`,
+    `<details class="chat-settings"><summary>Conversation settings</summary>`,
+    `<p class="meta chat-meter">${meter}</p>`,
+    `<p class="meta">Conversation history and project context are shared with Telegram. <a href="/chat/settings">Manage memory and history</a> · <a href="/chat/history">Find earlier messages</a></p>`,
     `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><button type="submit" class="quiet">end the session and forget the thread</button></form>`,
     data.recent.length === 0
       ? ""
       : `<p class="meta">recent turns: ${data.recent
           .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
           .join(" · ")}</p>`,
-    `<p class="meta">chat settings live on this page once the session ends</p>`,
+    `<p class="meta">Ending this conversation deletes its messages, pending proposals, and saved project context.</p>`,
     `</details>`,
   );
-  return screen("chat", parts.join("\n"), { chrome });
+  parts.push(`</div>`);
+  return screen("chat", parts.join("\n"), { chrome, functional: { script, fetches: true } });
 }
 
 function routinesPage(
@@ -8632,41 +10317,17 @@ function routinesPage(
     prefill?: { name: string; goal: string; not: string; touches: string; schedule: string } | null;
   },
 ): Screen {
-  const fill = form.prefill ?? null;
-  const capture =
-    chrome.project === null
-      ? ""
-      : [
-          `<h2>file a standing order</h2>`,
-          form.problem === null ? "" : `<div class="problem">${escape(form.problem)}</div>`,
-          `<form method="post" action="/routines/add" class="card">`,
-          `<input type="hidden" name="csrf" value="${escape(form.csrf)}">`,
-          `<input type="hidden" name="projectRevision" value="${form.revision}">`,
-          fill === null
-            ? `<p class="meta">start from a template: ${TEMPLATES.filter(one => one.kind === "routine")
-                .map(one => `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`)
-                .join(" · ")}</p>`
-            : `<p class="meta">pre-filled from a template — edit anything; nothing fires until you approve the standing order</p>`,
-          `<label>name <span class="meta">(lowercase-with-dashes — it names each instance)</span><input type="text" name="name" placeholder="nightly-deps" maxlength="41" value="${fill === null ? "" : escape(fill.name)}"></label>`,
-          `<label>goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2">${fill === null ? "" : escape(fill.goal)}</textarea></label>`,
-          `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${fill === null ? "" : escape(fill.not)}"></label>`,
-          `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${fill === null ? "" : escape(fill.touches)}"></label>`,
-          `<label>schedule <span class="meta">(every:&lt;minutes&gt; or daily:&lt;HH:MM&gt; UTC)</span><input type="text" name="schedule" placeholder="daily:03:30" value="${fill === null ? "" : escape(fill.schedule)}"></label>`,
-          `<label>budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem"></label>`,
-          `<button type="submit">file it \u2192 approve the standing order next</button>`,
-          `<p class="meta">filing is cheap — nothing fires until you approve the template on the next screen, password and all</p>`,
-          `</form>`,
-        ].join("\n");
-  const list =
-    tracks.length === 0
-      ? `<p class="meta">No standing orders${chrome.project === null ? " — open a project to file one" : " in this project yet — file one below; nothing fires until you approve it"}.</p>`
-      : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
-  return screen("routines", [
-    `<h1>routines</h1>`,
-    `<p class="hint">scheduled work — anything needing a person appears in the inbox</p>`,
-    list,
-    capture,
-  ].join("\n"), { chrome });
+  const draft = new URLSearchParams({ repeat: "daily" });
+  if (form.prefill) {
+    const fill = form.prefill;
+    for (const [key, value] of Object.entries({ request: fill.goal, not: fill.not, touches: fill.touches })) draft.set(key, value);
+    const schedule = parseSchedule(fill.schedule);
+    if (schedule) for (const [key, value] of Object.entries(scheduleFields(schedule))) draft.set(key, value);
+    draft.set("template", "1");
+  }
+  const composer = newTaskPage(chrome, chrome.project, form.csrf, form.revision, form.problem, [], draft);
+  const list = tracks.length === 0 ? "" : `<section class="routine-list"><h1>Recurring tasks</h1><p class="hint">Progress and work that needs you appear in your overview.</p>${tracks.map(track => trackRow(track, chrome.project === null)).join("\n")}</section>`;
+  return { ...composer, title: "Routines", body: list + composer.body };
 }
 
 function routineScreenPage(chrome: Chrome, data: {
@@ -8685,30 +10346,25 @@ function routineScreenPage(chrome: Chrome, data: {
   const schedule = parseSchedule(routine.schedule);
   const scheduleSaid = schedule === null ? routine.schedule : describeSchedule(schedule);
 
-  const terms =
-    `<div class="card">` +
-    `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(routine.goal)}</p>` +
-    `<p class="meta">not this</p><p class="recap" style="margin-top:0">${routine.outOfScope === null ? "<em>no exclusions</em>" : escape(routine.outOfScope)}</p>` +
-    `<p class="meta">touches · ${routine.touches.length === 0 ? "anything" : routine.touches.map(one => escape(one)).join(", ")}</p>` +
-    `<p class="meta">needs · ${routine.requirements.length === 0 ? "nothing beyond the repository" : routine.requirements.map(one => escape(one)).join(", ")}</p>` +
-    `<p class="meta">schedule · ${escape(scheduleSaid)}</p>` +
-    `<p class="meta">budget · ${routine.costCeilingUsd === null ? "no ceiling" : `$${routine.costCeilingUsd.toFixed(2)} per rolling 7 days`}</p>` +
-    `<p class="meta">one at a time — a firing skips while the previous instance is unfinished</p>` +
-    `</div>`;
+  const terms = `<section class="routine-terms"><h2>Your task</h2><p class="routine-description">${escape(routine.goal)}</p><dl class="routine-review-facts">` +
+    `<div><dt>Repeat</dt><dd>${escape(scheduleSaid)}</dd></div>` +
+    `<div><dt>Assistant</dt><dd>${routine.profile ? `${escape(ASSISTANTS[routine.profile.provider].name)} · ${escape(routine.profile.model)}` : "Session setup needed"}</dd></div>` +
+    `<div><dt>Spending limit</dt><dd>${routine.costCeilingUsd === null ? "No weekly limit" : `$${routine.costCeilingUsd.toFixed(2)} over the last 7 days`}${routine.budgetPerRunMicrousd == null ? "" : ` · $${(routine.budgetPerRunMicrousd / 1_000_000).toFixed(2)} per run`}</dd></div>` +
+    `<div><dt>Keep unchanged</dt><dd>${routine.outOfScope === null ? "No exclusions" : escape(routine.outOfScope)}</dd></div>` +
+    `<div><dt>Allowed files</dt><dd>${routine.touches.length === 0 ? "All files in this project" : routine.touches.map(escape).join(", ")}</dd></div>` +
+    (routine.requirements.length === 0 ? "" : `<div><dt>Requirements</dt><dd>${routine.requirements.map(escape).join(", ")}</dd></div>`) +
+    `</dl><p class="meta">One run at a time. A scheduled run is skipped if the previous one is unfinished.</p>` +
+    (schedule !== null && schedule.kind !== "every" && schedule.timezone !== undefined && schedule.timezone !== "UTC" ? `<details class="routine-time-details"><summary>Clock changes</summary><p class="meta">Uses the selected timezone throughout the year. If a clock change skips this time, that run is skipped. If the time repeats, it runs once.</p></details>` : "") + `</section>`;
 
-  const approveForm = approved
-    ? ""
-    : [
-        `<form method="post" action="${routineHref(routine.id)}/approve" class="card approve-form">`,
-        `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-        `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
-        `<input type="hidden" name="digest" value="${escape(routine.digest)}">`,
-        `<p><strong>approve this standing order:</strong></p>`,
-        `<p class="recap">Each firing creates a task under exactly the terms above and BUILDS IT WITHOUT ASKING — ${escape(scheduleSaid)}, until you pause it. Questions and failures still reach you like any other work.</p>`,
-        `<label>your password, typed again — a signed-in session alone cannot agree to standing work<input type="password" name="token" autocomplete="current-password"></label>`,
-        `<button type="submit">approve this routine</button>`,
-        `</form>`,
-      ].join("\n");
+  const approveForm = approved ? "" : `<form method="post" action="${routineHref(routine.id)}/approve" class="card approve-form">` +
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="nonce" value="${escape(data.nonce)}"><input type="hidden" name="digest" value="${escape(routine.digest)}">` +
+    `<p><strong>Enable automatic runs</strong></p><p class="meta">Each run follows the description and limits above without asking for approval again, until you pause it. Questions and failures still reach you.</p>` +
+    `<label>Your password<input type="password" name="token" autocomplete="current-password" required></label>` +
+    `<div class="setup-actions"><button type="submit" class="primary">Enable recurring task</button>${routine.approvedAt === null ? `<a href="/tasks/new?routine=${routine.id}">Edit task</a>` : ""}</div></form>`;
+
+  if (!approved) return screen("Review recurring task", `<div class="task-review routine-review"><p class="eyebrow">${escape(projectName(routine.repo))} · RECURRING TASK</p><h1>Review recurring task</h1><p class="hint">Check what will run and when. Nothing runs until you enable it.</p>` +
+    (data.problem === null ? "" : `<p class="problem" role="alert">${escape(data.problem)}</p>`) +
+    `<div class="card routine-review-card">${terms}${approveForm}</div></div>`, { chrome });
 
   const verb = (name: string, label: string, danger = false): string =>
     `<form method="post" action="${routineHref(routine.id)}/${name}" class="inline">` +
@@ -8726,7 +10382,7 @@ function routineScreenPage(chrome: Chrome, data: {
     `<div class="card">` +
     (routine.paused ? verb("resume", "resume") : verb("pause", "pause")) +
     (runNowForm === "" ? "" : " " + runNowForm) +
-    `<p class="meta">${routine.paused ? "resuming fires again at the next due slot" : "pausing stops firing instantly; a running instance finishes"}${runNowForm === "" ? "" : " · run now spawns an extra instance without touching the schedule — spend outside the schedule takes your password again"}</p>` +
+    `<p class="meta">${routine.paused ? "resuming fires again at the next due slot" : "pausing stops firing instantly; a running instance finishes"}${runNowForm === "" ? "" : " · run now confirms an extra instance without changing the schedule"}</p>` +
     `</div>`;
 
   const ledger =
@@ -8756,12 +10412,12 @@ function routineScreenPage(chrome: Chrome, data: {
     approved && !routine.paused && routine.nextFireAt !== null
       ? `<p class="meta">next fire ${escape(when(routine.nextFireAt))}</p>`
       : "",
-    "<h2>the standing order</h2>",
-    terms,
+    "<h2>Recurring task</h2>",
+    `<div class="card">${terms}</div>`,
     approveForm,
-    "<h2>acts</h2>",
+    "<h2>Controls</h2>",
     acts,
-    "<h2>firings</h2>",
+    "<h2>Run history</h2>",
     ledger,
   ].join("\n"), { chrome });
 }
@@ -8921,7 +10577,7 @@ function homePage(chrome: Chrome, data: {
       : "";
 
   return screen("activity", [
-    `<h1>activity</h1>`,
+    `<h1>Activity</h1>`,
     buildsViews("activity"),
     data.repo === null
       ? ""
@@ -8956,7 +10612,7 @@ function tasksPage(
     tasks.length === 0
       ? `<p class="meta">${
           state === null
-            ? "The queue is empty \u2014 add the first task below. It builds once you approve its scope."
+            ? "No tasks yet. Describe what you want done to create your first task."
             : `Nothing is ${escape(state)}.`
         }</p>`
       : tasks
@@ -8967,12 +10623,12 @@ function tasksPage(
           )
           .join("\n");
   return screen("tasks", [
-    "<h1>tasks</h1>",
-    `<p class="meta">work you want done${repo === null ? "" : ` in <span class="mono">${escape(repo)}</span>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
+    `<header class="control-room-head"><h1>Tasks</h1><a class="button-link primary" href="/tasks/new">New task</a></header>`,
+    `<p class="meta">work you want done${repo === null ? "" : ` in <span class="mono">${escape(repo)}</span>`} \u2014 open a task to review it or check its progress</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
     rows,
-    `<h2>add a task</h2>`,
+    `<details class="legacy-task-entry"${prefill === null ? "" : " open"}><summary>${prefill === null ? "Advanced task entry" : "Review task template"}</summary>`,
     `<form method="post" action="/tasks/add" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     prefill === null
@@ -8981,7 +10637,7 @@ function tasksPage(
     `<label>id<input type="text" name="id" placeholder="fix-payout-guard"></label>`,
     `<label>title<input type="text" name="title" value="${prefill === null ? "" : escape(prefill.title)}"></label>`,
     repo === null
-      ? `<label>repo <span class="meta">(required — no project is open, so the task must say where it belongs)</span><input type="text" name="repo" required></label>`
+      ? (chrome.projects?.length ? `<label>Project<select name="repo" required><option value="">Choose a project</option>${chrome.projects.map(one => `<option value="${escape(one.path)}">${escape(one.name)}</option>`).join("")}</select></label>` : `<label>Project folder<input type="text" name="repo" required></label>`)
       : `<label>repo <span class="meta">(optional — empty files into the open project)</span><input type="text" name="repo"></label>`,
     `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
     `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
@@ -8993,48 +10649,27 @@ function tasksPage(
 
 
 function browsePage(chrome: Chrome, data: {
-  at: string;
-  root: string;
-  roots: string[];
-  parent: string | null;
+  at: string; root: string; roots: string[]; parent: string | null;
   entries: { name: string; path: string; git: boolean }[];
-  csrf: string;
+  csrf: string; selected: string[];
 }): Screen {
-  const crumb = data.at === data.root ? projectName(data.root) : `${projectName(data.root)}${data.at.slice(data.root.length)}`;
-  const openForm = (path: string): string =>
-    [
-      `<form method="post" action="/projects/open" class="inline">`,
-      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-      `<input type="hidden" name="path" value="${escape(path)}">`,
-      `<button type="submit">open</button>`,
-      `</form>`,
-    ].join("");
-  return screen("projects", [
-    `<h1>choose a folder</h1>`,
-    `<p class="meta">git repositories float to the top and can be opened; anything else can be entered — only folders under ${
-      data.roots.length === 1 ? `<span class="mono">${escape(projectName(data.root))}</span>` : "the configured roots"
-    } are visible here</p>`,
-    data.roots.length > 1
-      ? `<p class="meta">roots: ${data.roots.map(one => `<a href="/projects/browse?at=${encodeURIComponent(one)}" class="mono">${escape(projectName(one))}</a>`).join(" · ")}</p>`
-      : "",
-    `<p class="mono meta">${escape(crumb)}</p>`,
-    data.parent === null
-      ? ""
-      : `<p class="row"><a href="/projects/browse?at=${encodeURIComponent(data.parent)}">\u2190 up one level</a></p>`,
-    data.entries.length === 0
-      ? `<p class="meta">no folders here</p>`
-      : data.entries
-          .map(
-            one =>
-              `<p class="row">` +
-              `<a href="/projects/browse?at=${encodeURIComponent(one.path)}"><strong>${escape(one.name)}</strong></a>` +
-              `${one.git ? ` <span class="badge badge-done">git</span>` : ""}` +
-              `<span class="right">${one.git ? openForm(one.path) : `<a class="meta" href="/projects/browse?at=${encodeURIComponent(one.path)}">enter \u2192</a>`}</span>` +
-              `</p>`,
-          )
-          .join("\n"),
-    `<p class="meta"><a href="/projects">\u2190 back to projects</a></p>`,
-  ].join("\n"), { chrome });
+  const selected = new Set(data.selected);
+  const link = (path: string, label: string): string => `<a data-folder-link href="/projects/browse?at=${encodeURIComponent(path)}${[...selected].map(one => `&amp;selected=${encodeURIComponent(one)}`).join("")}">${escape(label)}</a>`;
+  return screen("Add projects", [
+    `<h1>Add projects</h1><p class="hint">Select project folders, then review your selection. You can keep browsing to select folders in other locations.</p>`,
+    `<p class="meta">Folders on this connection's computer. Adding projects keeps your existing work running.</p>`,
+    `<p>${data.roots.map(root => link(root, projectName(root))).join(" · ")}</p>`,
+    `<p class="meta" style="overflow-wrap:anywhere">${escape(data.at)}</p>`,
+    data.parent === null ? "" : `<p>${link(data.parent, "← Up one folder")}</p>`,
+    `<form id="project-selection" method="post" action="/projects/add-preview" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    [...selected].filter(path => !data.entries.some(one => one.git && one.path === path)).map(path => `<input type="hidden" name="paths" value="${escape(path)}">`).join(""),
+    `<div class="setup-actions project-selection-actions"><button class="primary">Review selected projects</button><span id="selection-count" class="meta" role="status">${selected.size} selected</span></div>`,
+    data.entries.some(one => one.git) ? `<label class="folder-choice"><input type="checkbox" data-select-all> Select all projects in this folder</label>` : "",
+    data.entries.length === 0 ? `<p>No folders here.</p>` : data.entries.map(one => `<div class="folder-row">${one.git ? `<label class="folder-choice"><input type="checkbox" name="paths" value="${escape(one.path)}"${selected.has(one.path) ? " checked" : ""}><strong>${escape(one.name)}</strong></label><span class="meta">Git project</span>` : `${link(one.path, one.name)}<span class="meta">Browse →</span>`}</div>`).join(""),
+    `</form>`,
+    `<p><a href="/projects">← Back to projects</a></p>`,
+  ].join(""), { chrome, functional: { script: `(function(){var f=document.getElementById("project-selection");if(!f)return;function paths(){return Array.from(f.querySelectorAll('[name=paths]')).filter(function(i){return i.type==="hidden"||i.checked}).map(function(i){return i.value})}function update(){document.getElementById("selection-count").textContent=paths().length+" selected";f.querySelector("button.primary").disabled=paths().length===0}f.addEventListener("change",function(e){if(e.target.matches("[data-select-all]"))f.querySelectorAll('input[type=checkbox][name=paths]').forEach(function(i){i.checked=e.target.checked});update()});document.querySelectorAll("[data-folder-link]").forEach(function(a){a.addEventListener("click",function(){var u=new URL(a.href);u.searchParams.delete("selected");paths().forEach(function(p){u.searchParams.append("selected",p)});a.href=u.pathname+u.search})});update()})();` } });
 }
 
 
@@ -9199,6 +10834,47 @@ export function decisionAnswerScript(): string {
  * ledger — all of it across every admitted project, a project chip on every
  * row. The caller has already applied admission and per-row visibility.
  */
+function portfolioProjects(data: {
+  projects: { repo: string; configured: boolean; worker: WorkerState | null; remoteHost: string | null }[];
+  cards: BoardCard[]; done: WorkbenchDone[]; csrf: string; canAct: boolean; saturated: boolean;
+}): string {
+  const all = [...data.projects];
+  for (const card of data.cards) if (card.repo !== null && !all.some(one => one.repo === card.repo)) all.push({ repo: card.repo, configured: true, worker: null, remoteHost: null });
+  const byProject = all.map(project => ({ ...project, tasks: data.cards.filter(card => card.repo === project.repo) }));
+  byProject.sort((a, b) => b.tasks.filter(one => one.lane === "attention").length - a.tasks.filter(one => one.lane === "attention").length || b.tasks.filter(one => one.lane === "building").length - a.tasks.filter(one => one.lane === "building").length || projectName(a.repo).localeCompare(projectName(b.repo)));
+  const counts = (lane: BoardCard["lane"]) => data.cards.filter(one => one.lane === lane).length;
+  const header = data.cards.length === 0 && data.done.length === 0 ? "" : `<div class="cards overview-totals"><div class="stat-card"><span class="k">Projects</span><strong>${all.length}</strong></div><div class="stat-card"><span class="k">Need your input</span><strong>${counts("attention")}</strong></div><div class="stat-card"><span class="k">Working now</span><strong>${counts("building")}</strong></div><div class="stat-card"><span class="k">Queued or waiting</span><strong>${counts("queued") + counts("waiting")}</strong></div></div>`;
+  const form = (repo: string, label: string, returnTo: string, primary = false): string => data.csrf === "" ? "" : `<form method="post" action="/projects/select" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="path" value="${escape(repo)}"><input type="hidden" name="return" value="${returnTo}"><button${primary ? ' class="primary"' : ""}>${escape(label)}</button></form>`;
+  const cards = byProject.map(project => {
+    const { repo, tasks, worker } = project;
+    const attention = tasks.filter(one => one.lane === "attention");
+    const building = tasks.filter(one => one.lane === "building");
+    const waiting = tasks.filter(one => one.lane === "waiting");
+    const queued = tasks.filter(one => one.lane === "queued");
+    const ready = worker?.state === "running" || project.remoteHost !== null;
+    const status = !project.configured ? "Setup needed" : attention.length ? "Needs you" : building.length ? "Working" : ready ? "Session ready" : "Session paused";
+    const next = [...attention, ...building, ...waiting, ...queued].slice(0, 3);
+    const latest = data.done.find(one => one.repo === repo);
+    const setupUrl = `/control?repo=${encodeURIComponent(repo)}`;
+    const workerAction = (primary: boolean): string => !data.canAct || data.csrf === "" || worker === null || worker.state === "stopping" || (!project.configured && worker.state !== "running") ? "" : `<form method="post" action="/control/worker" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="repo" value="${escape(repo)}"><input type="hidden" name="return" value="overview"><input type="hidden" name="action" value="${worker.state === "running" ? "stop" : "start"}"><button${primary ? ' class="primary"' : ""}>${worker.state === "running" ? "Pause session" : "Start session"}</button></form>`;
+    const setupNeeded = !project.configured;
+    const intro = setupNeeded ? `<div class="project-next-step"><h3>Set up your session</h3><p>Choose the AI assistant for this project. Then describe a task and let it get to work.</p></div>` :
+      !ready ? `<div class="project-next-step"><h3>${worker?.state === "error" ? "Reconnect your session" : worker?.state === "stopping" ? "Pausing your session" : "Ready when you are"}</h3><p>${worker?.state === "error" ? "Open session settings to check the connection." : worker?.state === "stopping" ? "Finishing the current stop. Your work is kept." : "Start a session to work through approved tasks in the background."}</p></div>` :
+      tasks.length === 0 ? `<div class="project-next-step"><h3>What would you like to get done?</h3><p>Your assistant is ready. Describe a task to get started.</p></div>` : "";
+    const primary = setupNeeded ? `<a class="button-link primary" href="${setupUrl}">Set up session</a>` :
+      !ready && worker !== null && worker.state !== "error" ? workerAction(true) :
+      !ready ? `<a class="button-link primary" href="${setupUrl}#worker">${worker?.state === "error" ? "Reconnect session" : "Set up session"}</a>` : data.canAct ? form(repo, "New task", "/tasks/new", true) : form(repo, "Open project", "/board", true);
+    return `<section class="workspace-card${setupNeeded ? ' needs-setup' : ''}"><div class="workspace-head"><span class="project-avatar" aria-hidden="true">${escape(projectName(repo).slice(0, 1).toUpperCase())}</span><strong class="workspace-name">${escape(projectName(repo))}</strong><span class="badge ${attention.length ? "badge-attention" : building.length ? "badge-running" : ""}">${status}</span></div>` + intro +
+      (tasks.length ? `<p class="meta project-count-summary">${attention.length} need you · ${building.length} working · ${queued.length + waiting.length} queued or waiting</p>` : "") +
+      next.map(task => `<a class="project-task" href="${taskHref(task.taskId)}"><strong>${escape(task.title)}</strong><span class="meta">${escape(task.reason)} →</span></a>`).join("") +
+      (tasks.length > 3 ? `<p class="meta">${tasks.length - 3} more tasks on the project board</p>` : "") +
+      (latest ? `<p class="meta">Latest: <a href="${taskHref(latest.taskId)}">${escape(latest.title)}</a> · ${latest.outcome === "built" ? "built locally" : escape(latest.outcome ?? "finished")}</p>` : "") +
+      `<div class="setup-actions">${primary}${tasks.length ? form(repo, "Open project", "/board") : ""}${project.configured && !ready && data.canAct ? form(repo, "New task", "/tasks/new") : ""}</div>` +
+      `<details class="project-details"><summary>Project details</summary><p class="meta project-path">${escape(repo)}</p>${setupNeeded ? "" : `<a href="${setupUrl}">Session settings</a>`}${ready ? workerAction(false) : ""}${project.remoteHost === null ? "" : `<p class="meta">Connected on ${escape(project.remoteHost)}</p>`}</details></section>`;
+  }).join("");
+  return header + (cards ? `<div class="section-heading"><h2>Your projects</h2><a class="meta" href="/projects">Manage projects →</a></div><div class="workspace-pulse">${cards}</div>` : `<div class="card"><h2>Add your projects</h2><p>Choose several project folders, then track their tasks and progress together here.</p><a class="button-link primary" href="/projects">Add projects</a></div>`) + (data.saturated ? `<p class="meta">Showing up to 200 active tasks. Open a project's board for the rest.</p>` : "");
+}
+
 function portfolioOverview(data: {
   attention: BoardCard[];
   building: BoardCard[];
@@ -9221,69 +10897,8 @@ function portfolioOverview(data: {
   }[];
   csrf: string;
   now: Date;
+  projectOverview: string;
 }): string {
-  type Pulse = { repo: string | null; attention: number; building: number; waiting: number; queued: number; done: number };
-  const pulses = new Map<string, Pulse>();
-  const pulseFor = (repo: string | null): Pulse => {
-    const key = repo ?? "";
-    const existing = pulses.get(key);
-    if (existing !== undefined) return existing;
-    const made = { repo, attention: 0, building: 0, waiting: 0, queued: 0, done: 0 };
-    pulses.set(key, made);
-    return made;
-  };
-  for (const card of [...data.attention, ...data.building, ...data.waiting, ...data.queued]) {
-    pulseFor(card.repo)[card.lane] += 1;
-  }
-  for (const one of data.done) pulseFor(one.repo).done += 1;
-  const pulseRows = [...pulses.values()].sort((a, b) =>
-    b.attention - a.attention || b.building - a.building || b.waiting - a.waiting ||
-    (a.repo === null ? 1 : b.repo === null ? -1 : projectName(a.repo).localeCompare(projectName(b.repo))),
-  );
-  const workspace = (repo: string | null): string => repo === null ? "Unplaced work" : projectName(repo);
-  // A workspace card (board pass): the repo's name and one status word,
-  // its four counts, a bar of the same counts in proportion, and — for a
-  // real repo, with a session token — the one tap to its own board. The
-  // status word is the loudest true thing: needs you beats building beats
-  // waiting beats queued; a repo with nothing in flight is idle.
-  const statusOf = (one: (typeof pulseRows)[number]): { word: string; cls: string } =>
-    one.attention > 0
-      ? { word: "needs you", cls: "badge-open" }
-      : one.building > 0
-        ? { word: "building", cls: "badge-running" }
-        : one.waiting > 0
-          ? { word: "waiting", cls: "" }
-          : one.queued > 0
-            ? { word: "queued", cls: "" }
-            : { word: "idle", cls: "" };
-  const workspaceRows = pulseRows.map(one => {
-    const status = statusOf(one);
-    const total = one.attention + one.building + one.waiting + one.queued;
-    const seg = (cls: string, count: number): string =>
-      count === 0 ? "" : `<span class="seg ${cls}" style="flex-grow:${count}"></span>`;
-    const boardForm =
-      one.repo === null || data.csrf === ""
-        ? ""
-        : `<form method="post" action="/projects/open" class="inline">` +
-          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-          `<input type="hidden" name="path" value="${escape(one.repo)}">` +
-          `<input type="hidden" name="return" value="/board">` +
-          `<button type="submit">board →</button></form>`;
-    return (
-      `<div class="workspace-card${one.attention > 0 ? " hot" : ""}">` +
-      `<div class="workspace-head"><span class="workspace-name">${escape(workspace(one.repo))}</span>` +
-      `<span class="badge ${status.cls}">${status.word}</span>${boardForm}</div>` +
-      `<div class="workspace-stats">` +
-      `<span class="pulse-stat${one.attention > 0 ? " hot" : ""}"><b>${one.attention}</b> need you</span>` +
-      `<span class="pulse-stat"><b>${one.building}</b> live</span>` +
-      `<span class="pulse-stat"><b>${one.waiting}</b> waiting</span>` +
-      `<span class="pulse-stat"><b>${one.queued}</b> next</span></div>` +
-      `<div class="workspace-bar${total === 0 ? " empty" : ""}" aria-hidden="true">` +
-      seg("attention", one.attention) + seg("building", one.building) + seg("waiting", one.waiting) + seg("queued", one.queued) +
-      `</div></div>`
-    );
-  }).join("\n");
-
   // ---- waits on you: everything a person must resolve, across projects ----
   const waitCount =
     data.decisions.length + data.approvals.length + data.requeueables.length +
@@ -9295,7 +10910,7 @@ function portfolioOverview(data: {
         `<a class="decide-card" href="${taskHref(one.taskId)}">` +
         `<p class="q">${escape(one.title)}</p>` +
         `<span class="meta">${escape(one.goal.length > 120 ? one.goal.slice(0, 120) + "…" : one.goal)}</span><br>` +
-        `<span class="mono meta">${escape(one.taskId)}</span>${projectChip(one.repo)} <span class="right meta">review and sign →</span>` +
+        `<span class="mono meta">${escape(one.taskId)}</span>${projectChip(one.repo)} <span class="right meta">Review approval →</span>` +
         `</a>`,
     )
     .join("\n");
@@ -9370,14 +10985,17 @@ function portfolioOverview(data: {
     )
     .join("\n");
 
+  const empty = data.attention.length + data.building.length + data.waiting.length + data.queued.length + data.done.length + data.runs24.length + data.ledger.length + waitCount === 0;
   return [
-    `<div class="control-room-head"><div><h1>portfolio</h1>` +
-      `<p class="meta">every project and live build in one place</p></div>` +
-      `<div class="actions"><a class="badge" href="/tasks/new">+ new task</a><a class="badge" href="/board?scope=all">full board →</a></div></div>`,
+    `<div class="control-room-head"><div><h1>Overview</h1>` +
+      `<p class="meta">Progress, next steps, and work that needs you — across all your projects.</p></div>` +
+      (empty ? `</div>` : `<div class="actions"><a class="button-link primary" href="/tasks/new">New task</a><a class="badge" href="/board?scope=all">All tasks →</a></div></div>`),
+    `<div id="portfolio-projects">${data.projectOverview}</div><p class="meta" id="portfolio-projects-stamp" role="status"></p>`,
     data.saturated ? `<div class="problem">This overview reached its 200-task display cap; the task list holds the rest.</div>` : "",
-    `<h2>waits on you</h2>`,
+    ...(empty ? [] : [
+    `<h2>Needs your attention</h2>`,
     waitCount === 0
-      ? `<div class="answered"><strong>Nothing needs you.</strong> <span class="meta">You can leave this open; live state updates in the rail.</span></div>`
+      ? `<div class="answered"><strong>Nothing needs you.</strong> <span class="meta">Project progress updates automatically here.</span></div>`
       : [
           decisionCards,
           approvalCards,
@@ -9389,12 +11007,7 @@ function portfolioOverview(data: {
     data.gapsProject === null
       ? `<p class="meta">requirement gaps are checked one project at a time — open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
       : "",
-    `<h2>project pulse</h2>`,
-    `<p class="hint">one row per repository</p>`,
-    pulseRows.length === 0
-      ? `<div class="card"><p><strong>No active work yet.</strong></p><p class="meta">Queue a task and its progress will show here across every workspace.</p></div>`
-      : `<div class="workspace-pulse">${workspaceRows}</div>`,
-    `<h2>the last 24 hours</h2>`,
+    `<h2>Last 24 hours</h2>`,
     `<p class="hint">runs started in the last 24 hours</p>`,
     data.runs24.length === 0
       ? `<p class="meta">no runs started in the window</p>`
@@ -9409,8 +11022,9 @@ function portfolioOverview(data: {
           : ""),
     `<h2>running</h2>`,
     data.live.length === 0 ? `<p class="meta">no agent is working right now</p>` : liveRows,
-    `<h2>terminal runs started in the last 24 hours</h2>`,
+    `<h2>Recent results</h2>`,
     data.ledger.length === 0 ? `<p class="meta">none yet</p>` : ledgerRows,
+    ]),
   ].join("\n");
 }
 
@@ -9812,7 +11426,7 @@ function githubReposPage(
             .join("\n");
   return screen("projects", [
     `<h1>your GitHub repositories</h1>`,
-    `<p class="meta">what the server's signed-in <span class="mono">gh</span> account can see — repositories already on this machine offer open; the rest clone through the usual preview and password.</p>`,
+    `<p class="meta">what the server's signed-in <span class="mono">gh</span> account can see — repositories already on this machine offer open; review and confirm the others before cloning.</p>`,
     rows,
     `<p class="row" style="margin-top:.6rem"><a class="badge" href="/projects">← back to projects</a></p>`,
   ].join("\n"), { chrome });
@@ -9837,7 +11451,7 @@ function projectsPage(
     onboard === null
       ? ""
       : !onboard.enabled
-        ? `<h2>add a repository</h2><p class="meta">${escape(onboard.why)}</p>`
+        ? `<p class="meta">To add a project from GitHub, first download it to this computer, then choose its folder.</p>`
         : [
             `<h2>add a repository</h2>`,
             `<p class="meta">paste a GitHub repository — you see what it is before anything is written. The clone acts as the serve process's ambient GitHub credential and lands under your projects root. Large-file (LFS) objects are not downloaded.</p>`,
@@ -9907,41 +11521,40 @@ function projectsPage(
           : openForm(one.path, one.name, "/", "project-name")
       }`,
       `<span class="right">${
-        open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "open \u2192")
+        open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "Open project \u2192")
       }</span></div>`,
       `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(one.path)}</p>`,
-      `<p class="row" style="gap:.35rem;flex-wrap:wrap">${peekChips(one.path, one.peek)}</p>`,
+      `<div class="row project-counts">${peekChips(one.path, one.peek)}</div>`,
       `<p class="meta">${escape(one.note)}</p>`,
       `</div>`,
     ].join("\n");
   const cards = (items: { path: string; name: string; note: string }[]): string =>
-    items.map(one => projectCard({ ...one, peek: peeks[one.path] ?? null })).join("\n");
+    `<div class="project-catalog">${items.map(one => projectCard({ ...one, peek: peeks[one.path] ?? null })).join("\n")}</div>`;
 
   const recentItems = recent.map(one => ({ path: one.path, name: one.name, note: `last opened ${when(one.lastOpenedAt)}` }));
-  const candidateItems = candidates.map(path => ({ path, name: projectName(path), note: "seen in the queue" }));
+  const candidateItems = candidates.map(path => ({ path, name: projectName(path), note: "Available on this computer" }));
 
   // The two ways to ADD a project, side by side and honest about what each
   // needs: browse this machine's filesystem, or paste a GitHub repo.
   const addCard = [
-    `<div class="card">`,
-    `<h2 style="margin-top:0">add a project</h2>`,
+    `<div class="card" id="add-projects">`,
+    `<h2 style="margin-top:0">Add projects</h2>`,
     browsable
-      ? `<p class="row"><a class="badge" href="/projects/browse">\ud83d\uddc2 browse this machine's folders \u2192</a></p>`
-      : `<p class="meta">folder browsing needs a scoped serve \u2014 start with <code>--project-root &lt;dir&gt;</code> or <code>--repo</code> and this lights up</p>`,
+      ? `<p>Choose several project folders and add them together.</p><p><a class="button-link primary" href="/projects/browse">Choose project folders →</a></p>`
+      : `<p class="meta">This connection can access the projects listed above. Ask the person who set it up to make more project folders available.</p>`,
     onboard === null ? "" : `<p class="row"><a class="badge" href="/projects/github">see your GitHub repositories \u2192</a></p>`,
     onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
-    `<details style="margin-top:.5rem"><summary class="meta">or type an exact path</summary>`,
-    `<form method="post" action="/projects/open" class="card" style="margin-top:.4rem">`,
+    `<details style="margin-top:.5rem"><summary class="meta">Add folders by path</summary>`,
+    `<form method="post" action="/projects/add-preview" class="card" style="margin-top:.4rem">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
-    `<button type="submit">open project</button>`,
+    `<label>Project folders on this computer — one per line<textarea name="pathsText" rows="3" placeholder="/Users/you/code/your-project"></textarea></label>`,
+    `<button type="submit">Review projects</button>`,
     `</form></details>`,
     `</div>`,
   ].join("\n");
 
   return screen("projects", [
-    `<h1>projects</h1>`,
-    `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its board, and its runs</p>`,
+    `<header class="control-room-head"><div><h1>Projects</h1><p class="meta">Manage your projects here. <a href="/workbench">See progress and what needs you across all projects →</a></p></div><a class="button-link primary" href="#add-projects">Add projects</a></header>`,
     unscopedMode
       ? `<p class="meta">this server was started without a project list, so everything is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`
       : "",
@@ -9968,7 +11581,7 @@ function projectsPage(
  * to. AsyncLocalStorage follows the request's own async chain, so two
  * interleaved requests never read each other's token.
  */
-const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string }>();
+const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; who: Who }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
@@ -9998,6 +11611,8 @@ const strokeIcon = (paths: string): string =>
 const QUEUE_VIEW = "/board?view=order";
 const FOLDER_PATHS = `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`;
 const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
+  setup: strokeIcon(`<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>`),
+  workbench: strokeIcon(`<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>`),
   inbox: strokeIcon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
   board: strokeIcon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
   runs: strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
@@ -10013,16 +11628,17 @@ const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
  */
 function moreRows(chrome: Pick<Chrome, "chat" | "settings">): { key: Chrome["active"]; href: string; label: string; hint: string }[] {
   return [
-    { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
-    { key: "work", href: "/tasks", label: "task list", hint: "everything, filterable" },
-    { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
-    { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
-    ...(chrome.chat === true ? [{ key: "chat" as const, href: "/chat", label: "chat", hint: "the mate \u2014 a conversation that proposes, never acts" }] : []),
-    { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
-    { key: "caps", href: "/caps", label: "requirements", hint: "tools and credentials builds need" },
-    { key: "people", href: "/people", label: "people", hint: "who can sign in, and what they have done" },
-    { key: "mode", href: "/mode", label: "operating mode", hint: "the signed posture this repository runs under" },
-    ...(chrome.settings ? [{ key: "settings" as const, href: "/settings", label: "settings", hint: "alerts, messaging, credentials" }] : []),
+    { key: "setup", href: "/control", label: "Sessions", hint: "set up a project, connect an assistant, and start working" },
+    { key: "workbench", href: "/workbench", label: "Overview", hint: "every project and live build in one place" },
+    { key: "work", href: "/tasks", label: "Tasks", hint: "everything, filterable" },
+    { key: "fleet", href: "/fleet", label: "Agents", hint: "who is working, and on what" },
+    { key: "routines", href: "/routines", label: "Routines", hint: "scheduled tracks and their firings" },
+    ...(chrome.chat === true ? [{ key: "chat" as const, href: "/chat", label: "Chat", hint: "one conversation across every project \u2014 it proposes, you approve" }] : []),
+    { key: "system", href: "/system", label: "System", hint: "workers, providers, and grants" },
+    { key: "caps", href: "/caps", label: "Requirements", hint: "tools and credentials builds need" },
+    { key: "people", href: "/people", label: "People", hint: "who can sign in, and what they have done" },
+    { key: "mode", href: "/mode", label: "Operating mode", hint: "the signed posture this repository runs under" },
+    ...(chrome.settings ? [{ key: "settings" as const, href: "/settings", label: "Settings", hint: "alerts, messaging, credentials" }] : []),
   ];
 }
 
@@ -10352,35 +11968,54 @@ function newTaskPage(
   projectRevision: number,
   problem: string | null,
   candidates: { id: string; title: string }[] = [],
+  draft = new URLSearchParams(),
 ): Screen {
-  return screen("new task", [
-    `<h1>new task</h1>`,
-    `<p class="meta">plain words for work you want done${
-      project === null ? "" : ` in <span class="mono">${escape(project)}</span>`
-    } — it builds unattended once you approve its scope on the next screen</p>`,
-    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
-    `<form method="post" action="/tasks/add" class="card">`,
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+  const projects = chrome.projects?.length ? chrome.projects : project === null ? [] : [{path: project, name: projectName(project)}];
+  const selected = draft.get("repo") ?? project ?? (projects.length === 1 ? projects[0]!.path : "");
+  const value = (name: string, fallback = "") => escape(draft.get(name) ?? fallback);
+  const repeat = draft.get("repeat") ?? "once";
+  const recurring = repeat !== "once";
+  const zone = draft.get("timezone") ?? "UTC";
+  const zones = [...new Set([zone, "UTC", "America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York", "Europe/London", "Europe/Paris", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney", ...Intl.supportedValuesOf("timeZone")])];
+  if (projects.length === 0) return screen("New task", `<div class="task-compose"><h1>Add a project first</h1><p>Choose where your assistant will work, then describe your task.</p><a class="button-link primary" href="${escape(chrome.addProjectsHref ?? '/projects')}">Add projects</a></div>`, { chrome });
+  return screen("New task", [
+    `<div class="task-compose"><p class="eyebrow">NEW TASK</p><h1>What would you like to get done?</h1>`,
+    `<p class="hint">Describe the outcome. Run it once, or make it a recurring task.</p>`,
+    problem === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
+    `<form method="post" action="/tasks/add" class="card task-composer" id="task-composer">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="composer" value="1">`,
     `<input type="hidden" name="projectRevision" value="${projectRevision}">`,
-    // No project open: the placement must be said (verification finding 1 —
-    // the server refuses an empty one, this field is how you answer it).
-    project === null
-      ? `<label>repo <span class="meta">(required — no project is open, so the task must say where it belongs)</span><input type="text" name="repo" required></label>`
-      : "",
-    `<label>title<input type="text" name="title" placeholder="Add a sliding-window rate limiter to the public API"></label>`,
-    `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
-      `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
-    `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="scout" value="1" style="margin-top:.35rem"><span>scout <span class="meta">— deliver a report instead of a branch: a read-only session investigates the goal as a question and writes up what it found; nothing in the repository changes</span></span></label>`,
-    `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
-    candidates.length === 0
-      ? ""
-      : `<label>starts after <span class="meta">(optional — waits for that task to finish before a worker takes this one)</span>` +
-        `<select name="after"><option value="">right away</option>` +
-        candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
-        `</select></label>`,
-    `<button type="submit">create task</button>`,
-    `</form>`,
-  ].join("\n"), { chrome });
+    draft.has("routine-id") ? `<input type="hidden" name="routine-id" value="${value("routine-id")}"><input type="hidden" name="routine-digest" value="${value("routine-digest")}">` : "",
+    `<label class="composer-project">Project<select aria-label="Project" name="repo" required>${projects.length > 1 && selected === "" ? '<option value="">Choose a project</option>' : ""}${projects.map(one => `<option value="${escape(one.path)}"${one.path === selected ? ' selected' : ''}>${escape(one.name)}</option>`).join("")}</select></label>`,
+    `<label for="task-request" class="composer-label">Your task</label><textarea id="task-request" name="request" rows="6" maxlength="2000" required placeholder="Describe what you want done and what a good result looks like…">${value("request")}</textarea>`,
+    `<div class="composer-suggestions"><span class="meta">Try</span>${[["nightly-deps", "Update dependencies"], ["test-coverage", "Improve test coverage"], ["docs-drift", "Refresh docs"]].map(([template, label]) => `<a href="/tasks/new?template=${template}&amp;repo=${encodeURIComponent(selected)}">${label}</a>`).join("")}</div>`,
+    draft.has("template") ? `<p class="meta composer-template-note">Template added. Adjust the description, schedule, or limits before reviewing.</p>` : "",
+    `<div class="composer-schedule"><label>Repeat<select aria-label="Repeat" name="repeat">${[["once", "Once"], ["daily", "Daily"], ["weekly", "Weekly"], ["custom", "Custom interval"]].map(([key, label]) => `<option value="${key}"${key === repeat ? " selected" : ""}>${label}</option>`).join("")}</select></label>`,
+    `<label class="schedule-weekday">On<select aria-label="On" name="weekday">${WEEKDAYS.map((day, i) => `<option value="${i}"${String(i) === (draft.get("weekday") ?? "1") ? " selected" : ""}>${day}</option>`).join("")}</select></label>`,
+    `<label class="schedule-clock">At<input type="time" aria-label="At" name="time" value="${value("time", "09:00")}"></label>`,
+    `<label class="schedule-interval">Every<input type="number" min="1" max="10080" step="1" aria-label="Every" name="interval" value="${value("interval", "1")}"></label><label class="schedule-interval">Unit<select aria-label="Unit" name="interval-unit">${["minutes", "hours", "days"].map(unit => `<option value="${unit}"${unit === (draft.get("interval-unit") ?? "hours") ? " selected" : ""}>${unit}</option>`).join("")}</select></label>`,
+    `<label class="schedule-zone">Timezone<select aria-label="Timezone" name="timezone"${draft.has("timezone") ? "" : ' data-detect-timezone="1"'}>${zones.map(one => `<option value="${escape(one)}"${one === zone ? " selected" : ""}>${escape(one.replace(/_/g, " "))}</option>`).join("")}</select></label></div>`,
+    `<details class="composer-options"${problem !== null && ["title", "not", "touches", "after", "scout", "ceiling"].some(name => draft.get(name)) ? ' open' : ''}><summary>Options</summary>`,
+    draft.has("routine-id") ? "" : `<label>Task name <span class="meta">(optional)</span><input type="text" name="title" maxlength="200" value="${value("title")}" placeholder="Named automatically from your description"></label>`,
+    `<label>Keep unchanged <span class="meta">(optional)</span><textarea name="not" rows="2" placeholder="Anything the assistant should leave alone">${value("not")}</textarea></label>`,
+    `<label>Limit changes to <span class="meta">(optional)</span><input name="touches" value="${value("touches")}" placeholder="Files or folders, separated by commas"></label>`,
+    `<div class="recurring-options"><label>Weekly spending limit <span class="meta">(optional)</span><div class="money-input"><span>$</span><input type="number" aria-label="Weekly spending limit" name="ceiling" min="0.01" step="0.01" value="${value("ceiling")}" placeholder="No limit"></div></label><p class="meta">Measured over the last 7 days. Requires an assistant that reports costs.</p></div>`,
+    `<div class="once-options"><label class="check-option"><input type="checkbox" name="scout" value="1"${draft.get("scout") === "1" ? " checked" : ""}><span>Research only <span class="meta">— get a report without code changes</span></span></label>`,
+    candidates.length === 0 ? "" : `<label>Wait for another task<select name="after"><option value="">No dependency</option>${candidates.map(one => `<option value="${escape(one.id)}"${draft.get("after") === one.id ? ' selected' : ''}>${escape(one.title)}</option>`).join("")}</select></label>`,
+    `</div></details><div class="composer-footer"><span class="meta">Nothing runs until you approve.</span><button type="submit" class="primary">${recurring ? "Review recurring task →" : "Review task →"}</button></div></form></div>`,
+  ].join("\n"), { chrome, functional: { script: taskComposerScript() } });
+}
+
+function taskComposerScript(): string {
+  return `(function(){var form=document.getElementById('task-composer');if(!form)return;
+var repeat=form.elements.repeat,zone=form.elements.timezone;
+if(zone.dataset.detectTimezone){try{var local=Intl.DateTimeFormat().resolvedOptions().timeZone;if(local){if(!Array.from(zone.options).some(function(o){return o.value===local}))zone.add(new Option(local.replace(/_/g,' '),local));zone.value=local;}}catch(e){}}
+function update(){var recurring=repeat.value!=='once';form.querySelector('button[type=submit]').textContent=recurring?'Review recurring task →':'Review task →';
+form.querySelectorAll('.once-options input,.once-options select').forEach(function(f){f.disabled=recurring;});
+form.querySelectorAll('.recurring-options input').forEach(function(f){f.disabled=!recurring;});
+form.querySelectorAll('.schedule-clock input,.schedule-zone select').forEach(function(f){f.disabled=repeat.value!=='daily'&&repeat.value!=='weekly';});
+form.elements.weekday.disabled=repeat.value!=='weekly';form.elements.interval.disabled=repeat.value!=='custom';form.elements['interval-unit'].disabled=repeat.value!=='custom';}
+repeat.addEventListener('change',update);update();})();`;
 }
 
 /** The revision batch a task's approval screen restates, or the named reason it cannot. */
@@ -10407,6 +12042,7 @@ function taskBody(data: {
   holds: Hold[];
   contest?: { id: number; state: string; agents: number; kind: "race" | "comparison" } | null;
   claimed: boolean;
+  stopRequested?: boolean;
   /** What this task waits for — blockers outside this console's ceiling
    * are named but carry no state and no link. */
   waitsFor?: { id: string; state: string | null; admitted: boolean }[];
@@ -10422,6 +12058,7 @@ function taskBody(data: {
   /** The tracker item this task stands for, when it is external work. */
   mirror?: ExternalMirror | null;
   scope: Scope | null;
+  projectConfigured?: boolean;
   /** Filed race terms (v14) — the approval restates them; one yes covers both. */
   raceTerms?: TournamentTerms | null;
   /** What the approval nonce/digest bind: scope digest, or the joint fingerprint. */
@@ -10434,6 +12071,8 @@ function taskBody(data: {
   coordinatorProposals?: { rows: CoordinatorProposal[]; decisions: Map<number, Decision>; now: Date } | null;
   /** Operator steering notes (arc 1), delivery state included. */
   steering?: SteerNote[];
+  /** An invalid guidance submission stays editable on the task page. */
+  steeringDraft?: string;
   /** The publication grant the publisher would act under — from
    * publicationGrantFor(repo) only; null when none, or no project. */
   grant?: PublicationGrant | null;
@@ -10476,6 +12115,23 @@ function taskBody(data: {
   // page carrying a password ceremony degrades to the static line.
   const liveRunId = data.liveRunId ?? null;
   const liveRun = liveRunId === null ? undefined : data.runs.find(one => one.id === liveRunId);
+  const latestBuild = data.runs.find(one => one.role === "builder" || one.role === "scout");
+  const builtRun = data.runs.find(one => one.outcome === "built" && one.committed);
+  const paused = data.holds.some(one => one.ownerKind === "operator") && !["done", "cancelled"].includes(task.state);
+  const delivered = data.publication;
+  const stateLabel = data.stopRequested ? "Stopping" : paused && !data.claimed ? "Paused" : liveRun !== undefined ? "Running" :
+    task.state !== "done" ? task.state : data.deliverable === "report" ? "Report ready" :
+      latestBuild?.outcome === "no-change" ? "No changes needed" : delivered?.remoteState === "MERGED" ? "Merged" :
+        delivered?.state === "opened" && delivered.prNumber !== null ? "PR open" : delivered?.state === "pushed" ? "Pushed · no PR" : builtRun === undefined ? "Completed · no recorded build" : "Built locally";
+  const recoveryCard = !paused ? "" : `<div class="card" data-control-state="${data.stopRequested ? "stopping" : "paused"}"><h2>${data.stopRequested ? "Stopping this build" : latestBuild?.reason === "handoff-incomplete" ? "Work preserved — completion needs repair" : "Work paused"}</h2>` +
+    `<p>${data.stopRequested ? "The worker is stopping this run. Its changes will be kept." : "Resume to continue with the preserved work under the existing approval."}</p>` +
+    (latestBuild === undefined ? "" : `<a href="/r/${latestBuild.id}">Inspect the build record</a>`) + `</div>`;
+  const deliveryCard = task.state !== "done" || builtRun === undefined || data.deliverable === "report" ? "" :
+    `<div class="card" data-delivery-state="${escape(stateLabel)}"><h2>${escape(stateLabel)}</h2>` +
+    `<p><code>${escape(builtRun.branch ?? "")}</code> · commit <code>${escape((builtRun.headRevision ?? "").slice(0, 12))}</code></p>` +
+    `<a href="/r/${builtRun.id}#review">Review changes</a> ` +
+    (safePrUrl(delivered?.prUrl ?? null) !== null ? `<a href="${escape(safePrUrl(delivered?.prUrl ?? null)!)}">Open pull request</a>` :
+      data.csrf === "" ? "" : act("publish-preview", "Push and open PR", `<input type="hidden" name="run" value="${builtRun.id}">`)) + `</div>`;
   const degraded = data.degraded === "sensitive";
   const attemptPanel = (() => {
     if (liveRunId === null || liveRun === undefined) return "";
@@ -10544,8 +12200,8 @@ function taskBody(data: {
       ? ""
       : `<form method="post" action="${taskHref(task.id)}/steer" class="row">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-        `<input type="text" name="note" placeholder="guidance for the next attempt" aria-label="steering note" style="width:100%;max-width:28rem">` +
-        `<button type="submit">steer</button></form>` +
+        `<label>Guidance for the next attempt <span class="meta">— up to 500 characters</span><textarea name="note" rows="3" maxlength="500" required placeholder="What should the assistant keep in mind?" aria-label="steering note">${escape(data.steeringDraft ?? "")}</textarea></label>` +
+        `<button type="submit">Save guidance</button></form>` +
         `<p class="meta">lands when the next attempt starts — a running agent is not interrupted, and a note cannot widen the approved scope</p>`;
   const steeringCard =
     steerRows === "" && steerForm === "" ? "" : `<h2>steering</h2>${steerRows}${steerForm}`;
@@ -10678,15 +12334,15 @@ function taskBody(data: {
       : data.revision !== null && data.revision !== undefined && "problem" in data.revision
         ? `<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: approval is blocked.</strong></p><p class="meta">${escape(data.revision.problem)} — a revision approves only against a brief that verifies</p></div>`
         : scope.profileState === "unresolved"
-          ? `<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: its scope cannot be approved yet.</strong></p>` +
+          ? `<div class="card approve-form" id="approve"><p><strong>Choose how this task should run.</strong></p>` +
             profileWords(scope) +
-            `<p class="ceremony-road"><a class="button-link" href="#scope">edit the scope to fix it →</a></p></div>`
+            `<p class="ceremony-road"><a class="button-link" href="#scope">Review scope & execution settings →</a></p></div>`
         : [
           `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form" id="approve">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
-          `<p class="ceremony-head"><strong>This task is waiting on you — approve exactly this:</strong> <a href="#scope">edit instead →</a></p>`,
+          `<p class="ceremony-head"><strong>Review your task</strong> <a href="#scope-description">Edit description →</a></p>`,
           // The deliverable INSIDE the ceremony (mate arc §10): a yes on a
           // scout task authorizes a read-only session and a report, never
           // a branch — said where the signature is given.
@@ -10699,10 +12355,10 @@ function taskBody(data: {
           data.coordinator === null || data.coordinator === undefined
             ? ""
             : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAgo)}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
-          `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
-          `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
-          `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
-          profileWords(scope),
+          `<p class="meta">What will be done</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
+          scope.outOfScope === null ? "" : `<p class="meta">Keep unchanged</p><p class="recap" style="margin-top:0">${escape(scope.outOfScope)}</p>`,
+          `<p class="meta">Allowed files: ${scope.touches.length === 0 ? "any files in this project" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          profileWords(scope, data.filedVia === "console" && data.runs.length === 0),
           scope.budgetMicrousd === null
             ? ""
             : `<p class="meta">each build attempt may spend $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} — the agent is stopped at this figure</p>`,
@@ -10725,8 +12381,8 @@ function taskBody(data: {
                 `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
                 `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
                 `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
-          `<label>your password, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>`,
-          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : data.raceTerms.kind === "comparison" ? "approve scope and comparison — one yes covers both" : "approve scope and tournament — one yes covers both"}</button></div>`,
+          `<label>Confirm with your password<input type="password" name="token" autocomplete="current-password"></label>`,
+          `<div class="sticky-actions"><button type="submit" class="primary">${data.raceTerms === null || data.raceTerms === undefined ? "Approve task" : data.raceTerms.kind === "comparison" ? "approve scope and comparison — one yes covers both" : "approve scope and tournament — one yes covers both"}</button></div>`,
           `</form>`,
         ].join("\n");
 
@@ -10775,16 +12431,26 @@ function taskBody(data: {
             ].join("\n")
           : "";
 
+  const executionForm =
+    scope === null || data.csrf === "" || data.claimed ? "" : `<details id="execution-settings"><summary>Execution settings</summary><form method="post" action="${taskHref(task.id)}/settings-preview">` +
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+      `<label>Model<input name="model" list="execution-models" value="${escape(scope.profile?.model ?? "")}" required></label><datalist id="execution-models">${modelChoices(scope.profile?.provider ?? "claude", scope.profile?.model ?? null).map(one => `<option value="${escape(one.value)}">${escape(one.label)}</option>`).join("")}</datalist>` +
+      (scope.profile?.provider !== "claude" ? "" : `<label>Maximum turns<input name="turns" type="number" min="1" max="2000" value="${scope.profile.maxTurns}"></label>`) +
+      `<label>Maximum minutes<input name="minutes" type="number" min="1" max="240" value="${Math.round((scope.profile?.timeoutSeconds ?? 1800) / 60)}"></label>` +
+      (scope.profile?.provider === "claude" || scope.profile?.provider === "gemini" ? `<label>Permissions<select name="posture"><option value="safe">File edits${scope.profile.provider === "claude" ? " and named tools" : ""}</option><option value="escalated"${(scope.profile.provider === "claude" && scope.profile.permissionArgv === "bypassPermissions") || (scope.profile.provider === "gemini" && scope.profile.approvalArgv === "yolo") ? " selected" : ""}>All tools without prompting</option></select></label>` : `<input type="hidden" name="posture" value="safe">`) +
+      (scope.profile?.provider !== "claude" ? "" : `<label>Tools allowed unattended, one rule per line<textarea name="tools" rows="5" placeholder="Bash(npm test:*)&#10;Bash(npm run typecheck:*)&#10;Bash(git status:*)">${escape((scope.profile.allowedTools ?? []).join("\n"))}</textarea></label>`) +
+      `<button type="submit">Review settings</button></form></details>`;
+
   const scopeForm = [
-    `<details${scope === null ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
-      approval.approved ? " (editing voids the approval)" : ""
+    `<details${scope === null ? " open" : ""}><summary>${scope === null ? "Describe this task" : "Edit description"}${
+      approval.approved ? " (changes need approval again)" : ""
     }</summary>`,
     `<form method="post" action="${taskHref(task.id)}/scope">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="sawDigest" value="${escape(scope?.digest ?? "")}">`,
-    `<label>goal<textarea name="goal" rows="3">${escape(scope?.goal ?? "")}</textarea></label>`,
-    `<label>not this<textarea name="not" rows="2">${escape(scope?.outOfScope ?? "")}</textarea></label>`,
-    `<label>touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
+    `<label>What should be done?<textarea id="scope-description" name="goal" rows="5" maxlength="2000" required>${escape(scope?.goal ?? "")}</textarea></label>`,
+    `<details class="task-boundaries"><summary>Boundaries & advanced options</summary><label>Keep unchanged<textarea name="not" rows="2">${escape(scope?.outOfScope ?? "")}</textarea></label>`,
+    `<label>Limit changes to <span class="meta">(one file or folder per line)</span><textarea name="touches" rows="2">${escape(
       (scope?.touches ?? []).join("\n"),
     )}</textarea></label>`,
     (() => {
@@ -10846,8 +12512,9 @@ function taskBody(data: {
         `</details>`,
       ].join("\n");
     })(),
-    `<button type="submit">save scope</button>`,
+    `</details><button type="submit" class="primary">Review changes</button>`,
     `</form></details>`,
+    executionForm,
   ].join("\n");
 
   // 41_237 → "41k": token counts read at a glance; exactness lives on the run page.
@@ -11095,13 +12762,14 @@ function taskBody(data: {
     `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason"></form>`;
   const actsBar = [
     `<div class="acts-bar">`,
+    liveRun === undefined || data.csrf === "" || contest !== null ? "" : data.stopRequested ? `<span role="status">Stopping…</span>` : act("stop", "Stop build", `<input type="hidden" name="run" value="${liveRun.id}">`),
     // While a ceremony leads the page, no other act competes as primary.
     primaryAct === null ? "" : approveForm === "" ? `<span class="primary">${primaryAct.html}</span>` : primaryAct.html,
     task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0
       ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
     holdAct,
-    data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
+    data.holds.some(hold => hold.ownerKind === "operator") && !data.claimed ? act("resume", "Resume work") : "",
     `</div>`,
     primaryAct === null ? "" : `<p class="meta acts-why">${primaryAct.why}</p>`,
     data.claimed
@@ -11130,6 +12798,22 @@ function taskBody(data: {
       : `<details class="section" id="${title.replace(/\s+/g, "-")}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` +
         html.replace(`<h2>${title}</h2>`, "") + `</details>`;
 
+  const focusedDraft = data.filedVia === "console" && task.state === "queued" && !data.claimed && data.runs.length === 0 &&
+    data.plan === null && data.decisions.length === 0 && data.incidents.length === 0 && data.holds.length === 0 &&
+    (data.waitsFor ?? []).length === 0 && data.coordinator == null && data.raceTerms == null && data.revision == null &&
+    data.mirror == null && data.attended?.open == null && data.steeringDraft === undefined;
+  if (focusedDraft) {
+    const setupUrl = `/control?${data.repo === null ? "" : `repo=${encodeURIComponent(data.repo)}`}`;
+    const unresolved = scope?.profileState === "unresolved";
+    return `<div class="task-review"><p class="eyebrow">${approval.approved ? "TASK APPROVED" : "REVIEW TASK"}${data.repo === null ? "" : ` · ${escape(projectName(data.repo))}`}</p><h1>${escape(task.title)}</h1>` +
+      (data.problem === null ? "" : `<div class="problem" role="alert">${escape(data.problem)}</div>`) +
+      (unresolved ? `<section class="card task-setup-needed"><h2>Your task is saved</h2><p class="recap">${escape(scope!.goal)}</p>` +
+        (data.projectConfigured ? `<p>Use your session's assistant settings to review this task.</p><form method="post" action="${taskHref(task.id)}/scope"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="sawDigest" value="${escape(scope!.digest)}"><input type="hidden" name="goal" value="${escape(scope!.goal)}"><input type="hidden" name="not" value="${escape(scope!.outOfScope ?? "")}"><input type="hidden" name="touches" value="${escape(scope!.touches.join("\n"))}">${scope!.budgetMicrousd == null ? "" : `<input type="hidden" name="budget-usd" value="${scope!.budgetMicrousd / 1_000_000}">`}<button class="primary">Review with session settings</button></form>` : `<p>Choose an assistant before approving this task.</p><a class="button-link primary" href="${setupUrl}&amp;task=${encodeURIComponent(task.id)}">Set up session</a>`) + `</section>` :
+        approval.approved ? `<section class="card task-approved"><h2>Ready for your assistant</h2><p class="recap">${escape(scope?.goal ?? task.title)}</p><p class="meta">This task will run when its session is active and ready.</p><div class="setup-actions"><a class="button-link primary" href="${setupUrl}#worker">Open session</a><a href="/workbench">Back to projects</a></div></section>` : approveForm) +
+      `<section id="scope" class="task-edit">${scope === null ? '<p>Describe the result you want, then review and approve it.</p>' : ""}${scopeForm}</section>` +
+      `<details class="task-more"><summary>More task options</summary>${actsBar}${attendedCard}${cancelAct}<p class="meta">Task ID: ${escape(task.id)}</p></details></div>`;
+  }
+
   return [
     // The title leads; the machine facts — id, state, project, provenance —
     // follow as one mono meta row instead of riding the headline.
@@ -11143,7 +12827,9 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
+    `<h1>${escape(task.title)} <span class="badge badge-${liveRun === undefined ? escape(task.state) : "running"}">${escape(stateLabel)}</span></h1>`,
+    recoveryCard,
+    deliveryCard,
     approveForm === "" ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
     // observed state, and — when the tracker closed it and has been seen
@@ -11203,6 +12889,7 @@ function taskBody(data: {
     // (slice 1c) rides beside the main column on wide screens and above it
     // on narrow ones.
     `<div class="task-layout"><div class="task-main">`,
+    `<nav class="task-regions"><a href="#scope">Scope & settings</a><a href="#history">History</a></nav><section class="control-region" id="action"${liveRun !== undefined || contestCard !== "" || data.decisions.length > 0 || data.incidents.length > 0 || (data.coordinatorProposals?.rows.length ?? 0) > 0 ? "" : " hidden"}><h2>Now</h2>`,
     contestCard,
     attemptPanel,
     data.coordinatorProposals == null || data.coordinatorProposals.rows.length === 0
@@ -11220,8 +12907,15 @@ function taskBody(data: {
           true,
           data.coordinatorProposals.rows.length,
         ),
-    section("decisions", decisions, true, data.decisions.length),
-    section("incidents", incidents, true, data.incidents.length),
+    data.decisions.length === 0 ? "" : section("decisions", decisions, true, data.decisions.length),
+    data.incidents.length === 0 ? "" : section("incidents", incidents, true, data.incidents.length),
+    `</section>`,
+    section("scope", [scopeCard, planCard, revisionCard, attendedCard, scopeForm,
+      section("steering", steeringCard, data.steeringDraft !== undefined, (data.steering ?? []).length),
+      section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
+      section("holds", holds, data.holds.length > 0, data.holds.length)].join("\n"), scope === null || data.steeringDraft !== undefined),
+    `<section class="control-region" id="history"><h2>History</h2>`,
+    data.runs.length === 0 ? `<p class="meta">No attempts yet.</p>` : "",
     data.publication === null || data.publication === undefined
       ? ""
       : `<p class="row"><span class="meta">published</span> ` +
@@ -11236,13 +12930,17 @@ function taskBody(data: {
     section("report", reportCard, true),
     section("attempts", runs, true, data.runs.length),
     section("spend", spendCard, false),
-    section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
-    section("scope", ["<h2>scope</h2>", scopeCard, planCard, revisionCard, attendedCard, scopeForm].join("\n"), true),
-    section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
-    section("holds", holds, true, data.holds.length),
+
     cancelAct,
+    `</section>`,
     `</div><aside class="task-rail">${rail}</aside></div>`,
   ].join("\n");
+}
+
+function taskStatusToken(data: Parameters<typeof taskBody>[0]): string {
+  return createHash("sha256").update(JSON.stringify([data.task.state, data.scope?.digest, data.scope?.approvedDigest, data.liveRunId,
+    data.stopRequested, data.runs.map(one => [one.id, one.outcome]), data.holds.map(one => one.id),
+    data.decisions.map(one => [one.id, one.state]), data.incidents.map(one => [one.id, one.resolvedAt]), data.publication?.state, data.publication?.remoteState])).digest("hex");
 }
 
 function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen {
@@ -11257,16 +12955,21 @@ function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen 
   // page re-renders degraded — no poller, static attempt line, link-only
   // decisions — and ships no functional script at all.
   const first = taskBody(data);
+  const chatBack = `<p class="meta"><a href="/chat">← Back to chat</a></p>`;
+  if (first.startsWith('<div class="task-review">')) { const { listPane: _listPane, ...focusedChrome } = chrome; chrome = focusedChrome; }
   const sensitive =
     SENSITIVE_INPUT.test(first) || (chrome.listPane !== undefined && SENSITIVE_INPUT.test(chrome.listPane));
   if (sensitive) return screen(`task \u00b7 ${data.task.id}`, taskBody({ ...data, degraded: "sensitive" }), { chrome });
   const liveRunId = data.liveRunId ?? null;
   const liveRun = liveRunId === null ? undefined : data.runs.find(one => one.id === liveRunId);
   const script =
+    `(function(){var dirty=${data.steeringDraft !== undefined},seen=${JSON.stringify(taskStatusToken(data))};document.addEventListener('input',function(){dirty=true;});document.addEventListener('change',function(){dirty=true;});` +
+    `function poll(){if(document.hidden){setTimeout(poll,5000);return;}fetch(${JSON.stringify(taskHref(data.task.id) + "?fragment=task-status")},{cache:'no-store',redirect:'manual'}).then(function(r){return r.ok?r.json():null;}).then(function(next){` +
+    `if(next&&next.status!==seen){if(!dirty&&!String(window.getSelection())){location.reload();return;}document.getElementById('task-refresh-notice').hidden=false;}setTimeout(poll,5000);}).catch(function(){setTimeout(poll,5000);});}setTimeout(poll,5000);})();` +
     (liveRun !== undefined && data.peekable === true ? regionScript("run-peek", "peek", 15, `/r/${liveRun.id}`) : "") +
     (liveRun !== undefined && data.peekable === true && liveRun.provider === "claude" ? transcriptScript(`/r/${liveRun.id}`) : "") +
     (data.csrf !== "" && data.decisions.some(one => one.state === "open" || one.state === "expired") ? decisionAnswerScript() : "");
-  return screen(`task \u00b7 ${data.task.id}`, first, {
+  return screen(`task \u00b7 ${data.task.id}`, `<p id="task-refresh-notice" class="card" hidden>Task status changed. <a href="${taskHref(data.task.id)}">Refresh when your edits are ready.</a></p>` + chatBack + first, {
     chrome,
     ...(script === "" ? {} : { functional: { script, fetches: true } }),
   });
@@ -11898,6 +13601,7 @@ function runPage(
 
   return screen(`build #${run.id}`, [
     `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
+    !running || csrf === "" ? "" : `<form method="post" action="${taskHref(taskId)}/stop"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${run.id}"><button type="submit">Stop build</button></form>`,
     `<div id="run-facts">${rows}</div>`,
     running ? `<p class="meta" id="run-facts-stamp"></p>` : "",
     conversation,
@@ -12003,28 +13707,38 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
   ].join("\n"), { chrome });
 }
 
+function approvalToggle(required: boolean): string {
+  return `<label class="approval-toggle"><input type="checkbox" role="switch" aria-label="Require a password for approvals" name="approval-password" value="required"${required ? " checked" : ""}><span><strong>Require a password for approvals</strong><br><span class="meta">Off uses your signed-in session for task approvals, project setup, and publishing. You still review and confirm each action.</span></span></label>`;
+}
+
+function approvalPreferenceCard(required: boolean, csrf: string, saved: boolean): string {
+  return `<section class="settings-section" id="approval-preferences"><h2>Approval preferences</h2>${saved ? `<p role="status">Approval preference saved.</p>` : ""}<p class="meta">Applies to all your projects, in the app and on the web.</p><form method="post" action="/settings/approval-password"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="previous-required" value="${required}">${approvalToggle(required)}${required ? `<label>Confirm changes with your password<input type="password" name="token" autocomplete="current-password" required></label>` : ""}<p class="meta">Account and access changes require your password.</p><button class="primary">Save approval preference</button></form></section>`;
+}
+
 function settingsPage(
   chrome: Chrome,
-  existing: TokenSource | null,
-  hasEnv: boolean,
+  _existing: TokenSource | null,
+  _hasEnv: boolean,
   csrf: string,
   problem: string | null,
   messaging: { channel: string | null; implicit: boolean; configured: string[] } | null = null,
   push: { available: boolean; devices: PushSubscription[] } | null = null,
-  providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean }[] | null = null,
+  providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean; connection: ProviderConnection }[] | null = null,
   digest: { everyMs: number | null; lastSentAt: string | null; held: number } | null = null,
+  telegramCard = "",
+  telegramPaired = false,
 ): Screen {
   const digestCard =
     digest === null || csrf === ""
       ? ""
       : [
-          "<h2>telegram digest</h2>",
-          `<p class="meta">away mode: routine facts (merges, reports, retries, plans ready) are held and sent as one digest on this cadence. A decision and anything that needs a person now still page the moment they land.</p>`,
+          "<h3>Telegram digest</h3>",
+          `<p class="meta">Group routine updates into a digest. Requests that need your input still arrive immediately.</p>`,
           `<form method="post" action="/settings/telegram-digest" class="card">`,
           `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-          `<label>send a digest<select name="every">` +
+          `<label>Routine updates<select name="every">` +
             [
-              ["off", "off — every fact pages as it lands"],
+              ["off", "Send each update immediately"],
               ["30", "every 30 minutes"],
               ["60", "every hour"],
               ["240", "every 4 hours"],
@@ -12039,45 +13753,39 @@ function settingsPage(
             `</select></label>`,
           `<p class="meta">${
             digest.everyMs === null
-              ? "off"
-              : `${digest.held} routine fact(s) held · next digest ${digest.lastSentAt === null ? "at the next bridge pass" : `no earlier than ${escape(new Date(new Date(digest.lastSentAt).getTime() + digest.everyMs).toISOString())}`}`
+              ? "Updates arrive individually."
+              : `${digest.held} updates waiting · next digest ${digest.lastSentAt === null ? "shortly" : `no earlier than ${escape(new Date(new Date(digest.lastSentAt).getTime() + digest.everyMs).toISOString())}`}`
           }</p>`,
-          `<button type="submit">save</button>`,
+          `<button type="submit" class="primary">Save changes</button>`,
           `</form>`,
         ].join("\n");
   const keysCard =
     providerKeys === null || csrf === ""
       ? ""
       : [
-          "<h2>provider API keys</h2>",
-          `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key reaches its provider only when that provider's sign-in is set to "the API key"; other providers never see it.</p>`,
+          "<h2>AI providers</h2>",
+          `<p class="meta">Choose how each assistant signs in. Use an existing subscription or add a private API key. Choose which assistant works on a project in <a href="/control">project setup</a>.</p>`,
           ...providerKeys.map(one =>
             [
               `<form method="post" action="/settings/provider-key" class="card">`,
               `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
               `<input type="hidden" name="provider" value="${escape(one.provider)}">`,
-              `<p class="row"><strong>${escape(one.provider)}</strong> <span class="mono meta">${escape(one.envName)}</span> ` +
-                `<span class="meta">${
-                  one.mode === "subscription" ? "uses its own login" : "uses the API key"
-                } \u00b7 ${
-                  one.set
-                    ? `key stored${one.updatedAt === null ? "" : ` ${escape(one.updatedAt.slice(0, 10))}`}`
-                    : one.ambient
-                      ? "key in this server's environment"
-                      : "no key stored"
-                }</span></p>`,
+              `<details class="provider-settings"><summary><span class="provider-name">${escape(ASSISTANTS[one.provider as ProviderId].name)}</span> <span class="badge ${one.connection.state === "connected" ? "badge-done" : ""}">${connectionLabel(one.connection)}</span></summary>`,
+              connectionWords(one.provider as ProviderId, one.connection),
+              (one.provider === "openrouter" ? `<p><a href="/control?provider=openrouter#assistant">Browse models & prices →</a></p>` : ""),
+              `<p><a class="meta" href="/settings?check-connection=${encodeURIComponent(one.provider)}#providers">Check again</a></p>`,
               one.subscriptionCapable
-                ? `<label>sign-in<select name="auth-mode">` +
+                ? `<label>Sign-in method<select name="auth-mode">` +
                   `<option value="subscription"${one.mode === "subscription" ? " selected" : ""}>use my ${escape(one.provider)} subscription / login</option>` +
                   `<option value="api-key"${one.mode === "api-key" ? " selected" : ""}>use the API key below</option>` +
                   `</select></label>`
                 : "",
               `<label>API key <span class="meta">(kept as your fallback; saving replaces it)</span><input type="password" name="value" autocomplete="off"></label>`,
-              `<button type="submit">save</button>`,
+              `<button type="submit" class="primary">Save changes</button>`,
               one.set
-                ? ` <button type="submit" formaction="/settings/provider-key-clear">remove the stored key</button>`
+                ? ` <button type="submit" class="secondary" formaction="/settings/provider-key-clear">Remove key</button>`
                 : "",
-              `</form>`,
+              `</details></form>`,
             ].join("\n"),
           ),
         ].join("\n");
@@ -12085,30 +13793,30 @@ function settingsPage(
     push === null || csrf === ""
       ? ""
       : [
-          "<h2>receives alerts on this device</h2>",
+          "<h3>Device notifications</h3>",
           push.available
             ? [
-                `<p class="meta">a notification when a decision, a pick, or a pull request needs a person — fixed phrases only; task content never rides a notification.</p>`,
-                `<p class="meta">on iPhone or iPad: add this console to the Home Screen first, then enable from inside it.</p>`,
+                `<p class="meta">Get a notification when a task needs your attention. Task details stay private inside the app.</p>`,
+                `<p class="meta">On iPhone or iPad, add Standing Orders to your Home Screen first, then enable notifications there.</p>`,
                 `<form method="post" action="/push/subscribe" id="push-form" class="card">`,
                 `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
                 `<input type="hidden" name="endpoint" value=""><input type="hidden" name="p256dh" value=""><input type="hidden" name="auth" value="">`,
-                `<label>your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
-                `<button type="submit" id="push-enable">get alerts on this device</button>`,
+                `<label>Your password <input type="password" name="token" autocomplete="current-password"></label>`,
+                `<button type="submit" id="push-enable">Enable notifications</button>`,
                 `<p class="meta" id="push-state"></p>`,
                 `</form>`,
               ].join("\n")
-            : `<p class="meta">alerts to this device need a secure address — put TLS in front (tailscale serve works) and start serve with --public-url https://…</p>`,
+            : `<p class="meta">Browser notifications are unavailable at this local address. Connect Telegram for updates, or ask your administrator to enable a secure web address.</p>`,
           ...push.devices
             .filter(one => one.retiredAt === null || one.retiredReason === "gone")
             .map(
               one =>
-                `<p class="row">${escape(one.uaWords)} · since ${escape(when(one.createdAt))}` +
+                `<div class="row">${escape(one.uaWords)} · since ${escape(when(one.createdAt))}` +
                 `${one.retiredAt !== null ? ` · <span class="meta">expired</span>` : one.consecutiveFailures >= 20 ? ` · <span class="meta">failing</span>` : ""}` +
                 (one.retiredAt === null
                   ? ` <form method="post" action="/push/remove" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}"><button type="submit">remove</button></form>`
                   : "") +
-                `</p>`,
+                `</div>`,
             ),
         ].join("\n");
   // The enrollment behavior rides the ONE composed script (arc 4, finding
@@ -12137,50 +13845,29 @@ function settingsPage(
         `form.dataset.ready="1";form.submit();});` +
         `}).catch(function(){if(state)state.textContent="could not subscribe — the browser said no";});});` +
         `})();`;
-  const messagingCard =
-    messaging === null || messaging.configured.length === 0
-      ? ""
-      : [
-          "<h2>connected messaging</h2>",
-          `<p class="meta">alerts are sent through one service — the others stay quiet so you are never notified twice${
-            messaging.implicit ? " · <strong>several are connected and none was chosen — pick one</strong>" : ""
-          }</p>`,
-          `<form method="post" action="/settings/messaging" class="card">`,
-          `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-          ...messaging.configured.map(
-            channel =>
-              `<label style="display:flex;gap:.5rem;align-items:center"><input type="radio" name="primary" value="${escape(channel)}"${
-                channel === messaging.channel ? " checked" : ""
-              }> ${escape(channel)}${channel === messaging.channel ? ` <span class="meta">— receiving alerts now${messaging.implicit ? " (by default, not by choice)" : ""}</span>` : ""}${
-                channel === "telegram" ? ` <span class="meta">· can carry answer buttons and reply-notes</span>` : ` <span class="meta">· messages with console links; acting stays here</span>`
-              }</label>`,
-          ),
-          `<button type="submit">use this service</button>`,
-          `</form>`,
-          `<p class="meta">Telegram keeps accepting taps and replies even when another service delivers the alerts. Connect services from the terminal: <code>standing-orders webhook set slack|discord &lt;url&gt;</code>.</p>`,
-        ].join("\n");
-  const current =
-    hasEnv
-      ? `set in the environment (${escape(TOKEN_ENV)}) — that takes precedence over anything saved here`
-      : existing === null
-        ? "not set"
-        : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
+  const channelName = (channel: string): string => ({ telegram: "Telegram", slack: "Slack", discord: "Discord" })[channel] ?? channel;
+  const messagingCard = messaging === null || messaging.configured.length === 0
+    ? `<p class="empty-note">Connect Telegram to receive updates outside the app.</p>`
+    : messaging.configured.length === 1 && messaging.channel === messaging.configured[0] && !messaging.implicit
+      ? `<div class="connection-status"><div><strong>${escape(channelName(messaging.channel))}</strong><p class="meta">Your notification service</p></div><span class="badge ${messaging.channel === "telegram" && !telegramPaired ? "" : "badge-done"}">${messaging.channel === "telegram" && !telegramPaired ? "Finish connecting Telegram" : "Alerts enabled"}</span></div>`
+      : `<p class="meta">Choose where updates arrive. Only one service sends notifications.</p>${messaging.implicit ? `<p class="notice">Choose your preferred service to finish notification setup.</p>` : ""}` +
+        `<form method="post" action="/settings/messaging" class="channel-form"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        messaging.configured.map(channel => `<label class="channel-choice"><input type="radio" name="primary" value="${escape(channel)}"${channel === messaging.channel ? " checked" : ""}><span><strong>${escape(channelName(channel))}</strong><span class="meta">${channel === "telegram" ? "Updates, answer buttons, and replies" : "Updates with links to the app"}</span></span>${channel === messaging.channel ? `<span class="badge">Current</span>` : ""}</label>`).join("") +
+        `<div class="form-actions"><button type="submit" class="primary">Save notification service</button></div></form>`;
   return screen("settings", [
-    "<h1>settings</h1>",
-    pushCard,
-    keysCard,
-    messagingCard,
-    digestCard,
-    "<h2>telegram bot token</h2>",
-    `<p class="meta">current: ${current}</p>`,
-    problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,
-    `<form method="post" action="/settings/telegram-token">`,
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<label>token from @BotFather<input type="password" name="token" autocomplete="off"></label>`,
-    `<button type="submit">save</button>`,
-    "</form>",
-    `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
-    ` <code>standing-orders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
+    `<header class="page-heading"><h1>Settings</h1><p class="meta">Make Standing Orders work the way you do.</p></header>`,
+    problem === null ? "" : `<p class="notice" role="status">${escape(problem)}</p>`,
+    `<div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">`,
+    `<a href="#approval-preferences">Approvals</a>`,
+    telegramCard === "" ? "" : `<a href="#telegram">Telegram</a>`,
+    `<a href="#notifications">Notifications</a>`,
+    keysCard === "" ? "" : `<a href="#providers">AI providers</a>`,
+    `</nav><div class="settings-content">`,
+    `<!-- approval-preferences -->`,
+    telegramCard,
+    `<section class="settings-section" id="notifications"><h2>Notifications</h2><p class="meta">Stay up to date without keeping the app open.</p>${messagingCard}${digestCard}${pushCard}</section>`,
+    keysCard === "" ? "" : `<section class="settings-section" id="providers">${keysCard}</section>`,
+    `</div></div>`,
   ].join("\n"), { chrome, ...(pushScript === null ? {} : { functional: { script: pushScript, fetches: true } }) });
 }
 
@@ -12360,12 +14047,12 @@ function taskOf(store: Store, decision: Decision): string {
 
 // ---- request plumbing ------------------------------------------------------
 
-async function form(request: IncomingMessage): Promise<URLSearchParams> {
+async function form(request: IncomingMessage, cap = BODY_CAP): Promise<URLSearchParams> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += (chunk as Buffer).length;
-    if (size > BODY_CAP) throw new Error("body too large");
+    if (size > cap) throw new Error("body too large");
     chunks.push(chunk as Buffer);
   }
   return new URLSearchParams(Buffer.concat(chunks).toString("utf8"));

@@ -20,7 +20,7 @@ import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunn
 import { readProviderKey, readAuthMode, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { classifyTerminal } from "./exhaustion.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
-import { startClaudeHeldSession } from "./exec.js";
+import { startClaudeHeldSession, terminateProvider } from "./exec.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
 
@@ -76,7 +76,7 @@ export type InvokeResult =
   | { kind: "ran"; outcome: AgentOutcome }
   | {
       kind: "refused";
-      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody";
+      reason: "provider-unattested" | "provider-protocol" | "chain-credential" | "chain-custody" | "runner-custody" | "stopped";
       providerVersion: string | null;
       diagnostic: string | null;
     };
@@ -215,14 +215,25 @@ export async function invokeAgent(
   else store.stampProviderStart(runId, clock());
 
   const spawn = runner ?? adapter.defaultRunner;
+  if (store.runStopRequested(runId)) {
+    return { kind: "refused", reason: "stopped", providerVersion: null, diagnostic: "Stopped by the operator before the provider started." };
+  }
   // B3: the attested executable IS the spawned executable — one resolution.
   // A MANAGED key reaches exactly its own provider's child environment
   // (keys.ts): the foreign-credential strip already shed everybody
   // else's, and the plane's own env never needed to carry it. A key
   // already ambient in the environment keeps working; the managed file,
   // being deliberate, wins.
-  const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
+  let childPid: number | undefined;
+  const stopPoll = setInterval(() => {
+    if (childPid !== undefined && store.runStopRequested(runId)) terminateProvider(childPid);
+  }, 500);
+  stopPoll.unref();
+  let result: Awaited<ReturnType<ProviderRunner>>;
+  try {
+    result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
+    onSpawn: pid => { childPid = pid; runOptions.onSpawn?.(pid); },
     timeoutMs,
     ...(managedKey === null
       ? {}
@@ -247,7 +258,10 @@ export async function invokeAgent(
     // moment the stream announces it, first write wins — a daemon that
     // dies mid-turn still knows which session to offer the successor.
     onSessionId: id => store.stampRun(runId, { sessionId: id }),
-  });
+    });
+  } finally {
+    clearInterval(stopPoll);
+  }
 
   const envelope = adapter.parse(result.stdout);
   store.recordUsage(runId, {

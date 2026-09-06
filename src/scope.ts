@@ -25,6 +25,7 @@
  */
 
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { sessionApprovalAllowed } from "./approval-session.js";
 import { hasForbiddenControls } from "./decision.js";
 import type { Store, Mutation } from "./store.js";
 
@@ -106,6 +107,8 @@ export type ClaudeProfile = {
    * acceptEdits ONLY (finding 22); bypass arrives with the attended
    * authorization work. */
   permissionArgv: "acceptEdits" | "bypassPermissions";
+  /** Exact additional tool permissions, shown and bound by the approval. */
+  allowedTools?: string[];
   maxTurns: number;
   repairMaxTurns: number;
   timeoutSeconds: number;
@@ -283,12 +286,14 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
       (p["permissionArgv"] === "acceptEdits" || p["permissionArgv"] === "bypassPermissions") &&
       num(p["maxTurns"]) && num(p["repairMaxTurns"]) &&
       num(p["timeoutSeconds"]) && num(p["repairTimeoutSeconds"]) &&
-      str(p["repairModel"])
+      str(p["repairModel"]) &&
+      (p["allowedTools"] === undefined || (Array.isArray(p["allowedTools"]) && p["allowedTools"].length <= 64 && p["allowedTools"].every((tool: unknown) => typeof tool === "string" && tool.length > 0 && tool.length <= 256 && !/[\u0000-\u001f\u007f]/.test(tool))))
     ) {
       return {
         provider: "claude",
         model: p["model"],
         permissionArgv: p["permissionArgv"],
+        ...(p["allowedTools"] === undefined ? {} : { allowedTools: p["allowedTools"] as string[] }),
         maxTurns: p["maxTurns"],
         repairMaxTurns: p["repairMaxTurns"],
         timeoutSeconds: p["timeoutSeconds"],
@@ -364,7 +369,7 @@ export type Scope = {
   approvedDigest: string | null;
   /** How the approval happened (v29): 'password' = the ceremony;
    * 'mode' = sealed by the signer's live mode (modeDigest names it). */
-  approvalBasis?: "password" | "mode" | null;
+  approvalBasis?: "password" | "mode" | "session" | null;
   modeDigest?: string | null;
   /** v24 (optional so hand-built scopes in tests stay valid): the working
    * execution profile, its resolution state, and the immutable snapshot
@@ -645,6 +650,7 @@ export function authenticateApprover(
   by: string,
   token: string,
 ): { ok: true } | { ok: false; reason: "no-approvers" | "not-an-approver" } {
+  if (token === "" && sessionApprovalAllowed(store, by)) return { ok: true };
   const account = authenticateAccount(store, by, token);
   if (!account.ok) {
     return { ok: false, reason: account.reason === "no-approvers" ? "no-approvers" : "not-an-approver" };
@@ -767,7 +773,7 @@ export function approve(
     // profile — the exact bytes the digest the approver signed was bound
     // to. Routing saveScope here would re-run resolution and could sign a
     // profile nobody saw.
-    const sealed = store.sealScopeApproval(taskId, by, now, mutation);
+    const sealed = store.sealScopeApproval(taskId, by, now, mutation, token === "" && sessionApprovalAllowed(store, by) ? { kind: "session" } : undefined);
     if (!sealed) return { ok: false as const, reason: "changed" as const };
     const approved = store.getScope(taskId);
     if (approved === null) return { ok: false as const, reason: "no-scope" as const };

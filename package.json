@@ -1,7 +1,7 @@
 {
   "name": "standing-orders",
   "version": "0.4.2",
-  "description": "A control plane for unattended coding agents — queue tasks, walk away, come back to pull requests. Agents build in leased worktrees, never touch your default branch, and interrupt you only for decisions that need a human.",
+  "description": "A control plane for unattended coding agents \u2014 queue tasks, walk away, come back to pull requests. Agents build in leased worktrees, never touch your default branch, and interrupt you only for decisions that need a human.",
   "directories": {
     "doc": "docs"
   },
@@ -10,7 +10,8 @@
     "test": "vitest run",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build",
+    "desktop": "node scripts/build-desktop.mjs"
   },
   "repository": {
     "type": "git",

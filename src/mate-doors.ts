@@ -18,6 +18,7 @@ import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
 import { fileTaskProposal } from "./proposal.js";
 import { proposeGuarded } from "./scope.js";
+import { stopTaskRun, resumeTaskWork } from "./control.js";
 
 export type ProposalKind = MateProposal["kind"];
 
@@ -49,7 +50,7 @@ export type DoorOptions = {
   /** The existing ceremony for an irreversible decision option: `confirm=yes`, typed explicitly (ruling 12). */
   confirm?: boolean;
   /** Which surface answered — recorded on the decision. Named by the caller, never defaulted (v3 review, finding 1). */
-  via: "web" | "cli";
+  via: "web" | "cli" | "telegram";
 };
 
 /** A coordinator proposal lives seven days (§9); the door refuses an older one whatever the sweep did (v3 review, finding 3). */
@@ -279,6 +280,13 @@ function executeProposal(
     if ((standing?.id ?? null) !== (typeof sawHold === "number" ? sawHold : null)) {
       return refuse("stale", "the hold on this task changed since this was proposed — look again");
     }
+    if (payload["stopRun"] !== undefined) {
+      const runId = payloadNumber(payload, "stopRun");
+      if (runId === null || !Number.isSafeInteger(runId)) return refuse("stale", "The running build changed. Ask for a fresh pause request.");
+      const stopped = stopTaskRun(store, { taskId, runId, by: actor.name, now });
+      if (!stopped.ok) return refuse("stale", "That build is no longer running. Ask for a fresh pause request.");
+      return { ok: true, kind, said: `Stopping ${store.getTask(taskId)?.title ?? taskId}. Work will be preserved and the task will stay paused.`, taskId };
+    }
     store.hold(ref.id, reason, null, now);
     return { ok: true, kind, said: `${taskId} held: ${reason}`, taskId };
   }
@@ -287,7 +295,8 @@ function executeProposal(
     const holdId = payloadNumber(payload, "holdId");
     const standing = store.activeHolds(ref.id, now).find(one => one.ownerKind === "operator") ?? null;
     if (standing === null || standing.id !== holdId) return refuse("stale", "that hold is no longer the one standing — look again");
-    store.unhold(ref.id);
+    const resumed = resumeTaskWork(store, taskId, now);
+    if (!resumed.ok) return refuse("refused", resumed.reason === "still-stopping" ? "The current build is still stopping. Wait for it to finish, then resume." : "This task is no longer paused.");
     return { ok: true, kind, said: `${taskId} released from its hold`, taskId };
   }
 

@@ -1,10 +1,16 @@
 /**
  * The converse engine (fleet chat v3) — a DIRECT no-tool API call.
  *
- * Chat never spawns a provider CLI: the boundary that matters (no tools,
- * no filesystem, no inherited instructions, no hooks) is established by
- * constructing the HTTP request ourselves and sending no tool surface at
- * all. Zero dependencies — Node's fetch.
+ * THIS adapter never spawns a provider CLI: the boundary that matters (no
+ * tools, no filesystem, no inherited instructions, no hooks) is
+ * established by constructing the HTTP request ourselves and sending no
+ * tool surface at all. Zero dependencies — Node's fetch.
+ *
+ * The unified chat's LOCAL adapter does spawn one, because the account it
+ * answers with is a sign-in this computer already holds and there is no
+ * other way to reach it. It re-establishes the same boundary by explicit
+ * flags rather than by omission; the argv and the reason for every flag
+ * are in `chat-assistant.ts`.
  *
  * Two-layer parsing, per the Codex v3 review (change 2): the PROVIDER
  * WRAPPER (Anthropic / OpenRouter response JSON) is stream-capped,
@@ -709,14 +715,19 @@ export const DATA_DOCUMENT_BUDGET_BYTES = 24_576;
 export function buildDataDocument(
   snapshot: import("./store.js").ChatSnapshot,
   budgetBytes = DATA_DOCUMENT_BUDGET_BYTES,
+  /** One project's id (`r2`) to narrow the ITEMS to — the repo list itself
+   * stays whole, so the ids never shift under the model and it can still
+   * say which other projects exist. null = every project, the default. */
+  focusRepoId: string | null = null,
 ): { document: string; shed: number } {
   const id = (repoIndex: number): string => (repoIndex >= 0 ? `r${repoIndex + 1}` : "r0");
+  const inFocus = (repoId: string): boolean => focusRepoId === null || repoId === focusRepoId;
   const lists = {
-    tasks: snapshot.tasks.map(one => ({ repo: id(one.repoIndex), id: one.id, title: one.title, state: one.state, ageHours: one.ageHours, strikes: one.strikes })),
-    decisions: snapshot.decisions.map(one => ({ repo: id(one.repoIndex), id: one.id, question: one.question, optionLabels: one.optionLabels })),
-    incidents: snapshot.incidents.map(one => ({ repo: id(one.repoIndex), kind: one.kind, ageHours: one.ageHours })),
-    routines: snapshot.routines.map(one => ({ repo: id(one.repoIndex), name: one.name, schedule: one.schedule, status: one.status, lastFire: one.lastFire })),
-    publications: snapshot.publications.map(one => ({ repo: id(one.repoIndex), pr: one.pr, checkState: one.checkState })),
+    tasks: snapshot.tasks.map(one => ({ repo: id(one.repoIndex), id: one.id, title: one.title, state: one.state, ageHours: one.ageHours, strikes: one.strikes })).filter(one => inFocus(one.repo)),
+    decisions: snapshot.decisions.map(one => ({ repo: id(one.repoIndex), id: one.id, question: one.question, optionLabels: one.optionLabels })).filter(one => inFocus(one.repo)),
+    incidents: snapshot.incidents.map(one => ({ repo: id(one.repoIndex), kind: one.kind, ageHours: one.ageHours })).filter(one => inFocus(one.repo)),
+    routines: snapshot.routines.map(one => ({ repo: id(one.repoIndex), name: one.name, schedule: one.schedule, status: one.status, lastFire: one.lastFire })).filter(one => inFocus(one.repo)),
+    publications: snapshot.publications.map(one => ({ repo: id(one.repoIndex), pr: one.pr, checkState: one.checkState })).filter(one => inFocus(one.repo)),
   };
   const notShown = {
     tasks: snapshot.tasksSaturated ? "more exist" : "",
@@ -730,6 +741,8 @@ export function buildDataDocument(
     JSON.stringify({
       snapshotVersion: 1,
       repos: snapshot.repos.map((_, index) => ({ id: `r${index + 1}` })),
+      // Declared in-band: a narrowed list must never read as a complete one.
+      focus: focusRepoId ?? "all",
       ...lists,
       shedForSize: shed,
       saturated: notShown,

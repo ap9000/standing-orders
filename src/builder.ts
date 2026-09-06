@@ -218,6 +218,7 @@ export type BuildRefusal =
   | "revision-brief"
   | "external"
   | "stopped"
+  | "handoff-incomplete"
   // Phase 3 (attested runtime): the gateway's value-shaped refusals. The
   // first is the race road only — the tick's pre-claim skip keeps the
   // normal road from ever claiming; the second is the harness breaking
@@ -1053,6 +1054,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         maxTurns: effective.maxTurns ?? maxTurns,
         permissionMode,
         skipPermissions: effective.skipPermissions,
+        ...(effective.profile.provider !== "claude" || effective.profile.allowedTools === undefined ? {} : { allowedTools: effective.profile.allowedTools }),
         resumeSession,
         // Minted identity (Phase 3 A5/D5): the plane chooses the session id
         // before spawn where the harness supports it; the gateway stamps it
@@ -1086,6 +1088,10 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // pre-claim skip, or the harness breaking its own protocol. Both dispose
   // through the ordinary refusal road — worktree released, run recorded,
   // strikes per the road's existing budget (C1).
+  if (request.shouldStop?.() === true || store.runStopRequested(request.runId)) {
+    await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
+    return { ok: false, reason: "stopped", message: `Stopped by the operator. Work is preserved in ${worktree}.` };
+  }
   if (invoked.kind === "refused") {
     return {
       ok: false,
@@ -1148,6 +1154,10 @@ export type CapturedBuild = {
  */
 export async function settleProviderOutcome(captured: CapturedBuild, result: AgentOutcome): Promise<BuildResult> {
   const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, clock } = captured;
+  if (request.shouldStop?.() === true || store.runStopRequested(request.runId)) {
+    await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
+    return { ok: false, reason: "stopped", message: `Stopped by the operator. Work is preserved uncommitted in ${worktree}.` };
+  }
   if (result.timedOut) {
     // A mailbox cut down mid-write is quarantined, never ingested: whatever
     // half-sentence it holds, no lease vouches for it as a decision.
@@ -1225,6 +1235,10 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     root,
     sessionId: result.sessionId ?? undefined,
   });
+  if (request.shouldStop?.() === true || store.runStopRequested(request.runId)) {
+    await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
+    return { ok: false, reason: "stopped", message: `Stopped by the operator. Work is preserved in ${worktree}.` };
+  }
   if (parked !== null) {
     if ("fenced" in parked) {
       return {
@@ -1285,20 +1299,27 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     // Missing or unremovable — either way the sweep and the commit-path
     // exclusions keep it out of anybody's repository.
   }
+  const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
+  if (status.code !== 0) return { ok: false, reason: "git", message: firstLine(status.stderr) };
+  const dirty = status.stdout.split("\n").filter(line =>
+    line.trim() !== "" && !line.trimEnd().endsWith(LEASE_MARKER) &&
+    !looksLikeProtocolFile(line.trim().split("/").pop() ?? line.trim()));
   if (!spoken.ok) {
+    if (dirty.length > 0) await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
     return {
       ok: false,
-      reason: "no-op",
+      reason: dirty.length > 0 ? "handoff-incomplete" : "no-op",
       message: spoken.missing
-        ? `the agent finished without writing its handoff ${done} — an attempt that cannot say how it ended did not end well`
+        ? `The agent finished without its completion record. ${dirty.length > 0 ? "Work is preserved; resume to inspect it and repair completion." : "No changed files were found."}`
         : `the handoff could not be read: ${spoken.problem}`,
     };
   }
   const parsedHandoff = parseHandoff(spoken.raw.toString("utf8"));
   if (!parsedHandoff.ok) {
+    if (dirty.length > 0) await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
     return {
       ok: false,
-      reason: "no-op",
+      reason: dirty.length > 0 ? "handoff-incomplete" : "no-op",
       message: `the handoff failed validation: ${parsedHandoff.problems.map(problem => problem.reason).join(", ")}`,
       problems: parsedHandoff.problems,
     };
@@ -1311,19 +1332,6 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     store.recordOutcomeFacts(request.runId, { handoff: handoff.conclusion });
     return { ok: false, reason: "agent-reported", message: handoff.conclusion };
   }
-
-  const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
-  if (status.code !== 0) {
-    return { ok: false, reason: "git", message: firstLine(status.stderr) };
-  }
-  const dirty = status.stdout
-    .split("\n")
-    .filter(
-      line =>
-        line.trim() !== "" &&
-        !line.trimEnd().endsWith(LEASE_MARKER) &&
-        !looksLikeProtocolFile(line.trim().split("/").pop() ?? line.trim()),
-    );
 
   if (handoff.status === "no-change") {
     if (dirty.length > 0) {
@@ -1368,7 +1376,8 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   // The stop fence, re-proved at the last gate before anything commits
   // (audit IV-1): an operator's stop beats an agent's finish. The work
   // stays in the worktree, uncommitted, preserved for the successor.
-  if (request.shouldStop?.() === true) {
+  if (request.shouldStop?.() === true || store.runStopRequested(request.runId)) {
+    await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
     return {
       ok: false,
       reason: "stopped",
@@ -1409,7 +1418,28 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       }, clock());
     }
   }
+  if (made.ok && made.parked === undefined && made.committed && (request.shouldStop?.() === true || store.runStopRequested(request.runId))) {
+    // A stop can arrive during commit/evidence capture. Undo only this
+    // controller's own new commit, keeping every byte staged for resume.
+    // Never move a branch whose head or lease changed under us.
+    const head = await git(GIT, ["rev-parse", "HEAD"], { cwd: worktree });
+    const currentBranch = await git(GIT, ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktree });
+    const recorded = store.getRun(request.runId);
+    if (head.code === 0 && currentBranch.stdout.trim() === branch && head.stdout.trim() === recorded?.headRevision && store.currentLiveLease(taskRef, clock()) === request.leaseId) {
+      await git(GIT, ["reset", "--soft", baseRevision], { cwd: worktree });
+    }
+    await captureRecovery(store, git, worktree, baseRevision, root, request.runId, clock());
+    return { ok: false, reason: "stopped", message: `Stopped before publication. Work is preserved in ${worktree}.` };
+  }
   return made;
+}
+
+/** Snapshot unfinished work under the same bounded, redacting evidence rules. */
+async function captureRecovery(store: Store, git: Runner, worktree: string, base: string, root: string, runId: number, now: Date): Promise<void> {
+  const run = store.getRun(runId);
+  if (run === null || store.currentLiveLease(run.taskRef, now) !== run.leaseId) return;
+  try { await captureParkEvidence(store, git, worktree, base, root, runId, now); }
+  catch { store.addRunNote(runId, "system", "The recovery snapshot could not be captured. The worktree files remain preserved.", now); }
 }
 
 /**
@@ -1583,6 +1613,7 @@ async function ingestPark(args: {
         permissionMode: request.permissionMode ?? "acceptEdits",
         skipPermissions:
           args.profile !== undefined ? profileWantsSkip(args.profile) : (request.skipPermissions ?? false),
+        ...(args.profile?.provider !== "claude" || args.profile.allowedTools === undefined ? {} : { allowedTools: args.profile.allowedTools }),
         resumeSession: resumableRepair ? (sessionId ?? null) : null,
         // Mint a start id ONLY when NOT resuming (Codex gemini verify,
         // finding 3): now that gemini resume is native, a repair that
@@ -1813,6 +1844,12 @@ function brief(
     `- You are on branch ${branch}. Do not switch branches, and never commit to main.`,
     "- Do not push, open a pull request, or run any network write.",
     "- Stay inside this worktree.",
+    "- Complete and verify the requested behavior, not just the code changes.",
+    "  Run the project's relevant checks, inspect the result, and fix failures.",
+    "  For UI work, check the actual flow and layout when a browser is available.",
+    "  A test you could not run is not a passing test. If permissions or missing",
+    "  tools prevent a required check, report failed with the blocked command",
+    "  and the work still needed; do not claim completed or invent validation.",
     "- If the goal needs work outside the scope above, or you reach a judgement",
     "  call somebody else must make — an irreversible choice, a tradeoff the",
     "  scope does not settle — do not guess and do not widen the scope. Park it:",
@@ -1834,9 +1871,10 @@ function brief(
     '    { "version": 1, "status": "completed" | "no-change" | "failed",',
     '      "conclusion": "<one paragraph: what you did, or why nothing was',
     '      needed, or what stopped you>" }',
-    "  completed = you made the changes; no-change = the goal needs no change",
-    "  and the conclusion says why; failed = you could not do it. Write to a",
-    "  temporary name first, then rename it into place.",
+    "  completed = the requested changes and required checks are finished;",
+    "  no-change = the goal needs no change",
+    "  and the conclusion says why; failed = you could not do it. Use the Write",
+    "  tool to write the final filename directly; no shell or rename is needed.",
     ...(answers.length === 0
       ? []
       : [

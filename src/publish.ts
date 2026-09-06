@@ -134,6 +134,8 @@ export async function publishPass(
   store: Store,
   options: {
     repo: string;
+    /** An attended publication action works only on the chosen result. */
+    runId?: number;
     clock?: () => Date;
     exec?: PublishExec;
   },
@@ -143,6 +145,9 @@ export async function publishPass(
   const report: PublishReport = { pushed: 0, opened: 0, adopted: 0, failed: 0, problems: [] };
 
   for (const publication of store.pendingPublications()) {
+    if (options.runId !== undefined && publication.run !== options.runId) continue;
+    const placedRepo = store.refForId(publication.taskRef)?.repo;
+    if (placedRepo != null && placedRepo !== options.repo) continue;
     // The secret gate (audit IV-7): a run whose accepted diff carried a
     // high-confidence secret shape publishes NOTHING — pushing the branch
     // would hand the credential to the remote. Fail closed, say why once,

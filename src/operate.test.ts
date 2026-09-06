@@ -1070,6 +1070,7 @@ describe("providers — identification without spend", () => {
     const probe = async (file: string, args: readonly string[]) => {
       probed.push([file, ...args]);
       if (args[0] === "--version") return { code: 0, stdout: `${file} 9.9.9\n`, stderr: "", timedOut: false, notFound: false };
+      if (args[0] === "auth") return { code: 0, stdout: JSON.stringify({ loggedIn: true, email: "account@example.com", accessToken: "must-not-render" }), stderr: "", timedOut: false, notFound: false };
       if (args[0] === "login") return { code: 0, stdout: "Logged in using ChatGPT\n", stderr: "", timedOut: false, notFound: false };
       return { code: 1, stdout: "", stderr: "", timedOut: false, notFound: false };
     };
@@ -1084,13 +1085,13 @@ describe("providers — identification without spend", () => {
     const codex = report.find(one => one["provider"] === "codex");
     expect(codex).toMatchObject({ installed: true, identity: "Logged in using ChatGPT", measuresCost: false });
     const claude = report.find(one => one["provider"] === "claude");
-    // No non-spending auth probe exists for claude: identity stays null,
-    // history stands in ("never" on a fresh database).
-    expect(claude).toMatchObject({ identity: null, lastSuccessfulRun: null, measuresCost: true });
+    // Claude uses its structured status command without exposing raw identity output.
+    expect(claude).toMatchObject({ identity: "Signed in to Claude Code", lastSuccessfulRun: null, measuresCost: true });
+    expect(lines.join("\n")).not.toContain("must-not-render");
     const openrouter = report.find(one => one["provider"] === "openrouter");
     expect(openrouter).toHaveProperty("keyPresent");
     // Only --version and login status were ever run — nothing that spends.
-    expect(probed.every(one => one[1] === "--version" || one[1] === "login")).toBe(true);
+    expect(probed.every(one => one[1] === "--version" || one[1] === "login" || one[1] === "auth")).toBe(true);
   });
 });
 

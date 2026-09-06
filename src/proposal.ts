@@ -221,6 +221,7 @@ export function fileRoutineProposal(
   store: Store,
   input: RoutineProposalInput,
   now: Date,
+  revision?: { id: number; digest: string },
 ): { ok: true; id: number; digest: string } | ProposalRefusal {
   if (!FILED_VIA.test(input.filedVia)) {
     return refuse("bad-provenance", "filedVia is an audit token: lowercase letters, digits, dashes, colons");
@@ -271,6 +272,17 @@ export function fileRoutineProposal(
   // saves too (finding 19) — approval then refuses until restated.
   const resolvedProfile = resolveScopeProfile(store, repo.repo, undefined, {});
   const routineProfile = resolvedProfile.ok ? resolvedProfile.profile : null;
+  if (revision !== undefined) return store.transact(() => {
+    const existing = store.getRoutine(revision.id);
+    if (existing === null || existing.approvedAt !== null || existing.digest !== revision.digest || existing.repo !== repo.repo || existing.name !== input.name) return refuse("bad-terms", "This recurring task changed. Reopen it before editing.");
+    // The composer edits unapproved drafts only. Terms it does not expose
+    // remain exact, including per-run limits and capability requirements.
+    const retained = { ...terms, requirements: existing.requirements, budgetPerRunMicrousd: existing.budgetPerRunMicrousd };
+    const profile = routineProfile ?? existing.profile ?? null;
+    const digest = routineDigestOf(retained, profile);
+    store.updateRoutineTerms(existing.id, { ...retained, digest, profile }, now);
+    return { ok: true as const, id: existing.id, digest };
+  });
   const created = store.createRoutine(
     {
       name: input.name,

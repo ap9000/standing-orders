@@ -58,6 +58,7 @@ export type Invocation = {
   maxTurns: number;
   permissionMode: string;
   skipPermissions: boolean;
+  allowedTools?: readonly string[];
   /** Resume this session (repair). Meaningless across providers. */
   resumeSession: string | null;
   /** Claude's native dollar cap (tournament stage 3b) — the harness stops
@@ -163,6 +164,7 @@ const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
  */
 export const claudeHeldArgv = (invocation: Omit<Invocation, "brief">): string[] => [
   "-p",
+  ...(invocation.allowedTools === undefined || invocation.allowedTools.length === 0 ? [] : ["--allowedTools", ...invocation.allowedTools]),
   ...(invocation.resumeSession === null ? [] : ["--resume", invocation.resumeSession]),
   "--input-format",
   "stream-json",
@@ -190,6 +192,7 @@ const claudeArgv = (invocation: Invocation): string[] => [
   "--output-format",
   "stream-json",
   "--verbose",
+  ...(invocation.allowedTools === undefined || invocation.allowedTools.length === 0 ? [] : ["--allowedTools", ...invocation.allowedTools]),
   "--max-turns",
   String(invocation.maxTurns),
   ...(invocation.skipPermissions
@@ -855,7 +858,7 @@ export function inspectionOf(provider: ProviderId): ProviderInspection {
     id: provider,
     binary: adapter.binary,
     identityProbe:
-      provider === "codex" || provider === "openrouter" ? ["login", "status"] : null,
+      provider === "claude" ? ["auth", "status", "--json"] : provider === "codex" || provider === "openrouter" ? ["login", "status"] : null,
     requiresEnv: provider === "openrouter" ? OPENROUTER_ENV_KEY : null,
     measuresCost: reportsCost(provider),
   };

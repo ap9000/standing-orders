@@ -390,6 +390,25 @@ describe("the pool, against real git", () => {
     expect(existsSync(join(leased.worktree.path, "scratch.txt"))).toBe(true);
   });
 
+  test.each(["stopped", "handoff-incomplete"])("%s resumes the same tracked and untracked work, with a recovery patch", async reason => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    store.createTask({ id: "t-resume", title: "Recover this work" }, T0);
+    const taskRef = store.refFor("built-in", "t-resume").id;
+    const first = await pool.lease({ repo, branch: "feat/resume", base: "main", runner: "builder-1", taskRef, now: T0 });
+    if (!first.ok) throw new Error(first.message);
+    const runId = store.startRun({ taskRef, leaseId: "interrupted", runner: "builder-1", branch: "feat/resume", worktree: first.worktree.path, now: T0 });
+    await writeFile(join(first.worktree.path, "README.md"), "preserved edits\n");
+    await writeFile(join(first.worktree.path, "new.ts"), "preserved new file\n");
+    store.finishRun(runId, { outcome: "interrupted", reason, now: later(1_000) });
+    await pool.release(first.worktree.path, later(1_000));
+    const second = await pool.lease({ repo, branch: "feat/resume", runner: "builder-1", taskRef, now: later(2_000), reclaim: { evidenceRoot: join(base, "evidence") } });
+    if (!second.ok) throw new Error(second.message);
+    const { readFile } = await import("node:fs/promises");
+    expect(await readFile(join(second.worktree.path, "README.md"), "utf8")).toBe("preserved edits\n");
+    expect(await readFile(join(second.worktree.path, "new.ts"), "utf8")).toBe("preserved new file\n");
+    expect(await readFile(second.reclaimed!, "utf8")).toContain("preserved new file");
+  });
+
   test("a task's own leftover is kept as a patch and the tree reset for the retry; another task's, or a lease without reclaim, still refuses", async () => {
     const pool = new WorktreePool(store, { root: join(base, "pool") });
     const evidence = join(base, "evidence");

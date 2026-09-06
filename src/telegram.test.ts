@@ -174,7 +174,7 @@ describe("the telegram bridge", () => {
     expect(binding).toMatchObject({ chatId: String(CHAT), userId: String(USER), approver: "alex" });
     // The confirmation names the approver, so a hijacked code is visible.
     const reply = script.calls.find(call => call.method === "sendMessage");
-    expect(String(reply?.params["text"])).toContain("answers as alex");
+    expect(String(reply?.params["text"])).toContain("answer requests as alex");
   });
 
   test("a wrong code, a group chat, and a second pairing all get silence", async () => {

@@ -1,8 +1,8 @@
 /**
- * The Telegram bridge: decisions out, answers back, zero tokens spent.
+ * The Telegram bridge: authenticated decisions and optional queued chat.
  *
- * This is channel plumbing — no LLM is anywhere in this path, and everything
- * it renders is deterministic. The security model, in one breath: a chat is
+ * Decision handling is deterministic and spends no model tokens. The console
+ * separately answers queued questions through its shared Chat engine. A chat is
  * not a person, so pairing is a local authenticated act that binds one
  * private chat AND one immutable user id to one approver generation; a
  * button is not a command, so callback_data carries only an opaque one-time
@@ -23,6 +23,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validateNote } from "./decision.js";
 import type { Store, Decision, Notification, TelegramBinding } from "./store.js";
+import { enqueueTelegramQuestion, recordTelegramNotification } from "./telegram-chat.js";
+import { telegramProgress } from "./telegram-progress.js";
+import { queueTelegramConfirmation } from "./telegram-chat-actions.js";
+import { telegramMedia } from "./chat-media.js";
 
 /** The environment name — and therefore the name the builder strips from agents. */
 export const TOKEN_ENV = "STANDING_ORDERS_TELEGRAM_TOKEN";
@@ -156,6 +160,11 @@ export function hashPairingCode(code: string): string {
   return createHash("sha256").update(code, "utf8").digest("hex");
 }
 
+/** A browser's Start link can bind only to the bot the operator reviewed. */
+export function hashTelegramStartCode(botId: string, code: string): string {
+  return hashPairingCode(`telegram-start:${botId}:${code}`);
+}
+
 /** 128 bits, hex — pasteable, and not guessable inside any code's lifetime. */
 export function mintPairingCode(): string {
   return randomBytes(16).toString("hex");
@@ -195,6 +204,8 @@ export async function bridgePass(
     /** false: inbound only — another channel is primary and carries the
      * pages; taps and replies still land here. */
     deliver?: boolean;
+    /** The console drains ordinary messages through its shared Chat engine. */
+    chat?: boolean;
   },
 ): Promise<{ ok: true; report: BridgeReport } | { ok: false; reason: "bridge-busy"; message: string }> {
   const clock = options.clock ?? (() => new Date());
@@ -216,7 +227,7 @@ export async function bridgePass(
     if (options.deliver !== false) {
       await deliverOutbox(store, botId, transport, owner, clock, report);
     }
-    await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report);
+    await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.chat);
   } finally {
     // Handed back so the next cron firing is not told busy for the rest of
     // this pass's TTL. A crash skips this and the lease expires instead —
@@ -274,6 +285,8 @@ export async function followBridge(
     owner?: string;
     /** false: inbound only; another channel is primary. */
     deliver?: boolean;
+    /** Re-read each cycle: the console can connect while this worker runs. */
+    chat?: boolean | (() => boolean);
     pollSeconds?: number;
     /** One line per cycle that did something — the follower's narration hook. */
     onCycle?: (report: BridgeReport) => void;
@@ -320,6 +333,7 @@ export async function followBridge(
       }
       await drainUpdates(
         store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal,
+        options.chat,
       );
 
       total.cycles++;
@@ -478,6 +492,7 @@ async function deliverOne(
       const sent = await send(transport, binding.chatId, part);
       if (!sent.ok) return { ok: false, error: sent.error };
       last = sent.messageId;
+      recordTelegramNotification(store, binding, sent.messageId, notification.id);
     }
     return { ok: true, receipt: receiptFor(botId, binding.chatId, last) };
   }
@@ -510,6 +525,7 @@ async function deliverOne(
     // routes to this decision, exactly (Codex free-text review, finding 1).
     if (sent.messageId !== null) {
       store.recordTelegramDecisionMessage(binding.id, binding.chatId, sent.messageId, decision.id, clock());
+      recordTelegramNotification(store, binding, sent.messageId, notification.id);
     }
   }
 
@@ -548,6 +564,7 @@ async function deliverOne(
       sent.messageId,
     );
     store.recordTelegramDecisionMessage(binding.id, binding.chatId, sent.messageId, decision.id, clock());
+    recordTelegramNotification(store, binding, sent.messageId, notification.id);
   }
   return { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) };
 }
@@ -597,7 +614,7 @@ type Update = {
     message_id: number;
     text?: string;
     chat?: { id: number; type?: string };
-    from?: { id: number };
+    from?: { id: number; is_bot?: boolean };
     reply_to_message?: { message_id: number };
     /** Presence of any of these disqualifies a note: only direct, initial,
      * plain text counts as authored-and-confirmed by the paired operator. */
@@ -621,6 +638,7 @@ type Context = {
   transport: TelegramTransport;
   clock: () => Date;
   report: BridgeReport;
+  chat: boolean;
 };
 
 async function drainUpdates(
@@ -634,8 +652,9 @@ async function drainUpdates(
   report: BridgeReport,
   pollSeconds = 0,
   signal?: AbortSignal,
+  chat: boolean | (() => boolean) = false,
 ): Promise<void> {
-  const context: Context = { store, botId, transport, clock, report };
+  const context: Context = { store, botId, transport, clock, report, chat: false };
   let offset = cursor + 1;
 
   for (let page = 0; page < PAGE_BUDGET; page++) {
@@ -657,6 +676,8 @@ async function drainUpdates(
     if (updates.length === 0) return;
 
     for (const update of updates) {
+      // Configuration may have changed while getUpdates was long-polling.
+      context.chat = typeof chat === "function" ? chat() : chat;
       const effects = applyUpdate(context, update);
       // Effects are Telegram-side conveniences — acks, edits, replies. They
       // retry-or-drop; they never decide whether the cursor moves, because
@@ -708,15 +729,45 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
   const message = update.message as NonNullable<Update["message"]>;
   const chat = message.chat;
   const from = message.from;
-  const pair = /^\/pair\s+([0-9a-f]{32})\s*$/.exec(message.text ?? "");
+  const pair = /^\/(pair|start)\s+([0-9a-f]{32})\s*$/.exec(message.text ?? "");
 
   if (pair === null && chat !== undefined && from !== undefined) {
+    if (context.chat) {
+      const binding = store.liveTelegramBinding(botId);
+      if (binding === null || !Number.isSafeInteger(message.message_id) || message.message_id <= 0 || chat.type !== "private" || String(chat.id) !== binding.chatId ||
+        String(from.id) !== binding.userId || from.is_bot === true || message.forward_origin !== undefined ||
+        message.forward_date !== undefined || message.via_bot !== undefined || message.sender_chat !== undefined) {
+        report.ignored++; return;
+      }
+      // Plain replies are conversation. The existing explicit note path remains
+      // available without ever interpreting a question as a decision answer.
+      if (message.text?.startsWith("/note ") && message.reply_to_message !== undefined) {
+        applyNote(context, { ...update, message: { ...message, text: message.text.slice(6) } }, effects);
+        return;
+      }
+      const media = telegramMedia(message as Record<string, unknown>);
+      const help = message.text === "/start" || message.text === "/help"
+        ? "You're connected to Standing Orders. Ask about your projects, reply to an alert, or send a screenshot, PDF, or text document (up to 5 MB). Voice notes need transcription enabled in Settings → Telegram. Name a project to focus on it, or say ‘all projects’. Proposed changes appear as confirmation buttons and also in app Chat."
+        : (message.text === undefined || message.caption !== undefined) && media === null
+          ? "Please send a text question, screenshot, PDF, text document, or voice note."
+          : enqueueTelegramQuestion(store, binding, { updateId: update.update_id, messageId: String(message.message_id),
+              replyTo: message.reply_to_message === undefined ? null : String(message.reply_to_message.message_id),
+              message: message.text ?? message.caption ?? (media?.kind === "voice" ? "Please respond to my voice note." : "Please help me understand this attachment.") }, clock());
+      if (help === null && media !== null) store.raw().prepare("UPDATE telegram_chat_detail SET attachment_json = ? WHERE request = ?").run(JSON.stringify(media), update.update_id);
+      store.raw().prepare("UPDATE telegram_update SET result = ? WHERE update_id = ?").run(help === null ? "chat-queued" : "chat-help", update.update_id);
+      if (help !== null) effects.push(async () => {
+        await transport("sendMessage", { chat_id: binding.chatId, text: help,
+          reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true }, link_preview_options: { is_disabled: true } });
+      });
+      else effects.push(() => telegramProgress(store, binding, update.update_id, transport));
+      return;
+    }
     // Not a pairing: maybe a free-text note. Every condition or silence.
     applyNote(context, update, effects);
     return;
   }
 
-  // Only /pair, only in a private chat, only with the sender on the record.
+  // Only a pairing command, only in a private chat, with the sender on record.
   // A group is exactly where "the chat" and "the person" diverge, which is
   // why a group cannot pair at all.
   if (pair === null || chat === undefined || chat.type !== "private" || from === undefined) {
@@ -726,7 +777,7 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
 
   const consumed = store.consumeTelegramPairing(
     {
-      codeHash: hashPairingCode(pair[1] as string),
+      codeHash: pair[1] === "start" ? hashTelegramStartCode(botId, pair[2] as string) : hashPairingCode(pair[2] as string),
       botId,
       chatId: String(chat.id),
       userId: String(from.id),
@@ -748,7 +799,9 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
     // "paired" line is annoying; a paired chat that never heard so is worse.
     await transport("sendMessage", {
       chat_id: chatId,
-      text: `paired: this chat now answers as ${approver}`,
+      text: context.chat
+        ? `Connected to Standing Orders as ${approver}. Ask me about your projects or reply to an alert. You can continue the same conversation in Chat in the app. Use decision buttons when something needs your approval.`
+        : `Connected to Standing Orders. This private chat can now receive updates and answer requests as ${approver}.`,
       link_preview_options: { is_disabled: true },
     });
   });
@@ -908,6 +961,12 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     return;
   }
 
+  if (token.startsWith("cp:")) {
+    const queued = context.chat && queueTelegramConfirmation(store, binding, update.update_id, token, String(message.message_id), clock());
+    ack(queued ? "Checking this change…" : "This card expired. Ask me for a fresh proposal.");
+    if (!queued) report.ignored++;
+    return;
+  }
   const action = store.getTelegramAction(token);
   if (
     action === null ||

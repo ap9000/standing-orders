@@ -27,14 +27,24 @@ import { reportsCost } from "./provider.js";
 
 export type Schedule =
   | { kind: "every"; minutes: number }
-  | { kind: "daily"; hhmm: string };
+  | { kind: "daily"; hhmm: string; timezone?: string }
+  | { kind: "weekly"; day: number; hhmm: string; timezone?: string };
+
+export const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
+
+export function validTimezone(value: string): boolean {
+  if (!/^[A-Za-z0-9_+/-]{1,80}$/.test(value)) return false;
+  try { new Intl.DateTimeFormat("en", { timeZone: value }).format(0); return true; }
+  catch { return false; }
+}
 
 /** Bounds a person would pick on purpose: 5 minutes to 7 days. */
 export const MIN_EVERY_MINUTES = 5;
 export const MAX_EVERY_MINUTES = 7 * 24 * 60;
 
 /**
- * `every:<minutes>` or `daily:<HH:MM>` (UTC, and every surface says so).
+ * Existing daily schedules remain UTC. Calendar schedules may name an IANA
+ * timezone, whose wall-clock time stays fixed across daylight saving changes.
  * No cron expressions in v1 — a schedule the operator cannot read at a
  * glance is a schedule they cannot honestly approve.
  */
@@ -45,20 +55,23 @@ export function parseSchedule(text: string): Schedule | null {
     if (minutes < MIN_EVERY_MINUTES || minutes > MAX_EVERY_MINUTES) return null;
     return { kind: "every", minutes };
   }
-  const daily = /^daily:([01][0-9]|2[0-3]):([0-5][0-9])$/.exec(text);
-  if (daily !== null) {
-    return { kind: "daily", hhmm: `${daily[1]}:${daily[2]}` };
+  const calendar = /^(daily|weekly:[0-6]):([01][0-9]|2[0-3]):([0-5][0-9])(?:@([A-Za-z0-9_+/-]{1,80}))?$/.exec(text);
+  if (calendar !== null) {
+    const timezone = calendar[4];
+    if (timezone !== undefined && !validTimezone(timezone)) return null;
+    const time = { hhmm: `${calendar[2]}:${calendar[3]}`, ...(timezone === undefined ? {} : { timezone }) };
+    return calendar[1] === "daily" ? { kind: "daily", ...time } : { kind: "weekly", day: Number(calendar[1]!.slice(-1)), ...time };
   }
   return null;
 }
 
 export function scheduleText(schedule: Schedule): string {
-  return schedule.kind === "every" ? `every:${schedule.minutes}` : `daily:${schedule.hhmm}`;
+  return schedule.kind === "every" ? `every:${schedule.minutes}` : `${schedule.kind === "weekly" ? `weekly:${schedule.day}` : "daily"}:${schedule.hhmm}${schedule.timezone === undefined ? "" : `@${schedule.timezone}`}`;
 }
 
 /** The schedule, in words an operator agrees to. */
 export function describeSchedule(schedule: Schedule): string {
-  if (schedule.kind === "daily") return `daily at ${schedule.hhmm} UTC`;
+  if (schedule.kind !== "every") return `${schedule.kind === "daily" ? "daily" : `every ${WEEKDAYS[schedule.day]}`} at ${schedule.hhmm} ${schedule.timezone ?? "UTC"}`;
   const { minutes } = schedule;
   if (minutes % (24 * 60) === 0) return `every ${minutes / (24 * 60)} day(s)`;
   if (minutes % 60 === 0) return `every ${minutes / 60} hour(s)`;
@@ -74,7 +87,7 @@ export function firstFireAt(schedule: Schedule, now: Date): string {
   if (schedule.kind === "every") {
     return new Date(now.getTime() + schedule.minutes * 60_000).toISOString();
   }
-  return nextDaily(schedule.hhmm, now);
+  return nextCalendar(schedule, now);
 }
 
 /**
@@ -84,7 +97,7 @@ export function firstFireAt(schedule: Schedule, now: Date): string {
  * later firing by its lateness.
  */
 export function nextFireAt(schedule: Schedule, anchorIso: string, now: Date): string {
-  if (schedule.kind === "daily") return nextDaily(schedule.hhmm, now);
+  if (schedule.kind !== "every") return nextCalendar(schedule, now);
   const interval = schedule.minutes * 60_000;
   const anchor = new Date(anchorIso).getTime();
   const elapsed = now.getTime() - anchor;
@@ -93,15 +106,30 @@ export function nextFireAt(schedule: Schedule, anchorIso: string, now: Date): st
   return new Date(anchor + steps * interval).toISOString();
 }
 
-function nextDaily(hhmm: string, now: Date): string {
-  const [hours, minutes] = hhmm.split(":").map(Number);
-  const candidate = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hours ?? 0, minutes ?? 0, 0, 0,
-  ));
-  if (candidate.getTime() <= now.getTime()) {
-    candidate.setUTCDate(candidate.getUTCDate() + 1);
+function nextCalendar(schedule: Exclude<Schedule, { kind: "every" }>, now: Date): string {
+  const format = new Intl.DateTimeFormat("en-US", { timeZone: schedule.timezone ?? "UTC", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  // Represent wall-clock components as a UTC number solely for arithmetic.
+  const wall = (instant: number) => {
+    const parts = Object.fromEntries(format.formatToParts(instant).map(part => [part.type, part.value]));
+    return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
+  };
+  const localNow = new Date(wall(now.getTime()));
+  const [hour, minute] = schedule.hhmm.split(":").map(Number);
+  const today = Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate(), hour, minute);
+  for (let days = 0; days <= 15; days++) {
+    const target = today + days * 86_400_000;
+    if (schedule.kind === "weekly" && new Date(target).getUTCDay() !== schedule.day) continue;
+    // Nearby dates expose both offsets around a daylight-saving transition.
+    // A missing clock time skips its slot. An ambiguous time uses the first
+    // occurrence only, even if the scheduler advances during the repeated hour.
+    const offsets = [...new Set([-36, 0, 36].map(hours => { const sample = target + hours * 3_600_000; return wall(sample) - sample; }))];
+    const matches = offsets.map(offset => target - offset).filter(instant => wall(instant) === target);
+    if (matches.length > 0) {
+      const first = Math.min(...matches);
+      if (first > now.getTime()) return new Date(first).toISOString();
+    }
   }
-  return candidate.toISOString();
+  throw new Error("No calendar occurrence within the next fifteen days");
 }
 
 /** Every term the digest must bind — a change to any is a different order. */
@@ -172,7 +200,7 @@ export function validateRoutineTerms(terms: RoutineTerms): RoutineProblem[] {
   if (parseSchedule(terms.schedule) === null) {
     problems.push({
       field: "schedule",
-      problem: `\`every:<minutes>\` (${MIN_EVERY_MINUTES}–${MAX_EVERY_MINUTES}) or \`daily:<HH:MM>\` (UTC)`,
+      problem: `an interval of ${MIN_EVERY_MINUTES}–${MAX_EVERY_MINUTES} minutes, or a daily or weekly time with a valid timezone`,
     });
   }
   if (terms.costCeilingUsd !== null && (!Number.isFinite(terms.costCeilingUsd) || terms.costCeilingUsd <= 0)) {

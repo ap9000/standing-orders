@@ -72,7 +72,7 @@ export type Disposition =
       sealed: boolean;
     }
   /** The standalone road's simple record: outcome written, nothing else. */
-  | { kind: "recorded"; outcome: "failed" | "refused" }
+  | { kind: "recorded"; outcome: "failed" | "refused" | "interrupted" }
   | { kind: "invariant"; reason: string };
 
 /** The reasons tick classifies as the attempt itself breaking. */
@@ -125,6 +125,15 @@ export function maybeRequestAutoReview(store: Store, repo: string, runId: number
 }
 
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
+  // The stop check and accepted completion share a write transaction. A
+  // request arriving while git commits must still prevent publication.
+  return context.store.transact(() => disposeSettledOutcome(context,
+    context.store.runStopRequested(context.runId)
+      ? { ok: false, reason: "stopped", message: "Stopped by the operator. Work is preserved; resume when ready." }
+      : result));
+}
+
+function disposeSettledOutcome(context: DisposeContext, result: BuildResult): Disposition {
   const { store, policy, leaseId, runId, taskId, taskRef, runner, repo, branch, origin, provider, model, worktreePath, clock } =
     context;
 
@@ -300,6 +309,20 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
 
   // ---- refusals and failures -----------------------------------------------
 
+  if (result.reason === "stopped" || result.reason === "handoff-incomplete") {
+    if (policy === "tick") {
+      if (!store.pauseInterruptedRun(runId, result.reason, result.message, clock())) {
+        store.finishRun(runId, { outcome: "refused", reason: "fenced", now: clock() });
+        return { kind: "fenced" };
+      }
+    } else {
+      store.recordOutcomeFacts(runId, { handoff: result.message });
+      store.finishRun(runId, { outcome: "interrupted", reason: result.reason, now: clock() });
+      if (leaseId !== undefined) release(store, leaseId, clock());
+    }
+    return { kind: "recorded", outcome: "interrupted" };
+  }
+
   if (policy === "continuation") {
     // The taskless failure (v4 Q7): the run says what happened, the claim
     // releases — NO strikes, NO holds, NO done→failed demotion; three
@@ -374,7 +397,7 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
         ? "agent-reported"
         : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
           ? "no-op"
-          : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "stopped" || result.reason === "provider-unattested" || result.reason === "provider-protocol"
+          : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "provider-unattested" || result.reason === "provider-protocol"
             ? "retryable-infra"
             : result.reason === "commit-failure"
               ? "commit-failure"

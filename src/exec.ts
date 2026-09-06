@@ -26,6 +26,14 @@ export type RunOptions = {
   timeoutMs?: number;
   maxBuffer?: number;
   /**
+   * Written to the child's stdin, which is then closed. For input a command
+   * must not carry on its command line: argv is world-readable through `ps`,
+   * and the unified chat's prompt carries the operator's own project state.
+   * Honoured by the buffered `run` transport only — the streaming ones and
+   * the held session own their stdin for the protocol they speak.
+   */
+  input?: string;
+  /**
    * Extra environment, merged over the process's own. A capability probe is a
    * question about an environment, and a test has to be able to construct the
    * environment the question is about.
@@ -155,6 +163,17 @@ export function terminateLiveProviders(): number {
   return terminated;
 }
 
+/** Stop only a child still owned by this process, never an arbitrary pid. */
+export function terminateProvider(pid: number): boolean {
+  for (const child of liveProviders) {
+    if (child.pid === pid) {
+      killGroup(child);
+      return true;
+    }
+  }
+  return false;
+}
+
 /** The one place a child's environment is decided (audit IV-5). */
 /**
  * Chat credentials never reach a child process (Codex chat v3 review,
@@ -249,6 +268,19 @@ export function run(file: string, args: readonly string[], options: RunOptions =
   const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER } = options;
   const childEnv = resolveChildEnv(options);
 
+  // The group transport opens stdin as `ignore`, so input given here would
+  // reach the child as an immediate EOF — an empty prompt answered as
+  // though it were the real one. Refused loudly instead of silently.
+  if (options.input !== undefined && options.processGroup === true) {
+    return Promise.resolve({
+      code: 1,
+      stdout: "",
+      stderr: "input is not supported on the process-group transport",
+      timedOut: false,
+      notFound: false,
+    });
+  }
+
   // A provider run needs its own process group; execFile cannot give one,
   // so the buffered path detours through spawn with identical semantics.
   if (options.processGroup === true) {
@@ -266,7 +298,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
   return retryTransientSpawn(
     () =>
       new Promise<SpawnAttempt>(resolve => {
-        execFile(
+        const child = execFile(
           file,
           [...args],
           {
@@ -289,6 +321,17 @@ export function run(file: string, args: readonly string[], options: RunOptions =
             });
           },
         );
+        // stdin, when the caller gave input. A child that exits without
+        // reading it makes the write fail with EPIPE — which is the child's
+        // exit to report, not an error of its own, so it is absorbed here
+        // and the callback above still answers with what the run did.
+        if (options.input !== undefined) {
+          const stdin = child.stdin;
+          if (stdin !== null) {
+            stdin.on("error", () => {});
+            stdin.end(options.input);
+          }
+        }
       }),
   );
 }

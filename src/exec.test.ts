@@ -21,6 +21,14 @@ describe("run", () => {
     expect(result.notFound).toBe(false);
   });
 
+  test("sends multiline input over stdin without including it in argv", async () => {
+    const input = "Private task description\nKeep line breaks and Unicode: café";
+    const result = await run(NODE, ["-e", "let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>process.stdout.write(JSON.stringify({input:s,args:process.argv})));"], { input });
+    expect(result.code).toBe(0);
+    const output = JSON.parse(result.stdout);
+    expect(output.input).toBe(input); expect(output.args).not.toContain(input);
+  });
+
   test("reports a non-zero exit as a result rather than throwing", async () => {
     // `git` fails routinely — outside a repo, on a bad ref. Failure is data.
     const result = await run(NODE, ["-e", "process.exit(3)"]);

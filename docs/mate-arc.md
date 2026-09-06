@@ -223,10 +223,25 @@ Codex read commit 749d328 against this spec and found 3 critical, 8 high,
   `/queue/move`, `/t/:id/hold|unhold`, `POST /d/:id/answer`, and the
   password ceremonies for scope approval, irreversible answers, and cancel.
   The mate has no tool that mutates state; it has tools that *propose*.
-- **Fleet chat v13's transport stays.** Direct provider call over fetch, no
-  CLI spawn, no filesystem, capped bodies, the strict wrapper parser, worst-
-  case reservation against the weekly ceiling, the latch on unknown spend.
-  The mate adds a bounded tool loop *inside* that contract (§3).
+- **Fleet chat v13's transport stays** for the API adapter. Direct provider
+  call over fetch, no CLI spawn, no filesystem, capped bodies, the strict
+  wrapper parser, worst-case reservation against the weekly ceiling, the
+  latch on unknown spend. The mate adds a bounded tool loop *inside* that
+  contract (§3).
+- **The unified chat's local adapter DOES spawn a CLI** (`chat-assistant.ts`),
+  because the Claude Code account this computer is already signed in to is
+  reachable no other way. Everything the fetch transport got by omission it
+  re-establishes by explicit flag — `--tools ""` for no tools at all,
+  `--disallowed-tools mcp__*` with `--strict-mcp-config` for no MCP,
+  `--safe-mode` for no CLAUDE.md, skills, plugins or hooks, `--max-turns 1`,
+  `--no-session-persistence`, `--permission-prompts none` — plus an empty
+  scratch working directory, the prompt on stdin rather than argv, and the
+  same credential stripping the non-spending sign-in probe uses. A
+  permission MODE is not a tool boundary and was never sufficient. It is
+  NOT run under `--bare`: bare reads neither OAuth nor the keychain, so the
+  very account in question could not answer. There is no reservation (a
+  subscription is not a wallet), so the window's ceiling is a meter, and a
+  turn the harness reports no cost for stays UNKNOWN rather than free.
 - **The v13 snapshot rules stay**: explicit repo list = the ceiling's
   admitted repos; admission inside every query before its LIMIT; repo paths
   never leave the process (opaque `r1..rN`); decision recaps, consequences,
@@ -614,3 +629,67 @@ everything, as today.
 12. **A malformed park mailbox is a `malformed-decision`.** The scout AND
     the planner finalizers take which payload broke; the incident and the
     page name it. The planner's own taxonomy was wrong the same way.
+
+---
+
+# The unified chat (console)
+
+One conversation manages every project the console serves. It replaces the
+setup-and-session forms that used to stand between an operator and a
+question, and it is the same thread the CLI reads — `/chat` renders rows,
+never a second store.
+
+## The flow
+
+1. **Open Chat.** It is a rail destination now, not a row in the "More"
+   group. The first line of the page says who is answering: *Claude Code
+   account connected*, *Ready through your API key*, or a warning with the
+   reason and a "Check again" link. The state is a live, non-spending
+   check of this computer's sign-in — never inferred from a saved key.
+2. **Send a message.** With approval passwords off, the first message
+   starts the conversation immediately. With passwords on, confirm once
+   before chatting. Conversation settings contain the 12-hour window and
+   usage limits; subsequent messages need no password.
+3. **Ask in plain language.** No password per message, no session mint, no
+   terminal, no second API key. The assistant is given the same redacted
+   snapshot the mate is given: task ids, titles, states, open questions and
+   their option labels, incident kinds, routine names and schedules, PR
+   numbers and observed check states. Paths, basenames, branches, diffs,
+   notes, decision details, and identities do not go.
+4. **Narrow, or don't.** The chips default to *All projects*. Picking one
+   narrows only what the assistant is SHOWN; the thread is untouched, so
+   switching never costs you the conversation. A project that leaves the
+   ceiling widens the focus back to all. The chips are drawn only for the
+   local adapter, which is the only one that can honour them — the API
+   mate fetches state through its own tools and would ignore the filter.
+5. **Read a proposal as a card.** A task proposal names its project the way
+   you name it, states its goal and what is out of scope, and does nothing.
+   Review task saves one draft and opens its approval page directly.
+   **Nothing runs until you approve.** Back to chat returns to the same
+   conversation.
+6. **Watch it move without leaving.** A confirmed card grows a state badge
+   and one relevant next action. Progress updates automatically; typing a
+   message prevents refreshes from disrupting your draft.
+
+## What is deliberate
+
+- **Which assistant answers is decided at mint and never re-chosen.** The
+  credential on the session says who continues it, so a message cannot
+  change hands — or billing road — between one turn and the next.
+- **A transport that cannot answer does not hide the thread.** A sign-in
+  probe that times out withholds the composer and explains itself; it never
+  shows the start card, because starting a conversation ends the old one
+  and a slow subprocess must not become lost work.
+- **Unknown usage stays unknown.** A subscription turn may carry no dollar
+  figure. Such a turn is marked "usage not reported" in the thread and is
+  not counted in the window's total, which is therefore a floor. A failed
+  or crashed local turn settles nothing: there is no reservation to charge,
+  which is honest about the ledger and silent about the account's own
+  usage.
+- **The window meter and the weekly bound are different numbers.** The
+  ledger's check is a rolling seven days; reusing the window's ceiling for
+  it would have made the second conversation of a week open already spent.
+- **Project names are translated locally.** The assistant sees `r1..rN`;
+  the UI translates these back into readable names. Unique project names
+  in messages become IDs before transmission. Duplicate folder names
+  require an explicit project choice.
