@@ -23,7 +23,7 @@
 import { createHash } from "node:crypto";
 import { hasForbiddenControls, hasDisguisedText } from "./decision.js";
 import { ROUTINE_NAME, parseSchedule } from "./routine.js";
-import type { ChatProviderId } from "./store.js";
+import type { ChatProviderId, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 
 // ---------------------------------------------------------------- limits
 
@@ -162,7 +162,18 @@ export function settleMicrousd(model: string, tokensIn: number, tokensOut: numbe
 
 // ---------------------------------------------------------------- keys
 
-export const CHAT_KEY_ENV: Record<ChatProviderId, string> = {
+export const DIRECT_CHAT_PROVIDERS: readonly DirectChatProviderId[] = ["anthropic-api", "openrouter-api"];
+export const SUBSCRIPTION_CHAT_PROVIDERS: readonly SubscriptionChatProviderId[] = ["claude-subscription", "codex-subscription"];
+
+export function isDirectChatProvider(provider: ChatProviderId): provider is DirectChatProviderId {
+  return (DIRECT_CHAT_PROVIDERS as readonly string[]).includes(provider);
+}
+
+export function isSubscriptionChatProvider(provider: ChatProviderId): provider is SubscriptionChatProviderId {
+  return (SUBSCRIPTION_CHAT_PROVIDERS as readonly string[]).includes(provider);
+}
+
+export const CHAT_KEY_ENV: Record<DirectChatProviderId, string> = {
   "anthropic-api": "ANTHROPIC_API_KEY",
   "openrouter-api": "OPENROUTER_API_KEY",
 };
@@ -173,15 +184,22 @@ export function credentialKeyOf(provider: ChatProviderId, key: string): string {
   return createHash("sha256").update(`standing-orders/chat/v1\u0000${provider}\u0000${key}`).digest("hex");
 }
 
+/** Subscription usage has no API credential to fingerprint. The provider
+ * identity is sufficient because dollar latches do not apply to zero-cost
+ * ledger rows, while switching harnesses still invalidates a live session. */
+export function subscriptionCredentialKey(provider: SubscriptionChatProviderId): string {
+  return credentialKeyOf(provider, "cached-membership-login");
+}
+
 /** Rough shape checks so a pasted password or sentence is refused loudly
  * instead of stored as a "key". Deliberately loose otherwise — vendors
  * change prefixes; the API itself is the real validator. */
-const KEY_SHAPES: Record<ChatProviderId, RegExp> = {
+const KEY_SHAPES: Record<DirectChatProviderId, RegExp> = {
   "anthropic-api": /^sk-[A-Za-z0-9_-]{20,200}$/,
   "openrouter-api": /^sk-[A-Za-z0-9_-]{20,200}$/,
 };
 
-export function plausibleChatKey(provider: ChatProviderId, key: string): boolean {
+export function plausibleChatKey(provider: DirectChatProviderId, key: string): boolean {
   return KEY_SHAPES[provider].test(key.trim());
 }
 
@@ -468,7 +486,7 @@ export type MateHistoryMessage =
  * anything else about the shape is malformed.
  */
 export function parseMateProviderWrapper(
-  provider: ChatProviderId,
+  provider: DirectChatProviderId,
   bytes: Buffer,
 ): { ok: true; answer: MateProviderAnswer } | { ok: false; problem: string } {
   const parsed = strictJsonParse(bytes, WRAPPER_CAP_BYTES, 14);
@@ -568,7 +586,7 @@ export function parseMateProviderWrapper(
 /** The mate's request: system contract, the data document as the first
  * operator message, the history in provider-native shape, the tools. */
 export function composeMateRequest(args: {
-  provider: ChatProviderId;
+  provider: DirectChatProviderId;
   model: string;
   key: string;
   system: string;
@@ -628,7 +646,7 @@ export function composeMateRequest(args: {
 /** The mate's network call: the same transport posture as fleet chat's, the tool-capable parser at the end. */
 export async function performMateRequest(
   request: { url: string; headers: Record<string, string>; body: string },
-  provider: ChatProviderId,
+  provider: DirectChatProviderId,
   signal: AbortSignal,
   fetcher: typeof fetch = fetch,
 ): Promise<{ ok: true; answer: MateProviderAnswer } | { ok: false; problem: string }> {
@@ -647,7 +665,7 @@ export async function performMateRequest(
 }
 
 export function parseProviderWrapper(
-  provider: ChatProviderId,
+  provider: DirectChatProviderId,
   bytes: Buffer,
 ): { ok: true; answer: ProviderAnswer } | { ok: false; problem: string } {
   const parsed = strictJsonParse(bytes, WRAPPER_CAP_BYTES, 12);
@@ -762,7 +780,7 @@ const SYSTEM_RULES = [
 ].join("\n");
 
 export function composeRequest(args: {
-  provider: ChatProviderId;
+  provider: DirectChatProviderId;
   model: string;
   key: string;
   dataDocument: string;
@@ -829,7 +847,7 @@ export async function readCappedBody(response: Response, cap: number): Promise<B
  */
 export async function performChatRequest(
   args: {
-    provider: ChatProviderId;
+    provider: DirectChatProviderId;
     model: string;
     key: string;
     dataDocument: string;

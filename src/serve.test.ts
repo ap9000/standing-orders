@@ -18,6 +18,7 @@ import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT } from "./serve.js";
 import { resolveScopeProfile } from "./agentconfig.js";
+import type { MateProviderAnswer } from "./converse.js";
 
 const T0 = new Date("2026-08-11T22:00:00.000Z");
 
@@ -6836,6 +6837,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
   let evidenceRoot: string;
   let repoDir: string;
   let script: (() => Response)[];
+  let subscriptionAnswers: MateProviderAnswer[];
   let clockNow: Date;
 
   const url = (path: string) => `${base}${path}`;
@@ -6879,6 +6881,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     repoDir = realpathSync(mkdtempSync(join(tmpdir(), "standing-orders-mate-repo-")));
     clockNow = T0;
     script = [];
+    subscriptionAnswers = [];
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
@@ -6898,6 +6901,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
         if (next === undefined) throw new Error("the script ran out");
         return next();
       }) as typeof fetch,
+      subscriptionChatRunner: async () => {
+        const next = subscriptionAnswers.shift();
+        if (next === undefined) throw new Error("the subscription script ran out");
+        return { ok: true, answer: next };
+      },
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -6937,6 +6945,49 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).not.toContain('name="token"');
     expect(thread).toContain("this session: $0.00 of $5.00");
     expect(thread).toContain('action="/chat/mate/end"');
+  });
+
+  test("a logged-in Codex membership has no dollar maximum in setup, minting, or the live conversation", async () => {
+    const cookie = await login();
+    let html = await page(cookie);
+    const csrf = csrfFrom(html);
+    const configured = await post(cookie, "/chat/config", {
+      csrf,
+      provider: "codex-subscription",
+      model: "default",
+      "weekly-usd": "100",
+      "daily-turns": "25",
+      token: approverToken,
+    });
+    expect(configured.status).toBe(303);
+    expect(store.getChatConfig()).toMatchObject({ provider: "codex-subscription", model: "default", dailyTurns: 25, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 });
+
+    html = await page(cookie);
+    expect(html).toContain("Codex membership (logged-in CLI)");
+    expect(html).toContain("membership login · no dollar ceiling");
+    expect(html).toContain("no dollar maximum");
+    expect(html).toContain("codex login");
+    expect(html).not.toContain('name="weekly-usd"');
+    expect(html).not.toContain('name="ceiling-usd"');
+    expect(html).not.toContain('name="key"');
+
+    const minted = await post(cookie, "/chat/mate/mint", { csrf, hours: "4", token: approverToken });
+    expect(minted.status).toBe(303);
+    expect(store.activeMateSession("alex", clockNow)).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
+    subscriptionAnswers.push({ text: "The queue is calm.", calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
+    const sent = await post(cookie, "/chat", { csrf, message: "how does it look?" });
+    expect(sent.status).toBe(303);
+    await settle();
+
+    html = await page(cookie);
+    expect(html).toContain("The queue is calm.");
+    expect(html).toContain("membership login · no dollar ceiling");
+    expect(html).not.toContain("this session: $0.00 of $0.00");
+    expect(html).toContain('class="card composer"');
+    expect(html).not.toContain('name="token"');
+    const turn = store.recentMateTurns("alex", 1)[0];
+    expect(turn).toMatchObject({ state: "answered", reservedMicrousd: 0, settledMicrousd: 0, tokensIn: 21, tokensOut: 5 });
+    expect(store.raw().prepare("SELECT provider, reserved_microusd, settled_microusd FROM chat_turn WHERE mate_turn = ?").get(turn?.id)).toEqual({ provider: "codex-subscription", reserved_microusd: 0, settled_microusd: 0 });
   });
 
   test("a turn: the model reads and proposes, the card confirms through the door, a stale card refuses", async () => {

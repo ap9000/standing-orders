@@ -1,5 +1,18 @@
 # Progress
 
+**2026-09-06 — Membership-backed unified chat has no dollar maximum.**
+Chat now accepts `codex-subscription` and `claude-subscription`, reusing the
+local CLI's cached login instead of requiring an API key. The setup screen
+defaults to Codex membership and `default`; weekly and session dollar fields
+disappear for either membership provider, while the daily-turn and expiry
+rails remain. Direct Anthropic and OpenRouter API modes retain their pinned
+prices, pre-dispatch reservations, and mandatory ceilings. Each membership
+turn runs the harness in a deleted temporary directory with repository tools,
+web, apps, MCP, and ambient credential variables disabled; its structured
+tool-call envelope still passes through the mate's proposal-only doors. Schema
+v35 widens the two exact provider CHECKs without losing prior config or turn
+rows.
+
 **2026-09-06 — Chat becomes the unified project workspace.** The mate's
 existing cross-project thread, proposal cards, confirmation doors, and
 spend envelope now sit beside one bounded pulse per admitted project:

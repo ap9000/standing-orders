@@ -9,12 +9,13 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ChatConfig, MateProposal, Store } from "./store.js";
-import { CHAT_KEY_ENV, credentialKeyOf, priceForConfig } from "./converse.js";
+import type { ChatConfig, DirectChatProviderId, MateProposal, Store, SubscriptionChatProviderId } from "./store.js";
+import { CHAT_KEY_ENV, credentialKeyOf, isDirectChatProvider, priceForConfig, subscriptionCredentialKey } from "./converse.js";
 import { verifyApproverByPassword, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, type MateTurnOutcome } from "./mate.js";
 import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
 import { projectName } from "./project.js";
+import type { SubscriptionMateRunner } from "./subscription-chat.js";
 
 export type MateCliSeams = {
   fetcher?: typeof fetch;
@@ -22,6 +23,8 @@ export type MateCliSeams = {
   /** Lines the REPL reads instead of stdin (tests). */
   lines?: AsyncIterable<string> | Iterable<string>;
   clock?: () => Date;
+  /** Subscription harness seam; tests never consume a real membership turn. */
+  subscriptionRunner?: SubscriptionMateRunner;
 };
 
 export type MateCliInput = {
@@ -49,7 +52,7 @@ function money(microusd: number): string {
   return `$${(microusd / 1_000_000).toFixed(2)}`;
 }
 
-function keyFor(config: ChatConfig, databaseFile: string, env: Record<string, string | undefined>): string | null {
+function keyFor(config: ChatConfig & { provider: DirectChatProviderId }, databaseFile: string, env: Record<string, string | undefined>): string | null {
   const fromEnv = env[CHAT_KEY_ENV[config.provider]];
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
   try {
@@ -148,12 +151,15 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     return { code, reason, message };
   };
 
-  if (store.isDemo()) return refuse("demo", "this is a demo database — chat spends money and refuses it");
+  if (store.isDemo()) return refuse("demo", "this is a demo database — chat cannot contact an external model");
   const config = store.getChatConfig();
-  if (config === null) return refuse("unconfigured", "chat is not configured — standing-orders config set chat --provider … --model … --weekly-usd …");
-  if (priceForConfig(config) === null) return refuse("unpriced", `no pinned price for ${config.model} — re-save the chat configuration`);
-  const key = keyFor(config, input.databaseFile, env);
-  if (key === null) return refuse("no-key", `no ${config.provider} key — export ${CHAT_KEY_ENV[config.provider]}, or paste one on the console's chat page`);
+  if (config === null) return refuse("unconfigured", "chat is not configured — choose a membership or direct API provider with standing-orders config set chat");
+  const directProvider = isDirectChatProvider(config.provider) ? config.provider : null;
+  const subscriptionProvider = directProvider === null ? config.provider as SubscriptionChatProviderId : null;
+  const direct = directProvider !== null;
+  if (direct && priceForConfig(config) === null) return refuse("unpriced", `no pinned price for ${config.model} — re-save the chat configuration`);
+  const key = direct ? keyFor(config as ChatConfig & { provider: DirectChatProviderId }, input.databaseFile, env) : null;
+  if (direct && key === null) return refuse("no-key", `no ${directProvider} key — export ${CHAT_KEY_ENV[directProvider]}, or paste one on the console's chat page`);
   const repos = [...input.repos];
   if (repos.length === 0) return refuse("empty-ceiling", "the mate needs projects to see — name them with --repo, or enroll some in the console", MATE_CLI_EXIT.usage);
 
@@ -174,7 +180,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   store.sweepStaleMateTurns(now);
   store.sweepMateThreads(now);
   let session = store.activeMateSession(who.name, now);
-  const credentialKey = credentialKeyOf(config.provider, key);
+  const credentialKey = direct ? credentialKeyOf(directProvider, key as string) : subscriptionCredentialKey(subscriptionProvider as SubscriptionChatProviderId);
   if (session !== null && session.credentialKey !== credentialKey) {
     // A session minted under another provider key cannot be spent by this
     // one (slice-2 review, finding 9): say so, never loop on `not-yours`.
@@ -187,9 +193,9 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     session = null;
   }
   if (session === null) {
-    const ceilingUsd = input.ceilingUsd ?? 5;
+    const ceilingUsd = direct ? (input.ceilingUsd ?? 5) : 0;
     const hours = input.hours ?? 4;
-    if (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000) return refuse("usage", "--ceiling-usd is a dollar amount between 0 and 1000", MATE_CLI_EXIT.usage);
+    if (direct && (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000)) return refuse("usage", "--ceiling-usd is a dollar amount between 0 and 1000", MATE_CLI_EXIT.usage);
     if (!Number.isInteger(hours) || hours < 1 || hours > 24) return refuse("usage", "--hours is a whole number, 1 to 24", MATE_CLI_EXIT.usage);
     const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
     const expiresAt = new Date(now.getTime() + hours * 3_600_000);
@@ -200,10 +206,11 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     );
     session = store.getMateSession(id);
     if (session === null) return refuse("failed", "the session could not be minted", MATE_CLI_EXIT.failed);
-    say(`mate session minted: up to ${money(ceilingMicrousd)} until ${expiresAt.toISOString().slice(0, 16).replace("T", " ")}Z over ${repos.map((one, index) => `r${index + 1} ${projectName(one)}`).join(", ")}`);
-    say(`(the weekly chat ceiling, ${money(config.weeklyCeilingMicrousd)}, still binds above it)`);
+    if (!direct && input.ceilingUsd !== undefined) say("the supplied --ceiling-usd value is ignored for membership usage");
+    say(`mate session minted: ${direct ? `up to ${money(ceilingMicrousd)}` : "subscription usage (no dollar ceiling)"} until ${expiresAt.toISOString().slice(0, 16).replace("T", " ")}Z over ${repos.map((one, index) => `r${index + 1} ${projectName(one)}`).join(", ")}`);
+    if (direct) say(`(the weekly chat ceiling, ${money(config.weeklyCeilingMicrousd)}, still binds above it)`);
   } else {
-    say(`mate session live: ${money(session.spentMicrousd)} of ${money(session.ceilingMicrousd)} spent, until ${session.expiresAt.slice(0, 16).replace("T", " ")}Z`);
+    say(`mate session live: ${direct ? `${money(session.spentMicrousd)} of ${money(session.ceilingMicrousd)} spent` : "subscription usage (no dollar ceiling)"}, until ${session.expiresAt.slice(0, 16).replace("T", " ")}Z`);
   }
   const thread = store.openMateThread(who.name, who.ceilingDigest, now).thread;
 
@@ -237,7 +244,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       const outcome: MateTurnOutcome = { ok: false, refused: "session-ended", message: "this mate session has ended — run chat again to mint one" };
       return outcome;
     }
-    return runMateTurn({ store, who, session: live, thread, config, key, message, ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), clock });
+    return runMateTurn({ store, who, session: live, thread, config, key, message, ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), ...(seams.subscriptionRunner === undefined ? {} : { subscriptionRunner: seams.subscriptionRunner }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), clock });
   };
   const report = (outcome: MateTurnOutcome): void => {
     if (outcome.ok) {

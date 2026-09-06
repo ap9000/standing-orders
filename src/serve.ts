@@ -55,12 +55,15 @@ import {
   buildDataDocument,
   composeRequest,
   credentialKeyOf,
+  isDirectChatProvider,
+  isSubscriptionChatProvider,
   parseAssistantEnvelope,
   performChatRequest,
   priceOf,
   priceForConfig,
   worstCaseForPrice,
   settleForPrice,
+  subscriptionCredentialKey,
   fetchOpenRouterCatalog,
   plausibleChatKey,
   PRICED_MODELS,
@@ -141,15 +144,17 @@ import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, INSTALLATION_SCOPE } from "./agentconfig.js";
-import { isProviderId, reportsCost, PROVIDER_IDS } from "./provider.js";
+import { isProviderId, reportsCost, PROVIDER_IDS, validModelId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
+import type { ChatConfig, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
 
 export type ServeOptions = {
@@ -201,9 +206,12 @@ export type ServeOptions = {
    */
   repos?: readonly string[];
   projectRoots?: readonly string[];
-  /** Injected by tests: the fetch chat turns use, and where chat keys are
-   * read from (defaults to process.env). Chat never spawns anything. */
+  /** Injected by tests: the fetch direct-API chat turns use, and where chat
+   * keys are read from (defaults to process.env). */
   chatFetcher?: typeof fetch;
+  /** Subscription-backed mate transport; injected in tests so no real
+   * Codex or Claude membership turn is consumed. */
+  subscriptionChatRunner?: SubscriptionMateRunner;
   chatEnv?: Record<string, string | undefined>;
   /**
    * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
@@ -1944,7 +1952,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             url.searchParams.get("said") ??
             (ceilingStale ? "the admitted projects changed since your mate session was minted — start a new conversation below; that ends the old one" : null) ??
             takeMateNote(who.session.csrf, null),
-          ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled.config.weeklyCeilingMicrousd) } : {}),
+          ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled) } : {}),
           ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now) } : {}),
         }),
       );
@@ -2141,24 +2149,36 @@ export function createDecisionServer(options: ServeOptions): Server {
     createHash("sha256").update([...ceiling.repos].sort().join("\n")).digest("hex");
 
   type ChatEnablement =
-    | { ok: true; config: NonNullable<ReturnType<Store["getChatConfig"]>>; key: string; keySource: "environment" | "stored"; price: import("./converse.js").ModelPrice; credentialKey: string }
+    | { ok: true; billing: "metered"; config: ChatConfig & { provider: DirectChatProviderId }; key: string; keySource: "environment" | "stored"; price: import("./converse.js").ModelPrice; credentialKey: string }
+    | { ok: true; billing: "subscription"; config: ChatConfig & { provider: SubscriptionChatProviderId }; key: null; keySource: null; price: null; credentialKey: string }
     | { ok: false; code: "demo" | "unscoped" | "roots" | "unresolved" | "empty" | "unconfigured" | "unpriced" | "no-key"; why: string };
 
   /** Every condition re-proved per request — the render and the POST each
    * ask again; nothing is cached into authority. */
   function chatEnablement(): ChatEnablement {
-    if (store.isDemo()) return { ok: false, code: "demo", why: "this is a demo database — chat spends money and refuses it" };
+    if (store.isDemo()) return { ok: false, code: "demo", why: "this is a demo database — chat cannot contact an external model" };
     if (unscopedMode) return { ok: false, code: "unscoped", why: "chat needs an explicit ceiling: restart serve naming repos with --repo" };
     if (ceiling.roots.length > 0) return { ok: false, code: "roots", why: "chat refuses root-derived ceilings — name each repo explicitly with --repo" };
     if (unresolvedRepos.length > 0) return { ok: false, code: "unresolved", why: "a --repo path did not resolve at startup — fix it and restart before chat will run" };
     if (ceiling.repos.length === 0) return { ok: false, code: "empty", why: "the ceiling is empty — chat has nothing it may see" };
     const config = store.getChatConfig();
     if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: standing-orders config set chat" };
+    if (isSubscriptionChatProvider(config.provider)) {
+      return {
+        ok: true,
+        billing: "subscription",
+        config: config as ChatConfig & { provider: SubscriptionChatProviderId },
+        key: null,
+        keySource: null,
+        price: null,
+        credentialKey: subscriptionCredentialKey(config.provider),
+      };
+    }
     const price = priceForConfig(config);
     if (price === null) return { ok: false, code: "unpriced", why: `no pinned price for ${config.model} — re-save the configuration to pin one` };
     const key = chatKeyFor(config.provider);
     if (key === null) return { ok: false, code: "no-key", why: `no ${config.provider} key — paste one below (stored 0600 beside the database, never in it), or export ${CHAT_KEY_ENV[config.provider]} in the serve environment` };
-    return { ok: true, config, key: key.key, keySource: key.source, price, credentialKey: credentialKeyOf(config.provider, key.key) };
+    return { ok: true, billing: "metered", config: config as ChatConfig & { provider: DirectChatProviderId }, key: key.key, keySource: key.source, price, credentialKey: credentialKeyOf(config.provider, key.key) };
   }
 
   /**
@@ -2168,7 +2188,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * database, never echoed whole). The file exists so onboarding lives
    * in the UI; the environment exists so operators who prefer it keep it.
    */
-  function chatKeyFor(provider: ChatProviderId): { key: string; source: "environment" | "stored" } | null {
+  function chatKeyFor(provider: DirectChatProviderId): { key: string; source: "environment" | "stored" } | null {
     const fromEnv = chatEnv[CHAT_KEY_ENV[provider]];
     if (fromEnv !== undefined && fromEnv !== "") return { key: fromEnv, source: "environment" };
     if (options.configDir === undefined) return null;
@@ -2180,7 +2200,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   }
 
-  function storeChatKey(provider: ChatProviderId, key: string): { ok: true } | { ok: false; message: string } {
+  function storeChatKey(provider: DirectChatProviderId, key: string): { ok: true } | { ok: false; message: string } {
     if (options.configDir === undefined) {
       return { ok: false, message: "this server has no config directory — export the key in the serve environment instead" };
     }
@@ -2195,7 +2215,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return { ok: true };
   }
 
-  function forgetChatKey(provider: ChatProviderId): void {
+  function forgetChatKey(provider: DirectChatProviderId): void {
     if (options.configDir === undefined) return;
     try {
       rmFileSync(join(options.configDir, `chat-key-${provider}`));
@@ -2268,7 +2288,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * opened it. Every failure maps to the closed enum BEFORE anything can
    * log it; a turn that may have started but has no usable usage LATCHES
    * (unknown spend blocks the credential until acknowledged).  */
-  async function runChatTurn(turnId: number, session: Session, enabled: ChatEnablement & { ok: true }, userMessage: string, dataDocument: string): Promise<void> {
+  async function runChatTurn(turnId: number, session: Session, enabled: Extract<ChatEnablement, { ok: true; billing: "metered" }>, userMessage: string, dataDocument: string): Promise<void> {
     const started = store.startChatTurn(turnId, new Date());
     if (!started.ok) return;
     const controller = new AbortController();
@@ -4218,33 +4238,40 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `/chat?said=${encodeURIComponent("the stored key file is gone (an environment variable, if set, still applies)")}`);
       }
       const provider = body.get("provider") ?? "";
-      const model = body.get("model") ?? "";
-      const weekly = Number(body.get("weekly-usd") ?? "");
+      const requestedModel = (body.get("model") ?? "").trim();
+      const weeklyText = (body.get("weekly-usd") ?? "").trim();
+      const weekly = Number(weeklyText);
       const daily = (body.get("daily-turns") ?? "").trim() === "" ? 50 : Number(body.get("daily-turns"));
-      if (provider !== "anthropic-api" && provider !== "openrouter-api") {
+      if (provider !== "anthropic-api" && provider !== "openrouter-api" && provider !== "claude-subscription" && provider !== "codex-subscription") {
         return redirect(response, `/chat?said=${encodeURIComponent("pick a chat provider")}`);
+      }
+      const subscription = isSubscriptionChatProvider(provider);
+      const model = requestedModel === "" && subscription ? "default" : requestedModel;
+      if (!validModelId(model)) {
+        return redirect(response, `/chat?said=${encodeURIComponent("the model id must be 1–128 letters, digits, dots, slashes, colons, underscores, or dashes")}`);
       }
       // The key, when pasted, is stored FIRST (0600 file, Telegram-token
       // precedent) so the catalog fetch below can already use it. It never
       // touches the database and is never echoed back.
       const pastedKey = (body.get("key") ?? "").trim();
       if (pastedKey !== "") {
-        const stored = storeChatKey(provider, pastedKey);
+        if (subscription) return redirect(response, `/chat?said=${encodeURIComponent("subscription chat uses the CLI's cached login — do not paste an API key")}`);
+        const stored = storeChatKey(provider as DirectChatProviderId, pastedKey);
         if (!stored.ok) return redirect(response, `/chat?said=${encodeURIComponent(stored.message)}`);
       }
       // The pin: anthropic models come from the compiled table; openrouter
       // models come from OpenRouter's OWN catalog, priced by the authority
       // that will bill them. No price found anywhere = refused, not guessed.
-      let pin = priceOf(model);
+      let pin = subscription ? { inMicrousd: 0, outMicrousd: 0 } : priceOf(model);
       if (provider === "openrouter-api") {
         const catalog = await chatCatalog();
         const hit = catalog?.find(one => one.id === model);
         if (hit !== undefined) pin = hit.price;
       }
-      if (pin === null) {
+      if (!subscription && pin === null) {
         return redirect(response, `/chat?said=${encodeURIComponent(provider === "openrouter-api" ? "that model is not in OpenRouter's catalog (or the catalog is unreachable) — chat cannot reserve spend it cannot bound" : "that model has no pinned price — chat cannot reserve spend it cannot bound")}`);
       }
-      if (!Number.isFinite(weekly) || weekly <= 0) {
+      if (!subscription && (!Number.isFinite(weekly) || weekly <= 0)) {
         return redirect(response, `/chat?said=${encodeURIComponent("the weekly ceiling is a positive dollar amount — chat without one is unbounded, not configured")}`);
       }
       if (!Number.isInteger(daily) || daily <= 0 || daily > 1_000) {
@@ -4255,9 +4282,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           provider,
           model,
           dailyTurns: daily,
-          weeklyCeilingMicrousd: Math.round(weekly * 1_000_000),
-          priceInMicrousd: pin.inMicrousd,
-          priceOutMicrousd: pin.outMicrousd,
+          weeklyCeilingMicrousd: subscription ? 0 : Math.round(weekly * 1_000_000),
+          priceInMicrousd: pin!.inMicrousd,
+          priceOutMicrousd: pin!.outMicrousd,
         },
         who.name,
         now,
@@ -4273,9 +4300,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The one password ceremony of a conversation (§1): it restates the
       // terms — this much, until then, over these projects — and mints the
       // session every later turn debits without asking again.
-      const ceilingUsd = Number((body.get("ceiling-usd") ?? "").trim());
+      const ceilingText = (body.get("ceiling-usd") ?? "").trim();
+      const ceilingUsd = enabled.billing === "subscription" ? 0 : Number(ceilingText);
       const hours = Number((body.get("hours") ?? "").trim());
-      if (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000) {
+      if (enabled.billing === "metered" && (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000)) {
         return redirect(response, `/chat?said=${encodeURIComponent("the session ceiling is a dollar amount between 0 and 1000")}`);
       }
       if (!Number.isInteger(hours) || hours < 1 || hours > 24) {
@@ -4358,12 +4386,15 @@ export function createDecisionServer(options: ServeOptions): Server {
           return redirect(response, `/chat?said=${encodeURIComponent(`a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`)}`);
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, fetcher: chatFetcher, clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
           .catch(() => noteMate(who.session.csrf, null, "the turn failed unexpectedly"));
         return redirect(response, "/chat");
+      }
+      if (enabled.billing === "subscription") {
+        return redirect(response, `/chat?said=${encodeURIComponent("start the conversation first — the one password ceremony opens the subscription-backed session")}`);
       }
       // The password, typed again, on EVERY message (v2 ruling 2): chat is
       // spend, and a seven-day cookie is not a spend credential.
@@ -8346,42 +8377,49 @@ function chatPage(chrome: Chrome, data: {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
     const openrouterModels = data.openrouterModels ?? PRICED_MODELS.filter(one => one.includes("/"));
-    const option = (model: string): string =>
-      `<option value="${escape(model)}"${current?.model === model ? " selected" : ""}>${escape(model)}</option>`;
+    const currentSubscription = current !== null && isSubscriptionChatProvider(current.provider);
+    const models = [...new Set(["default", ...anthropicModels, ...openrouterModels, ...(current === null ? [] : [current.model])])];
     return [
       `<form method="post" action="/chat/config" class="card">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
       `<label>provider<select name="provider">`,
+      `<option value="codex-subscription"${current?.provider === "codex-subscription" ? " selected" : ""}>Codex membership (logged-in CLI)</option>`,
+      `<option value="claude-subscription"${current?.provider === "claude-subscription" ? " selected" : ""}>Anthropic membership (logged-in CLI)</option>`,
       `<option value="anthropic-api"${current?.provider === "anthropic-api" ? " selected" : ""}>anthropic-api (direct API)</option>`,
       `<option value="openrouter-api"${current?.provider === "openrouter-api" ? " selected" : ""}>openrouter-api (direct API)</option>`,
       `</select></label>`,
-      `<label>model <span class="meta">(only models with a pinned price — chat reserves worst-case spend up front)</span><select name="model">`,
-      `<optgroup label="anthropic-api">${anthropicModels.map(option).join("")}</optgroup>`,
-      `<optgroup label="openrouter-api">${openrouterModels.map(option).join("")}</optgroup>`,
-      `</select></label>`,
+      `<label>model <span class="meta">(use default for your membership's current model; direct API models need a pinned price)</span>` +
+        `<input name="model" list="chat-models" value="${escape(current?.model ?? "default")}"><datalist id="chat-models">` +
+        `${models.map(model => `<option value="${escape(model)}"></option>`).join("")}</datalist></label>`,
       data.openrouterModels === null
         ? `<p class="meta">with OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
         : `<p class="meta">${data.openrouterModels.length} models live from OpenRouter's catalog; saving pins today's price — re-save to re-pin</p>`,
-      `<label>weekly ceiling <span class="meta">(dollars per rolling 7 days — required; enforced before every turn)</span>` +
-        `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
+      currentSubscription
+        ? `<p class="meta"><strong>no dollar maximum.</strong> Membership chat uses the plan attached to the logged-in CLI; the daily turn limit and session expiry still apply.</p>`
+        : `<label>weekly ceiling <span class="meta">(direct API only; leave blank when choosing a membership)</span>` +
+          `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
       `<label>daily turns <span class="meta">(default 50)</span>` +
         `<input type="text" name="daily-turns" inputmode="numeric" style="width:8rem" value="${current === null ? "" : String(current.dailyTurns)}"></label>`,
-      `<label>API key <span class="meta">(${data.keyFacts
-        .map(one =>
-          one.state === "none"
-            ? `${escape(one.provider)}: none yet`
-            : one.state === "environment"
-              ? `${escape(one.provider)}: from the environment`
-              : `${escape(one.provider)}: stored ${escape(one.tail ?? "")}`,
-        )
-        .join(" · ")})</span>` +
-        `<input type="password" name="key" placeholder="paste to set or replace — leave empty to keep" autocomplete="off"></label>`,
-      `<label>your password <span class="meta">(this routes spend — typed again, like every spend act)</span>` +
+      currentSubscription
+        ? `<p class="meta">Authenticate on this machine first with ${current?.provider === "codex-subscription" ? `<span class="mono">codex login</span>` : `the <span class="mono">claude</span> CLI`}. Standing Orders reuses that cached login and never stores it.</p>`
+        : `<label>API key <span class="meta">(${data.keyFacts
+          .map(one =>
+            one.state === "none"
+              ? `${escape(one.provider)}: none yet`
+              : one.state === "environment"
+                ? `${escape(one.provider)}: from the environment`
+                : `${escape(one.provider)}: stored ${escape(one.tail ?? "")}`,
+          )
+          .join(" · ")})</span>` +
+          `<input type="password" name="key" placeholder="direct API only — leave empty to keep" autocomplete="off"></label>`,
+      `<label>your password <span class="meta">(typed again to change the provider)</span>` +
         `<input type="password" name="token" autocomplete="current-password"></label>`,
       `<button type="submit">${current === null ? "turn chat on" : "save"}</button>`,
       `</form>`,
-      `<p class="meta">a pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
-        `<span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">OPENROUTER_API_KEY</span>) always wins when set</p>`,
+      currentSubscription
+        ? `<p class="meta">The membership provider runs without repository tools in a temporary directory; Standing Orders remains the only layer that can turn a proposed action into a confirmation card.</p>`
+        : `<p class="meta">a pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
+          `<span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">OPENROUTER_API_KEY</span>) always wins when set</p>`,
     ].join("\n");
   };
   const parts: string[] = [
@@ -8399,10 +8437,11 @@ function chatPage(chrome: Chrome, data: {
     }
     return screen("chat", parts.join("\n"), { chrome });
   }
-  const config = (data.enabled as unknown as { config: { provider: string; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
+  const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
+  const subscription = isSubscriptionChatProvider(config.provider);
   parts.push(
     `<p class="meta">answering with <span class="mono">${escape(config.provider)} · ${escape(config.model)}</span>` +
-      ` — ${data.turnsToday} of ${config.dailyTurns} turns today · ${chatMoney(data.weeklySpent)} of ${chatMoney(config.weeklyCeilingMicrousd)} this rolling week` +
+      ` — ${data.turnsToday} of ${config.dailyTurns} turns today · ${subscription ? "membership login · no dollar ceiling" : `${chatMoney(data.weeklySpent)} of ${chatMoney(config.weeklyCeilingMicrousd)} this rolling week`}` +
       ` · repos: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
     `<p class="meta">what leaves this machine: task ids/titles/states, open questions and option labels, incident kinds, routine names/schedules, PR numbers and observed check states — deliberately, to the configured provider. Paths, branches, diffs, notes, decision details, and identities never do.</p>`,
   );
@@ -8448,15 +8487,17 @@ function chatPage(chrome: Chrome, data: {
         `</div>`,
     );
   }
-  parts.push(
-    `<h2>ask</h2>`,
-    `<form method="post" action="/chat" class="card">`,
-    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<label>message<textarea name="message" rows="3" maxlength="2000"></textarea></label>`,
-    `<label>your password <span class="meta">(every message — chat spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">ask</button>`,
-    `</form>`,
-  );
+  if (!subscription) {
+    parts.push(
+      `<h2>ask</h2>`,
+      `<form method="post" action="/chat" class="card">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<label>message<textarea name="message" rows="3" maxlength="2000"></textarea></label>`,
+      `<label>your password <span class="meta">(every message — chat spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+      `<button type="submit">ask</button>`,
+      `</form>`,
+    );
+  }
   parts.push(
     `<details><summary class="meta">chat settings</summary>`,
     configForm(data.config),
@@ -8511,17 +8552,25 @@ function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string
 }
 
 /** The card that starts a conversation: the one password ceremony (mate arc §1). */
-function mateMintCard(csrf: string, weeklyCeilingMicrousd: number): string {
+function mateMintCard(
+  csrf: string,
+  enabled: { billing: "metered" | "subscription"; config: { provider: ChatProviderId; weeklyCeilingMicrousd: number } },
+): string {
+  const subscription = enabled.billing === "subscription";
   return [
     `<div class="card mate-mint">`,
     `<p><strong>talk to the mate.</strong> <span class="meta">one conversation across every project this console serves — it reads, recaps, and proposes; you confirm each act on a card</span></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<div class="mate-terms">`,
-    `<label>this session may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
+    subscription
+      ? `<span>using your logged-in ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership · no dollar maximum</span>`
+      : `<label>this session may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
     `<label>for <span class="inline-field"><input type="text" name="hours" inputmode="numeric" value="4" style="width:4rem"> hours</span></label>`,
     `</div>`,
-    `<p class="meta">the weekly chat ceiling (${chatMoney(weeklyCeilingMicrousd)}) still binds above it; every turn reserves its worst case first and is refused before it spends when either would be exceeded</p>`,
+    subscription
+      ? `<p class="meta">the session expiry and daily turn limit still bind; your membership's own plan limits remain upstream</p>`
+      : `<p class="meta">the weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above it; every turn reserves its worst case first and is refused before it spends when either would be exceeded</p>`,
     `<label>your password <span class="meta">(once — this mints the session; messages need no password after)</span><input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">start the conversation</button>`,
     `</form>`,
@@ -8689,13 +8738,16 @@ function matePage(chrome: Chrome, data: {
   problem: string | null;
   now: Date;
 }): Screen {
+  const subscription = isSubscriptionChatProvider(data.config.provider);
   const conversation: string[] = [
     `<div class="chat-head"><div><h1>chat</h1>` +
       `<p class="meta">one conversation across every project · the mate proposes, you confirm</p></div>` +
       `<span class="badge badge-running">session live</span></div>`,
     `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
-      `<span>this session: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
-      `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>` +
+      (subscription
+        ? `<span>membership login · no dollar ceiling</span>`
+        : `<span>this session: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
+          `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
       `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
       `<span>until ${escape(data.session.expiresAt.slice(11, 16))}Z</span></div>`,
   ];
@@ -8737,7 +8789,7 @@ function matePage(chrome: Chrome, data: {
   }
   conversation.push(`</div>`);
   if (data.pending !== null) {
-    conversation.push(`<div class="card"><p><strong>thinking…</strong> <span class="meta">turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
+    conversation.push(`<div class="card"><p><strong>thinking…</strong> <span class="meta">turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far${subscription ? " · membership-backed" : `, up to ${chatMoney(data.pending.reservedMicrousd)} reserved`} — this page refreshes itself</span></p></div>`);
     return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${conversation.join("\n")}</section></div>`, { chrome, refreshSeconds: 3 });
   }
   conversation.push(
@@ -8752,7 +8804,7 @@ function matePage(chrome: Chrome, data: {
     data.recent.length === 0
       ? ""
       : `<p class="meta">recent turns: ${data.recent
-          .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
+          .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
           .join(" · ")}</p>`,
     `<p class="meta">chat settings live on this page once the session ends</p>`,
     `</details>`,

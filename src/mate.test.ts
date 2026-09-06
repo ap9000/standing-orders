@@ -3,9 +3,10 @@ import { openStore, type ChatConfig, type Store } from "./store.js";
 import { fileTaskProposal } from "./proposal.js";
 import { propose } from "./scope.js";
 import { ceilingDigestOf, isVerifiedApprover, reproveApprover, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
-import { MATE_MAX_STEPS, MATE_STEP_TEXT_CAP_BYTES, MATE_TOOL_CALL_CAP_BYTES, MATE_TOOL_RESULT_CAP_BYTES, MAX_OUTPUT_TOKENS, credentialKeyOf, mateWorstCaseForPrice, parseMateProviderWrapper } from "./converse.js";
+import { MATE_MAX_STEPS, MATE_STEP_TEXT_CAP_BYTES, MATE_TOOL_CALL_CAP_BYTES, MATE_TOOL_RESULT_CAP_BYTES, MAX_OUTPUT_TOKENS, credentialKeyOf, mateWorstCaseForPrice, parseMateProviderWrapper, subscriptionCredentialKey } from "./converse.js";
 import { runMateTurn, historyFor, MATE_REFUSAL_COPY } from "./mate.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, executeMateTool, redactForMate } from "./mate-tools.js";
+import type { SubscriptionMateRunner } from "./subscription-chat.js";
 
 const T0 = new Date("2026-09-02T12:00:00.000Z");
 const INSIDE = "/repo/inside-PATH-CANARY";
@@ -139,6 +140,37 @@ describe("the mate's turn", () => {
     expect(script.bodies[1]).toContain("\"queued\"");
     // The key rides in the header, never the body.
     expect(script.bodies[0]).not.toContain(KEY);
+  });
+
+  test("a membership-backed turn needs no API key or dollar ceiling, but keeps the tool loop and daily ledger", async () => {
+    const config: ChatConfig = {
+      ...CONFIG,
+      provider: "codex-subscription",
+      model: "default",
+      weeklyCeilingMicrousd: 0,
+      priceInMicrousd: 0,
+      priceOutMicrousd: 0,
+    };
+    const credential = subscriptionCredentialKey("codex-subscription");
+    const live = session(0, 3_600_000, "alex", credential);
+    const requests: Parameters<SubscriptionMateRunner>[0][] = [];
+    const subscriptionRunner: SubscriptionMateRunner = async request => {
+      requests.push(request);
+      return requests.length === 1
+        ? { ok: true, answer: { text: "I will look.", calls: [{ id: "r1", name: "recap", args: {} }], tokensIn: 100, tokensOut: 20, reportedCostMicrousd: null } }
+        : { ok: true, answer: { text: "One decision needs you.", calls: [], tokensIn: 90, tokensOut: 12, reportedCostMicrousd: null } };
+    };
+    const outcome = await runMateTurn({ store, who, session: live, thread: thread(), config, key: null, message: "what needs me?", subscriptionRunner, clock });
+    expect(outcome).toMatchObject({ ok: true, reply: "One decision needs you.", steps: 2, settledMicrousd: 0 });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.history.some(message => message.role === "tool")).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(store.getMateTurn(outcome.turn)).toMatchObject({ state: "answered", reservedMicrousd: 0, settledMicrousd: 0, tokensIn: 190, tokensOut: 32 });
+    expect(store.getMateSession(live.id)?.spentMicrousd).toBe(0);
+    expect(store.chatWeeklySpendMicrousd(credential, clock())).toBe(0);
+    expect(store.raw().prepare("SELECT provider FROM chat_turn WHERE mate_turn = ? ORDER BY id").all(outcome.turn).map(row => row["provider"])).toEqual(["codex-subscription", "codex-subscription"]);
+    expect(store.latchedChatTurns(credential)).toEqual([]);
+    expect(store.chatTurnsToday("alex", clock())).toBe(1);
   });
 
   test("canary: nothing sent to the provider names a path, an approver, a digest, or a consequence — free text included", async () => {

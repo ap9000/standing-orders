@@ -6,6 +6,7 @@ import { realpathSync } from "node:fs";
 import { openStore } from "./store.js";
 import { addApprover } from "./scope.js";
 import { runOperate } from "./operate.js";
+import type { MateProviderAnswer } from "./converse.js";
 
 const T0 = new Date("2026-09-02T12:00:00.000Z");
 type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
@@ -20,6 +21,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
   let token: string;
   let lines: string[];
   let script: (() => Response)[];
+  let subscriptionAnswers: MateProviderAnswer[];
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "standing-orders-mate-cli-"));
@@ -38,6 +40,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     store.close();
     lines = [];
     script = [];
+    subscriptionAnswers = [];
   });
 
   afterEach(async () => {
@@ -58,6 +61,11 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
           if (next === undefined) throw new Error("the script ran out");
           return next();
         }) as typeof fetch,
+        subscriptionRunner: async () => {
+          const next = subscriptionAnswers.shift();
+          if (next === undefined) throw new Error("the subscription script ran out");
+          return { ok: true, answer: next };
+        },
       },
     });
   };
@@ -96,6 +104,23 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--say", "sure?", "--json"])).toBe(0);
     const envelope = JSON.parse(out()) as Record<string, unknown>;
     expect(envelope).toMatchObject({ ok: true, command: "chat", reply: "still b.", proposals: [{ id: 1, kind: "next" }] });
+  });
+
+  test("Codex membership config and chat need neither an API key nor either dollar maximum", async () => {
+    expect(await run(["config", "set", "chat", "--provider", "codex-subscription", "--weekly-usd", "99", "--as", "alex", "--token", token])).toBe(0);
+    expect(out()).toContain("logged-in Codex harness");
+    expect(out()).toContain("no dollar ceiling");
+    expect(out()).toContain("--weekly-usd value was ignored");
+    subscriptionAnswers.push({ text: "All projects are calm.", calls: [], tokensIn: 17, tokensOut: 4, reportedCostMicrousd: null });
+    expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--ceiling-usd", "99", "--say", "status?"] , [], {})).toBe(0);
+    expect(out()).toContain("--ceiling-usd value is ignored");
+    expect(out()).toContain("mate session minted: subscription usage (no dollar ceiling)");
+    expect(out()).toContain("All projects are calm.");
+    const store = openStore(db);
+    expect(store.getChatConfig()).toMatchObject({ provider: "codex-subscription", model: "default", weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 });
+    expect(store.activeMateSession("alex", T0)).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
+    expect(store.recentMateTurns("alex", 1)[0]).toMatchObject({ state: "answered", reservedMicrousd: 0, settledMicrousd: 0 });
+    store.close();
   });
 
   test("the REPL: text is a turn, `confirm N` runs the door, `open N` prints the task, `end` forgets the thread", async () => {

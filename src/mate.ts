@@ -15,7 +15,7 @@
  * (finding 8); and everything the model sees passed `mateView` (finding 9).
  */
 import { Buffer } from "node:buffer";
-import type { ChatConfig, MateProposalKind, MateSession, MateThread, Store } from "./store.js";
+import type { ChatConfig, DirectChatProviderId, MateProposalKind, MateSession, MateThread, Store, SubscriptionChatProviderId } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
 import {
@@ -26,15 +26,18 @@ import {
   buildDataDocument,
   composeMateRequest,
   credentialKeyOf,
+  isDirectChatProvider,
   mateWorstCaseForPrice,
   performMateRequest,
   priceForConfig,
   settleForPrice,
+  subscriptionCredentialKey,
   type MateHistoryMessage,
 } from "./converse.js";
 import { scanForSecrets } from "./evidence.js";
 import { MATE_CONTRACT } from "./mate-contract.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMateTool, mateViewContextFor, redactForMate, toolResultBytes } from "./mate-tools.js";
+import { composeSubscriptionMatePrompt, performSubscriptionMateRequest, type SubscriptionMateRunner } from "./subscription-chat.js";
 
 export const MATE_MESSAGE_MAX_CHARS = 2_000;
 /** The thread's recent history the model sees, most recent first until the cap. */
@@ -48,10 +51,12 @@ export type MateTurnInput = {
   thread: MateThread;
   /** The installation's chat configuration: provider, model, pinned price, caps. */
   config: ChatConfig;
-  /** The provider key; the credential identity is derived from it, never supplied. */
-  key: string;
+  /** Direct API key; subscription providers use their cached harness login. */
+  key: string | null;
   message: string;
   fetcher?: typeof fetch;
+  /** Injected by tests; production invokes the isolated local harness. */
+  subscriptionRunner?: SubscriptionMateRunner;
   clock?: () => Date;
   /** Where evidence lives — get_task reads a scout's report from here. */
   evidenceRoot?: string;
@@ -141,11 +146,18 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   if (!isVerifiedApprover(who) || !reproveApprover(store, who).ok || who.generation !== session.approverGeneration) return refuse("standing");
   // Ruling 9: the session and the thread are bound to the ceiling this surface holds.
   if (session.ceilingDigest !== who.ceilingDigest || thread.ceilingDigest !== who.ceilingDigest) return refuse("ceiling-changed");
-  const price = priceForConfig(config);
-  if (price === null) return refuse("unpriced");
-  // The credential identity is DERIVED from the key (finding 2): the ledger
-  // and the latch it binds to cannot be renamed away by a caller.
-  const credentialKey = credentialKeyOf(config.provider, input.key);
+  const directProvider = isDirectChatProvider(config.provider) ? config.provider : null;
+  const subscriptionProvider = directProvider === null ? config.provider as SubscriptionChatProviderId : null;
+  const direct = directProvider !== null;
+  const price = direct ? priceForConfig(config) : null;
+  if (direct && price === null) return refuse("unpriced");
+  if (direct && input.key === null) return refuse("unpriced");
+  // API accounting binds to the secret credential. A subscription has no
+  // API credential or dollar ledger, but changing harness still ends the
+  // old session through a stable provider-specific identity.
+  const credentialKey = direct
+    ? credentialKeyOf(directProvider, input.key as string)
+    : subscriptionCredentialKey(subscriptionProvider as SubscriptionChatProviderId);
 
   let now = clock();
   store.sweepStaleMateTurns(now);
@@ -154,12 +166,17 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   const snapshot = store.chatSnapshot(who.repos, now);
   const document = redactForMate(buildDataDocument(snapshot).document, view);
   const history: MateHistoryMessage[] = [...historyFor(store, thread.id), { role: "operator", text: message }];
-  const compose = (key: string): { url: string; headers: Record<string, string>; body: string } =>
-    composeMateRequest({ provider: config.provider, model: config.model, key, system: MATE_CONTRACT, dataDocument: document, history, tools: MATE_TOOL_SCHEMAS });
-  // The base body is scanned whole (v2 ruling 4) and measured for the reservation.
-  const base = compose("");
-  if (scanForSecrets(base.body).length > 0) return refuse("secret-in-context");
-  const reserved = mateWorstCaseForPrice(price, Buffer.byteLength(base.body, "utf8"));
+  const composeDirect = (key: string): { url: string; headers: Record<string, string>; body: string } => {
+    if (!direct) throw new Error("not a direct chat provider");
+    return composeMateRequest({ provider: directProvider as DirectChatProviderId, model: config.model, key, system: MATE_CONTRACT, dataDocument: document, history, tools: MATE_TOOL_SCHEMAS });
+  };
+  const composeSubscription = (): string =>
+    composeSubscriptionMatePrompt({ system: MATE_CONTRACT, dataDocument: document, history, tools: MATE_TOOL_SCHEMAS });
+  // The exact outbound base is scanned whole. Only direct API traffic needs
+  // a worst-case dollar reservation; subscription traffic records zero.
+  const base = direct ? composeDirect("").body : composeSubscription();
+  if (scanForSecrets(base).length > 0) return refuse("secret-in-context");
+  const reserved = direct ? mateWorstCaseForPrice(price as NonNullable<typeof price>, Buffer.byteLength(base, "utf8")) : 0;
 
   const opened = store.openMateTurn(
     {
@@ -213,9 +230,10 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     now = clock();
     const remainingMs = TURN_WALL_CLOCK_MS - (now.getTime() - turnStartedAt);
     if (remainingMs <= 0) return fail("timeout", "the turn ran out of time before the model finished", false);
-    const request = compose(input.key);
+    const request = direct ? composeDirect(input.key as string) : composeSubscription();
     // Tool results join the outbound body: scanned again before every dispatch.
-    if (scanForSecrets(request.body).length > 0) {
+    const outbound = typeof request === "string" ? request : request.body;
+    if (scanForSecrets(outbound).length > 0) {
       return fail("secret-refused", "a tool result contained something credential-shaped — the turn stopped before sending it", false);
     }
     const step = store.openMateStep(
@@ -229,20 +247,49 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     const stepStarted = store.startChatTurn(step.id, now);
     if (!stepStarted.ok) return fail("provider-error", "the step could not be dispatched", false);
     steps++;
-    const requestBytes = Buffer.byteLength(request.body, "utf8");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), remainingMs);
+    const requestBytes = Buffer.byteLength(outbound, "utf8");
     let result: Awaited<ReturnType<typeof performMateRequest>>;
-    try {
-      result = await performMateRequest(request, config.provider, controller.signal, fetcher);
-    } catch {
-      result = { ok: false, problem: "network" };
-    } finally {
-      clearTimeout(timer);
+    if (direct) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), remainingMs);
+      try {
+        result = await performMateRequest(request as { url: string; headers: Record<string, string>; body: string }, directProvider, controller.signal, fetcher);
+      } catch {
+        result = { ok: false, problem: "network" };
+      } finally {
+        clearTimeout(timer);
+      }
+    } else {
+      const runner = input.subscriptionRunner ?? performSubscriptionMateRequest;
+      try {
+        result = await runner({
+          provider: subscriptionProvider as SubscriptionChatProviderId,
+          model: config.model,
+          system: MATE_CONTRACT,
+          dataDocument: document,
+          history,
+          tools: MATE_TOOL_SCHEMAS,
+          timeoutMs: remainingMs,
+        });
+      } catch {
+        result = { ok: false, problem: "provider-error" };
+      }
     }
     now = clock();
     const finishStep = (outcome: Parameters<Store["finalizeChatTurn"]>[2]): boolean => store.finalizeChatTurn(step.id, stepStarted.generation, outcome, now);
     if (!result.ok) {
+      if (!direct) {
+        finishStep({ state: "failed", failureReason: result.problem === "timeout" ? "timeout" : result.problem === "malformed-reply" ? "malformed-reply" : "provider-error", settledMicrousd: 0 });
+        const message =
+          result.problem === "not-found"
+            ? "the selected subscription CLI is not installed on this machine"
+            : result.problem === "timeout"
+              ? "the subscription turn ran out of time"
+              : result.problem === "malformed-reply"
+                ? "the subscription provider returned a malformed answer and it was discarded"
+                : "the subscription provider refused or could not complete the turn — check its login in the terminal";
+        return fail(result.problem === "timeout" ? "timeout" : result.problem === "malformed-reply" ? "malformed-reply" : "provider-error", message, false);
+      }
       if (result.problem.startsWith("status-")) {
         // The provider ANSWERED with an error: nothing billed for this step.
         finishStep({ state: "failed", failureReason: "provider-error", settledMicrousd: 0 });
@@ -262,12 +309,14 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     const answer = result.answer;
     // Usage that cannot be true — more input tokens than bytes sent — is a
     // malformed reply with unknown cost, never a number to settle by.
-    if (answer.tokensIn > requestBytes) {
+    if (direct && answer.tokensIn > requestBytes) {
       finishStep({ state: "failed", failureReason: "malformed-reply", settledMicrousd: null, unknownSpend: true });
       return fail("malformed-reply", "the provider reported usage that cannot be true; cost unknown — the whole reservation is charged; acknowledge to re-enable chat", true);
     }
     // The pinned math, or the provider's own reported charge when HIGHER.
-    const stepSettled = Math.max(settleForPrice(price, answer.tokensIn, answer.tokensOut), answer.reportedCostMicrousd ?? 0);
+    const stepSettled = direct
+      ? Math.max(settleForPrice(price as NonNullable<typeof price>, answer.tokensIn, answer.tokensOut), answer.reportedCostMicrousd ?? 0)
+      : 0;
     finishStep({ state: "answered", tokensIn: answer.tokensIn, tokensOut: answer.tokensOut, settledMicrousd: stepSettled, replyBytes: Buffer.byteLength(answer.text, "utf8") });
     tokensIn += answer.tokensIn;
     tokensOut += answer.tokensOut;

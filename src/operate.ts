@@ -162,10 +162,10 @@ import {
 import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { planTournament, planComparison, contestNoun, jointApprovalDigest, admitContest, crossReadyBarrier, finalizeContestant, recoverContests, maybeAggregate as contestMaybeAggregate, sweepContestCleanup, escalateOverdueContests } from "./contest.js";
-import { priceOf, PRICED_MODELS } from "./converse.js";
+import { isDirectChatProvider, isSubscriptionChatProvider, priceOf, PRICED_MODELS } from "./converse.js";
 import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, INSTALLATION_SCOPE } from "./agentconfig.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
-import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
+import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validModelId, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
 import {
   build,
@@ -367,10 +367,10 @@ Agents — which provider and model each phase runs on
   standing-orders providers                 what is installed, logged in, and
                                         configured on this machine — without
                                         spending anything to find out
-  standing-orders config set chat --provider anthropic-api|openrouter-api
-      --model <m> --weekly-usd <n> [--daily-turns <n>] --as <you> --token <t>
-      the fleet chat engine: a direct no-tool API call; the key rides the
-      serve environment, the ceiling is enforced in integer micro-dollars
+  standing-orders config set chat --provider claude-subscription|codex-subscription|anthropic-api|openrouter-api
+      [--model <m>] [--weekly-usd <n>] [--daily-turns <n>] --as <you> --token <t>
+      membership providers reuse a logged-in local harness with no dollar
+      maximum; direct API providers require a key and weekly dollar ceiling
   standing-orders chat --as <you> [--repo <path>…] [--say "…"] [--end]
       [--ceiling-usd <n>] [--hours <n>] [--json]   (password at the prompt;
       --token <t> only for scripts — it lands in shell history)
@@ -5024,17 +5024,21 @@ async function configCommand(
       return succeed(write, json, "config clear", { chat: null }, () => ["Chat is off — the config row is gone."]);
     }
     const provider = text(flags, "provider");
-    const model = text(flags, "model");
+    const requestedModel = text(flags, "model");
     const weeklyUsd = text(flags, "weekly-usd");
     const dailyGiven = text(flags, "daily-turns");
-    if (provider !== "anthropic-api" && provider !== "openrouter-api") {
-      return fail(write, json, "config set", "usage", "chat providers are direct API adapters: --provider anthropic-api|openrouter-api", EXIT.usage);
+    if (provider !== "anthropic-api" && provider !== "openrouter-api" && provider !== "claude-subscription" && provider !== "codex-subscription") {
+      return fail(write, json, "config set", "usage", "chat provider is one of claude-subscription, codex-subscription, anthropic-api, openrouter-api", EXIT.usage);
     }
-    if (model === undefined || priceOf(model) === null) {
+    const model = requestedModel ?? (isSubscriptionChatProvider(provider) ? "default" : "");
+    if (!validModelId(model)) {
+      return fail(write, json, "config set", "usage", "--model must be 1–128 letters, digits, dots, slashes, colons, underscores, or dashes", EXIT.usage);
+    }
+    if (isDirectChatProvider(provider) && priceOf(model) === null) {
       return fail(write, json, "config set", "unpriced-model", `chat reserves worst-case spend up front, so the model needs a pinned price — priced today: ${PRICED_MODELS.join(", ")}`, EXIT.refused);
     }
     const weekly = Number(weeklyUsd);
-    if (weeklyUsd === undefined || !Number.isFinite(weekly) || weekly <= 0) {
+    if (isDirectChatProvider(provider) && (weeklyUsd === undefined || !Number.isFinite(weekly) || weekly <= 0)) {
       return fail(write, json, "config set", "usage", "--weekly-usd <dollars> is required — chat without a ceiling is not configured, it is unbounded", EXIT.usage);
     }
     const daily = dailyGiven === undefined ? 50 : Number(dailyGiven);
@@ -5043,7 +5047,7 @@ async function configCommand(
     }
     // The CLI pins from the compiled table (the console additionally offers
     // OpenRouter's live catalog — priced by the party that bills it).
-    const pinned = priceOf(model);
+    const pinned = isDirectChatProvider(provider) ? priceOf(model) : { inMicrousd: 0, outMicrousd: 0 };
     if (pinned === null) {
       return fail(write, json, "config set", "unpriced-model", `no compiled price for ${model}`, EXIT.refused);
     }
@@ -5052,7 +5056,7 @@ async function configCommand(
         provider,
         model,
         dailyTurns: daily,
-        weeklyCeilingMicrousd: Math.round(weekly * 1_000_000),
+        weeklyCeilingMicrousd: isDirectChatProvider(provider) ? Math.round(weekly * 1_000_000) : 0,
         priceInMicrousd: pinned.inMicrousd,
         priceOutMicrousd: pinned.outMicrousd,
       },
@@ -5060,8 +5064,15 @@ async function configCommand(
       clock(),
     );
     return succeed(write, json, "config set", { chat: store.getChatConfig() }, () => [
-      `Chat answers with ${provider} · ${model}, at most ${daily} turns/day, at most $${weekly.toFixed(2)} per rolling week.`,
-      `The key rides the serve environment (${provider === "anthropic-api" ? "ANTHROPIC_API_KEY" : "OPENROUTER_API_KEY"}) — never this database.`,
+      isDirectChatProvider(provider)
+        ? `Chat answers with ${provider} · ${model}, at most ${daily} turns/day, at most $${weekly.toFixed(2)} per rolling week.`
+        : `Chat answers through the logged-in ${provider === "codex-subscription" ? "Codex" : "Claude"} harness${model === "default" ? " using its default model" : ` · ${model}`}, at most ${daily} turns/day, with no dollar ceiling.`,
+      isDirectChatProvider(provider)
+        ? `The key rides the serve environment (${provider === "anthropic-api" ? "ANTHROPIC_API_KEY" : "OPENROUTER_API_KEY"}) — never this database.`
+        : `The harness reuses its cached membership login; authenticate first with ${provider === "codex-subscription" ? "`codex login`" : "the `claude` CLI"}.`,
+      ...(isSubscriptionChatProvider(provider) && weeklyUsd !== undefined
+        ? ["The supplied --weekly-usd value was ignored because membership usage has no dollar meter."]
+        : []),
     ]);
   }
 

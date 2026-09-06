@@ -337,10 +337,25 @@ reserve it for a worker, hold it, rewrite a scope, cancel, or suggest an
 answer to a parked decision. Every proposal is a card you confirm, with
 every consequence and the builder's recommendation shown beside the
 mate's pick; a scope the mate wrote never seals under an operating mode.
-It spends against a ceiling you set per session and never sees a path, a
-digest, or an account name. The console keeps a live pulse for every
+It never sees a path, a digest, or an account name. Direct API use spends
+against a ceiling you set per session. The console keeps a live pulse for every
 admitted project beside that shared thread, with one-click fleet questions
 and a direct road to each project's board.
+
+The chat setup screen defaults to **Codex membership · default model**.
+Run `codex login` once on the machine serving Standing Orders, choose that
+provider, and there is no Standing Orders dollar maximum: the session expiry,
+daily turn limit, and your plan's own upstream limits still apply. Anthropic
+membership works the same way after signing in with the `claude` CLI. Direct
+`anthropic-api` and `openrouter-api` modes remain available; only those modes
+ask for weekly and per-session dollar ceilings.
+
+```sh
+codex login
+standing-orders config set chat --provider codex-subscription --as you --token <password>
+standing-orders serve --repo /path/to/project-a --repo /path/to/project-b
+# Open /chat, type your password once to start the conversation, then talk.
+```
 
 Coding agents you run elsewhere reach the same plane through the MCP
 gateway: `standing-orders mcp` serves a coordinator credential you mint,

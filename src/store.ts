@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 34;
+export const SCHEMA_VERSION = 35;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -220,7 +220,9 @@ export type ExecutionSlot = {
 
 /** Chat providers are direct API adapters — a DISJOINT type from the build
  * harness providers, by design (Codex v3 review, change 1). */
-export type ChatProviderId = "anthropic-api" | "openrouter-api";
+export type DirectChatProviderId = "anthropic-api" | "openrouter-api";
+export type SubscriptionChatProviderId = "claude-subscription" | "codex-subscription";
+export type ChatProviderId = DirectChatProviderId | SubscriptionChatProviderId;
 
 /** What chat may know (v3 change 9): repo-indexed, path-free items. The
  * repos list itself stays server-side; only indexes leave as opaque ids. */
@@ -1259,18 +1261,19 @@ CREATE TABLE IF NOT EXISTS spend_defaults (
   updated_by               TEXT NOT NULL
 );
 
--- Fleet chat (v13). Chat providers are DIRECT API adapters, deliberately a
--- separate type from the build harnesses (Codex v3 review, change 1): a
--- shared table would admit invalid pairs like build+anthropic-api. One
--- installation-scoped row; written only by the authenticated config verb.
+-- Fleet chat (v13, membership adapters in v35). Chat providers remain a
+-- separate type from build providers: direct APIs use pinned dollar prices;
+-- subscription adapters use the installed harness's cached login and zero
+-- dollar ledger rows. One installation-scoped row; written only by the
+-- authenticated config verb.
 CREATE TABLE IF NOT EXISTS chat_config (
   id                      INTEGER PRIMARY KEY CHECK (id = 1),
-  provider                TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  provider                TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api','claude-subscription','codex-subscription')),
   model                   TEXT NOT NULL,
   daily_turns             INTEGER NOT NULL DEFAULT 50,
   -- The rolling 7-day spend ceiling, integer micro-dollars (change 4):
-  -- reservations count against it transactionally; NOT NULL because a
-  -- chat without a ceiling is not configured, it is unbounded.
+  -- reservations count against it transactionally. Subscription-backed
+  -- chat stores zero: there is no truthful dollar meter on plan usage.
   weekly_ceiling_microusd INTEGER NOT NULL,
   -- The PINNED price (v13b): snapshotted from the provider's own catalog
   -- (or the compiled table) at the authenticated save, integer
@@ -1297,7 +1300,7 @@ CREATE TABLE IF NOT EXISTS chat_turn (
   -- Domain-separated sha256 over provider+key, full hex — a stable,
   -- non-secret accounting identity (128+ bits per change 6).
   credential_key    TEXT NOT NULL,
-  provider          TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  provider          TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api','claude-subscription','codex-subscription')),
   model             TEXT NOT NULL,
   state             TEXT NOT NULL CHECK (state IN ('queued','running','answered','failed')),
   -- Terminal transitions are generation-checked CAS: a late response
@@ -1317,7 +1320,9 @@ CREATE TABLE IF NOT EXISTS chat_turn (
   acknowledged_at   TEXT,
   acknowledged_by   TEXT,
   reply_bytes       INTEGER,
-  candidate_count   INTEGER
+  candidate_count   INTEGER,
+  kind              TEXT NOT NULL DEFAULT 'chat',
+  mate_turn         INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS chat_turn_credential ON chat_turn (credential_key, created_at);
@@ -2951,6 +2956,11 @@ function migrate(db: Database): void {
   addColumn(db, "chat_turn", "kind", "TEXT NOT NULL DEFAULT 'chat'");
   addColumn(db, "chat_turn", "mate_turn", "INTEGER");
   addColumn(db, "task_scope", "proposed_via", "TEXT");
+  // v35 (subscription-backed mate): the chat provider CHECKs admit the
+  // two local harness login modes. The dollar columns stay intact for API
+  // traffic; subscription rows carry zero because no dollar amount is
+  // observable or enforceable through a membership login.
+  rebuildChatProvidersForV35(db);
   // v33 (mate v3): `answer` joins the proposal kinds — a CHECK widening,
   // copy-rename against the v32 shape.
   rebuildMateProposalForV33(db);
@@ -4098,6 +4108,80 @@ function canonicalDdl(sql: string): string {
     // the v29 merge_blocker rebuild refused a real console database).
     .replace(/ ,/g, ",")
     .trim();
+}
+
+function CHAT_CONFIG_V34_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+  id                      INTEGER PRIMARY KEY CHECK (id = 1),
+  provider                TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  model                   TEXT NOT NULL,
+  daily_turns             INTEGER NOT NULL DEFAULT 50,
+  weekly_ceiling_microusd INTEGER NOT NULL,
+  price_in_microusd       INTEGER,
+  price_out_microusd      INTEGER,
+  updated_at              TEXT NOT NULL,
+  updated_by              TEXT NOT NULL
+)`;
+}
+
+function CHAT_CONFIG_V35_DDL(name: string): string {
+  return CHAT_CONFIG_V34_DDL(name).replace(
+    "'anthropic-api','openrouter-api'",
+    "'anthropic-api','openrouter-api','claude-subscription','codex-subscription'",
+  );
+}
+
+function CHAT_TURN_V34_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  approver          TEXT NOT NULL,
+  credential_key    TEXT NOT NULL,
+  provider          TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  model             TEXT NOT NULL,
+  state             TEXT NOT NULL CHECK (state IN ('queued','running','answered','failed')),
+  generation        INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL,
+  started_at        TEXT,
+  deadline_at       TEXT,
+  finished_at       TEXT,
+  tokens_in         INTEGER,
+  tokens_out        INTEGER,
+  reserved_microusd INTEGER NOT NULL,
+  settled_microusd  INTEGER,
+  failure_reason    TEXT CHECK (failure_reason IN
+    ('provider-error','timeout','over-budget','malformed-reply','secret-refused','crashed','over-cap','unknown-spend')),
+  unknown_spend     INTEGER NOT NULL DEFAULT 0,
+  acknowledged_at   TEXT,
+  acknowledged_by   TEXT,
+  reply_bytes       INTEGER,
+  candidate_count   INTEGER,
+  kind TEXT NOT NULL DEFAULT 'chat',
+  mate_turn INTEGER
+)`;
+}
+
+function CHAT_TURN_V35_DDL(name: string): string {
+  return CHAT_TURN_V34_DDL(name).replace(
+    "'anthropic-api','openrouter-api'",
+    "'anthropic-api','openrouter-api','claude-subscription','codex-subscription'",
+  );
+}
+
+const CHAT_CONFIG_COLUMNS = [
+  "id", "provider", "model", "daily_turns", "weekly_ceiling_microusd", "price_in_microusd", "price_out_microusd", "updated_at", "updated_by",
+] as const;
+const CHAT_TURN_COLUMNS = [
+  "id", "approver", "credential_key", "provider", "model", "state", "generation", "created_at", "started_at", "deadline_at", "finished_at",
+  "tokens_in", "tokens_out", "reserved_microusd", "settled_microusd", "failure_reason", "unknown_spend", "acknowledged_at", "acknowledged_by",
+  "reply_bytes", "candidate_count", "kind", "mate_turn",
+] as const;
+
+/** v35: widen both persisted provider checks with exact-shape rebuilds. */
+export function rebuildChatProvidersForV35(db: Database): void {
+  rebuildExact(db, "chat_config", CHAT_CONFIG_V34_DDL, CHAT_CONFIG_V35_DDL, CHAT_CONFIG_COLUMNS);
+  rebuildExact(db, "chat_turn", CHAT_TURN_V34_DDL, CHAT_TURN_V35_DDL, CHAT_TURN_COLUMNS);
+  db.exec("CREATE INDEX IF NOT EXISTS chat_turn_credential ON chat_turn (credential_key, created_at)");
+  db.exec("CREATE INDEX IF NOT EXISTS chat_turn_approver ON chat_turn (approver, created_at)");
 }
 
 const PHASE_CONFIG_V25_DDL = `CREATE TABLE phase_config (
