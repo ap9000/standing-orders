@@ -1871,7 +1871,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface — it keeps your drafts in the session");
       store.sweepStaleChatTurns(now);
       store.sweepStaleMateTurns(now);
-      store.sweepMateThreads(now);
       store.sweepCoordinatorProposals(now);
       sweepChatDrafts(Date.now());
       // Pending cards, and the recently answered ones so the door's words are read (last 30).
@@ -1882,7 +1881,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The mate (mate arc §5): while a mate session is live, /chat IS the
       // thread — the same rows the CLI reads. Without one, fleet chat as
       // before, plus the card that mints a session.
-      const mateSession = enabled.ok && who.role === "approver" ? store.activeMateSession(who.name, now) : null;
+      const mateSession = enabled.ok && who.role === "approver" ? store.activeMateSession(who.name) : null;
       const principal = enabled.ok && who.role === "approver" ? matePrincipal(who) : null;
       // A session under another ceiling is not continuable from here; a GET
       // writes nothing (slice-2 review, finding 7) — the mint card below
@@ -4298,24 +4297,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       const enabled = chatEnablement();
       if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
       // The one password ceremony of a conversation (§1): it restates the
-      // terms — this much, until then, over these projects — and mints the
+      // terms — this spend ceiling, over these projects — and mints the
       // session every later turn debits without asking again.
       const ceilingText = (body.get("ceiling-usd") ?? "").trim();
       const ceilingUsd = enabled.billing === "subscription" ? 0 : Number(ceilingText);
-      const hours = Number((body.get("hours") ?? "").trim());
       if (enabled.billing === "metered" && (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000)) {
         return redirect(response, `/chat?said=${encodeURIComponent("the session ceiling is a dollar amount between 0 and 1000")}`);
-      }
-      if (!Number.isInteger(hours) || hours < 1 || hours > 24) {
-        return redirect(response, `/chat?said=${encodeURIComponent("a session lasts a whole number of hours, 1 to 24")}`);
       }
       const verified = verifyApproverByPassword(store, who.name, body.get("token") ?? "", ceiling.repos);
       if (!verified.ok) return redirect(response, `/chat?said=${encodeURIComponent("minting a session takes your password, typed again")}`);
       const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
-      const expiresAt = new Date(now.getTime() + hours * 3_600_000);
-      const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${expiresAt.toISOString()}\n${verified.who.ceilingDigest}`).digest("hex");
+      const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${verified.who.ceilingDigest}`).digest("hex");
       store.mintMateSession(
-        { approver: who.name, approverGeneration: verified.who.generation, credentialKey: enabled.credentialKey, ceilingMicrousd, ceilingDigest: verified.who.ceilingDigest, termsDigest, expiresAt },
+        { approver: who.name, approverGeneration: verified.who.generation, credentialKey: enabled.credentialKey, ceilingMicrousd, ceilingDigest: verified.who.ceilingDigest, termsDigest },
         now,
       );
       store.openMateThread(who.name, verified.who.ceilingDigest, now);
@@ -4377,7 +4371,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // A live mate session: the message is a mate turn — no password, the
       // session's ceremony already covered it (§1); the engine refuses on
       // its own terms and the thread shows why.
-      const mateSession = who.role === "approver" ? store.activeMateSession(who.name, now) : null;
+      const mateSession = who.role === "approver" ? store.activeMateSession(who.name) : null;
       if (mateSession !== null) {
         const principal = matePrincipal(who);
         if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
@@ -8395,7 +8389,7 @@ function chatPage(chrome: Chrome, data: {
         ? `<p class="meta">with OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
         : `<p class="meta">${data.openrouterModels.length} models live from OpenRouter's catalog; saving pins today's price — re-save to re-pin</p>`,
       currentSubscription
-        ? `<p class="meta"><strong>no dollar maximum.</strong> Membership chat uses the plan attached to the logged-in CLI; the daily turn limit and session expiry still apply.</p>`
+        ? `<p class="meta"><strong>no dollar maximum.</strong> Membership chat uses the plan attached to the logged-in CLI; the conversation stays live until you end it, and the daily turn limit still applies.</p>`
         : `<label>weekly ceiling <span class="meta">(direct API only; leave blank when choosing a membership)</span>` +
           `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
       `<label>daily turns <span class="meta">(default 50)</span>` +
@@ -8565,12 +8559,11 @@ function mateMintCard(
     `<div class="mate-terms">`,
     subscription
       ? `<span>using your logged-in ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership · no dollar maximum</span>`
-      : `<label>this session may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
-    `<label>for <span class="inline-field"><input type="text" name="hours" inputmode="numeric" value="4" style="width:4rem"> hours</span></label>`,
+      : `<label>this conversation may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
     `</div>`,
     subscription
-      ? `<p class="meta">the session expiry and daily turn limit still bind; your membership's own plan limits remain upstream</p>`
-      : `<p class="meta">the weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above it; every turn reserves its worst case first and is refused before it spends when either would be exceeded</p>`,
+      ? `<p class="meta">the conversation stays active until you end it; the daily turn limit and your membership's own plan limits remain upstream</p>`
+      : `<p class="meta">the conversation stays active until you end it; the weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above this total</p>`,
     `<label>your password <span class="meta">(once — this mints the session; messages need no password after)</span><input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">start the conversation</button>`,
     `</form>`,
@@ -8742,14 +8735,13 @@ function matePage(chrome: Chrome, data: {
   const conversation: string[] = [
     `<div class="chat-head"><div><h1>chat</h1>` +
       `<p class="meta">one conversation across every project · the mate proposes, you confirm</p></div>` +
-      `<span class="badge badge-running">session live</span></div>`,
+      `<span class="badge badge-running">conversation live</span></div>`,
     `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
       (subscription
         ? `<span>membership login · no dollar ceiling</span>`
-        : `<span>this session: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
+        : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
           `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
-      `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
-      `<span>until ${escape(data.session.expiresAt.slice(11, 16))}Z</span></div>`,
+      `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span></div>`,
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -8798,15 +8790,15 @@ function matePage(chrome: Chrome, data: {
     `<label>message<textarea name="message" rows="3" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="how do things stand?"></textarea></label>`,
     `<button type="submit">send</button>`,
     `</form>`,
-    `<details><summary class="meta">this session</summary>`,
-    `<p class="meta">minted ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · expires ${escape(data.session.expiresAt.slice(0, 16).replace("T", " "))}Z · the thread lives 24 hours and is deleted when the session ends</p>`,
-    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><button type="submit" class="quiet">end the session and forget the thread</button></form>`,
+    `<details><summary class="meta">this conversation</summary>`,
+    `<p class="meta">started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · stays live until you end it · only bounded recent context is sent to the model</p>`,
+    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,
     data.recent.length === 0
       ? ""
       : `<p class="meta">recent turns: ${data.recent
           .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
           .join(" · ")}</p>`,
-    `<p class="meta">chat settings live on this page once the session ends</p>`,
+    `<p class="meta">chat settings live on this page once the conversation ends</p>`,
     `</details>`,
   );
   return screen(

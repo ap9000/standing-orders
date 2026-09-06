@@ -83,7 +83,7 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     if (proposal === null) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
     const thread = store.getMateThread(proposal.thread);
     if (thread === null || thread.approver !== who.name) return { ok: false, kind: null, reason: "not-yours", said: "no such proposal" } as const;
-    const session = store.activeMateSession(who.name, now);
+    const session = store.activeMateSession(who.name);
     if (session === null || session.approverGeneration !== who.generation) {
       return { ok: false, kind: proposal.kind, reason: "session-ended", said: "the mate session this was proposed in has ended — its cards cannot be confirmed" } as const;
     }

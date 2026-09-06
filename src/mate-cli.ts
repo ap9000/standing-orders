@@ -38,7 +38,6 @@ export type MateCliInput = {
   say: string | undefined;
   end: boolean;
   ceilingUsd: number | undefined;
-  hours: number | undefined;
   seams?: MateCliSeams;
   /** Where evidence lives — a scout's report reads from here. */
   evidenceRoot?: string;
@@ -178,8 +177,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   }
 
   store.sweepStaleMateTurns(now);
-  store.sweepMateThreads(now);
-  let session = store.activeMateSession(who.name, now);
+  let session = store.activeMateSession(who.name);
   const credentialKey = direct ? credentialKeyOf(directProvider, key as string) : subscriptionCredentialKey(subscriptionProvider as SubscriptionChatProviderId);
   if (session !== null && session.credentialKey !== credentialKey) {
     // A session minted under another provider key cannot be spent by this
@@ -194,23 +192,20 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   }
   if (session === null) {
     const ceilingUsd = direct ? (input.ceilingUsd ?? 5) : 0;
-    const hours = input.hours ?? 4;
     if (direct && (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000)) return refuse("usage", "--ceiling-usd is a dollar amount between 0 and 1000", MATE_CLI_EXIT.usage);
-    if (!Number.isInteger(hours) || hours < 1 || hours > 24) return refuse("usage", "--hours is a whole number, 1 to 24", MATE_CLI_EXIT.usage);
     const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
-    const expiresAt = new Date(now.getTime() + hours * 3_600_000);
-    const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${expiresAt.toISOString()}\n${who.ceilingDigest}`).digest("hex");
+    const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${who.ceilingDigest}`).digest("hex");
     const id = store.mintMateSession(
-      { approver: who.name, approverGeneration: who.generation, credentialKey, ceilingMicrousd, ceilingDigest: who.ceilingDigest, termsDigest, expiresAt },
+      { approver: who.name, approverGeneration: who.generation, credentialKey, ceilingMicrousd, ceilingDigest: who.ceilingDigest, termsDigest },
       now,
     );
     session = store.getMateSession(id);
     if (session === null) return refuse("failed", "the session could not be minted", MATE_CLI_EXIT.failed);
     if (!direct && input.ceilingUsd !== undefined) say("the supplied --ceiling-usd value is ignored for membership usage");
-    say(`mate session minted: ${direct ? `up to ${money(ceilingMicrousd)}` : "subscription usage (no dollar ceiling)"} until ${expiresAt.toISOString().slice(0, 16).replace("T", " ")}Z over ${repos.map((one, index) => `r${index + 1} ${projectName(one)}`).join(", ")}`);
+    say(`mate conversation started: ${direct ? `up to ${money(ceilingMicrousd)}` : "subscription usage (no dollar ceiling)"} over ${repos.map((one, index) => `r${index + 1} ${projectName(one)}`).join(", ")} — live until you end it`);
     if (direct) say(`(the weekly chat ceiling, ${money(config.weeklyCeilingMicrousd)}, still binds above it)`);
   } else {
-    say(`mate session live: ${direct ? `${money(session.spentMicrousd)} of ${money(session.ceilingMicrousd)} spent` : "subscription usage (no dollar ceiling)"}, until ${session.expiresAt.slice(0, 16).replace("T", " ")}Z`);
+    say(`mate conversation live: ${direct ? `${money(session.spentMicrousd)} of ${money(session.ceilingMicrousd)} spent` : "subscription usage (no dollar ceiling)"} — live until you end it`);
   }
   const thread = store.openMateThread(who.name, who.ceilingDigest, now).thread;
 
@@ -239,7 +234,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   };
 
   const turn = async (message: string): Promise<MateTurnOutcome> => {
-    const live = store.activeMateSession(who.name, clock());
+    const live = store.activeMateSession(who.name);
     if (live === null) {
       const outcome: MateTurnOutcome = { ok: false, refused: "session-ended", message: "this mate session has ended — run chat again to mint one" };
       return outcome;

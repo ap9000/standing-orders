@@ -338,17 +338,18 @@ answer to a parked decision. Every proposal is a card you confirm, with
 every consequence and the builder's recommendation shown beside the
 mate's pick; a scope the mate wrote never seals under an operating mode.
 It never sees a path, a digest, or an account name. Direct API use spends
-against a ceiling you set per session. The console keeps a live pulse for every
+against a ceiling you set per conversation. The console keeps a live pulse for every
 admitted project beside that shared thread, with one-click fleet questions
 and a direct road to each project's board.
 
 The chat setup screen defaults to **Codex membership · default model**.
 Run `codex login` once on the machine serving Standing Orders, choose that
-provider, and there is no Standing Orders dollar maximum: the session expiry,
-daily turn limit, and your plan's own upstream limits still apply. Anthropic
+provider, and there is no Standing Orders dollar maximum. The conversation
+stays live until you end it; the daily turn limit and your plan's own upstream
+limits still apply. Anthropic
 membership works the same way after signing in with the `claude` CLI. Direct
 `anthropic-api` and `openrouter-api` modes remain available; only those modes
-ask for weekly and per-session dollar ceilings.
+ask for weekly and per-conversation dollar ceilings.
 
 ```sh
 codex login

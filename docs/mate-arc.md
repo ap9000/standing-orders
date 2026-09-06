@@ -67,14 +67,16 @@ agent, ship with a crew" on our authority model (docs/firstmate-assessment.md
    cannot continue the thread or confirm its proposals (it starts a new
    thread and says why).
 10. **Delegated spend, done the mode way.** `mate_session` stores the
-    approver generation and a terms digest (ceiling $, expiry, ceiling
-    digest); every turn and confirm re-authenticates against the current
+    approver generation and a terms digest (ceiling $, ceiling digest);
+    the session stays live until explicitly ended, while every turn and
+    confirm re-authenticates against the current
     approver row; `revokeApprover` closes the approver's mate sessions in
     its transaction; a running CLI REPL learns on its next turn and exits.
 11. **Transcripts, ruled explicitly** (rule change #2): the thread stores
     operator text and assistant text only — never tool results, never
-    provider payloads — for 24 hours, swept after; secrets are scanned out
-    before storage; `--end` and revocation delete the thread. The first
+    provider payloads — until explicit closure; only the bounded recent
+    window is sent back to the model. Secrets are scanned out before
+    storage; `--end` and revocation delete the thread. The first
     durable model text now precedes a filing; the password that minted the
     session is what backs it.
 12. **The ceremonies as they are.** Irreversible answers take the existing
@@ -156,10 +158,10 @@ Codex read commit 749d328 against this spec and found 3 critical, 8 high,
 
 ## Round-3 rulings (slices 2–4 review, 2026-09-02: twelve findings, all closed)
 
-1. **A card dies with its session.** `confirmMateProposal` requires a LIVE
-   mate session minted by the principal's generation under the card's
-   ceiling; an expired session's cards refuse `session-ended` although the
-   cookie still stands. A credential rotation runs the same cascade as a
+1. **A card dies with its conversation.** `confirmMateProposal` requires a
+   LIVE mate session minted by the principal's generation under the card's
+   ceiling; an explicitly ended session's cards refuse `session-ended`
+   although the cookie still stands. A credential rotation runs the same cascade as a
    revocation (`revokeDerivedAuthority`): live turns fail charged whole,
    sessions end, threads and proposals are deleted. (finding 1)
 2. **Standing is re-proved INSIDE the confirm transaction.** (finding 2)
@@ -246,14 +248,14 @@ approver's reads (the ceiling), its proposals are the approver's proposals
 in waiting. `filed_via` for anything it files is `mate` (display provenance,
 inside the existing grammar); nothing carries `coordinator_cid`.
 
-**The mate session** (the one rule change, flagged for review): today chat
-takes the password with every message. A conversation cannot. A mate
-session is a password ceremony once — restating "this session may spend up
-to $X on chat until <time>" — that mints a signed, expiring row
-(`mate_session`: approver, credential_key, ceiling_microusd, spent_microusd,
-expires_at, revoked_at). Every turn debits it transactionally; exhaustion or
-expiry ends it; any approver may revoke it from `/chat` or `standing-orders
-chat --end`. The weekly chat ceiling still binds above it.
+**The mate session:** chat used to take the password with every message. A
+conversation cannot. A mate session is a password ceremony once — restating
+the admitted projects and, for direct API use, "this conversation may spend
+up to $X" — that mints a signed row (`mate_session`: approver,
+credential_key, ceiling_microusd, spent_microusd, ended_at). Every turn
+debits it transactionally. The conversation remains live until the operator
+ends it, their standing is revoked, the provider credential changes, or the
+admitted project ceiling changes. The weekly chat ceiling still binds above it.
 
 ## 2. The tools (shared with MCP)
 
@@ -280,7 +282,7 @@ parameterized by a **principal** (`{ kind: "coordinator", cid, repos }` or
 spread, CAS material included), ceiling_digest, state
 (`drafting|pending|confirming|confirmed|refused|dismissed|expired`),
 created_at, resolved_at, resolved_by, outcome_json. `drafting` until the
-turn finalizes; expires with the thread (24h). Confirmation is one
+turn finalizes; it lives with the thread until acted on or explicitly closed. Confirmation is one
 transaction (ruling 7); a stale proposal is the door's typed refusal,
 rendered in place. At most 5 proposals per turn.
 
@@ -359,7 +361,7 @@ door and renders the door's answer on the card (`filed t-42`, `moved to
 the front`, or the typed refusal); irreversible answers and cancel link to
 their ceremonies. `dismiss` is a second small form. The composer is one
 field; the page keeps the v13 problems, the latch acknowledgement, the key
-facts, and the spend line ("this session: $0.42 of $5 · this week $3.10 of
+facts, and the spend line ("this conversation: $0.42 of $5 · this week $3.10 of
 $20"). The thread polls its own fragment while a turn runs (regionScript,
 form-free fragment: proposals render inert until the turn ends).
 
@@ -367,9 +369,9 @@ form-free fragment: proposals render inert until the turn ends).
 
 **As landed (slice 3, 2026-09-02).** `standing-orders chat --as <you>
 --token <t> [--repo <path>…] [--say "…"] [--end] [--ceiling-usd <n>]
-[--hours <n>] [--json]` in `src/mate-cli.ts`, dispatched from
-`src/operate.ts`. The password mints the session (defaults $5 for 4 h;
-the terms are printed); the ceiling is the `--repo` list, or the enrolled
+[--json]` in `src/mate-cli.ts`, dispatched from `src/operate.ts`. The password
+mints a persistent session (the direct-API spend ceiling defaults to $5 and
+the terms are printed); the project ceiling is the `--repo` list, or the enrolled
 projects when none are named; a live session under other projects is
 ended and re-minted, and says so. The REPL reads lines: text is a turn;
 `proposals`, `confirm N`, `dismiss N`, `open N` act on the pending cards

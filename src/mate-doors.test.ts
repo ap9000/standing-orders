@@ -20,12 +20,12 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     if (!verified.ok) throw new Error(verified.reason);
     return verified.who;
   };
-  const session = (expiresInMs = 3_600_000) =>
-    store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64), expiresAt: new Date(clockAt + expiresInMs) }, clock());
+  const session = () =>
+    store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
   const pending = (kind: "next" | "reserve" | "hold" | "answer", payload: Record<string, unknown>): number => {
     const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
-    const live = store.activeMateSession("alex", clock())!;
+    const live = store.activeMateSession("alex")!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
     if (!opened.ok) throw new Error(opened.reason);
     const started = store.startMateTurn(opened.id, clock());
@@ -48,11 +48,11 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   });
   afterEach(() => store.close());
 
-  test("a card outlives its session: an expired session refuses the confirm although the cookie's principal still stands", () => {
-    session(1_000);
+  test("an explicitly ended conversation refuses an old card although the principal still stands", () => {
+    const sessionId = session();
     const seen = store.transact(() => ({ queueRevision: store.queueRevision(), position: store.queuePosition("c")! }));
     const id = pending("next", { task: "c", queueRevision: seen.queueRevision, position: seen.position.position, column: seen.position.column });
-    clockAt += 5_000;
+    store.endMateSession(sessionId, "alex", clock());
     expect(confirmMateProposal(store, who, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "session-ended" });
     expect(store.getMateProposal(id)?.state).toBe("pending");
     expect(store.queuePosition("c")?.position).toBe(3);
@@ -63,7 +63,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     const seen = store.transact(() => ({ queueRevision: store.queueRevision(), position: store.queuePosition("c")! }));
     const id = pending("next", { task: "c", queueRevision: seen.queueRevision, position: seen.position.position, column: seen.position.column });
     store.saveApprover("alex", "n".repeat(64), clock());
-    expect(store.activeMateSession("alex", clock())).toBeNull();
+    expect(store.activeMateSession("alex")).toBeNull();
     expect(store.getMateProposal(id)).toBeNull();
     expect(confirmMateProposal(store, who, id, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "standing" });
     // The new generation mints its own principal and finds nothing to confirm.

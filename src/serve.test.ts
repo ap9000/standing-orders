@@ -6671,7 +6671,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     const csrf = csrfOf(before);
     const minted = await fetch(url("/chat/mate/mint"), {
       method: "POST", headers: { cookie, origin: base }, redirect: "manual",
-      body: new URLSearchParams({ csrf, "ceiling-usd": "5", hours: "4", token: approverToken }),
+      body: new URLSearchParams({ csrf, "ceiling-usd": "5", token: approverToken }),
     });
     expect(minted.status).toBe(303);
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
@@ -6868,7 +6868,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
   };
   const mint = async (cookie: string, ceilingUsd = "50"): Promise<string> => {
     const csrf = csrfFrom(await page(cookie));
-    const minted = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": ceilingUsd, hours: "4", token: approverToken });
+    const minted = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": ceilingUsd, token: approverToken });
     expect(minted.status).toBe(303);
     expect(minted.headers.get("location")).toBe("/chat");
     return csrf;
@@ -6926,13 +6926,14 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(before).toContain('action="/chat/mate/mint"');
     expect(before).not.toContain('class="thread"');
     const csrf = csrfFrom(before);
-    const noPassword = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5", hours: "4" });
+    expect(before).not.toContain('name="hours"');
+    const noPassword = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5" });
     expect(noPassword.headers.get("location") ?? "").toContain("password");
-    expect(store.activeMateSession("alex", clockNow)).toBeNull();
-    const badTerms = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "0", hours: "4", token: approverToken });
+    expect(store.activeMateSession("alex")).toBeNull();
+    const badTerms = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "0", token: approverToken });
     expect(badTerms.headers.get("location") ?? "").toContain("dollar");
     await mint(cookie, "5");
-    const session = store.activeMateSession("alex", clockNow);
+    const session = store.activeMateSession("alex");
     expect(session).toMatchObject({ approver: "alex", ceilingMicrousd: 5_000_000, spentMicrousd: 0 });
     const thread = await page(cookie);
     expect(thread).toContain('class="thread"');
@@ -6943,7 +6944,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toMatch(/<span class="name">all projects/);
     expect(thread).toContain('class="card composer"');
     expect(thread).not.toContain('name="token"');
-    expect(thread).toContain("this session: $0.00 of $5.00");
+    expect(thread).toContain("this conversation: $0.00 of $5.00");
+    expect(thread).toContain("stays live until you end it");
     expect(thread).toContain('action="/chat/mate/end"');
   });
 
@@ -6971,9 +6973,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain('name="ceiling-usd"');
     expect(html).not.toContain('name="key"');
 
-    const minted = await post(cookie, "/chat/mate/mint", { csrf, hours: "4", token: approverToken });
+    const minted = await post(cookie, "/chat/mate/mint", { csrf, token: approverToken });
     expect(minted.status).toBe(303);
-    expect(store.activeMateSession("alex", clockNow)).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
+    expect(store.activeMateSession("alex")).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
     subscriptionAnswers.push({ text: "The queue is calm.", calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
     const sent = await post(cookie, "/chat", { csrf, message: "how does it look?" });
     expect(sent.status).toBe(303);
@@ -7036,9 +7038,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     html = await page(cookie);
     expect(html).toContain("the queue moved since this was proposed");
     // Session spend is the two turns' settled cost, shown on the page.
-    const session = store.activeMateSession("alex", clockNow);
+    const session = store.activeMateSession("alex");
     expect(session?.spentMicrousd).toBe(4 * (100 * 3 + 20 * 15));
-    expect(html).toContain("this session: $0.00 of $50.00");
+    expect(html).toContain("this conversation: $0.00 of $50.00");
   });
 
   test("a cancel card only points at the task; dismiss retires a card; ending the session forgets the thread", async () => {
@@ -7059,11 +7061,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     await post(cookie, "/chat/proposal/2/dismiss", { csrf });
     expect(store.getMateProposal(2)?.state).toBe("dismissed");
     expect(store.activeHolds(store.refFor("built-in", "b").id, clockNow)).toEqual([]);
-    const threadId = store.openMateThread("alex", store.activeMateSession("alex", clockNow)!.ceilingDigest, clockNow).thread.id;
+    const threadId = store.openMateThread("alex", store.activeMateSession("alex")!.ceilingDigest, clockNow).thread.id;
     expect(store.listMateMessages(threadId, 10)).toHaveLength(2);
     const ended = await post(cookie, "/chat/mate/end", { csrf });
     expect(ended.status).toBe(303);
-    expect(store.activeMateSession("alex", clockNow)).toBeNull();
+    expect(store.activeMateSession("alex")).toBeNull();
     expect(store.listMateMessages(threadId, 10)).toEqual([]);
     expect(store.listMateProposals(threadId)).toEqual([]);
     html = await page(cookie);
@@ -7082,17 +7084,17 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const viewerPage = await (await fetch(url("/chat"), { headers: { cookie: viewerCookie } })).text();
     expect(viewerPage).not.toContain('action="/chat/mate/mint"');
     const viewerCsrf = /name="csrf" value="([0-9a-f]{64})"/.exec(viewerPage)?.[1] ?? csrf;
-    const viewerMint = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { cookie: viewerCookie, origin: base }, body: new URLSearchParams({ csrf: viewerCsrf, "ceiling-usd": "5", hours: "1", token: "watching-only-1" }), redirect: "manual" });
+    const viewerMint = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { cookie: viewerCookie, origin: base }, body: new URLSearchParams({ csrf: viewerCsrf, "ceiling-usd": "5", token: "watching-only-1" }), redirect: "manual" });
     expect(viewerMint.status).toBe(403);
-    expect(store.activeMateSession("vic", clockNow)).toBeNull();
+    expect(store.activeMateSession("vic")).toBeNull();
     // The approver's session, minted under a different repo order than the server holds: the page says so and changes nothing.
     await mint(cookie);
-    const live = store.activeMateSession("alex", clockNow)!;
+    const live = store.activeMateSession("alex")!;
     store.handle.prepare("UPDATE mate_session SET ceiling_digest = ? WHERE id = ?").run("f".repeat(64), live.id);
     const html = await page(cookie);
     expect(html).toContain("the admitted projects changed since your mate session was minted");
     expect(html).toContain('action="/chat/mate/mint"');
-    expect(store.activeMateSession("alex", clockNow)).not.toBeNull();
+    expect(store.activeMateSession("alex")).not.toBeNull();
   });
 
   test("coordinator proposals are cards on /chat and the task page; an irreversible answer confirms only with the field", async () => {
@@ -7148,7 +7150,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain("unknown spend blocks chat");
     html = await page(cookie);
     expect(html).not.toContain("malformed and was discarded");
-    const bearer = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { authorization: `Bearer ${approverToken}`, origin: base }, body: new URLSearchParams({ "ceiling-usd": "5", hours: "1", token: approverToken }), redirect: "manual" });
+    const bearer = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { authorization: `Bearer ${approverToken}`, origin: base }, body: new URLSearchParams({ "ceiling-usd": "5", token: approverToken }), redirect: "manual" });
     expect([401, 403]).toContain(bearer.status);
   });
 });

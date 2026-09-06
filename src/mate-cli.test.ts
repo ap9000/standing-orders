@@ -81,7 +81,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     expect(await run(["chat", "--as", "alex", "--token", "wrong", "--repo", repo, "--json"])).toBe(3);
     expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "unauthenticated" });
     const store = openStore(db);
-    expect(store.activeMateSession("alex", T0)).toBeNull();
+    expect(store.activeMateSession("alex")).toBeNull();
     store.close();
   });
 
@@ -91,12 +91,12 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
       () => text("I propose moving b to the front."),
     );
     expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--say", "what should move?"])).toBe(0);
-    expect(out()).toContain("mate session minted: up to $5.00 until 2026-09-02 16:00Z over r1 repo");
+    expect(out()).toContain("mate conversation started: up to $5.00 over r1 repo — live until you end it");
     expect(out()).toContain("read 0 · proposed 1 · 2 steps");
     expect(out()).toContain("I propose moving b to the front.");
     expect(out()).toContain("1. move b to the front (was 2 of 2)");
     const store = openStore(db);
-    expect(store.activeMateSession("alex", T0)).toMatchObject({ approver: "alex", ceilingMicrousd: 5_000_000 });
+    expect(store.activeMateSession("alex")).toMatchObject({ approver: "alex", ceilingMicrousd: 5_000_000 });
     expect(store.listMateProposals(1, ["pending"])).toHaveLength(1);
     store.close();
     // The next run finds the session live and the thread intact; --json gives one envelope per turn.
@@ -114,11 +114,11 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     subscriptionAnswers.push({ text: "All projects are calm.", calls: [], tokensIn: 17, tokensOut: 4, reportedCostMicrousd: null });
     expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--ceiling-usd", "99", "--say", "status?"] , [], {})).toBe(0);
     expect(out()).toContain("--ceiling-usd value is ignored");
-    expect(out()).toContain("mate session minted: subscription usage (no dollar ceiling)");
+    expect(out()).toContain("mate conversation started: subscription usage (no dollar ceiling)");
     expect(out()).toContain("All projects are calm.");
     const store = openStore(db);
     expect(store.getChatConfig()).toMatchObject({ provider: "codex-subscription", model: "default", weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 });
-    expect(store.activeMateSession("alex", T0)).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
+    expect(store.activeMateSession("alex")).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
     expect(store.recentMateTurns("alex", 1)[0]).toMatchObject({ state: "answered", reservedMicrousd: 0, settledMicrousd: 0 });
     store.close();
   });
@@ -128,10 +128,10 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
       () => answer([{ type: "tool_use", id: "c1", name: "propose_next", input: { task: "b" } }, { type: "tool_use", id: "c2", name: "propose_hold", input: { task: "a", reason: "later" } }]),
       () => text("Two proposals."),
     );
-    const code = await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--ceiling-usd", "20", "--hours", "2"], ["what next?", "proposals", "open 2", "confirm 1", "confirm 1", "dismiss 1", "confirm 9", "confirm 2", "end"]);
+    const code = await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--ceiling-usd", "20"], ["what next?", "proposals", "open 2", "confirm 1", "confirm 1", "dismiss 1", "confirm 9", "confirm 2", "end"]);
     expect(code).toBe(0);
     const printed = out();
-    expect(printed).toContain("up to $20.00 until 2026-09-02 14:00Z");
+    expect(printed).toContain("up to $20.00 over r1 repo — live until you end it");
     expect(printed).toContain("Two proposals.");
     expect(printed).toContain("1. move b to the front (was 2 of 2)");
     expect(printed).toContain("2. hold a: later");
@@ -145,7 +145,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     const store = openStore(db);
     expect(store.queuePosition("b")?.position).toBe(1);
     expect(store.activeHolds(store.refFor("built-in", "a").id, T0).map(one => one.reason)).toEqual(["later"]);
-    expect(store.activeMateSession("alex", T0)).toBeNull();
+    expect(store.activeMateSession("alex")).toBeNull();
     expect(store.listMateMessages(1, 10)).toEqual([]);
     store.close();
   });

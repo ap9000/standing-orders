@@ -372,7 +372,7 @@ Agents — which provider and model each phase runs on
       membership providers reuse a logged-in local harness with no dollar
       maximum; direct API providers require a key and weekly dollar ceiling
   standing-orders chat --as <you> [--repo <path>…] [--say "…"] [--end]
-      [--ceiling-usd <n>] [--hours <n>] [--json]   (password at the prompt;
+      [--ceiling-usd <n>] [--json]                 (password at the prompt;
       --token <t> only for scripts — it lands in shell history)
       the mate: one conversation across your projects, the same thread the
       console shows; the password mints a spending session once; it reads
@@ -497,7 +497,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
   "choose", "note", "max-open-decisions", "max-held-sessions", "name", "days", "publication", "auto-approve", "review-auto", "entries", "port", "host", "allow-host",
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
-  "say", "ceiling-usd", "hours",
+  "say", "ceiling-usd",
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
@@ -9329,7 +9329,6 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
     return fail(write, json, "chat", "usage", "the mate takes your name and password — `--as <you>` and the hidden prompt; `--token <t>` only where a script must (it lands in shell history)", EXIT.usage);
   }
   const ceilingGiven = text(flags, "ceiling-usd");
-  const hoursGiven = text(flags, "hours");
   // The ceiling: the `--repo` list, or the ENROLLED registry beside the
   // database (slice-2 review, finding 5) — never the opened-project history.
   // An unreadable registry refuses rather than inventing a ceiling.
@@ -9351,7 +9350,6 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
     say: text(flags, "say"),
     end: flags.has("end"),
     ceilingUsd: ceilingGiven === undefined ? undefined : Number(ceilingGiven),
-    hours: hoursGiven === undefined ? undefined : Number(hoursGiven),
     ...(context.mateSeams === undefined ? {} : { seams: { ...context.mateSeams, clock: context.mateSeams.clock ?? context.clock } }),
     ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
   });

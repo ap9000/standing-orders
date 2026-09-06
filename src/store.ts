@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 35;
+export const SCHEMA_VERSION = 36;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -299,7 +299,6 @@ export type MateSession = {
   ceilingDigest: string;
   termsDigest: string;
   mintedAt: string;
-  expiresAt: string;
   endedAt: string | null;
   endedBy: string | null;
 };
@@ -1328,10 +1327,11 @@ CREATE TABLE IF NOT EXISTS chat_turn (
 CREATE INDEX IF NOT EXISTS chat_turn_credential ON chat_turn (credential_key, created_at);
 CREATE INDEX IF NOT EXISTS chat_turn_approver ON chat_turn (approver, created_at);
 
--- The mate (v32): one conversation per approver that manages the fleet
--- by proposal. A session is delegated chat spend, signed once (ruling 10);
+-- The mate (v32, persistent sessions in v36): one conversation per approver
+-- that manages the fleet by proposal. A session is delegated chat spend,
+-- signed once and live until explicitly ended (ruling 10);
 -- a thread is the conversation, ceiling-bound (ruling 9); messages hold
--- operator and assistant text only, for 24h (ruling 11); a proposal is
+-- operator and assistant text only until explicit closure (ruling 11); a proposal is
 -- inert until its turn finalizes and executes only through a confirm
 -- transaction (ruling 7); a turn is the accounting row for one operator
 -- message and its several provider requests, each of which is a chat_turn
@@ -1346,11 +1346,10 @@ CREATE TABLE IF NOT EXISTS mate_session (
   ceiling_digest      TEXT NOT NULL,
   terms_digest        TEXT NOT NULL,
   minted_at           TEXT NOT NULL,
-  expires_at          TEXT NOT NULL,
   ended_at            TEXT,
   ended_by            TEXT
 );
-CREATE INDEX IF NOT EXISTS mate_session_live ON mate_session (approver, ended_at, expires_at);
+CREATE INDEX IF NOT EXISTS mate_session_live ON mate_session (approver, ended_at);
 
 CREATE TABLE IF NOT EXISTS mate_thread (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2961,6 +2960,11 @@ function migrate(db: Database): void {
   // traffic; subscription rows carry zero because no dollar amount is
   // observable or enforceable through a membership login.
   rebuildChatProvidersForV35(db);
+  // v36 (long-running mate): the password-minted conversation is an
+  // explicit-lifecycle capability, not a wall-clock lease. Existing v35
+  // sessions are closed during migration because their signed terms were
+  // time-bounded; the operator can mint a persistent session deliberately.
+  rebuildMateSessionForV36(db);
   // v33 (mate v3): `answer` joins the proposal kinds — a CHECK widening,
   // copy-rename against the v32 shape.
   rebuildMateProposalForV33(db);
@@ -4182,6 +4186,81 @@ export function rebuildChatProvidersForV35(db: Database): void {
   rebuildExact(db, "chat_turn", CHAT_TURN_V34_DDL, CHAT_TURN_V35_DDL, CHAT_TURN_COLUMNS);
   db.exec("CREATE INDEX IF NOT EXISTS chat_turn_credential ON chat_turn (credential_key, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS chat_turn_approver ON chat_turn (approver, created_at)");
+}
+
+function MATE_SESSION_V35_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  approver            TEXT NOT NULL,
+  approver_generation INTEGER NOT NULL,
+  credential_key      TEXT NOT NULL,
+  ceiling_microusd    INTEGER NOT NULL,
+  spent_microusd      INTEGER NOT NULL DEFAULT 0,
+  ceiling_digest      TEXT NOT NULL,
+  terms_digest        TEXT NOT NULL,
+  minted_at           TEXT NOT NULL,
+  expires_at          TEXT NOT NULL,
+  ended_at            TEXT,
+  ended_by            TEXT
+)`;
+}
+
+function MATE_SESSION_V36_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  approver            TEXT NOT NULL,
+  approver_generation INTEGER NOT NULL,
+  credential_key      TEXT NOT NULL,
+  ceiling_microusd    INTEGER NOT NULL,
+  spent_microusd      INTEGER NOT NULL DEFAULT 0,
+  ceiling_digest      TEXT NOT NULL,
+  terms_digest        TEXT NOT NULL,
+  minted_at           TEXT NOT NULL,
+  ended_at            TEXT,
+  ended_by            TEXT
+)`;
+}
+
+const MATE_SESSION_V36_COLUMNS = [
+  "id", "approver", "approver_generation", "credential_key", "ceiling_microusd",
+  "spent_microusd", "ceiling_digest", "terms_digest", "minted_at", "ended_at", "ended_by",
+] as const;
+
+/** v36: remove the mate's artificial absolute expiry. */
+export function rebuildMateSessionForV36(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_session'").get();
+  if (row === undefined) return;
+  const stored = canonicalDdl(String(row["sql"]));
+  if (stored === canonicalDdl(MATE_SESSION_V36_DDL("mate_session"))) return;
+  if (stored !== canonicalDdl(MATE_SESSION_V35_DDL("mate_session"))) {
+    throw new Error("the mate_session table's DDL is not a shape this migration knows — refusing to rebuild it");
+  }
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      // A v35 session was signed with an expiry. Never silently broaden
+      // those old terms into a persistent authorization during migration.
+      db.exec(`UPDATE mate_session
+                  SET ended_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                      ended_by = 'v36-migration'
+                WHERE ended_at IS NULL`);
+      db.exec(MATE_SESSION_V36_DDL("mate_session_next"));
+      const names = MATE_SESSION_V36_COLUMNS.join(", ");
+      db.exec(`INSERT INTO mate_session_next (${names}) SELECT ${names} FROM mate_session`);
+      db.exec("DROP TABLE mate_session");
+      db.exec("ALTER TABLE mate_session_next RENAME TO mate_session");
+      db.exec("CREATE INDEX IF NOT EXISTS mate_session_live ON mate_session (approver, ended_at)");
+      const broken = db.prepare("PRAGMA foreign_key_check").all();
+      if (broken.length > 0) throw new Error("foreign keys did not survive the mate_session rebuild");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
 }
 
 const PHASE_CONFIG_V25_DDL = `CREATE TABLE phase_config (
@@ -13317,7 +13396,7 @@ export class Store {
 
   /** Delegated chat spend, signed once: the row every mate turn debits. */
   mintMateSession(
-    args: { approver: string; approverGeneration: number; credentialKey: string; ceilingMicrousd: number; ceilingDigest: string; termsDigest: string; expiresAt: Date },
+    args: { approver: string; approverGeneration: number; credentialKey: string; ceilingMicrousd: number; ceilingDigest: string; termsDigest: string },
     now: Date,
   ): number {
     return this.transact(() => {
@@ -13329,19 +13408,19 @@ export class Store {
         .run(now.toISOString(), args.approver, args.approver);
       const inserted = this.db
         .prepare(
-          `INSERT INTO mate_session (approver, approver_generation, credential_key, ceiling_microusd, ceiling_digest, terms_digest, minted_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO mate_session (approver, approver_generation, credential_key, ceiling_microusd, ceiling_digest, terms_digest, minted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(args.approver, args.approverGeneration, args.credentialKey, args.ceilingMicrousd, args.ceilingDigest, args.termsDigest, now.toISOString(), args.expiresAt.toISOString());
+        .run(args.approver, args.approverGeneration, args.credentialKey, args.ceilingMicrousd, args.ceilingDigest, args.termsDigest, now.toISOString());
       return Number(inserted.lastInsertRowid);
     });
   }
 
-  /** The live session — not ended, not expired — or null. Exhaustion is the caller's arithmetic. */
-  activeMateSession(approver: string, now: Date): MateSession | null {
+  /** The live session — explicitly ended or still active. Exhaustion is the caller's arithmetic. */
+  activeMateSession(approver: string): MateSession | null {
     const row = this.db
-      .prepare("SELECT * FROM mate_session WHERE approver = ? AND ended_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1")
-      .get(approver, now.toISOString());
+      .prepare("SELECT * FROM mate_session WHERE approver = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
+      .get(approver);
     return row === undefined ? null : readMateSession(row);
   }
 
@@ -13432,18 +13511,6 @@ export class Store {
       }));
   }
 
-  /** Transcripts live 24 hours (ruling 11); pending proposals expire with them, in one write. */
-  sweepMateThreads(now: Date): { messages: number; proposals: number } {
-    return this.transact(() => {
-      const cutoff = new Date(now.getTime() - 24 * 3_600_000).toISOString();
-      const messages = this.db.prepare("DELETE FROM mate_message WHERE created_at < ?").run(cutoff);
-      const proposals = this.db
-        .prepare("UPDATE mate_proposal SET state = 'expired', resolved_at = ? WHERE state IN ('drafting','pending') AND created_at < ?")
-        .run(now.toISOString(), cutoff);
-      return { messages: Number(messages.changes), proposals: Number(proposals.changes) };
-    });
-  }
-
   /** A proposal is inert (`drafting`) until its turn finalizes. */
   draftMateProposal(proposal: { thread: number; turn: number; kind: MateProposalKind; payload: Record<string, unknown>; ceilingDigest: string }, now: Date): number {
     const inserted = this.db
@@ -13526,7 +13593,7 @@ export class Store {
         .get(args.approver);
       if (live !== undefined || liveChat !== undefined) return { ok: false as const, reason: "concurrent" as const };
       if (this.chatTurnsToday(args.approver, now) >= args.dailyTurns) return { ok: false as const, reason: "daily-cap" as const };
-      if (session.endedAt !== null || session.expiresAt <= now.toISOString()) {
+      if (session.endedAt !== null) {
         return { ok: false as const, reason: "session-ended" as const };
       }
       if (session.spentMicrousd + args.reservedMicrousd > session.ceilingMicrousd) {
@@ -16012,7 +16079,6 @@ function readMateSession(row: Record<string, unknown>): MateSession {
     ceilingDigest: String(row["ceiling_digest"]),
     termsDigest: String(row["terms_digest"]),
     mintedAt: String(row["minted_at"]),
-    expiresAt: String(row["expires_at"]),
     endedAt: maybe("ended_at"),
     endedBy: maybe("ended_by"),
   };

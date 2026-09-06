@@ -92,9 +92,9 @@ describe("the mate's turn", () => {
 
   afterEach(() => store.close());
 
-  const session = (ceilingMicrousd = 5_000_000, expiresInMs = 3_600_000, approver = "alex", credentialKey = CREDENTIAL) => {
+  const session = (ceilingMicrousd = 5_000_000, approver = "alex", credentialKey = CREDENTIAL) => {
     const id = store.mintMateSession(
-      { approver, approverGeneration: who.generation, credentialKey, ceilingMicrousd, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64), expiresAt: new Date(clockAt + expiresInMs) },
+      { approver, approverGeneration: who.generation, credentialKey, ceilingMicrousd, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) },
       clock(),
     );
     const row = store.getMateSession(id);
@@ -142,6 +142,18 @@ describe("the mate's turn", () => {
     expect(script.bodies[0]).not.toContain(KEY);
   });
 
+  test("a conversation remains live across days until it is explicitly ended", async () => {
+    const live = session();
+    const first = scripted([text("I will remember that.")]);
+    expect(await turn("remember the alpha launch", first.fetcher, { session: live })).toMatchObject({ ok: true });
+    clockAt += 30 * 24 * 3_600_000;
+    const later = scripted([text("Still here.")]);
+    const outcome = await turn("pick up where we left off", later.fetcher, { session: live });
+    expect(outcome).toMatchObject({ ok: true, reply: "Still here." });
+    expect(store.activeMateSession("alex")?.id).toBe(live.id);
+    expect(later.bodies[0]).toContain("remember the alpha launch");
+  });
+
   test("a membership-backed turn needs no API key or dollar ceiling, but keeps the tool loop and daily ledger", async () => {
     const config: ChatConfig = {
       ...CONFIG,
@@ -152,7 +164,7 @@ describe("the mate's turn", () => {
       priceOutMicrousd: 0,
     };
     const credential = subscriptionCredentialKey("codex-subscription");
-    const live = session(0, 3_600_000, "alex", credential);
+    const live = session(0, "alex", credential);
     const requests: Parameters<SubscriptionMateRunner>[0][] = [];
     const subscriptionRunner: SubscriptionMateRunner = async request => {
       requests.push(request);
@@ -392,9 +404,6 @@ describe("the mate's turn", () => {
     const ended = session();
     store.endMateSession(ended.id, "alex", clock());
     expect(await turn("hello", script.fetcher, { session: ended })).toMatchObject({ ok: false, refused: "session-ended" });
-    const expiring = session(5_000_000, 1_000);
-    clockAt += 5_000;
-    expect(await turn("hello", script.fetcher, { session: expiring })).toMatchObject({ ok: false, refused: "session-ended" });
     expect(await turn("hello", script.fetcher, { config: { ...CONFIG, priceInMicrousd: null, priceOutMicrousd: null, model: "no-such-model" } })).toMatchObject({ ok: false, refused: "unpriced" });
     expect(script.bodies).toHaveLength(0);
     const live = session();
@@ -408,13 +417,13 @@ describe("the mate's turn", () => {
   });
 
   test("admission binds the session and the thread to the approver and the credential", async () => {
-    const bobs = session(5_000_000, 3_600_000, "root");
+    const bobs = session(5_000_000, "root");
     const bobsThread = thread("root");
     expect(await turn("hello", scripted([text("hi")]).fetcher, { session: bobs })).toMatchObject({ ok: false, refused: "not-yours" });
     expect(await turn("hello", scripted([text("hi")]).fetcher, { thread: bobsThread })).toMatchObject({ ok: false, refused: "not-yours" });
     expect(store.listMateMessages(bobsThread.id, 10)).toEqual([]);
     // A session minted under another credential cannot be spent by this key.
-    const otherKey = session(5_000_000, 3_600_000, "alex", credentialKeyOf("anthropic-api", "sk-ant-other"));
+    const otherKey = session(5_000_000, "alex", credentialKeyOf("anthropic-api", "sk-ant-other"));
     expect(await turn("hello", scripted([text("hi")]).fetcher, { session: otherKey })).toMatchObject({ ok: false, refused: "not-yours" });
     // A closed thread cannot be continued.
     const live = session();
@@ -524,7 +533,7 @@ describe("the mate's turn", () => {
       or({ content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "list_tasks", arguments: JSON.stringify({ repo: "r1" }) } }] }),
       or({ content: "two tasks are queued in r1" }),
     ]);
-    const live = session(5_000_000, 3_600_000, "alex", credentialKeyOf("openrouter-api", "or-key"));
+    const live = session(5_000_000, "alex", credentialKeyOf("openrouter-api", "or-key"));
     const outcome = await turn("what is queued?", script.fetcher, { session: live, config: { ...CONFIG, provider: "openrouter-api", model: "openai/gpt-5" }, key: "or-key" });
     expect(outcome).toMatchObject({ ok: true, steps: 2, activity: "read 1 · proposed 0 · 2 steps" });
     if (!outcome.ok) throw new Error("unreachable");

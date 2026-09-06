@@ -329,7 +329,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended while the model was answering", unknownSpend: false };
     const standing = reproveApprover(store, who);
     const liveSession = store.getMateSession(session.id);
-    if (!standing.ok || liveSession === null || liveSession.endedAt !== null || liveSession.expiresAt <= now.toISOString()) {
+    if (!standing.ok || liveSession === null || liveSession.endedAt !== null) {
       return fail("revoked", "your standing or this session ended while the model was answering — nothing it proposed was kept", false);
     }
 
