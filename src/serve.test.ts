@@ -6615,7 +6615,14 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
     approverToken = added.token;
-    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repos: [repoA, repoB] });
+    store.setChatConfig({
+      provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50,
+      weeklyCeilingMicrousd: 100_000_000, priceInMicrousd: 3, priceOutMicrousd: 15,
+    }, "alex", T0);
+    server = createDecisionServer({
+      store, evidenceRoot, clock: () => new Date(), repos: [repoA, repoB],
+      chatEnv: { ANTHROPIC_API_KEY: "sk-test-key" },
+    });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (typeof address !== "object" || address === null) throw new Error("no address");
@@ -6644,6 +6651,43 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect((board.match(/href="\/projects"/g) ?? []).length).toBe(2);
     // The chrome layer folds an open switcher on an outside tap.
     expect(board).toContain('details.switcher[open]');
+  });
+
+  test("chat is a projectless, all-project surface when several projects are served", async () => {
+    for (const [id, repo] of [["chat-alpha", repoA], ["chat-beta", repoB]] as const) {
+      const made = store.createConsoleTask({ id, title: id, repo, goal: `do ${id}`, filedVia: "test" }, T0);
+      expect(made.ok).toBe(true);
+    }
+    const cookie = await login();
+    const response = await fetch(url("/chat"), { headers: { cookie }, redirect: "manual" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-security-policy") ?? "").toContain("connect-src 'self'");
+    const before = await response.text();
+    expect(before).toContain("<h1>chat</h1>");
+    expect(before).toMatch(/<span class="name">all projects/);
+    expect(before).not.toContain("<h1>projects</h1>");
+
+    const csrf = csrfOf(before);
+    const minted = await fetch(url("/chat/mate/mint"), {
+      method: "POST", headers: { cookie, origin: base }, redirect: "manual",
+      body: new URLSearchParams({ csrf, "ceiling-usd": "5", hours: "4", token: approverToken }),
+    });
+    expect(minted.status).toBe(303);
+    const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(html).toContain('class="chat-workspace"');
+    expect(html).toContain("projects in this conversation");
+    expect(html).toContain("<strong>alpha</strong>");
+    expect(html).toContain("<strong>beta</strong>");
+    expect(html).toContain('data-waiting="2"');
+    expect(html).toContain(`name="path" value="${repoA}"`);
+    expect(html).toContain('name="return" value="/board"');
+
+    const opened = await fetch(url("/projects/open"), {
+      method: "POST", headers: { cookie, origin: base }, redirect: "manual",
+      body: new URLSearchParams({ csrf, path: repoA, return: "/board" }),
+    });
+    expect(opened.status).toBe(303);
+    expect(opened.headers.get("location")).toBe("/board");
   });
 
   test("a project card that is not open is itself the open form: the name returns home, and it carries the session's token", async () => {
@@ -6884,6 +6928,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(session).toMatchObject({ approver: "alex", ceilingMicrousd: 5_000_000, spentMicrousd: 0 });
     const thread = await page(cookie);
     expect(thread).toContain('class="thread"');
+    expect(thread).toContain('class="chat-workspace"');
+    expect(thread).toContain('class="chat-projects"');
+    expect(thread).toContain('aria-label="projects in this conversation"');
+    expect(thread).toContain('name="message" value="What needs my attention across every project?"');
+    expect(thread).toMatch(/<span class="name">all projects/);
     expect(thread).toContain('class="card composer"');
     expect(thread).not.toContain('name="token"');
     expect(thread).toContain("this session: $0.00 of $5.00");
@@ -7591,6 +7640,7 @@ describe("the reduction pass (Laws of UX): four rows and a more group, five tabs
         ".tabbar a .dot-badge",
         ".lane-attention h2::before",
         ".command-metric.attention .label::before",
+        ".chat-project-stats span.hot, .chat-project-stats span.hot b",
         ".workspace-stats .pulse-stat.hot b",
         ".workspace-bar .seg.attention",
       ].sort(),

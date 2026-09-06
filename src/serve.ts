@@ -807,6 +807,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
+      url.pathname !== "/chat" &&
       url.pathname !== "/settings" && url.pathname !== "/logout" && url.pathname !== "/people" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, "/projects");
@@ -1879,6 +1880,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       // writes nothing (slice-2 review, finding 7) — the mint card below
       // starts a new conversation, and minting ends the old session.
       const ceilingStale = enabled.ok && mateSession !== null && principal !== null && mateSession.ceilingDigest !== principal.ceilingDigest;
+      const chatProjects = ceiling.repos.map((repo, index) => {
+        let peek: ProjectPeek | null = null;
+        try {
+          peek = store.projectPeek(repo, now);
+        } catch {
+          // The project rail is orientation, like chrome's project peek: a
+          // failed count must not make the conversation itself disappear.
+        }
+        return { id: `r${index + 1}`, label: projectName(repo), path: repo, peek };
+      });
       if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
         {
           const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
@@ -1886,7 +1897,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(
             response,
             200,
-            matePage(chromeFor(project, "chat"), {
+            matePage(chromeFor(null, "chat", undefined, "all"), {
               session: mateSession,
               messages: store.listMateMessages(opened.thread.id, 40),
               proposals: store.listMateProposals(opened.thread.id),
@@ -1898,7 +1909,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               config: enabled.config,
               turnsToday: store.chatTurnsToday(who.name, now),
               weeklySpent: store.chatWeeklySpendMicrousd(enabled.credentialKey, now),
-              repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
+              projects: chatProjects,
               csrf: who.session.csrf,
               problem: url.searchParams.get("said") ?? said,
               now,
@@ -1909,7 +1920,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        chatPage(chromeFor(project, "chat"), {
+        chatPage(chromeFor(null, "chat", undefined, "all"), {
           enabled,
           pending,
           latched,
@@ -1917,7 +1928,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           recent: store.recentChatTurns(who.name, 10),
           turnsToday: store.chatTurnsToday(who.name, now),
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
-          repoLabels: ceiling.repos.map((repo, index) => ({ id: `r${index + 1}`, label: projectName(repo) })),
+          repoLabels: chatProjects.map(({ id, label }) => ({ id, label })),
           config: store.getChatConfig(),
           keyFacts: (["anthropic-api", "openrouter-api"] as const).map(one => {
             const found = chatKeyFor(one);
@@ -2443,7 +2454,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // v28: the chrome layer itself fetches (the attended beat), so any
     // page that ships it needs connect-src — not only pages whose own
     // functional script polls.
-    return page(response, status, html, nonce, s.functional?.fetches === true || chromeLayer);
+    return page(response, status, html, nonce, s.functional?.fetches === true || chromeLayer || sensitiveBeat !== "");
   }
 
   /** The badge cache: five seconds per project — mutations invalidate it. */
@@ -5806,7 +5817,7 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
     "Content-Security-Policy":
       `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; manifest-src 'self'; worker-src 'self'; img-src 'self'; script-src 'nonce-${nonce}'; ` +
       // connect-src only when the page's script actually fetches (a region
-      // poller) — the chrome layer alone gets no network at all.
+      // poller, the full chrome beat, or the minimal sensitive-page beat).
       `${fetches === true ? "connect-src 'self'; " : ""}form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
     "Content-Type": "text/html; charset=utf-8",
   });
@@ -6708,8 +6719,38 @@ const STYLE = `
     padding: .75rem .9rem; border: 1px solid var(--border);
     border-radius: calc(var(--radius) - 2px); background: var(--card); font-size: .8125rem; min-width: 0;
   }
-  /* the mate's thread (mate arc §5) */
-  .thread { display: flex; flex-direction: column; gap: 0.75rem; margin: 1rem 0; }
+  /* The mate's unified workspace: bounded project pulse on the left, the
+     one durable conversation on the right. It widens only this screen;
+     the rest of the console keeps its reading measure. */
+  main:has(.chat-workspace) { max-width: 78rem; }
+  .chat-workspace { display: grid; grid-template-columns: minmax(14rem, 17rem) minmax(0, 1fr); gap: 1.5rem; }
+  .chat-main { min-width: 0; max-width: 52rem; }
+  .chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+  .chat-head h1 { margin-bottom: .15rem; }
+  .chat-budget {
+    display: flex; flex-wrap: wrap; gap: .25rem .75rem; margin: .75rem 0 1rem;
+    color: var(--muted-foreground); font-size: .6875rem; font-variant-numeric: tabular-nums;
+  }
+  .chat-budget > span { white-space: nowrap; }
+  .chat-projects {
+    position: sticky; top: 1rem; align-self: start; max-height: calc(100vh - 2rem); overflow-y: auto;
+    padding-right: 1rem; border-right: 1px solid var(--border);
+  }
+  .chat-projects-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .25rem; }
+  .chat-projects-head h2 { margin: 0; color: var(--foreground); font-size: .875rem; }
+  .chat-project-card { padding: .75rem 0; border-bottom: 1px solid var(--border); }
+  .chat-project-card:last-child { border-bottom: 0; }
+  .chat-project-name { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .4rem; }
+  .chat-project-name strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .8125rem; }
+  .chat-project-name .mono { color: var(--muted-foreground); font-size: .6875rem; }
+  .chat-project-stats { display: grid; grid-template-columns: 1fr 1fr; gap: .2rem .5rem; margin-top: .55rem; }
+  .chat-project-stats span { color: var(--muted-foreground); font-size: .6875rem; white-space: nowrap; }
+  .chat-project-stats b { color: var(--foreground); font-family: var(--font-mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chat-project-stats span.hot, .chat-project-stats span.hot b { color: var(--brand); }
+  .chat-project-actions { display: flex; gap: .25rem; margin-top: .55rem; }
+  .chat-project-actions form { margin-bottom: 0; }
+  .chat-project-actions button { min-height: 1.75rem; padding: .2rem .55rem; font-size: .6875rem; box-shadow: none; }
+  .thread { display: flex; flex-direction: column; gap: 0.75rem; margin: 1rem 0; min-height: 13rem; }
   .thread .msg { max-width: 46rem; padding: 0.6rem 0.85rem; border-radius: 0.75rem; border: 1px solid var(--border); }
   .thread .msg p { margin: 0.25rem 0; }
   .thread .msg.op { align-self: flex-end; background: var(--muted); }
@@ -6721,7 +6762,30 @@ const STYLE = `
   .thread .proposal.refused { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
   .thread .proposal .done { color: var(--ok); }
   .thread .proposal .refused { color: var(--danger); }
+  .chat-empty { margin: auto; padding: 2.5rem 1rem; text-align: center; }
+  .chat-empty > strong { display: block; font-size: 1rem; }
+  .chat-prompts { display: flex; justify-content: center; flex-wrap: wrap; gap: .35rem; margin-top: .85rem; }
+  .chat-prompts form { margin: 0; }
+  .chat-prompts button { min-height: 2rem; box-shadow: none; }
   .composer textarea { width: 100%; }
+  @media (min-width: 901px) {
+    .chat-workspace .composer { position: sticky; bottom: .75rem; z-index: 5; box-shadow: var(--shadow-overlay); }
+  }
+  @media (max-width: 900px) {
+    .chat-workspace { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+    .chat-main { max-width: none; }
+    .chat-projects { position: static; max-height: none; overflow: visible; padding: 0 0 1rem; border: 0; border-bottom: 1px solid var(--border); }
+    .chat-project-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0 .875rem; }
+  }
+  @media (max-width: 760px) {
+    .chat-project-list { display: flex; gap: .625rem; overflow-x: auto; padding: .125rem 0 .5rem; scroll-snap-type: x proximity; }
+    .chat-project-card {
+      flex: 0 0 min(17rem, 82vw); scroll-snap-align: start; padding: .7rem .75rem;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    }
+    .chat-project-card:last-child { border-bottom: 1px solid var(--border); }
+    .chat-projects { padding-bottom: .75rem; }
+  }
   .mate-terms { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; }
   .mate-terms .inline-field { white-space: nowrap; }
   button.quiet { background: transparent; color: var(--fg-muted); border-color: var(--border); }
@@ -8191,6 +8255,73 @@ function chatMoney(microusd: number | null): string {
   return microusd === null ? "unknown" : `$${(microusd / 1_000_000).toFixed(2)}`;
 }
 
+type ChatProjectPulse = {
+  id: string;
+  label: string;
+  path: string;
+  peek: ProjectPeek | null;
+};
+
+/**
+ * The mate's project rail: one bounded pulse per admitted project, plus
+ * two roads that preserve the plane's contracts. "ask" sends the stable
+ * rN alias the model already sees; "board" uses the existing POST switch
+ * instead of smuggling a project change through a GET parameter.
+ */
+function chatProjectRail(projects: readonly ChatProjectPulse[], csrf: string, inert: boolean): string {
+  const statusOf = (peek: ProjectPeek | null): string =>
+    peek === null
+      ? "unavailable"
+      : peek.waiting > 0
+        ? "needs you"
+        : peek.running > 0
+          ? "building"
+          : peek.queued > 0
+            ? "queued"
+            : "quiet";
+  const rows = projects.map(one => {
+    const peek = one.peek;
+    const ask = `Give me a concise status for ${one.id} (${one.label}) and recommend the next reversible action.`;
+    return (
+      `<div class="chat-project-card">` +
+      `<div class="chat-project-name"><span class="mono">${escape(one.id)}</span><strong>${escape(one.label)}</strong>` +
+      `<span class="badge">${escape(statusOf(peek))}</span></div>` +
+      (peek === null
+        ? `<p class="meta">pulse unavailable</p>`
+        : `<div class="chat-project-stats">` +
+          `<span${peek.waiting > 0 ? ' class="hot"' : ""}><b>${peek.waiting}</b> need you</span>` +
+          `<span><b>${peek.running}</b> live</span><span><b>${peek.queued}</b> queued</span>` +
+          `<span><b>${peek.doneRecently}</b> done today</span></div>`) +
+      `<div class="chat-project-actions">` +
+      (inert
+        ? ""
+        : `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+          `<button type="submit" name="message" value="${escape(ask)}" class="quiet" aria-label="ask about ${escape(one.label)}">ask</button></form>`) +
+      `<form method="post" action="/projects/open" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+      `<input type="hidden" name="path" value="${escape(one.path)}"><input type="hidden" name="return" value="/board">` +
+      `<button type="submit" class="quiet" aria-label="open ${escape(one.label)} board">board</button></form></div></div>`
+    );
+  }).join("");
+  return (
+    `<aside class="chat-projects" aria-label="projects in this conversation">` +
+    `<div class="chat-projects-head"><h2>projects</h2><span class="badge">${projects.length}</span></div>` +
+    `<div class="chat-project-list">${rows}</div></aside>`
+  );
+}
+
+/** Spend-authorized one-click questions: ordinary /chat posts, not a new door. */
+function matePromptStarters(csrf: string): string {
+  const prompts = [
+    ["needs my attention", "What needs my attention across every project?"],
+    ["building now", "What is building right now across every project?"],
+    ["what should move next", "Review every project's queue and recommend what should move next."],
+  ] as const;
+  return `<div class="chat-prompts" aria-label="suggested questions">${prompts.map(([label, message]) =>
+    `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    `<button type="submit" name="message" value="${escape(message)}" class="quiet">${escape(label)}</button></form>`,
+  ).join("")}</div>`;
+}
+
 function chatPage(chrome: Chrome, data: {
   enabled: { ok: true } & Record<string, unknown> | { ok: false; why: string };
   pending: ChatTurn | null;
@@ -8553,22 +8684,24 @@ function matePage(chrome: Chrome, data: {
   config: import("./store.js").ChatConfig;
   turnsToday: number;
   weeklySpent: number;
-  repoLabels: { id: string; label: string }[];
+  projects: ChatProjectPulse[];
   csrf: string;
   problem: string | null;
   now: Date;
 }): Screen {
-  const parts: string[] = [
-    "<h1>chat</h1>",
-    `<p class="meta">the mate reads every project this console serves and proposes; nothing happens until you confirm a card. ` +
-      `<span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
-      ` · this session: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)} until ${escape(data.session.expiresAt.slice(11, 16))}Z` +
-      ` · this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)} · ${data.turnsToday} of ${data.config.dailyTurns} turns today</p>`,
-    `<p class="meta">projects: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
+  const conversation: string[] = [
+    `<div class="chat-head"><div><h1>chat</h1>` +
+      `<p class="meta">one conversation across every project · the mate proposes, you confirm</p></div>` +
+      `<span class="badge badge-running">session live</span></div>`,
+    `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
+      `<span>this session: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
+      `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>` +
+      `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
+      `<span>until ${escape(data.session.expiresAt.slice(11, 16))}Z</span></div>`,
   ];
-  if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
+  if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
-    parts.push(
+    conversation.push(
       `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
         `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
     );
@@ -8580,16 +8713,21 @@ function matePage(chrome: Chrome, data: {
     byTurn.set(one.turn, list);
   }
   const inert = data.pending !== null;
-  parts.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now));
-  parts.push(`<div class="thread">`);
-  if (data.messages.length === 0) parts.push(`<p class="meta">nothing said yet — ask how things stand.</p>`);
+  conversation.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now));
+  conversation.push(`<div class="thread">`);
+  if (data.messages.length === 0) {
+    conversation.push(
+      `<div class="chat-empty"><strong>What should we look at first?</strong>` +
+      `<p class="meta">Ask in your own words, or start with a fleet question.</p>${matePromptStarters(data.csrf)}</div>`,
+    );
+  }
   for (const message of data.messages) {
     if (message.role === "operator") {
-      parts.push(`<div class="msg op"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
+      conversation.push(`<div class="msg op"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
       continue;
     }
     const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
-    parts.push(
+    conversation.push(
       `<div class="msg mate">` +
         (message.activity === null ? "" : `<p class="meta mono activity">${escape(message.activity)}</p>`) +
         `<p style="white-space:pre-wrap">${escape(message.text)}</p>` +
@@ -8597,12 +8735,12 @@ function matePage(chrome: Chrome, data: {
         `</div>`,
     );
   }
-  parts.push(`</div>`);
+  conversation.push(`</div>`);
   if (data.pending !== null) {
-    parts.push(`<div class="card"><p><strong>thinking…</strong> <span class="meta">turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
-    return screen("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
+    conversation.push(`<div class="card"><p><strong>thinking…</strong> <span class="meta">turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
+    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${conversation.join("\n")}</section></div>`, { chrome, refreshSeconds: 3 });
   }
-  parts.push(
+  conversation.push(
     `<form method="post" action="/chat" class="card composer">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<label>message<textarea name="message" rows="3" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="how do things stand?"></textarea></label>`,
@@ -8619,7 +8757,11 @@ function matePage(chrome: Chrome, data: {
     `<p class="meta">chat settings live on this page once the session ends</p>`,
     `</details>`,
   );
-  return screen("chat", parts.join("\n"), { chrome });
+  return screen(
+    "chat",
+    `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, false)}<section class="chat-main">${conversation.join("\n")}</section></div>`,
+    { chrome },
+  );
 }
 
 function routinesPage(

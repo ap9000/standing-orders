@@ -338,7 +338,9 @@ answer to a parked decision. Every proposal is a card you confirm, with
 every consequence and the builder's recommendation shown beside the
 mate's pick; a scope the mate wrote never seals under an operating mode.
 It spends against a ceiling you set per session and never sees a path, a
-digest, or an account name.
+digest, or an account name. The console keeps a live pulse for every
+admitted project beside that shared thread, with one-click fleet questions
+and a direct road to each project's board.
 
 Coding agents you run elsewhere reach the same plane through the MCP
 gateway: `standing-orders mcp` serves a coordinator credential you mint,

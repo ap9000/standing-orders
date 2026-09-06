@@ -1,5 +1,19 @@
 # Progress
 
+**2026-09-06 — Chat becomes the unified project workspace.** The mate's
+existing cross-project thread, proposal cards, confirmation doors, and
+spend envelope now sit beside one bounded pulse per admitted project:
+needs-you, live, queued, and finished-today counts, with direct roads to
+ask about that project or open its board. Empty conversations offer three
+real `/chat` prompts (attention, live work, and queue order), the screen's
+scope truth is now always “all projects,” and the layout collapses to one
+column below 900px. No authority changed: prompt chips are ordinary
+spend-authorized mate turns and project navigation still uses the existing
+CSRF-protected POST switch.
+The browser pass also closed two integration gaps: multi-project chat is
+exempt from the open-project redirect, and the minimal heartbeat on a
+sensitive chat setup page now receives its required same-origin CSP door.
+
 **2026-09-03 — The reduction pass, improvements 1 and 3 by hand: four
 rows and a more group, one accent in two places.** The Mobbin study
 (Linear web and mobile, Vercel, Railway, Supabase, GitHub) settled both.

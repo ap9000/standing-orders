@@ -79,6 +79,7 @@ ring at 2px offset on buttons and links; a ring-colored border with a soft
 | Section header | `h2` (+ `.lane-count` pill) | — | small semibold dim sans |
 | Lane | `details.lane` with `summary > h2` | — | a column on a desktop, a folding section on a phone; a state dot on every header |
 | Workspace card | `.workspace-card` | — | name · status word · four inset count cells · proportional bar · board tap |
+| Chat workspace | `.chat-workspace` + `.chat-projects` + `.thread` | — | one bounded project pulse beside the shared mate thread; project actions remain ordinary guarded forms |
 | Switcher | `details.switcher` + `.switcher-menu` | `NavBar` | POST forms with the session token; a check marks the current row; inert on sensitive pages |
 | Shell | `.side` 220px with icon rows; `.mobile-top` + `.tabbar` | `NavBar` | primary rows carry icons, the foot list stays text; one visible `/projects` link per breakpoint |
 
@@ -123,6 +124,17 @@ top-down and every long thing folds.
    scope (open; the edit form and the tournament fields fold inside it),
    waits for (folded when empty), holds.
 
+## 4c. The chat workspace
+
+Chat is always an all-project surface. On a desk, a sticky project rail sits
+beside the single mate thread; every admitted project shows needs-you, live,
+queued, and finished-today counts, then two guarded forms: ask about its
+stable `rN` alias or open its board. On a phone, those cards become one
+horizontally scrolling row so the conversation remains in the first screen.
+An empty thread offers three ordinary spend-authorized message forms, never
+a separate action path. The mate still only proposes and every act still
+lands as a confirmable card.
+
 ## 5. The shell
 
 Desktop: a 220px sidebar (inbox · portfolio · work{board, queue} · builds ·
@@ -137,8 +149,9 @@ for the same menu as a sheet above the tab bar, with "manage projects →"),
 quick capture — then the five-tab bar padded for the home indicator.
 `viewport-fit=cover` makes the safe areas real.
 
-Sensitive pages (a password ceremony on screen) gain no scripts and no chrome
-forms: the switcher renders as the name and its one link.
+Sensitive pages (a password ceremony on screen) gain no chrome scripts or
+chrome forms: the switcher renders as the name and its one link. The minimal
+same-origin session heartbeat remains, under the page's nonce and CSP.
 
 ## 6. Motion and browser surfaces
 
