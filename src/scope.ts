@@ -100,11 +100,11 @@ export type ClaudeProfile = {
   provider: "claude";
   /** The exact model string the argv carries. Never empty, never "default". */
   model: string;
-  /** Claude's real argv semantic: --permission-mode acceptEdits, or the
-   * separate --dangerously-skip-permissions flag. Phase 1 files
-   * acceptEdits ONLY (finding 22); bypass arrives with the attended
-   * authorization work. */
-  permissionArgv: "acceptEdits" | "bypassPermissions";
+  /** Claude's real argv semantic. `auto` is the safe unattended posture:
+   * Claude's classifier allows routine project work and stops risky acts.
+   * `acceptEdits` remains readable for approvals created before auto mode;
+   * bypass is still a separate, explicitly signed escalation. */
+  permissionArgv: "auto" | "acceptEdits" | "bypassPermissions";
   maxTurns: number;
   repairMaxTurns: number;
   timeoutSeconds: number;
@@ -284,7 +284,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
   if (p["provider"] === "claude") {
     if (
       str(p["model"]) &&
-      (p["permissionArgv"] === "acceptEdits" || p["permissionArgv"] === "bypassPermissions") &&
+      (p["permissionArgv"] === "auto" || p["permissionArgv"] === "acceptEdits" || p["permissionArgv"] === "bypassPermissions") &&
       num(p["maxTurns"]) && num(p["repairMaxTurns"]) &&
       num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
       str(p["repairModel"])

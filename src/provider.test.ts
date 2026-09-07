@@ -15,7 +15,7 @@ const ASK = {
   brief: "do the thing",
   model: null as string | null,
   maxTurns: 40,
-  permissionMode: "acceptEdits",
+  permissionMode: "auto",
   skipPermissions: false,
   resumeSession: null as string | null,
 };
@@ -30,7 +30,7 @@ describe("argv dialects", () => {
       "--output-format", "stream-json",
       "--verbose",
       "--max-turns", "40",
-      "--permission-mode", "acceptEdits",
+      "--permission-mode", "auto",
       "--model", "sonnet",
     ]);
     expect(adapterFor("claude").argv({ ...ASK, resumeSession: "s-1" })).toContain("--resume");

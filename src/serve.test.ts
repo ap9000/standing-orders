@@ -1198,6 +1198,7 @@ describe("the operations console", () => {
     expect(screen).toContain("Wired the guard; tests added.");
     expect(screen).toContain('class="card result-card"');
     expect(screen).toContain("Added the payout boundary");
+    expect(screen).toContain("checks reported by the agent");
     expect(screen).toContain("Focused tests pass");
     expect(screen).toContain("Watch the first production run");
   });
@@ -6392,6 +6393,37 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(ready).toContain('data-dispatch-status="ready-to-run"');
     expect(ready).toContain("every dispatch gate currently passes");
     expect(ready).not.toContain('data-dispatch-status="no-worker-online"');
+  });
+
+  test("a completed task only claims evidence when both the handoff and terminal diff exist", async () => {
+    const ref = seed("t-proof", "show me the proof");
+    const run = finished("t-proof", ref, "built", 0.25);
+    store.setTaskState("t-proof", "done", T0);
+    await boot();
+    const cookie = await login();
+
+    const incomplete = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(incomplete).toContain('data-dispatch-status="complete-proof-incomplete"');
+    expect(incomplete).toContain("agent handoff and terminal diff");
+    expect(incomplete).not.toContain('data-dispatch-status="complete-with-evidence"');
+
+    const sha256 = createHash("sha256").update("").digest("hex");
+    for (const kind of ["handoff", "terminal-diff"] as const) {
+      store.saveArtifact({
+        run,
+        kind,
+        key: `${run}/${kind}`,
+        bytesOriginal: 0,
+        bytesStored: 0,
+        truncated: false,
+        sha256,
+        capture: `${kind} (exit 0)`,
+      }, T0);
+    }
+    const proven = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(proven).toContain('data-dispatch-status="complete-with-evidence"');
+    expect(proven).toContain(`Build #${run}`);
+    expect(proven).toContain("agent-reported checks and machine-captured diff");
   });
 
   test("the attempt panel names the run; its pollers hit the RUN's fragments, never the task URL", async () => {

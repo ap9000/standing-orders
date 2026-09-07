@@ -642,15 +642,16 @@ describe("what the builder tells the agent", () => {
   });
 
   test("does not skip permission checks unless a person asked for it", async () => {
-    // Unattended work is exactly the case that tempts you to use that flag.
+    // Auto is the guarded headless posture: routine project work can run,
+    // but the bypass flag remains an explicitly signed escalation.
     await build1();
 
     expect(asked).toContain("--permission-mode");
-    expect(asked).toContain("acceptEdits");
+    expect(asked).toContain("auto");
     expect(asked).not.toContain("--dangerously-skip-permissions");
   });
 
-  test("skipping permissions on approved work refuses, typed — the approval bound acceptEdits (v24)", async () => {
+  test("skipping permissions on approved work refuses, typed — the approval bound auto mode (v24)", async () => {
     const result = await build1({ skipPermissions: true });
 
     expect(result).toMatchObject({ ok: false, reason: "stale-approval" });

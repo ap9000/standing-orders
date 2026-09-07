@@ -2747,6 +2747,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       who.via === "cookie" && scope !== null && approvalDigest !== null && !approvalOf(scope).approved && !revisionBroken
         ? mintApprovalNonce(who.name, taskId, approvalDigest)
         : "";
+    const runs = ref === null ? [] : store.runsFor(ref.id);
+    const completion = (() => {
+      const latest = runs.find(one => one.finishedAt !== null);
+      if (latest === undefined) return null;
+      const artifacts = store.artifactsFor(latest.id);
+      return {
+        runId: latest.id,
+        outcome: latest.outcome,
+        hasTerminalDiff: artifacts.some(one => one.kind === "terminal-diff"),
+        hasHandoff: artifacts.some(one => one.kind === "handoff"),
+      };
+    })();
     return {
         task: found,
         strikes: ref?.strikes ?? 0,
@@ -2844,7 +2856,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           }
           return null;
         })(),
-        runs: ref === null ? [] : store.runsFor(ref.id),
+        runs,
+        completion,
         decisions: ref === null ? [] : store.decisionsForTask(ref.id),
         incidents: ref === null ? [] : store.incidentsForTask(ref.id),
         coordinatorProposals: (() => {
@@ -2905,7 +2918,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             mint: {
               models,
               pinnedModel,
-              posture: modeTerms?.permissionDefault === "escalated" ? ("bypassPermissions" as const) : ("acceptEdits" as const),
+              posture: modeTerms?.permissionDefault === "escalated" ? ("bypassPermissions" as const) : ("auto" as const),
               quick: modeTerms?.quickMint === true && liveMode !== null && liveMode.signedBy === who.name,
             },
             open: null,
@@ -5064,7 +5077,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     // runs, never a partial edit. Absent choices keep the scope's pin.
     const chosenModel = (inputs.model ?? "").trim();
     const chosenPosture =
-      inputs.posture === "bypassPermissions" ? ("bypassPermissions" as const) : inputs.posture === "acceptEdits" ? ("acceptEdits" as const) : null;
+      inputs.posture === "bypassPermissions"
+        ? ("bypassPermissions" as const)
+        : inputs.posture === "auto"
+          ? ("auto" as const)
+          : inputs.posture === "acceptEdits"
+            ? ("acceptEdits" as const)
+            : null;
     if (chosenModel !== "" || chosenPosture !== null) {
       pinned = {
         ...pinned,
@@ -5153,7 +5172,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         const posture =
           profile?.permissionArgv === "bypassPermissions"
             ? "FULL permissions — claude runs with --dangerously-skip-permissions; nothing asks"
-            : "asks before edits outside the worktree (acceptEdits)";
+            : profile?.permissionArgv === "auto"
+              ? "safe unattended permissions — routine project commands and edits proceed; risky acts stop"
+              : "legacy acceptEdits — edits proceed, commands that ask are denied unattended";
         return `<p class="meta">runs on</p><p class="recap" style="margin-top:0">claude · ${escape(String(profile?.model ?? ""))} — ${posture}</p>`;
       })() +
       (terms.parentRun == null
@@ -6000,7 +6021,13 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
   const repair = profile.repairModel === "inherit" ? "same model" : profile.repairModel;
   const base =
     profile.provider === "claude"
-      ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — edits auto-accepted inside its leased worktree, ${profile.maxTurns}-turn runaway breaker, ${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+      ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — ${
+          profile.permissionArgv === "bypassPermissions"
+            ? "FULL permissions; nothing asks"
+            : profile.permissionArgv === "auto"
+              ? "safe unattended permissions; routine project commands and edits proceed, risky acts stop"
+              : "legacy acceptEdits; edits proceed, commands that ask are denied unattended"
+        }, ${profile.maxTurns}-turn runaway breaker, ${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
       : profile.provider === "gemini"
         ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "EVERY tool auto-approved" : "edits auto-approved, other tools refused"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
         : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
@@ -11251,6 +11278,10 @@ function taskBody(data: {
   approvalDigest?: string | null;
   spendDefaults?: { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; raceAgents: number | null } | null;
   runs: Run[];
+  /** Proof produced by the newest finished attempt. The two booleans are
+   * machine facts about immutable, hash-addressed artifacts — never inferred
+   * from the agent's prose. */
+  completion?: { runId: number; outcome: string | null; hasTerminalDiff: boolean; hasHandoff: boolean } | null;
   decisions: Decision[];
   incidents: Incident[];
   /** Pending coordinator proposals on this task (mate arc v3), with the decisions their answer cards name. */
@@ -11275,7 +11306,7 @@ function taskBody(data: {
     canMint: boolean;
     /** The mint picker (P1/C7): claude models to choose from, and the
      * permission posture default (escalated when the active mode says so). */
-    mint?: { models: string[]; pinnedModel: string; posture: "acceptEdits" | "bypassPermissions"; quick: boolean };
+    mint?: { models: string[]; pinnedModel: string; posture: "auto" | "acceptEdits" | "bypassPermissions"; quick: boolean };
     open: { id: string; state: string; expiresAt: string; turnsUsed: number; cap: number; spentMicrousd: number; budgetMicrousd: number; running: boolean } | null;
   } | null;
   now: Date;
@@ -11343,7 +11374,23 @@ function taskBody(data: {
       `<strong>${escape(title)}</strong> <span class="meta">${detail}</span></div>`;
 
     if (task.state === "done") {
-      return box("ok", "Complete", `The task reached a terminal result. <a href="#attempts">Review the attempt and its proof below.</a>`);
+      const proof = data.completion ?? null;
+      if (proof === null) {
+        return box("problem", "Complete, proof missing", "The task is terminal but has no finished attempt record. Treat it as unverified.");
+      }
+      const missing = [proof.hasHandoff ? null : "agent handoff", proof.hasTerminalDiff ? null : "terminal diff"]
+        .filter((one): one is string => one !== null);
+      return missing.length > 0
+        ? box(
+            "problem",
+            "Complete, proof incomplete",
+            `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, but its ${escape(missing.join(" and "))} is missing.`,
+          )
+        : box(
+            "ok",
+            "Complete with evidence",
+            `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its agent-reported checks and machine-captured diff; each is labeled by source.`,
+          );
     }
     if (task.state === "cancelled") {
       return box("problem", "Cancelled", "Nothing else will run for this task.");
@@ -11653,7 +11700,8 @@ function taskBody(data: {
               attended.mint === undefined
                 ? ""
                 : `<label>permissions<select name="posture">` +
-                  `<option value="acceptEdits"${attended.mint.posture === "acceptEdits" ? " selected" : ""}>asks before edits outside the worktree</option>` +
+                  `<option value="auto"${attended.mint.posture === "auto" ? " selected" : ""}>safe unattended — routine project commands and edits proceed</option>` +
+                  `<option value="acceptEdits"${attended.mint.posture === "acceptEdits" ? " selected" : ""}>legacy acceptEdits — commands that ask are denied unattended</option>` +
                   `<option value="bypassPermissions"${attended.mint.posture === "bypassPermissions" ? " selected" : ""}>full permissions — nothing asks</option>` +
                   `</select></label>`,
               `<button type="submit">read the terms</button>`,
@@ -12720,7 +12768,7 @@ function runPage(
         (structuredHandoff === null
           ? ""
           : resultList("completed", structuredHandoff.changes) +
-            resultList("verified", structuredHandoff.verification) +
+            resultList("checks reported by the agent", structuredHandoff.verification) +
             resultList("follow-up", structuredHandoff.followUps)) +
         `</section>`;
   const evidence =

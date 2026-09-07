@@ -20,7 +20,7 @@ export type ModeName = "standard" | "hands-off";
 
 export type ModeTerms = {
   name: ModeName;
-  /** The filing default per provider (C7 matrix): "safe" = acceptEdits /
+  /** The filing default per provider (C7 matrix): "safe" = auto /
    * auto_edit; "escalated" = bypassPermissions / yolo. Codex-shaped
    * providers have one posture and the ceremony words say escalation
    * changes nothing for them. */
@@ -169,7 +169,7 @@ export function modeWords(terms: ModeTerms): string[] {
   return [
     terms.permissionDefault === "escalated"
       ? "new filings default to FULL permissions: claude runs with --dangerously-skip-permissions, gemini with --approval-mode yolo (codex-shaped lanes have one posture; this changes nothing for them)"
-      : "new filings keep the safe permission defaults (edits auto-approved, everything else asks)",
+      : "new filings use safe unattended permissions: routine project commands and edits proceed; risky acts stop for approval",
     terms.autoApproveFiling
       ? "every scope YOU file — signed-in console or credentialed CLI — is approved the moment you file it; while this mode is active, your signed-in browser session becomes a spend credential for this repository"
       : "filings still wait for their own approval ceremony",

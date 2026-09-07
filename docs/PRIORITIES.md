@@ -56,3 +56,11 @@ visible provenance and an operator-controlled reset.
 
 Priority 1 is active. Priority 2 follows immediately because reliable execution
 without reliable proof is only a faster way to produce uncertain work.
+
+The first Priority 1 slice now pins the worker service to the installed Node
+runtime, requires a fresh worker heartbeat before installation reports success,
+shows the exact dispatch gate on every task, and uses Claude's guarded
+unattended `auto` permission mode so routine project commands and tests can run
+without granting unrestricted permissions. A completed task only says
+“complete with evidence” when both its terminal handoff and machine-captured
+diff exist; otherwise it names the missing proof.

@@ -42,7 +42,7 @@ import { storeEvidence, budgetedStatJson, type DiffStat } from "./evidence.js";
 const DEMO_PROFILE = {
   provider: "claude" as const,
   model: "sonnet",
-  permissionArgv: "acceptEdits" as const,
+  permissionArgv: "auto" as const,
   maxTurns: 1_000, repairMaxTurns: 4, timeoutSeconds: 1_200, timeoutKind: "idle" as const, repairTimeoutSeconds: 300,
   repairModel: "inherit",
 };

@@ -126,9 +126,9 @@ describe("the C7 escalation matrix, sealed where profiles are sealed", () => {
     expect(scope?.approvalBasis ?? "password").toBe("mode");
   });
 
-  test("standard (safe) keeps acceptEdits", () => {
+  test("standard (safe) uses Claude's guarded unattended auto mode", () => {
     const scope = signAndSeal("standard");
-    expect(scope?.profile).toMatchObject({ provider: "claude", permissionArgv: "acceptEdits" });
+    expect(scope?.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
   });
 
   test("coverage answers only for the signer with autoApprove, never for anyone else", () => {

@@ -16287,7 +16287,7 @@ export function contestantProfileOf(provider: string, model: string, repairModel
     ? {
         provider: "claude",
         model,
-        permissionArgv: "acceptEdits",
+        permissionArgv: "auto",
         maxTurns: CLAUDE_LIMITS.maxTurns,
         repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
         timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,

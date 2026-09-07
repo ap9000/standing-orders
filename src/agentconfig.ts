@@ -154,9 +154,10 @@ export function resolveScopeProfile(
       ? {
           provider,
           model,
-          // Phase 1 files acceptEdits ONLY (finding 22) — bypass arrives
-          // with the attended authorization work, through its own ceremony.
-          permissionArgv: "acceptEdits",
+          // Auto mode is designed for headless work: routine repository
+          // commands and edits proceed, while risky acts still stop at the
+          // provider's permission classifier. Bypass remains a ceremony.
+          permissionArgv: "auto",
           maxTurns: CLAUDE_LIMITS.maxTurns,
           repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
           timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,

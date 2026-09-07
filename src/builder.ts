@@ -20,9 +20,9 @@
  *
  * **Permission checks are not skipped by default.** `claude` has a flag for it
  * and unattended work is exactly the case that tempts you to use it; the
- * default here is `acceptEdits`, which lets the agent write files in the
- * worktree it was given and nothing else. Turning that off is an explicit
- * choice an operator makes, per run, and it is named honestly.
+ * default here is `auto`, whose classifier permits routine project work while
+ * stopping risky actions. Turning checks off is an explicit choice an
+ * operator signs, and it is named honestly.
  *
  * Observable progress keeps an ordinary build alive. A no-progress
  * watchdog and a high runaway-turn breaker still stop a pathological loop;
@@ -386,7 +386,7 @@ export function proveApprovedProfile(
   }
   const wantSkip = profileWantsSkip(snapshot);
   if (given.skipPermissions && !wantSkip) {
-    return { ok: false, message: "the approval binds acceptEdits permissions — skipping them was never agreed to (stale-approval)" };
+    return { ok: false, message: `the approval binds ${snapshot.provider === "claude" ? snapshot.permissionArgv : "safe"} permissions — skipping them was never agreed to (stale-approval)` };
   }
   if (snapshot.provider === "claude" && given.maxTurns !== undefined && given.maxTurns !== snapshot.maxTurns) {
     return { ok: false, message: `approved with a ${snapshot.maxTurns}-turn limit, asked for ${given.maxTurns} — re-approve to change it (stale-approval)` };
@@ -424,7 +424,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     worktree,
     branch,
     now,
-    permissionMode = "acceptEdits",
+    permissionMode = "auto",
     skipPermissions = false,
     provider = "claude",
     model,
@@ -1055,7 +1055,10 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         phase: "build",
         brief: briefText,
         maxTurns: effective.maxTurns ?? maxTurns,
-        permissionMode,
+        permissionMode:
+          effective.profile.provider === "claude" && effective.profile.permissionArgv !== "bypassPermissions"
+            ? effective.profile.permissionArgv
+            : permissionMode,
         skipPermissions: effective.skipPermissions,
         resumeSession,
         // Minted identity (Phase 3 A5/D5): the plane chooses the session id
@@ -1597,7 +1600,10 @@ async function ingestPark(args: {
           args.profile !== undefined && args.profile.provider === "claude"
             ? (args.profile.repairMaxTurns as number)
             : REPAIR_MAX_TURNS,
-        permissionMode: request.permissionMode ?? "acceptEdits",
+        permissionMode:
+          args.profile?.provider === "claude" && args.profile.permissionArgv !== "bypassPermissions"
+            ? args.profile.permissionArgv
+            : (request.permissionMode ?? "auto"),
         skipPermissions:
           args.profile !== undefined ? profileWantsSkip(args.profile) : (request.skipPermissions ?? false),
         resumeSession: resumableRepair ? (sessionId ?? null) : null,

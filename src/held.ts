@@ -214,7 +214,10 @@ export class HeldSessionCoordinator {
       phase: "build",
       model: captured.effective.model,
       maxTurns: captured.effective.maxTurns ?? 40,
-      permissionMode: "acceptEdits",
+      permissionMode:
+        captured.effective.profile.provider === "claude" && captured.effective.profile.permissionArgv !== "bypassPermissions"
+          ? captured.effective.profile.permissionArgv
+          : "auto",
       skipPermissions: captured.effective.skipPermissions,
       resumeSession: null,
       maxBudgetUsd: Math.max(0.01, remainingMicrousd / 1_000_000),
