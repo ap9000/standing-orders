@@ -603,6 +603,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         respond(response, 200, type, body as string);
       };
       if (url.pathname === "/manifest.webmanifest") return asset("application/manifest+json", PWA_MANIFEST);
+      if (url.pathname === "/favicon.ico") return asset("image/png", Buffer.from(PWA_ICON_APPLE, "base64"));
       if (url.pathname === "/icon.svg") return asset("image/svg+xml", PWA_ICON_SVG);
       if (url.pathname === "/icon-192.png") return asset("image/png", Buffer.from(PWA_ICON_192, "base64"));
       if (url.pathname === "/icon-512.png") return asset("image/png", Buffer.from(PWA_ICON_512, "base64"));
@@ -1824,6 +1825,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           store.openAuthorizationFor(found.taskRef) === null
             ? { taskId }
             : null,
+          structuredHandoffView(artifacts, evidenceRoot),
         ),
       );
     }
@@ -3580,6 +3582,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         .split(/[\n,]/)
         .map(one => one.trim())
         .filter(one => one !== "");
+      const scout = body.get("scout") === "1";
       // One filing door for every surface (Codex adoption review, finding 7).
       const made = fileTaskProposal(
         store,
@@ -3590,7 +3593,13 @@ export function createDecisionServer(options: ServeOptions): Server {
           ...(goal === "" ? {} : { goal }),
           outOfScope: notThis === "" ? null : notThis,
           touches: touchesGiven,
-          ...(body.get("scout") === "1" ? { deliverable: "report" as const } : {}),
+          ...(scout ? { deliverable: "report" as const } : {}),
+          planning:
+            scout
+              ? "skip"
+              : body.get("planning-policy") === "choice"
+                ? body.get("plan-first") === "1" ? "required" : "skip"
+                : "auto",
           filedVia: "console",
           ...(admitted === null ? {} : { admittedRepos: admitted }),
         },
@@ -5569,6 +5578,16 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, taskHref(taskId));
       }
       case "approve": {
+        const approvingRef = store.lookupRef(taskId);
+        if (approvingRef?.plan === "requested") {
+          return taskScreen(
+            response,
+            who,
+            taskId,
+            "approval is blocked while planning is in progress — review the drafted plan first",
+            409,
+          );
+        }
         // Step-up: the session got you here; only the token agrees. The
         // digest names what was seen; the nonce proves this exact form was
         // rendered to this approver and is spent either way.
@@ -5588,7 +5607,6 @@ export function createDecisionServer(options: ServeOptions): Server {
         // provably the batch on disk at the moment of the yes — a brief
         // deleted or corrupted between render and click blocks the
         // approval instead of silently approving comment-free work.
-        const approvingRef = store.lookupRef(taskId);
         if (approvingRef !== null && approvingRef.revisionBriefArtifact !== null) {
           const view = revisionViewOf(approvingRef);
           if (view !== null && "problem" in view) {
@@ -5933,10 +5951,10 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
   const repair = profile.repairModel === "inherit" ? "same model" : profile.repairModel;
   const base =
     profile.provider === "claude"
-      ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — edits auto-accepted inside its leased worktree, ${profile.maxTurns} turns / ${Math.round(profile.timeoutSeconds / 60)} min per attempt; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+      ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — edits auto-accepted inside its leased worktree, ${profile.maxTurns}-turn runaway breaker, ${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
       : profile.provider === "gemini"
-        ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "EVERY tool auto-approved" : "edits auto-approved, other tools refused"}, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
-        : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (the ${Math.round(profile.timeoutSeconds / 60)}-minute clock is the bound); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
+        ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "EVERY tool auto-approved" : "edits auto-approved, other tools refused"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+        : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
   // The fallback chain rides EVERY surface these words sign (F+G review,
   // finding 2): the digest binds the whole chain, so the password form —
   // task page and /next alike — states every entry, credential included.
@@ -6318,6 +6336,19 @@ const STYLE = `
   form.option input[type=text] { font-size: 0.8125rem; margin-top: .5rem; min-height: 2.25rem; }
 
   .recap { color: var(--muted-foreground); margin: .75rem 0; white-space: pre-wrap; }
+  .result-card {
+    margin: 1.25rem 0; border-color: color-mix(in srgb, var(--success) 32%, var(--glass-border));
+    background: linear-gradient(145deg, color-mix(in srgb, var(--success-soft) 52%, var(--glass-strong)), var(--glass));
+    box-shadow: var(--shadow-card), 0 1px 0 var(--glass-highlight) inset;
+  }
+  .result-card h2 { margin: 0; }
+  .result-section { margin-top: .875rem; }
+  .result-section > strong {
+    display: block; font: 600 .6875rem/1.3 var(--font-mono); color: var(--muted-foreground);
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .result-section ul { margin: .375rem 0 0; padding-left: 1.25rem; }
+  .result-section li { margin: .25rem 0; }
   .question { font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; margin: 1rem 0; white-space: pre-wrap; }
   .answered {
     border: 1px solid color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft);
@@ -7523,6 +7554,7 @@ function shell(
     `<meta name="mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">`,
+    `<link rel="icon" href="/icon.svg" type="image/svg+xml">`,
     // Live status with zero JavaScript: the page asks the browser to fetch
     // it again. Only ever on read-only briefing pages — a refresh on a page
     // with a form would eat what somebody was typing.
@@ -7554,7 +7586,7 @@ function shell(
 
   const chrome = options.chrome;
   const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
-    `<a href="${href}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
+    `<a href="${href}" aria-label="${escape(label)}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
     `${NAV_ICONS[key] === undefined ? "" : `<span class="glyph">${NAV_ICONS[key]}</span>`}${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
@@ -7634,11 +7666,11 @@ function shell(
     item("projects", "/projects", "projects"),
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
-    `<span class="grow"></span>`,
     `<nav class="nav-groups">`,
     navGroup("workflows", "workflows", workflowsRows(), WORKFLOWS_KEYS.has(chrome.active)),
     navGroup("admin", "admin", adminRows(), ADMIN_KEYS.has(chrome.active)),
     `</nav>`,
+    `<span class="grow"></span>`,
     ...(chrome.settings ? [`<nav class="nav-settings">${item("settings", "/settings", "settings")}</nav>`] : []),
     `</aside>`,
   ].join("\n");
@@ -9330,6 +9362,7 @@ function tasksPage(
     `<h2>add a task</h2>`,
     `<form method="post" action="/tasks/add" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<input type="hidden" name="planning-policy" value="choice">`,
     prefill === null
       ? ""
       : `<p class="meta">pre-filled from a template — edit anything; it files UNAPPROVED like every task</p>`,
@@ -9341,6 +9374,7 @@ function tasksPage(
     `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
     `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
     `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
+    `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: let an agent inspect the repository and improve the scope before approval</span></span></label>`,
     `<button type="submit">add</button>`,
     `</form></details>`,
   ].join("\n"), { chrome });
@@ -10730,6 +10764,7 @@ function newTaskPage(
     `<form method="post" action="/tasks/add" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="projectRevision" value="${projectRevision}">`,
+    `<input type="hidden" name="planning-policy" value="choice">`,
     // No project open: the placement must be said (verification finding 1 —
     // the server refuses an empty one, this field is how you answer it).
     project === null
@@ -10738,6 +10773,7 @@ function newTaskPage(
     `<label>title<input type="text" name="title" placeholder="Add a sliding-window rate limiter to the public API"></label>`,
     `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
       `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
+    `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: inspect the repository and draft a stronger scope before you approve anything; long planning continues while the agent is making progress</span></span></label>`,
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="scout" value="1" style="margin-top:.35rem"><span>scout <span class="meta">— deliver a report instead of a branch: a read-only session investigates the goal as a question and writes up what it found; nothing in the repository changes</span></span></label>`,
     `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
     candidates.length === 0
@@ -11041,7 +11077,7 @@ function taskBody(data: {
   // shape. An unapprovable scope gets the problem and the edit road
   // instead of a password it cannot use.
   const approveForm =
-    scope === null || approval.approved
+    scope === null || approval.approved || data.plan === "requested"
       ? ""
       : data.revision !== null && data.revision !== undefined && "problem" in data.revision
         ? `<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: approval is blocked.</strong></p><p class="meta">${escape(data.revision.problem)} — a revision approves only against a brief that verifies</p></div>`
@@ -11083,7 +11119,7 @@ function taskBody(data: {
               ? `<p><strong>and this comparison:</strong></p>` +
                 `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
                 `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
-                `No dollar caps exist on a comparison — each agent runs until it finishes or its clock ends it; ` +
+                `No dollar caps exist on a comparison — each agent runs until it finishes or stops making progress; ` +
                 `spend lands measured only where the harness reports dollars (` +
                 `${data.raceTerms.agents.filter(agent => agent.provider === "claude").length} of ${data.raceTerms.n} lanes here). ` +
                 `You will compare the results and pick one.</p>`
@@ -11453,6 +11489,8 @@ function taskBody(data: {
       ? { html: act("requeue", "retry — branch and workspace kept"), why: "resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased" }
       : canPlan
         ? { html: act("plan", "plan first"), why: "plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it" }
+        : data.plan === "requested"
+          ? null
         : task.state === "queued" && !data.claimed && (data.position?.position ?? 1) > 1
           ? { html: act("next", "build this next"), why: "moves it to the front of its queue — the next free worker looks here first; approval is still required" }
           : null;
@@ -11512,6 +11550,7 @@ function taskBody(data: {
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
     `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
+    planCard,
     approveForm === "" ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
     // observed state, and — when the tracker closed it and has been seen
@@ -11605,7 +11644,7 @@ function taskBody(data: {
     section("attempts", runs, true, data.runs.length),
     section("spend", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
-    section("scope", ["<h2>scope</h2>", scopeCard, planCard, revisionCard, attendedCard, scopeForm].join("\n"), true),
+    section("scope", ["<h2>scope</h2>", scopeCard, revisionCard, attendedCard, scopeForm].join("\n"), true),
     section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),
     cancelAct,
@@ -11871,6 +11910,39 @@ type TerminalDiffView = {
     | null;
 };
 
+/** A compact, typed view of the agent-authored handoff. Older v1
+ * artifacts simply have no lists, while v2 can present the useful answer
+ * before the raw diff and evidence below it. */
+type StructuredHandoffView = {
+  conclusion: string;
+  changes: string[];
+  verification: string[];
+  followUps: string[];
+};
+
+function structuredHandoffView(artifacts: Artifact[], root: string): StructuredHandoffView | null {
+  const artifact = [...artifacts].reverse().find(one => one.kind === "handoff");
+  if (artifact === undefined) return null;
+  const read = readVerifiedArtifact(root, artifact);
+  if (!read.ok) return null;
+  try {
+    const parsed = JSON.parse(read.content.toString("utf8")) as Record<string, unknown> | null;
+    if (parsed === null || typeof parsed !== "object" || typeof parsed["conclusion"] !== "string") return null;
+    const conclusion = oneLineOf(parsed["conclusion"], 600);
+    if (conclusion === "" || hasForbiddenControls(conclusion)) return null;
+    const list = (name: string): string[] =>
+      Array.isArray(parsed[name])
+        ? (parsed[name] as unknown[])
+            .filter((one): one is string => typeof one === "string" && one.trim() !== "" && !hasForbiddenControls(one))
+            .slice(0, 8)
+            .map(one => oneLineOf(one, 240))
+        : [];
+    return { conclusion, changes: list("changes"), verification: list("verification"), followUps: list("followUps") };
+  } catch {
+    return null;
+  }
+}
+
 const CAPTURE_EXIT = /\(exit ([0-9]{1,4})\)\s*$/;
 
 /**
@@ -12081,6 +12153,7 @@ function runPage(
   noted = false,
   heldTurns: { turns: SessionTurn[]; open: boolean; state: string; cap: number } | null = null,
   continueOffer: { taskId: string } | null = null,
+  structuredHandoff: StructuredHandoffView | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
@@ -12152,10 +12225,21 @@ function runPage(
           `<p class="meta">display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
           `<pre id="live-transcript" class="mono" style="max-height:24rem;overflow:auto;white-space:pre-wrap"></pre>` +
           `<p class="meta" id="live-transcript-state"></p>`;
-  const handoff =
-    run.handoff === null
+  const resultSummary = structuredHandoff?.conclusion ?? run.handoff;
+  const resultList = (label: string, items: string[]): string =>
+    items.length === 0
       ? ""
-      : `<h2>conclusion</h2><p class="recap">${escape(run.handoff)}</p>`;
+      : `<div class="result-section"><strong>${escape(label)}</strong><ul>${items.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+  const handoff =
+    resultSummary === null
+      ? ""
+      : `<section class="card result-card"><h2>result</h2><p class="recap">${escape(resultSummary)}</p>` +
+        (structuredHandoff === null
+          ? ""
+          : resultList("completed", structuredHandoff.changes) +
+            resultList("verified", structuredHandoff.verification) +
+            resultList("follow-up", structuredHandoff.followUps)) +
+        `</section>`;
   const evidence =
     artifacts.length === 0
       ? ""
@@ -12271,10 +12355,10 @@ function runPage(
     conversation,
     transcript,
     peek,
+    handoff,
     terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
     reviewCard,
     continueCard,
-    handoff,
     evidence,
     notesCard,
   ].join("\n"), {

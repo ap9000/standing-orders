@@ -38,11 +38,12 @@ import type { Runner } from "./builder.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { openLiveLog } from "./live.js";
 import { proveTreeUntouched, snapshotIgnored } from "./tree-proof.js";
+import { CLAUDE_LIMITS } from "./scope.js";
 
 const GIT = "git";
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
-const DEFAULT_PLAN_TIMEOUT_MS = 15 * 60_000;
-const DEFAULT_PLAN_TURNS = 30;
+const DEFAULT_PLAN_TIMEOUT_MS = 20 * 60_000;
+const DEFAULT_PLAN_TURNS = CLAUDE_LIMITS.maxTurns;
 const DEFAULT_PULSE_MS = 60_000;
 
 export type PlanRequest = {
@@ -265,7 +266,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       },
       {
         cwd: worktree,
-        timeoutMs,
+        idleTimeoutMs: timeoutMs,
         omitEnv: AGENT_ENV_DENYLIST,
         ...(agent === undefined ? {} : { runner: agent }),
         clock,
@@ -299,7 +300,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
       ok: false,
       kind: "failure",
       reason: "timeout",
-      message: `the planner ran past ${Math.round(timeoutMs / 60_000)} minutes and was stopped`,
+      message: `the planner made no observable progress for ${Math.round(timeoutMs / 60_000)} minutes and was stopped`,
     };
   }
   if (result.initFailed) {

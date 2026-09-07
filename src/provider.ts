@@ -133,11 +133,9 @@ type Adapter = {
   defaultRunner: ProviderRunner;
   /** Secrets the model's OWN shells must never inherit (spawn env is separate). */
   extraOmitEnv: readonly string[];
-  /**
-   * Codex has no --max-turns: without a turn bound the wall clock is the
-   * only spending bound, so it is shortened rather than silently equated
-   * with claude's economics (Codex provider review, high finding 1).
-   */
+  /** Normalize the phase's bounded interval. For ordinary current profiles
+   * this is the no-progress watchdog; for repair and legacy profiles it is
+   * a hard wall clock. */
   clampTimeout(phase: Phase, requestedMs: number): number;
 };
 
@@ -383,12 +381,13 @@ function codexParse(stdout: string): ParsedEnvelope {
   return { sessionId, finalMessage, tokensIn, tokensOut, costUsd: null, usageRaw, initObserved, promptConsumed: null, diagnostic: null, structuralTerminal };
 }
 
-/** Codex wall-clock caps, phase by phase — the turn bound it does not have. */
+/** Codex interval caps: inactivity for current profiles, wall clock for
+ * repair and legacy profiles. */
 const CODEX_TIMEOUT_CAP_MS: Record<Phase, number> = {
   build: 20 * 60_000,
-  plan: 10 * 60_000,
+  plan: 20 * 60_000,
   repair: 5 * 60_000,
-  review: 10 * 60_000,
+  review: 20 * 60_000,
 };
 
 /**
@@ -429,13 +428,13 @@ const geminiArgv = (invocation: Invocation): string[] => [
   ...(invocation.model === null ? [] : ["-m", invocation.model]),
 ];
 
-/** Gemini wall-clock caps: the codex posture — no turn bound exists, so
- * the clock is the spending bound and it is SHORTENED, never equated. */
+/** Gemini interval caps: inactivity for current profiles, wall clock for
+ * repair and legacy profiles. */
 const GEMINI_TIMEOUT_CAP_MS: Record<Phase, number> = {
   build: 20 * 60_000,
-  plan: 10 * 60_000,
+  plan: 20 * 60_000,
   repair: 5 * 60_000,
-  review: 10 * 60_000,
+  review: 20 * 60_000,
 };
 
 const DIAGNOSTIC_CAP = 2 * 1024;

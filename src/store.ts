@@ -16291,6 +16291,7 @@ export function contestantProfileOf(provider: string, model: string, repairModel
         maxTurns: CLAUDE_LIMITS.maxTurns,
         repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
         timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,
+        timeoutKind: "idle",
         repairTimeoutSeconds: CLAUDE_LIMITS.repairTimeoutSeconds,
         repairModel,
       }
@@ -16306,6 +16307,7 @@ export function contestantProfileOf(provider: string, model: string, repairModel
           maxTurns: "unsupported",
           repairMaxTurns: "unsupported",
           timeoutSeconds: GEMINI_LIMITS.timeoutSeconds,
+          timeoutKind: "idle",
           repairTimeoutSeconds: GEMINI_LIMITS.repairTimeoutSeconds,
           repairModel,
         }
@@ -16316,6 +16318,7 @@ export function contestantProfileOf(provider: string, model: string, repairModel
           maxTurns: "unsupported",
           repairMaxTurns: "unsupported",
           timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
+          timeoutKind: "idle",
           repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
           repairModel,
         };

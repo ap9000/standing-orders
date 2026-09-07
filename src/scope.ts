@@ -79,13 +79,12 @@ function sameDigest(left: string, right: string): boolean {
  * shapes (finding 20) — they never enter a digest.
  */
 export const CLAUDE_LIMITS = {
-  // Turns are agentic round-trips (each tool call is one). A task that reads
-  // its way through a real codebase before editing spends 40 on reading
-  // alone (2026-09-04, run 1394 died at exactly 40 with two files edited);
-  // the wall clock is the ceiling that means something.
-  maxTurns: 200,
+  // The activity watchdog is the real safety rail. Keep a very high turn
+  // breaker only for a pathological loop; ordinary long-horizon work should
+  // finish, checkpoint, or park long before it can reach this number.
+  maxTurns: 1_000,
   repairMaxTurns: 4,
-  timeoutSeconds: 1800,
+  timeoutSeconds: 1_200,
   repairTimeoutSeconds: 300,
 } as const;
 export const CODEX_SHAPED_LIMITS = {
@@ -109,6 +108,9 @@ export type ClaudeProfile = {
   maxTurns: number;
   repairMaxTurns: number;
   timeoutSeconds: number;
+  /** Absent on legacy approvals, where timeoutSeconds remains an absolute
+   * wall clock. New approvals bind an activity watchdog instead. */
+  timeoutKind?: "idle";
   repairTimeoutSeconds: number;
   /** Exact model for repairs, or the stable literal "inherit" (= the
    * build model, which is itself exact). */
@@ -121,11 +123,12 @@ export type CodexShapedProfile = {
   /** Codex's real constraint surface: the sandbox argument. There is no
    * separate permission argument, so no invented field. */
   sandboxMode: "workspace-write";
-  /** The tool has no turn limit; the wall clock is the bound. Stored as
-   * the literal so the approval words can say so honestly. */
+  /** The tool has no argv turn limit. New approvals use an inactivity
+   * watchdog; legacy approvals retain their signed wall-clock bound. */
   maxTurns: "unsupported";
   repairMaxTurns: "unsupported";
   timeoutSeconds: number;
+  timeoutKind?: "idle";
   repairTimeoutSeconds: number;
   repairModel: string;
 };
@@ -139,11 +142,12 @@ export type GeminiProfile = {
    * `plan` are not profile values — headless `default` just fails tools,
    * and `plan` is read-only while the protocol requires workspace writes. */
   approvalArgv: "auto_edit" | "yolo";
-  /** No argv turn bound exists (v0.57.0 audit); the wall clock is the
-   * spending bound, exactly the codex posture. */
+  /** No argv turn bound exists (v0.57.0 audit); new approvals use an
+   * inactivity watchdog, while legacy approvals keep their signed clock. */
   maxTurns: "unsupported";
   repairMaxTurns: "unsupported";
   timeoutSeconds: number;
+  timeoutKind?: "idle";
   repairTimeoutSeconds: number;
   repairModel: string;
 };
@@ -282,7 +286,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
       str(p["model"]) &&
       (p["permissionArgv"] === "acceptEdits" || p["permissionArgv"] === "bypassPermissions") &&
       num(p["maxTurns"]) && num(p["repairMaxTurns"]) &&
-      num(p["timeoutSeconds"]) && num(p["repairTimeoutSeconds"]) &&
+      num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
       str(p["repairModel"])
     ) {
       return {
@@ -292,6 +296,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
         maxTurns: p["maxTurns"],
         repairMaxTurns: p["repairMaxTurns"],
         timeoutSeconds: p["timeoutSeconds"],
+        ...(p["timeoutKind"] === "idle" ? { timeoutKind: "idle" as const } : {}),
         repairTimeoutSeconds: p["repairTimeoutSeconds"],
         repairModel: p["repairModel"],
       };
@@ -303,7 +308,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
       str(p["model"]) &&
       p["sandboxMode"] === "workspace-write" &&
       p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
-      num(p["timeoutSeconds"]) && num(p["repairTimeoutSeconds"]) &&
+      num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
       str(p["repairModel"])
     ) {
       return {
@@ -313,6 +318,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
         maxTurns: "unsupported",
         repairMaxTurns: "unsupported",
         timeoutSeconds: p["timeoutSeconds"],
+        ...(p["timeoutKind"] === "idle" ? { timeoutKind: "idle" as const } : {}),
         repairTimeoutSeconds: p["repairTimeoutSeconds"],
         repairModel: p["repairModel"],
       };
@@ -324,7 +330,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
       str(p["model"]) &&
       (p["approvalArgv"] === "auto_edit" || p["approvalArgv"] === "yolo") &&
       p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
-      num(p["timeoutSeconds"]) && num(p["repairTimeoutSeconds"]) &&
+      num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
       str(p["repairModel"])
     ) {
       return {
@@ -334,6 +340,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
         maxTurns: "unsupported",
         repairMaxTurns: "unsupported",
         timeoutSeconds: p["timeoutSeconds"],
+        ...(p["timeoutKind"] === "idle" ? { timeoutKind: "idle" as const } : {}),
         repairTimeoutSeconds: p["repairTimeoutSeconds"],
         repairModel: p["repairModel"],
       };

@@ -69,6 +69,23 @@ describe("run", () => {
 });
 
 describe("the provider process group (M6.12)", () => {
+  test("an idle watchdog resets on observable progress and stops a silent provider", async () => {
+    const progressing = await runStreamJsonl(
+      process.execPath,
+      ["-e", "let n=0;const t=setInterval(()=>{console.log(JSON.stringify({type:'thread.started',thread_id:String(++n)}));if(n===5){clearInterval(t);}},60)"],
+      { idleTimeoutMs: 180, processGroup: true },
+    );
+    expect(progressing.timedOut).toBe(false);
+    expect(progressing.code).toBe(0);
+    expect(progressing.stdout).toContain('"thread_id":"5"');
+
+    const silent = await runStreamJsonl(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+      idleTimeoutMs: 150,
+      processGroup: true,
+    });
+    expect(silent.timedOut).toBe(true);
+  });
+
   test("a processGroup child's whole tree dies at the timeout — no orphaned grandchildren", async () => {
     // A parent that spawns a grandchild and exits nothing: without group
     // semantics, killing the parent leaves the grandchild running.

@@ -43,7 +43,7 @@ const DEMO_PROFILE = {
   provider: "claude" as const,
   model: "sonnet",
   permissionArgv: "acceptEdits" as const,
-  maxTurns: 40, repairMaxTurns: 4, timeoutSeconds: 1800, repairTimeoutSeconds: 300,
+  maxTurns: 1_000, repairMaxTurns: 4, timeoutSeconds: 1_200, timeoutKind: "idle" as const, repairTimeoutSeconds: 300,
   repairModel: "inherit",
 };
 
@@ -76,10 +76,17 @@ index 11aa0b2..c44d1f7 100644
 `;
 
 const DEMO_HANDOFF = {
+  schema: 1,
   outcome: "built",
   committed: true,
   conclusion:
     "Fixed the payout rounding drift: settle() now rounds at cent precision instead of accumulating half-cent errors. Added boundary tests against the ledger fixtures. All 214 tests pass.",
+  changes: [
+    "Rounded settlement values at cent precision in src/payout.ts.",
+    "Added ledger-fixture coverage for half-cent boundaries.",
+  ],
+  verification: ["All 214 tests pass, including the new rounding boundary cases."],
+  followUps: [],
   decisionsIncorporated: [],
 };
 

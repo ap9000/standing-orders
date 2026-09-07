@@ -1168,6 +1168,22 @@ describe("the operations console", () => {
     store.stampProviderStart(run, T0);
     store.recordUsage(run, { tokensIn: 10, tokensOut: 5, costUsd: 0.42 });
     store.recordOutcomeFacts(run, { handoff: "Wired the guard; tests added." });
+    const handoff = Buffer.from(JSON.stringify({
+      schema: 1,
+      outcome: "built",
+      committed: true,
+      conclusion: "Wired the guard; tests added.",
+      changes: ["Added the payout boundary"],
+      verification: ["Focused tests pass"],
+      followUps: ["Watch the first production run"],
+    }), "utf8");
+    mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
+    writeFileSync(join(evidenceRoot, String(run), "handoff.json"), handoff);
+    store.saveArtifact({
+      run, kind: "handoff", key: `${run}/handoff.json`,
+      bytesOriginal: handoff.length, bytesStored: handoff.length, truncated: false,
+      sha256: createHash("sha256").update(handoff).digest("hex"), capture: "agent terminal handoff",
+    }, T0);
     store.finishRun(run, { outcome: "built", reason: "clean", now: T0 });
     const cookie = await login();
 
@@ -1180,6 +1196,10 @@ describe("the operations console", () => {
     const screen = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(screen).toContain("$0.42");
     expect(screen).toContain("Wired the guard; tests added.");
+    expect(screen).toContain('class="card result-card"');
+    expect(screen).toContain("Added the payout boundary");
+    expect(screen).toContain("Focused tests pass");
+    expect(screen).toContain("Watch the first production run");
   });
 
   test("run evidence: own artifacts serve, foreign artifacts and foreign repos are not found", async () => {
@@ -1708,6 +1728,62 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(anonymous.headers.get("location")).toBe("/login");
   });
 
+  test("new implementation tasks recommend and request planning before approval", async () => {
+    const cookie = await login();
+    const form = await (await fetch(url("/tasks/new"), { headers: { cookie } })).text();
+    expect(form).toContain('name="plan-first" value="1" checked');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(form)?.[1] as string;
+    const revision = /name="projectRevision" value="([0-9]+)"/.exec(form)?.[1] as string;
+    const created = await fetch(url("/tasks/add"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({
+        csrf,
+        projectRevision: revision,
+        "planning-policy": "choice",
+        "plan-first": "1",
+        id: "planned-from-create",
+        title: "Fix a small label",
+      }),
+      redirect: "manual",
+    });
+    expect(created.status).toBe(303);
+    expect(store.lookupRef("planned-from-create")?.plan).toBe("requested");
+    const page = await (await fetch(url("/t/planned-from-create"), { headers: { cookie } })).text();
+    expect(page).toContain("planning requested");
+    expect(page).not.toContain("approve exactly this");
+  });
+
+  test("a requested plan blocks an approval submitted from a stale form", async () => {
+    store.createTask({ id: "stale-plan-approval", title: "stale approval" }, T0);
+    const ref = store.refFor("built-in", "stale-plan-approval").id;
+    store.placeTask(ref, "/repo/main");
+    propose(store, {
+      taskId: "stale-plan-approval",
+      goal: "implement the approved shape",
+      now: T0,
+    });
+
+    const cookie = await login();
+    const page = await (await fetch(url("/t/stale-plan-approval"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] ?? "";
+    const digest = /name="digest" value="([0-9a-f]{32,64})"/.exec(page)?.[1] ?? "";
+    const nonce = /name="nonce" value="([^"]+)"/.exec(page)?.[1] ?? "";
+    expect(digest).not.toBe("");
+    expect(nonce).not.toBe("");
+
+    store.requestPlan(ref, T0);
+    const response = await fetch(url("/t/stale-plan-approval/approve"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, digest, nonce, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain("approval is blocked while planning is in progress");
+    expect(store.getScope("stale-plan-approval")?.approvedAt).toBeNull();
+  });
+
   test("plan first: the console asks, the board says planning, the draft returns for review", async () => {
     store.createTask({ id: "t-plan", title: "needs thought" }, T0);
     const ref = store.refFor("built-in", "t-plan").id;
@@ -1730,6 +1806,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const screen = await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text();
     expect(screen).toContain("planning requested");
     expect(screen).not.toContain(">plan first<");
+    expect(screen).not.toContain("approve exactly this");
 
     const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
     expect(board).toContain("planning next");
@@ -4383,7 +4460,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const cookie = await login();
     const html = await (await fetch(url("/done"), { headers: { cookie } })).text();
     const side = /<aside class="side">(.*?)<\/aside>/s.exec(html)?.[1] ?? "";
-    expect(side).toContain('<nav class="nav-settings"><a href="/settings">settings</a></nav>');
+    expect(side).toContain('<nav class="nav-settings"><a href="/settings" aria-label="settings">settings</a></nav>');
     expect(side.indexOf('<nav class="nav-groups">')).toBeLessThan(side.indexOf('<nav class="nav-settings">'));
     const workflows = /<details class="nav-group" data-group="workflows"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
     const admin = /<details class="nav-group" data-group="admin"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
@@ -6575,7 +6652,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
     expect(html).toMatch(/<a href="\/"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/runs"><span class="glyph"><svg/);
-    expect(html).toMatch(/<a href="\/workbench">portfolio<\/a>/);
+    expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio">portfolio<\/a>/);
     // Section headers speak sans; the state chips wear a dot before the word.
     expect(html).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
     expect(html).toContain(".badge-running::before, .badge-parked::before, .count.badge-open::before {");
@@ -7655,7 +7732,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     const primary = /<nav>(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
     expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/projects"]);
     // The count rides the inbox row only; every primary row wears an icon.
-    expect(primary).toMatch(/<a href="\/" class="active" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
+    expect(primary).toMatch(/<a href="\/" aria-label="inbox" class="active" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
     expect((primary.match(/<span class="glyph">/g) ?? []).length).toBe(5);
 
     // Both groups collapsed by default: neither carries the inbox's group.
@@ -7667,12 +7744,12 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(admin?.[2]).toContain("<summary>admin");
     const workflowsRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(workflows?.[2] ?? "")?.[1] ?? "";
     const adminRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(admin?.[2] ?? "")?.[1] ?? "";
-    expect([...workflowsRows.matchAll(/<a href="([^"]+)">([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+    expect([...workflowsRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
       "portfolio /workbench",
       "task list /tasks",
       "routines /routines",
     ]);
-    expect([...adminRows.matchAll(/<a href="([^"]+)">([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+    expect([...adminRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
       "fleet /fleet",
       "requirements /caps",
       "people /people",

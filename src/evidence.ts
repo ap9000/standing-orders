@@ -480,6 +480,11 @@ export type HandoffArtifact = {
   decisionsIncorporated: number[];
   /** The agent's conclusion — agent-reported, and labeled so by its position here. */
   conclusion: string;
+  /** Structured operator-facing output. Optional for artifacts written by
+   * older versions; readers treat absence as an empty list. */
+  changes?: string[];
+  verification?: string[];
+  followUps?: string[];
   freshness: {
     stampedAt: string;
     /** A successor proves this against the branch before trusting anything above. */

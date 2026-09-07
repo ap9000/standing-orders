@@ -89,9 +89,9 @@ describe("spec validation", () => {
 });
 
 describe("the turn bound codex does not have", () => {
-  test("codex wall clocks are clamped below claude's — timeout is its only spending bound", () => {
+  test("codex phase intervals are normalized without shortening a progressing plan", () => {
     expect(adapterFor("codex").clampTimeout("build", 30 * 60_000)).toBe(20 * 60_000);
-    expect(adapterFor("codex").clampTimeout("plan", 15 * 60_000)).toBe(10 * 60_000);
+    expect(adapterFor("codex").clampTimeout("plan", 15 * 60_000)).toBe(15 * 60_000);
     expect(adapterFor("codex").clampTimeout("repair", 5 * 60_000)).toBe(5 * 60_000);
     expect(adapterFor("claude").clampTimeout("build", 30 * 60_000)).toBe(30 * 60_000);
   });
@@ -437,9 +437,9 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
     expect(argv.join(" ")).not.toContain("--max-budget-usd");
   });
 
-  test("the wall clock is shortened, never equated (codex posture)", () => {
+  test("phase intervals match the long-running codex posture", () => {
     expect(adapterFor("gemini").clampTimeout("build", 30 * 60_000)).toBe(20 * 60_000);
-    expect(adapterFor("gemini").clampTimeout("plan", 15 * 60_000)).toBe(10 * 60_000);
+    expect(adapterFor("gemini").clampTimeout("plan", 15 * 60_000)).toBe(15 * 60_000);
     expect(adapterFor("gemini").clampTimeout("repair", 9 * 60_000)).toBe(5 * 60_000);
   });
 

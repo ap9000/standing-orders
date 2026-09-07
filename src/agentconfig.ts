@@ -6,6 +6,7 @@
  *   explicit flags     — this pass's operator, per field
  *   project override   — phase_config row scoped to the canonical repo
  *   installation       — phase_config row scoped 'installation'
+ *   review inheritance — when review is unset, the planner's complete pair
  *   default            — claude, harness default model
  *
  * Config rows are COMPLETE pairs (provider required, model optional), so a
@@ -60,8 +61,19 @@ export function resolvePhaseAgent(
     return valid.ok ? { ok: true, spec, source: "flag" } : { ok: false, problem: valid.problem };
   }
 
-  const project = repo === null ? null : store.phaseConfig(repo, phase);
-  const installation = store.phaseConfig(INSTALLATION_SCOPE, phase);
+  const directProject = repo === null ? null : store.phaseConfig(repo, phase);
+  const directInstallation = store.phaseConfig(INSTALLATION_SCOPE, phase);
+  // Planning and review benefit from the same high-judgment model, while
+  // execution can use a different provider. An explicit review row always
+  // wins; only an unset review inherits the planner's complete pair.
+  const inheritedProject = phase === "review" && directProject === null && directInstallation === null && repo !== null
+    ? store.phaseConfig(repo, "plan")
+    : null;
+  const inheritedInstallation = phase === "review" && directProject === null && directInstallation === null
+    ? store.phaseConfig(INSTALLATION_SCOPE, "plan")
+    : null;
+  const project = directProject ?? inheritedProject;
+  const installation = directInstallation ?? inheritedInstallation;
   const row = project ?? installation;
   const source = project !== null ? ("project" as const) : installation !== null ? ("installation" as const) : ("default" as const);
 
@@ -148,6 +160,7 @@ export function resolveScopeProfile(
           maxTurns: CLAUDE_LIMITS.maxTurns,
           repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
           timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,
+          timeoutKind: "idle",
           repairTimeoutSeconds: CLAUDE_LIMITS.repairTimeoutSeconds,
           repairModel,
         }
@@ -161,6 +174,7 @@ export function resolveScopeProfile(
             maxTurns: "unsupported",
             repairMaxTurns: "unsupported",
             timeoutSeconds: GEMINI_LIMITS.timeoutSeconds,
+            timeoutKind: "idle",
             repairTimeoutSeconds: GEMINI_LIMITS.repairTimeoutSeconds,
             repairModel,
           }
@@ -171,6 +185,7 @@ export function resolveScopeProfile(
             maxTurns: "unsupported",
             repairMaxTurns: "unsupported",
             timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
+            timeoutKind: "idle",
             repairTimeoutSeconds: CODEX_SHAPED_LIMITS.repairTimeoutSeconds,
             repairModel,
           };

@@ -37,11 +37,12 @@ import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { openLiveLog } from "./live.js";
 import { proveTreeUntouched, snapshotIgnored } from "./tree-proof.js";
 import { redactSecretLines, scanForSecrets } from "./evidence.js";
+import { CLAUDE_LIMITS } from "./scope.js";
 
 const GIT = "git";
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
-const DEFAULT_SCOUT_TIMEOUT_MS = 15 * 60_000;
-const DEFAULT_SCOUT_TURNS = 40;
+const DEFAULT_SCOUT_TIMEOUT_MS = 20 * 60_000;
+const DEFAULT_SCOUT_TURNS = CLAUDE_LIMITS.maxTurns;
 const DEFAULT_PULSE_MS = 60_000;
 
 export type ScoutRequest = {
@@ -245,7 +246,7 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
       },
       {
         cwd: worktree,
-        timeoutMs,
+        idleTimeoutMs: timeoutMs,
         omitEnv: AGENT_ENV_DENYLIST,
         ...(agent === undefined ? {} : { runner: agent }),
         clock,
@@ -271,7 +272,7 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
 
   if (result.timedOut) {
     quarantineMailboxes(worktree, root, request.runId);
-    return { ok: false, kind: "failure", reason: "timeout", message: `the scout ran past ${Math.round(timeoutMs / 60_000)} minutes and was stopped` };
+    return { ok: false, kind: "failure", reason: "timeout", message: `the scout made no observable progress for ${Math.round(timeoutMs / 60_000)} minutes and was stopped` };
   }
   if (result.initFailed) {
     return { ok: false, kind: "failure", reason: "provider-init", message: "the provider harness never initialized — config, auth, or install, not the report" };

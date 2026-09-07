@@ -34,9 +34,10 @@ import { resolvePhaseAgent } from "./agentconfig.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import { evidenceRoot, readMailbox, readVerifiedArtifact, reviewFileName } from "./evidence.js";
 import type { Runner } from "./builder.js";
+import { CLAUDE_LIMITS } from "./scope.js";
 
-const DEFAULT_REVIEW_TIMEOUT_MS = 10 * 60_000;
-const DEFAULT_REVIEW_TURNS = 20;
+const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60_000;
+const DEFAULT_REVIEW_TURNS = CLAUDE_LIMITS.maxTurns;
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
 
 /** The one file the pass writes INTO the scratch directory for the agent. */
@@ -287,7 +288,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
         },
         {
           cwd: scratch,
-          timeoutMs: request.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS,
+          idleTimeoutMs: request.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS,
           omitEnv: AGENT_ENV_DENYLIST,
           ...(request.agent === undefined ? {} : { runner: request.agent }),
           clock,
@@ -309,7 +310,11 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     }
     const result = invoked.outcome;
     if (result.timedOut) {
-      return { ok: false, reason: "timeout", message: "the reviewer ran past its clock and was stopped" };
+      return {
+        ok: false,
+        reason: "timeout",
+        message: `the reviewer made no observable progress for ${Math.round((request.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS) / 60_000)} minutes and was stopped`,
+      };
     }
     if (result.initFailed) {
       return { ok: false, reason: "provider-init", message: "the provider harness never initialized — config, auth, or install, not the review" };

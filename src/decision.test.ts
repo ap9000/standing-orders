@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { parseDecision, repairPrompt, LIMITS } from "./decision.js";
+import { parseDecision, parseHandoff, repairPrompt, LIMITS } from "./decision.js";
 
 const sound = {
   urgency: "blocking",
@@ -137,5 +137,43 @@ describe("repairPrompt", () => {
     const prompt = repairPrompt(result.problems, "STANDING-ORDERS-PARK-abc.json");
     expect(prompt).toContain('"ghost" does not match any option id');
     expect(prompt).toContain("Rewrite STANDING-ORDERS-PARK-abc.json only");
+  });
+});
+
+describe("parseHandoff", () => {
+  test("accepts the structured v2 result and keeps v1 compatible", () => {
+    const v2 = parseHandoff(JSON.stringify({
+      version: 2,
+      status: "completed",
+      conclusion: "The unified workflow is ready.",
+      changes: ["Added plan-first filing", "Presented a compact run result"],
+      verification: ["Typecheck and focused tests pass"],
+      followUps: ["Enable the preferred execution route"],
+    }));
+    expect(v2).toMatchObject({
+      ok: true,
+      handoff: {
+        changes: ["Added plan-first filing", "Presented a compact run result"],
+        verification: ["Typecheck and focused tests pass"],
+        followUps: ["Enable the preferred execution route"],
+      },
+    });
+    expect(parseHandoff(JSON.stringify({ version: 1, status: "no-change", conclusion: "Already done." }))).toMatchObject({
+      ok: true, handoff: { changes: [], verification: [], followUps: [] },
+    });
+  });
+
+  test("compacts useful prose instead of failing completed work on presentation length", () => {
+    const result = parseHandoff(JSON.stringify({
+      version: 2,
+      status: "completed",
+      conclusion: `${"A useful result sentence. ".repeat(50)}tail`,
+      changes: ["x".repeat(400)],
+    }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.handoff.conclusion.length).toBeLessThanOrEqual(600);
+    expect(result.handoff.changes[0]?.length).toBeLessThanOrEqual(240);
+    expect(result.handoff.conclusion.endsWith("…")).toBe(true);
   });
 });

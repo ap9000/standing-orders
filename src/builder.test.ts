@@ -669,7 +669,7 @@ describe("what the builder tells the agent", () => {
     expect(diverged).toMatchObject({ ok: false, reason: "stale-approval" });
 
     await build1({});
-    expect(asked[asked.indexOf("--max-turns") + 1]).toBe("200");
+    expect(asked[asked.indexOf("--max-turns") + 1]).toBe("1000");
   });
 
   test("runs in the leased worktree and nowhere else", async () => {

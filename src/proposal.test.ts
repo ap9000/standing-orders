@@ -4,7 +4,7 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
-import { fileTaskProposal, fileRoutineProposal, validateTaskText } from "./proposal.js";
+import { fileTaskProposal, fileRoutineProposal, shouldPlanTask, validateTaskText } from "./proposal.js";
 import { termsOf, routineDigestOf } from "./routine.js";
 
 const T0 = new Date("2026-08-14T12:00:00.000Z");
@@ -35,6 +35,25 @@ describe("the one filing door", () => {
     expect(scope?.approvedBy).toBeNull();
     expect(scope?.approvedDigest).toBeNull();
     expect(store.filedViaOf(made.id)).toBe("console");
+  });
+
+  test("plans substantial implementation work by default, with explicit required and skip controls", () => {
+    expect(shouldPlanTask({ title: "Rework sidebar navigation", repo, filedVia: "chat:claude" })).toBe(true);
+    expect(shouldPlanTask({ title: "Fix typo", repo, filedVia: "console" })).toBe(false);
+    expect(shouldPlanTask({ title: "Fix typo", repo, filedVia: "console", planning: "required" })).toBe(true);
+    expect(shouldPlanTask({ title: "Rework sidebar navigation", repo, filedVia: "console", planning: "skip" })).toBe(false);
+    expect(shouldPlanTask({ title: "Investigate navigation", repo, filedVia: "console", deliverable: "report", planning: "required" })).toBe(false);
+    expect(shouldPlanTask({ title: "Rework sidebar navigation", repo, filedVia: "mcp:linear" })).toBe(false);
+    expect(shouldPlanTask({ title: "Rework sidebar navigation", repo, filedVia: "console", proposedVia: "coordinator" })).toBe(false);
+
+    const made = fileTaskProposal(
+      store,
+      { title: "Unify project workflow end to end", repo, filedVia: "chat:claude" },
+      T0,
+    );
+    if (!made.ok) throw new Error(made.reason);
+    expect(made.planning).toBe(true);
+    expect(store.lookupRef(made.id)?.plan).toBe("requested");
   });
 
   test("provenance is set-once — a stamped row never changes", () => {

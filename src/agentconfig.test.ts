@@ -75,6 +75,19 @@ describe("phase-agent resolution", () => {
     });
   });
 
+  test("an unset reviewer inherits the planner, while an explicit review route wins", () => {
+    store.setPhaseConfig(INSTALLATION_SCOPE, "plan", "claude", "opus", "alex", T0);
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "codex", "gpt-6-astra", "alex", T0);
+    expect(resolvePhaseAgent(store, "review", "/repo", {})).toMatchObject({
+      spec: { provider: "claude", model: "opus" }, source: "installation",
+    });
+
+    store.setPhaseConfig(INSTALLATION_SCOPE, "review", "codex", "gpt-6-astra", "alex", T0);
+    expect(resolvePhaseAgent(store, "review", "/repo", {})).toMatchObject({
+      spec: { provider: "codex", model: "gpt-6-astra" }, source: "installation",
+    });
+  });
+
   test("a pinned task agent outranks every flag — the critical finding", () => {
     store.createTask({ id: "t-pin", title: "w" }, T0);
     const ref = store.refFor(BUILT_IN, "t-pin");

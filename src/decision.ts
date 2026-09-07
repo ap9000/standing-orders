@@ -340,11 +340,40 @@ function truncate(text: string, at: number): string {
 export type ParsedHandoff = {
   status: "completed" | "no-change" | "failed";
   conclusion: string;
+  /** Compact, structured operator output. Version-1 handoffs rehydrate with
+   * empty lists; version 2 agents fill these directly. */
+  changes: string[];
+  verification: string[];
+  followUps: string[];
 };
 
-export const HANDOFF_VERSION = 1;
-const HANDOFF_CONCLUSION_CAP = 2_000;
+export const HANDOFF_VERSION = 2;
+export const HANDOFF_CONCLUSION_CAP = 600;
 const HANDOFF_PAYLOAD_CAP = 16 * 1024;
+const HANDOFF_LIST_CAP = 8;
+const HANDOFF_ITEM_CAP = 240;
+
+/** Agent prose is display material, not authority. Once the structural
+ * outcome is valid, excess verbosity is compacted deterministically rather
+ * than throwing away completed code and paying for a whole new attempt. */
+function compactHandoffText(value: string, cap: number): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (clean.length <= cap) return clean;
+  const room = Math.max(1, cap - 1);
+  const candidate = clean.slice(0, room);
+  const sentence = Math.max(candidate.lastIndexOf(". "), candidate.lastIndexOf("! "), candidate.lastIndexOf("? "));
+  const word = candidate.lastIndexOf(" ");
+  const cut = sentence >= Math.floor(room * 0.55) ? sentence + 1 : word >= Math.floor(room * 0.55) ? word : room;
+  return `${candidate.slice(0, cut).trimEnd()}…`;
+}
+
+function handoffList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((one): one is string => typeof one === "string" && one.trim() !== "" && !FORBIDDEN_MULTILINE.test(one))
+    .slice(0, HANDOFF_LIST_CAP)
+    .map(one => compactHandoffText(one, HANDOFF_ITEM_CAP));
+}
 
 export function parseHandoff(
   raw: string,
@@ -367,10 +396,10 @@ export function parseHandoff(
   const body = parsed as Record<string, unknown>;
   const problems: Problem[] = [];
 
-  if (body["version"] !== HANDOFF_VERSION) {
+  if (body["version"] !== 1 && body["version"] !== HANDOFF_VERSION) {
     problems.push({
       reason: "bad-version",
-      message: `version must be the number ${HANDOFF_VERSION} (got ${describe(body["version"])})`,
+      message: `version must be 1 or ${HANDOFF_VERSION} (got ${describe(body["version"])})`,
     });
   }
   const status = body["status"];
@@ -380,12 +409,26 @@ export function parseHandoff(
       message: `status must be "completed", "no-change", or "failed" (got ${describe(status)})`,
     });
   }
-  const conclusion = prose(body["conclusion"], "conclusion", HANDOFF_CONCLUSION_CAP, problems);
+  const rawConclusion = body["conclusion"];
+  let conclusion: string | null = null;
+  if (typeof rawConclusion !== "string" || rawConclusion.trim() === "") {
+    problems.push({ reason: "missing-conclusion", message: "conclusion is required" });
+  } else if (FORBIDDEN_MULTILINE.test(rawConclusion)) {
+    problems.push({ reason: "conclusion-control-characters", message: "conclusion contains control characters — text only" });
+  } else {
+    conclusion = compactHandoffText(rawConclusion, HANDOFF_CONCLUSION_CAP);
+  }
 
   if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
-    handoff: { status: status as ParsedHandoff["status"], conclusion: conclusion as string },
+    handoff: {
+      status: status as ParsedHandoff["status"],
+      conclusion: conclusion as string,
+      changes: handoffList(body["changes"]),
+      verification: handoffList(body["verification"]),
+      followUps: handoffList(body["followUps"]),
+    },
   };
 }
 

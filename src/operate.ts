@@ -1917,13 +1917,10 @@ async function tickCommand(
         backToParked();
         continue;
       }
-      // Comparison lanes carry NO dollar terms (Phase 3 slice B, E1): the
-      // clock is the bound, and a budget-of-zero must never read as
-      // exhausted. But the clock must be CUMULATIVE (Codex slice-B
-      // finding 1): every resume re-arms the sealed per-attempt timeout,
-      // so without a lane-total bound a park/answer loop could run
-      // forever. Three sealed clocks bound the lane, stated in the
-      // ceremony words.
+      // Legacy comparison lanes carried an absolute clock. New profiles use
+      // a progress watchdog and may remain alive indefinitely while useful
+      // work is observable; only legacy approvals retain their cumulative
+      // wall-clock contract.
       const remaining = waiting.kind === "comparison" ? null : racer.budgetMicrousd - racer.accountedMicrousd;
       if (remaining !== null && remaining <= 0) {
         const current = store.getContestant(racer.id);
@@ -1935,7 +1932,7 @@ async function tickCommand(
       if (waiting.kind === "comparison") {
         const laneProfile = racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel);
         const clockCapMs = 3 * laneProfile.timeoutSeconds * 1000;
-        if (store.contestantCumulativeMs(racer.id) >= clockCapMs) {
+        if (laneProfile.timeoutKind !== "idle" && store.contestantCumulativeMs(racer.id) >= clockCapMs) {
           const current = store.getContestant(racer.id);
           if (current !== null) store.casContestantState(racer.id, ["ready"], "stopped", current.generation);
           contestMaybeAggregate(store, waiting.id, clock());
@@ -9050,7 +9047,7 @@ function scopeTask(
       ...describeScope(scope),
       "",
       ...plan.laneWords.map(lane => `  ${lane}`),
-      "  no dollar caps exist on a comparison — each agent runs until it finishes or its clock ends it;",
+      "  no dollar caps exist on a comparison — each agent runs until it finishes or stops making progress;",
       "  spend lands measured only where the harness reports dollars",
       "",
       `  standing-orders task approve ${id} --yes`,

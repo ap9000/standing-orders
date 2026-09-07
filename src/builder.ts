@@ -24,8 +24,9 @@
  * worktree it was given and nothing else. Turning that off is an explicit
  * choice an operator makes, per run, and it is named honestly.
  *
- * Output is bounded twice — wall clock and turns — because a builder that
- * cannot finish also cannot be allowed to keep spending.
+ * Observable progress keeps an ordinary build alive. A no-progress
+ * watchdog and a high runaway-turn breaker still stop a pathological loop;
+ * repair remains narrowly time-bounded because its job is narrowly scoped.
  */
 
 import { unlinkSync } from "node:fs";
@@ -391,7 +392,10 @@ export function proveApprovedProfile(
     return { ok: false, message: `approved with a ${snapshot.maxTurns}-turn limit, asked for ${given.maxTurns} — re-approve to change it (stale-approval)` };
   }
   if (given.timeoutMs !== undefined && given.timeoutMs !== snapshot.timeoutSeconds * 1000) {
-    return { ok: false, message: `approved with a ${snapshot.timeoutSeconds}s clock, asked for ${Math.round(given.timeoutMs / 1000)}s — re-approve to change it (stale-approval)` };
+    return {
+      ok: false,
+      message: `approved with a ${snapshot.timeoutSeconds}s ${snapshot.timeoutKind === "idle" ? "no-progress window" : "clock"}, asked for ${Math.round(given.timeoutMs / 1000)}s — re-approve to change it (stale-approval)`,
+    };
   }
   return {
     ok: true,
@@ -1064,7 +1068,11 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       },
       {
         cwd: worktree,
-        timeoutMs: effective.timeoutMs,
+        // New approvals bind a no-progress watchdog, not a deadline. Legacy
+        // snapshots carry no timeoutKind and retain their wall-clock terms.
+        ...(effective.profile.timeoutKind === "idle"
+          ? { idleTimeoutMs: effective.timeoutMs }
+          : { timeoutMs: effective.timeoutMs }),
         omitEnv: AGENT_ENV_DENYLIST,
         ...(agent === undefined ? {} : { runner: agent }),
         ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
@@ -1155,7 +1163,10 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     return {
       ok: false,
       reason: "timeout",
-      message: `the builder ran past ${Math.round(timeoutMs / 60_000)} minutes and was stopped — whatever it wrote is still in ${worktree}`,
+      message:
+        effective.profile.timeoutKind === "idle"
+          ? `the builder made no observable progress for ${Math.round(timeoutMs / 60_000)} minutes and was stopped — whatever it wrote is still in ${worktree}`
+          : `the builder ran past ${Math.round(timeoutMs / 60_000)} minutes and was stopped — whatever it wrote is still in ${worktree}`,
     };
   }
   if (result.initFailed) {
@@ -1352,6 +1363,9 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       committed: false,
       decisionsIncorporated: answers.map(one => one.decision.id),
       conclusion: handoff.conclusion,
+      changes: handoff.changes,
+      verification: handoff.verification,
+      followUps: handoff.followUps,
       freshness: { stampedAt: clock().toISOString(), currentAsOf: baseRevision },
     }, clock());
     return { ok: true, committed: false, noChange: true, branch, summary: handoff.conclusion };
@@ -1405,6 +1419,9 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
         committed: true,
         decisionsIncorporated: answers.map(one => one.decision.id),
         conclusion: handoff.conclusion,
+        changes: handoff.changes,
+        verification: handoff.verification,
+        followUps: handoff.followUps,
         freshness: { stampedAt: clock().toISOString(), currentAsOf: head },
       }, clock());
     }
@@ -1831,9 +1848,14 @@ function brief(
     "  a moved HEAD is refused outright. Never reset or discard work.",
     "- When you finish — and you must always end explicitly, unless you",
     `  parked — write ONE file named exactly ${done} in the worktree root:`,
-    '    { "version": 1, "status": "completed" | "no-change" | "failed",',
-    '      "conclusion": "<one paragraph: what you did, or why nothing was',
-    '      needed, or what stopped you>" }',
+    '    { "version": 2, "status": "completed" | "no-change" | "failed",',
+    '      "conclusion": "<outcome first, plain language, at most 600 characters>",',
+    '      "changes": ["<specific change, at most 240 characters>"],',
+    '      "verification": ["<check and result, at most 240 characters>"],',
+    '      "followUps": ["<remaining concern, only when one exists>"] }',
+    "  Keep each list to at most 8 items. The conclusion is the operator's",
+    "  compact result, not a transcript: never include a preamble, file dump,",
+    "  or repeated explanation. The machine stores full diffs separately.",
     "  completed = you made the changes; no-change = the goal needs no change",
     "  and the conclusion says why; failed = you could not do it. Write to a",
     "  temporary name first, then rename it into place.",

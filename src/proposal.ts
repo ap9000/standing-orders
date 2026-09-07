@@ -73,6 +73,11 @@ export type TaskProposalInput = {
   proposedVia?: "mate" | "coordinator" | "scout";
   /** What comes back (v34): 'report' files a scout task. Set once, at filing. */
   deliverable?: "branch" | "report";
+  /** Planning policy at the filing door. `required` is an explicit
+   * operator choice, `skip` is an explicit direct-to-scope choice, and
+   * `auto` (the default) plans implementation work whose breadth suggests
+   * repository discovery will materially improve the approved scope. */
+  planning?: "auto" | "required" | "skip";
   /**
    * The caller's ceiling as canonical repo paths. undefined = the caller
    * genuinely has none (the CLI on the operator's own machine). A surface
@@ -81,6 +86,28 @@ export type TaskProposalInput = {
    */
   admittedRepos?: readonly string[];
 };
+
+const SUBSTANTIAL_WORK = /\b(?:architecture|end[- ]to[- ]end|migrat(?:e|ion)|moderni[sz]e|redesign|refactor|rework|workflow|navigation|accessibility|responsive|performance|security|unif(?:y|ied)|multi[- ](?:step|project|service))\b/i;
+
+/** One deterministic planning policy for console, chat, MCP, and sync
+ * filings. A planner needs a repository to inspect; report/scout work is
+ * already the discovery phase and never recursively plans itself. */
+export function shouldPlanTask(input: TaskProposalInput): boolean {
+  if (input.deliverable === "report" || input.planning === "skip") return false;
+  // Remote coordinators only propose work. Keep their submissions quarantined
+  // until an operator has restated the scope; automatic planning must not turn
+  // an untrusted MCP filing into executable workflow state.
+  if (input.proposedVia === "coordinator" || input.filedVia?.startsWith("mcp:")) return false;
+  if (input.repo === undefined || input.repo.trim() === "") return false;
+  if (input.planning === "required") return true;
+  const goal = input.goal ?? "";
+  const descriptionSize = input.title.length + goal.length + (input.outOfScope?.length ?? 0);
+  return (
+    (input.touches?.length ?? 0) >= 2 ||
+    descriptionSize >= 280 ||
+    SUBSTANTIAL_WORK.test(`${input.title}\n${goal}`)
+  );
+}
 
 export type RoutineProposalInput = {
   name: string;
@@ -178,7 +205,7 @@ export function fileTaskProposal(
   store: Store,
   input: TaskProposalInput,
   now: Date,
-): { ok: true; id: string } | ProposalRefusal {
+): { ok: true; id: string; planning: boolean } | ProposalRefusal {
   if (!FILED_VIA.test(input.filedVia)) {
     return refuse("bad-provenance", "filedVia is an audit token: lowercase letters, digits, dashes, colons");
   }
@@ -214,7 +241,12 @@ export function fileTaskProposal(
           : `the store refused the filing: ${made.reason}`,
     );
   }
-  return { ok: true, id: made.id };
+  let planning = false;
+  if (shouldPlanTask({ ...input, ...(repo.repo === undefined ? {} : { repo: repo.repo }) })) {
+    const ref = store.lookupRef(made.id);
+    if (ref !== null) planning = store.requestPlan(ref.id, now).ok;
+  }
+  return { ok: true, id: made.id, planning };
 }
 
 export function fileRoutineProposal(

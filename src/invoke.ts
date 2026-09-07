@@ -110,10 +110,18 @@ export async function invokeAgent(
 
   const adapter = adapterFor(spec.provider);
   const argv = adapter.argv({ ...invocation, model: spec.model });
-  const timeoutMs = adapter.clampTimeout(
-    invocation.phase,
-    options.timeoutMs ?? 30 * 60_000,
-  );
+  // Long-running phases pass idleTimeoutMs: the process has no absolute
+  // deadline and is stopped only after a full no-output interval. Bounded
+  // callers (notably repair) keep timeoutMs and its hard wall clock. A
+  // legacy caller that names neither retains the historic bounded default.
+  const hardTimeoutMs =
+    options.timeoutMs === undefined ? undefined : adapter.clampTimeout(invocation.phase, options.timeoutMs);
+  const idleTimeoutMs =
+    options.idleTimeoutMs === undefined ? undefined : adapter.clampTimeout(invocation.phase, options.idleTimeoutMs);
+  const defaultTimeoutMs =
+    hardTimeoutMs === undefined && idleTimeoutMs === undefined
+      ? adapter.clampTimeout(invocation.phase, 30 * 60_000)
+      : undefined;
 
   // Tier-2 attestation (A2/B3): the authoritative check, immediately
   // before the spawn it authorizes. Tier-1 providers return null here and
@@ -140,7 +148,15 @@ export async function invokeAgent(
   // mode-file flip between admission and spawn must never move the spend
   // onto a credential the operator didn't approve for this entry. Every
   // other run reads the operator's live setting, as always.
-  const { runner, clock: _clock, versionProbe: _probe, keyHome, ...runOptions } = options;
+  const {
+    runner,
+    clock: _clock,
+    versionProbe: _probe,
+    keyHome,
+    timeoutMs: _hardTimeout,
+    idleTimeoutMs: _idleTimeout,
+    ...runOptions
+  } = options;
   const authMode =
     run.chainCycle != null && run.authMode != null ? run.authMode : readAuthMode(spec.provider, keyHome);
   const ownKeyEnv = OWN_KEY_ENV[spec.provider];
@@ -223,7 +239,9 @@ export async function invokeAgent(
   // being deliberate, wins.
   const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
     ...runOptions,
-    timeoutMs,
+    ...(hardTimeoutMs === undefined ? {} : { timeoutMs: hardTimeoutMs }),
+    ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
+    ...(defaultTimeoutMs === undefined ? {} : { timeoutMs: defaultTimeoutMs }),
     ...(managedKey === null
       ? {}
       : { env: { ...(runOptions.env ?? {}), [PROVIDER_KEY_ENV[spec.provider]]: managedKey } }),

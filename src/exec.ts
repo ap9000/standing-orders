@@ -23,7 +23,18 @@ export type ExecResult = {
 
 export type RunOptions = {
   cwd?: string;
+  /**
+   * Absolute wall-clock ceiling. Keep this for bounded commands and repair
+   * turns. Long-running provider sessions use idleTimeoutMs instead: useful
+   * work should not be killed merely because it has been running a while.
+   */
   timeoutMs?: number;
+  /**
+   * No-progress watchdog for streaming children. It is re-armed whenever
+   * stdout or stderr produces bytes. When this is supplied without
+   * timeoutMs there is deliberately no absolute wall-clock ceiling.
+   */
+  idleTimeoutMs?: number;
   maxBuffer?: number;
   /**
    * Extra environment, merged over the process's own. A capability probe is a
@@ -198,6 +209,49 @@ export const OVERFLOW_CODE = 125;
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
 export const DEFAULT_MAX_BUFFER = 8 * 1024 * 1024;
+
+/**
+ * A streaming process may run for hours while it is making observable
+ * progress. This controller keeps the ordinary hard timeout available for
+ * bounded work, while allowing provider callers to choose an activity-based
+ * watchdog with no wall-clock deadline. Both roads share the same kill and
+ * settlement semantics.
+ */
+function streamWatchdog(
+  options: RunOptions,
+  onTimeout: () => void,
+): { touch: () => void; stop: () => void } {
+  const hardMs = options.timeoutMs ?? (options.idleTimeoutMs === undefined ? DEFAULT_TIMEOUT_MS : undefined);
+  const idleMs = options.idleTimeoutMs;
+  let fired = false;
+  let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const fire = (): void => {
+    if (fired) return;
+    fired = true;
+    onTimeout();
+  };
+  const armIdle = (): void => {
+    if (idleMs === undefined) return;
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = setTimeout(fire, idleMs);
+    idleTimer.unref?.();
+  };
+  if (hardMs !== undefined) {
+    hardTimer = setTimeout(fire, hardMs);
+    hardTimer.unref?.();
+  }
+  armIdle();
+
+  return {
+    touch: armIdle,
+    stop: () => {
+      if (hardTimer !== undefined) clearTimeout(hardTimer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+    },
+  };
+}
 
 const MAX_BUFFER_ERROR = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
 
@@ -433,7 +487,7 @@ export function runStreamJsonl(
   args: readonly string[],
   options: RunOptions = {},
 ): Promise<ExecResult> {
-  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const { cwd } = options;
   const childEnv = resolveChildEnv(options);
 
   return new Promise(resolve => {
@@ -496,14 +550,15 @@ export function runStreamJsonl(
       }
     };
 
-    const timer = setTimeout(() => {
+    const watchdog = streamWatchdog(options, () => {
       timedOut = true;
       if (options.processGroup === true) killGroup(child);
       else child.kill("SIGKILL");
-    }, timeoutMs);
+    });
 
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
+      watchdog.touch();
       partial += chunk;
       let cut = partial.indexOf("\n");
       while (cut !== -1) {
@@ -515,6 +570,7 @@ export function runStreamJsonl(
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
+      watchdog.touch();
       if (stderr.length < JSONL_STDERR_CAP) stderr += chunk.slice(0, JSONL_STDERR_CAP - stderr.length);
     });
 
@@ -522,7 +578,7 @@ export function runStreamJsonl(
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      watchdog.stop();
       liveProviders.delete(child);
       if (partial.trim() !== "") keep(partial);
       const lines = lastMessage === null ? kept : [...kept, lastMessage];
@@ -571,7 +627,7 @@ export function runGeminiStreamJsonl(
   args: readonly string[],
   options: RunOptions = {},
 ): Promise<ExecResult> {
-  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const { cwd } = options;
   const childEnv = resolveChildEnv(options);
 
   return new Promise(resolve => {
@@ -651,14 +707,15 @@ export function runGeminiStreamJsonl(
       }
     };
 
-    const timer = setTimeout(() => {
+    const watchdog = streamWatchdog(options, () => {
       timedOut = true;
       if (options.processGroup === true) killGroup(child);
       else child.kill("SIGKILL");
-    }, timeoutMs);
+    });
 
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
+      watchdog.touch();
       partial += chunk;
       let cut = partial.indexOf("\n");
       while (cut !== -1) {
@@ -670,6 +727,7 @@ export function runGeminiStreamJsonl(
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
+      watchdog.touch();
       if (stderr.length < JSONL_STDERR_CAP) stderr += chunk.slice(0, JSONL_STDERR_CAP - stderr.length);
     });
 
@@ -677,7 +735,7 @@ export function runGeminiStreamJsonl(
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      watchdog.stop();
       liveProviders.delete(child);
       if (partial.trim() !== "") keep(partial);
       const lines: string[] = [];
@@ -762,7 +820,7 @@ export function runClaudeStreamJsonl(
   args: readonly string[],
   options: RunOptions = {},
 ): Promise<ExecResult> {
-  const { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const { cwd } = options;
   const childEnv = resolveChildEnv(options);
 
   return new Promise(resolve => {
@@ -853,14 +911,15 @@ export function runClaudeStreamJsonl(
       }
     };
 
-    const timer = setTimeout(() => {
+    const watchdog = streamWatchdog(options, () => {
       timedOut = true;
       if (options.processGroup === true) killGroup(child);
       else child.kill("SIGKILL");
-    }, timeoutMs);
+    });
 
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
+      watchdog.touch();
       partial += chunk;
       let cut = partial.indexOf("\n");
       while (cut !== -1) {
@@ -872,6 +931,7 @@ export function runClaudeStreamJsonl(
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
+      watchdog.touch();
       if (stderr.length < JSONL_STDERR_CAP) stderr += chunk.slice(0, JSONL_STDERR_CAP - stderr.length);
     });
 
@@ -879,7 +939,7 @@ export function runClaudeStreamJsonl(
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      watchdog.stop();
       liveProviders.delete(child);
       if (partial.trim() !== "") keep(partial);
       const lines = [initLine, resultLine].filter((one): one is string => one !== null);
