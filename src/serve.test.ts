@@ -6586,6 +6586,23 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(quietRail).not.toContain("0 tokens");
   });
 
+  test("subscription telemetry is labeled as an API-price equivalent, never as API-key spend", async () => {
+    const ref = seed("t-membership", "covered by the membership");
+    const run = finished("t-membership", ref, "built", 2.75);
+    store.stampTerminalClass(run, "subscription", "unknown");
+    await boot();
+    const cookie = await login();
+
+    const task = await (await fetch(url("/t/t-membership"), { headers: { cookie } })).text();
+    expect(task).toContain("$2.75 API-price equivalent from subscription usage (not an API charge)");
+    expect(task).toContain("subscription · $2.75 API-price equivalent (not an API charge)");
+    expect(task).not.toContain(">cost<");
+
+    const runPage = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
+    expect(runPage).toContain("subscription · $2.75 API-price equivalent (not an API charge)");
+    expect(runPage).toContain(">usage</span>");
+  });
+
   test("the task page reads top-down (task page pass): eyebrow, title with state, the acts bar with the resolving act primary, the property list, then folded sections with counts", async () => {
     const ref = seed("t-shape", "shaped");
     const failedRun = finished("t-shape", ref, "failed", null);
@@ -6614,7 +6631,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(rail).toContain('<span class="meta">this attempt</span>');
     // Sections fold with counts: attempts open, spend folded, scope open and addressable.
     expect(html).toContain('<details class="section" id="attempts" open><summary><h2>attempts <span class="lane-count">1</span></h2></summary>');
-    expect(html).toContain('<details class="section" id="spend"><summary><h2>spend</h2></summary>');
+    expect(html).toContain('<details class="section" id="usage"><summary><h2>usage</h2></summary>');
     expect(html).toContain('<details class="section" id="scope" open><summary><h2>scope</h2></summary>');
     // Cancel stays armed at the foot, after every section.
     expect(html.lastIndexOf('<details class="arm-danger">')).toBeGreaterThan(html.lastIndexOf('<details class="section"'));

@@ -14164,6 +14164,7 @@ export class Store {
     handoff: string | null;
     costUsd: number | null;
     provider: string | null;
+    authMode: "subscription" | "api-key" | null;
     ranMinutes: number | null;
     prNumber: number | null;
     prUrl: string | null;
@@ -14186,7 +14187,7 @@ export class Store {
              AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
              ${admission}
          )
-         SELECT completed.*, run.outcome, run.handoff, run.cost_usd, run.provider, run.started_at, run.finished_at,
+         SELECT completed.*, run.outcome, run.handoff, run.cost_usd, run.provider, run.auth_mode, run.started_at, run.finished_at,
                 publication.state AS pub_state, publication.pr_number, publication.pr_url
          FROM completed
          LEFT JOIN run ON run.id = (
@@ -14207,6 +14208,10 @@ export class Store {
         handoff: row["handoff"] === null ? null : String(row["handoff"]),
         costUsd: row["cost_usd"] === null ? null : Number(row["cost_usd"]),
         provider: row["provider"] === null || row["provider"] === undefined ? null : String(row["provider"]),
+        authMode:
+          row["auth_mode"] === "subscription" || row["auth_mode"] === "api-key"
+            ? row["auth_mode"]
+            : null,
         ranMinutes:
           row["started_at"] === null || row["finished_at"] === null || row["started_at"] === undefined
             ? null
@@ -14246,6 +14251,7 @@ export class Store {
     startedAt: string;
     ranMinutes: number | null;
     costUsd: number | null;
+    authMode: "subscription" | "api-key" | null;
     prNumber: number | null;
     prUrl: string | null;
   }[] {
@@ -14254,7 +14260,7 @@ export class Store {
       admitted === null ? "" : `AND (task_ref.repo IS NULL OR task_ref.repo IN (${admitted.map(() => "?").join(",")}))`;
     return this.db
       .prepare(
-        `SELECT run.id AS run_id, run.outcome, run.role, run.provider, run.model, run.cost_usd,
+        `SELECT run.id AS run_id, run.outcome, run.role, run.provider, run.model, run.cost_usd, run.auth_mode,
                 run.started_at, run.finished_at,
                 task_ref.external_id AS task_id, task_ref.repo AS task_repo, task.title AS title,
                 publication.pr_number, publication.pr_url
@@ -14283,6 +14289,10 @@ export class Store {
             ? null
             : Math.max(1, Math.round((new Date(String(row["finished_at"])).getTime() - new Date(String(row["started_at"])).getTime()) / 60_000)),
         costUsd: row["cost_usd"] === null ? null : Number(row["cost_usd"]),
+        authMode:
+          row["auth_mode"] === "subscription" || row["auth_mode"] === "api-key"
+            ? row["auth_mode"]
+            : null,
         prNumber: row["pr_number"] === null || row["pr_number"] === undefined ? null : Number(row["pr_number"]),
         prUrl: row["pr_url"] === null || row["pr_url"] === undefined ? null : String(row["pr_url"]),
       }));

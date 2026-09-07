@@ -139,7 +139,7 @@ import {
   resolveCeiling,
   rowVisible,
 } from "./project.js";
-import { tally, spendLine } from "./summary.js";
+import { tally, spendLine, runCostWords } from "./summary.js";
 import { classify, holdOwnerWords } from "./board.js";
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
@@ -5924,6 +5924,7 @@ function taskHref(taskId: string): string {
 /** The spend line for a 7am reader: whole cents, "runs", the gap still named. */
 function consoleSpend(summary: ReturnType<typeof tally<Run & { taskId: string }>>): string {
   if (summary.invoked.length === 0) return "nothing — no provider was invoked";
+  if (summary.measured.some(run => run.authMode === "subscription")) return spendLine(summary);
   const dollars = `$${summary.spend.toFixed(2)}`;
   // The measured count rides the SAME clause as the total (Phase 3 A6):
   // a bare sum over a mixed fleet reads as complete, and is not.
@@ -8633,7 +8634,7 @@ function boardBody(
               `${row.handoff === null ? "" : `<span class="why">${escape(row.handoff.length > 120 ? row.handoff.slice(0, 120) + "\u2026" : row.handoff)}</span>`}` +
               facts([
                 ...(row.ranMinutes === null ? [] : [["ran", `${row.ranMinutes}m`] as [string, string]]),
-                ["cost", row.costUsd === null ? "unmeasured" : `$${row.costUsd.toFixed(2)}`],
+                ["usage", runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null })],
               ]) +
               chips([
                 `<span class="badge badge-done">${row.outcome === "no-change" ? "no change" : "built"}</span>`,
@@ -8721,14 +8722,14 @@ function donePage(
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
               `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
-              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.costUsd !== null ? ` \u00b7 $${row.costUsd.toFixed(2)}` : row.provider !== null && isProviderId(row.provider) && !reportsCost(row.provider) ? " \u00b7 tokens only" : ""}</p></div>`
+              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}</p></div>`
             );
           })
           .join("\n");
   return screen("done", [
     `<h1>done</h1>`,
     buildsViews("done"),
-    `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, what it cost, and its pull request</p>`,
+    `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, usage, and its pull request</p>`,
     list,
   ].join("\n"), { chrome });
 }
@@ -10115,7 +10116,7 @@ function portfolioOverview(data: {
   ledger: {
     runId: number; taskId: string; title: string; repo: string | null; outcome: string; role: string;
     provider: string | null; model: string | null; startedAt: string; ranMinutes: number | null;
-    costUsd: number | null; prNumber: number | null; prUrl: string | null;
+    costUsd: number | null; authMode: "subscription" | "api-key" | null; prNumber: number | null; prUrl: string | null;
   }[];
   csrf: string;
   now: Date;
@@ -10257,7 +10258,7 @@ function portfolioOverview(data: {
         `${one.role === "scout" ? `<a class="badge" href="${taskHref(one.taskId)}#report">report</a> ` : ""}` +
         `<span class="mono meta">${one.provider === null ? "" : escape(one.provider)}${one.model === null ? "" : ` · ${escape(one.model)}`}` +
         `${one.ranMinutes === null ? "" : ` · ${one.ranMinutes}m`}` +
-        ` · ${one.costUsd === null ? "unmeasured" : `$${one.costUsd.toFixed(2)}`}` +
+        ` · ${escape(runCostWords({ authMode: one.authMode, costUsd: one.costUsd, tokensIn: null, tokensOut: null }))}` +
         `${(() => {
           if (one.prNumber === null) return "";
           // The URL-sink rule (audit IV-11): only a verified github pull
@@ -11713,7 +11714,7 @@ function taskBody(data: {
           profileWords(scope),
           scope.budgetMicrousd === null
             ? ""
-            : `<p class="meta">each build attempt may spend $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} — the agent is stopped at this figure</p>`,
+            : `<p class="meta">each build attempt has a $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} agent-reported usage cap — on a subscription this is a work limiter, not an API charge</p>`,
           // One yes covers BOTH documents (finding 31): the race terms are
           // restated on the same card the password signs, or they are not
           // approved at all.
@@ -11804,8 +11805,9 @@ function taskBody(data: {
           : defaults?.buildPerRunMicrousd != null
             ? (defaults.buildPerRunMicrousd / 1_000_000).toFixed(2)
             : "";
-      return `<label>dollar cap per build attempt <span class="meta">(optional — the agent is stopped at this figure)</span>` +
-        `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(budgetPrefill)}" placeholder="no cap beyond the installation backstop"></label>`;
+      return `<label>agent-reported usage cap <span class="meta">(optional — leave blank for uncapped subscription work)</span>` +
+        `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(budgetPrefill)}" placeholder="no cap"></label>` +
+        `<p class="meta">Claude expresses this limiter in API-equivalent dollars even on a membership. It does not switch the run to API billing.</p>`;
     })(),
     (() => {
       const profileMode: UnattendedPermissionMode | null =
@@ -11903,7 +11905,7 @@ function taskBody(data: {
               run.model,
               minutesOf(run),
               tokensOf(run),
-              run.costUsd !== null ? `$${run.costUsd.toFixed(2)}` : run.id === liveRunId ? "unmeasured so far" : "unmeasured",
+              runCostWords(run, run.id === liveRunId),
               run.parentRun !== null ? `↳ of #${run.parentRun}` : null,
             ].filter((bit): bit is string => bit !== null);
             return (
@@ -11923,6 +11925,10 @@ function taskBody(data: {
     if (rows.length === 0) return "no attempt yet";
     const measured = rows.filter(one => one.costUsd !== null);
     const dollars = measured.reduce((sum, one) => sum + (one.costUsd ?? 0), 0);
+    const subscription = measured.filter(one => one.authMode === "subscription");
+    const subscriptionEquivalent = subscription.reduce((sum, one) => sum + (one.costUsd ?? 0), 0);
+    const metered = measured.filter(one => one.authMode !== "subscription");
+    const meteredDollars = metered.reduce((sum, one) => sum + (one.costUsd ?? 0), 0);
     // Tokens count only where an attempt reported them; a null report is
     // said, never summed as zero (commit-3 review, finding 2).
     const reported = rows.filter(one => one.tokensIn !== null || one.tokensOut !== null);
@@ -11933,6 +11939,14 @@ function taskBody(data: {
         : reported.length < rows.length
           ? `${compactCount(tokens)} tokens from ${reported.length}/${rows.length} attempts`
           : `${compactCount(tokens)} tokens`;
+    if (subscription.length > 0) {
+      return [
+        ...(metered.length > 0 ? [`$${meteredDollars.toFixed(2)} API-key usage`] : []),
+        `$${subscriptionEquivalent.toFixed(2)} API-price equivalent from subscription usage (not an API charge)`,
+        tokenWords,
+        ...(measured.length < rows.length ? [`${rows.length - measured.length} attempt(s) unmeasured`] : []),
+      ].join(" · ");
+    }
     if (measured.length === rows.length) return `$${dollars.toFixed(2)} · ${tokenWords} · measured`;
     if (measured.length === 0) {
       return reported.length > 0
@@ -12018,8 +12032,18 @@ function taskBody(data: {
       byProvider.set(run.provider, entry);
     }
     const lines = [...byProvider.entries()].map(([provider, spend]) => {
-      const dollars =
-        spend.measured === spend.runs
+      const providerRuns = data.runs.filter(run => run.provider === provider);
+      const subscriptionRuns = providerRuns.filter(run => run.authMode === "subscription" && run.costUsd !== null);
+      const subscriptionEquivalent = subscriptionRuns.reduce((sum, run) => sum + (run.costUsd ?? 0), 0);
+      const meteredRuns = providerRuns.filter(run => run.authMode !== "subscription" && run.costUsd !== null);
+      const meteredCost = meteredRuns.reduce((sum, run) => sum + (run.costUsd ?? 0), 0);
+      const dollars = subscriptionRuns.length > 0
+        ? [
+            ...(meteredRuns.length > 0 ? [`$${meteredCost.toFixed(2)} API-key usage`] : []),
+            `$${subscriptionEquivalent.toFixed(2)} subscription API-price equivalent — not an API charge`,
+            ...(spend.measured < spend.runs ? [`${spend.runs - spend.measured} unmeasured`] : []),
+          ].join(" · ")
+        : spend.measured === spend.runs
           ? `$${spend.costUsd.toFixed(2)}`
           : spend.measured === 0
             ? "dollar cost unmeasured"
@@ -12029,7 +12053,7 @@ function taskBody(data: {
         `<span class="meta">${spend.runs} attempt(s) · ${compactCount(spend.tokensIn)} in / ${compactCount(spend.tokensOut)} out · ${escape(dollars)}</span></p>`
       );
     });
-    return `<h2>spend</h2>` + lines.join("\n");
+    return lines.join("\n");
   })();
 
   const decisions =
@@ -12262,7 +12286,7 @@ function taskBody(data: {
         }</span></p>`,
     section("report", reportCard, true),
     section("attempts", runs, true, data.runs.length),
-    section("spend", spendCard, false),
+    section("usage", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section("scope", ["<h2>scope</h2>", scopeCard, revisionCard, attendedCard, scopeForm].join("\n"), true),
     section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
@@ -12471,15 +12495,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: R
               runOutcomeBadge(run, liveIds.has(run.id)) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
               `<span class="right meta mono">${escape(when(run.startedAt))}` +
-              `${
-                run.costUsd !== null
-                  ? ` \u00b7 $${run.costUsd.toFixed(2)}`
-                  : run.tokensIn !== null || run.tokensOut !== null
-                    ? " \u00b7 tokens only"
-                    : run.providerStartedAt !== null
-                      ? " \u00b7 unmeasured"
-                      : ""
-              }</span></p>`,
+              `${run.providerStartedAt === null && run.tokensIn === null && run.tokensOut === null && run.costUsd === null ? "" : ` \u00b7 ${escape(runCostWords(run, liveIds.has(run.id)))}`}</span></p>`,
           )
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
@@ -12701,16 +12717,12 @@ function runFactsRows(run: Run, taskId: string, live: boolean): string {
     ["provider started", when(run.providerStartedAt), true],
     ["tokens in", run.tokensIn === null ? null : run.tokensIn.toLocaleString(), true],
     ["tokens out", run.tokensOut === null ? null : run.tokensOut.toLocaleString(), true],
-    // The unmeasured is said in words (M5.6): tokens without dollars means
-    // this provider reports no prices, and a hidden row would read as free.
+    // Auth is part of the economic fact: Claude's subscription harness
+    // reports an API-price equivalent, not a separate API-key charge.
     [
-      "cost",
-      run.costUsd !== null
-        ? `$${run.costUsd.toFixed(2)}`
-        : run.tokensIn !== null || run.tokensOut !== null
-          ? "dollar cost unmeasured — this provider reports tokens, not prices"
-          : null,
-      run.costUsd !== null,
+      "usage",
+      run.providerStartedAt === null && run.tokensIn === null && run.tokensOut === null && run.costUsd === null ? null : runCostWords(run, live),
+      run.costUsd !== null && run.authMode !== "subscription",
     ],
   ];
   const elapsed =
@@ -13127,7 +13139,7 @@ function settingsPage(
       ? ""
       : [
           "<h2>provider API keys</h2>",
-          `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key reaches its provider only when that provider's sign-in is set to "the API key"; other providers never see it.</p>`,
+          `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key reaches its provider only when that provider's sign-in is set to "the API key"; subscription mode strips that provider's key from the agent process, so the logged-in membership cannot silently become API billing.</p>`,
           ...providerKeys.map(one =>
             [
               `<form method="post" action="/settings/provider-key" class="card">`,
@@ -13135,7 +13147,7 @@ function settingsPage(
               `<input type="hidden" name="provider" value="${escape(one.provider)}">`,
               `<p class="row"><strong>${escape(one.provider)}</strong> <span class="mono meta">${escape(one.envName)}</span> ` +
                 `<span class="meta">${
-                  one.mode === "subscription" ? "uses its own login" : "uses the API key"
+                  one.mode === "subscription" ? "uses its own login · no API-key spend" : "uses the API key"
                 } \u00b7 ${
                   one.set
                     ? `key stored${one.updatedAt === null ? "" : ` ${escape(one.updatedAt.slice(0, 10))}`}`
