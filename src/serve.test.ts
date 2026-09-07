@@ -1189,6 +1189,12 @@ describe("the operations console", () => {
 
     const list = await (await fetch(url("/runs"), { headers: { cookie } })).text();
     expect(list).toContain(`/r/${run}`);
+    expect(list).toContain('class="badge badge-built">built</span>');
+    expect(list).not.toMatch(/<p class="row"><span class="dot /);
+    const tasks = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
+    expect(tasks).not.toMatch(/<a class="row"[^>]*><span class="dot /);
+    const task = await (await fetch(url("/t/t-1"), { headers: { cookie } })).text();
+    expect(task).not.toMatch(/<p class="row"><span class="dot /);
 
     expect((await fetch(url("/runs?before=abc"), { headers: { cookie } })).status).toBe(400);
     expect((await fetch(url("/runs?before=9007199254740993"), { headers: { cookie } })).status).toBe(400);
@@ -6706,9 +6712,13 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(html).toMatch(/<a href="\/"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/runs"><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio" title="portfolio">portfolio<\/a>/);
-    // Section headers speak sans; the state chips wear a dot before the word.
+    // Section headers speak sans; status labels are quiet rounded rectangles,
+    // while numeric counts retain the conventional pill silhouette.
     expect(html).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
-    expect(html).toContain(".badge-running::before, .badge-parked::before, .count.badge-open::before {");
+    expect(html).toContain("border: 1px solid var(--border); border-radius: .375rem;");
+    expect(html).toContain(".count {");
+    expect(html).toContain("border-radius: 9999px;");
+    expect(html).not.toContain(".badge-running::before");
   });
 
   test("the header pill names the scope: project with counts when one is open, 'all projects' on the portfolio", async () => {

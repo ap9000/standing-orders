@@ -6275,41 +6275,42 @@ const STYLE = `
   .ledger .good b { color: var(--success); }
   .ledger .bad b { color: var(--destructive); }
 
-  /* Status chips: one vocabulary — mono type, 12% tint, hairline of the
-     same hue. Neutral facts stay dim. */
+  /* Status labels are quiet metadata, not decoration. Their words carry
+     the meaning; the restrained tint only speeds scanning. Count badges
+     remain round so a number cannot be confused with a state. */
   .badge {
-    display: inline-flex; align-items: center; gap: .375rem; border: 1px solid var(--border); border-radius: 9999px;
-    padding: .0625rem .5rem; font-size: 0.6875rem; font-weight: 500; line-height: 1.5;
-    background: transparent; color: var(--muted-foreground); vertical-align: middle;
+    display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: .375rem;
+    padding: .0625rem .4rem; font-size: 0.6875rem; font-weight: 500; line-height: 1.45;
+    background: color-mix(in srgb, var(--card) 58%, transparent); color: var(--muted-foreground); vertical-align: middle;
     font-family: var(--font-sans); font-variant-numeric: tabular-nums; white-space: nowrap;
   }
-  /* A state word wears its dot; neutral facts (a project, a routine) do not. */
-  .badge-done::before, .badge-answered::before, .badge-verified::before, .badge-built::before,
-  .badge-failed::before, .badge-cancelled::before, .badge-overdue::before,
-  .badge-running::before, .badge-parked::before, .count.badge-open::before {
-    content: ""; width: .375rem; height: .375rem; border-radius: 9999px; background: currentColor; flex: none;
-  }
-  .count.badge-open::before { display: none; }
   .badge-done, .badge-answered, .badge-verified, .badge-built {
-    background: var(--success-soft); color: var(--success);
-    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+    background: color-mix(in srgb, var(--muted) 58%, var(--card)); color: var(--foreground);
+    border-color: var(--border);
   }
-  .badge-failed, .badge-cancelled, .badge-overdue {
-    background: var(--destructive-soft); color: var(--destructive);
-    border-color: color-mix(in srgb, var(--destructive) 35%, transparent);
+  .badge-failed {
+    background: color-mix(in srgb, var(--muted) 58%, var(--card));
+    color: color-mix(in srgb, var(--destructive) 68%, var(--foreground)); border-color: var(--border);
+  }
+  .badge-overdue {
+    background: color-mix(in srgb, var(--muted) 58%, var(--card)); color: var(--foreground);
+    border-color: var(--border);
   }
   /* "open" and "parked" are neutral facts (an open PR, a parked decision);
      the AMBER form is the attention count — the number that waits on you.
      One accent, two places (reduction pass §3): the needs-you count and
      the act that resolves the screen. Cards, frames, and seals are neutral. */
   .badge-open, .badge-parked { color: var(--foreground); }
+  .count {
+    min-width: 1.25rem; padding-inline: .35rem; border-radius: 9999px;
+  }
   .count.badge-open {
     background: var(--brand-soft); color: var(--brand);
-    border-color: color-mix(in srgb, var(--brand) 35%, transparent);
+    border-color: color-mix(in srgb, var(--brand) 24%, var(--border));
   }
   .badge-running {
-    background: var(--running-soft); color: var(--running);
-    border-color: color-mix(in srgb, var(--running) 35%, transparent);
+    background: color-mix(in srgb, var(--muted) 58%, var(--card));
+    color: color-mix(in srgb, var(--running) 72%, var(--foreground)); border-color: var(--border);
   }
   .badge-cut { background: var(--muted); }
 
@@ -9790,7 +9791,7 @@ function tasksPage(
       : tasks
           .map(
             task =>
-              `<a class="row" href="${taskHref(task.id)}">${taskDot(task.state)}<span class="mono">${escape(task.id)}</span> ` +
+              `<a class="row" href="${taskHref(task.id)}"><span class="mono">${escape(task.id)}</span> ` +
               `${escape(task.title)} <span class="right badge badge-${escape(task.state)}">${escape(task.state)}</span></a>`,
           )
           .join("\n");
@@ -11818,7 +11819,7 @@ function taskBody(data: {
               run.parentRun !== null ? `↳ of #${run.parentRun}` : null,
             ].filter((bit): bit is string => bit !== null);
             return (
-              `<p class="row">${runDot(run, run.id === liveRunId)}<a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
+              `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               runOutcomeBadge(run, run.id === liveRunId) +
               `${run.reason === null ? "" : ` <span class="meta">${escape(reasonWords(run.reason))}</span>`}` +
               ` <span class="meta mono">${escape(bits.join(" · "))}</span>` +
@@ -12370,32 +12371,6 @@ function runOutcomeBadge(run: Run, live: boolean): string {
 }
 
 
-/**
- * The state dot (Phase 2E, A5): one vocabulary everywhere — working
- * (brand pulse), waiting-on-you (warning), done (success), failed
- * (destructive), queued/idle (muted). Derived from EXISTING state fields
- * only; anything ambiguous is muted, never green.
- */
-function taskDot(state: TaskState): string {
-  const cls =
-    state === "running" ? "dot-ok pulse" : state === "done" ? "dot-ok" : state === "failed" ? "dot-bad" : "dot-off";
-  return `<span class="dot ${cls}" aria-hidden="true"></span> `;
-}
-
-function runDot(run: Run, live: boolean): string {
-  const cls =
-    run.outcome === null
-      ? live
-        ? "dot-ok pulse"
-        : "dot-off"
-      : run.outcome === "built" || run.outcome === "no-change"
-        ? "dot-ok"
-        : run.outcome === "parked"
-          ? "dot-warn"
-          : "dot-bad";
-  return `<span class="dot ${cls}" aria-hidden="true"></span> `;
-}
-
 function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: ReadonlySet<number>, nextCursor: number | null): Screen {
   const list =
     rows.length === 0
@@ -12403,7 +12378,7 @@ function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: R
       : rows
           .map(
             run =>
-              `<p class="row">${runDot(run, liveIds.has(run.id))}<a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
+              `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
               runOutcomeBadge(run, liveIds.has(run.id)) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
