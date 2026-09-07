@@ -28,7 +28,7 @@
  * re-admission and checkout custody (stage 4), cleanup (stage 6).
  */
 
-import { profileDigestOf } from "./scope.js";
+import { profileDigestOf, type UnattendedPermissionMode } from "./scope.js";
 import { contestantProfileOf } from "./store.js";
 import { createHash } from "node:crypto";
 import { release } from "./claim.js";
@@ -39,7 +39,7 @@ import type { Contest, Contestant, ContestState, Store, TournamentTerms } from "
 export const MIN_AGENTS = 2;
 export const MAX_AGENTS = 4;
 
-export type RaceAgent = { provider: string; model: string; repairModel: string };
+export type RaceAgent = { provider: string; model: string; repairModel: string; permissionMode?: UnattendedPermissionMode };
 
 // ---------------------------------------------------------------- digests
 
@@ -62,7 +62,7 @@ export function raceDigestOf(terms: {
       agent.provider,
       agent.model,
       agent.repairModel,
-      profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel)),
+      profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel, agent.permissionMode)),
     ]),
     per: terms.perAgentBudgetMicrousd,
     total: terms.totalBudgetMicrousd,
@@ -93,7 +93,7 @@ export function comparisonDigestOf(terms: {
       agent.provider,
       agent.model,
       agent.repairModel,
-      profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel)),
+      profileDigestOf(contestantProfileOf(agent.provider, agent.model, agent.repairModel, agent.permissionMode)),
     ]),
     publication: terms.publicationPolicy,
   });
@@ -117,7 +117,7 @@ export type ComparisonPlan = {
  * each lane's bound is its sealed profile's wall clock, said in words.
  */
 export function planComparison(input: {
-  agents: { provider: string; model: string; repairModel?: string }[];
+  agents: { provider: string; model: string; repairModel?: string; permissionMode?: UnattendedPermissionMode }[];
   publicationPolicy?: string;
 }): { ok: true; plan: ComparisonPlan } | { ok: false; reason: string; message: string } {
   if (input.agents.length < MIN_AGENTS || input.agents.length > MAX_AGENTS) {
@@ -140,7 +140,7 @@ export function planComparison(input: {
     const capability = MONEY_CAPABILITIES[asked.provider];
     if (!capability.tournamentEligible) unmeasuredLanes++;
     const repairModel = asked.repairModel ?? asked.model;
-    agents.push({ provider: asked.provider, model: asked.model, repairModel });
+    agents.push({ provider: asked.provider, model: asked.model, repairModel, ...(asked.permissionMode === undefined ? {} : { permissionMode: asked.permissionMode }) });
     laneWords.push(
       reportsCost(asked.provider)
         ? `${asked.provider} · ${asked.model} — spend measured in dollars; no cap on a comparison, the clock is the bound`
@@ -195,7 +195,7 @@ export type TournamentPlan = {
 };
 
 export function planTournament(input: {
-  agents: { provider: string; model: string; repairModel?: string }[];
+  agents: { provider: string; model: string; repairModel?: string; permissionMode?: UnattendedPermissionMode }[];
   perAgentBudgetUsd: number;
   totalBudgetUsd: number;
   publicationPolicy?: string;
@@ -236,7 +236,7 @@ export function planTournament(input: {
     if (tail === null || repairTail === null) {
       return { ok: false, reason: "unpriced-model", message: `${model} has no pinned overrun price` };
     }
-    agents.push({ provider: asked.provider, model, repairModel });
+    agents.push({ provider: asked.provider, model, repairModel, ...(asked.permissionMode === undefined ? {} : { permissionMode: asked.permissionMode }) });
     reserves.push(Math.max(tail, repairTail));
   }
   const perAgentBudgetMicrousd = Math.round(input.perAgentBudgetUsd * 1_000_000);
@@ -386,6 +386,7 @@ export function admitContest(
         provider: agent.provider,
         model: agent.model,
         repairModel: agent.repairModel,
+        ...(agent.permissionMode === undefined ? {} : { permissionMode: agent.permissionMode }),
         branch: contestBranch(args.taskId, contestId, index + 1),
         // Comparison lanes carry no dollar terms; unmeasured lanes are
         // pre-latched as a fact of the lane (spec D6).

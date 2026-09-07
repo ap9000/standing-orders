@@ -313,12 +313,13 @@ function repairModelOf(profile: ExecutionProfile | undefined, request: BuildRequ
   return (request.repairModel ?? request.model) ?? null;
 }
 
-/** The one escalated-autonomy read (Phase 3): claude's bypass and
- * gemini's yolo are the SAME ceremony class, derived here and nowhere
- * else so a new variant cannot half-join. */
+/** The one escalated-autonomy read (Phase 3): Claude's bypass, Codex's
+ * danger-full-access posture, and Gemini's yolo are the SAME ceremony
+ * class, derived here and nowhere else so a new variant cannot half-join. */
 function profileWantsSkip(profile: ExecutionProfile): boolean {
   return (
     (profile.provider === "claude" && profile.permissionArgv === "bypassPermissions") ||
+    ((profile.provider === "codex" || profile.provider === "openrouter") && profile.sandboxMode === "danger-full-access") ||
     (profile.provider === "gemini" && profile.approvalArgv === "yolo")
   );
 }

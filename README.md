@@ -257,6 +257,22 @@ tests, but it has not yet been exercised on a physical Windows machine —
 if you are the first, `daemon install --dry-run` shows exactly what it
 would register, and an issue report is very welcome.
 
+### Unattended permissions
+
+The console's **Settings → unattended permissions** control chooses the
+starting policy for new tasks. **Auto** lets routine repository commands and
+edits proceed while the provider may stop on a risky permission request.
+**Full access** runs Claude with `--dangerously-skip-permissions`, Codex (and
+its OpenRouter transport) with `--dangerously-bypass-approvals-and-sandbox`,
+and Gemini with `--approval-mode yolo`, so permission prompts cannot pause work
+while you are away. Use Full access only for repositories and setup commands
+you trust.
+
+Every new-task and task-scope form has the same two-choice control. A task's
+choice is durable through planning rewrites and is sealed into the approved
+execution profile; changing the installation default never broadens an
+existing scope or approval.
+
 ## The phone, both directions
 
 The Telegram bridge closes the loop without a terminal: a parked decision

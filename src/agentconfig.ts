@@ -22,7 +22,7 @@
 
 import { isProviderId, validateSpec, type AgentSpec, type Phase, type ProviderId } from "./provider.js";
 import { contestantProfileOf, type Store, type TaskRef } from "./store.js";
-import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile } from "./scope.js";
+import { CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, chainFromJson, canonicalChainJson, type ChainEntry, type ExecutionProfile, type UnattendedPermissionMode } from "./scope.js";
 import { SUBSCRIPTION_CAPABLE } from "./keys.js";
 
 export const INSTALLATION_SCOPE = "installation";
@@ -111,7 +111,7 @@ export function resolveScopeProfile(
   store: Store,
   repo: string | null,
   ref: Pick<TaskRef, "agentProvider" | "agentModel"> | undefined,
-  flags: PhaseFlags & { repairModel?: string | undefined },
+  flags: PhaseFlags & { repairModel?: string | undefined; permissionMode?: UnattendedPermissionMode | undefined },
 ): ProfileResolution {
   const build = resolvePhaseAgent(store, "build", repo, flags, ref);
   if (!build.ok) return { ok: false, reason: "unknown-provider", problem: build.problem };
@@ -149,6 +149,7 @@ export function resolveScopeProfile(
     }
   }
 
+  const permissionMode = flags.permissionMode ?? store.permissionDefault().mode;
   const profile: ExecutionProfile =
     provider === "claude"
       ? {
@@ -156,8 +157,9 @@ export function resolveScopeProfile(
           model,
           // Auto mode is designed for headless work: routine repository
           // commands and edits proceed, while risky acts still stop at the
-          // provider's permission classifier. Bypass remains a ceremony.
-          permissionArgv: "auto",
+          // provider's permission classifier. Full access is an explicit
+          // installation or task choice and is sealed into this profile.
+          permissionArgv: permissionMode,
           maxTurns: CLAUDE_LIMITS.maxTurns,
           repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
           timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,
@@ -169,9 +171,9 @@ export function resolveScopeProfile(
         ? {
             provider,
             model,
-            // Filing seals auto_edit ONLY — the acceptEdits parallel; yolo
-            // is a ceremony-worded escalation, not a filing default.
-            approvalArgv: "auto_edit",
+            // The cross-provider choice resolves to Gemini's own real argv:
+            // auto_edit for Auto, yolo for Full access.
+            approvalArgv: permissionMode === "bypassPermissions" ? "yolo" : "auto_edit",
             maxTurns: "unsupported",
             repairMaxTurns: "unsupported",
             timeoutSeconds: GEMINI_LIMITS.timeoutSeconds,
@@ -182,7 +184,7 @@ export function resolveScopeProfile(
         : {
             provider,
             model,
-            sandboxMode: "workspace-write",
+            sandboxMode: permissionMode === "bypassPermissions" ? "danger-full-access" : "workspace-write",
             maxTurns: "unsupported",
             repairMaxTurns: "unsupported",
             timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,
@@ -212,7 +214,7 @@ export function resolveScopeChain(
   store: Store,
   repo: string | null,
   ref: Pick<TaskRef, "agentProvider" | "agentModel"> | undefined,
-  flags: PhaseFlags & { repairModel?: string | undefined },
+  flags: PhaseFlags & { repairModel?: string | undefined; permissionMode?: UnattendedPermissionMode | undefined },
   baseAuthMode: "subscription" | "api-key",
 ): ChainResolution {
   const base = resolveScopeProfile(store, repo, ref, flags);
@@ -243,7 +245,7 @@ export function resolveScopeChain(
     if (!argvSafe.ok) {
       return { ok: false, reason: "bad-fallback", problem: argvSafe.problem };
     }
-    entries.push({ profile: contestantProfileOf(one.provider, one.model, one.repairModel ?? "inherit"), authMode: one.authMode });
+    entries.push({ profile: contestantProfileOf(one.provider, one.model, one.repairModel ?? "inherit", flags.permissionMode ?? store.permissionDefault().mode), authMode: one.authMode });
   }
   // Re-prove the whole chain through the strict rehydrator: it rejects
   // exact-duplicate entries and any malformed shape, so what the approval

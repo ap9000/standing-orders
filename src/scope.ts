@@ -120,9 +120,10 @@ export type ClaudeProfile = {
 export type CodexShapedProfile = {
   provider: "codex" | "openrouter";
   model: string;
-  /** Codex's real constraint surface: the sandbox argument. There is no
-   * separate permission argument, so no invented field. */
-  sandboxMode: "workspace-write";
+  /** Codex's real constraint surface. Full access is rendered with the
+   * CLI's combined --dangerously-bypass-approvals-and-sandbox switch; the
+   * value here records the resulting sandbox posture in the signed profile. */
+  sandboxMode: "workspace-write" | "danger-full-access";
   /** The tool has no argv turn limit. New approvals use an inactivity
    * watchdog; legacy approvals retain their signed wall-clock bound. */
   maxTurns: "unsupported";
@@ -153,6 +154,11 @@ export type GeminiProfile = {
 };
 
 export type ExecutionProfile = ClaudeProfile | CodexShapedProfile | GeminiProfile;
+
+/** The durable unattended permission choices exposed by the console. The
+ * provider-specific argv is still what gets sealed into an approval; this
+ * small cross-provider type is only the operator-facing policy. */
+export type UnattendedPermissionMode = "auto" | "bypassPermissions";
 
 export const PROFILE_DIGEST_VERSION = 2;
 
@@ -306,7 +312,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
   if (p["provider"] === "codex" || p["provider"] === "openrouter") {
     if (
       str(p["model"]) &&
-      p["sandboxMode"] === "workspace-write" &&
+      (p["sandboxMode"] === "workspace-write" || p["sandboxMode"] === "danger-full-access") &&
       p["maxTurns"] === "unsupported" && p["repairMaxTurns"] === "unsupported" &&
       num(p["timeoutSeconds"]) && (p["timeoutKind"] === undefined || p["timeoutKind"] === "idle") && num(p["repairTimeoutSeconds"]) &&
       str(p["repairModel"])
@@ -314,7 +320,7 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
       return {
         provider: p["provider"],
         model: p["model"],
-        sandboxMode: "workspace-write",
+        sandboxMode: p["sandboxMode"],
         maxTurns: "unsupported",
         repairMaxTurns: "unsupported",
         timeoutSeconds: p["timeoutSeconds"],
@@ -405,6 +411,9 @@ export type ScopeInput = {
   /** v24: an EXPLICIT profile skips resolution in the store (routine
    * firings and the demo's illustrative scopes use this road). */
   profile?: ExecutionProfile;
+  /** A task-level permission choice. When absent, the task's stored choice
+   * (if any), then the installation default, decides the concrete profile. */
+  permissionMode?: UnattendedPermissionMode;
   /** Integer micro-dollars per build attempt; digest-bound when present. */
   budgetMicrousd?: number | null;
   /** The mode road's escalated filing default (C7): the resolved profile
@@ -467,7 +476,7 @@ export function digestOf(
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile, posture, proposedVia = null } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile, permissionMode, posture, proposedVia = null } = input;
 
   const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd };
   const previous = store.getScope(taskId);
@@ -489,6 +498,7 @@ export function propose(store: Store, input: ScopeInput): Scope {
 
   store.saveScope(scope, mutation, {
     ...(profile === undefined ? {} : { profile }),
+    ...(permissionMode === undefined ? {} : { permissionMode }),
     ...(posture === undefined ? {} : { posture }),
     proposedVia,
   });

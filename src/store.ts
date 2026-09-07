@@ -31,7 +31,7 @@ import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry } from "./scope.js";
+import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
 import { readAuthMode } from "./keys.js";
 import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 36;
+export const SCHEMA_VERSION = 37;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -105,6 +105,10 @@ export type TaskRef = {
   /** The pinned agent, when a fire transaction stamped one. Authoritative. */
   agentProvider: string | null;
   agentModel: string | null;
+  /** Durable per-task override. null means the installation default is used
+   * the next time this task's scope is filed. Approved scopes still bind the
+   * concrete provider argv and never change under a setting edit. */
+  permissionMode?: UnattendedPermissionMode | null;
   /** Plan pins (P2/C7): read ONLY by the plan phase; precedence plan pin
    * > plan flags > plan config > installation > default. */
   planProvider: string | null;
@@ -131,7 +135,7 @@ export type TournamentTerms = {
   kind: "race" | "comparison";
   raceDigest: string;
   /** Ordered agents: exact model ids, resolved at filing. */
-  agents: { provider: string; model: string; repairModel: string }[];
+  agents: { provider: string; model: string; repairModel: string; permissionMode?: UnattendedPermissionMode }[];
   n: number;
   perAgentBudgetMicrousd: number;
   overrunReserveMicrousd: number;
@@ -946,6 +950,10 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- runtime flag never overrides a pin. NULL = resolve from config.
   agent_provider          TEXT,
   agent_model             TEXT,
+  -- Per-task unattended permission override (v37). NULL inherits the
+  -- installation default when a scope is next filed; approvals bind the
+  -- resulting concrete profile, never this mutable preference.
+  permission_mode         TEXT CHECK (permission_mode IN ('auto','bypassPermissions')),
   -- A revision task (M6.8): which task's reviewed run it revises, and the
   -- immutable brief artifact carrying the exact comment batch. Every
   -- revision requires its own approval; nothing is inherited.
@@ -1259,6 +1267,17 @@ CREATE TABLE IF NOT EXISTS spend_defaults (
   updated_at               TEXT NOT NULL,
   updated_by               TEXT NOT NULL
 );
+
+-- Unattended permission default (v37). It is a filing default only: changing
+-- it never rewrites an existing scope or approval. Each approved scope binds
+-- the concrete provider argv produced from this choice.
+CREATE TABLE IF NOT EXISTS permission_default (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  mode       TEXT NOT NULL CHECK (mode IN ('auto','bypassPermissions')),
+  updated_at TEXT,
+  updated_by TEXT
+);
+INSERT OR IGNORE INTO permission_default (id, mode) VALUES (1, 'auto');
 
 -- Fleet chat (v13, membership adapters in v35). Chat providers remain a
 -- separate type from build providers: direct APIs use pinned dollar prices;
@@ -2965,6 +2984,9 @@ function migrate(db: Database): void {
   // sessions are closed during migration because their signed terms were
   // time-bounded; the operator can mint a persistent session deliberately.
   rebuildMateSessionForV36(db);
+  // v37 (unattended permissions): the installation singleton arrives via
+  // SCHEMA on both roads; task overrides are additive and null by default.
+  addColumn(db, "task_ref", "permission_mode", "TEXT CHECK (permission_mode IN ('auto','bypassPermissions'))");
   // v33 (mate v3): `answer` joins the proposal kinds — a CHECK widening,
   // copy-rename against the v32 shape.
   rebuildMateProposalForV33(db);
@@ -6269,7 +6291,7 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; permissionMode?: UnattendedPermissionMode; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
     this.once(mutation, "saveScope", () => this.transact(() => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -6284,13 +6306,24 @@ export class Store {
       let profile: ExecutionProfile | null = options.profile ?? null;
       let unresolvedReason: string | null = null;
       let provenance: string | null = options.profile === undefined ? null : JSON.stringify({ resolvedFrom: "explicit" });
+      const ref = this.lookupRef(scope.taskId);
+      const permissionMode: UnattendedPermissionMode =
+        options.posture === "escalated"
+          ? "bypassPermissions"
+          : options.permissionMode ?? ref?.permissionMode ?? this.permissionDefault().mode;
+      // A form/CLI choice is a durable TASK choice. The active operating
+      // mode's escalated posture is intentionally not persisted here: when
+      // that signed mode expires, a later rewrite falls back to the task's
+      // own choice (or the installation default).
+      if (options.permissionMode !== undefined && ref !== null) {
+        this.db.prepare("UPDATE task_ref SET permission_mode = ? WHERE id = ?").run(options.permissionMode, ref.id);
+      }
       if (profile === null) {
-        const ref = this.lookupRef(scope.taskId);
         const resolved = resolveScopeProfile(
           this,
           ref?.repo ?? null,
           ref === null ? undefined : { agentProvider: ref.agentProvider, agentModel: ref.agentModel },
-          {},
+          { permissionMode },
         );
         if (resolved.ok) {
           profile = resolved.profile;
@@ -6299,16 +6332,17 @@ export class Store {
           unresolvedReason = resolved.problem;
         }
       }
-      // The C7 escalation matrix, applied where the profile is sealed:
-      // claude bypassPermissions / gemini yolo; codex-shaped lanes have
-      // one posture and escalation changes nothing for them.
+      // Explicit profiles normally win byte-for-byte (routine firings and
+      // demo fixtures depend on that). The signed operating mode's
+      // escalated posture is the one exception, retained from C7: it must
+      // apply even when a CLI caller supplied a concrete profile.
       if (options.posture === "escalated" && profile !== null) {
         profile =
           profile.provider === "claude"
             ? { ...profile, permissionArgv: "bypassPermissions" }
             : profile.provider === "gemini"
               ? { ...profile, approvalArgv: "yolo" }
-              : profile;
+              : { ...profile, sandboxMode: "danger-full-access" };
       }
       const digest = profile === null
         ? scope.digest
@@ -6337,7 +6371,7 @@ export class Store {
             this,
             chainRepo,
             chainRef === null ? undefined : { agentProvider: chainRef.agentProvider, agentModel: chainRef.agentModel },
-            {},
+            { permissionMode },
             readAuthMode(profile.provider),
           );
           if (chain.ok && chain.kind === "chain") {
@@ -8833,6 +8867,9 @@ export class Store {
        * escalated posture ride the FILING, before the digest is computed —
        * never stamped after the fact. */
       budgetMicrousd?: number | null;
+      /** Durable task-level choice; absent means use the installation
+       * default whenever this task's scope is next filed. */
+      permissionMode?: UnattendedPermissionMode;
       posture?: "escalated";
       /** Revision tasks inherit these from the source scope (Codex M5-M8
        * audit, IV-2): a revision that silently drops the original's
@@ -8892,6 +8929,9 @@ export class Store {
       // Placement happens BEFORE the scope exists, so the immutability guard
       // in placeTask never fires here — atomic create, place, then scope.
       if (spec.repo !== undefined && spec.repo !== "") this.placeTask(ref.id, spec.repo);
+      if (spec.permissionMode !== undefined) {
+        this.db.prepare("UPDATE task_ref SET permission_mode = ? WHERE id = ?").run(spec.permissionMode, ref.id);
+      }
       if (spec.goal !== undefined) {
         const draft = {
           goal: spec.goal.trim(),
@@ -8910,7 +8950,11 @@ export class Store {
             approvedDigest: null,
           },
           {},
-          { ...(spec.posture === undefined ? {} : { posture: spec.posture }), proposedVia: spec.proposedVia ?? null },
+          {
+            ...(spec.permissionMode === undefined ? {} : { permissionMode: spec.permissionMode }),
+            ...(spec.posture === undefined ? {} : { posture: spec.posture }),
+            proposedVia: spec.proposedVia ?? null,
+          },
         );
       }
       return { ok: true as const, id };
@@ -9087,6 +9131,23 @@ export class Store {
   }
 
   // ---- phase configuration ------------------------------------------------
+
+  /** Installation filing default. Existing approved scopes remain immutable;
+   * this is consulted only when a new or rewritten scope resolves. */
+  permissionDefault(): { mode: UnattendedPermissionMode; updatedAt: string | null; updatedBy: string | null } {
+    const row = this.db.prepare("SELECT mode, updated_at, updated_by FROM permission_default WHERE id = 1").get();
+    return {
+      mode: row?.["mode"] === "bypassPermissions" ? "bypassPermissions" : "auto",
+      updatedAt: row?.["updated_at"] == null ? null : String(row["updated_at"]),
+      updatedBy: row?.["updated_by"] == null ? null : String(row["updated_by"]),
+    };
+  }
+
+  setPermissionDefault(mode: UnattendedPermissionMode, by: string, now: Date): void {
+    this.db
+      .prepare("UPDATE permission_default SET mode = ?, updated_at = ?, updated_by = ? WHERE id = 1")
+      .run(mode, now.toISOString(), by);
+  }
 
   /** One phase's configured agent at one scope, or null. */
   phaseConfig(scope: string, phase: string): { provider: string; model: string | null; updatedAt: string; updatedBy: string } | null {
@@ -9319,7 +9380,7 @@ export class Store {
       /** v27: absent = 'race' (every historical caller). */
       kind?: "race" | "comparison";
       raceDigest: string;
-      agents: { provider: string; model: string; repairModel: string }[];
+      agents: { provider: string; model: string; repairModel: string; permissionMode?: UnattendedPermissionMode }[];
       perAgentBudgetMicrousd: number;
       overrunReserveMicrousd: number;
       totalBudgetMicrousd: number;
@@ -9462,7 +9523,7 @@ export class Store {
 
   createContestants(
     contest: number,
-    agents: { provider: string; model: string; repairModel: string; branch: string; budgetMicrousd: number; reserveMicrousd: number; unknownSpend?: boolean }[],
+    agents: { provider: string; model: string; repairModel: string; permissionMode?: UnattendedPermissionMode; branch: string; budgetMicrousd: number; reserveMicrousd: number; unknownSpend?: boolean }[],
   ): number[] {
     return this.transact(() =>
       agents.map((agent, index) => {
@@ -9488,7 +9549,7 @@ export class Store {
             // v24: the contestant's OWN sealed profile — race terms carry
             // exact models already; the effective limits join them here so
             // the dispatch proof holds each lane to its lane.
-            canonicalProfileJson(contestantProfileOf(agent.provider, agent.model, agent.repairModel)),
+            canonicalProfileJson(contestantProfileOf(agent.provider, agent.model, agent.repairModel, agent.permissionMode)),
           );
         return Number(inserted.lastInsertRowid);
       }),
@@ -15920,6 +15981,10 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
       row["agent_model"] === null || row["agent_model"] === undefined
         ? null
         : String(row["agent_model"]),
+    permissionMode:
+      row["permission_mode"] === "auto" || row["permission_mode"] === "bypassPermissions"
+        ? row["permission_mode"]
+        : null,
     planProvider:
       row["plan_provider"] === null || row["plan_provider"] === undefined
         ? null
@@ -16282,12 +16347,17 @@ export type WorktreeSetup = {
 
 /** A contestant's execution profile (v24): exact ids from the race terms,
  * effective limits from the same constants every dispatch uses. */
-export function contestantProfileOf(provider: string, model: string, repairModel: string): ExecutionProfile {
+export function contestantProfileOf(
+  provider: string,
+  model: string,
+  repairModel: string,
+  permissionMode: UnattendedPermissionMode = "auto",
+): ExecutionProfile {
   return provider === "claude"
     ? {
         provider: "claude",
         model,
-        permissionArgv: "auto",
+        permissionArgv: permissionMode,
         maxTurns: CLAUDE_LIMITS.maxTurns,
         repairMaxTurns: CLAUDE_LIMITS.repairMaxTurns,
         timeoutSeconds: CLAUDE_LIMITS.timeoutSeconds,
@@ -16303,7 +16373,7 @@ export function contestantProfileOf(provider: string, model: string, repairModel
           // reachable the moment comparisons admitted it.
           provider: "gemini",
           model,
-          approvalArgv: "auto_edit",
+          approvalArgv: permissionMode === "bypassPermissions" ? "yolo" : "auto_edit",
           maxTurns: "unsupported",
           repairMaxTurns: "unsupported",
           timeoutSeconds: GEMINI_LIMITS.timeoutSeconds,
@@ -16314,7 +16384,7 @@ export function contestantProfileOf(provider: string, model: string, repairModel
       : {
           provider: provider === "openrouter" ? "openrouter" : "codex",
           model,
-          sandboxMode: "workspace-write",
+          sandboxMode: permissionMode === "bypassPermissions" ? "danger-full-access" : "workspace-write",
           maxTurns: "unsupported",
           repairMaxTurns: "unsupported",
           timeoutSeconds: CODEX_SHAPED_LIMITS.timeoutSeconds,

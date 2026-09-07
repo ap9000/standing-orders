@@ -37,6 +37,7 @@ import {
   type RoutineTerms,
 } from "./routine.js";
 import type { Store } from "./store.js";
+import type { UnattendedPermissionMode } from "./scope.js";
 
 /** Provenance tokens are part of the audit surface: lowercase, bounded,
  * nothing that could render as anything but itself. */
@@ -78,6 +79,9 @@ export type TaskProposalInput = {
    * `auto` (the default) plans implementation work whose breadth suggests
    * repository discovery will materially improve the approved scope. */
   planning?: "auto" | "required" | "skip";
+  /** Concrete per-task unattended permission choice. When absent, the
+   * installation default is resolved as the scope is filed. */
+  permissionMode?: UnattendedPermissionMode;
   /**
    * The caller's ceiling as canonical repo paths. undefined = the caller
    * genuinely has none (the CLI on the operator's own machine). A surface
@@ -223,6 +227,7 @@ export function fileTaskProposal(
       title: input.title,
       ...(repo.repo === undefined ? {} : { repo: repo.repo }),
       ...(input.goal === undefined ? {} : { goal: input.goal }),
+      ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       outOfScope,
       touches,
       filedVia: input.filedVia,

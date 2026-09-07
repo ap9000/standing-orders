@@ -59,8 +59,12 @@ without reliable proof is only a faster way to produce uncertain work.
 
 The first Priority 1 slice now pins the worker service to the installed Node
 runtime, requires a fresh worker heartbeat before installation reports success,
-shows the exact dispatch gate on every task, and uses Claude's guarded
-unattended `auto` permission mode so routine project commands and tests can run
-without granting unrestricted permissions. A completed task only says
+and shows the exact dispatch gate on every task. Unattended permissions are now
+an installation default plus a durable per-task choice: `auto` keeps the guarded
+provider classifier, while Full access seals Claude's
+`--dangerously-skip-permissions`, Codex's combined approval/sandbox bypass, or
+Gemini's `yolo` into that task's approval so permission prompts cannot strand it
+while the operator is away. Changing
+the default never broadens existing approvals. A completed task only says
 “complete with evidence” when both its terminal handoff and machine-captured
 diff exist; otherwise it names the missing proof.

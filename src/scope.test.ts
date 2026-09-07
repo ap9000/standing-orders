@@ -263,6 +263,38 @@ describe("a chosen password is a first-class credential", () => {
       store.close();
     }
   });
+
+  test("the installation default never rewrites an approval, while a task override survives later scope rewrites", () => {
+    const store = openStore(":memory:");
+    try {
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+      store.createTask({ id: "t-1", title: "the work" }, T0);
+      const approverToken = bootstrapApprover(store);
+      const original = propose(store, { taskId: "t-1", goal: "a guard", now: T0 });
+      expect(approve(store, "t-1", "alex", T0, original.digest, approverToken)).toMatchObject({ ok: true });
+
+      store.setPermissionDefault("bypassPermissions", "alex", later(1_000));
+      const unchanged = store.getScope("t-1")!;
+      expect(approvalOf(unchanged)).toMatchObject({ approved: true });
+      expect(unchanged.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
+
+      const taskChoice = propose(store, {
+        taskId: "t-1",
+        goal: "a narrower guard",
+        permissionMode: "auto",
+        now: later(2_000),
+      });
+      expect(taskChoice.digest).not.toBe(original.digest);
+      expect(store.refFor("built-in", "t-1").permissionMode).toBe("auto");
+
+      // This is the planner/mate rewrite shape: it supplies new scope text but
+      // no permission field. The durable task choice still wins over global.
+      const rewritten = propose(store, { taskId: "t-1", goal: "the planner's guard", now: later(3_000) });
+      expect(rewritten.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe("execution profiles (foundations, findings 13/14/17/21)", () => {

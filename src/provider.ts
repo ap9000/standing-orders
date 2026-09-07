@@ -298,17 +298,19 @@ function claudeParse(stdout: string): ParsedEnvelope {
 
 /**
  * Codex argv. The brief is the positional prompt; resume is a subcommand.
- * `workspace-write` because the protocol REQUIRES workspace writes (the
- * mailbox, the handoff) — unwanted commits are caught by the same
- * post-agent proofs that gate claude. Never `--ephemeral`: repair resumes.
+ * Auto uses `workspace-write` because the protocol REQUIRES workspace
+ * writes (the mailbox, the handoff). Full access uses Codex's one explicit
+ * combined bypass flag; that exact choice came from the sealed profile.
+ * Never `--ephemeral`: repair resumes.
  */
 const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string[] => [
   "exec",
   ...(invocation.resumeSession === null ? [] : ["resume", invocation.resumeSession]),
   "--json",
   "--skip-git-repo-check",
-  "--sandbox",
-  "workspace-write",
+  ...(invocation.skipPermissions
+    ? ["--dangerously-bypass-approvals-and-sandbox"]
+    : ["--sandbox", "workspace-write"]),
   ...(invocation.model === null ? [] : ["-m", invocation.model]),
   ...extra,
   invocation.brief,

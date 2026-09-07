@@ -8888,6 +8888,7 @@ function scopeTask(
   // any registered provider — refused outright when every lane could hold
   // a real budget (the discipline gate: race those instead).
   const compareGiven = text(flags, "compare");
+  const permissionMode = store.refFor(BUILT_IN, id).permissionMode ?? store.permissionDefault().mode;
   let plannedComparison: ReturnType<typeof planComparison> | null = null;
   if (compareGiven !== undefined) {
     if (raceGiven !== undefined || raceCountGiven !== undefined || text(flags, "race-per-usd") !== undefined || text(flags, "race-total-usd") !== undefined) {
@@ -8898,7 +8899,7 @@ function scopeTask(
     }
     const lanes = compareGiven.split(",").map(one => {
       const [provider = "", model = ""] = one.trim().split(":");
-      return { provider, model };
+      return { provider, model, permissionMode };
     });
     plannedComparison = planComparison({ agents: lanes });
     if (!plannedComparison.ok) {
@@ -8928,7 +8929,7 @@ function scopeTask(
     }
     let agents = raceGiven.split(",").map(one => {
       const [provider = "", model = ""] = one.trim().split(":");
-      return { provider, model };
+      return { provider, model, permissionMode };
     });
     // The competing-agent COUNT (operator request): an explicit --race-count
     // replicates a single named agent; with several named agents it may only
@@ -8941,12 +8942,12 @@ function scopeTask(
         return fail(write, json, "task scope", "usage", "--race-count is how many agents compete: a whole number from 2 to 4", EXIT.usage);
       }
       if (agents.length === 1) {
-        agents = Array.from({ length: count }, () => ({ ...(agents[0] as { provider: string; model: string }) }));
+        agents = Array.from({ length: count }, () => ({ ...(agents[0] as { provider: string; model: string; permissionMode: typeof permissionMode }) }));
       } else if (agents.length !== count) {
         return fail(write, json, "task scope", "usage", `--race names ${agents.length} agents but --race-count says ${count} — make them agree, or name one agent and let the count replicate it`, EXIT.usage);
       }
     } else if (agents.length === 1 && defaults?.raceAgents != null) {
-      agents = Array.from({ length: defaults.raceAgents }, () => ({ ...(agents[0] as { provider: string; model: string }) }));
+      agents = Array.from({ length: defaults.raceAgents }, () => ({ ...(agents[0] as { provider: string; model: string; permissionMode: typeof permissionMode }) }));
     }
     plannedRace = planTournament({
       agents,

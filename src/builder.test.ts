@@ -651,6 +651,64 @@ describe("what the builder tells the agent", () => {
     expect(asked).not.toContain("--dangerously-skip-permissions");
   });
 
+  test("an installation Full access default is sealed into the scope and reaches the Claude argv", async () => {
+    store.setPermissionDefault("bypassPermissions", "alex", T0);
+    const scope = propose(store, {
+      taskId: "t-1",
+      goal: "add a guard on the payout path",
+      outOfScope: "do not touch the billing model",
+      touches: ["src/payouts.ts"],
+      now: T0,
+    });
+    expect(scope.profile).toMatchObject({ provider: "claude", permissionArgv: "bypassPermissions" });
+    expect(approve(store, "t-1", "alex", T0, scope.digest, approverToken)).toMatchObject({ ok: true });
+
+    await build1();
+
+    expect(asked).toContain("--dangerously-skip-permissions");
+    expect(asked).not.toContain("--permission-mode");
+  });
+
+  test("a Codex Full access scope reaches the combined approval and sandbox bypass argv", async () => {
+    store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPermissionDefault("bypassPermissions", "alex", T0);
+    const scope = propose(store, {
+      taskId: "t-1",
+      goal: "add a guard on the payout path",
+      touches: ["src/payouts.ts"],
+      now: T0,
+    });
+    expect(scope.profile).toMatchObject({ provider: "codex", sandboxMode: "danger-full-access" });
+    expect(approve(store, "t-1", "alex", T0, scope.digest, approverToken)).toMatchObject({ ok: true });
+
+    const codexRun = store.startRun({
+      taskRef,
+      leaseId: "test-lease",
+      runner: "builder-1",
+      provider: "codex",
+      model: "gpt-5-codex",
+      branch: "feat/a",
+      worktree: wt,
+      now: T0,
+    });
+    await build(store, {
+      taskId: "t-1",
+      taskRef,
+      runner: "builder-1",
+      provider: "codex",
+      worktree: wt,
+      runId: codexRun,
+      evidenceRoot: join2(wt, ".evidence"),
+      branch: "feat/a",
+      now: T0,
+      agent,
+      git,
+    });
+
+    expect(asked).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(asked).not.toContain("--sandbox");
+  });
+
   test("skipping permissions on approved work refuses, typed — the approval bound auto mode (v24)", async () => {
     const result = await build1({ skipPermissions: true });
 

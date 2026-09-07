@@ -7532,6 +7532,94 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const anonymous = await fetch(`${base}/settings/telegram-digest`, { method: "POST", body: new URLSearchParams({ every: "60" }) });
     expect(anonymous.status).toBe(401);
   });
+
+  test("Settings chooses the global permission default and each task can override the sealed profile", async () => {
+    store.createTask({ id: "existing-auto", title: "existing automatic task" }, T0);
+    propose(store, { taskId: "existing-auto", goal: "keep the current permission profile", now: T0 });
+    const cookie = await login();
+    let settings = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(settings).toContain("unattended permissions");
+    expect(settings).toContain('name="permission-mode" value="auto" checked');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(settings)?.[1] ?? "";
+    const permissionForm = /<form method="post" action="\/settings\/permission-default"[\s\S]*?<\/form>/.exec(settings)?.[0] ?? "";
+    expect(permissionForm).toContain(`name="csrf" value="${csrf}"`);
+
+    const global = await fetch(`${base}/settings/permission-default`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, "permission-mode": "bypassPermissions" }),
+      redirect: "manual",
+    });
+    expect(global.status).toBe(303);
+    expect(store.permissionDefault()).toMatchObject({ mode: "bypassPermissions", updatedBy: "alex" });
+
+    const existingPage = await (await fetch(`${base}/t/existing-auto`, { headers: { cookie } })).text();
+    const existingPermissionField = /<fieldset class="permission-field">[\s\S]*?<\/fieldset>/.exec(existingPage)?.[0] ?? "";
+    expect(existingPermissionField).toContain('name="permission-mode" value="auto" checked');
+
+    const fresh = await (await fetch(`${base}/tasks/new`, { headers: { cookie } })).text();
+    expect(fresh).toContain('name="permission-mode" value="bypassPermissions" checked');
+    const revision = /name="projectRevision" value="(\d+)"/.exec(fresh)?.[1] ?? "0";
+    const filed = await fetch(`${base}/tasks/add`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({
+        csrf,
+        projectRevision: revision,
+        title: "unattended permissions proof",
+        goal: "prove the permission policy flows end to end",
+        repo: "/repo/main",
+        "plan-first": "0",
+        "planning-policy": "choice",
+        "permission-mode": "bypassPermissions",
+      }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    const taskId = decodeURIComponent((filed.headers.get("location") ?? "").split("/").at(-1) ?? "");
+    const full = store.getScope(taskId);
+    expect(store.refFor("built-in", taskId).permissionMode).toBe("bypassPermissions");
+    expect(full?.profile).toMatchObject({ provider: "claude", permissionArgv: "bypassPermissions" });
+
+    let taskPage = await (await fetch(`${base}/t/${encodeURIComponent(taskId)}`, { headers: { cookie } })).text();
+    expect(taskPage).toContain('name="permission-mode" value="bypassPermissions" checked');
+    const sawDigest = /name="sawDigest" value="([0-9a-f]{32})"/.exec(taskPage)?.[1] ?? "";
+    const changed = await fetch(`${base}/t/${encodeURIComponent(taskId)}/scope`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({
+        csrf,
+        sawDigest,
+        goal: "prove the permission policy flows end to end",
+        not: "",
+        touches: "",
+        "permission-mode": "auto",
+      }),
+      redirect: "manual",
+    });
+    expect(changed.status).toBe(303);
+    const automatic = store.getScope(taskId);
+    expect(automatic?.digest).not.toBe(full?.digest);
+    expect(store.refFor("built-in", taskId).permissionMode).toBe("auto");
+    expect(automatic?.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
+    settings = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(settings).toContain('name="permission-mode" value="bypassPermissions" checked');
+
+    // A Codex task also keeps the profile it already filed if the global
+    // starting value changes later; editing unrelated scope text must not
+    // silently re-sandbox it.
+    store.setPhaseConfig("installation", "build", "codex", "gpt-5-codex", "alex", T0);
+    store.createTask({ id: "existing-codex-full", title: "existing Codex full task" }, T0);
+    propose(store, {
+      taskId: "existing-codex-full",
+      goal: "keep the current Codex permission profile",
+      now: T0,
+    });
+    store.setPermissionDefault("auto", "alex", T0);
+    const codexPage = await (await fetch(`${base}/t/existing-codex-full`, { headers: { cookie } })).text();
+    const codexPermissionField = /<fieldset class="permission-field">[\s\S]*?<\/fieldset>/.exec(codexPage)?.[0] ?? "";
+    expect(codexPermissionField).toContain('name="permission-mode" value="bypassPermissions" checked');
+  });
 });
 
 describe("the first account (setup review): sign up on the login page with the printed code", () => {

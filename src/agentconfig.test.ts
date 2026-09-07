@@ -104,6 +104,16 @@ describe("phase-agent resolution", () => {
       ok: false,
     });
   });
+
+  test("Full access resolves to Codex's danger-full-access profile", () => {
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "codex", "gpt-5-codex", "alex", T0);
+    store.setPermissionDefault("bypassPermissions", "alex", T0);
+
+    expect(resolveScopeProfile(store, "/repo", undefined, {})).toMatchObject({
+      ok: true,
+      profile: { provider: "codex", sandboxMode: "danger-full-access" },
+    });
+  });
 });
 
 describe("firing pins the agent and re-proves the ceiling against it", () => {

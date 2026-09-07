@@ -103,6 +103,7 @@ import {
   proposeGuarded,
   type AttendedTerms,
   type Scope,
+  type UnattendedPermissionMode,
 } from "./scope.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
@@ -1529,6 +1530,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           null,
           project,
           prefill,
+          store.permissionDefault().mode,
         ),
       );
     }
@@ -1645,7 +1647,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         .listTasksScoped(project, undefined, 100, null)
         .filter(one => one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
         .map(one => ({ id: one.id, title: one.title }));
-      return sendScreen(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable));
+      return sendScreen(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable, store.permissionDefault().mode));
     }
 
     const task = matchTaskPath(url.pathname, "");
@@ -1677,7 +1679,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         rows.map(row => `<a class="menu-row" href="${row.href}"><strong>${row.label}</strong><span class="meta">${row.hint}</span></a>`).join("\n") +
         `</div>`;
       const settingsSection = chrome.settings
-        ? section("settings", [{ key: "settings" as const, href: "/settings", label: "settings", hint: "alerts, messaging, credentials" }])
+        ? section("settings", [{ key: "settings" as const, href: "/settings", label: "settings", hint: "agent defaults, alerts, credentials" }])
         : "";
       return page(response, 200, shell("menu", [
         `<h1>more</h1>`,
@@ -2038,7 +2040,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(
         response,
         200,
-        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys, digest),
+        settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys, digest, {
+          ...store.permissionDefault(),
+          canManage: who.role === "approver",
+        }),
       );
     }
 
@@ -2845,6 +2850,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         raceTerms,
         approvalDigest,
         spendDefaults: store.getSpendDefaults(),
+        permissionDefault: store.permissionDefault().mode,
+        permissionMode: ref?.permissionMode ?? null,
         publication: (() => {
           // The latest publication across this task's runs, with its
           // OBSERVED CI state (audit SD-5): the reviewer learns PR and CI
@@ -3450,6 +3457,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, "/settings");
     }
 
+    if (url.pathname === "/settings/permission-default" && options.telegramTokenFile !== undefined) {
+      const wanted = body.get("permission-mode");
+      if (wanted !== "auto" && wanted !== "bypassPermissions") {
+        return refuse(response, who, 400, "permissions must be Auto or Full access", "/settings");
+      }
+      store.setPermissionDefault(wanted, who.name, now);
+      return redirect(
+        response,
+        `/settings?said=${encodeURIComponent(
+          wanted === "bypassPermissions"
+            ? "new tasks now default to Full access — existing scopes and approvals are unchanged"
+            : "new tasks now default to Auto — existing scopes and approvals are unchanged",
+        )}`,
+      );
+    }
+
     if (url.pathname === "/settings/telegram-digest" && options.telegramTokenFile !== undefined) {
       // The cadence is a closed list of minutes — never a free number from
       // a form; "off" clears it. Any approver session may set it.
@@ -3519,7 +3542,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         const existing = loadBotToken({}, options.telegramTokenFile);
         const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
         const csrf = who.via === "cookie" ? who.session.csrf : "";
-        return sendScreen(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message));
+        return sendScreen(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message, null, null, null, null, {
+          ...store.permissionDefault(),
+          canManage: who.role === "approver",
+        }));
       }
       return redirect(response, "/settings");
     }
@@ -3604,7 +3630,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project),
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project, null, store.permissionDefault().mode),
         );
       }
       let repo = effective;
@@ -3617,7 +3643,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(
             response,
             403,
-            tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project),
+            tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project, null, store.permissionDefault().mode),
           );
         }
         repo = canonical;
@@ -3630,6 +3656,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         .map(one => one.trim())
         .filter(one => one !== "");
       const scout = body.get("scout") === "1";
+      const permissionMode = body.get("permission-mode");
+      if (permissionMode !== null && permissionMode !== "auto" && permissionMode !== "bypassPermissions") {
+        return refuse(response, who, 400, "permissions must be Auto or Full access", "/tasks/new");
+      }
       // One filing door for every surface (Codex adoption review, finding 7).
       const made = fileTaskProposal(
         store,
@@ -3640,6 +3670,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ...(goal === "" ? {} : { goal }),
           outOfScope: notThis === "" ? null : notThis,
           touches: touchesGiven,
+          ...(permissionMode === null ? {} : { permissionMode }),
           ...(scout ? { deliverable: "report" as const } : {}),
           planning:
             scout
@@ -3657,7 +3688,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           made.reason === "backlog-full" ? 429 : 400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project),
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, null, store.permissionDefault().mode),
         );
       }
       // A proved root-mode placement joins the project table (finding 15):
@@ -5496,6 +5527,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       case "scope": {
         const sawDigest = body.get("sawDigest");
+        const permissionGiven = body.get("permission-mode");
+        if (permissionGiven !== null && permissionGiven !== "" && permissionGiven !== "auto" && permissionGiven !== "bypassPermissions") {
+          return taskScreen(response, who, taskId, "permissions must be Auto or Full access", 400);
+        }
+        const permissionMode: UnattendedPermissionMode =
+          permissionGiven === "bypassPermissions"
+            ? "bypassPermissions"
+            : permissionGiven === "auto"
+              ? "auto"
+              : ref.permissionMode ?? store.permissionDefault().mode;
         // The optional per-attempt dollar cap (v15) rides the same form.
         const budgetGiven = (body.get("budget-usd") ?? "").trim();
         const budgetUsd = budgetGiven === "" ? null : Number(budgetGiven);
@@ -5513,6 +5554,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           .map(lane => ({
             provider: (body.get(`compare-provider-${lane}`) ?? "").trim(),
             model: (body.get(`compare-model-${lane}`) ?? "").trim(),
+            permissionMode,
           }))
           .filter(lane => lane.provider !== "" || lane.model !== "");
         let plannedComparison: ReturnType<typeof planComparison> | null = null;
@@ -5538,7 +5580,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const perUsd = Number((body.get("race-per-usd") ?? "").trim());
           const totalUsd = Number((body.get("race-total-usd") ?? "").trim());
           const planned = planTournament({
-            agents: Array.from({ length: count }, () => ({ provider: "claude", model })),
+            agents: Array.from({ length: count }, () => ({ provider: "claude", model, permissionMode })),
             perAgentBudgetUsd: perUsd,
             totalBudgetUsd: totalUsd,
           });
@@ -5578,6 +5620,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             goal: body.get("goal") ?? "",
             outOfScope: body.get("not") ?? null,
             touches: (body.get("touches") ?? "").split(/[\n,]/),
+            permissionMode,
             ...(budgetUsd !== null
               ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
               : coverage?.defaultBudgetMicrousd != null
@@ -6023,14 +6066,14 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
     profile.provider === "claude"
       ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — ${
           profile.permissionArgv === "bypassPermissions"
-            ? "FULL permissions; nothing asks"
+            ? "FULL permissions; claude runs with --dangerously-skip-permissions and nothing asks"
             : profile.permissionArgv === "auto"
               ? "safe unattended permissions; routine project commands and edits proceed, risky acts stop"
               : "legacy acceptEdits; edits proceed, commands that ask are denied unattended"
         }, ${profile.maxTurns}-turn runaway breaker, ${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
       : profile.provider === "gemini"
-        ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "EVERY tool auto-approved" : "edits auto-approved, other tools refused"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
-        : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — workspace-write sandbox, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
+        ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "Full access via --approval-mode yolo; every tool auto-approved" : "Auto via --approval-mode auto_edit; edits auto-approved, other tools refused"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+        : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — ${profile.sandboxMode === "danger-full-access" ? "FULL permissions via --dangerously-bypass-approvals-and-sandbox; nothing asks" : "workspace-write sandbox"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
   // The fallback chain rides EVERY surface these words sign (F+G review,
   // finding 2): the digest binds the whole chain, so the password form —
   // task page and /next alike — states every entry, credential included.
@@ -6387,6 +6430,26 @@ const STYLE = `
   input:hover, textarea:hover, select:hover { border-color: var(--muted-foreground); }
   input[type=number] { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   input[type=radio], input[type=checkbox] { accent-color: var(--ring); }
+  .permission-field { border: 0; padding: 0; margin: 1rem 0 0; min-width: 0; }
+  .permission-field legend { padding: 0; font-size: .8125rem; font-weight: 600; }
+  .permission-toggle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin-top: .5rem; }
+  .permission-choice {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .6rem; align-items: start;
+    margin: 0; padding: .72rem .78rem; border: 1px solid var(--glass-border);
+    border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--card) 66%, transparent);
+    cursor: pointer; transition: border-color .15s, background .15s, box-shadow .15s;
+  }
+  .permission-choice:hover { background: var(--muted); }
+  .permission-choice:has(input:checked) {
+    border-color: color-mix(in srgb, var(--foreground) 42%, var(--border));
+    background: var(--card); box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 8%, transparent), var(--shadow);
+  }
+  .permission-choice input { margin: .14rem 0 0; }
+  .permission-choice strong, .permission-choice small { display: block; }
+  .permission-choice strong { font-size: .8125rem; }
+  .permission-choice small { margin-top: .16rem; color: var(--muted-foreground); font-size: .6875rem; font-weight: 400; line-height: 1.35; }
+  .permission-note { margin: .55rem 0 0; }
+  .scope-editor .permission-toggle { grid-template-columns: 1fr; }
   input[type=password] { font-family: var(--font-mono); }
   input:focus-visible, textarea:focus-visible, select:focus-visible {
     outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 25%, transparent);
@@ -7285,6 +7348,7 @@ const STYLE = `
     .command-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .workspace-pulse { grid-template-columns: 1fr; }
     .workspace-stats .pulse-stat { padding: .375rem .125rem; font-size: .625rem; letter-spacing: -.01em; }
+    .permission-toggle { grid-template-columns: 1fr; }
   }
 
   /* Runner lanes (queue + fleet): one column per worker. */
@@ -9777,6 +9841,7 @@ function tasksPage(
   problem: string | null,
   repo: string | null = null,
   prefill: { title: string; goal: string; not: string; touches: string } | null = null,
+  permissionDefault: UnattendedPermissionMode = "auto",
 ): Screen {
   const filters = TASK_STATES.map(
     one => (one === state ? `<strong>${one}</strong>` : `<a href="/tasks?state=${one}">${one}</a>`),
@@ -9817,6 +9882,8 @@ function tasksPage(
     `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
     `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: let an agent inspect the repository and improve the scope before approval</span></span></label>`,
+    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
+      `<p class="meta permission-note">Starts from the installation default. You can change it again on the task before approval.</p></fieldset>`,
     `<button type="submit">add</button>`,
     `</form></details>`,
   ].join("\n"), { chrome });
@@ -11197,6 +11264,7 @@ function newTaskPage(
   projectRevision: number,
   problem: string | null,
   candidates: { id: string; title: string }[] = [],
+  permissionDefault: UnattendedPermissionMode = "auto",
 ): Screen {
   return screen("new task", [
     `<h1>new task</h1>`,
@@ -11218,6 +11286,8 @@ function newTaskPage(
       `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: inspect the repository and draft a stronger scope before you approve anything; long planning continues while the agent is making progress</span></span></label>`,
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="scout" value="1" style="margin-top:.35rem"><span>scout <span class="meta">— deliver a report instead of a branch: a read-only session investigates the goal as a question and writes up what it found; nothing in the repository changes</span></span></label>`,
+    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
+      `<p class="meta permission-note">Starts from the installation default. You can change it again on the task before approval.</p></fieldset>`,
     `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
     candidates.length === 0
       ? ""
@@ -11278,6 +11348,10 @@ function taskBody(data: {
   /** What the approval nonce/digest bind: scope digest, or the joint fingerprint. */
   approvalDigest?: string | null;
   spendDefaults?: { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; raceAgents: number | null } | null;
+  /** Installation starting value for a task that has no profile yet. */
+  permissionDefault?: UnattendedPermissionMode;
+  /** Durable choice for this task, when one was explicitly made. */
+  permissionMode?: UnattendedPermissionMode | null;
   runs: Run[];
   /** Proof produced by the newest finished attempt. The two booleans are
    * machine facts about immutable, hash-addressed artifacts — never inferred
@@ -11714,7 +11788,7 @@ function taskBody(data: {
     `<details${scope === null ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
       approval.approved ? " (editing voids the approval)" : ""
     }</summary>`,
-    `<form method="post" action="${taskHref(task.id)}/scope">`,
+    `<form method="post" action="${taskHref(task.id)}/scope" class="scope-editor">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="sawDigest" value="${escape(scope?.digest ?? "")}">`,
     `<label>goal<textarea name="goal" rows="3">${escape(scope?.goal ?? "")}</textarea></label>`,
@@ -11732,6 +11806,20 @@ function taskBody(data: {
             : "";
       return `<label>dollar cap per build attempt <span class="meta">(optional — the agent is stopped at this figure)</span>` +
         `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(budgetPrefill)}" placeholder="no cap beyond the installation backstop"></label>`;
+    })(),
+    (() => {
+      const profileMode: UnattendedPermissionMode | null =
+        scope?.profile?.provider === "claude"
+          ? scope.profile.permissionArgv === "bypassPermissions" ? "bypassPermissions" : "auto"
+          : scope?.profile?.provider === "gemini"
+            ? scope.profile.approvalArgv === "yolo" ? "bypassPermissions" : "auto"
+            : scope?.profile?.provider === "codex" || scope?.profile?.provider === "openrouter"
+              ? scope.profile.sandboxMode === "danger-full-access" ? "bypassPermissions" : "auto"
+              : null;
+      const selected: UnattendedPermissionMode = data.permissionMode ?? profileMode ?? data.permissionDefault ?? "auto";
+      return `<fieldset class="permission-field"><legend>agent permissions</legend>` +
+        permissionModeChoices("permission-mode", selected) +
+        `<p class="meta permission-note">This task’s choice is sealed into its scope. Full access prevents permission prompts or sandbox limits from pausing supported unattended agents.</p></fieldset>`;
     })(),
     (() => {
       // The tournament controls (operator request): how many agents compete,
@@ -12916,6 +13004,18 @@ export function runFactsFragment(run: Run, taskId: string, live: boolean): strin
   return runFactsRows(run, taskId, live);
 }
 
+/** One accessible two-choice control everywhere permissions are selected.
+ * The words describe behavior; the raw flag stays secondary detail. */
+function permissionModeChoices(name: string, selected: UnattendedPermissionMode): string {
+  const choice = (value: UnattendedPermissionMode, title: string, detail: string): string =>
+    `<label class="permission-choice"><input type="radio" name="${escape(name)}" value="${escape(value)}"${value === selected ? " checked" : ""}>` +
+    `<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span></label>`;
+  return `<div class="permission-toggle" role="radiogroup" aria-label="agent permissions">` +
+    choice("auto", "Auto", "Routine work proceeds; risky permission requests may stop for you.") +
+    choice("bypassPermissions", "Full access", "Never asks. Uses the provider’s unrestricted non-interactive mode.") +
+    `</div>`;
+}
+
 function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): Screen {
   if (caps === null) {
     return screen("requirements", [
@@ -12971,7 +13071,26 @@ function settingsPage(
   push: { available: boolean; devices: PushSubscription[] } | null = null,
   providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean }[] | null = null,
   digest: { everyMs: number | null; lastSentAt: string | null; held: number } | null = null,
+  permissionDefault: { mode: UnattendedPermissionMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
 ): Screen {
+  const permissionCard =
+    permissionDefault === null
+      ? ""
+      : [
+          "<h2>unattended permissions</h2>",
+          `<p class="meta">the starting choice for every new task. Each task can change it before approval; an approved scope always keeps the exact setting you signed.</p>`,
+          permissionDefault.canManage && csrf !== ""
+            ? `<form method="post" action="/settings/permission-default" class="card permission-policy">` +
+              `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+              `<p><strong>default for new tasks</strong></p>` +
+              permissionModeChoices("permission-mode", permissionDefault.mode) +
+              `<p class="meta permission-note">Full access is for repositories and setup commands you trust. Changing this default does not alter any existing scope or approval.</p>` +
+              `<button type="submit">save default</button></form>`
+            : `<div class="card"><p><strong>${permissionDefault.mode === "bypassPermissions" ? "Full access" : "Auto"}</strong></p><p class="meta">an approver can change this default</p></div>`,
+          permissionDefault.updatedAt === null
+            ? ""
+            : `<p class="meta">last changed ${escape(when(permissionDefault.updatedAt))}${permissionDefault.updatedBy === null ? "" : ` by ${escape(permissionDefault.updatedBy)}`}</p>`,
+        ].join("\n");
   const digestCard =
     digest === null || csrf === ""
       ? ""
@@ -13125,6 +13244,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
+    permissionCard,
     pushCard,
     keysCard,
     messagingCard,

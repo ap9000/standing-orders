@@ -46,6 +46,10 @@ describe("argv dialects", () => {
     // Never ephemeral: repair resumes persisted sessions.
     expect(argv).not.toContain("--ephemeral");
 
+    const full = adapterFor("codex").argv({ ...ASK, skipPermissions: true });
+    expect(full).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(full).not.toContain("--sandbox");
+
     const resumed = adapterFor("codex").argv({ ...ASK, resumeSession: "thread-1" });
     expect(resumed.slice(0, 3)).toEqual(["exec", "resume", "thread-1"]);
   });
