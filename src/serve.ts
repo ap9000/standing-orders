@@ -7100,8 +7100,13 @@ const STYLE = `
   }
   .composer button::after { content: "↑"; font: 600 1.15rem/1 var(--font-sans); }
   .chat-main > details { margin-top: 1rem; background: color-mix(in srgb, var(--glass) 70%, transparent); }
-  @media (min-width: 901px) {
-    .chat-workspace .composer { position: sticky; bottom: 1rem; z-index: 5; box-shadow: var(--shadow-overlay); }
+  @media (min-width: 761px) {
+    /* Keep the desktop composer in the document flow. A sticky bottom
+     * constraint pulled it over proposal cards on long conversations (and
+     * into the middle of full-page captures), hiding the very acts it asks
+     * the operator to confirm. The #latest anchor still brings this form
+     * into view after every turn without making it an overlay. */
+    .chat-workspace .composer { position: static; width: 100%; box-shadow: var(--shadow); }
   }
   @media (min-width: 761px) and (max-width: 1199px) {
     .chat-workspace { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
