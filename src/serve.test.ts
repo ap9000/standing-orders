@@ -4379,6 +4379,58 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     }
   });
 
+  test("settings is pinned outside both accordion groups, and only where the console offers it", async () => {
+    const cookie = await login();
+    const html = await (await fetch(url("/done"), { headers: { cookie } })).text();
+    const side = /<aside class="side">(.*?)<\/aside>/s.exec(html)?.[1] ?? "";
+    expect(side).toContain('<nav class="nav-settings"><a href="/settings">settings</a></nav>');
+    expect(side.indexOf('<nav class="nav-groups">')).toBeLessThan(side.indexOf('<nav class="nav-settings">'));
+    const workflows = /<details class="nav-group" data-group="workflows"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
+    const admin = /<details class="nav-group" data-group="admin"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
+    expect(workflows).not.toContain("/settings");
+    expect(admin).not.toContain("/settings");
+    // The phone's overflow drawer mirrors it — its own headed section, last.
+    const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
+    expect(menu).toContain('<h2 class="menu-group-label">settings</h2>');
+    expect(menu).toContain('<a class="menu-row" href="/settings">');
+  });
+
+  test("the active page's accordion group opens itself; the other stays collapsed", async () => {
+    const cookie = await login();
+    const groupsOf = async (path: string): Promise<{ workflows: string | undefined; admin: string | undefined }> => {
+      const html = await (await fetch(url(path), { headers: { cookie } })).text();
+      const side = /<aside class="side">(.*?)<\/aside>/s.exec(html)?.[1] ?? "";
+      return {
+        workflows: /<details class="nav-group" data-group="workflows"([^>]*)>/.exec(side)?.[1],
+        admin: /<details class="nav-group" data-group="admin"([^>]*)>/.exec(side)?.[1],
+      };
+    };
+    // /workbench is a workflows destination: its own group opens, admin stays shut.
+    const onWorkbench = await groupsOf("/workbench");
+    expect(onWorkbench.workflows).toBe(" open");
+    expect(onWorkbench.admin).toBe("");
+    // /fleet is an admin destination: the reverse.
+    const onFleet = await groupsOf("/fleet");
+    expect(onFleet.workflows).toBe("");
+    expect(onFleet.admin).toBe(" open");
+    // Neither destination's page opens a group it does not own.
+    const onDone = await groupsOf("/done");
+    expect(onDone.workflows).toBe("");
+    expect(onDone.admin).toBe("");
+  });
+
+  test("the accordion is keyboard-operable and focusable like every other control, and its chevron dies under reduced motion", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/"), { headers: { cookie } })).text();
+    // Native <details>/<summary> — the same accessible pattern the project
+    // switcher already uses — carries keyboard open/close and a focus ring
+    // for free; no bespoke widget or extra ARIA wiring was added for it.
+    expect(home).toContain('button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }');
+    expect(home).toContain('.nav-group > summary .chevron { width: .875rem; height: .875rem; flex: none; transition: transform .15s; }');
+    // The rotation is real motion, so it dies under prefers-reduced-motion.
+    expect(home).toContain('button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }');
+  });
+
   test("the board keeps its poller privileges: connect-src, the noscript opt-out, and swap preservation", async () => {
     const cookie = await login();
     const response = await fetch(url("/board"), { headers: { cookie } });
@@ -5724,7 +5776,7 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     expect(home.indexOf(">inbox<")).toBeLessThan(home.indexOf(">board<"));
     expect(home.indexOf(">board<")).toBeLessThan(home.indexOf(">builds<"));
     expect(home.indexOf(">builds<")).toBeLessThan(home.indexOf(">projects<"));
-    expect(home.indexOf('<nav class="foot">')).toBeLessThan(home.indexOf(">portfolio<"));
+    expect(home.indexOf('<nav class="nav-groups">')).toBeLessThan(home.indexOf(">portfolio<"));
 
     // Fleet and the rolled-up board are all-project; the scoped board is not.
     const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
@@ -7539,7 +7591,7 @@ describe("the board's order view (operator request): the one place a drag does a
   });
 });
 
-describe("the reduction pass (Laws of UX): four rows and a more group, five tabs, one accent in two places", () => {
+describe("the reduction pass (Laws of UX): five always-visible rows and two accordion groups, six tabs, one accent in two places", () => {
   let store: Store;
   let server: Server;
   let base: string;
@@ -7595,41 +7647,61 @@ describe("the reduction pass (Laws of UX): four rows and a more group, five tabs
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
-  test("the rail is inbox · board · builds · projects and a dim more group; the tab bar is the same four and more; the queue and the switch link are gone from chrome", async () => {
+  test("the rail is chat · inbox · board · builds · projects and two collapsed accordion groups (workflows, admin); the tab bar mirrors it; the queue and the switch link are gone from chrome", async () => {
     parkOne();
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
     const side = /<aside class="side">(.*?)<\/aside>/s.exec(home)?.[1] ?? "";
     const primary = /<nav>(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
-    expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/", "/board", "/runs", "/projects"]);
-    // The count rides the inbox row only.
+    expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/projects"]);
+    // The count rides the inbox row only; every primary row wears an icon.
     expect(primary).toMatch(/<a href="\/" class="active" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
-    const foot = /<nav class="foot">(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
-    expect([...foot.matchAll(/<a href="([^"]+)">([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+    expect((primary.match(/<span class="glyph">/g) ?? []).length).toBe(5);
+
+    // Both groups collapsed by default: neither carries the inbox's group.
+    const workflows = /<details class="nav-group" data-group="workflows"([^>]*)>(.*?)<\/details>/s.exec(side);
+    const admin = /<details class="nav-group" data-group="admin"([^>]*)>(.*?)<\/details>/s.exec(side);
+    expect(workflows?.[1]).toBe("");
+    expect(admin?.[1]).toBe("");
+    expect(workflows?.[2]).toContain("<summary>workflows");
+    expect(admin?.[2]).toContain("<summary>admin");
+    const workflowsRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(workflows?.[2] ?? "")?.[1] ?? "";
+    const adminRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(admin?.[2] ?? "")?.[1] ?? "";
+    expect([...workflowsRows.matchAll(/<a href="([^"]+)">([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
       "portfolio /workbench",
       "task list /tasks",
-      "fleet /fleet",
       "routines /routines",
-      "chat /chat",
-      "system /system",
+    ]);
+    expect([...adminRows.matchAll(/<a href="([^"]+)">([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
+      "fleet /fleet",
       "requirements /caps",
       "people /people",
       "operating mode /mode",
+      "system /system",
     ]);
-    expect(foot).not.toContain("<svg");
+    // The group rows stay text, the way Linear's does — only the rail's
+    // primary rows and the chevrons wear a drawn icon.
+    expect(workflowsRows).not.toContain("<svg");
+    expect(adminRows).not.toContain("<svg");
     expect(side).not.toContain('href="/queue"');
+    expect(side).not.toContain('class="nav-settings"');
     expect(home).not.toContain("switch project");
+    // The client keeps the two groups exclusive.
+    expect(home).toContain('document.querySelectorAll(".nav-group")');
 
     const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(home)?.[1] ?? "";
-    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/", "/board", "/runs", "/projects", "/menu"]);
+    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/projects", "/menu"]);
     // A phone tab says THAT something waits — a dot, never a number.
     expect(tabbar).toContain('<span class="dot-badge" role="img" aria-label="1 waiting"></span>');
     expect(tabbar).not.toContain("badge-open");
 
-    // /menu draws the same more group, nothing else.
+    // /menu mirrors the same two groups, nothing else.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
+    expect(menu).toContain('<h2 class="menu-group-label">workflows</h2>');
+    expect(menu).toContain('<h2 class="menu-group-label">admin</h2>');
+    expect(menu).not.toContain('<h2 class="menu-group-label">settings</h2>');
     const rows = [...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1]);
-    expect(rows).toEqual(["/workbench", "/tasks", "/fleet", "/routines", "/chat", "/system", "/caps", "/people", "/mode"]);
+    expect(rows).toEqual(["/workbench", "/tasks", "/routines", "/fleet", "/caps", "/people", "/mode", "/system"]);
   });
 
   test("every retired destination still answers: the queue redirects to the board's order view; done, review, and activity are views of builds", async () => {

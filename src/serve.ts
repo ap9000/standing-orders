@@ -1667,12 +1667,23 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     if (url.pathname === "/menu") {
       // The phone's overflow drawer as an honest page: every destination
-      // the bottom bar does not carry, one tap away, no JavaScript.
+      // the tab bar does not carry, one tap away, no JavaScript — grouped
+      // under the same workflows/admin headings as the rail's accordion,
+      // with settings last, outside both.
       const chrome = chromeFor(project, "menu");
-      const rows = moreRows(chrome)
-        .map(row => `<a class="menu-row" href="${row.href}"><strong>${row.label}</strong><span class="meta">${row.hint}</span></a>`)
-        .join("\n");
-      return page(response, 200, shell("menu", [`<h1>more</h1>`, `<div class="menu-list">${rows}</div>`].join("\n"), { chrome }));
+      const section = (label: string, rows: NavRow[]): string =>
+        `<h2 class="menu-group-label">${label}</h2><div class="menu-list">` +
+        rows.map(row => `<a class="menu-row" href="${row.href}"><strong>${row.label}</strong><span class="meta">${row.hint}</span></a>`).join("\n") +
+        `</div>`;
+      const settingsSection = chrome.settings
+        ? section("settings", [{ key: "settings" as const, href: "/settings", label: "settings", hint: "alerts, messaging, credentials" }])
+        : "";
+      return page(response, 200, shell("menu", [
+        `<h1>more</h1>`,
+        section("workflows", workflowsRows()),
+        section("admin", adminRows()),
+        settingsSection,
+      ].join("\n"), { chrome }));
     }
 
     const run = /^\/r\/([0-9]{1,15})$/.exec(url.pathname);
@@ -6416,10 +6427,25 @@ const STYLE = `
   .decide-option { margin: 0; display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
   .decide-option button { margin: 0; }
   .decide-option .meta { flex: 1 1 12rem; }
-  .side .nav-label {
-    margin: .875rem .5rem .25rem; font-size: .6875rem; font-weight: 500;
-    color: var(--muted-foreground); font-family: var(--font-sans);
+  /* The rail's two accordion groups (sidebar rework): collapsed by
+   * default, the active page's group open, opening one closes the other
+   * (client toggle in chromeScript). Native <details>/<summary> carries
+   * the expanded state and keyboard operation for free — the same pattern
+   * the switcher already uses. */
+  .side .nav-groups { display: flex; flex-direction: column; gap: .125rem; margin-top: .375rem; }
+  .nav-group > summary {
+    display: flex; align-items: center; justify-content: space-between; gap: .5rem;
+    list-style: none; cursor: pointer; padding: .4375rem .625rem; min-height: 2.125rem;
+    border-radius: calc(var(--radius) - 3px); text-decoration: none;
+    color: var(--muted-foreground); font-size: .6875rem; font-weight: 500;
+    font-family: var(--font-sans);
   }
+  .nav-group > summary::-webkit-details-marker { display: none; }
+  .nav-group > summary:hover { background: var(--glass); color: var(--foreground); }
+  .nav-group > summary .chevron { width: .875rem; height: .875rem; flex: none; transition: transform .15s; }
+  .nav-group[open] > summary .chevron { transform: rotate(180deg); }
+  .nav-group .nav-group-items { display: flex; flex-direction: column; gap: .125rem; margin: .125rem 0 .25rem; }
+  .side .nav-settings { margin-top: .375rem; }
   .side nav a {
     display: flex; align-items: center; gap: .625rem; padding: .4375rem .625rem; min-height: 2.125rem;
     border-radius: calc(var(--radius) - 3px); text-decoration: none;
@@ -6613,6 +6639,13 @@ const STYLE = `
     .content > main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
   }
 
+  /* /menu mirrors the rail's workflows/admin grouping as plain headed
+   * sections — no collapse: it is already one tap behind the tab bar. */
+  .menu-group-label {
+    margin: 1.5rem 0 .25rem; font-size: .75rem; font-weight: 600;
+    color: var(--muted-foreground); font-family: var(--font-sans);
+  }
+  .menu-group-label:first-of-type { margin-top: .75rem; }
   .menu-list { display: flex; flex-direction: column; gap: .375rem; margin-top: .75rem; }
   .menu-row {
     display: flex; flex-direction: column; gap: .125rem; text-decoration: none;
@@ -7083,7 +7116,7 @@ button { min-height: 44px; }
   ::view-transition-group(*), ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
   .pulse, .fire-live { animation: none; }
   .palette, .kbd-help { animation: none; }
-  button, .side nav a, .chat-project-card { transition: none; }
+  button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }
   button:hover, .side nav a:hover, .chat-project-card:hover { transform: none; }
 }
 
@@ -7323,6 +7356,13 @@ function chromeScript(): string {
     `var m=Math.floor(s/60);var h=Math.floor(m/60);` +
     `nodes[i].textContent=h>0?h+"h "+(m%60)+"m":m>0?m+"m "+(s%60)+"s":s+"s";}}` +
     `setInterval(tick,1000);tick();` +
+    // The rail's two accordion groups stay exclusive: opening one closes
+    // the other. Each <details> already carries its own open/closed state
+    // and keyboard operation natively — this only enforces "at most one
+    // open" on top of that, and no-ops wherever the groups are absent.
+    `var navGroups=document.querySelectorAll(".nav-group");` +
+    `navGroups.forEach(function(g){g.addEventListener("toggle",function(){` +
+    `if(g.open){navGroups.forEach(function(o){if(o!==g)o.removeAttribute("open");});}});});` +
     // the palette
     `var raw=document.getElementById("palette-index");if(!raw)return;` +
     `var index;try{index=JSON.parse(raw.textContent||"[]");}catch(e){return;}` +
@@ -7571,13 +7611,23 @@ function shell(
       : `<span class="name">${scopeName}</span>`) +
     scopeStatus +
     `</div>`;
+  // The rail's own accordion (sidebar rework): open the group holding the
+  // active page, closed otherwise — the client toggle keeps it exclusive.
+  const navGroup = (key: "workflows" | "admin", label: string, rows: NavRow[], open: boolean): string =>
+    `<details class="nav-group" data-group="${key}"${open ? " open" : ""}>` +
+    `<summary>${label}${CHEVRON_ICON}</summary>` +
+    `<nav class="nav-group-items">${rows.map(row => item(row.key, row.href, row.label)).join("")}</nav>` +
+    `</details>`;
   const side = [
     `<aside class="side">`,
     `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
     `<nav>`,
-    // Four destinations and a more group (reduction pass §1): the rail is
-    // the operator's three verbs — answer, approve, retry — plus where the
-    // work is and where it builds. Everything else is a dim text row.
+    // Task-first IA: chat, inbox, board, builds, projects — always visible,
+    // always in this order, each with an icon, active, focus, and count
+    // treatment. Chat is present only where the ceiling ever allows it
+    // (unchanged gating); everything else is a dim text row inside one of
+    // the two accordion groups below, or settings pinned under them.
+    ...(chrome.chat === true ? [item("chat", "/chat", "chat")] : []),
     item("inbox", "/", "inbox", chrome.inboxCount),
     item("board", "/board", "board"),
     item("runs", "/runs", "builds"),
@@ -7585,10 +7635,11 @@ function shell(
     `</nav>`,
     `<a class="new-task" href="/tasks/new">+ new task</a>`,
     `<span class="grow"></span>`,
-    `<nav class="foot">`,
-    `<span class="nav-label">more</span>`,
-    ...moreRows(chrome).map(row => item(row.key, row.href, row.label)),
+    `<nav class="nav-groups">`,
+    navGroup("workflows", "workflows", workflowsRows(), WORKFLOWS_KEYS.has(chrome.active)),
+    navGroup("admin", "admin", adminRows(), ADMIN_KEYS.has(chrome.active)),
     `</nav>`,
+    ...(chrome.settings ? [`<nav class="nav-settings">${item("settings", "/settings", "settings")}</nav>`] : []),
     `</aside>`,
   ].join("\n");
 
@@ -7613,8 +7664,9 @@ function shell(
         `</div></div>`;
 
   // The phone chrome (arc 4): a top bar with the project one tap from
-  // switching and quick capture, and a bottom tab bar with the four
-  // destinations a thumb visits — everything else behind /menu. CSS shows
+  // switching and quick capture, and a bottom tab bar with the always-
+  // visible destinations (chat where allowed, inbox, board, builds,
+  // projects) a thumb visits — everything else behind /menu. CSS shows
   // these only below 760px; desktop keeps the sidebar untouched.
   const mobileTop = [
     `<header class="mobile-top">`,
@@ -7638,6 +7690,7 @@ function shell(
   const icon = (paths: string): string =>
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
   const TAB_ICONS = {
+    chat: icon(CHAT_PATHS),
     inbox: icon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
     board: icon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
     runs: icon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
@@ -7651,6 +7704,7 @@ function shell(
     `${count !== undefined && count > 0 ? `<span class="dot-badge" role="img" aria-label="${count} waiting"></span>` : ""}</a>`;
   const tabbar = [
     `<nav class="tabbar">`,
+    ...(chrome.chat === true ? [tab("chat", "/chat", "chat")] : []),
     tab("inbox", "/", "inbox", chrome.inboxCount),
     tab("board", "/board", "board"),
     tab("runs", "/runs", "builds"),
@@ -10298,34 +10352,47 @@ const strokeIcon = (paths: string): string =>
 /** Where the queue lives now: the board, flipped to dispatch order. */
 const QUEUE_VIEW = "/board?view=order";
 const FOLDER_PATHS = `<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`;
+const CHAT_PATHS = `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`;
 const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
+  chat: strokeIcon(CHAT_PATHS),
   inbox: strokeIcon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
   board: strokeIcon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
   runs: strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
   projects: strokeIcon(FOLDER_PATHS),
 };
 
+/** One grouped destination inside an accordion group or the /menu overflow. */
+type NavRow = { key: Chrome["active"]; href: string; label: string; hint: string };
+
 /**
- * The more group (reduction pass §1): every destination the four primary
- * rows do not carry — ONE list, drawn as the rail's dim foot on a desk and
- * as /menu's rows on a phone, so the two never disagree. activity, done,
- * and the review queue are views of builds, not rows; the queue is the
- * board's order view; peek hangs off builds.
+ * Task-first IA: the rail's five always-visible rows (chat, inbox, board,
+ * builds, projects) sit above two accordion groups. Workflows is where
+ * work is planned, worked, and scheduled; Admin is who and what the fleet
+ * runs on. Both draw from the same two lists on a desk (accordion groups)
+ * and on a phone (/menu sections), so the two never disagree. activity,
+ * done, and the review queue are views of builds, not rows; the queue is
+ * the board's order view; peek hangs off builds; settings is pinned
+ * outside both groups, never inside one.
  */
-function moreRows(chrome: Pick<Chrome, "chat" | "settings">): { key: Chrome["active"]; href: string; label: string; hint: string }[] {
+function workflowsRows(): NavRow[] {
   return [
     { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
     { key: "work", href: "/tasks", label: "task list", hint: "everything, filterable" },
-    { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
     { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
-    ...(chrome.chat === true ? [{ key: "chat" as const, href: "/chat", label: "chat", hint: "the mate \u2014 a conversation that proposes, never acts" }] : []),
-    { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
+  ];
+}
+function adminRows(): NavRow[] {
+  return [
+    { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
     { key: "caps", href: "/caps", label: "requirements", hint: "tools and credentials builds need" },
     { key: "people", href: "/people", label: "people", hint: "who can sign in, and what they have done" },
     { key: "mode", href: "/mode", label: "operating mode", hint: "the signed posture this repository runs under" },
-    ...(chrome.settings ? [{ key: "settings" as const, href: "/settings", label: "settings", hint: "alerts, messaging, credentials" }] : []),
+    { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
   ];
 }
+/** Which accordion group opens by default for a given active page. */
+const WORKFLOWS_KEYS = new Set<Chrome["active"]>(["workbench", "work", "routines"]);
+const ADMIN_KEYS = new Set<Chrome["active"]>(["fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,
  * and activity are ways of looking at builds, not destinations. */
