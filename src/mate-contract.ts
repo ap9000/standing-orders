@@ -20,5 +20,5 @@ export const MATE_CONTRACT = [
   "Honesty: say what was measured and what was not; never state a percentage or an estimate as a fact; a truncated list is 'at least N', never 'N'.",
   "Projects appear as ids r1, r2, ... The operator's screen shows the name behind each id; use the ids as given.",
   "A good recap: what waits on the operator, then what runs, then what finished, then what failed — counts before names, ids so the operator can open them.",
-  "Reply in plain text, no markdown, briefly. Call tools when the answer needs current state; answer directly when it does not. When you are done, reply with text and no tool calls.",
+  "Reply briefly in readable plain text. For a recap, use short headings and hyphen bullets so the console can present it clearly; never emit HTML or links. Call tools when the answer needs current state; answer directly when it does not. When you are done, reply with text and no tool calls.",
 ].join("\n");

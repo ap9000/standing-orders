@@ -149,7 +149,7 @@ import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.j
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
-import type { ChatConfig, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
+import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -1910,6 +1910,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return { id: `r${index + 1}`, label: projectName(repo), path: repo, peek };
       });
+      let fleetSnapshot: ChatSnapshot | null = null;
+      if (ceiling.repos.length > 0) {
+        try {
+          fleetSnapshot = store.chatSnapshot(ceiling.repos, now);
+        } catch {
+          // The project rail already degrades each pulse independently.
+          // A failed briefing query must not make the conversation vanish.
+        }
+      }
       if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
         {
           const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
@@ -1930,6 +1939,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               turnsToday: store.chatTurnsToday(who.name, now),
               weeklySpent: store.chatWeeklySpendMicrousd(enabled.credentialKey, now),
               projects: chatProjects,
+              fleetSnapshot,
               csrf: who.session.csrf,
               problem: url.searchParams.get("said") ?? said,
               now,
@@ -1948,7 +1958,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           recent: store.recentChatTurns(who.name, 10),
           turnsToday: store.chatTurnsToday(who.name, now),
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
-          repoLabels: chatProjects.map(({ id, label }) => ({ id, label })),
+          projects: chatProjects,
+          fleetSnapshot,
+          canManage: who.role === "approver",
           config: store.getChatConfig(),
           keyFacts: (["anthropic-api", "openrouter-api"] as const).map(one => {
             const found = chatKeyFor(one);
@@ -4346,6 +4358,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       mateSaid.delete(who.session.csrf);
       return redirect(response, "/chat");
     }
+    if (url.pathname === "/chat/mate/stop") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const wanted = Number(body.get("turn") ?? "");
+      const live = store.liveMateTurnFor(who.name);
+      if (!Number.isInteger(wanted) || live === null || live.id !== wanted) {
+        noteMate(who.session.csrf, null, "that turn has already finished");
+        return redirect(response, "/chat#latest");
+      }
+      // A stopped direct-API turn is conservatively charged its reserved
+      // worst case: dispatch may already have happened. Membership turns
+      // reserve zero. The conversation itself stays live.
+      store.failLiveMateTurnsFor(who.name, "stopped", now);
+      noteMate(who.session.csrf, live.id, "stopped — the conversation is still open");
+      return redirect(response, "/chat#latest");
+    }
     const mateProposal = /^\/chat\/proposal\/([0-9]{1,15})\/(confirm|dismiss)$/.exec(url.pathname);
     if (mateProposal !== null) {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
@@ -4354,14 +4381,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       const id = Number(mateProposal[1]);
       if (mateProposal[2] === "dismiss") {
         if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
-        return redirect(response, "/chat");
+        return redirect(response, "/chat#latest");
       }
       const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web" });
       if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
         return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, "/chat");
       }
       if (!outcome.ok && outcome.reason === "needs-confirm") noteMate(who.session.csrf, null, outcome.said);
-      return redirect(response, "/chat");
+      return redirect(response, "/chat#latest");
     }
     // Coordinator proposals (mate arc v3): confirmed by any approver whose
     // ceiling admits the repo; the card lives on /chat and on the task.
@@ -4405,7 +4432,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
           .catch(() => noteMate(who.session.csrf, null, "the turn failed unexpectedly"));
-        return redirect(response, "/chat");
+        return redirect(response, "/chat#latest");
       }
       if (enabled.billing === "subscription") {
         return redirect(response, `/chat?said=${encodeURIComponent("start the conversation first — the one password ceremony opens the subscription-backed session")}`);
@@ -4467,7 +4494,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `/chat?said=${encodeURIComponent(said)}`);
       }
       void runChatTurn(opened.id, who.session, enabled, message, document);
-      return redirect(response, "/chat");
+      return redirect(response, "/chat#latest");
     }
 
     const chatFile = /^\/chat\/file\/([0-9a-f]{32})$/.exec(url.pathname);
@@ -6862,6 +6889,49 @@ const STYLE = `
     white-space: nowrap; padding: .32rem .58rem; border: 1px solid var(--glass-border);
     border-radius: 999px; background: color-mix(in srgb, var(--glass) 74%, transparent);
   }
+  .chat-overview {
+    margin: 0 0 1.35rem; padding: 1rem; border-radius: calc(var(--radius) + 2px);
+    background:
+      linear-gradient(145deg, color-mix(in srgb, var(--running-soft) 45%, transparent), transparent 48%),
+      var(--glass);
+    box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
+  }
+  .chat-overview-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .chat-overview-head h2 { margin: .1rem 0 0; color: var(--foreground); font-size: .95rem; letter-spacing: -.02em; }
+  .chat-overview-head form { margin: 0; }
+  .chat-overview-head button, .chat-overview-link {
+    min-height: 2rem; padding: .25rem .7rem; font-size: .6875rem; text-decoration: none;
+  }
+  .chat-overview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .45rem; margin-top: .85rem; }
+  .chat-overview-stat {
+    display: flex; flex-direction: column; min-width: 0; padding: .65rem .7rem;
+    border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px);
+    background: color-mix(in srgb, var(--glass-strong) 64%, transparent); text-decoration: none;
+  }
+  .chat-overview-stat:hover { background: var(--glass-strong); }
+  .chat-overview-stat b { color: var(--foreground); font: 600 1.2rem/1.2 var(--font-mono); font-variant-numeric: tabular-nums; }
+  .chat-overview-stat span { overflow: hidden; color: var(--muted-foreground); font-size: .65rem; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-overview-stat.attention b { color: var(--warning); }
+  .chat-overview-stat.live b { color: var(--running); }
+  .chat-overview-items { display: grid; gap: .35rem; margin-top: .7rem; }
+  .chat-overview-item {
+    display: grid; grid-template-columns: 1.75rem minmax(0, 1fr) auto; align-items: center; gap: .6rem;
+    padding: .48rem .55rem; border-radius: calc(var(--radius) - 4px); color: inherit; text-decoration: none;
+  }
+  .chat-overview-item:hover { background: color-mix(in srgb, var(--muted) 72%, transparent); }
+  .chat-overview-icon { display: grid; place-items: center; width: 1.75rem; height: 1.75rem; border-radius: .55rem; background: var(--muted); color: var(--muted-foreground); }
+  .chat-overview-icon svg { width: .9rem; height: .9rem; }
+  .chat-overview-item.decision .chat-overview-icon { color: var(--warning); background: var(--warning-soft); }
+  .chat-overview-item.failed .chat-overview-icon { color: var(--destructive); background: var(--destructive-soft); }
+  .chat-overview-item.running .chat-overview-icon { color: var(--running); background: var(--running-soft); }
+  .chat-overview-copy { min-width: 0; }
+  .chat-overview-copy strong, .chat-overview-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-overview-copy strong { font-size: .75rem; font-weight: 500; }
+  .chat-overview-copy span { color: var(--muted-foreground); font-size: .65rem; margin-top: .05rem; }
+  .chat-overview-arrow { color: var(--muted-foreground); }
+  .chat-overview-clear { display: flex; align-items: center; gap: .45rem; margin: .8rem .2rem 0; color: var(--muted-foreground); font-size: .75rem; }
+  .chat-overview-note { margin: .65rem .2rem 0; font-size: .6875rem; }
+  .chat-readonly { margin-top: 1rem; padding: 1rem; }
   .chat-projects {
     position: sticky; top: 4rem; align-self: start; max-height: calc(100vh - 5rem); overflow-y: auto;
     padding: 1rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) + 3px);
@@ -6913,13 +6983,47 @@ const STYLE = `
     color: var(--foreground); font: 600 .6875rem/1 var(--font-mono); letter-spacing: -.04em;
     box-shadow: 0 12px 28px -20px var(--running), 0 1px 0 var(--glass-highlight) inset;
   }
-  .thread .activity { font-size: .6875rem; opacity: .75; letter-spacing: .01em; }
-  .thread .proposal { margin: .75rem 0 0; padding: 1rem; background: var(--glass); }
-  .thread .proposal .acts { display: flex; gap: .5rem; margin-top: .6rem; }
-  .thread .proposal.confirmed { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
-  .thread .proposal.refused { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
-  .thread .proposal .done { color: var(--ok); }
-  .thread .proposal .refused { color: var(--danger); }
+  .chat-copy > :first-child { margin-top: 0; }
+  .chat-copy > :last-child { margin-bottom: 0; }
+  .chat-copy p { margin: .35rem 0 .7rem; }
+  .chat-copy h3 { margin: 1rem 0 .35rem; color: var(--foreground); font-size: .8125rem; }
+  .chat-copy ul, .chat-copy ol { margin: .4rem 0 .75rem; padding-left: 1.3rem; }
+  .chat-copy li { margin: .24rem 0; padding-left: .15rem; }
+  .chat-message-foot { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: .75rem; }
+  .chat-message-foot time { color: var(--muted-foreground); font: 400 .625rem/1 var(--font-mono); white-space: nowrap; }
+  .chat-activity { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .chat-activity span { padding: .15rem .42rem; border: 1px solid var(--glass-border); border-radius: 999px; color: var(--muted-foreground); font: 400 .625rem/1.25 var(--font-mono); }
+  .proposal { margin: .9rem 0 0; padding: 0; overflow: hidden; background: var(--glass); }
+  .proposal-head { display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto; align-items: center; gap: .65rem; padding: .75rem .85rem; border-bottom: 1px solid var(--glass-border); }
+  .proposal-head > span:nth-child(2) { min-width: 0; }
+  .proposal-head strong, .proposal-head small { display: block; }
+  .proposal-head strong { font-size: .75rem; }
+  .proposal-head small { margin-top: .05rem; color: var(--muted-foreground); font-size: .625rem; }
+  .proposal-icon { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: .6rem; color: var(--running); background: var(--running-soft); }
+  .proposal-icon svg { width: 1rem; height: 1rem; }
+  .proposal-cancel .proposal-icon { color: var(--destructive); background: var(--destructive-soft); }
+  .proposal-answer .proposal-icon { color: var(--warning); background: var(--warning-soft); }
+  .proposal-body { padding: .85rem; }
+  .proposal-body h3 { margin: 0; color: var(--foreground); font-size: .9rem; letter-spacing: -.015em; }
+  .proposal-summary { margin: .45rem 0 0; color: var(--foreground); white-space: pre-wrap; }
+  .proposal-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem; margin: .75rem 0 0; }
+  .proposal-facts div { min-width: 0; padding: .45rem .55rem; border-radius: calc(var(--radius) - 5px); background: color-mix(in srgb, var(--muted) 65%, transparent); }
+  .proposal-facts dt { color: var(--muted-foreground); font: 400 .6rem/1.25 var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }
+  .proposal-facts dd { margin: .18rem 0 0; overflow-wrap: anywhere; font-size: .72rem; }
+  .proposal-rationale { margin-top: .75rem; padding: .65rem .75rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
+  .proposal-rationale strong { display: block; margin-top: .2rem; }
+  .proposal-rationale p { margin: .2rem 0 0; color: var(--muted-foreground); }
+  .proposal-disclosure { margin-top: .7rem !important; font-size: .6875rem; }
+  .proposal-actions { padding: 0 .85rem .85rem; }
+  .proposal-actions .acts { display: flex; align-items: center; gap: .5rem; }
+  .proposal-actions form { margin: 0; }
+  .proposal-actions .done, .proposal-actions .refused, .proposal-wait { margin: 0; padding: .55rem .65rem; border-radius: calc(var(--radius) - 5px); font-size: .72rem; }
+  .proposal-actions .done { color: var(--success); background: var(--success-soft); }
+  .proposal-actions .refused { color: var(--destructive); background: var(--destructive-soft); }
+  .proposal.confirmed { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+  .proposal.refused { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+  .proposal .done { color: var(--ok); }
+  .proposal .refused { color: var(--danger); }
   .chat-empty { margin: auto; padding: clamp(3rem, 9vh, 6rem) 1rem 3rem; text-align: center; }
   .chat-empty::before {
     content: "s·o"; display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin: 0 auto 1.1rem;
@@ -6933,6 +7037,13 @@ const STYLE = `
   .chat-prompts { display: flex; justify-content: center; flex-wrap: wrap; gap: .5rem; margin-top: 1.25rem; }
   .chat-prompts form { margin: 0; }
   .chat-prompts button { min-height: 2.35rem; box-shadow: none; background: var(--glass); padding-inline: .9rem; }
+  .chat-thinking { display: flex; align-items: center; gap: .75rem; padding: .75rem .85rem; }
+  .chat-thinking p { flex: 1; margin: 0; }
+  .chat-thinking p strong, .chat-thinking p span { display: block; }
+  .chat-thinking p span { margin-top: .08rem; }
+  .chat-thinking form { margin: 0; }
+  .thinking-orb { position: relative; width: 2rem; height: 2rem; flex: none; border-radius: 999px; background: var(--running-soft); }
+  .thinking-orb::after { content: ""; position: absolute; inset: .55rem; border-radius: inherit; background: var(--running); animation: pulse 1.25s ease-in-out infinite; }
   .composer {
     display: flex; align-items: flex-end; gap: .75rem; padding: .7rem; margin-top: .5rem;
     border-radius: 1.35rem; background: var(--glass-strong);
@@ -6969,10 +7080,19 @@ const STYLE = `
     .chat-head { padding-inline: 0; }
     .chat-head h1 { font-size: 1.4rem; }
     .chat-budget { margin-top: .75rem; }
+    .chat-overview { padding: .8rem; }
+    .chat-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .chat-overview-head { align-items: flex-start; }
+    .chat-overview-copy strong, .chat-overview-copy span { white-space: normal; }
     .thread { min-height: 18rem; padding: 0; }
     .thread .msg.op { max-width: 90%; }
     .thread .msg.mate { padding-left: 3rem; padding-right: 0; }
     .thread .msg.mate::before { width: 2.15rem; height: 2.15rem; border-radius: .7rem; }
+    .proposal-facts { grid-template-columns: 1fr; }
+    .proposal-actions .acts { align-items: stretch; flex-direction: column; }
+    .proposal-actions .acts form, .proposal-actions .acts button { width: 100%; }
+    .chat-prompts { justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; padding-bottom: .35rem; }
+    .chat-prompts form { flex: none; }
     .chat-workspace .composer { position: static; }
   }
   main:has(.mate-mint) { max-width: 68rem; }
@@ -8488,6 +8608,70 @@ type ChatProjectPulse = {
   peek: ProjectPeek | null;
 };
 
+/** A live, server-derived portfolio card. It is deliberately independent
+ * of the model's prose: the numbers and links always reflect the current
+ * control plane, while chat remains the place to ask what they mean. */
+function chatFleetOverview(
+  snapshot: ChatSnapshot | null,
+  projects: readonly ChatProjectPulse[],
+  csrf: string,
+  interactive: boolean,
+): string {
+  if (snapshot === null) {
+    return `<section class="card chat-overview"><div class="chat-overview-head"><div><span class="eyebrow">live overview</span><h2>Portfolio pulse unavailable</h2></div></div><p class="meta">The conversation is still available; refresh to try the live project summary again.</p></section>`;
+  }
+  const total = (key: keyof ProjectPeek): number => projects.reduce((sum, one) => sum + (one.peek?.[key] ?? 0), 0);
+  const needsYou = total("waiting");
+  const running = total("running");
+  const queued = total("queued");
+  const done = total("doneRecently");
+  const projectOf = (index: number): string => projects[index]?.label ?? `r${index + 1}`;
+  const rows: string[] = [];
+  for (const decision of snapshot.decisions.slice(0, 2)) {
+    rows.push(
+      `<a class="chat-overview-item decision" href="/d/${decision.id}">` +
+        `<span class="chat-overview-icon">${strokeIcon(`<path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
+        `<span class="chat-overview-copy"><strong>${escape(decision.question)}</strong><span>${escape(projectOf(decision.repoIndex))} · ${escape(decision.taskId)} · decision #${decision.id}</span></span>` +
+        `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
+    );
+  }
+  for (const task of snapshot.tasks.filter(one => one.state === "failed").slice(0, Math.max(0, 3 - rows.length))) {
+    rows.push(
+      `<a class="chat-overview-item failed" href="${taskHref(task.id)}">` +
+        `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 9v4"/><path d="M12 17h.01"/><path d="m10.3 2.9-8.6 15A2 2 0 0 0 3.4 21h17.2a2 2 0 0 0 1.7-3.1l-8.6-15a2 2 0 0 0-3.4 0z"/>`)}</span>` +
+        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · failed</span></span>` +
+        `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
+    );
+  }
+  for (const task of snapshot.tasks.filter(one => one.state === "running").slice(0, Math.max(0, 4 - rows.length))) {
+    rows.push(
+      `<a class="chat-overview-item running" href="${taskHref(task.id)}">` +
+        `<span class="chat-overview-icon">${strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`)}</span>` +
+        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · building now</span></span>` +
+        `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
+    );
+  }
+  const saturated = snapshot.tasksSaturated || snapshot.decisionsSaturated || snapshot.incidentsSaturated;
+  const briefing = "Brief me on what needs my attention, what is building, and the highest-leverage next action across every project.";
+  return (
+    `<section class="card chat-overview" aria-label="live portfolio overview" data-card-kind="fleet-overview">` +
+    `<div class="chat-overview-head"><div><span class="eyebrow">live overview</span><h2>Across ${projects.length} project${projects.length === 1 ? "" : "s"}</h2></div>` +
+    (interactive
+      ? `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" name="message" value="${escape(briefing)}" class="quiet">brief me</button></form>`
+      : `<a href="/board?scope=all" class="chat-overview-link">open board</a>`) +
+    `</div>` +
+    `<div class="chat-overview-stats">` +
+    `<a href="/" class="chat-overview-stat attention"><b>${needsYou}</b><span>need you</span></a>` +
+    `<a href="/board?scope=all" class="chat-overview-stat live"><b>${running}</b><span>building</span></a>` +
+    `<a href="/board?scope=all&amp;view=order" class="chat-overview-stat"><b>${queued}</b><span>queued</span></a>` +
+    `<a href="/done" class="chat-overview-stat"><b>${done}</b><span>done today</span></a>` +
+    `</div>` +
+    (rows.length === 0 ? `<p class="chat-overview-clear"><span class="dot dot-ok"></span>No active blockers or builds. The fleet is quiet.</p>` : `<div class="chat-overview-items">${rows.join("")}</div>`) +
+    (saturated ? `<p class="meta chat-overview-note">Showing a bounded live view; ask for a narrower project or state to go deeper.</p>` : "") +
+    `</section>`
+  );
+}
+
 /**
  * The mate's project rail: one bounded pulse per admitted project, plus
  * two roads that preserve the plane's contracts. "ask" sends the stable
@@ -8538,15 +8722,72 @@ function chatProjectRail(projects: readonly ChatProjectPulse[], csrf: string, in
 /** Spend-authorized one-click questions: ordinary /chat posts, not a new door. */
 function matePromptStarters(csrf: string): string {
   const prompts = [
-    ["needs my attention", "What needs my attention across every project?"],
-    ["building now", "What is building right now across every project?"],
-    ["what should move next", "Review every project's queue and recommend what should move next."],
+    ["brief me", "Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."],
+    ["decisions", "Walk me through the open decisions, their options, and what you recommend I inspect first."],
+    ["building now", "What is building right now across every project? Call out blockers or unusual risk."],
+    ["prioritize queues", "Review every project's queue and propose the most valuable reversible reprioritization."],
+    ["draft next task", "Based on the current fleet, suggest one high-leverage task or scout investigation and draft it as a proposal."],
   ] as const;
   return `<div class="chat-prompts" aria-label="suggested questions">${prompts.map(([label, message]) =>
     `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<button type="submit" name="message" value="${escape(message)}" class="quiet">${escape(label)}</button></form>`,
   ).join("")}</div>`;
 }
+
+/** A deliberately small rich-text grammar for model copy. Input is escaped
+ * before tags are introduced: headings, bullets, numbered steps, bold, and
+ * inline code are presentation only—never executable HTML or external links. */
+function renderChatText(text: string): string {
+  const inline = (value: string): string =>
+    escape(value)
+      .replace(/`([^`\n]{1,240})`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]{1,500})\*\*/g, "<strong>$1</strong>");
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const out: string[] = [];
+  let paragraph: string[] = [];
+  let list: "ul" | "ol" | null = null;
+  const flushParagraph = (): void => {
+    if (paragraph.length === 0) return;
+    out.push(`<p>${paragraph.map(inline).join("<br>")}</p>`);
+    paragraph = [];
+  };
+  const closeList = (): void => {
+    if (list === null) return;
+    out.push(`</${list}>`);
+    list = null;
+  };
+  for (const line of lines) {
+    const heading = /^(?:#{1,3}\s+)(.+)$/.exec(line);
+    const bullet = /^\s*[-*]\s+(.+)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+    if (heading !== null) {
+      flushParagraph(); closeList();
+      out.push(`<h3>${inline(heading[1] ?? "")}</h3>`);
+    } else if (bullet !== null || numbered !== null) {
+      flushParagraph();
+      const wanted = bullet !== null ? "ul" : "ol";
+      if (list !== wanted) { closeList(); out.push(`<${wanted}>`); list = wanted; }
+      out.push(`<li>${inline((bullet ?? numbered)?.[1] ?? "")}</li>`);
+    } else if (line.trim() === "") {
+      flushParagraph(); closeList();
+    } else {
+      closeList();
+      paragraph.push(line);
+    }
+  }
+  flushParagraph(); closeList();
+  return `<div class="chat-copy">${out.join("")}</div>`;
+}
+
+function chatActivity(activity: string | null): string {
+  if (activity === null) return "";
+  return `<div class="chat-activity" aria-label="work performed">${activity.split(" · ").map(one => `<span>${escape(one)}</span>`).join("")}</div>`;
+}
+
+const CHAT_COMPOSER_SCRIPT =
+  `(function(){var box=document.querySelector(".composer textarea");if(!box)return;` +
+  `function size(){box.style.height="auto";box.style.height=Math.min(box.scrollHeight,208)+"px";}size();box.addEventListener("input",size);` +
+  `box.addEventListener("keydown",function(ev){if(ev.isComposing||ev.key!=="Enter"||ev.shiftKey||!window.matchMedia("(min-width: 761px)").matches)return;ev.preventDefault();if(box.value.trim()!=="")box.form.requestSubmit();});})();`;
 
 function chatPage(chrome: Chrome, data: {
   enabled: { ok: true } & Record<string, unknown> | { ok: false; why: string };
@@ -8556,7 +8797,9 @@ function chatPage(chrome: Chrome, data: {
   recent: ChatTurn[];
   turnsToday: number;
   weeklySpent: number;
-  repoLabels: { id: string; label: string }[];
+  projects: ChatProjectPulse[];
+  fleetSnapshot: ChatSnapshot | null;
+  canManage: boolean;
   config: import("./store.js").ChatConfig | null;
   /** Where each provider's key comes from — never the key itself. */
   keyFacts: { provider: string; state: "environment" | "stored" | "none"; tail: string | null }[];
@@ -8618,8 +8861,8 @@ function chatPage(chrome: Chrome, data: {
     ].join("\n");
   };
   const parts: string[] = [
-    "<h1>chat</h1>",
-    `<p class="meta">ask about your fleet in plain language — it reads a limited summary of the projects this console serves and can draft work; drafts have no authority, live only in this browser session, and are filed and approved by you like everything else</p>`,
+    `<div class="chat-head"><div><h1>chat</h1><p class="meta">one place to understand every project and shape what happens next</p></div>` +
+      `<span class="badge">unified workspace</span></div>`,
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
@@ -8627,7 +8870,7 @@ function chatPage(chrome: Chrome, data: {
     // The ceiling refusals need a restart to fix; configuration does not —
     // it is a first-class act of this console (operator request).
     const code = (data.enabled as { code?: string }).code;
-    if (code === "unconfigured" || code === "unpriced" || code === "no-key") {
+    if (data.canManage && (code === "unconfigured" || code === "unpriced" || code === "no-key")) {
       parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
     }
     return screen("chat", parts.join("\n"), { chrome });
@@ -8635,13 +8878,16 @@ function chatPage(chrome: Chrome, data: {
   const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
   const subscription = isSubscriptionChatProvider(config.provider);
   parts.push(
-    `<p class="meta">answering with <span class="mono">${escape(config.provider)} · ${escape(config.model)}</span>` +
-      ` — ${data.turnsToday} of ${config.dailyTurns} turns today · ${subscription ? "membership login · no dollar ceiling" : `${chatMoney(data.weeklySpent)} of ${chatMoney(config.weeklyCeilingMicrousd)} this rolling week`}` +
-      ` · repos: ${data.repoLabels.map(one => `<span class="mono">${escape(one.id)}</span> ${escape(one.label)}`).join(", ")}</p>`,
-    `<p class="meta">what leaves this machine: task ids/titles/states, open questions and option labels, incident kinds, routine names/schedules, PR numbers and observed check states — deliberately, to the configured provider. Paths, branches, diffs, notes, decision details, and identities never do.</p>`,
+    `<div class="chat-budget"><span class="mono">answering with ${escape(config.provider)} · ${escape(config.model)}</span>` +
+      `<span>${data.turnsToday} / ${config.dailyTurns} turns today</span>` +
+      `<span>${subscription ? "membership login · no dollar ceiling" : `${chatMoney(data.weeklySpent)} of ${chatMoney(config.weeklyCeilingMicrousd)} this week`}</span></div>`,
+    chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false),
   );
-  if (data.mateMint !== undefined) parts.push(data.mateMint);
-  if (data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
+  if (!data.canManage) {
+    parts.push(`<div class="card chat-readonly"><strong>Read-only view</strong><p class="meta">An approver can start the unified conversation and confirm its proposed actions. You can still open every live card and project board here.</p></div>`);
+  }
+  if (data.canManage && data.mateMint !== undefined) parts.push(data.mateMint);
+  if (data.canManage && data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
   for (const turn of data.latched) {
     parts.push(
       `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
@@ -8649,16 +8895,16 @@ function chatPage(chrome: Chrome, data: {
     );
   }
   if (data.pending !== null) {
-    parts.push(`<div class="card"><p><strong>asking…</strong> <span class="meta">turn #${data.pending.id}, up to ${chatMoney(data.pending.reservedMicrousd)} reserved — this page refreshes itself</span></p></div>`);
+    parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id} · up to ${chatMoney(data.pending.reservedMicrousd)} reserved · this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
-    return screen("chat", parts.join("\n"), { chrome, refreshSeconds: 3 });
+    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome, refreshSeconds: 3 });
   }
   const last = data.chat?.lastTurn ?? null;
   if (last !== null) {
     if (last.staticError !== null) {
-      parts.push(`<div class="card"><p class="meta">${escape(last.staticError)}</p></div>`);
+      parts.push(`<div class="card" id="latest"><p class="meta">${escape(last.staticError)}</p></div>`);
     } else if (last.reply !== null) {
-      parts.push(`<div class="card"><p style="white-space:pre-wrap">${escape(last.reply)}</p>` +
+      parts.push(`<div class="card" id="latest">${renderChatText(last.reply)}` +
         (last.proposalsDiscarded ? `<p class="meta">a draft block in this answer was malformed and was discarded whole</p>` : "") +
         `</div>`);
     }
@@ -8682,7 +8928,7 @@ function chatPage(chrome: Chrome, data: {
         `</div>`,
     );
   }
-  if (!subscription) {
+  if (!subscription && data.canManage) {
     parts.push(
       `<h2>ask</h2>`,
       `<form method="post" action="/chat" class="card">`,
@@ -8693,28 +8939,30 @@ function chatPage(chrome: Chrome, data: {
       `</form>`,
     );
   }
-  parts.push(
-    `<details><summary class="meta">chat settings</summary>`,
-    configForm(data.config),
-    `<form method="post" action="/chat/config" class="inline">`,
-    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<input type="hidden" name="off" value="1">`,
-    `<input type="password" name="token" placeholder="your password" autocomplete="current-password">`,
-    `<button type="submit">turn chat off</button>`,
-    `</form>`,
-    data.keyFacts
-      .filter(one => one.state === "stored")
-      .map(
-        one =>
-          `<form method="post" action="/chat/config" class="inline">` +
-          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-          `<input type="hidden" name="forget-key" value="${escape(one.provider)}">` +
-          `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
-          `<button type="submit">forget the stored ${escape(one.provider)} key</button></form>`,
-      )
-      .join("\n"),
-    `</details>`,
-  );
+  if (data.canManage) {
+    parts.push(
+      `<details><summary class="meta">chat settings</summary>`,
+      configForm(data.config),
+      `<form method="post" action="/chat/config" class="inline">`,
+      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<input type="hidden" name="off" value="1">`,
+      `<input type="password" name="token" placeholder="your password" autocomplete="current-password">`,
+      `<button type="submit">turn chat off</button>`,
+      `</form>`,
+      data.keyFacts
+        .filter(one => one.state === "stored")
+        .map(
+          one =>
+            `<form method="post" action="/chat/config" class="inline">` +
+            `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+            `<input type="hidden" name="forget-key" value="${escape(one.provider)}">` +
+            `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
+            `<button type="submit">forget the stored ${escape(one.provider)} key</button></form>`,
+        )
+        .join("\n"),
+      `</details>`,
+    );
+  }
   if (data.recent.length > 0) {
     parts.push(`<h2>recent turns</h2>`);
     for (const turn of data.recent) {
@@ -8725,7 +8973,7 @@ function chatPage(chrome: Chrome, data: {
       );
     }
   }
-  return screen("chat", parts.join("\n"), { chrome });
+  return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome });
 }
 
 function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): Screen {
@@ -8807,24 +9055,43 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   const text = (key: string): string => (typeof payload[key] === "string" ? (payload[key] as string) : "");
   const task = text("task");
   const repoId = text("repoId");
+  const presentations: Record<MateProposal["kind"], { label: string; action: string; icon: string }> = {
+    task: { label: payload["report"] === true ? "Scout investigation" : "New task", action: "file task", icon: `<path d="M12 5v14"/><path d="M5 12h14"/>` },
+    next: { label: "Queue priority", action: "move to front", icon: `<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>` },
+    reserve: { label: "Worker assignment", action: payload["worker"] === null ? "release" : "reserve", icon: `<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>` },
+    hold: { label: "Pause work", action: "hold", icon: `<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>` },
+    unhold: { label: "Resume work", action: "release hold", icon: `<path d="m7 4 13 8-13 8z"/>` },
+    scope: { label: "Scope revision", action: "save scope", icon: `<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>` },
+    answer: { label: "Decision answer", action: "confirm answer", icon: `<path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>` },
+    cancel: { label: "Cancel task", action: "open task", icon: `<path d="m15 9-6 6"/><path d="m9 9 6 6"/><circle cx="12" cy="12" r="9"/>` },
+  };
+  const presentation = presentations[view.kind];
+  const facts = (...rows: [string, string][]): string => {
+    const visible = rows.filter(([, value]) => value !== "");
+    return visible.length === 0 ? "" : `<dl class="proposal-facts">${visible.map(([key, value]) => `<div><dt>${escape(key)}</dt><dd>${value}</dd></div>`).join("")}</dl>`;
+  };
   let what: string;
   if (view.kind === "task") {
     what =
-      `<strong>file ${escape(text("title"))}</strong> in <span class="mono">${escape(repoId)}</span>${payload["report"] === true ? ` <span class="badge">scout — delivers a report, never a branch</span>` : ""}<p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
-      (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`) +
-      (Array.isArray(payload["touches"]) && payload["touches"].length > 0 ? `<p class="meta">touches: ${escape((payload["touches"] as string[]).join(", "))}</p>` : "");
+      `<h3>${escape(text("title"))}</h3><p class="proposal-summary">${escape(text("goal"))}</p>` +
+      facts(
+        ["project", `<span class="mono">${escape(repoId)}</span>`],
+        ["deliverable", payload["report"] === true ? "report only" : "branch"],
+        ["out of scope", escape(text("not"))],
+        ["may touch", Array.isArray(payload["touches"]) ? escape((payload["touches"] as string[]).join(", ")) : ""],
+      );
   } else if (view.kind === "next") {
-    what = `<strong>move <a href="${taskHref(task)}">${escape(task)}</a> to the front</strong> <span class="meta">(it was ${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))})</span>`;
+    what = `<h3>Move <a href="${taskHref(task)}">${escape(task)}</a> to the front</h3>` + facts(["current position", `${escape(String(payload["position"] ?? "?"))} of ${escape(String(payload["of"] ?? "?"))}`], ["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "reserve") {
-    what = `<strong>${payload["worker"] === null ? "release" : "reserve"} <a href="${taskHref(task)}">${escape(task)}</a>${payload["worker"] === null ? " to the shared queue" : ` for ${escape(text("worker"))}`}</strong>`;
+    what = `<h3>${payload["worker"] === null ? "Release" : "Reserve"} <a href="${taskHref(task)}">${escape(task)}</a></h3>` + facts(["destination", payload["worker"] === null ? "shared queue" : escape(text("worker"))], ["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "hold") {
-    what = `<strong>hold <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
+    what = `<h3>Hold <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("reason"))}</p>` + facts(["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "unhold") {
-    what = `<strong>release <a href="${taskHref(task)}">${escape(task)}</a> from its hold</strong>`;
+    what = `<h3>Release <a href="${taskHref(task)}">${escape(task)}</a> from its hold</h3>` + facts(["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "scope") {
     what =
-      `<strong>rewrite the scope of <a href="${taskHref(task)}">${escape(task)}</a></strong><p style="white-space:pre-wrap">${escape(text("goal"))}</p>` +
-      (text("not") === "" ? "" : `<p class="meta">not: ${escape(text("not"))}</p>`);
+      `<h3>Rewrite <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("goal"))}</p>` +
+      facts(["out of scope", escape(text("not"))], ["may touch", Array.isArray(payload["touches"]) ? escape((payload["touches"] as string[]).join(", ")) : ""], ["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "answer") {
     const decisionId = typeof payload["decision"] === "number" ? payload["decision"] : 0;
     const pick = text("option");
@@ -8843,18 +9110,18 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
             .join("") +
           `</ul>`;
     what =
-      `<strong>answer <a href="/d/${decisionId}">decision #${decisionId}</a> on <a href="${taskHref(task)}">${escape(task)}</a></strong>` +
-      (decision === null ? "" : `<p style="white-space:pre-wrap">${escape(decision.question)}</p>`) +
+      `<h3>Answer <a href="/d/${decisionId}">decision #${decisionId}</a> on <a href="${taskHref(task)}">${escape(task)}</a></h3>` +
+      (decision === null ? "" : `<p class="proposal-summary">${escape(decision.question)}</p>`) +
       options +
-      `<p class="meta">proposed: <strong>${escape(text("optionLabel"))}</strong> — ${escape(text("rationale"))}</p>` +
-      `<p class="meta">${payload["readConsequences"] === true ? `${view.by.mate ? "the mate" : "the coordinator"} read every consequence but not the builder's recap` : `${view.by.mate ? "the mate" : "the coordinator"} did NOT read the consequences`}; you see both here${decision !== null && decision.state !== "open" ? " · this decision is no longer open" : ""}</p>`;
+      `<div class="proposal-rationale"><span class="eyebrow">proposed answer</span><strong>${escape(text("optionLabel"))}</strong><p>${escape(text("rationale"))}</p></div>` +
+      `<p class="meta proposal-disclosure">${payload["readConsequences"] === true ? `${view.by.mate ? "The mate" : "The coordinator"} read every consequence but not the builder's recommendation` : `${view.by.mate ? "The mate" : "The coordinator"} did not read the consequences`}. You see both here${decision !== null && decision.state !== "open" ? " · this decision is no longer open" : ""}.</p>`;
   } else {
-    what = `<strong>cancel <a href="${taskHref(task)}">${escape(task)}</a></strong> <span class="meta">${escape(text("reason"))}</span>`;
+    what = `<h3>Cancel <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("reason"))}</p>` + facts(["project", `<span class="mono">${escape(repoId)}</span>`]);
   }
   const outcome = view.outcome as { said?: unknown; taskId?: unknown } | null;
   const said = outcome !== null && typeof outcome.said === "string" ? outcome.said : null;
   const irreversible = view.kind === "answer" && payload["reversible"] === false;
-  const provenance = view.by.mate ? "" : `<p class="meta">proposed by <span class="mono">${escape(view.by.name)}</span> · ${escape(view.by.ago)}</p>`;
+  const provenance = view.by.mate ? "mate" : `${escape(view.by.name)} · ${escape(view.by.ago)}`;
   let acts = "";
   if (view.state === "pending" && !inert) {
     acts =
@@ -8864,23 +9131,31 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
         : `<div class="acts">` +
           `<form method="post" action="${view.actionBase}/${view.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
           (irreversible ? `<label class="arm"><input type="checkbox" name="confirm" value="yes"> I understand this cannot be undone</label>` : "") +
-          `<button type="submit">confirm</button></form>` +
+          `<button type="submit">${escape(presentation.action)}</button></form>` +
           `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>` +
           `</div>`;
   } else if (view.state === "pending") {
-    acts = `<p class="meta">confirm or dismiss once the turn ends</p>`;
+    acts = `<p class="meta proposal-wait">Available when the current turn finishes.</p>`;
   } else if (view.state === "confirmed") {
     const filed = outcome !== null && typeof outcome.taskId === "string" ? outcome.taskId : null;
     acts =
-      `<p class="meta done">${escape(said ?? "confirmed")}` +
+      `<p class="done">${escape(said ?? "confirmed")}` +
       (view.kind === "scope" && filed !== null ? ` — <a href="${taskHref(filed)}#approve">approve it</a>` : filed !== null && view.kind === "task" ? ` — <a href="${taskHref(filed)}">open it</a>` : "") +
       `</p>`;
   } else if (view.state === "refused") {
-    acts = `<p class="meta refused">${escape(said ?? "refused")}</p>`;
+    acts = `<p class="refused">${escape(said ?? "refused")}</p>`;
   } else {
     acts = `<p class="meta">${escape(view.state)}</p>`;
   }
-  return `<div class="card proposal ${escape(view.state)}"><p><span class="badge">${escape(view.kind)}</span> ${what}</p>${provenance}${acts}</div>`;
+  const stateClass = view.state === "confirmed" ? "badge-done" : view.state === "refused" ? "badge-failed" : "";
+  return (
+    `<article class="card proposal proposal-${escape(view.kind)} ${escape(view.state)}" data-card-kind="${escape(view.kind)}">` +
+    `<header class="proposal-head"><span class="proposal-icon">${strokeIcon(presentation.icon)}</span>` +
+    `<span><strong>${escape(presentation.label)}</strong><small>proposed by ${provenance}</small></span>` +
+    `<span class="badge ${stateClass}">${escape(view.state)}</span></header>` +
+    `<div class="proposal-body">${what}</div>` +
+    `<footer class="proposal-actions">${acts}</footer></article>`
+  );
 }
 
 function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean, decision: Decision | null): string {
@@ -8928,6 +9203,7 @@ function matePage(chrome: Chrome, data: {
   turnsToday: number;
   weeklySpent: number;
   projects: ChatProjectPulse[];
+  fleetSnapshot: ChatSnapshot | null;
   csrf: string;
   problem: string | null;
   now: Date;
@@ -8935,14 +9211,15 @@ function matePage(chrome: Chrome, data: {
   const subscription = isSubscriptionChatProvider(data.config.provider);
   const conversation: string[] = [
     `<div class="chat-head"><div><h1>chat</h1>` +
-      `<p class="meta">one conversation across every project · the mate proposes, you confirm</p></div>` +
+      `<p class="meta">one conversation across every project · understand, prioritize, and act from here</p></div>` +
       `<span class="badge badge-running">conversation live</span></div>`,
-    `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
+    `<div class="chat-budget"><span class="mono">answering with ${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
       (subscription
         ? `<span>membership login · no dollar ceiling</span>`
         : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
           `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
       `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span></div>`,
+    chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null),
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -8968,28 +9245,34 @@ function matePage(chrome: Chrome, data: {
   }
   for (const message of data.messages) {
     if (message.role === "operator") {
-      conversation.push(`<div class="msg op"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
+      conversation.push(`<div class="msg op" data-message-role="operator"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
       continue;
     }
     const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
     conversation.push(
-      `<div class="msg mate">` +
-        (message.activity === null ? "" : `<p class="meta mono activity">${escape(message.activity)}</p>`) +
-        `<p style="white-space:pre-wrap">${escape(message.text)}</p>` +
+      `<div class="msg mate" data-message-role="assistant">` +
+        renderChatText(message.text) +
         cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null)).join("") +
+        `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, data.now))}</time></div>` +
         `</div>`,
     );
   }
   conversation.push(`</div>`);
   if (data.pending !== null) {
-    conversation.push(`<div class="card"><p><strong>thinking…</strong> <span class="meta">turn #${data.pending.id}, ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"} so far${subscription ? " · membership-backed" : `, up to ${chatMoney(data.pending.reservedMicrousd)} reserved`} — this page refreshes itself</span></p></div>`);
+    conversation.push(
+      `<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working across your projects</strong>` +
+      `<span class="meta">turn #${data.pending.id} · ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`}</span></p>` +
+      `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
+      `<button type="submit" class="quiet">stop</button></form></div>`,
+    );
     return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${conversation.join("\n")}</section></div>`, { chrome, refreshSeconds: 3 });
   }
   conversation.push(
-    `<form method="post" action="/chat" class="card composer">`,
+    data.messages.length === 0 ? "" : matePromptStarters(data.csrf),
+    `<form method="post" action="/chat" class="card composer" id="latest" aria-label="message the mate">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<label>message<textarea name="message" rows="3" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="how do things stand?"></textarea></label>`,
-    `<button type="submit">send</button>`,
+    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="Ask about projects, prioritize work, or draft the next task…"></textarea></label>`,
+    `<button type="submit" aria-label="send message">send</button>`,
     `</form>`,
     `<details><summary class="meta">this conversation</summary>`,
     `<p class="meta">started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · stays live until you end it · only bounded recent context is sent to the model</p>`,
@@ -9005,7 +9288,7 @@ function matePage(chrome: Chrome, data: {
   return screen(
     "chat",
     `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, false)}<section class="chat-main">${conversation.join("\n")}</section></div>`,
-    { chrome },
+    { chrome, functional: { script: CHAT_COMPOSER_SCRIPT } },
   );
 }
 

@@ -2975,7 +2975,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
       body: new URLSearchParams({ csrf, message: "back?", token: approverToken }),
       redirect: "manual",
     });
-    expect(unblocked.headers.get("location")).toBe("/chat");
+    expect(unblocked.headers.get("location")).toBe("/chat#latest");
   });
 
 
@@ -7068,8 +7068,10 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain('class="thread"');
     expect(thread).toContain('class="chat-workspace"');
     expect(thread).toContain('class="chat-projects"');
+    expect(thread).toContain('data-card-kind="fleet-overview"');
+    expect(thread).toContain('aria-label="live portfolio overview"');
     expect(thread).toContain('aria-label="projects in this conversation"');
-    expect(thread).toContain('name="message" value="What needs my attention across every project?"');
+    expect(thread).toContain('name="message" value="Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."');
     expect(thread).toMatch(/<span class="name">all projects/);
     expect(thread).toContain('class="card composer"');
     expect(thread).not.toContain('name="token"');
@@ -7105,13 +7107,14 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const minted = await post(cookie, "/chat/mate/mint", { csrf, token: approverToken });
     expect(minted.status).toBe(303);
     expect(store.activeMateSession("alex")).toMatchObject({ ceilingMicrousd: 0, spentMicrousd: 0 });
-    subscriptionAnswers.push({ text: "The queue is calm.", calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
+    subscriptionAnswers.push({ text: "## Fleet status\n\n- **Queue:** calm\n- Run `smoke` next.\n\n<script>bad()</script>", calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
     const sent = await post(cookie, "/chat", { csrf, message: "how does it look?" });
     expect(sent.status).toBe(303);
     await settle();
 
     html = await page(cookie);
-    expect(html).toContain("The queue is calm.");
+    expect(html).toContain('<div class="chat-copy"><h3>Fleet status</h3><ul><li><strong>Queue:</strong> calm</li><li>Run <code>smoke</code> next.</li></ul><p>&lt;script&gt;bad()&lt;/script&gt;</p></div>');
+    expect(html).not.toContain("<script>bad()</script>");
     expect(html).toContain("membership login · no dollar ceiling");
     expect(html).not.toContain("this session: $0.00 of $0.00");
     expect(html).toContain('class="card composer"');
@@ -7134,9 +7137,14 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const turn = store.recentMateTurns("alex", 1)[0];
     expect(turn).toMatchObject({ state: "answered", steps: 2 });
     let html = await page(cookie);
-    expect(html).toContain('<div class="msg op"><p style="white-space:pre-wrap">what is queued?</p></div>');
+    expect(html).toContain('<div class="msg op" data-message-role="operator"><p style="white-space:pre-wrap">what is queued?</p></div>');
     expect(html).toContain("I propose moving b to the front.");
-    expect(html).toContain("read 1 · proposed 1 · 2 steps");
+    expect(html).toContain('class="chat-activity"');
+    expect(html).toContain("read 1");
+    expect(html).toContain("proposed 1");
+    expect(html).toContain("2 steps");
+    expect(html).toContain('data-card-kind="next"');
+    expect(html).toContain('class="proposal-facts"');
     expect(html).toContain('action="/chat/proposal/1/confirm"');
     expect(html).toContain('action="/chat/proposal/1/dismiss"');
     // No csrf: the central gate refuses, nothing moves.
@@ -7212,6 +7220,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const viewerCookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] as string;
     const viewerPage = await (await fetch(url("/chat"), { headers: { cookie: viewerCookie } })).text();
     expect(viewerPage).not.toContain('action="/chat/mate/mint"');
+    expect(viewerPage).not.toContain('action="/chat/config"');
+    expect(viewerPage).toContain("Read-only view");
     const viewerCsrf = /name="csrf" value="([0-9a-f]{64})"/.exec(viewerPage)?.[1] ?? csrf;
     const viewerMint = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { cookie: viewerCookie, origin: base }, body: new URLSearchParams({ csrf: viewerCsrf, "ceiling-usd": "5", token: "watching-only-1" }), redirect: "manual" });
     expect(viewerMint.status).toBe(403);
@@ -7224,6 +7234,43 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain("the admitted projects changed since your mate session was minted");
     expect(html).toContain('action="/chat/mate/mint"');
     expect(store.activeMateSession("alex")).not.toBeNull();
+  });
+
+  test("an operator can stop one in-flight turn without ending the conversation", async () => {
+    const cookie = await login();
+    const csrf = await mint(cookie);
+    const session = store.activeMateSession("alex");
+    if (session === null) throw new Error("missing session");
+    const thread = store.openMateThread("alex", session.ceilingDigest, clockNow).thread;
+    const opened = store.openMateTurn(
+      {
+        approver: "alex",
+        session: session.id,
+        thread: thread.id,
+        credentialKey: session.credentialKey,
+        reservedMicrousd: 100,
+        dailyTurns: 50,
+        weeklyCeilingMicrousd: 100_000_000,
+        deadlineMs: 60_000,
+      },
+      clockNow,
+    );
+    if (!opened.ok) throw new Error(opened.reason);
+    expect(store.startMateTurn(opened.id, clockNow)).toMatchObject({ ok: true });
+
+    let html = await page(cookie);
+    expect(html).toContain('action="/chat/mate/stop"');
+    expect(html).toContain(`name="turn" value="${opened.id}"`);
+    const stopped = await post(cookie, "/chat/mate/stop", { csrf, turn: String(opened.id) });
+    expect(stopped.status).toBe(303);
+    expect(stopped.headers.get("location")).toBe("/chat#latest");
+    expect(store.liveMateTurnFor("alex")).toBeNull();
+    expect(store.activeMateSession("alex")).not.toBeNull();
+    expect(store.recentMateTurns("alex", 1)[0]).toMatchObject({ state: "failed", failureReason: "stopped" });
+
+    html = await page(cookie);
+    expect(html).toContain("stopped — the conversation is still open");
+    expect(html).toContain('class="card composer"');
   });
 
   test("coordinator proposals are cards on /chat and the task page; an irreversible answer confirms only with the field", async () => {
