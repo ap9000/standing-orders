@@ -55,6 +55,7 @@ import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
 import {
+  daemonLaunchCommand,
   daemonStatus,
   installDaemon,
   planDaemon,
@@ -6056,24 +6057,38 @@ async function daemonCommand(
 
   const binFlag = text(flags, "bin");
   const resolveBin = async (): Promise<{ bin: string; binArgs: string[] } | null> => {
-    if (binFlag !== undefined) return { bin: binFlag, binArgs: [] };
+    const direct = daemonLaunchCommand({
+      execPath: process.execPath,
+      ...(process.argv[1] === undefined ? {} : { entry: resolve(process.argv[1]) }),
+      ...(binFlag === undefined ? {} : { explicitBin: resolve(binFlag) }),
+    });
+    if (direct !== null) return direct;
     const found = await supervise("sh", ["-lc", "command -v standing-orders"]);
     if (found.code === 0 && found.stdout.trim() !== "") {
-      return { bin: found.stdout.trim(), binArgs: [] };
+      // Even the PATH fallback is run by this process's absolute Node binary:
+      // npm's package bin is a JS symlink whose env-node shebang is precisely
+      // what a minimal launchd environment cannot resolve.
+      return { bin: process.execPath, binArgs: [found.stdout.trim()] };
     }
     return null;
   };
 
   if (action === "install") {
     const runnerName = text(flags, "runner");
-    const token = text(flags, "token");
+    const inlineToken = text(flags, "token");
+    const tokenPath = text(flags, "token-file");
+    if (inlineToken !== undefined && tokenPath !== undefined) {
+      return fail(write, json, "daemon install", "usage", "choose one credential source: --token or --token-file", EXIT.usage);
+    }
+    const token = inlineToken ?? readTokenFile(tokenPath);
     if (runnerName === undefined || token === undefined) {
-      return fail(write, json, "daemon install", "usage", "`standing-orders daemon install --runner <name> --token <t> --repo <path>` (plus any watch flags to bake in)", EXIT.usage);
+      return fail(write, json, "daemon install", "usage", "`standing-orders daemon install --runner <name> (--token <t> | --token-file <path>) --repo <path>` (plus any watch flags to bake in)", EXIT.usage);
     }
     const auth = authenticate(store, runnerName, token);
     if (!auth.ok) {
       return fail(write, json, "daemon install", auth.reason, describeAuth(auth.reason, runnerName), EXIT.refused);
     }
+    const heartbeatBefore = store.getRunner(runnerName)?.runner.heartbeatAt ?? null;
     const located = await resolveBin();
     if (located === null) {
       return fail(
@@ -6120,8 +6135,47 @@ async function daemonCommand(
     if (!installed.ok) {
       return fail(write, json, "daemon install", "supervisor", installed.message, EXIT.failed);
     }
-    return succeed(write, json, "daemon install", { label: plan.label, unit: plan.unitPath, logs: plan.logPath }, () => [
+    const started = await daemonStatus(plan, supervise);
+    if (started.state !== "running") {
+      return fail(
+        write,
+        json,
+        "daemon install",
+        "not-running",
+        `the service was installed but did not stay running (${started.detail}) — read ${plan.logPath}; no work will be claimed until this is fixed`,
+        EXIT.failed,
+      );
+    }
+    // A supervisor PID is necessary but not sufficient: macOS can leave a
+    // process stuck behind a protected-folder access check before it ever
+    // opens the queue. The credentialed runner heartbeat is the end-to-end
+    // readiness receipt that proves this service reached the work loop.
+    const readyDeadline = Date.now() + 5_000;
+    let liveRunner = store.getRunner(runnerName)?.runner ?? null;
+    while (
+      Date.now() < readyDeadline &&
+      (liveRunner === null || liveRunner.heartbeatAt === heartbeatBefore || !isAlive(liveRunner, new Date()))
+    ) {
+      await new Promise(resolveReady => setTimeout(resolveReady, 100));
+      liveRunner = store.getRunner(runnerName)?.runner ?? null;
+    }
+    if (liveRunner === null || liveRunner.heartbeatAt === heartbeatBefore || !isAlive(liveRunner, new Date())) {
+      const macHint = process.platform === "darwin" && repo.startsWith(join(homedir(), "Documents"))
+        ? " macOS may be blocking background access to Documents; grant the Node executable Full Disk Access, move the repository outside a protected folder, or keep `standing-orders up` running from your terminal."
+        : "";
+      return fail(
+        write,
+        json,
+        "daemon install",
+        "not-ready",
+        `the supervisor has a process, but ${runnerName} never reached its worker heartbeat.${macHint} Read ${plan.logPath}; no work will be claimed until the heartbeat appears`,
+        EXIT.failed,
+      );
+    }
+    return succeed(write, json, "daemon install", { label: plan.label, unit: plan.unitPath, logs: plan.logPath, state: started.state, pid: started.pid, heartbeatAt: liveRunner.heartbeatAt }, () => [
       `Installed and started ${plan.label}.`,
+      `  verified ${started.detail}`,
+      `  worker   ${runnerName} answered at ${liveRunner.heartbeatAt}`,
       `  unit    ${plan.unitPath}`,
       `  token   ${plan.tokenFile} (0600 — the unit never carries it)`,
       `  logs    ${plan.logPath}`,

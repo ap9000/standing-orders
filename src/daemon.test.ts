@@ -9,6 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  daemonLaunchCommand,
   daemonStatus,
   installDaemon,
   labelFor,
@@ -65,6 +66,8 @@ describe("the daemon plan", () => {
 
     expect(made.unitPath).toContain("Library/LaunchAgents");
     expect(made.unitContent).toContain("<string>watch</string>");
+    expect(made.unitContent).toContain("<key>WorkingDirectory</key>");
+    expect(made.unitContent).toContain("<string>/Users/alex/code/thing</string>");
     expect(made.unitContent).toContain("<string>--token-file</string>");
     expect(made.unitContent).toContain(join(dir, "runner-token"));
     expect(made.unitContent).not.toContain("--token<");
@@ -73,11 +76,33 @@ describe("the daemon plan", () => {
     expect(made.unitContent).toContain("<key>ThrottleInterval</key>");
   });
 
+  test("the service pins the current Node runtime instead of relying on env node", () => {
+    expect(daemonLaunchCommand({
+      execPath: "/Users/alex/.nvm/versions/node/v22/bin/node",
+      entry: "/opt/standing-orders/dist/bin.js",
+    })).toEqual({
+      bin: "/Users/alex/.nvm/versions/node/v22/bin/node",
+      binArgs: ["/opt/standing-orders/dist/bin.js"],
+    });
+    expect(daemonLaunchCommand({
+      execPath: "/usr/local/bin/node",
+      explicitBin: "/opt/standing-orders/dist/bin.js",
+    })).toEqual({
+      bin: "/usr/local/bin/node",
+      binArgs: ["/opt/standing-orders/dist/bin.js"],
+    });
+    expect(daemonLaunchCommand({
+      execPath: "/usr/local/bin/node",
+      explicitBin: "/opt/standing-orders/native-wrapper",
+    })).toEqual({ bin: "/opt/standing-orders/native-wrapper", binArgs: [] });
+  });
+
   test("the systemd unit says restart-on-failure and appends to its log", () => {
     const made = plan("linux");
 
     expect(made.unitPath).toContain(".config/systemd/user");
     expect(made.unitContent).toContain("Restart=on-failure");
+    expect(made.unitContent).toContain("WorkingDirectory=/Users/alex/code/thing");
     expect(made.unitContent).toContain("--token-file");
     expect(made.unitContent).toContain(`append:${made.logPath}`);
   });
@@ -107,6 +132,11 @@ describe("the daemon plan", () => {
     expect(readFileSync(made.unitPath, "utf8")).toContain("watch");
     expect(script.calls[0]?.file).toBe("launchctl");
     expect(script.calls[0]?.args[0]).toBe("bootstrap");
+    expect(script.calls[1]?.args).toEqual([
+      "kickstart",
+      "-k",
+      `gui/${typeof process.getuid === "function" ? process.getuid() : 501}/${made.label}`,
+    ]);
   });
 
   test("modern launchctl failing falls back to the legacy verb", async () => {
@@ -119,7 +149,38 @@ describe("the daemon plan", () => {
     const installed = await installDaemon(made, "secret-token", script.run);
 
     expect(installed).toMatchObject({ ok: true });
-    expect(script.calls.map(call => call.args[0])).toEqual(["bootstrap", "load"]);
+    expect(script.calls.map(call => call.args[0])).toEqual(["bootstrap", "bootout", "bootstrap", "load"]);
+  });
+
+  test("re-install replaces a loaded job before starting the newly written unit", async () => {
+    const made = plan("darwin");
+    const calls: string[] = [];
+    let bootstraps = 0;
+    const run = async (_file: string, args: readonly string[]) => {
+      calls.push(args[0] as string);
+      if (args[0] === "bootstrap") {
+        bootstraps += 1;
+        return { ...OK, code: bootstraps === 1 ? 5 : 0 };
+      }
+      return OK;
+    };
+
+    expect(await installDaemon(made, "secret-token", run)).toMatchObject({ ok: true });
+    expect(calls).toEqual(["bootstrap", "bootout", "bootstrap", "kickstart"]);
+  });
+
+  test("a loaded plist is not reported as started when kickstart fails", async () => {
+    const made = plan("darwin");
+    const script = scripted({
+      "launchctl bootstrap": { code: 0 },
+      "launchctl kickstart": { code: 5 },
+    });
+
+    const installed = await installDaemon(made, "secret-token", script.run);
+
+    expect(installed).toMatchObject({ ok: false });
+    if (installed.ok) throw new Error("expected a refusal");
+    expect(installed.message).toContain("could not start");
   });
 
   test("status reads launchd's answer into running / loaded / not-installed", async () => {

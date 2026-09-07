@@ -14,7 +14,7 @@ interrupted only for decisions that genuinely need a human.**
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Design](docs/DESIGN.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
+[Design](docs/DESIGN.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
 
 <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/demo.svg" alt="Queue tasks, install the daemon, leave; a parked decision is answered from a phone and the tasks come back as pull requests." width="760">
 
@@ -57,7 +57,7 @@ another setup code.
 ```sh
 npx standing-orders demo               # a seeded sandbox — see it working in 90 seconds, zero spend
 npx standing-orders                    # what's in flight across your repos — read-only, zero config
-npx standing-orders daemon install …   # the unattended loop, as an OS service — no crontab
+npx standing-orders daemon install …   # the unattended loop, as a verified OS service — no crontab
 ```
 
 ## Getting started

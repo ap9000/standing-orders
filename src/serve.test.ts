@@ -6372,6 +6372,28 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
+  test("a queued task says whether it can actually dispatch, including the exact worker repair", async () => {
+    seed("t-ready", "tell me if this will run");
+    await boot();
+    const cookie = await login();
+
+    // The runner was registered at T0 and has gone quiet. The task must not
+    // merely say queued: it names the blocking gate and the one-command road.
+    const offline = await (await fetch(url("/t/t-ready"), { headers: { cookie } })).text();
+    expect(offline).toContain('data-dispatch-status="no-worker-online"');
+    expect(offline).toContain("Nothing will start until it answers.");
+    expect(offline).toContain("standing-orders up");
+    expect(offline).not.toContain('data-dispatch-status="ready-to-run"');
+
+    // A current heartbeat for a worker bound to this project changes the
+    // same durable task to a positive, equally explicit readiness answer.
+    store.touchRunner("night-shift-1", new Date());
+    const ready = await (await fetch(url("/t/t-ready"), { headers: { cookie } })).text();
+    expect(ready).toContain('data-dispatch-status="ready-to-run"');
+    expect(ready).toContain("every dispatch gate currently passes");
+    expect(ready).not.toContain('data-dispatch-status="no-worker-online"');
+  });
+
   test("the attempt panel names the run; its pollers hit the RUN's fragments, never the task URL", async () => {
     const ref = seed("t-live", "being built");
     const run = live("t-live", ref);

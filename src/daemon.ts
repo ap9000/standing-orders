@@ -40,6 +40,30 @@ export type DaemonPlan = {
   tokenFile: string;
 };
 
+/**
+ * Pin a service to the Node runtime that is executing Standing Orders.
+ *
+ * launchd does not inherit an interactive shell's PATH, so invoking a JS
+ * package bin through `#!/usr/bin/env node` can install successfully and then
+ * fail before the CLI starts. The service instead runs the absolute Node
+ * binary with the package entry as its first argument. An explicitly supplied
+ * non-JavaScript executable remains an escape hatch for wrappers and packaged
+ * binaries.
+ */
+export function daemonLaunchCommand(args: {
+  execPath: string;
+  entry?: string;
+  explicitBin?: string;
+}): { bin: string; binArgs: string[] } | null {
+  if (args.explicitBin !== undefined) {
+    return /\.(?:c|m)?js$/i.test(args.explicitBin)
+      ? { bin: args.execPath, binArgs: [args.explicitBin] }
+      : { bin: args.explicitBin, binArgs: [] };
+  }
+  if (args.entry === undefined || /\.(?:c|m)?tsx?$/i.test(args.entry)) return null;
+  return { bin: args.execPath, binArgs: [args.entry] };
+}
+
 /** One service per repo, named so two repos' watches never collide. */
 export function labelFor(repo: string): string {
   const slug = repo
@@ -102,6 +126,8 @@ export function planDaemon(args: {
   <array>
 ${escaped}
   </array>
+  <key>WorkingDirectory</key>
+  <string>${xml(repo)}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -184,6 +210,7 @@ Description=standing-orders watch — ${repo}
 
 [Service]
 ExecStart=${command.map(systemdEscape).join(" ")}
+WorkingDirectory=${systemdEscape(repo)}
 Restart=on-failure
 RestartSec=15
 StandardOutput=append:${logPath}
@@ -218,8 +245,27 @@ export async function installDaemon(
     // Modern first, legacy fallback: `bootstrap` replaced `load` but older
     // macOS answers only to the old verb.
     const uid = typeof process.getuid === "function" ? process.getuid() : 501;
-    const modern = await run("launchctl", ["bootstrap", `gui/${uid}`, plan.unitPath]);
-    if (modern.code === 0) return { ok: true };
+    let modern = await run("launchctl", ["bootstrap", `gui/${uid}`, plan.unitPath]);
+    if (modern.code !== 0) {
+      // Re-install is an update, not a false "already installed" success.
+      // If this label is already loaded, boot it out and bootstrap the unit
+      // we just wrote so changed runtimes/flags actually take effect.
+      const replaced = await run("launchctl", ["bootout", `gui/${uid}/${plan.label}`]);
+      if (replaced.code === 0) {
+        modern = await run("launchctl", ["bootstrap", `gui/${uid}`, plan.unitPath]);
+      }
+    }
+    if (modern.code === 0) {
+      // RunAtLoad should start the job, but an explicit kickstart gives the
+      // installer a synchronous success/failure boundary instead of treating
+      // "the plist parsed" as proof that the worker started.
+      const started = await run("launchctl", ["kickstart", "-k", `gui/${uid}/${plan.label}`]);
+      if (started.code === 0) return { ok: true };
+      return {
+        ok: false,
+        message: `loaded, but launchctl could not start the worker: ${firstLine(started.stderr) || `exit ${started.code}`}`,
+      };
+    }
     const legacy = await run("launchctl", ["load", "-w", plan.unitPath]);
     if (legacy.code === 0) return { ok: true };
     return {

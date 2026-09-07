@@ -2807,6 +2807,25 @@ export function createDecisionServer(options: ServeOptions): Server {
           const found = store.runsFor(ref.id).find(one => runIsLive(one));
           return found === undefined ? null : found.id;
         })(),
+        worker: (() => {
+          const runners = store.listRunners().filter(one => one.retiredAt === null);
+          const eligible = ref?.repo === null || ref?.repo === undefined
+            ? []
+            : runners.filter(one => one.repos.includes(ref.repo as string));
+          const answering = eligible.filter(one => runnerAlive(one, now));
+          return {
+            answering: answering.length,
+            registered: eligible.length,
+            totalRegistered: runners.length,
+            lastHeard: eligible.map(one => one.heartbeatAt).sort().at(-1) ?? null,
+          };
+        })(),
+        gaps:
+          ref?.repo === null || ref?.repo === undefined
+            ? []
+            : computeGaps(store, ref.repo, now).filter(one =>
+                one.unblocks.includes(taskId) || one.alsoBlocks.includes(taskId),
+              ),
         peekable: options.localRunner !== undefined,
         position: store.queuePosition(taskId),
         mirror: store.mirrorByTask(taskId),
@@ -11215,6 +11234,10 @@ function taskBody(data: {
   /** The run whose lease is the CURRENT live claim — computed by the data
    * layer; the renderer never guesses liveness from a null outcome. */
   liveRunId?: number | null;
+  /** Workers that are both alive and authorized for this task's project. */
+  worker?: { answering: number; registered: number; totalRegistered: number; lastHeard: string | null };
+  /** Unmet capabilities that keep this exact task out of dispatch. */
+  gaps?: Gap[];
   /** Whether this serve asserted its runner — the live file view exists. */
   peekable?: boolean;
   /** Where the task stands in its own column, from the data layer. */
@@ -11303,6 +11326,69 @@ function taskBody(data: {
             `<pre id="live-transcript" class="mono" style="max-height:18rem;overflow:auto;white-space:pre-wrap"></pre>` +
             `<p class="meta" id="live-transcript-state"></p>`;
     return `<div class="card attempt-live" data-live-run="${liveRun.id}">${head}${peek}${transcript}${door}</div>`;
+  })();
+
+  // One truthful answer to the first question on a queued task: "will this
+  // run?" The badge alone cannot distinguish approval, dependency,
+  // capability, and worker gates. This card does, in priority order, and
+  // gives the nearest concrete repair rather than making the operator infer
+  // it from the rest of the page.
+  const dispatchStatus = (() => {
+    const approval = approvalOf(scope);
+    const waitingOn = (data.waitsFor ?? []).filter(one => one.state !== "done" && one.state !== "cancelled");
+    const worker = data.worker ?? { answering: 0, registered: 0, totalRegistered: 0, lastHeard: null };
+    const gaps = data.gaps ?? [];
+    const box = (kind: "ok" | "problem", title: string, detail: string): string =>
+      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" data-dispatch-status="${escape(title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
+      `<strong>${escape(title)}</strong> <span class="meta">${detail}</span></div>`;
+
+    if (task.state === "done") {
+      return box("ok", "Complete", `The task reached a terminal result. <a href="#attempts">Review the attempt and its proof below.</a>`);
+    }
+    if (task.state === "cancelled") {
+      return box("problem", "Cancelled", "Nothing else will run for this task.");
+    }
+    if (data.claimed && liveRun !== undefined) {
+      return box("ok", "Running now", `Worker <span class="mono">${escape(liveRun.runner)}</span> owns <a href="/r/${liveRun.id}">build #${liveRun.id}</a>.`);
+    }
+    if (task.state === "failed" || data.incidents.some(one => one.resolvedAt === null)) {
+      return box("problem", "Needs a retry", `The last attempt stopped. Review the incident, then use <strong>retry</strong> below; its branch and workspace are preserved.`);
+    }
+    if (data.repo === null) {
+      return box("problem", "Needs a project", "Place this task in a repository before a worker can claim it.");
+    }
+    if (scope === null) {
+      if (data.plan !== "requested") {
+        return box("problem", "Needs a scope", `<a href="#scope">Write the success contract</a> or use <strong>plan first</strong>. Nothing spends until it is approved.`);
+      }
+    } else if (scope.profileState === "unresolved") {
+      return box("problem", "Needs an agent profile", `<a href="#scope">Choose an available provider and model</a>; this scope cannot be approved or dispatched yet.`);
+    } else if (!approval.approved && data.plan !== "requested") {
+      return box("problem", "Needs your approval", `<a href="#approve">Review and sign the exact scope</a>. No worker can claim it before that.`);
+    }
+    if (data.holds.length > 0) {
+      return box("problem", "On hold", `${escape(data.holds[0]?.reason ?? "A hold blocks the next attempt.")} Use <strong>unhold</strong> below when it may continue.`);
+    }
+    if (waitingOn.length > 0) {
+      const first = waitingOn[0] as (typeof waitingOn)[number];
+      const link = first.admitted ? `<a href="${taskHref(first.id)}" class="mono">${escape(first.id)}</a>` : `<span class="mono">${escape(first.id)}</span>`;
+      return box("problem", "Waiting on another task", `${link} must finish first${waitingOn.length > 1 ? `, with ${waitingOn.length - 1} more blocker${waitingOn.length > 2 ? "s" : ""}` : ""}.`);
+    }
+    if (gaps.length > 0) {
+      return box("problem", "Missing a requirement", `<a href="/caps">Repair ${escape(gaps[0]?.key ?? "the missing capability")}</a>${gaps.length > 1 ? ` and ${gaps.length - 1} more` : ""}; dispatch checks these before spending.`);
+    }
+    if (worker.answering === 0) {
+      const history = worker.registered === 0
+        ? worker.totalRegistered > 0
+          ? "Workers exist, but none is registered for this project."
+          : "No worker has been registered."
+        : `The ${worker.registered} registered worker${worker.registered === 1 ? " is" : "s are"} offline; last heard ${worker.lastHeard === null ? "never" : escape(when(worker.lastHeard))}.`;
+      return box("problem", "No worker online", `${history} On the machine that should build, run <span class="mono">standing-orders up</span>. Nothing will start until it answers.`);
+    }
+    if (data.plan === "requested") {
+      return box("ok", "Planner ready", `${worker.answering} eligible worker${worker.answering === 1 ? " is" : "s are"} online; planning may start on the next pass.`);
+    }
+    return box("ok", "Ready to run", `${worker.answering} eligible worker${worker.answering === 1 ? " is" : "s are"} online and every dispatch gate currently passes.`);
   })();
 
   const contest = data.contest ?? null;
@@ -11946,6 +12032,7 @@ function taskBody(data: {
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
     `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
+    dispatchStatus,
     planCard,
     approveForm === "" ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
