@@ -5,12 +5,12 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { readFileSync, readdirSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, chmodSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resetAttestationCache } from "./attest.js";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { openStore, type Store } from "./store.js";
-import { invokeAgent, type InvokeResult } from "./invoke.js";
+import { invokeAgent, invokeHeldAgent, type InvokeResult } from "./invoke.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire } from "./claim.js";
 
@@ -109,6 +109,62 @@ describe("the invocation gateway", () => {
     });
 
     expect(stampAtSpawn).toBe(T0.toISOString());
+  });
+
+  test("the provider gets a disposable control database, never the caller's live one", async () => {
+    let childDb: string | undefined;
+    await invokeRan(store, runId, CLAUDE, ASK, {
+      env: { STANDING_ORDERS_DB: "/operator/live/orders.db" },
+      runner: async (_file, _args, options) => {
+        childDb = options.env?.["STANDING_ORDERS_DB"];
+        expect(childDb).toBeDefined();
+        expect(childDb).not.toBe("/operator/live/orders.db");
+        expect(existsSync(dirname(childDb!))).toBe(true);
+        return OK;
+      },
+    });
+
+    expect(childDb).toBeDefined();
+    expect(existsSync(dirname(childDb!))).toBe(false);
+  });
+
+  test("a held provider keeps its disposable database only until the session exits", async () => {
+    let childDb: string | undefined;
+    let finish: (value: { code: number | null }) => void = () => {};
+    const exited = new Promise<{ code: number | null }>(resolve => {
+      finish = resolve;
+    });
+
+    const started = await invokeHeldAgent(store, runId, CLAUDE, ["--held"], {
+      socketPath: "/tmp/standing-orders-held-test.sock",
+      cookie: "cookie",
+      env: { STANDING_ORDERS_DB: "/operator/live/orders.db" },
+      starter: async (_file, _args, options) => {
+        childDb = options.env?.["STANDING_ORDERS_DB"];
+        return {
+          ok: true,
+          handle: {
+            supervisorPid: 1,
+            agentPgid: 2,
+            writeTurn: () => true,
+            endInput: () => {},
+            terminate: () => {},
+            killHard: () => {},
+            exited,
+          },
+        };
+      },
+    });
+
+    expect(started.ok).toBe(true);
+    expect(childDb).toBeDefined();
+    expect(childDb).not.toBe("/operator/live/orders.db");
+    expect(existsSync(dirname(childDb!))).toBe(true);
+
+    finish({ code: 0 });
+    await exited;
+    await Promise.resolve();
+    expect(existsSync(dirname(childDb!))).toBe(false);
   });
 
   test("usage is read off every completed process, nonzero exits included", async () => {

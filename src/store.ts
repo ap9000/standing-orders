@@ -2744,6 +2744,12 @@ export type Database = {
  * a database nobody can find when it matters.
  */
 export function databasePath(env: Record<string, string | undefined>, home: string): string {
+  // Provider children receive a unique path through this variable. Keeping
+  // the override database-specific avoids changing XDG_CONFIG_HOME for every
+  // other tool an agent may need while ensuring a self-hosting task cannot
+  // migrate or lock the control plane that launched it.
+  const isolated = env["STANDING_ORDERS_DB"];
+  if (isolated !== undefined && isolated !== "") return isolated;
   const xdg = env["XDG_CONFIG_HOME"];
   const base = xdg !== undefined && xdg !== "" ? xdg : join(home, ".config");
   const renamed = join(base, "standing-orders", "orders.db");

@@ -23,12 +23,35 @@ import { attestProvider, type VersionProbe } from "./attest.js";
 import { startClaudeHeldSession } from "./exec.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export type { ProviderRunner } from "./provider.js";
 
 /** The claude binary name — kept for the legacy quota rows and tests that
  * describe history; new code carries a resolved AgentSpec instead. */
 export const PROVIDER_BINARY = "claude";
+
+/**
+ * A provider can run the repository's own CLI. In a self-hosting build that
+ * must never mean "open the database that launched me": a migration from the
+ * candidate checkout would change the live schema underneath the older
+ * supervisor, and even a read can contend with its watch transaction. Every
+ * provider process therefore sees a unique disposable Standing Orders
+ * database while retaining its normal HOME/XDG environment for subscriptions
+ * and unrelated developer tools.
+ */
+const AGENT_DATABASE_ENV = "STANDING_ORDERS_DB";
+
+function isolatedAgentDatabase(runId: number): { dir: string; file: string } {
+  const dir = mkdtempSync(join(tmpdir(), `standing-orders-agent-${runId}-`));
+  return { dir, file: join(dir, "orders.db") };
+}
+
+function removeAgentDatabase(dir: string): void {
+  rmSync(dir, { recursive: true, force: true });
+}
 
 export type ProviderUsage = {
   tokensIn: number | null;
@@ -237,35 +260,45 @@ export async function invokeAgent(
   // else's, and the plane's own env never needed to carry it. A key
   // already ambient in the environment keeps working; the managed file,
   // being deliberate, wins.
-  const result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
-    ...runOptions,
-    ...(hardTimeoutMs === undefined ? {} : { timeoutMs: hardTimeoutMs }),
-    ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
-    ...(defaultTimeoutMs === undefined ? {} : { timeoutMs: defaultTimeoutMs }),
-    ...(managedKey === null
-      ? {}
-      : { env: { ...(runOptions.env ?? {}), [PROVIDER_KEY_ENV[spec.provider]]: managedKey } }),
-    omitEnv: [
-      ...(runOptions.omitEnv ?? []),
-      ...adapter.extraOmitEnv,
-      // Subscription mode: shed this provider's OWN key too, so an ambient
-      // one cannot force API billing over the login the operator prefers.
-      // Api-key mode: shed every OTHER own-key alias (finding 1) — gemini
-      // reads GOOGLE_API_KEY as well as GEMINI_API_KEY, and a stray alias
-      // must not override the ONE canonical key this mode injected.
-      ...(authMode === "subscription"
-        ? ownKeyEnv
-        : ownKeyEnv.filter(name => name !== PROVIDER_KEY_ENV[spec.provider])),
-    ],
-    // Providers run in their own process group (M6.12): the harness spawns
-    // shells and tools of its own, and both the timeout and the watch's
-    // hard stop must end the whole tree, not orphan the grandchildren.
-    processGroup: true,
-    // The session registry's crash guarantee (M6.9): the id is stamped the
-    // moment the stream announces it, first write wins — a daemon that
-    // dies mid-turn still knows which session to offer the successor.
-    onSessionId: id => store.stampRun(runId, { sessionId: id }),
-  });
+  const isolatedDb = isolatedAgentDatabase(runId);
+  let result: Awaited<ReturnType<typeof spawn>>;
+  try {
+    result = await spawn(attested !== null ? attested.executable : adapter.binary, argv, {
+      ...runOptions,
+      ...(hardTimeoutMs === undefined ? {} : { timeoutMs: hardTimeoutMs }),
+      ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
+      ...(defaultTimeoutMs === undefined ? {} : { timeoutMs: defaultTimeoutMs }),
+      env: {
+        ...(runOptions.env ?? {}),
+        ...(managedKey === null ? {} : { [PROVIDER_KEY_ENV[spec.provider]]: managedKey }),
+        // This key is deliberately last: no caller may point an agent back at
+        // the live control database through a generic RunOptions override.
+        [AGENT_DATABASE_ENV]: isolatedDb.file,
+      },
+      omitEnv: [
+        ...(runOptions.omitEnv ?? []),
+        ...adapter.extraOmitEnv,
+        // Subscription mode: shed this provider's OWN key too, so an ambient
+        // one cannot force API billing over the login the operator prefers.
+        // Api-key mode: shed every OTHER own-key alias (finding 1) — gemini
+        // reads GOOGLE_API_KEY as well as GEMINI_API_KEY, and a stray alias
+        // must not override the ONE canonical key this mode injected.
+        ...(authMode === "subscription"
+          ? ownKeyEnv
+          : ownKeyEnv.filter(name => name !== PROVIDER_KEY_ENV[spec.provider])),
+      ],
+      // Providers run in their own process group (M6.12): the harness spawns
+      // shells and tools of its own, and both the timeout and the watch's
+      // hard stop must end the whole tree, not orphan the grandchildren.
+      processGroup: true,
+      // The session registry's crash guarantee (M6.9): the id is stamped the
+      // moment the stream announces it, first write wins — a daemon that
+      // dies mid-turn still knows which session to offer the successor.
+      onSessionId: id => store.stampRun(runId, { sessionId: id }),
+    });
+  } finally {
+    removeAgentDatabase(isolatedDb.dir);
+  }
 
   const envelope = adapter.parse(result.stdout);
   store.recordUsage(runId, {
@@ -428,28 +461,48 @@ export async function invokeHeldAgent(
   const heldKey =
     heldMode === "api-key" ? readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null) : null;
   const start = starter ?? startClaudeHeldSession;
-  return start(adapter.binary, argv, {
-    ...runOptions,
-    ...(heldKey === null ? {} : { env: { ...(runOptions.env ?? {}), [PROVIDER_KEY_ENV.claude]: heldKey } }),
-    omitEnv: [
-      ...(runOptions.omitEnv ?? []),
-      ...adapter.extraOmitEnv,
-      ...(heldMode === "subscription" ? OWN_KEY_ENV.claude : []),
-    ],
-    socketPath,
-    cookie,
-    ...(graceMs === undefined ? {} : { graceMs }),
-    ...(readyTimeoutMs === undefined ? {} : { readyTimeoutMs }),
-    events: {
-      ...events,
-      onSessionId: id => {
-        store.stampRun(runId, { sessionId: id });
-        try {
-          events?.onSessionId?.(id);
-        } catch {
-          // Observational.
-        }
+  const isolatedDb = isolatedAgentDatabase(runId);
+  let started: import("./exec.js").HeldSessionStart;
+  try {
+    started = await start(adapter.binary, argv, {
+      ...runOptions,
+      env: {
+        ...(runOptions.env ?? {}),
+        ...(heldKey === null ? {} : { [PROVIDER_KEY_ENV.claude]: heldKey }),
+        [AGENT_DATABASE_ENV]: isolatedDb.file,
       },
-    },
-  });
+      omitEnv: [
+        ...(runOptions.omitEnv ?? []),
+        ...adapter.extraOmitEnv,
+        ...(heldMode === "subscription" ? OWN_KEY_ENV.claude : []),
+      ],
+      socketPath,
+      cookie,
+      ...(graceMs === undefined ? {} : { graceMs }),
+      ...(readyTimeoutMs === undefined ? {} : { readyTimeoutMs }),
+      events: {
+        ...events,
+        onSessionId: id => {
+          store.stampRun(runId, { sessionId: id });
+          try {
+            events?.onSessionId?.(id);
+          } catch {
+            // Observational.
+          }
+        },
+      },
+    });
+  } catch (error) {
+    removeAgentDatabase(isolatedDb.dir);
+    throw error;
+  }
+  if (!started.ok) {
+    removeAgentDatabase(isolatedDb.dir);
+  } else {
+    void started.handle.exited.then(
+      () => removeAgentDatabase(isolatedDb.dir),
+      () => removeAgentDatabase(isolatedDb.dir),
+    );
+  }
+  return started;
 }

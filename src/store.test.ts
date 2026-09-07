@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { SCHEMA_VERSION, openStore, BUILT_IN, type Capability, type Store } from "./store.js";
+import { SCHEMA_VERSION, databasePath, openStore, BUILT_IN, type Capability, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 
@@ -17,6 +17,23 @@ const tok = (name: string) => `tok-${name}`;
 function enroll(store: Store, name: string): void {
   register(store, { name, host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => tok(name) });
 }
+
+describe("the database path", () => {
+  test("a provider-specific isolation path wins without changing the rest of XDG", () => {
+    expect(
+      databasePath(
+        { STANDING_ORDERS_DB: "/tmp/standing-orders-agent/orders.db", XDG_CONFIG_HOME: "/operator/config" },
+        "/operator/home",
+      ),
+    ).toBe("/tmp/standing-orders-agent/orders.db");
+  });
+
+  test("an empty isolation path falls back to the normal operator database", () => {
+    expect(databasePath({ STANDING_ORDERS_DB: "", XDG_CONFIG_HOME: "/operator/config" }, "/operator/home")).toBe(
+      "/operator/config/standing-orders/orders.db",
+    );
+  });
+});
 
 describe("the built-in task store", () => {
   let store: Store;
