@@ -1451,7 +1451,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     const cookie = await login();
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
     expect(home).toContain('class="side"');
-    expect(home).toContain('<a href="/projects"><span class="glyph"><svg');
+    expect(home).toContain('<a href="/projects" aria-label="projects" title="projects"><span class="glyph"><svg');
     expect(home).toContain("+ new task");
     // The sole configured repo opened itself — no forced detour.
     expect(home).toContain("inbox");
@@ -4460,7 +4460,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const cookie = await login();
     const html = await (await fetch(url("/done"), { headers: { cookie } })).text();
     const side = /<aside class="side">(.*?)<\/aside>/s.exec(html)?.[1] ?? "";
-    expect(side).toContain('<nav class="nav-settings"><a href="/settings" aria-label="settings">settings</a></nav>');
+    expect(side).toMatch(/<nav class="nav-settings"><a href="\/settings" aria-label="settings" title="settings"><span class="glyph"><svg.*?<\/svg><\/span>settings<\/a><\/nav>/s);
     expect(side.indexOf('<nav class="nav-groups">')).toBeLessThan(side.indexOf('<nav class="nav-settings">'));
     const workflows = /<details class="nav-group" data-group="workflows"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
     const admin = /<details class="nav-group" data-group="admin"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
@@ -4505,7 +4505,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(home).toContain('button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }');
     expect(home).toContain('.nav-group > summary .chevron { width: .875rem; height: .875rem; flex: none; transition: transform .15s; }');
     // The rotation is real motion, so it dies under prefers-reduced-motion.
-    expect(home).toContain('button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }');
+    expect(home).toContain('.app, button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }');
   });
 
   test("the board keeps its poller privileges: connect-src, the noscript opt-out, and swap preservation", async () => {
@@ -5840,9 +5840,8 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
 
     // One visible /projects link per breakpoint (portfolio arc §1, amended
     // by the mobile pass, then the reduction pass): the rail's projects row
-    // on desktop, the projects tab on a phone — where the scope bar hides
-    // and the pill carries the name, the counts, and the switch. Exactly
-    // those two links live in chrome.
+    // on desktop, and "manage projects" inside the phone's project switcher.
+    // Exactly those two links live in chrome.
     expect(home).toContain('<details class="project-pill switcher"><summary><span class="name">main<svg');
     expect(home).toContain('<span class="pill-status">');
     expect((home.match(/href="\/projects"/g) ?? []).length).toBe(2);
@@ -6652,7 +6651,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
     expect(html).toMatch(/<a href="\/"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/runs"><span class="glyph"><svg/);
-    expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio">portfolio<\/a>/);
+    expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio" title="portfolio">portfolio<\/a>/);
     // Section headers speak sans; the state chips wear a dot before the word.
     expect(html).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
     expect(html).toContain(".badge-running::before, .badge-parked::before, .count.badge-open::before {");
@@ -6774,10 +6773,10 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     for (const repo of [repoA, repoB]) {
       expect(bar).toContain(`<form method="post" action="/projects/open"><input type="hidden" name="csrf" value="${csrfOf(board)}"><input type="hidden" name="return" value="/board?scope=all"><input type="hidden" name="path" value="${repo}"><button type="submit">${repo.split("/").pop()}</button></form>`);
     }
-    // The phone pill carries the same menu; the road to /projects is the
-    // projects row (desktop) and the projects tab (phone) — one each.
+    // The phone pill carries the same menu and a direct management route;
+    // the bottom bar stays focused on the five daily destinations.
     expect(board).toContain('<details class="project-pill switcher"><summary>');
-    expect(board).not.toContain("manage projects");
+    expect(board).toContain('<a class="manage" href="/projects">manage projects</a>');
     expect((board.match(/href="\/projects"/g) ?? []).length).toBe(2);
     // The chrome layer folds an open switcher on an outside tap.
     expect(board).toContain('details.switcher[open]');
@@ -7068,6 +7067,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain('class="thread"');
     expect(thread).toContain('class="chat-workspace"');
     expect(thread).toContain('class="chat-projects"');
+    expect(thread).toContain('id="chat-project-panel"');
+    expect(thread).toContain('class="side-toggle" aria-label="collapse sidebar"');
+    expect(thread).toContain('class="chat-project-toggle quiet" aria-controls="chat-project-panel"');
+    expect(thread).toContain("standing-orders:chat-projects");
+    expect(thread).toContain('position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));');
     expect(thread).toContain('data-card-kind="fleet-overview"');
     expect(thread).toContain('aria-label="live portfolio overview"');
     expect(thread).toContain('aria-label="projects in this conversation"');
@@ -7715,7 +7719,7 @@ describe("the board's order view (operator request): the one place a drag does a
   });
 });
 
-describe("the reduction pass (Laws of UX): five always-visible rows and two accordion groups, six tabs, one accent in two places", () => {
+describe("the reduction pass (Laws of UX): five always-visible rows and two accordion groups, five tabs, one accent in two places", () => {
   let store: Store;
   let server: Server;
   let base: string;
@@ -7777,9 +7781,12 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     const home = await (await fetch(url("/"), { headers: { cookie } })).text();
     const side = /<aside class="side">(.*?)<\/aside>/s.exec(home)?.[1] ?? "";
     const primary = /<nav>(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
+    expect(side).toContain('class="side-toggle" aria-label="collapse sidebar" aria-expanded="true"');
+    expect(home).toContain("standing-orders:sidebar-collapsed");
+    expect(home).toContain(".app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }");
     expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/projects"]);
     // The count rides the inbox row only; every primary row wears an icon.
-    expect(primary).toMatch(/<a href="\/" aria-label="inbox" class="active" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
+    expect(primary).toMatch(/<a href="\/" aria-label="inbox" title="inbox" class="active" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
     expect((primary.match(/<span class="glyph">/g) ?? []).length).toBe(5);
 
     // Both groups collapsed by default: neither carries the inbox's group.
@@ -7814,10 +7821,11 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(home).toContain('document.querySelectorAll(".nav-group")');
 
     const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(home)?.[1] ?? "";
-    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/projects", "/menu"]);
+    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/", "/board", "/runs", "/menu"]);
     // A phone tab says THAT something waits — a dot, never a number.
     expect(tabbar).toContain('<span class="dot-badge" role="img" aria-label="1 waiting"></span>');
     expect(tabbar).not.toContain("badge-open");
+    expect(home).toContain('<a class="manage" href="/projects">manage projects</a>');
 
     // /menu mirrors the same two groups, nothing else.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();

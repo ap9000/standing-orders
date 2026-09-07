@@ -2483,8 +2483,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     // every other session. The beat reads no DOM and posts no parameters.
     // …except the one-time-secret pages (forceSensitive): those stay
     // script-free absolutely, and simply do not keep sessions alive.
-    const sensitiveBeat = sensitive && s.forceSensitive !== true && s.chrome !== undefined ? beatScript() : "";
-    const script = functional + (chromeLayer ? chromeScript() : sensitiveBeat);
+    const sensitiveChrome = sensitive && s.forceSensitive !== true && s.chrome !== undefined
+      ? beatScript() + sidebarScript()
+      : "";
+    const script = functional + (chromeLayer ? chromeScript() : sensitiveChrome);
     const nonce = script === "" ? undefined : randomBytes(16).toString("base64");
     const body = chromeLayer
       ? `${s.body}\n${paletteTagCached(s.chrome?.project ?? null)}\n${KBD_HELP}`
@@ -2492,13 +2494,14 @@ export function createDecisionServer(options: ServeOptions): Server {
     const html = shell(s.title, body, {
       ...(s.chrome === undefined ? {} : { chrome: s.chrome }),
       ...(sensitive ? { sensitive: true } : {}),
+      ...(s.chrome !== undefined && s.forceSensitive !== true ? { sidebarToggle: true } : {}),
       ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: s.refreshSeconds }),
       ...(nonce === undefined ? {} : { live: { nonce, script, fallbackRefresh: s.functional?.fetches === true } }),
     });
     // v28: the chrome layer itself fetches (the attended beat), so any
     // page that ships it needs connect-src — not only pages whose own
     // functional script polls.
-    return page(response, status, html, nonce, s.functional?.fetches === true || chromeLayer || sensitiveBeat !== "");
+    return page(response, status, html, nonce, s.functional?.fetches === true || chromeLayer || sensitiveChrome !== "");
   }
 
   /** The badge cache: five seconds per project — mutations invalidate it. */
@@ -6413,7 +6416,7 @@ const STYLE = `
   }
 
   /* The workspace shell: sidebar + content, an optional list pane between. */
-  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; transition: grid-template-columns .18s ease; }
   .side {
     border-right: 1px solid var(--glass-border);
     background: color-mix(in srgb, var(--glass-strong) 88%, transparent);
@@ -6422,7 +6425,15 @@ const STYLE = `
     -webkit-backdrop-filter: blur(24px) saturate(135%); backdrop-filter: blur(24px) saturate(135%);
     box-shadow: 1px 0 0 var(--glass-highlight) inset;
   }
-  .side .brand { padding: .25rem .625rem .875rem; font-size: 1rem; height: auto; letter-spacing: -.025em; }
+  .side-head { display: flex; align-items: center; gap: .25rem; min-height: 2.5rem; margin-bottom: .45rem; }
+  .side .brand { flex: 1; min-width: 0; padding: .25rem .625rem; font-size: 1rem; height: auto; letter-spacing: -.025em; }
+  .brand-short { display: none; font-family: var(--font-mono); letter-spacing: -.06em; }
+  .side-toggle {
+    display: grid; place-items: center; flex: 0 0 2rem; width: 2rem; min-height: 2rem; padding: 0;
+    border-color: transparent; background: transparent; color: var(--muted-foreground); box-shadow: none;
+  }
+  .side-toggle:hover { background: var(--glass); color: var(--foreground); transform: none; }
+  .side-toggle svg { width: 1rem; height: 1rem; }
   /* The scope bar: one hairline row, the single scope truth on every
    * screen; its name is the switcher. Amber never appears here except
    * the needs-you count. */
@@ -6505,6 +6516,7 @@ const STYLE = `
   .nav-group .nav-group-items { display: flex; flex-direction: column; gap: .125rem; margin: .125rem 0 .25rem; }
   .side .nav-settings { margin-top: .375rem; }
   .side nav a {
+    position: relative;
     display: flex; align-items: center; gap: .625rem; padding: .4375rem .625rem; min-height: 2.125rem;
     border-radius: calc(var(--radius) - 3px); text-decoration: none;
     color: var(--muted-foreground); font-size: .8125rem; font-weight: 500;
@@ -6513,6 +6525,24 @@ const STYLE = `
   .side nav a .glyph { display: inline-flex; width: 1rem; height: 1rem; color: var(--muted-foreground); flex: none; }
   .side nav a .glyph svg { width: 1rem; height: 1rem; }
   .side nav a:hover { background: var(--glass); color: var(--foreground); transform: translateX(2px); }
+  .app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+  .app.sidebar-collapsed .side { padding-inline: .625rem; }
+  .app.sidebar-collapsed .side-head { flex-direction: column; gap: .2rem; margin-bottom: .55rem; }
+  .app.sidebar-collapsed .side .brand { flex: none; padding: .2rem 0; font-size: .75rem; }
+  .app.sidebar-collapsed .brand-long { display: none; }
+  .app.sidebar-collapsed .brand-short { display: block; }
+  .app.sidebar-collapsed .side-toggle svg { transform: rotate(180deg); }
+  .app.sidebar-collapsed .side nav a {
+    justify-content: center; gap: 0; min-height: 2.5rem; padding: .5rem; font-size: 0;
+  }
+  .app.sidebar-collapsed .side nav a .glyph { width: 1.125rem; height: 1.125rem; }
+  .app.sidebar-collapsed .side nav a .glyph svg { width: 1.125rem; height: 1.125rem; }
+  .app.sidebar-collapsed .side nav a .count {
+    position: absolute; top: .15rem; right: .05rem; min-width: 1rem; padding: 0 .25rem; font-size: .55rem;
+  }
+  .app.sidebar-collapsed .side .new-task { min-height: 2.5rem; padding: .4rem 0; font-size: 0; }
+  .app.sidebar-collapsed .side .new-task::after { content: "+"; font-size: 1rem; }
+  .app.sidebar-collapsed .side .nav-groups { display: none; }
   .side nav a.active {
     background: linear-gradient(135deg, color-mix(in srgb, var(--running) 14%, var(--glass)), var(--glass));
     color: var(--foreground); box-shadow: 0 1px 0 var(--glass-highlight) inset, 0 8px 22px -18px var(--running);
@@ -6694,7 +6724,7 @@ const STYLE = `
       position: absolute; top: .3125rem; left: calc(50% + .375rem);
       width: .375rem; height: .375rem; border-radius: 9999px; background: var(--brand);
     }
-    .content > main { padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
+    .content > main { padding: 1rem 1rem calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
   }
 
   /* /menu mirrors the rail's workflows/admin grouping as plain headed
@@ -6877,10 +6907,19 @@ const STYLE = `
     display: grid; grid-template-columns: minmax(16rem, 18.5rem) minmax(0, 56rem);
     align-items: start; gap: clamp(1.25rem, 3vw, 2.75rem);
   }
+  .chat-workspace.projects-hidden { grid-template-columns: minmax(0, 56rem); }
+  .chat-workspace.projects-hidden .chat-projects { display: none; }
   .chat-main { min-width: 0; max-width: 56rem; }
   .chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: .5rem .25rem 0; }
   .chat-head h1 { margin-bottom: .2rem; font-size: 1.65rem; letter-spacing: -.04em; }
   .chat-head .badge-running { margin-top: .2rem; background: color-mix(in srgb, var(--success) 11%, var(--glass)); color: var(--success); }
+  .chat-head-actions { display: flex; align-items: center; justify-content: flex-end; gap: .45rem; flex-wrap: wrap; }
+  .chat-project-toggle {
+    display: inline-flex; align-items: center; gap: .4rem; min-height: 2rem; padding: .25rem .55rem;
+    color: var(--muted-foreground); font-size: .6875rem; box-shadow: none;
+  }
+  .chat-project-toggle svg { width: .9rem; height: .9rem; }
+  .chat-project-toggle .badge { padding-inline: .38rem; font-size: .6rem; }
   .chat-budget {
     display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 1.25rem;
     color: var(--muted-foreground); font-size: .6875rem; font-variant-numeric: tabular-nums;
@@ -6940,6 +6979,7 @@ const STYLE = `
   }
   .chat-projects-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .75rem; padding: 0 .15rem; }
   .chat-projects-head h2 { margin: 0; color: var(--foreground); font-size: .8125rem; letter-spacing: -.01em; }
+  .chat-project-close { display: none; margin-left: auto; width: 2rem; min-height: 2rem; padding: 0; font-size: 1rem; box-shadow: none; }
   .chat-project-card {
     padding: .8rem; margin-top: .5rem; border: 1px solid transparent; border-radius: var(--radius);
     background: color-mix(in srgb, var(--muted) 58%, transparent);
@@ -7063,37 +7103,65 @@ const STYLE = `
   @media (min-width: 901px) {
     .chat-workspace .composer { position: sticky; bottom: 1rem; z-index: 5; box-shadow: var(--shadow-overlay); }
   }
-  @media (max-width: 900px) {
+  @media (min-width: 761px) and (max-width: 1199px) {
     .chat-workspace { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
     .chat-main { max-width: none; }
-    .chat-projects { position: static; max-height: none; overflow: visible; padding: .85rem; }
-    .chat-project-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .5rem; }
-    .chat-project-card { margin: 0; }
+    .chat-projects { display: none; }
+    .chat-workspace.projects-open::before {
+      content: ""; position: fixed; inset: 0 0 0 232px; z-index: 23; background: rgb(0 0 0 / .18);
+      -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+    }
+    .chat-workspace.projects-open .chat-projects {
+      display: block; position: fixed; top: 4rem; left: calc(232px + 1.25rem); z-index: 25;
+      width: min(18.5rem, calc(100vw - 232px - 2.5rem)); max-height: calc(100vh - 5rem);
+    }
+    .app.sidebar-collapsed .chat-workspace.projects-open::before { inset: 0 0 0 64px; }
+    .app.sidebar-collapsed .chat-workspace.projects-open .chat-projects { left: calc(64px + 1.25rem); }
+    .chat-project-close { display: grid; place-items: center; }
   }
   @media (max-width: 760px) {
+    main:has(.chat-workspace) { padding: 1rem 1rem calc(9rem + env(safe-area-inset-bottom, 0rem)); }
+    .chat-workspace, .chat-workspace.projects-hidden { display: block; }
+    .chat-workspace.projects-hidden .chat-projects { display: block; }
+    .chat-project-toggle, .chat-project-close { display: none; }
     .chat-project-list { display: flex; gap: .625rem; overflow-x: auto; padding: .125rem 0 .5rem; scroll-snap-type: x proximity; }
     .chat-project-card {
-      flex: 0 0 min(17rem, 82vw); scroll-snap-align: start; padding: .7rem .75rem;
+      flex: 0 0 min(16rem, 78vw); scroll-snap-align: start; padding: .6rem .65rem;
       border: 1px solid var(--glass-border); border-radius: var(--radius); background: color-mix(in srgb, var(--muted) 72%, transparent);
     }
-    .chat-projects { padding-bottom: .75rem; }
+    .chat-projects { position: static; max-height: none; overflow: hidden; padding: .65rem; margin-bottom: .85rem; }
+    .chat-projects-head { margin-bottom: .35rem; }
+    .chat-project-stats { display: flex; flex-wrap: wrap; gap: .15rem .7rem; margin-top: .35rem; }
+    .chat-project-stats span { font-size: .625rem; }
+    .chat-project-stats span:last-child { display: none; }
+    .chat-project-actions { margin-top: .35rem; }
     .chat-head { padding-inline: 0; }
     .chat-head h1 { font-size: 1.4rem; }
-    .chat-budget { margin-top: .75rem; }
+    .chat-head-actions { align-items: flex-start; }
+    .chat-budget { gap: .3rem; margin: .65rem 0 .9rem; }
+    .chat-budget > span { padding: .25rem .48rem; }
+    .chat-budget > span:first-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .chat-overview { padding: .8rem; }
     .chat-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .chat-overview-head { align-items: flex-start; }
     .chat-overview-copy strong, .chat-overview-copy span { white-space: normal; }
     .thread { min-height: 18rem; padding: 0; }
     .thread .msg.op { max-width: 90%; }
-    .thread .msg.mate { padding-left: 3rem; padding-right: 0; }
+    .thread .msg.mate { padding-left: 2.8rem; padding-right: 0; }
     .thread .msg.mate::before { width: 2.15rem; height: 2.15rem; border-radius: .7rem; }
-    .proposal-facts { grid-template-columns: 1fr; }
-    .proposal-actions .acts { align-items: stretch; flex-direction: column; }
-    .proposal-actions .acts form, .proposal-actions .acts button { width: 100%; }
+    .proposal-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .proposal-actions .acts { align-items: stretch; flex-direction: row; flex-wrap: wrap; }
+    .proposal-actions .acts form { flex: 1 1 8rem; width: auto; }
+    .proposal-actions .acts form:has(.arm) { flex-basis: 100%; }
+    .proposal-actions .acts button { width: 100%; }
     .chat-prompts { justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; padding-bottom: .35rem; }
     .chat-prompts form { flex: none; }
-    .chat-workspace .composer { position: static; }
+    .chat-main { padding-bottom: 6rem; }
+    .chat-workspace .composer {
+      position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));
+      z-index: 29; margin: 0; padding: .45rem; border-radius: 1.1rem; box-shadow: var(--shadow-overlay);
+    }
+    .composer textarea { min-height: 2.75rem; padding: .55rem .65rem; font-size: .9375rem; }
   }
   main:has(.mate-mint) { max-width: 68rem; }
   main:has(.mate-mint) > h1 { margin-top: .5rem; font-size: 1.7rem; letter-spacing: -.04em; }
@@ -7267,7 +7335,7 @@ button { min-height: 44px; }
   ::view-transition-group(*), ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
   .pulse, .fire-live { animation: none; }
   .palette, .kbd-help { animation: none; }
-  button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }
+  .app, button, .side nav a, .nav-group > summary .chevron, .chat-project-card { transition: none; }
   button:hover, .side nav a:hover, .chat-project-card:hover { transform: none; }
 }
 
@@ -7489,9 +7557,25 @@ function beatScript(): string {
   );
 }
 
+/** The rail's presentation-only state is safe beside a password ceremony:
+ * it never reads a field or sends a request, and keeps the chat collapsible
+ * from its very first screen while the palette and global keys remain absent. */
+function sidebarScript(): string {
+  return (
+    `(function(){var app=document.querySelector(".app"),sideToggle=document.querySelector(".side-toggle");` +
+    `function setSide(collapsed){if(!app||!sideToggle)return;app.classList.toggle("sidebar-collapsed",collapsed);` +
+    `sideToggle.setAttribute("aria-expanded",String(!collapsed));sideToggle.setAttribute("aria-label",collapsed?"expand sidebar":"collapse sidebar");` +
+    `sideToggle.setAttribute("title",collapsed?"expand sidebar":"collapse sidebar");}` +
+    `if(app&&sideToggle){var sideCollapsed=false;try{sideCollapsed=localStorage.getItem("standing-orders:sidebar-collapsed")==="1";}catch(e){}` +
+    `setSide(sideCollapsed);sideToggle.addEventListener("click",function(){var next=!app.classList.contains("sidebar-collapsed");setSide(next);` +
+    `try{localStorage.setItem("standing-orders:sidebar-collapsed",next?"1":"0");}catch(e){}});}})();`
+  );
+}
+
 function chromeScript(): string {
   return (
     beatScript() +
+    sidebarScript() +
     `(function(){` +
     // The app-icon badge (Phase 2E): the page's server-rendered waiting
     // count is authoritative over any stale push — synced on every chrome
@@ -7654,6 +7738,9 @@ function shell(
     /** A password ceremony is on this page: the chrome gains no forms, so
      * the switcher renders inert — the name, and the one /projects link. */
     sensitive?: boolean;
+    /** Whether the presentation-only desktop rail control has a nonce'd
+     * handler. Sensitive pages may opt in; one-time-secret pages do not. */
+    sidebarToggle?: boolean;
     refreshSeconds?: number;
     /** The page's one nonce'd script: region pollers + the chrome layer,
      * composed by sendScreen. Read-only regions only; one nonce per
@@ -7706,7 +7793,7 @@ function shell(
 
   const chrome = options.chrome;
   const item = (key: Chrome["active"], href: string, label: string, count?: number): string =>
-    `<a href="${href}" aria-label="${escape(label)}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
+    `<a href="${href}" aria-label="${escape(label)}" title="${escape(label)}"${chrome.active === key ? ' class="active"' : ""}${key === "inbox" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
     `${NAV_ICONS[key] === undefined ? "" : `<span class="glyph">${NAV_ICONS[key]}</span>`}${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${key === "inbox" && chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
 
@@ -7772,7 +7859,11 @@ function shell(
     `</details>`;
   const side = [
     `<aside class="side">`,
-    `<a class="brand" href="/">standing<span class="dot">·</span>orders</a>`,
+    `<div class="side-head"><a class="brand" href="/"><span class="brand-long">standing<span class="dot">·</span>orders</span><span class="brand-short">s·o</span></a>`,
+    ...(options.sidebarToggle === true
+      ? [`<button type="button" class="side-toggle" aria-label="collapse sidebar" aria-expanded="true" title="collapse sidebar">${strokeIcon(`<path d="m15 18-6-6 6-6"/>`)}</button>`]
+      : []),
+    `</div>`,
     `<nav>`,
     // Task-first IA: chat, inbox, board, builds, projects — always visible,
     // always in this order, each with an icon, active, focus, and count
@@ -7785,7 +7876,7 @@ function shell(
     item("runs", "/runs", "builds"),
     item("projects", "/projects", "projects"),
     `</nav>`,
-    `<a class="new-task" href="/tasks/new">+ new task</a>`,
+    `<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`,
     `<nav class="nav-groups">`,
     navGroup("workflows", "workflows", workflowsRows(), WORKFLOWS_KEYS.has(chrome.active)),
     navGroup("admin", "admin", adminRows(), ADMIN_KEYS.has(chrome.active)),
@@ -7830,7 +7921,7 @@ function shell(
     canSwitch
       ? `<details class="project-pill switcher"><summary><span class="name">${scopeName}${CHEVRON_ICON}</span>${
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
-        }</summary>${switcherMenu("")}</details>`
+          }</summary>${switcherMenu(`<a class="manage" href="/projects">manage projects</a>`)}</details>`
       : `<a class="project-pill" href="/projects"><span class="name">${scopeName}</span>${
           scopeCounts === "" ? "" : `<span class="pill-status">${scopeCounts}</span>`
         }</a>`,
@@ -7846,7 +7937,6 @@ function shell(
     inbox: icon(`<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>`),
     board: icon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
     runs: icon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
-    projects: icon(FOLDER_PATHS),
     menu: icon(`<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>`),
   } as const;
   const tab = (key: keyof typeof TAB_ICONS & Chrome["active"], href: string, label: string, count?: number): string =>
@@ -7860,7 +7950,6 @@ function shell(
     tab("inbox", "/", "inbox", chrome.inboxCount),
     tab("board", "/board", "board"),
     tab("runs", "/runs", "builds"),
-    tab("projects", "/projects", "projects"),
     tab("menu", "/menu", "more"),
     `</nav>`,
   ].join("");
@@ -8713,8 +8802,9 @@ function chatProjectRail(projects: readonly ChatProjectPulse[], csrf: string, in
     );
   }).join("");
   return (
-    `<aside class="chat-projects" aria-label="projects in this conversation">` +
-    `<div class="chat-projects-head"><h2>projects</h2><span class="badge">${projects.length}</span></div>` +
+    `<aside class="chat-projects" id="chat-project-panel" aria-label="projects in this conversation">` +
+    `<div class="chat-projects-head"><h2>projects</h2><span class="badge">${projects.length}</span>` +
+    `<button type="button" class="chat-project-close quiet" aria-label="close projects">×</button></div>` +
     `<div class="chat-project-list">${rows}</div></aside>`
   );
 }
@@ -8732,6 +8822,18 @@ function matePromptStarters(csrf: string): string {
     `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<button type="submit" name="message" value="${escape(message)}" class="quiet">${escape(label)}</button></form>`,
   ).join("")}</div>`;
+}
+
+function chatHeading(copy: string, projectCount: number, live: boolean, showProjectToggle = true): string {
+  return (
+    `<div class="chat-head"><div><h1>chat</h1><p class="meta">${escape(copy)}</p></div>` +
+    `<div class="chat-head-actions">` +
+    (showProjectToggle
+      ? `<button type="button" class="chat-project-toggle quiet" aria-controls="chat-project-panel" aria-expanded="true" title="show or hide projects">` +
+        `${strokeIcon(`<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>`)}<span>projects</span><span class="badge">${projectCount}</span></button>`
+      : "") +
+    `<span class="badge${live ? " badge-running" : ""}">${live ? "conversation live" : "unified workspace"}</span></div></div>`
+  );
 }
 
 /** A deliberately small rich-text grammar for model copy. Input is escaped
@@ -8784,8 +8886,16 @@ function chatActivity(activity: string | null): string {
   return `<div class="chat-activity" aria-label="work performed">${activity.split(" · ").map(one => `<span>${escape(one)}</span>`).join("")}</div>`;
 }
 
-const CHAT_COMPOSER_SCRIPT =
-  `(function(){var box=document.querySelector(".composer textarea");if(!box)return;` +
+const CHAT_UI_SCRIPT =
+  `(function(){var workspace=document.querySelector(".chat-workspace"),projectPanel=document.getElementById("chat-project-panel"),projectToggle=document.querySelector(".chat-project-toggle"),projectClose=document.querySelector(".chat-project-close");` +
+  `if(workspace&&projectPanel&&projectToggle){var wide=window.matchMedia("(min-width: 1200px)");var saved="";try{saved=localStorage.getItem("standing-orders:chat-projects")||"";}catch(e){}` +
+  `function apply(open){workspace.classList.toggle("projects-open",open);workspace.classList.toggle("projects-hidden",!open);projectToggle.setAttribute("aria-expanded",String(open));}` +
+  `function preferred(){return wide.matches&&saved!=="closed";}apply(preferred());` +
+  `projectToggle.addEventListener("click",function(){var next=!workspace.classList.contains("projects-open");apply(next);if(wide.matches){saved=next?"open":"closed";try{localStorage.setItem("standing-orders:chat-projects",saved);}catch(e){}}});` +
+  `if(projectClose)projectClose.addEventListener("click",function(){apply(false);});` +
+  `document.addEventListener("click",function(ev){if(wide.matches||!workspace.classList.contains("projects-open"))return;var target=ev.target;if(target instanceof Node&&!projectPanel.contains(target)&&!projectToggle.contains(target))apply(false);});` +
+  `wide.addEventListener("change",function(){apply(preferred());});document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&!wide.matches&&workspace.classList.contains("projects-open"))apply(false);});}` +
+  `var box=document.querySelector(".composer textarea");if(!box)return;` +
   `function size(){box.style.height="auto";box.style.height=Math.min(box.scrollHeight,208)+"px";}size();box.addEventListener("input",size);` +
   `box.addEventListener("keydown",function(ev){if(ev.isComposing||ev.key!=="Enter"||ev.shiftKey||!window.matchMedia("(min-width: 761px)").matches)return;ev.preventDefault();if(box.value.trim()!=="")box.form.requestSubmit();});})();`;
 
@@ -8861,8 +8971,7 @@ function chatPage(chrome: Chrome, data: {
     ].join("\n");
   };
   const parts: string[] = [
-    `<div class="chat-head"><div><h1>chat</h1><p class="meta">one place to understand every project and shape what happens next</p></div>` +
-      `<span class="badge">unified workspace</span></div>`,
+    chatHeading("one place to understand every project and shape what happens next", data.projects.length, false, data.enabled.ok),
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
@@ -8897,7 +9006,7 @@ function chatPage(chrome: Chrome, data: {
   if (data.pending !== null) {
     parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id} · up to ${chatMoney(data.pending.reservedMicrousd)} reserved · this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
-    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome, refreshSeconds: 3 });
+    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
   }
   const last = data.chat?.lastTurn ?? null;
   if (last !== null) {
@@ -8973,7 +9082,7 @@ function chatPage(chrome: Chrome, data: {
       );
     }
   }
-  return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome });
+  return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome, functional: { script: CHAT_UI_SCRIPT } });
 }
 
 function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): Screen {
@@ -9210,9 +9319,7 @@ function matePage(chrome: Chrome, data: {
 }): Screen {
   const subscription = isSubscriptionChatProvider(data.config.provider);
   const conversation: string[] = [
-    `<div class="chat-head"><div><h1>chat</h1>` +
-      `<p class="meta">one conversation across every project · understand, prioritize, and act from here</p></div>` +
-      `<span class="badge badge-running">conversation live</span></div>`,
+    chatHeading("one conversation across every project · understand, prioritize, and act from here", data.projects.length, true),
     `<div class="chat-budget"><span class="mono">answering with ${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
       (subscription
         ? `<span>membership login · no dollar ceiling</span>`
@@ -9265,7 +9372,7 @@ function matePage(chrome: Chrome, data: {
       `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
       `<button type="submit" class="quiet">stop</button></form></div>`,
     );
-    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${conversation.join("\n")}</section></div>`, { chrome, refreshSeconds: 3 });
+    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${conversation.join("\n")}</section></div>`, { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
   }
   conversation.push(
     data.messages.length === 0 ? "" : matePromptStarters(data.csrf),
@@ -9288,7 +9395,7 @@ function matePage(chrome: Chrome, data: {
   return screen(
     "chat",
     `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, false)}<section class="chat-main">${conversation.join("\n")}</section></div>`,
-    { chrome, functional: { script: CHAT_COMPOSER_SCRIPT } },
+    { chrome, functional: { script: CHAT_UI_SCRIPT } },
   );
 }
 
@@ -10676,6 +10783,7 @@ const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
   board: strokeIcon(`<path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/>`),
   runs: strokeIcon(`<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`),
   projects: strokeIcon(FOLDER_PATHS),
+  settings: strokeIcon(`<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/>`),
 };
 
 /** One grouped destination inside an accordion group or the /menu overflow. */
