@@ -43,7 +43,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 37;
+export const SCHEMA_VERSION = 38;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -564,6 +564,7 @@ export const RUN_PHASES = [
   "validating-handoff",
   "capturing-evidence",
   "committing",
+  "verifying-proof",
 ] as const;
 export type RunPhase = (typeof RUN_PHASES)[number];
 
@@ -751,7 +752,20 @@ export type Decision = {
 export type Artifact = {
   id: number;
   run: number;
-  kind: "diff" | "status" | "park-payload" | "plan" | "terminal-diff" | "diff-stat" | "handoff" | "revision-brief" | "base-tree" | "report";
+  kind:
+    | "diff"
+    | "status"
+    | "park-payload"
+    | "plan"
+    | "terminal-diff"
+    | "diff-stat"
+    | "handoff"
+    | "revision-brief"
+    | "base-tree"
+    | "report"
+    | "proof"
+    | "check-log"
+    | "screenshot";
   key: string;
   bytesOriginal: number;
   bytesStored: number;
@@ -807,7 +821,14 @@ export type TelegramAction = {
 export type Incident = {
   id: number;
   run: number;
-  kind: "malformed-decision" | "attempts-exhausted" | "commit-failure" | "malformed-plan" | "plan-attempts-exhausted" | "malformed-report";
+  kind:
+    | "malformed-decision"
+    | "attempts-exhausted"
+    | "commit-failure"
+    | "malformed-plan"
+    | "plan-attempts-exhausted"
+    | "malformed-report"
+    | "malformed-proof";
   createdAt: string;
   resolvedAt: string | null;
   resolvedBy: string | null;
@@ -1670,7 +1691,7 @@ CREATE TABLE IF NOT EXISTS decision (
 CREATE TABLE IF NOT EXISTS artifact (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run            INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report')),
+  kind           TEXT NOT NULL CHECK (kind IN ('diff','status','park-payload','plan','terminal-diff','diff-stat','handoff','revision-brief','base-tree','report','proof','check-log','screenshot')),
   key            TEXT NOT NULL,
   bytes_original INTEGER NOT NULL,
   bytes_stored   INTEGER NOT NULL,
@@ -1711,7 +1732,7 @@ CREATE TABLE IF NOT EXISTS run_decision (
 CREATE TABLE IF NOT EXISTS incident (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   run         INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
-  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted','malformed-report')),
+  kind        TEXT NOT NULL CHECK (kind IN ('malformed-decision','attempts-exhausted','commit-failure','malformed-plan','plan-attempts-exhausted','malformed-report','malformed-proof')),
   created_at  TEXT NOT NULL,
   resolved_at TEXT,
   resolved_by TEXT
@@ -2394,6 +2415,47 @@ CREATE TABLE IF NOT EXISTS worktree_setup (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS worktree_setup_live
   ON worktree_setup (repo) WHERE revoked_at IS NULL;
+
+-- The per-repo verification command (Priority 2): the ONE shell command the
+-- plane re-runs, unattended, in a leased worktree after a build commits —
+-- operator-approved and digest-bound like worktree_setup, its own table
+-- rather than a second column on it: setup prepares a checkout, this
+-- checks a finished one, and revocation histories must not entangle.
+CREATE TABLE IF NOT EXISTS verify_command (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo        TEXT NOT NULL,
+  command     TEXT NOT NULL,
+  timeout_ms  INTEGER NOT NULL,
+  digest      TEXT NOT NULL,
+  approved_by TEXT NOT NULL,
+  approved_at TEXT NOT NULL,
+  revoked_at  TEXT,
+  revoked_by  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS verify_command_live
+  ON verify_command (repo) WHERE revoked_at IS NULL;
+
+-- The proof verdict (Priority 2): the machine-authored judgement, computed
+-- once at completion by adjudicate() and never re-inferred at render — a
+-- table keyed by run, not a run column, so widening it never touches
+-- run's own exact recognizers.
+CREATE TABLE IF NOT EXISTS proof_verdict (
+  run         INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  verdict     TEXT NOT NULL CHECK (verdict IN ('verified','attested','short','refuted')),
+  reasons_json TEXT NOT NULL,
+  decided_at  TEXT NOT NULL
+);
+
+-- An operator's explicit acceptance of a short/refuted verdict (Priority
+-- 2): the one act that lets a task read "done" despite incomplete proof.
+-- Recorded, never inferred — accepting is a person's act, like approving a
+-- scope.
+CREATE TABLE IF NOT EXISTS proof_acceptance (
+  run         INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  approver    TEXT NOT NULL,
+  note        TEXT,
+  accepted_at TEXT NOT NULL
+);
 
 -- An operator's note on a run (M6): immutable, bounded, append-only — the
 -- human's verdict next to the machine's record. Never a mutation of the
@@ -3494,6 +3556,14 @@ function migrate(db: Database): void {
   rebuildRunForV34(db);
   rebuildArtifactForV34(db);
   rebuildIncidentForV34(db);
+
+  // v38 (verified done): artifact.kind admits 'proof','check-log','screenshot';
+  // incident.kind admits 'malformed-proof' — both exact recognizers over the
+  // v34 shape (the same CHECK widening recipe, one generation later).
+  // verify_command, proof_verdict, and proof_acceptance are wholly new
+  // tables and arrive through the fresh SCHEMA's IF NOT EXISTS on both roads.
+  rebuildArtifactForV38(db);
+  rebuildIncidentForV38(db);
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -3534,6 +3604,16 @@ function V34_INCIDENT_DDL(name: string): string {
   return V7_INCIDENT_DDL(name).replace("'plan-attempts-exhausted'", "'plan-attempts-exhausted','malformed-report'");
 }
 const INCIDENT_COLUMNS = ["id", "run", "kind", "created_at", "resolved_at", "resolved_by"] as const;
+
+/** v38: artifact.kind additionally admits 'proof','check-log','screenshot'. */
+function V38_ARTIFACT_DDL(name: string): string {
+  return V34_ARTIFACT_DDL(name).replace("'revision-brief','base-tree','report'", "'revision-brief','base-tree','report','proof','check-log','screenshot'");
+}
+
+/** v38: incident.kind additionally admits 'malformed-proof'. */
+function V38_INCIDENT_DDL(name: string): string {
+  return V34_INCIDENT_DDL(name).replace("'plan-attempts-exhausted','malformed-report'", "'plan-attempts-exhausted','malformed-report','malformed-proof'");
+}
 
 /**
  * One exact copy-rename (v4 review, finding 7 — substrings are not
@@ -3577,14 +3657,32 @@ function rebuildExact(
   }
 }
 
-/** v34: artifact.kind admits 'report'. */
+/** v34: artifact.kind admits 'report'. A table already rebuilt to the v38
+ * shape (migrate() runs unconditionally on every open, including a fresh
+ * database created straight at the current shape) is a DONE shape too —
+ * the same "old-shape-plus-later-widening" recognizer rebuildRunForV29
+ * uses for V34_RUN_DDL. */
 export function rebuildArtifactForV34(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact'").get();
+  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V38_ARTIFACT_DDL("artifact"))) return;
   rebuildExact(db, "artifact", V17_ARTIFACT_DDL, V34_ARTIFACT_DDL, ARTIFACT_COLUMNS);
 }
 
-/** v34: incident.kind admits 'malformed-report'. */
+/** v34: incident.kind admits 'malformed-report'. Same v38-shape tolerance as rebuildArtifactForV34. */
 export function rebuildIncidentForV34(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'incident'").get();
+  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(V38_INCIDENT_DDL("incident"))) return;
   rebuildExact(db, "incident", V7_INCIDENT_DDL, V34_INCIDENT_DDL, INCIDENT_COLUMNS);
+}
+
+/** v38: artifact.kind admits 'proof','check-log','screenshot'. */
+export function rebuildArtifactForV38(db: Database): void {
+  rebuildExact(db, "artifact", [V17_ARTIFACT_DDL, V34_ARTIFACT_DDL], V38_ARTIFACT_DDL, ARTIFACT_COLUMNS);
+}
+
+/** v38: incident.kind admits 'malformed-proof'. */
+export function rebuildIncidentForV38(db: Database): void {
+  rebuildExact(db, "incident", [V7_INCIDENT_DDL, V34_INCIDENT_DDL], V38_INCIDENT_DDL, INCIDENT_COLUMNS);
 }
 
 /** The v34 run shape: 'scout' joins the roles, and the v30 columns sit
@@ -7320,6 +7418,105 @@ export class Store {
   /** The cache stamp: this checkout completed this setup. Success-only by contract. */
   stampWorktreeSetup(path: string, digest: string): void {
     this.db.prepare("UPDATE worktree SET setup_digest = ? WHERE path = ?").run(digest, path);
+  }
+
+  // ---- verify command (Priority 2) ---------------------------------------
+
+  /**
+   * Approve one repo's verification command, revoking any predecessor in
+   * the same transaction — exactly one live command per repo, enforced by
+   * the partial unique index. Cloned from setWorktreeSetup: same digest
+   * shape, same revoke-then-insert ceremony.
+   */
+  setVerifyCommand(
+    args: { repo: string; command: string; timeoutMs: number; approvedBy: string },
+    now: Date,
+  ): VerifyCommand {
+    const digest = createHash("sha256")
+      .update(`${args.repo} ${args.command} ${args.timeoutMs}`, "utf8")
+      .digest("hex")
+      .slice(0, 16);
+    return this.transact(() => {
+      this.db
+        .prepare("UPDATE verify_command SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+        .run(now.toISOString(), args.approvedBy, args.repo);
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO verify_command (repo, command, timeout_ms, digest, approved_by, approved_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(args.repo, args.command, args.timeoutMs, digest, args.approvedBy, now.toISOString());
+      const row = this.db.prepare("SELECT * FROM verify_command WHERE id = ?").get(Number(inserted.lastInsertRowid));
+      return readVerifyCommand(row as Record<string, unknown>);
+    });
+  }
+
+  liveVerifyCommand(repo: string): VerifyCommand | null {
+    const row = this.db.prepare("SELECT * FROM verify_command WHERE repo = ? AND revoked_at IS NULL").get(repo);
+    return row === undefined ? null : readVerifyCommand(row);
+  }
+
+  clearVerifyCommand(repo: string, by: string, now: Date): boolean {
+    const done = this.db
+      .prepare("UPDATE verify_command SET revoked_at = ?, revoked_by = ? WHERE repo = ? AND revoked_at IS NULL")
+      .run(now.toISOString(), by, repo);
+    return Number(done.changes) > 0;
+  }
+
+  // ---- proof verdict and acceptance (Priority 2) -------------------------
+
+  /** The machine's one verdict for a run, computed once at completion by
+   * adjudicate() — overwritten only by a re-computation of the SAME run's
+   * proof, never by a later render. */
+  saveProofVerdict(runId: number, verdict: ProofVerdictRow["verdict"], reasons: readonly string[], now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO proof_verdict (run, verdict, reasons_json, decided_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (run) DO UPDATE SET verdict = excluded.verdict, reasons_json = excluded.reasons_json, decided_at = excluded.decided_at`,
+      )
+      .run(runId, verdict, JSON.stringify(reasons), now.toISOString());
+  }
+
+  proofVerdictFor(runId: number): ProofVerdictRow | null {
+    const row = this.db.prepare("SELECT * FROM proof_verdict WHERE run = ?").get(runId);
+    return row === undefined ? null : readProofVerdict(row as Record<string, unknown>);
+  }
+
+  /** Every verdict for a batch of runs, keyed by run id — the board and
+   * `/done` read many rows at once and must not pay an N+1 for this. */
+  proofVerdictsFor(runIds: readonly number[]): Map<number, ProofVerdictRow> {
+    const map = new Map<number, ProofVerdictRow>();
+    if (runIds.length === 0) return map;
+    const placeholders = runIds.map(() => "?").join(",");
+    const rows = this.db.prepare(`SELECT * FROM proof_verdict WHERE run IN (${placeholders})`).all(...runIds);
+    for (const row of rows) {
+      const read = readProofVerdict(row as Record<string, unknown>);
+      map.set(read.run, read);
+    }
+    return map;
+  }
+
+  /** The operator's explicit acceptance of a short/refuted verdict — the
+   * one act that lets the task read done despite incomplete proof. */
+  acceptProof(runId: number, approver: string, note: string | null, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO proof_acceptance (run, approver, note, accepted_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (run) DO UPDATE SET approver = excluded.approver, note = excluded.note, accepted_at = excluded.accepted_at`,
+      )
+      .run(runId, approver, note, now.toISOString());
+  }
+
+  proofAcceptance(runId: number): ProofAcceptanceRow | null {
+    const row = this.db.prepare("SELECT * FROM proof_acceptance WHERE run = ?").get(runId);
+    if (row === undefined) return null;
+    const r = row as Record<string, unknown>;
+    return {
+      run: Number(r["run"]),
+      approver: String(r["approver"]),
+      note: r["note"] === null ? null : String(r["note"]),
+      acceptedAt: String(r["accepted_at"]),
+    };
   }
 
   // ---- run notes (M6) -----------------------------------------------------
@@ -14169,6 +14366,9 @@ export class Store {
     prNumber: number | null;
     prUrl: string | null;
     publicationState: string | null;
+    runId: number | null;
+    proofVerdict: ProofVerdictRow["verdict"] | null;
+    proofAccepted: boolean;
   }[] {
     const page = Math.max(1, Math.min(Math.floor(limit), 100));
     // Admission binds BEFORE the LIMIT here exactly as in the board's
@@ -14187,8 +14387,9 @@ export class Store {
              AND (? IS NULL OR task_ref.repo IS NULL OR task_ref.repo = ?)
              ${admission}
          )
-         SELECT completed.*, run.outcome, run.handoff, run.cost_usd, run.provider, run.auth_mode, run.started_at, run.finished_at,
-                publication.state AS pub_state, publication.pr_number, publication.pr_url
+         SELECT completed.*, run.id AS run_id, run.outcome, run.handoff, run.cost_usd, run.provider, run.auth_mode, run.started_at, run.finished_at,
+                publication.state AS pub_state, publication.pr_number, publication.pr_url,
+                proof_verdict.verdict AS proof_verdict, proof_acceptance.run AS proof_accepted_run
          FROM completed
          LEFT JOIN run ON run.id = (
            SELECT MAX(final.id) FROM run AS final
@@ -14196,6 +14397,8 @@ export class Store {
              AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
          )
          LEFT JOIN publication ON publication.run = run.id
+         LEFT JOIN proof_verdict ON proof_verdict.run = run.id
+         LEFT JOIN proof_acceptance ON proof_acceptance.run = run.id
          ORDER BY completed.completed_at DESC, completed.id DESC LIMIT ?`,
       )
       .all(BUILT_IN, repo, repo, ...(admitted ?? []), page)
@@ -14219,6 +14422,9 @@ export class Store {
         prNumber: row["pr_number"] === null ? null : Number(row["pr_number"]),
         prUrl: row["pr_url"] === null ? null : String(row["pr_url"]),
         publicationState: row["pub_state"] === null ? null : String(row["pub_state"]),
+        runId: row["run_id"] === null || row["run_id"] === undefined ? null : Number(row["run_id"]),
+        proofVerdict: row["proof_verdict"] === null || row["proof_verdict"] === undefined ? null : (String(row["proof_verdict"]) as ProofVerdictRow["verdict"]),
+        proofAccepted: row["proof_accepted_run"] !== null && row["proof_accepted_run"] !== undefined,
       }));
   }
 
@@ -16353,6 +16559,67 @@ export type WorktreeSetup = {
   approvedAt: string;
   revokedAt: string | null;
   revokedBy: string | null;
+};
+
+/** One repo's approved verification command (Priority 2) — the command
+ * text, never secret values; the plane re-runs it unattended after commit. */
+export type VerifyCommand = {
+  id: number;
+  repo: string;
+  command: string;
+  timeoutMs: number;
+  digest: string;
+  approvedBy: string;
+  approvedAt: string;
+  revokedAt: string | null;
+  revokedBy: string | null;
+};
+
+function readVerifyCommand(row: Record<string, unknown>): VerifyCommand {
+  return {
+    id: Number(row["id"]),
+    repo: String(row["repo"]),
+    command: String(row["command"]),
+    timeoutMs: Number(row["timeout_ms"]),
+    digest: String(row["digest"]),
+    approvedBy: String(row["approved_by"]),
+    approvedAt: String(row["approved_at"]),
+    revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
+    revokedBy: row["revoked_by"] === null ? null : String(row["revoked_by"]),
+  };
+}
+
+/** The machine's one verdict for a run's proof (Priority 2), computed once
+ * at completion — never re-inferred at render. */
+export type ProofVerdictRow = {
+  run: number;
+  verdict: "verified" | "attested" | "short" | "refuted";
+  reasons: string[];
+  decidedAt: string;
+};
+
+function readProofVerdict(row: Record<string, unknown>): ProofVerdictRow {
+  let reasons: string[] = [];
+  try {
+    const parsed = JSON.parse(String(row["reasons_json"]));
+    if (Array.isArray(parsed)) reasons = parsed.map(one => String(one));
+  } catch {
+    reasons = [];
+  }
+  return {
+    run: Number(row["run"]),
+    verdict: String(row["verdict"]) as ProofVerdictRow["verdict"],
+    reasons,
+    decidedAt: String(row["decided_at"]),
+  };
+}
+
+/** An operator's explicit acceptance of a short/refuted proof verdict. */
+export type ProofAcceptanceRow = {
+  run: number;
+  approver: string;
+  note: string | null;
+  acceptedAt: string;
 };
 
 /** A contestant's execution profile (v24): exact ids from the race terms,

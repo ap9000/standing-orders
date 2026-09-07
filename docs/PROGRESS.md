@@ -1,5 +1,47 @@
 # Progress
 
+**2026-09-07 — Verified done: a typed proof, adjudicated against the
+plane's own evidence, replaces presence-only "complete with evidence."**
+Priority 2's first slice. `src/proof.ts` (new): a scout-report-shaped 422
+parser for the build's optional proof manifest — up to 12 acceptance
+criteria, 12 checks with exit codes, 64 changed paths, 8 caveats, 8
+screenshots — and `adjudicate()`, a pure ordered-rules function computing
+one closed verdict (`verified` | `attested` | `short` | `refuted`) from
+the proof plus the machine's own captures, never re-run at render.
+`src/evidence.ts`: the `STANDING-ORDERS-PROOF-` protocol prefix, PNG/JPEG
+signature sniffing (never a claimed extension), and a verified per-run
+proof reader. Schema v38: `artifact.kind` and `incident.kind` widen by
+exact recognizers (from either the v17/v7 or v34 predecessor shape — the
+first exact-recognizer chain two generations deep, so an earlier
+generation's rebuild also had to learn its OWN table's later shape is a
+done state, the same way `rebuildRunForV29` already tolerated `V34_RUN_DDL`);
+new `verify_command` table (an operator-approved per-repository shell
+command, cloned from `worktree_setup`'s ceremony exactly: digest, restated
+terms, `--yes`); `proof_verdict` and `proof_acceptance`, one row per run.
+`src/builder.ts`: after commit and the terminal-diff capture, the builder
+reads the agent's optional proof, validates every claimed screenshot
+against the worktree's actual bytes, re-runs the repository's approved
+verify command under the same allowlisted environment as setup, and
+saves the verdict — all inside a phase (`verifying-proof`) and a
+try/catch that can never turn an already-committed attempt into a
+failure. A malformed proof is preserved as evidence and raises a
+`malformed-proof` incident; a missing one simply reads unverified. Every
+surface speaks `proof.ts`'s own words: the task page's dispatch status
+(four `data-dispatch-status` tokens), a new evidence-bundle card on the
+run page (criteria, the agent's declared checks, the plane's own re-run
+labeled "re-run here", caveats, screenshot thumbnails linking to the full
+image), `/done`, `/runs`, and the board — whose done lane now excludes,
+and whose attention lane gains, a completed task with an unaccepted
+short or refuted verdict (`board.ts`'s `attentionCardForUnverifiedDone`,
+kept a pure sibling of `classify()` rather than forced through its
+non-done precedence chain). `POST /t/<id>/accept-proof` and
+`standing-orders task accept` record an operator's explicit acceptance;
+`standing-orders verify [show|set|clear]` is `setup`'s ceremony under a
+new name. `standing-orders demo` seeds a fully "verified" bundle,
+screenshot included, so a fresh install sees the feature's honest
+ceiling on the first look. Suite 97 files / 1781 tests (1769 run, 12
+skipped).
+
 **2026-09-06 — Membership-backed unified chat has no dollar maximum.**
 Chat now accepts `codex-subscription` and `claude-subscription`, reusing the
 local CLI's cached login instead of requiring an API key. The setup screen

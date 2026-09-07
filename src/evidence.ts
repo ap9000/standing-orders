@@ -32,6 +32,7 @@ import { join, sep } from "node:path";
 import { LIMITS } from "./decision.js";
 import { PLAN_LIMITS } from "./plan.js";
 import { parseReport, REPORT_LIMITS, type ParsedReport } from "./scout-report.js";
+import { parseProof, PROOF_LIMITS, type ParsedProof } from "./proof.js";
 import type { Artifact, Store } from "./store.js";
 import type { ExecResult } from "./exec.js";
 import { encodeBaseTreeSnapshot, parseBaseTreeSnapshot, type BaseTreeEntry } from "./peek.js";
@@ -46,7 +47,15 @@ export const PLAN_PREFIX = "STANDING-ORDERS-PLAN-";
 export const REVIEW_PREFIX = "STANDING-ORDERS-REVIEW-";
 /** The scout's terminal handoff (v34): the report, its only deliverable. */
 export const REPORT_PREFIX = "STANDING-ORDERS-REPORT-";
+/** The build's proof manifest (Priority 2): optional, and read only after
+ * the handoff — a completed attempt's proof, never a parking or failure
+ * artifact. */
+export const PROOF_PREFIX = "STANDING-ORDERS-PROOF-";
 export const MAILBOX_SUFFIX = ".json";
+
+/** Bounds on a claimed screenshot file's own bytes — independent of the
+ * proof manifest's byte cap, since these are binary images, not JSON. */
+export const SCREENSHOT_BYTE_CAP = 5 * 1024 * 1024;
 
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
 export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
@@ -61,6 +70,9 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
   handoff: 32 * 1024,
   "revision-brief": 64 * 1024,
   report: REPORT_LIMITS.payload,
+  proof: PROOF_LIMITS.payload,
+  "check-log": 64 * 1024,
+  screenshot: SCREENSHOT_BYTE_CAP,
 };
 
 export function evidenceRoot(home: string): string {
@@ -95,6 +107,7 @@ export function looksLikeProtocolFile(name: string): boolean {
       name.startsWith(PLAN_PREFIX) ||
       name.startsWith(REVIEW_PREFIX) ||
       name.startsWith(REPORT_PREFIX) ||
+      name.startsWith(PROOF_PREFIX) ||
       name.startsWith("NIGHTORDERS-")) &&
     name.endsWith(MAILBOX_SUFFIX)
   );
@@ -110,6 +123,12 @@ export function planFileName(): string {
 
 export function reviewFileName(): string {
   return `${REVIEW_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
+}
+
+/** The build's optional proof manifest (Priority 2), named exactly like
+ * every other protocol file — a nonce the agent learns only from its brief. */
+export function proofFileName(): string {
+  return `${PROOF_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 export function reportFileName(): string {
@@ -182,6 +201,59 @@ export function readVerifiedReport(store: Store, root: string, taskRef: number):
   const parsed = parseReport(verified.content.toString("utf8"));
   if (!parsed.ok) return { ok: false, run: artifact.run, problem: "the stored report is not a report this build can read" };
   return { ok: true, run: artifact.run, report: parsed.report };
+}
+
+/** A build's proof, read the same verified way as a scout's report — but
+ * keyed by RUN, not task: unlike a scout's report (the task's one rolling
+ * deliverable), a proof belongs to the one attempt whose page is showing
+ * it. null = no proof artifact for this run; a problem names why an
+ * existing one cannot be shown. */
+export type ProofView =
+  | { ok: true; run: number; proof: ParsedProof }
+  | { ok: false; run: number; problem: string };
+
+export function readVerifiedProofForRun(store: Store, root: string, runId: number): ProofView | null {
+  const artifact = store.artifactsFor(runId).find(one => one.kind === "proof") ?? null;
+  if (artifact === null) return null;
+  let verified: ReturnType<typeof readVerifiedArtifact>;
+  try {
+    verified = readVerifiedArtifact(root, artifact);
+  } catch {
+    return { ok: false, run: runId, problem: "the proof file could not be read" };
+  }
+  if (!verified.ok) return { ok: false, run: runId, problem: `the proof does not verify (${verified.problem})` };
+  const parsed = parseProof(verified.content.toString("utf8"));
+  if (!parsed.ok) return { ok: false, run: runId, problem: "the stored proof is not a proof this build can read" };
+  return { ok: true, run: runId, proof: parsed.proof };
+}
+
+/**
+ * The PNG and JPEG magic bytes — the only two formats a screenshot may
+ * claim to be (scope: "no arbitrary binary evidence beyond bounded
+ * PNG/JPEG screenshots"). Sniffed from the bytes themselves, never from a
+ * claimed extension: an extension is a string an agent chose, a signature
+ * is not.
+ */
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+
+export function sniffImageKind(bytes: Buffer): "png" | "jpeg" | null {
+  if (bytes.length >= PNG_SIGNATURE.length && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return "png";
+  if (bytes.length >= JPEG_SIGNATURE.length && bytes.subarray(0, JPEG_SIGNATURE.length).equals(JPEG_SIGNATURE)) return "jpeg";
+  return null;
+}
+
+/** Whether bytes claimed as a screenshot actually are a bounded PNG or
+ * JPEG — the one check standing between a claimed path and stored,
+ * immutable image evidence. */
+export function validateScreenshotBytes(bytes: Buffer): { ok: true; kind: "png" | "jpeg" } | { ok: false; problem: string } {
+  if (bytes.length === 0) return { ok: false, problem: "the file is empty" };
+  if (bytes.length > SCREENSHOT_BYTE_CAP) {
+    return { ok: false, problem: `the file is over ${SCREENSHOT_BYTE_CAP} bytes` };
+  }
+  const kind = sniffImageKind(bytes);
+  if (kind === null) return { ok: false, problem: "the file is not a PNG or JPEG (checked by signature, not extension)" };
+  return { ok: true, kind };
 }
 
 /**

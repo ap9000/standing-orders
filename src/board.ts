@@ -127,6 +127,41 @@ export function holdOwnerWords(ownerKind: string): string {
   return HOLD_OWNER_WORDS[ownerKind] ?? "held";
 }
 
+/**
+ * A completed task whose proof is short or refuted and not yet accepted
+ * (Priority 2): the board's once-and-only-once rule holds because the
+ * done lane's own query excludes exactly these same rows (the fetch site
+ * splits `listCompletedWorkScoped`'s rows by verdict before either lane
+ * renders) — never a second classifier disagreeing with the first.
+ */
+export type UnverifiedDoneFacts = {
+  taskId: string;
+  title: string;
+  repo: string | null;
+  /** The run's completion time — the stall anchor, same as every other
+   * attention card's `stalledSince`. */
+  completedAt: string;
+  proofVerdict: "short" | "refuted";
+};
+
+export function attentionCardForUnverifiedDone(facts: UnverifiedDoneFacts): BoardCard {
+  return {
+    lane: "attention",
+    taskId: facts.taskId,
+    title: facts.title,
+    repo: facts.repo,
+    href: `/t/${encodeURIComponent(facts.taskId)}`,
+    claim: null,
+    stalledSince: facts.completedAt,
+    attempt: null,
+    overdue: false,
+    routineName: null,
+    priority: 0,
+    assignedRunner: null,
+    reason: facts.proofVerdict === "refuted" ? "complete — proof refuted" : "complete — needs verification",
+  };
+}
+
 export function classify(facts: BoardFacts, now: Date): BoardCard {
   const base = {
     taskId: facts.taskId,

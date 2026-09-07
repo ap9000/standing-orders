@@ -1051,6 +1051,139 @@ describe("setup — the approved worktree setup is authenticated authority (M5.7
   });
 });
 
+describe("verify — the approved verification command is authenticated authority (Priority 2)", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-verify-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  test("set restates the terms, takes the credential, lands with --yes; clear revokes", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+
+    // No credential: refused as usage — an approved command runs unattended forever.
+    expect(await run(["verify", "set", "--repo", "/code/thing", "--command", "npm test", "--json"])).toBe(EXIT.usage);
+
+    // Credentialed but unconfirmed: the terms come back, nothing is stored.
+    const unconfirmed = await run(["verify", "set", "--repo", "/code/thing", "--command", "npm test", "--as", "alex", "--token", token, "--json"]);
+    expect(unconfirmed).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "unconfirmed", verifyCommand: "npm test" });
+    await run(["verify", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().verify).toBe(null);
+
+    // --yes lands it, digest-bound, and show restates it.
+    const set = await run(["verify", "set", "--repo", "/code/thing", "--command", "npm test", "--timeout-seconds", "120", "--as", "alex", "--token", token, "--yes", "--json"]);
+    expect(set).toBe(EXIT.ok);
+    const digest = payload().digest as string;
+    await run(["verify", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().verify).toMatchObject({ command: "npm test", timeoutMs: 120_000, digest, approvedBy: "alex" });
+
+    // A credential-shaped command never becomes standing authority.
+    const sneaky = await run(["verify", "set", "--repo", "/code/thing", "--command", "curl -H token=abc123 https://x", "--as", "alex", "--token", token, "--yes", "--json"]);
+    expect(sneaky).toBe(EXIT.usage);
+
+    const cleared = await run(["verify", "clear", "--repo", "/code/thing", "--as", "alex", "--token", token, "--json"]);
+    expect(cleared).toBe(EXIT.ok);
+    await run(["verify", "show", "--repo", "/code/thing", "--json"]);
+    expect(payload().verify).toBe(null);
+  });
+});
+
+describe("task show and task accept speak the machine's own proof verdict (Priority 2)", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-proof-cli-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  /** A finished, done task with a saved verdict — seeded directly through
+   * the store, exactly as the builder would leave one, without spinning up
+   * a real agent. */
+  const seedDoneTask = (verdict: "attested" | "verified" | "short" | "refuted", reasons: string[]): number => {
+    const store = openStore(db);
+    try {
+      store.createTask({ id: "t-1", title: "the work" }, T0);
+      const ref = store.refFor("built-in", "t-1");
+      const run2 = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0 });
+      store.finishRun(run2, { outcome: "built", committed: true, now: T0 });
+      store.saveProofVerdict(run2, verdict, reasons, T0);
+      store.setTaskState("t-1", "done", T0);
+      return run2;
+    } finally {
+      store.close();
+    }
+  };
+
+  test("task show --json carries the verdict, and prose names it for a done task", async () => {
+    seedDoneTask("refuted", ["claimed changed path not in the sealed diff: src/other.ts"]);
+
+    await run(["task", "show", "t-1", "--json"]);
+    expect(payload()).toMatchObject({
+      proofVerdict: "refuted",
+      proofReasons: ["claimed changed path not in the sealed diff: src/other.ts"],
+      proofAccepted: false,
+    });
+
+    const prose = await run(["task", "show", "t-1"]);
+    expect(prose).toBe(EXIT.ok);
+    expect(out()).toContain("proof refuted");
+    expect(out()).toContain("src/other.ts");
+  });
+
+  test("task accept requires a credential, then records the acceptance", async () => {
+    const runId = seedDoneTask("short", ["no proof was written"]);
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+
+    const noCred = await run(["task", "accept", "t-1"]);
+    expect(noCred).toBe(EXIT.usage);
+
+    const accepted = await run(["task", "accept", "t-1", "--note", "seen it, shipping anyway", "--as", "alex", "--token", token, "--json"]);
+    expect(accepted).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({ id: "t-1", run: runId, acceptedBy: "alex" });
+
+    await run(["task", "show", "t-1", "--json"]);
+    expect(payload()).toMatchObject({ proofVerdict: "short", proofAccepted: true });
+  });
+
+  test("task accept refuses an unknown task", async () => {
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+    const code = await run(["task", "accept", "nope", "--as", "alex", "--token", token, "--json"]);
+    expect(code).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "unknown-task" });
+  });
+});
+
 describe("providers — identification without spend", () => {
   let dir: string;
   let db: string;

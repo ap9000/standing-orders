@@ -158,6 +158,7 @@ describe("the machine envelope", () => {
       people: ["list", "--json"],
       keys: ["status", "--json"],
       setup: ["show", "--json"],
+      verify: ["show", "--json"],
       intake: ["show", "--json"],
       providers: ["--json"],
       template: ["list", "--json"],

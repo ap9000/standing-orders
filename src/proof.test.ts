@@ -1,0 +1,259 @@
+import { describe, test, expect } from "vitest";
+import { parseProof, serializeProof, adjudicate, verdictWords, dispatchStatusToken, PROOF_LIMITS, type AdjudicateInput } from "./proof.js";
+
+const sound = {
+  version: 1,
+  criteria: [{ id: "c1", statement: "The button opens the settings panel.", verdict: "met", how: "Clicked it in the demo build." }],
+  checks: [{ command: "npm test", exitCode: 0, summary: "1668 tests passed." }],
+  changed: ["src/x.ts"],
+  caveats: ["The panel does not yet remember scroll position."],
+  screenshots: [{ path: "evidence/settings-panel.png", caption: "Settings panel open." }],
+};
+
+const parse = (payload: unknown) => parseProof(JSON.stringify(payload));
+const problemsOf = (payload: unknown): string[] => {
+  const result = parse(payload);
+  return result.ok ? [] : result.problems.map(p => p.reason);
+};
+
+describe("parseProof", () => {
+  test("accepts a sound proof", () => {
+    const result = parse(sound);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.proof.criteria).toHaveLength(1);
+    expect(result.proof.checks).toHaveLength(1);
+    expect(result.proof.changed).toEqual(["src/x.ts"]);
+    expect(result.proof.screenshots).toEqual([{ path: "evidence/settings-panel.png", caption: "Settings panel open." }]);
+  });
+
+  test("every list is optional except version", () => {
+    expect(parse({ version: 1 })).toMatchObject({ ok: true, proof: { criteria: [], checks: [], changed: [], caveats: [], screenshots: [] } });
+  });
+
+  test("refuses what is not JSON, and what is JSON but not an object", () => {
+    expect(parseProof("not json {")).toMatchObject({ ok: false });
+    expect(problemsOf([sound])).toContain("not-an-object");
+    expect(parseProof(JSON.stringify("a string"))).toMatchObject({ ok: false });
+  });
+
+  test("version must be exactly 1", () => {
+    expect(problemsOf({ ...sound, version: 2 })).toContain("bad-version");
+    expect(problemsOf({ ...sound, version: undefined })).toContain("bad-version");
+  });
+
+  test("the whole payload is capped", () => {
+    const bloated = { ...sound, caveats: ["x".repeat(PROOF_LIMITS.payload)] };
+    expect(parseProof(JSON.stringify(bloated))).toMatchObject({ ok: false });
+  });
+
+  describe("criteria", () => {
+    test("must be an array", () => {
+      expect(problemsOf({ ...sound, criteria: "nope" })).toContain("bad-criteria");
+    });
+    test("caps at PROOF_LIMITS.criteria", () => {
+      const many = Array.from({ length: PROOF_LIMITS.criteria + 1 }, (_, i) => ({ id: `c${i}`, statement: "s", verdict: "met", how: "h" }));
+      expect(problemsOf({ ...sound, criteria: many })).toContain("criteria-too-many");
+    });
+    test("ids must be unique", () => {
+      const dupes = [
+        { id: "same", statement: "a", verdict: "met", how: "h" },
+        { id: "same", statement: "b", verdict: "met", how: "h" },
+      ];
+      expect(problemsOf({ ...sound, criteria: dupes })).toContain("criteria[1]-duplicate-id");
+    });
+    test("verdict must be one of the three words", () => {
+      expect(problemsOf({ ...sound, criteria: [{ id: "c1", statement: "s", verdict: "sort-of", how: "h" }] })).toContain(
+        "criteria[0]-bad-verdict",
+      );
+    });
+    test("statement and how are required prose, capped and control-free", () => {
+      expect(problemsOf({ ...sound, criteria: [{ id: "c1", statement: "", verdict: "met", how: "h" }] })).toContain(
+        "missing-criteria[0].statement",
+      );
+      expect(
+        problemsOf({ ...sound, criteria: [{ id: "c1", statement: "x".repeat(PROOF_LIMITS.criterionStatement + 1), verdict: "met", how: "h" }] }),
+      ).toContain("criteria[0].statement-too-long");
+      expect(
+        problemsOf({ ...sound, criteria: [{ id: "c1", statement: "look]0;pwned", verdict: "met", how: "h" }] }),
+      ).toContain("criteria[0].statement-controls");
+    });
+  });
+
+  describe("checks", () => {
+    test("must be an array capped at PROOF_LIMITS.checks", () => {
+      expect(problemsOf({ ...sound, checks: "nope" })).toContain("bad-checks");
+      const many = Array.from({ length: PROOF_LIMITS.checks + 1 }, () => ({ command: "npm test", exitCode: 0, summary: "ok" }));
+      expect(problemsOf({ ...sound, checks: many })).toContain("checks-too-many");
+    });
+    test("exitCode must be an integer 0-255", () => {
+      expect(problemsOf({ ...sound, checks: [{ command: "c", exitCode: -1, summary: "s" }] })).toContain("checks[0]-bad-exit-code");
+      expect(problemsOf({ ...sound, checks: [{ command: "c", exitCode: 256, summary: "s" }] })).toContain("checks[0]-bad-exit-code");
+      expect(problemsOf({ ...sound, checks: [{ command: "c", exitCode: 1.5, summary: "s" }] })).toContain("checks[0]-bad-exit-code");
+      expect(problemsOf({ ...sound, checks: [{ command: "c", exitCode: "0", summary: "s" }] })).toContain("checks[0]-bad-exit-code");
+    });
+    test("command and summary are required, capped, control-free", () => {
+      expect(problemsOf({ ...sound, checks: [{ command: "", exitCode: 0, summary: "s" }] })).toContain("missing-checks[0].command");
+    });
+  });
+
+  describe("changed and caveats", () => {
+    test("changed caps at PROOF_LIMITS.changed entries", () => {
+      const many = Array.from({ length: PROOF_LIMITS.changed + 1 }, (_, i) => `src/f${i}.ts`);
+      expect(problemsOf({ ...sound, changed: many })).toContain("changed-too-many");
+    });
+    test("caveats caps at PROOF_LIMITS.caveats entries", () => {
+      const many = Array.from({ length: PROOF_LIMITS.caveats + 1 }, (_, i) => `caveat ${i}`);
+      expect(problemsOf({ ...sound, caveats: many })).toContain("caveats-too-many");
+    });
+    test("entries are prose: capped, control-free", () => {
+      expect(problemsOf({ ...sound, changed: ["x".repeat(PROOF_LIMITS.changedPath + 1)] })).toContain("changed[0]-too-long");
+      expect(problemsOf({ ...sound, caveats: ["look]0;pwned"] })).toContain("caveats[0]-controls");
+    });
+  });
+
+  describe("screenshots", () => {
+    test("must be an array capped at PROOF_LIMITS.screenshots", () => {
+      expect(problemsOf({ ...sound, screenshots: "nope" })).toContain("bad-screenshots");
+      const many = Array.from({ length: PROOF_LIMITS.screenshots + 1 }, (_, i) => ({ path: `e/${i}.png`, caption: "c" }));
+      expect(problemsOf({ ...sound, screenshots: many })).toContain("screenshots-too-many");
+    });
+    test("path must be a normalized repository-relative path", () => {
+      expect(problemsOf({ ...sound, screenshots: [{ path: "/etc/passwd", caption: "c" }] })).toContain(
+        "screenshots[0].path-not-relative",
+      );
+      expect(problemsOf({ ...sound, screenshots: [{ path: "../../etc/passwd", caption: "c" }] })).toContain(
+        "screenshots[0].path-not-relative",
+      );
+      expect(problemsOf({ ...sound, screenshots: [{ path: "a\\b.png", caption: "c" }] })).toContain(
+        "screenshots[0].path-not-relative",
+      );
+    });
+    test("paths must be unique", () => {
+      const dupes = [
+        { path: "e/a.png", caption: "a" },
+        { path: "e/a.png", caption: "b" },
+      ];
+      expect(problemsOf({ ...sound, screenshots: dupes })).toContain("screenshots[1]-duplicate-path");
+    });
+    test("caption is required prose", () => {
+      expect(problemsOf({ ...sound, screenshots: [{ path: "e/a.png", caption: "" }] })).toContain(
+        "missing-screenshots[0].caption",
+      );
+    });
+  });
+
+  test("re-serializes to the validated shape, not the raw bytes", () => {
+    const result = parse({ ...sound, extraField: "ignored", criteria: [{ id: "c1", statement: "s", verdict: "met", how: "h", extra: "x" }] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const serialized = serializeProof(result.proof);
+    expect(serialized).not.toContain("extraField");
+    expect(serialized).not.toContain("\"extra\"");
+    expect(JSON.parse(serialized)).toEqual(result.proof);
+  });
+});
+
+describe("adjudicate", () => {
+  const base: AdjudicateInput = {
+    proofArtifactPresent: true,
+    proofParse: parse(sound),
+    handoffPresent: true,
+    terminalDiffPresent: true,
+    terminalDiffCaptureStatus: "ok",
+    diffStat: { captured: true, truncated: false, paths: new Set(["src/x.ts"]) },
+    verifyCommand: { configured: false },
+    screenshots: [{ path: "evidence/settings-panel.png", ok: true }],
+  };
+
+  test("rule 1: no proof artifact at all -> short", () => {
+    expect(adjudicate({ ...base, proofArtifactPresent: false, proofParse: null })).toMatchObject({
+      verdict: "short",
+      reasons: ["no proof was written"],
+    });
+  });
+
+  test("rule 2: malformed proof -> short, names the problem", () => {
+    const malformed = parseProof("not json {");
+    const result = adjudicate({ ...base, proofParse: malformed });
+    expect(result.verdict).toBe("short");
+    expect(result.reasons[0]).toMatch(/malformed/);
+  });
+
+  test("rule 3: missing handoff -> short", () => {
+    expect(adjudicate({ ...base, handoffPresent: false })).toMatchObject({ verdict: "short" });
+  });
+
+  test("rule 3: missing terminal diff -> short", () => {
+    expect(adjudicate({ ...base, terminalDiffPresent: false })).toMatchObject({ verdict: "short" });
+  });
+
+  test("rule 3: failed diff capture -> short", () => {
+    expect(adjudicate({ ...base, terminalDiffCaptureStatus: "failed" })).toMatchObject({ verdict: "short" });
+  });
+
+  test("rule 4: a claimed changed path absent from the sealed, untruncated stat -> refuted", () => {
+    const result = adjudicate({ ...base, diffStat: { captured: true, truncated: false, paths: new Set(["src/other.ts"]) } });
+    expect(result.verdict).toBe("refuted");
+    expect(result.reasons[0]).toContain("src/x.ts");
+  });
+
+  test("rule 4 does not fire when the stat is truncated — cannot prove absence", () => {
+    const result = adjudicate({ ...base, diffStat: { captured: true, truncated: true, paths: new Set() } });
+    expect(result.verdict).not.toBe("refuted");
+  });
+
+  test("rule 4 does not fire when the stat failed to capture", () => {
+    const result = adjudicate({ ...base, diffStat: { captured: false, truncated: false, paths: new Set() } });
+    expect(result.verdict).not.toBe("refuted");
+  });
+
+  test("rule 5: an approved verification command that exits non-zero -> refuted", () => {
+    const result = adjudicate({ ...base, verifyCommand: { configured: true, ran: true, exitCode: 1 } });
+    expect(result.verdict).toBe("refuted");
+  });
+
+  test("rule 6: any criterion not-met or not-checked -> short", () => {
+    const notMet = parse({ ...sound, criteria: [{ id: "c1", statement: "s", verdict: "not-met", how: "h" }] });
+    expect(adjudicate({ ...base, proofParse: notMet })).toMatchObject({ verdict: "short" });
+    const notChecked = parse({ ...sound, criteria: [{ id: "c1", statement: "s", verdict: "not-checked", how: "h" }] });
+    expect(adjudicate({ ...base, proofParse: notChecked })).toMatchObject({ verdict: "short" });
+  });
+
+  test("an unverifiable claimed screenshot -> short", () => {
+    const result = adjudicate({ ...base, screenshots: [{ path: "evidence/settings-panel.png", ok: false, problem: "not a PNG or JPEG" }] });
+    expect(result.verdict).toBe("short");
+    expect(result.reasons[0]).toContain("evidence/settings-panel.png");
+  });
+
+  test("rule 7: an approved verification command that passes -> verified", () => {
+    const result = adjudicate({ ...base, verifyCommand: { configured: true, ran: true, exitCode: 0 } });
+    expect(result.verdict).toBe("verified");
+  });
+
+  test("rule 7: no verification command configured -> attested, the honest floor", () => {
+    expect(adjudicate(base)).toMatchObject({ verdict: "attested" });
+  });
+
+  test("a configured command that could not be run at all -> short, not refuted", () => {
+    const result = adjudicate({ ...base, verifyCommand: { configured: true, ran: false, attemptFailed: true } });
+    expect(result.verdict).toBe("short");
+  });
+
+  test("a proof with no criteria and no verify command still attests when the diff agrees", () => {
+    const empty = parse({ version: 1 });
+    expect(adjudicate({ ...base, proofParse: empty, diffStat: { captured: true, truncated: false, paths: new Set() } })).toMatchObject({
+      verdict: "attested",
+    });
+  });
+});
+
+describe("verdictWords and dispatchStatusToken", () => {
+  test("cover every verdict with distinct words and tokens", () => {
+    const verdicts = ["verified", "attested", "short", "refuted"] as const;
+    const words = verdicts.map(v => verdictWords(v, ["a reason"]).word);
+    expect(new Set(words).size).toBe(verdicts.length);
+    const tokens = verdicts.map(dispatchStatusToken);
+    expect(tokens).toEqual(["complete-verified", "complete-with-evidence", "needs-verification", "proof-refuted"]);
+  });
+});

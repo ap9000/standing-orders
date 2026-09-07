@@ -40,7 +40,7 @@ import { currentClaim, heartbeat, missingCapability, SYNC_MAX_AGE_MS } from "./c
 import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { parseDecision, parseHandoff, repairPrompt, type ParsedDecision, type Problem } from "./decision.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { invokeAgent, type AgentOutcome, type InvokeResult } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import { OPENROUTER_ENV_KEY, auditOf, ALL_CREDENTIAL_ENV } from "./provider.js";
@@ -54,11 +54,17 @@ import {
   storeHandoffArtifact,
   looksLikeProtocolFile,
   mailboxName,
+  proofFileName,
   quarantineMailboxes,
   readMailbox,
   readVerifiedArtifact,
+  scanForSecrets,
+  redactSecretLines,
   storeEvidence,
+  validateScreenshotBytes,
+  SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
+import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
 
 export type Runner = (
   file: string,
@@ -152,6 +158,9 @@ export type BuildRequest = {
   git?: Runner;
   /** Runs the approved worktree setup command (M5.7). Tests inject; production uses exec. */
   setup?: Runner;
+  /** Runs the repository's approved verification command (Priority 2), after
+   * commit. Tests inject; production uses exec. */
+  verify?: Runner;
   /**
    * The stop fence (audit IV-1, completed): re-proved AFTER the agent and
    * BEFORE the commit. A stop that lands while the agent runs preserves
@@ -850,6 +859,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   const root = request.evidenceRoot ?? evidenceRoot(homedir());
   const mailbox = mailboxName();
   const done = handoffName();
+  const proof = proofFileName();
   quarantineMailboxes(worktree, root, request.runId);
 
   // The pulse: while the agent runs, the lease is extended and the runner
@@ -987,7 +997,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // Every streaming transport emits events now (peek); a file that cannot
   // open is a null, and a null never costs a build.
   const liveLog = openLiveLog(root, request.runId);
-  const briefText = brief(scope as Scope, branch, mailbox, done, answers, planDocument, revisionBrief, previousHandoff, steering);
+  const briefText = brief(scope as Scope, branch, mailbox, done, proof, answers, planDocument, revisionBrief, previousHandoff, steering);
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
   // coordinator at the spawn point. Everything build() armed that its
@@ -1008,7 +1018,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         : `${briefText}\n\n=== OPERATOR FOLLOW-UP (this session continues finished attempt #${attended.authorization.parentRun ?? "?"}) ===\n${followup}\n=== END OPERATOR FOLLOW-UP ===`;
     const captured: CapturedBuild = {
       store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
-      runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done,
+      runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof,
       clock, fenced: () => fencedMidBuild,
     };
     const launched = await attended.coordinator.launch({
@@ -1113,7 +1123,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
 
   const captured: CapturedBuild = {
     store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
-    runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done,
+    runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof,
     clock, fenced: () => fencedMidBuild,
   };
   return settleProviderOutcome(captured, result);
@@ -1145,6 +1155,9 @@ export type CapturedBuild = {
   root: string;
   mailbox: string;
   done: string;
+  /** The proof manifest's nonce-bound filename (Priority 2) — optional for
+   * the agent to write, read the same way as the handoff once it finishes. */
+  proof: string;
   clock: () => Date;
   fenced: () => boolean;
 };
@@ -1159,7 +1172,7 @@ export type CapturedBuild = {
  * a run completes through THIS function or not at all.
  */
 export async function settleProviderOutcome(captured: CapturedBuild, result: AgentOutcome): Promise<BuildResult> {
-  const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, clock } = captured;
+  const { store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef, runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, clock } = captured;
   if (result.timedOut) {
     // A mailbox cut down mid-write is quarantined, never ingested: whatever
     // half-sentence it holds, no lease vouches for it as a decision.
@@ -1408,7 +1421,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       // a built run's page must show its diff long after the checkout is
       // released (M5.3).
       store.setRunPhase(request.runId, "capturing-evidence");
-      await captureTerminalDiff(store, git, worktree, baseRevision, head, root, request.runId, clock());
+      const diffEvidence = await captureTerminalDiff(store, git, worktree, baseRevision, head, root, request.runId, clock());
       storeHandoffArtifact(store, root, {
         schema: 1,
         taskId,
@@ -1428,9 +1441,185 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
         followUps: handoff.followUps,
         freshness: { stampedAt: clock().toISOString(), currentAsOf: head },
       }, clock());
+
+      // The proof (Priority 2): read after the handoff, re-run the
+      // repository's approved verification command, and adjudicate — all
+      // of it AFTER the commit, so nothing here can ever turn `made` into
+      // a failure. A missing or malformed proof never destroys already-
+      // committed work; the verdict alone carries the news.
+      try {
+        store.setRunPhase(request.runId, "verifying-proof");
+        await settleProof(store, request, worktree, root, proof, diffEvidence.statId, clock);
+      } catch {
+        // Adjudication itself must never fail the attempt — if even the
+        // catch-all inside settleProof somehow throws, the build still
+        // stands; the run simply has no verdict, which every surface
+        // treats the same as "no proof was written".
+      }
     }
   }
   return made;
+}
+
+/**
+ * Read the agent's optional proof, re-run the repository's approved
+ * verification command if one is configured, and save the machine's one
+ * verdict — computed once, here, and never re-inferred at render. Runs
+ * strictly after commit and terminal-diff capture; every branch below
+ * ends in `store.saveProofVerdict`, never in a thrown error that could
+ * reach the caller and be mistaken for a build failure.
+ */
+async function settleProof(
+  store: Store,
+  request: BuildRequest,
+  worktree: string,
+  root: string,
+  proofFile: string,
+  statArtifactId: number,
+  now: () => Date,
+): Promise<void> {
+  const runId = request.runId;
+
+  // 1. Read the proof file, exactly like the handoff: never let it reach
+  // the diff (the commit already ran; this is belt-and-suspenders — the
+  // git-add pathspec already excludes every STANDING-ORDERS-* name).
+  const read = readMailbox(join(worktree, proofFile), PROOF_LIMITS.payload);
+  try {
+    unlinkSync(join(worktree, proofFile));
+  } catch {
+    // Missing or unremovable — the file was never staged either way.
+  }
+
+  let proofParse: ReturnType<typeof parseProof> | null = null;
+  const proofArtifactPresent = read.ok;
+  if (read.ok) {
+    proofParse = parseProof(read.raw.toString("utf8"));
+    if (proofParse.ok) {
+      // Re-serialized from the validated shape, never the agent's raw
+      // bytes (the scout report's rule): what is stored, and later
+      // hash-verified, is exactly what this parser admitted.
+      const content = Buffer.from(serializeProof(proofParse.proof), "utf8");
+      storeEvidence(store, root, runId, "proof", "proof.json", content, "agent-authored proof (validated, re-serialized)", now());
+    } else {
+      // The payload is preserved as evidence even though it is malformed
+      // — a person reviewing the run should see what the agent tried to
+      // say, scanned for secrets like every other captured artifact.
+      const raw = read.raw.toString("utf8");
+      const hits = scanForSecrets(raw);
+      const preserved = Buffer.from(hits.length > 0 ? redactSecretLines(raw, hits) : raw, "utf8");
+      storeEvidence(store, root, runId, "proof", "proof.json", preserved, "agent-authored proof (malformed)", now(), {
+        redacted: hits.length > 0,
+        captureStatus: "failed",
+      });
+      store.createIncident({ run: runId, kind: "malformed-proof" }, now());
+    }
+  }
+
+  // 2. Validate every claimed screenshot against the worktree's actual
+  // files — signature and size, never the claimed extension.
+  const screenshots: ScreenshotOutcome[] =
+    proofParse !== null && proofParse.ok
+      ? proofParse.proof.screenshots.map(shot => {
+          const path = join(worktree, shot.path);
+          const found = readMailbox(path, SCREENSHOT_BYTE_CAP);
+          if (!found.ok) {
+            return { path: shot.path, ok: false, problem: found.missing ? "the file does not exist" : found.problem };
+          }
+          const checked = validateScreenshotBytes(found.raw);
+          if (!checked.ok) return { path: shot.path, ok: false, problem: checked.problem };
+          storeEvidence(
+            store,
+            root,
+            runId,
+            "screenshot",
+            `screenshot-${screenshotFileTag(shot.path)}.${checked.kind === "png" ? "png" : "jpg"}`,
+            found.raw,
+            `agent-claimed screenshot at ${shot.path} (validated ${checked.kind})`,
+            now(),
+          );
+          return { path: shot.path, ok: true };
+        })
+      : [];
+
+  // 3. The repository's approved verification command, when one exists —
+  // re-run unattended, exactly once, by the plane itself. Its own custody
+  // is re-proved immediately before the spawn (the setup spawn's own
+  // rule): a takeover between the commit and this instant runs nothing.
+  const repo = store.getWorktree(worktree)?.repo ?? null;
+  const configured = repo === null ? null : store.liveVerifyCommand(repo);
+  let verifyCommand: VerifyCommandFacts;
+  if (configured === null) {
+    verifyCommand = { configured: false };
+  } else if (!store.proveRunnerCustodyForSpawn(runId, now())) {
+    verifyCommand = { configured: true, ran: false, attemptFailed: true };
+  } else {
+    const runner = request.verify ?? run;
+    const made = await runner("/bin/sh", ["-c", configured.command], {
+      cwd: worktree,
+      timeoutMs: configured.timeoutMs,
+      envAllowlist: SETUP_ENV_ALLOWLIST,
+      omitEnv: SETUP_ENV_DENYLIST,
+    });
+    if (made.notFound || made.timedOut) {
+      verifyCommand = { configured: true, ran: false, attemptFailed: true };
+    } else {
+      const combined = `$ ${configured.command}\n(exit ${made.code}${made.timedOut ? ", timed out" : ""})\n\n--- stdout ---\n${made.stdout}\n\n--- stderr ---\n${made.stderr}`;
+      const hits = scanForSecrets(combined);
+      const logged = Buffer.from(hits.length > 0 ? redactSecretLines(combined, hits) : combined, "utf8");
+      storeEvidence(store, root, runId, "check-log", "check-log.txt", logged, `sh -c "${configured.command}" (exit ${made.code})`, now(), {
+        redacted: hits.length > 0,
+        captureStatus: "ok",
+      });
+      verifyCommand = { configured: true, ran: true, exitCode: made.code };
+    }
+  }
+
+  // 4. The sealed diff-stat, restated for adjudication — a truncated or
+  // failed capture cannot prove a claimed path absent.
+  const statArtifact = store.getArtifact(statArtifactId);
+  let diffStat: DiffStatFacts | null = null;
+  if (statArtifact !== null) {
+    if (statArtifact.captureStatus !== "ok") {
+      diffStat = { captured: false, truncated: false, paths: new Set() };
+    } else {
+      try {
+        const verified = readVerifiedArtifact(root, statArtifact);
+        if (verified.ok) {
+          const parsedStat = JSON.parse(verified.content.toString("utf8")) as { filesTruncated?: boolean; files?: { path?: string }[] };
+          diffStat = {
+            captured: true,
+            truncated: parsedStat.filesTruncated === true,
+            paths: new Set((parsedStat.files ?? []).map(one => String(one.path ?? ""))),
+          };
+        } else {
+          diffStat = { captured: false, truncated: false, paths: new Set() };
+        }
+      } catch {
+        diffStat = { captured: false, truncated: false, paths: new Set() };
+      }
+    }
+  }
+
+  const handoffArtifact = store.artifactsFor(runId).find(one => one.kind === "handoff") ?? null;
+  const terminalDiffArtifact = store.artifactsFor(runId).find(one => one.kind === "terminal-diff") ?? null;
+
+  const { verdict, reasons } = adjudicate({
+    proofArtifactPresent,
+    proofParse,
+    handoffPresent: handoffArtifact !== null,
+    terminalDiffPresent: terminalDiffArtifact !== null,
+    terminalDiffCaptureStatus: terminalDiffArtifact?.captureStatus ?? null,
+    diffStat,
+    verifyCommand,
+    screenshots,
+  });
+  store.saveProofVerdict(runId, verdict, reasons, now());
+}
+
+/** A stable, filesystem-safe tag for a claimed screenshot's stored evidence
+ * name — derived from its claimed path so two screenshots never collide. */
+function screenshotFileTag(path: string): string {
+  return createHash("sha256").update(path, "utf8").digest("hex").slice(0, 12);
 }
 
 /**
@@ -1726,6 +1915,7 @@ function brief(
   branch: string,
   mailbox: string,
   done: string,
+  proof: string,
   answers: readonly { decision: Decision; choice: string; note: string | null }[] = [],
   planDocument: string | null = null,
   revisionBrief: string | null = null,
@@ -1866,6 +2056,28 @@ function brief(
     "  completed = you made the changes; no-change = the goal needs no change",
     "  and the conclusion says why; failed = you could not do it. Write to a",
     "  temporary name first, then rename it into place.",
+    "- If you completed the task, you may additionally write ONE file named",
+    `  exactly ${proof} in the worktree root — your proof. It is not required,`,
+    "  but a completed task with no proof reads as needing verification, not",
+    "  done. JSON object:",
+    '    { "version": 1,',
+    '      "criteria": [ { "id": "<short-id>", "statement": "<acceptance',
+    '        criterion>", "verdict": "met" | "not-met" | "not-checked", "how":',
+    '        "<how you checked it>" }, ... up to 12 ],',
+    '      "checks": [ { "command": "<the command you ran>", "exitCode":',
+    '        <0-255>, "summary": "<what it reported>" }, ... up to 12 ],',
+    '      "changed": ["<repository-relative path you changed>", ... up to 64],',
+    '      "caveats": ["<anything left undone or uncertain>", ... up to 8],',
+    '      "screenshots": [ { "path": "<repository-relative path to a PNG or',
+    '        JPEG file in the worktree>", "caption": "<what it shows>" },',
+    "        ... up to 8 ] }",
+    "  Screenshots are required evidence for UI-facing changes — the machine",
+    "  reads the actual file at each claimed path, checks it is really a",
+    "  bounded PNG or JPEG, and stores it as evidence; a path that is not one",
+    "  fails verification. Every claimed changed path is checked against the",
+    "  machine's own diff, and a repository's approved verification command,",
+    "  if one is configured, is re-run by the machine itself — never by you.",
+    "  Write it to a temporary name first, then rename it into place.",
     ...(answers.length === 0
       ? []
       : [

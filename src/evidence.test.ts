@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseNumstat, readVerifiedArtifact, redactSecretLines, scanForSecrets, writeEvidenceFile } from "./evidence.js";
+import { parseNumstat, readVerifiedArtifact, redactSecretLines, scanForSecrets, writeEvidenceFile, sniffImageKind, validateScreenshotBytes, SCREENSHOT_BYTE_CAP } from "./evidence.js";
 import type { Artifact } from "./store.js";
 
 describe("reading evidence back, believing nothing", () => {
@@ -175,5 +175,44 @@ describe("the secret scan (audit IV-7) — high confidence only", () => {
   test("clean text produces no hits and no changes", () => {
     const clean = "diff --git a/x b/x\n+export const guarded = true;\n";
     expect(scanForSecrets(clean)).toEqual([]);
+  });
+});
+
+describe("screenshot evidence: signature, not extension (Priority 2)", () => {
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("rest of a png")]);
+  const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("rest of a jpeg")]);
+
+  test("sniffs PNG and JPEG by their magic bytes", () => {
+    expect(sniffImageKind(PNG)).toBe("png");
+    expect(sniffImageKind(JPEG)).toBe("jpeg");
+  });
+
+  test("a claimed .png that is not one is refused — the extension is not the check", () => {
+    expect(sniffImageKind(Buffer.from("not an image at all"))).toBeNull();
+  });
+
+  test("validateScreenshotBytes accepts a sound PNG or JPEG", () => {
+    expect(validateScreenshotBytes(PNG)).toEqual({ ok: true, kind: "png" });
+    expect(validateScreenshotBytes(JPEG)).toEqual({ ok: true, kind: "jpeg" });
+  });
+
+  test("refuses an empty file", () => {
+    const result = validateScreenshotBytes(Buffer.alloc(0));
+    expect(result).toMatchObject({ ok: false });
+  });
+
+  test("refuses a file over the byte cap even with a good signature", () => {
+    const oversized = Buffer.concat([PNG, Buffer.alloc(SCREENSHOT_BYTE_CAP)]);
+    const result = validateScreenshotBytes(oversized);
+    expect(result).toMatchObject({ ok: false });
+    if (result.ok) return;
+    expect(result.problem).toContain("bytes");
+  });
+
+  test("refuses bytes that are neither PNG nor JPEG", () => {
+    const result = validateScreenshotBytes(Buffer.from("<svg></svg>"));
+    expect(result).toMatchObject({ ok: false });
+    if (result.ok) return;
+    expect(result.problem).toMatch(/PNG or JPEG/);
   });
 });

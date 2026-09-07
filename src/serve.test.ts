@@ -6401,17 +6401,18 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(ready).not.toContain('data-dispatch-status="no-worker-online"');
   });
 
-  test("a completed task only claims evidence when both the handoff and terminal diff exist", async () => {
+  test("a completed task speaks the machine's own verdict (Priority 2) — never inferred at render", async () => {
     const ref = seed("t-proof", "show me the proof");
     const run = finished("t-proof", ref, "built", 0.25);
     store.setTaskState("t-proof", "done", T0);
     await boot();
     const cookie = await login();
 
-    const incomplete = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
-    expect(incomplete).toContain('data-dispatch-status="complete-proof-incomplete"');
-    expect(incomplete).toContain("agent handoff and terminal diff");
-    expect(incomplete).not.toContain('data-dispatch-status="complete-with-evidence"');
+    // No handoff, no terminal diff, and no verdict at all: the honest
+    // default is "needs verification", never a guess at "done".
+    const bare = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(bare).toContain('data-dispatch-status="needs-verification"');
+    expect(bare).not.toContain('data-dispatch-status="complete-with-evidence"');
 
     const sha256 = createHash("sha256").update("").digest("hex");
     for (const kind of ["handoff", "terminal-diff"] as const) {
@@ -6426,10 +6427,53 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
         capture: `${kind} (exit 0)`,
       }, T0);
     }
-    const proven = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
-    expect(proven).toContain('data-dispatch-status="complete-with-evidence"');
-    expect(proven).toContain(`Build #${run}`);
-    expect(proven).toContain("agent-reported checks and machine-captured diff");
+    // Artifacts alone still do not say "done" — only the machine's own
+    // saved verdict does (the presence-only check this strengthens).
+    const stillBare = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(stillBare).toContain('data-dispatch-status="needs-verification"');
+
+    store.saveProofVerdict(run, "attested", ["the proof agrees with the sealed diff; no verification command is configured to re-run"], T0);
+    const attested = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(attested).toContain('data-dispatch-status="complete-with-evidence"');
+    expect(attested).toContain(`Build #${run}`);
+    expect(attested).toContain("acceptance criteria, checks, and machine-captured diff");
+
+    store.saveProofVerdict(run, "verified", ["the approved verification command passed"], T0);
+    const verified = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(verified).toContain('data-dispatch-status="complete-verified"');
+
+    store.saveProofVerdict(run, "refuted", ["claimed changed path not in the sealed diff: src/other.ts"], T0);
+    const refuted = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(refuted).toContain('data-dispatch-status="proof-refuted"');
+    expect(refuted).toContain("src/other.ts");
+    expect(refuted).toContain('name="csrf"');
+    expect(refuted).toContain("accept anyway");
+
+    // Accepting flips the class, never the token — every surface still
+    // agrees on WHAT happened; a person has simply signed off on it.
+    store.acceptProof(run, "alex", "seen it, shipping anyway", T0);
+    const accepted = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
+    expect(accepted).toContain('data-dispatch-status="proof-refuted"');
+    expect(accepted).toContain("An operator accepted it anyway");
+    expect(accepted).not.toContain("accept anyway</button>");
+  });
+
+  test("the inbox surfaces a completed task with an unaccepted short or refuted verdict, and drops it once accepted", async () => {
+    const ref = seed("t-proof", "show me the proof");
+    const run = finished("t-proof", ref, "built", 0.25);
+    store.setTaskState("t-proof", "done", T0);
+    store.saveProofVerdict(run, "refuted", ["claimed changed path not in the sealed diff: src/other.ts"], T0);
+    await boot();
+    const cookie = await login();
+
+    const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(inbox).toContain("needs verification");
+    expect(inbox).toContain("show me the proof");
+    expect(inbox).toContain('href="/t/t-proof"');
+
+    store.acceptProof(run, "alex", null, T0);
+    const cleared = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(cleared).not.toContain("show me the proof");
   });
 
   test("the attempt panel names the run; its pollers hit the RUN's fragments, never the task URL", async () => {

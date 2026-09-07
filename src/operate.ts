@@ -51,6 +51,7 @@ import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
 import { readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
+import { verdictWords as proofVerdictWords } from "./proof.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -476,7 +477,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
-  "review",
+  "review", "accept",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -751,6 +752,8 @@ async function dispatch(
       return keysCommand(positional, flags, context);
     case "setup":
       return setupCommand(positional, flags, context);
+    case "verify":
+      return verifyCommand(positional, flags, context);
     case "intake":
       return intakeCommand(positional, flags, context);
     case "providers":
@@ -3740,8 +3743,17 @@ async function briefCommand(
       cutDown.length > 0 ? ` · ${cutDown.length} cut down mid-flight` : ""
     }`,
   );
+  // The closed machine-authored verdict (Priority 2), one batched read —
+  // never re-derived here, and never a reason to hide a built run's row.
+  const proofVerdicts = store.proofVerdictsFor(built.map(one => one.id));
   for (const one of built) {
-    lines.push(`      ${one.taskId.padEnd(20)} ${one.committed === true ? `committed to ${one.branch}` : "changed nothing, which is a real answer"}`);
+    const verdict = proofVerdicts.get(one.id);
+    const accepted = verdict !== undefined && store.proofAcceptance(one.id) !== null;
+    const proofNote =
+      verdict === undefined || accepted || (verdict.verdict !== "short" && verdict.verdict !== "refuted")
+        ? ""
+        : ` — ${proofVerdictWords(verdict.verdict, verdict.reasons).word}`;
+    lines.push(`      ${one.taskId.padEnd(20)} ${one.committed === true ? `committed to ${one.branch}` : "changed nothing, which is a real answer"}${proofNote}`);
   }
   for (const one of failed) {
     lines.push(`      ${one.taskId.padEnd(20)} failed: ${one.reason ?? "?"}${one.worktree === null ? "" : ` — work kept in ${one.worktree}`}`);
@@ -5225,6 +5237,115 @@ async function setupCommand(
   );
   return succeed(write, json, "setup set", { repo, digest: saved.digest, timeoutSeconds }, () => [
     `Approved: fresh checkouts of ${repo} run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) before any agent.`,
+  ]);
+}
+
+/**
+ * `standing-orders verify [show|set|clear]` (Priority 2): the ONE shell
+ * command the plane re-runs, unattended, in a leased worktree after a
+ * build commits — cloned from `setupCommand` line for line, because
+ * approving this is the same authority under a different name: a
+ * credential, restated terms, a digest, `--yes`. Setup prepares a fresh
+ * checkout; this checks a finished one.
+ */
+async function verifyCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json } = context;
+  const clock = context.clock ?? (() => new Date());
+  const action = positional[0] ?? "show";
+  const repo = text(flags, "repo");
+
+  if (action === "show") {
+    if (repo === undefined) {
+      return fail(write, json, "verify show", "usage", "which repo? --repo <path>", EXIT.usage);
+    }
+    const live = store.liveVerifyCommand(repo);
+    if (json) {
+      write(envelopeJson({ ok: true, command: "verify show", repo, verify: live }));
+      return EXIT.ok;
+    }
+    write(
+      live === null
+        ? `No verification command for ${repo}. A build's proof lands "attested" at best — nothing re-runs it.`
+        : `${repo} re-runs after every commit:\n  ${live.command}\n  timeout ${Math.round(live.timeoutMs / 1000)}s · digest ${live.digest} · approved by ${live.approvedBy} at ${live.approvedAt}`,
+    );
+    return EXIT.ok;
+  }
+
+  if (action !== "set" && action !== "clear") {
+    return fail(write, json, "verify", "usage", "`standing-orders verify [show|set --command <cmd> [--timeout-seconds <n>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
+  }
+  if (repo === undefined) {
+    return fail(write, json, `verify ${action}`, "usage", "which repo? --repo <path>", EXIT.usage);
+  }
+
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, `verify ${action}`, "usage", "an approved verification command runs unattended after every future build — changing it takes `--as <you> --token <t>`", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, `verify ${action}`, authenticated.reason, describeApproveFailure(authenticated.reason, repo), EXIT.refused);
+  }
+
+  if (action === "clear") {
+    const cleared = store.clearVerifyCommand(repo, acting.name, clock());
+    return succeed(write, json, "verify clear", { repo, cleared }, () => [
+      cleared ? `Cleared — builds of ${repo} land "attested" at best now; nothing re-runs.` : `Nothing was set for ${repo}.`,
+    ]);
+  }
+
+  const command = text(flags, "command");
+  if (command === undefined || command.trim() === "") {
+    return fail(write, json, "verify set", "usage", "--command <cmd> is what the plane re-runs after every commit", EXIT.usage);
+  }
+  if (command.length > 2000 || hasDisguisedText(command)) {
+    return fail(write, json, "verify set", "invalid", "the command must be under 2000 characters with no control or bidi characters", EXIT.usage);
+  }
+  // Same rule as an approved setup command (audit IV-5): a command that
+  // embeds a literal credential is stored forever in plain text.
+  const credentialShaped =
+    /([A-Za-z0-9_-]*(?:token|secret|password|passwd|apikey|api_key|authorization|bearer|credential)[A-Za-z0-9_-]*\s*[=:]\s*)(?![$"']?\$)\S+/i.test(command) ||
+    /\/\/[^\s/@]+:[^\s/@]+@/.test(command);
+  if (credentialShaped) {
+    return fail(write, json, "verify set", "credential-shaped", "the command appears to embed a credential — reference an environment variable the runner exports (e.g. $NPM_TOKEN) instead of a literal value", EXIT.usage);
+  }
+  const timeoutSeconds = Number(text(flags, "timeout-seconds") ?? "300");
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 3600) {
+    return fail(write, json, "verify set", "invalid", "--timeout-seconds is 1..3600", EXIT.usage);
+  }
+
+  if (flags.get("yes") !== true) {
+    if (json) {
+      write(envelopeJson({ ok: false, command: "verify set", reason: "unconfirmed", repo, verifyCommand: command, timeoutSeconds }));
+      return EXIT.refused;
+    }
+    for (const line of [
+      `The terms, exactly:`,
+      `  repo     ${repo}`,
+      `  command  ${command}`,
+      `  timeout  ${timeoutSeconds}s`,
+      ``,
+      `Every FUTURE build of this repo re-runs this command unattended,`,
+      `once, right after it commits — under an ALLOWLISTED environment`,
+      `(PATH, HOME, locale, temp — no credentials). A pass lands the`,
+      `build "verified"; a failure lands it "refuted", never blocked.`,
+      `Re-run with --yes to approve.`,
+    ]) {
+      write(line);
+    }
+    return EXIT.refused;
+  }
+
+  const saved = store.setVerifyCommand(
+    { repo, command, timeoutMs: timeoutSeconds * 1000, approvedBy: acting.name },
+    clock(),
+  );
+  return succeed(write, json, "verify set", { repo, digest: saved.digest, timeoutSeconds }, () => [
+    `Approved: builds of ${repo} re-run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) right after commit.`,
   ]);
 }
 
@@ -8135,6 +8256,8 @@ function taskCommand(
       return planTaskCommand(rest, flags, context);
     case "review":
       return reviewTaskCommand(rest, flags, context);
+    case "accept":
+      return acceptTaskProof(rest, flags, context);
     default:
       return fail(
         context.write,
@@ -8499,6 +8622,10 @@ function showTask(positional: readonly string[], context: Context): number {
 
   const ref = store.refFor(BUILT_IN, id);
   const scope = store.getScope(id);
+  const runs = store.runsFor(ref.id);
+  const latestFinished = runs.find(one => one.finishedAt !== null) ?? null;
+  const proofVerdict = latestFinished === null ? null : store.proofVerdictFor(latestFinished.id);
+  const proofAccepted = latestFinished !== null && store.proofAcceptance(latestFinished.id) !== null;
   const detail = {
     task,
     ref: ref.id,
@@ -8509,14 +8636,26 @@ function showTask(positional: readonly string[], context: Context): number {
     claim: currentClaim(store, ref.id, now),
     scope,
     approval: approvalOf(scope),
-    runs: store.runsFor(ref.id),
+    runs,
     deliverable: ref.deliverable,
     report: readVerifiedReport(store, context.evidenceRoot, ref.id),
+    proofVerdict: proofVerdict?.verdict ?? null,
+    proofReasons: proofVerdict?.reasons ?? [],
+    proofAccepted,
   };
 
   return succeed(write, json, "task show", detail, () => [
     `${task.id}  ${task.state}${ref.deliverable === "report" ? "  (scout — delivers a report)" : ""}`,
     `  ${task.title}`,
+    // The closed machine-authored verdict (Priority 2), computed once at
+    // completion — never re-derived here. Same words `verdictWords`
+    // gives every other surface, so the CLI and the console agree.
+    ...(task.state !== "done" || detail.proofVerdict === null
+      ? []
+      : [
+          `  proof: ${proofVerdictWords(detail.proofVerdict, detail.proofReasons).word}${detail.proofAccepted ? " (accepted)" : ""}`,
+          ...(detail.proofReasons.length > 0 ? [`    ${detail.proofReasons.join("; ")}`] : []),
+        ]),
     ...(detail.report === null
       ? []
       : detail.report.ok
@@ -8535,6 +8674,51 @@ function showTask(positional: readonly string[], context: Context): number {
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
       : describeScope(scope)),
+  ]);
+}
+
+/**
+ * `task accept <id>` (Priority 2): the operator's explicit acceptance of a
+ * short or refuted proof verdict — the one act that lets the task read
+ * done despite incomplete evidence. Credentialed like approving a scope:
+ * accepting bad news is still authority.
+ */
+async function acceptTaskProof(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, now } = context;
+  const id = positional[0];
+  if (id === undefined) return fail(write, json, "task accept", "usage", "`standing-orders task accept <id> [--note <text>] --as <you> --token <t>`", EXIT.usage);
+
+  const task = store.getTask(id);
+  if (task === null) return fail(write, json, "task accept", "unknown-task", `no task \`${id}\``, EXIT.refused);
+
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task accept", "usage", "accepting incomplete proof is a person's act — it takes `--as <you> --token <t>`", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task accept", authenticated.reason, describeApproveFailure(authenticated.reason, id), EXIT.refused);
+  }
+
+  const ref = store.refFor(BUILT_IN, id);
+  const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null);
+  if (latest === undefined) {
+    return fail(write, json, "task accept", "no-run", `${id} has no finished attempt to accept`, EXIT.refused);
+  }
+  const rawNote = text(flags, "note");
+  let note: string | null = null;
+  if (rawNote !== undefined && rawNote.trim() !== "") {
+    const validated = validateNote(rawNote);
+    if (!validated.ok) return fail(write, json, "task accept", "invalid", validated.problem, EXIT.usage);
+    note = validated.note;
+  }
+  store.acceptProof(latest.id, acting.name, note, now);
+  return succeed(write, json, "task accept", { id, run: latest.id, acceptedBy: acting.name }, () => [
+    `Accepted: ${id}'s build #${latest.id} reads done despite its proof, on ${acting.name}'s say-so.`,
   ]);
 }
 

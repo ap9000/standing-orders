@@ -83,9 +83,16 @@ in the repository, which is the console and the worker in one process.
    decision — question, options, consequences, which are reversible. It
    arrives in the inbox, on `/next`, and on your phone if Telegram is
    paired; one tap answers it and the build resumes.
-6. **Collect the result.** A build lands in *done recently* with its diff;
-   a scout's report lands on its task page with follow-ups you can file
-   in one tap. Publishing to a branch and a pull request happens only
+6. **Collect the result.** A build lands in *done recently* with its diff,
+   its evidence bundle — acceptance criteria, checks, screenshots for
+   UI-facing work — and a closed verdict: *verified* when the repository's
+   approved verification command passed, *attested* when none is
+   configured and nothing contradicts the proof, or *needs verification*
+   when the proof is missing, incomplete, or disagrees with what the
+   machine captured. The last of those never hides the work — the branch
+   and diff are exactly as reviewable, and you can accept it anyway with a
+   note. A scout's report lands on its task page with follow-ups you can
+   file in one tap. Publishing to a branch and a pull request happens only
    under a publication grant whose terms you approved on the **system**
    page.
 

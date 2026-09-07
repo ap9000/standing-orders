@@ -178,6 +178,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("task approve", "the yes — nothing builds without one; binds to the scope digest"),
   operator("task requeue", "exit a stall: incidents resolved, strikes cleared, queued again"),
   operator("task review", "ask an agent to review a finished run's sealed diff — its comments land for you to prune and seal"),
+  operator("task accept", "accept a short or refuted proof anyway — the one act that lets a task read done despite incomplete evidence"),
   operator("task reopen", "resume external work its tracker closed and has been SEEN open again"),
 
   // ---- leases (runner surface) ----
@@ -219,6 +220,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     positionals: [{ name: "id", required: true, meaning: "the routine" }], flags: [jsonFlag, dbFlag] },
   { invocation: "config show", synopsis: "phase and spend configuration", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },
   { invocation: "setup show", synopsis: "installation setup", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
+  { invocation: "verify show", synopsis: "the repository's approved verification command, if one exists", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },
   { invocation: "intake show", synopsis: "intake configuration", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "providers", synopsis: "which agent providers this binary can drive, and their transports", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag] },
   { invocation: "template list", synopsis: "routine templates", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
@@ -263,6 +265,8 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("config set", "set phase or spend configuration"),
   operator("config clear", "clear phase or spend configuration"),
   operator("setup clear", "clear installation setup"),
+  operator("verify set", "approve the one shell command the plane re-runs, unattended, after every future commit — same ceremony as setup set"),
+  operator("verify clear", "revoke a repository's approved verification command"),
   operator("intake grant", "grant an intake source"),
   operator("intake run", "run intake now"),
   operator("intake preview", "preview what intake would file"),

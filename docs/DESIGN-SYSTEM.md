@@ -101,7 +101,13 @@ Modelled on issue detail in Linear, GitHub, and Jira (iOS): the page reads
 top-down and every long thing folds.
 
 1. **Eyebrow** — mono id · project · provenance.
-2. **Title** with its state chip.
+2. **Title** with its state chip. A done task's dispatch-status box
+   beneath it speaks the machine's own proof verdict (Priority 2) —
+   *complete — verified*, *complete with evidence*, *needs verification*,
+   or *proof refuted* — never re-derived from the page; an accepted
+   short/refuted verdict keeps its word but reads `ok`, with an amber
+   "accept anyway" form (`.approve-form`, the same rule as approving a
+   scope) while it waits.
 3. **Acts bar** — every verb in one row; the act that resolves the task's
    state first and primary (retry on a stalled task, plan-first with no
    scope, build-next in the queue); hold with its reason beside it; unhold

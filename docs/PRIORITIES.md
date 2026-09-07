@@ -54,8 +54,9 @@ visible provenance and an operator-controlled reset.
 
 ## Current focus
 
-Priority 1 is active. Priority 2 follows immediately because reliable execution
-without reliable proof is only a faster way to produce uncertain work.
+Priority 1 is active, and the first Priority 2 slice has landed alongside it:
+completion now carries a typed, hash-addressed proof the plane adjudicates
+against evidence it captured itself, rather than an agent's own assertion.
 
 The first Priority 1 slice now pins the worker service to the installed Node
 runtime, requires a fresh worker heartbeat before installation reports success,
@@ -65,6 +66,19 @@ provider classifier, while Full access seals Claude's
 `--dangerously-skip-permissions`, Codex's combined approval/sandbox bypass, or
 Gemini's `yolo` into that task's approval so permission prompts cannot strand it
 while the operator is away. Changing
-the default never broadens existing approvals. A completed task only says
-“complete with evidence” when both its terminal handoff and machine-captured
-diff exist; otherwise it names the missing proof.
+the default never broadens existing approvals.
+
+The first Priority 2 slice: a builder may write one nonce-bound proof
+manifest — acceptance criteria, checks with exit codes, changed paths,
+caveats, and screenshot paths for UI-facing work — alongside its terminal
+handoff. The plane validates every claimed screenshot as a bounded PNG or
+JPEG by signature, validates claimed changed paths against the sealed
+diff, and re-runs one operator-approved per-repository verification
+command (`standing-orders verify set`) in the leased worktree, never a
+model-authored one. From this it computes one closed verdict — *verified*,
+*attested*, *short*, or *refuted* — once, at completion, and every surface
+(task, run, done, builds, board, `task show`, `brief`) speaks the same
+words. A `short` or `refuted` verdict reads "needs verification," not
+done, until an operator explicitly accepts it (`task accept`, or the
+console's accept button); the branch and diff stay exactly as reviewable
+either way — missing or malformed proof never destroys committed work.

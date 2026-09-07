@@ -90,6 +90,29 @@ const DEMO_HANDOFF = {
   decisionsIncorporated: [],
 };
 
+/** The evidence bundle's own manifest (Priority 2) — the seeded sandbox
+ * shows a fully "verified" build, so a fresh install sees the honest
+ * ceiling of the feature on the first look. */
+const DEMO_PROOF = {
+  version: 1 as const,
+  criteria: [
+    { id: "c1", statement: "Settlement no longer drifts at half-cent boundaries.", verdict: "met" as const, how: "Added and ran boundary tests against the ledger fixtures." },
+    { id: "c2", statement: "The human console formatter still renders payout dashboards.", verdict: "met" as const, how: "Ran the dashboard's own snapshot tests." },
+  ],
+  checks: [{ command: "npm test", exitCode: 0, summary: "214 tests passed, including the new rounding boundary cases." }],
+  changed: ["src/payout.ts", "src/payout.test.ts"],
+  caveats: [],
+  screenshots: [{ path: "evidence/payout-dashboard.png", caption: "Payout dashboard after the fix — totals match the ledger." }],
+};
+
+/** A one-pixel transparent PNG (Priority 2 demo): a real, signature-valid
+ * screenshot the evidence bundle can thumbnail, without shipping a real
+ * image asset for a synthetic run nobody actually captured. */
+const DEMO_SCREENSHOT_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
 /**
  * Seed a believable fleet mid-flight. The store MUST already carry the
  * demo stamp — this function refuses to seed an unfenced database, so no
@@ -279,6 +302,41 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     "composed at completion [demo: synthetic]",
     hoursAgo(8.4),
   );
+  // The evidence bundle (Priority 2): a validated proof, its claimed
+  // screenshot stored as immutable image evidence, the plane's own re-run
+  // check, and the closed verdict — computed once, exactly as the real
+  // builder would leave it, so a fresh install sees the finished feature.
+  storeEvidence(
+    store,
+    evidenceRoot,
+    doneRun,
+    "proof",
+    "proof.json",
+    Buffer.from(JSON.stringify(DEMO_PROOF, null, 2), "utf8"),
+    "agent-authored proof (validated, re-serialized) [demo: synthetic]",
+    hoursAgo(8.4),
+  );
+  storeEvidence(
+    store,
+    evidenceRoot,
+    doneRun,
+    "screenshot",
+    "screenshot-demo.png",
+    DEMO_SCREENSHOT_PNG,
+    "agent-claimed screenshot at evidence/payout-dashboard.png (validated png) [demo: synthetic]",
+    hoursAgo(8.4),
+  );
+  storeEvidence(
+    store,
+    evidenceRoot,
+    doneRun,
+    "check-log",
+    "check-log.txt",
+    Buffer.from(`$ npm test\n(exit 0)\n\n--- stdout ---\n214 tests passed.\n\n--- stderr ---\n`, "utf8"),
+    `sh -c "npm test" (exit 0) [demo: synthetic]`,
+    hoursAgo(8.4),
+  );
+  store.saveProofVerdict(doneRun, "verified", ["the approved verification command passed"], hoursAgo(8.4));
   store.finishRun(doneRun, { outcome: "built", committed: true, now: hoursAgo(8.4) });
   store.setTaskState(done, "done", hoursAgo(8.4));
   store.addRunNote(doneRun, "demo", "Reviewed the diff — the fixture numbers check out. Shipping.", hoursAgo(3));

@@ -49,7 +49,8 @@ import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, 
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
-import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
+import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
+import { verdictWords as proofVerdictWords, dispatchStatusToken, type ProofVerdict } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -140,7 +141,7 @@ import {
   rowVisible,
 } from "./project.js";
 import { tally, spendLine, runCostWords } from "./summary.js";
-import { classify, holdOwnerWords } from "./board.js";
+import { classify, holdOwnerWords, attentionCardForUnverifiedDone } from "./board.js";
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
@@ -979,6 +980,10 @@ export function createDecisionServer(options: ServeOptions): Server {
           decisions: store.listDecisionsScoped(project).filter(one => visible(one.repo)).slice(0, 10),
           approvals: store.scopesAwaitingApproval(project, 10, admission).filter(one => visible(one.repo)),
           requeueables: store.listRequeueablesScoped(project, now, 10, admission).filter(one => visible(one.repo)),
+          needsVerification: store
+            .listCompletedWorkScoped(project, 10, admission)
+            .filter(one => visible(one.repo) && (one.proofVerdict === "short" || one.proofVerdict === "refuted") && !one.proofAccepted)
+            .map(one => ({ taskId: one.taskId, title: one.title, verdict: one.proofVerdict as "short" | "refuted", repo: one.repo })),
           cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
           wizard: wizardSteps(now),
@@ -1186,15 +1191,33 @@ export function createDecisionServer(options: ServeOptions): Server {
         who.session.sawBoardAt = now.getTime();
       }
       const buildingCount = cards.filter(card => card.lane === "building").length;
+      // A completed task whose proof is short or refuted and not yet
+      // accepted (Priority 2) reads "needs verification", not done — the
+      // board's once-and-only-once rule holds because this split is the
+      // ONE place a done row becomes either lane; the done-lane render
+      // below never sees the rows filtered out here.
+      const unverifiedDone = done.filter(
+        row => (row.proofVerdict === "short" || row.proofVerdict === "refuted") && !row.proofAccepted,
+      );
+      const verifiedDone = done.filter(row => !unverifiedDone.includes(row));
+      const unverifiedCards = unverifiedDone.map(row =>
+        attentionCardForUnverifiedDone({
+          taskId: row.taskId,
+          title: row.title,
+          repo: row.repo,
+          completedAt: row.completedAt,
+          proofVerdict: row.proofVerdict as "short" | "refuted",
+        }),
+      );
       // Instances belong to their track row, not the main lanes — the board
       // is for one-off work; tracks are the heartbeat. The one exception is
       // attention: anything needing a person surfaces, wearing its routine.
-      const laneCards = cards.filter(card => card.routineName === null || card.lane === "attention");
+      const laneCards = [...cards.filter(card => card.routineName === null || card.lane === "attention"), ...unverifiedCards];
       const tracks = store
         .routineTracks(all ? null : project, now, admission)
         .filter(track => visible(track.routine.repo));
       const body = boardBody(
-        { cards: laneCards, tracks, done, saturated: snapshot.saturated, now, all, project, delta },
+        { cards: laneCards, tracks, done: verifiedDone, saturated: snapshot.saturated, now, all, project, delta },
         pr => store.ciFailureObserved(pr),
       );
       if (url.searchParams.get("fragment") === "1") {
@@ -1665,7 +1688,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         before = Number(raw);
       }
       const rows = store.listRunsBefore(before, RUNS_PAGE, project);
-      return sendScreen(response, 200, runsPage(chromeFor(project, "runs"), rows, liveRunIds(rows), rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null));
+      const verdicts = store.proofVerdictsFor(rows.map(one => one.id));
+      const accepted = new Set(rows.filter(one => store.proofAcceptance(one.id) !== null).map(one => one.id));
+      return sendScreen(response, 200, runsPage(chromeFor(project, "runs"), rows, liveRunIds(rows), rows.length === RUNS_PAGE ? rows[rows.length - 1]?.id ?? null : null, verdicts, accepted));
     }
 
     if (url.pathname === "/menu") {
@@ -1828,6 +1853,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             ? { taskId }
             : null,
           structuredHandoffView(artifacts, evidenceRoot),
+          proofBundleView(store, found, artifacts, evidenceRoot),
         ),
       );
     }
@@ -2757,11 +2783,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       const latest = runs.find(one => one.finishedAt !== null);
       if (latest === undefined) return null;
       const artifacts = store.artifactsFor(latest.id);
+      const verdict = store.proofVerdictFor(latest.id);
       return {
         runId: latest.id,
         outcome: latest.outcome,
         hasTerminalDiff: artifacts.some(one => one.kind === "terminal-diff"),
         hasHandoff: artifacts.some(one => one.kind === "handoff"),
+        // The closed machine-authored verdict (Priority 2), computed once
+        // at completion by adjudicate() and never re-inferred here — null
+        // only for a run that predates the proof system.
+        proofVerdict: verdict?.verdict ?? null,
+        proofReasons: verdict?.reasons ?? [],
+        proofAccepted: store.proofAcceptance(latest.id) !== null,
       };
     })();
     return {
@@ -4142,7 +4175,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer|follow-up)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer|follow-up|accept-proof)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -5756,6 +5789,28 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return redirect(response, body.get("return") === "next" ? "/next" : taskHref(taskId));
       }
+      case "accept-proof": {
+        // Accepting is a person's act, like approving a scope (Priority
+        // 2): a cookie session only, never a bearer credential.
+        if (who.via !== "cookie") {
+          return refuse(response, who, 403, "accepting a proof is a browser session's act");
+        }
+        const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null);
+        if (latest === undefined) {
+          return taskScreen(response, who, taskId, "this task has no finished attempt to accept", 404);
+        }
+        const rawNote = (body.get("note") ?? "").trim();
+        let note: string | null = null;
+        if (rawNote !== "") {
+          const validated = validateNote(rawNote);
+          if (!validated.ok) {
+            return taskScreen(response, who, taskId, validated.problem, 400);
+          }
+          note = validated.note;
+        }
+        store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
+        return redirect(response, taskHref(taskId));
+      }
       default:
         return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
     }
@@ -5885,6 +5940,17 @@ export function createDecisionServer(options: ServeOptions): Server {
     const read = readVerifiedArtifact(evidenceRoot, linked);
     if (!read.ok) {
       return respond(response, 410, "text/plain; charset=utf-8", "the evidence no longer matches its record");
+    }
+    // A validated screenshot is the one evidence kind meant to render
+    // inline (thumbnails, full-image links) — every other kind stays a
+    // downloaded text record, exactly as before.
+    if (linked.kind === "screenshot") {
+      const imageType = linked.key.endsWith(".png") ? "image/png" : linked.key.endsWith(".jpg") ? "image/jpeg" : null;
+      if (imageType !== null) {
+        response.writeHead(200, { ...SAFETY, "Content-Type": imageType, "Cache-Control": "private, max-age=31536000, immutable" });
+        response.end(read.content);
+        return;
+      }
     }
     response.writeHead(200, {
       ...SAFETY,
@@ -8175,6 +8241,10 @@ function inboxPage(chrome: Chrome, data: {
   requeueables: { taskId: string; title: string; state: TaskState; strikes: number; incidentCount: number; repo?: string | null }[];
   cancelledBlockers: { blockerId: string; dependentCount: number; exampleDependent: string; repo?: string | null; blockerRepo?: string | null }[];
   gaps: Gap[];
+  /** A completed task whose proof is short or refuted and not yet accepted
+   * (Priority 2) — reads "needs verification" here too, never silently
+   * "done" just because the inbox does not otherwise look at finished work. */
+  needsVerification: { taskId: string; title: string; verdict: "short" | "refuted"; repo?: string | null }[];
   /** The first-run checklist; null once the installation has succeeded once. */
   wizard: { done: boolean; title: string; detail: string }[] | null;
   /** Whether any worker is answering right now — said at the top when none is. */
@@ -8189,7 +8259,7 @@ function inboxPage(chrome: Chrome, data: {
       : ` <span class="badge">${escape(projectName(repo))}</span>`;
   const empty =
     data.decisions.length + data.approvals.length + data.requeueables.length +
-    data.cancelledBlockers.length + data.gaps.length === 0;
+    data.cancelledBlockers.length + data.gaps.length + data.needsVerification.length === 0;
 
   // The roll-up inbox keeps its links-only contract — acting means opening
   // the project. A SELECTED project's inbox answers reversible options on
@@ -8241,6 +8311,18 @@ function inboxPage(chrome: Chrome, data: {
                   `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
                   `<input type="hidden" name="return" value="inbox">` +
                   `<button type="submit">retry</button></form></span></p>`),
+          )
+          .join("\n");
+
+  const needsVerification =
+    data.needsVerification.length === 0
+      ? ""
+      : `<h2>needs verification</h2><p class="hint">finished, but the proof is short or refuted — read it, then accept it on the task page if it is fine as is</p>` +
+        data.needsVerification
+          .map(
+            one =>
+              `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> ${escape(one.title)}${chip(one.repo)}` +
+              ` <span class="badge badge-failed">${one.verdict === "refuted" ? "proof refuted" : "needs verification"}</span></p>`,
           )
           .join("\n");
 
@@ -8315,6 +8397,7 @@ function inboxPage(chrome: Chrome, data: {
     decisions,
     approvals,
     requeueables,
+    needsVerification,
     cancelled,
     gaps,
     data.rollup
@@ -8718,9 +8801,13 @@ function donePage(
                   : ` <span class="badge">${escape(row.publicationState)}</span>`
                 : ` <a href="${escape(row.prUrl ?? "#")}" class="badge badge-open">PR #${row.prNumber}</a>` +
                   (ciRed(row.prNumber) ? ` <span class="badge badge-failed">CI failing</span>` : "");
+            const needsVerification =
+              (row.proofVerdict === "short" || row.proofVerdict === "refuted") && !row.proofAccepted
+                ? ` <span class="badge badge-failed">${row.proofVerdict === "refuted" ? "proof refuted" : "needs verification"}</span>`
+                : "";
             return (
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
-              `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}</p>` +
+              `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}${needsVerification}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
               `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}</p></div>`
             );
@@ -11356,8 +11443,18 @@ function taskBody(data: {
   runs: Run[];
   /** Proof produced by the newest finished attempt. The two booleans are
    * machine facts about immutable, hash-addressed artifacts — never inferred
-   * from the agent's prose. */
-  completion?: { runId: number; outcome: string | null; hasTerminalDiff: boolean; hasHandoff: boolean } | null;
+   * from the agent's prose. `proofVerdict` is the closed machine-authored
+   * verdict (Priority 2), computed once at completion and never re-derived
+   * here — null only for a run that predates the proof system. */
+  completion?: {
+    runId: number;
+    outcome: string | null;
+    hasTerminalDiff: boolean;
+    hasHandoff: boolean;
+    proofVerdict: ProofVerdict | null;
+    proofReasons: string[];
+    proofAccepted: boolean;
+  } | null;
   decisions: Decision[];
   incidents: Incident[];
   /** Pending coordinator proposals on this task (mate arc v3), with the decisions their answer cards name. */
@@ -11454,19 +11551,65 @@ function taskBody(data: {
       if (proof === null) {
         return box("problem", "Complete, proof missing", "The task is terminal but has no finished attempt record. Treat it as unverified.");
       }
-      const missing = [proof.hasHandoff ? null : "agent handoff", proof.hasTerminalDiff ? null : "terminal diff"]
-        .filter((one): one is string => one !== null);
-      return missing.length > 0
-        ? box(
-            "problem",
-            "Complete, proof incomplete",
-            `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, but its ${escape(missing.join(" and "))} is missing.`,
-          )
-        : box(
-            "ok",
-            "Complete with evidence",
-            `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its agent-reported checks and machine-captured diff; each is labeled by source.`,
-          );
+      // A no-change conclusion never owes a proof — there is no diff to
+      // check acceptance criteria or a changed-path claim against — so it
+      // keeps reading on the two presence facts alone, exactly as before
+      // the proof system existed (the "attested floor" this preserves).
+      if (proof.outcome === "no-change") {
+        const missing = [proof.hasHandoff ? null : "agent handoff", proof.hasTerminalDiff ? null : "terminal diff"]
+          .filter((one): one is string => one !== null);
+        return missing.length > 0
+          ? box(
+              "problem",
+              "Complete, proof incomplete",
+              `<a href="/r/${proof.runId}">Build #${proof.runId}</a> concluded no change was needed, but its ${escape(missing.join(" and "))} is missing.`,
+            )
+          : box(
+              "ok",
+              "Complete with evidence",
+              `<a href="/r/${proof.runId}">Build #${proof.runId}</a> concluded no change was needed; its handoff and machine-captured diff are on record.`,
+            );
+      }
+      // A built run's verdict is the machine's own — computed once at
+      // completion by adjudicate() (Priority 2), never re-derived here.
+      // Acceptance changes the CLASS (problem → ok) and the words, never
+      // the underlying token: the surfaces still agree on what happened.
+      const accepted = proof.proofAccepted;
+      const detail = proof.proofReasons.length > 0 ? ` — ${escape(proof.proofReasons.join("; "))}` : "";
+      // The accept act (DESIGN-SYSTEM §1): the one amber verb that
+      // resolves this screen, sharing the approve ceremony's own CSS rule
+      // — never a new amber selector.
+      const acceptForm =
+        accepted || data.csrf === ""
+          ? ""
+          : `<form method="post" action="${taskHref(task.id)}/accept-proof" class="approve-form">` +
+            `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+            `<input type="text" name="note" maxlength="500" placeholder="optional note">` +
+            `<button type="submit">accept anyway</button></form>`;
+      if (proof.proofVerdict === "verified") {
+        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`);
+      }
+      if (proof.proofVerdict === "attested") {
+        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`);
+      }
+      if (proof.proofVerdict === "refuted") {
+        return (
+          box(
+            accepted ? "ok" : "problem",
+            "Proof refuted",
+            `<a href="/r/${proof.runId}">Build #${proof.runId}</a>'s proof disagrees with what the machine captured${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
+          ) + acceptForm
+        );
+      }
+      // "short", or no verdict at all (a legacy run, or one where
+      // adjudication itself could not run) — the honest default.
+      return (
+        box(
+          accepted ? "ok" : "problem",
+          "Needs verification",
+          `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, but its proof is incomplete${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
+        ) + acceptForm
+      );
     }
     if (task.state === "cancelled") {
       return box("problem", "Cancelled", "Nothing else will run for this task.");
@@ -12461,6 +12604,9 @@ const EVIDENCE_WORDS: Record<string, string> = {
   handoff: "the agent's conclusion",
   "revision-brief": "the revision brief",
   report: "the scout's report",
+  proof: "the agent's proof",
+  "check-log": "the plane's re-run check",
+  screenshot: "a screenshot",
 };
 
 function evidenceWords(kind: string): string {
@@ -12483,20 +12629,34 @@ function runOutcomeBadge(run: Run, live: boolean): string {
 }
 
 
-function runsPage(chrome: Chrome, rows: (Run & { taskId: string })[], liveIds: ReadonlySet<number>, nextCursor: number | null): Screen {
+function runsPage(
+  chrome: Chrome,
+  rows: (Run & { taskId: string })[],
+  liveIds: ReadonlySet<number>,
+  nextCursor: number | null,
+  verdicts: Map<number, { verdict: ProofVerdict }> = new Map(),
+  accepted: ReadonlySet<number> = new Set(),
+): Screen {
   const list =
     rows.length === 0
       ? `<p class="meta">No builds yet \u2014 they appear once an approved task is dispatched.</p>`
       : rows
-          .map(
-            run =>
+          .map(run => {
+            const verdict = verdicts.get(run.id)?.verdict ?? null;
+            const needsVerification =
+              (verdict === "short" || verdict === "refuted") && !accepted.has(run.id)
+                ? ` <span class="badge badge-failed">${verdict === "refuted" ? "proof refuted" : "needs verification"}</span>`
+                : "";
+            return (
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
               runOutcomeBadge(run, liveIds.has(run.id)) +
+              needsVerification +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
               `<span class="right meta mono">${escape(when(run.startedAt))}` +
-              `${run.providerStartedAt === null && run.tokensIn === null && run.tokensOut === null && run.costUsd === null ? "" : ` \u00b7 ${escape(runCostWords(run, liveIds.has(run.id)))}`}</span></p>`,
-          )
+              `${run.providerStartedAt === null && run.tokensIn === null && run.tokensOut === null && run.costUsd === null ? "" : ` \u00b7 ${escape(runCostWords(run, liveIds.has(run.id)))}`}</span></p>`
+            );
+          })
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
   return screen("builds", [`<h1>builds <a class="badge" href="/peek">peek at the live ones \u2192</a></h1>`, buildsViews("builds"), `<p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
@@ -12551,6 +12711,67 @@ function structuredHandoffView(artifacts: Artifact[], root: string): StructuredH
   } catch {
     return null;
   }
+}
+
+/** The evidence bundle (Priority 2): the closed machine-authored verdict,
+ * the agent's proof (or why it cannot be shown), the plane's own re-run
+ * check, and every validated screenshot — each row labeled by source so
+ * "the agent said" and "the machine proved" never blur together. */
+type ProofBundleView = {
+  verdict: ProofVerdict | null;
+  reasons: string[];
+  accepted: { by: string; note: string | null; at: string } | null;
+  proof: { criteria: { statement: string; verdict: string; how: string }[]; checks: { command: string; exitCode: number; summary: string }[]; caveats: string[] } | null;
+  proofProblem: string | null;
+  checkLog: { text: string; artifactId: number; truncated: boolean } | null;
+  screenshots: { path: string; caption: string; artifactId: number }[];
+};
+
+const SCREENSHOT_CAPTURE = /^agent-claimed screenshot at (.+) \(validated (?:png|jpeg)\)/;
+
+function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: string): ProofBundleView | null {
+  const verdictRow = store.proofVerdictFor(run.id);
+  const acceptanceRow = store.proofAcceptance(run.id);
+  const proofView = readVerifiedProofForRun(store, root, run.id);
+  const checkLogArtifact = artifacts.find(one => one.kind === "check-log") ?? null;
+  const screenshotArtifacts = artifacts.filter(one => one.kind === "screenshot");
+
+  if (verdictRow === null && proofView === null && checkLogArtifact === null && screenshotArtifacts.length === 0) {
+    return null;
+  }
+
+  const proof = proofView !== null && proofView.ok ? proofView.proof : null;
+  const captionFor = (path: string): string => proof?.screenshots.find(one => one.path === path)?.caption ?? path;
+  const screenshots = screenshotArtifacts.flatMap(artifact => {
+    const path = SCREENSHOT_CAPTURE.exec(artifact.capture)?.[1];
+    if (path === undefined) return [];
+    return [{ path, caption: captionFor(path), artifactId: artifact.id }];
+  });
+
+  let checkLog: ProofBundleView["checkLog"] = null;
+  if (checkLogArtifact !== null) {
+    const read = readVerifiedArtifact(root, checkLogArtifact);
+    checkLog = read.ok
+      ? { text: read.content.toString("utf8"), artifactId: checkLogArtifact.id, truncated: checkLogArtifact.truncated }
+      : { text: `(the check log no longer verifies: ${read.problem})`, artifactId: checkLogArtifact.id, truncated: false };
+  }
+
+  return {
+    verdict: verdictRow?.verdict ?? null,
+    reasons: verdictRow?.reasons ?? [],
+    accepted: acceptanceRow === null ? null : { by: acceptanceRow.approver, note: acceptanceRow.note, at: acceptanceRow.acceptedAt },
+    proof:
+      proof === null
+        ? null
+        : {
+            criteria: proof.criteria.map(one => ({ statement: one.statement, verdict: one.verdict, how: one.how })),
+            checks: proof.checks,
+            caveats: proof.caveats,
+          },
+    proofProblem: proofView !== null && !proofView.ok ? proofView.problem : null,
+    checkLog,
+    screenshots,
+  };
 }
 
 const CAPTURE_EXIT = /\(exit ([0-9]{1,4})\)\s*$/;
@@ -12697,6 +12918,77 @@ function terminalDiffCard(
   return parts.join("\n");
 }
 
+/**
+ * The evidence bundle (Priority 2): the closed verdict first — the one
+ * sentence every other surface agrees with — then criteria, the agent's
+ * declared checks, the plane's own re-run (labeled "re-run here", never
+ * confused with the agent's own claim), caveats, and every validated
+ * screenshot as a thumbnail linking to the full image. Renders nothing
+ * when the run predates the proof system.
+ */
+function evidenceBundleCard(view: ProofBundleView | null, runId: number): string {
+  if (view === null) return "";
+  const parts: string[] = ["<h2>evidence bundle</h2>"];
+
+  if (view.verdict !== null) {
+    const words = proofVerdictWords(view.verdict, view.reasons);
+    parts.push(`<p class="row" data-proof-verdict="${escape(dispatchStatusToken(view.verdict))}"><strong>${escape(words.word)}</strong>${words.detail === "" ? "" : ` <span class="meta">${escape(words.detail)}</span>`}</p>`);
+  }
+  if (view.accepted !== null) {
+    parts.push(
+      `<p class="meta">accepted by <span class="mono">${escape(view.accepted.by)}</span> · ${escape(when(view.accepted.at))}${view.accepted.note === null ? "" : ` — ${escape(view.accepted.note)}`}</p>`,
+    );
+  }
+
+  if (view.proofProblem !== null) {
+    parts.push(`<p class="meta">proof: ${escape(view.proofProblem)}</p>`);
+  } else if (view.proof !== null) {
+    if (view.proof.criteria.length > 0) {
+      parts.push(
+        `<div class="result-section"><strong>acceptance criteria</strong><ul>` +
+          view.proof.criteria
+            .map(one => `<li><span class="badge${one.verdict === "met" ? " badge-done" : one.verdict === "not-met" ? " badge-failed" : ""}">${escape(one.verdict)}</span> ${escape(one.statement)} <span class="meta">— ${escape(one.how)}</span></li>`)
+            .join("") +
+          `</ul></div>`,
+      );
+    }
+    if (view.proof.checks.length > 0) {
+      parts.push(
+        `<div class="result-section"><strong>checks reported by the agent</strong><ul>` +
+          view.proof.checks.map(one => `<li><span class="mono">${escape(one.command)}</span> <span class="meta">(exit ${one.exitCode}) — ${escape(one.summary)}</span></li>`).join("") +
+          `</ul></div>`,
+      );
+    }
+    if (view.proof.caveats.length > 0) {
+      parts.push(`<div class="result-section"><strong>caveats</strong><ul>${view.proof.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
+    }
+  }
+
+  if (view.checkLog !== null) {
+    parts.push(
+      `<details><summary>the plane's re-run check (re-run here)${view.checkLog.truncated ? " (TRUNCATED)" : ""}</summary>` +
+        `<pre class="mono" style="overflow-x:auto">${escape(view.checkLog.text)}</pre></details>` +
+        `<p class="meta"><a href="/r/${runId}/evidence/${view.checkLog.artifactId}">the raw check log</a></p>`,
+    );
+  }
+
+  if (view.screenshots.length > 0) {
+    parts.push(
+      `<div class="result-section"><strong>screenshots</strong>` +
+        view.screenshots
+          .map(
+            shot =>
+              `<p class="row"><a href="/r/${runId}/evidence/${shot.artifactId}">` +
+              `<img src="/r/${runId}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}" style="max-width:12rem;max-height:9rem;border-radius:var(--radius);border:1px solid var(--border)"></a> ` +
+              `<span class="meta">${escape(shot.caption)} · <span class="mono">${escape(shot.path)}</span></span></p>`,
+          )
+          .join("\n") +
+        `</div>`,
+    );
+  }
+
+  return parts.length === 1 ? "" : parts.join("\n");
+}
 
 /** The run's facts as rows — one renderer for the page and its live
  * fragment (A4). Elapsed ticks client-side while the run is open. */
@@ -12760,6 +13052,7 @@ function runPage(
   heldTurns: { turns: SessionTurn[]; open: boolean; state: string; cap: number } | null = null,
   continueOffer: { taskId: string } | null = null,
   structuredHandoff: StructuredHandoffView | null = null,
+  proofBundle: ProofBundleView | null = null,
 ): Screen {
   const rows = runFactsRows(run, taskId, running);
   // The conversation (Phase 2E, v2 S1g): every stdin injection as the
@@ -12962,6 +13255,7 @@ function runPage(
     transcript,
     peek,
     handoff,
+    evidenceBundleCard(proofBundle, run.id),
     terminal === null ? "" : terminalDiffCard(terminal, run.id, editor, commentForm !== ""),
     reviewCard,
     continueCard,

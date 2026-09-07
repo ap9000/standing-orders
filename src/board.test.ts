@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
-import { classify, type BoardFacts } from "./board.js";
+import { classify, attentionCardForUnverifiedDone, type BoardFacts } from "./board.js";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { acquire, release } from "./claim.js";
@@ -45,6 +45,19 @@ function facts(overrides: Partial<BoardFacts> = {}): BoardFacts {
     ...overrides,
   };
 }
+
+describe("attentionCardForUnverifiedDone (Priority 2)", () => {
+  test("a short verdict reads 'needs verification'; a refuted one names the refutation", () => {
+    const short = attentionCardForUnverifiedDone({
+      taskId: "t-9", title: "the work", repo: "/repo/x", completedAt: T0.toISOString(), proofVerdict: "short",
+    });
+    expect(short).toMatchObject({ lane: "attention", reason: "complete — needs verification", href: "/t/t-9" });
+    const refuted = attentionCardForUnverifiedDone({
+      taskId: "t-9", title: "the work", repo: null, completedAt: T0.toISOString(), proofVerdict: "refuted",
+    });
+    expect(refuted.reason).toBe("complete — proof refuted");
+  });
+});
 
 describe("the lane classifier", () => {
   test("task-local readiness satisfied lands in queued — and claims nothing about the fleet", () => {

@@ -385,7 +385,7 @@ describe("the builder's gates", () => {
     expect(patch?.capture).toContain("--no-textconv");
     // The machine's phase reached the last boundary the machine owns —
     // stamped by the state machine, never parsed from a provider stream.
-    expect(store.getRun(req.runId as number)?.phase).toBe("capturing-evidence");
+    expect(store.getRun(req.runId as number)?.phase).toBe("verifying-proof");
     // And the freshness-stamped handoff (M6.10): the machine's statement of
     // where this run left the world, provable against the branch.
     const handoff = artifacts.find(one => one.kind === "handoff");
@@ -2081,5 +2081,166 @@ describe("agentExitWords: a non-zero agent exit says what ended it", () => {
       .toBe("the agent stopped on an error after 3 turns: boom (error_during_execution)");
     expect(agentExitWords({ code: 2, stderr: "stderr says why", finalMessage: null, ending: null })).toBe("stderr says why");
     expect(agentExitWords({ code: 7, stderr: "", finalMessage: null })).toBe("exit 7");
+  });
+});
+
+describe("the proof (Priority 2): a missing or malformed proof never destroys committed work", () => {
+  let store: Store;
+  let approverToken: string;
+  let taskRef: number;
+  const agentCalls: string[][] = [];
+
+  /** Writes both the handoff and (when given) a proof file, reading each
+   * nonce out of the prompt exactly as the real agent would. */
+  const agentWithProof = (proofBody: unknown | null): Runner =>
+    async (_file, args, options) => {
+      agentCalls.push([...args]);
+      conclude(args, options);
+      const prompt = args[args.indexOf("-p") + 1] ?? "";
+      const name = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+      if (proofBody !== null && name !== undefined && options?.cwd !== undefined) {
+        writeSync2(join2(options.cwd, name), typeof proofBody === "string" ? proofBody : JSON.stringify(proofBody));
+      }
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+  /** Reports the leased branch, one modified file (src/index.ts), a
+   * numstat matching it, and commits happily. */
+  const git: Runner = async (_file, args) => {
+    if (args.includes("rev-parse")) return { ...OK, stdout: "feat/a\n" };
+    if (args.includes("symbolic-ref")) {
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
+    if (args.includes("--numstat")) return { ...OK, stdout: "1\t0\tsrc/index.ts " };
+    if (args.includes("status")) return { ...OK, stdout: " M src/index.ts\n" };
+    return { ...OK };
+  };
+
+  const request = (over: Record<string, unknown> = {}) => ({
+    taskId: "t-1",
+    taskRef,
+    runner: "builder-1",
+    worktree: wt,
+    runId: store.startRun({
+      taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+    }),
+    evidenceRoot: join2(wt, ".evidence"),
+    branch: "feat/a",
+    now: T0,
+    git,
+    ...over,
+  });
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    store.saveWorktree({
+      path: wt, repo: REPO, branch: "feat/a", runner: "builder-1", taskRef,
+      createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+    });
+    agentCalls.length = 0;
+  });
+
+  afterEach(() => store.close());
+
+  const approveScope = (goal = "add a guard on the payout path") => {
+    propose(store, { taskId: "t-1", goal, now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+  };
+  const claimIt = () =>
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
+
+  const soundProof = {
+    version: 1,
+    criteria: [{ id: "c1", statement: "the guard exists", verdict: "met", how: "read the diff" }],
+    checks: [{ command: "npm test", exitCode: 0, summary: "passed" }],
+    changed: ["src/index.ts"],
+    caveats: [],
+    screenshots: [],
+  };
+
+  test("no proof at all: the work commits, the verdict is short", async () => {
+    claimIt();
+    approveScope();
+    const req = request({ agent: agentWithProof(null) });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(store.artifactsFor(req.runId as number).map(one => one.kind)).not.toContain("proof");
+    const verdict = store.proofVerdictFor(req.runId as number);
+    expect(verdict).toMatchObject({ verdict: "short" });
+    expect(verdict?.reasons[0]).toContain("no proof was written");
+  });
+
+  test("a malformed proof: the work still commits, the verdict is short, and a malformed-proof incident is recorded", async () => {
+    claimIt();
+    approveScope();
+    const req = request({ agent: agentWithProof("not json {") });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(store.artifactsFor(req.runId as number).map(one => one.kind)).toContain("proof");
+    const verdict = store.proofVerdictFor(req.runId as number);
+    expect(verdict).toMatchObject({ verdict: "short" });
+    expect(verdict?.reasons[0]).toMatch(/malformed/);
+    const incidents = store.openIncidents(REPO);
+    expect(incidents.some(one => one.kind === "malformed-proof" && one.run === req.runId)).toBe(true);
+  });
+
+  test("a sound proof whose claims match the diff, no verify command configured: attested", async () => {
+    claimIt();
+    approveScope();
+    const req = request({ agent: agentWithProof(soundProof) });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(store.artifactsFor(req.runId as number).map(one => one.kind)).toContain("proof");
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "attested" });
+  });
+
+  test("a sound proof, an approved verify command that passes: verified, and the check-log is captured", async () => {
+    claimIt();
+    approveScope();
+    store.setVerifyCommand({ repo: REPO, command: "true", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    const req = request({ agent: agentWithProof(soundProof) });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "verified" });
+    expect(store.artifactsFor(req.runId as number).map(one => one.kind)).toContain("check-log");
+  });
+
+  test("a sound proof, an approved verify command that fails: refuted, but the work still commits", async () => {
+    claimIt();
+    approveScope();
+    store.setVerifyCommand({ repo: REPO, command: "false", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    const req = request({ agent: agentWithProof(soundProof) });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "refuted" });
+  });
+
+  test("a claimed changed path absent from the sealed diff: refuted", async () => {
+    claimIt();
+    approveScope();
+    const req = request({ agent: agentWithProof({ ...soundProof, changed: ["src/other.ts"] }) });
+
+    const result = await build(store, req);
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    const verdict = store.proofVerdictFor(req.runId as number);
+    expect(verdict).toMatchObject({ verdict: "refuted" });
+    expect(verdict?.reasons[0]).toContain("src/other.ts");
   });
 });
