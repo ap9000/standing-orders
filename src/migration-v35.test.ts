@@ -14,6 +14,18 @@ const V34_CHAT_CONFIG = `CREATE TABLE chat_config (
   updated_by              TEXT NOT NULL
 )`;
 
+const V34_CHAT_CONFIG_APPENDED = `CREATE TABLE chat_config (
+  id                      INTEGER PRIMARY KEY CHECK (id = 1),
+  provider                TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  model                   TEXT NOT NULL,
+  daily_turns             INTEGER NOT NULL DEFAULT 50,
+  weekly_ceiling_microusd INTEGER NOT NULL,
+  updated_at              TEXT NOT NULL,
+  updated_by              TEXT NOT NULL,
+  price_in_microusd INTEGER,
+  price_out_microusd INTEGER
+)`;
+
 // v32 added the final two columns with ALTER TABLE, which is the authentic
 // shape carried by every v34 database.
 const V34_CHAT_TURN = `CREATE TABLE chat_turn (
@@ -71,6 +83,25 @@ describe("schema v35: membership providers join chat's exact CHECKs", () => {
     rebuildChatProvidersForV35(db);
     expect(String(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chat_config'").get()?.["sql"])).toBe(configDdl);
     expect(String(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chat_turn'").get()?.["sql"])).toBe(turnDdl);
+  });
+
+  test("the authentic additive-column config shape upgrades without losing its row", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(V34_CHAT_CONFIG_APPENDED);
+    db.exec(V34_CHAT_TURN);
+    db.exec("INSERT INTO chat_config (id, provider, model, daily_turns, weekly_ceiling_microusd, updated_at, updated_by, price_in_microusd, price_out_microusd) VALUES (1, 'anthropic-api', 'claude-sonnet-5', 50, 5000000, 'now', 'alex', 3, 15)");
+
+    rebuildChatProvidersForV35(db);
+
+    expect(db.prepare("SELECT id, provider, model, price_in_microusd, price_out_microusd, updated_by FROM chat_config").get()).toEqual({
+      id: 1,
+      provider: "anthropic-api",
+      model: "claude-sonnet-5",
+      price_in_microusd: 3,
+      price_out_microusd: 15,
+      updated_by: "alex",
+    });
+    db.exec("UPDATE chat_config SET provider = 'codex-subscription'");
   });
 
   test("a lookalike table is refused rather than copied", () => {

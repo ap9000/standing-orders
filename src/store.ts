@@ -3522,7 +3522,7 @@ const INCIDENT_COLUMNS = ["id", "run", "kind", "created_at", "resolved_at", "res
 function rebuildExact(
   db: Database,
   table: string,
-  oldDdl: (name: string) => string,
+  oldDdl: ((name: string) => string) | readonly ((name: string) => string)[],
   targetDdl: (name: string) => string,
   columns: readonly string[],
 ): void {
@@ -3530,7 +3530,8 @@ function rebuildExact(
   if (row === undefined) return;
   const stored = canonicalDdl(String(row["sql"]));
   if (stored === canonicalDdl(targetDdl(table))) return;
-  if (stored !== canonicalDdl(oldDdl(table))) {
+  const predecessors = typeof oldDdl === "function" ? [oldDdl] : oldDdl;
+  if (!predecessors.some(ddl => stored === canonicalDdl(ddl(table)))) {
     throw new Error(`the ${table} table's DDL is not a shape this migration knows — refusing to rebuild it`);
   }
   db.exec("PRAGMA foreign_keys = OFF");
@@ -4111,6 +4112,10 @@ function canonicalDdl(sql: string): string {
     // comma — so comma spacing is presentation, never shape (found live:
     // the v29 merge_blocker rebuild refused a real console database).
     .replace(/ ,/g, ",")
+    // SQLite's stored ALTER shape also closes immediately after the final
+    // appended column, while an equivalent CREATE statement keeps the
+    // preceding newline as one space after collapsing whitespace.
+    .replace(/ \)/g, ")")
     .trim();
 }
 
@@ -4125,6 +4130,24 @@ function CHAT_CONFIG_V34_DDL(name: string): string {
   price_out_microusd      INTEGER,
   updated_at              TEXT NOT NULL,
   updated_by              TEXT NOT NULL
+)`;
+}
+
+/** The same v34 table as carried by installations that predate chat price
+ * pinning: SQLite appends ADD COLUMN fields after the original audit fields.
+ * Column order is storage shape, not meaning, but remains part of the exact
+ * recognizer so a genuinely unknown table is still refused. */
+function CHAT_CONFIG_V34_APPENDED_DDL(name: string): string {
+  return `CREATE TABLE ${name} (
+  id                      INTEGER PRIMARY KEY CHECK (id = 1),
+  provider                TEXT NOT NULL CHECK (provider IN ('anthropic-api','openrouter-api')),
+  model                   TEXT NOT NULL,
+  daily_turns             INTEGER NOT NULL DEFAULT 50,
+  weekly_ceiling_microusd INTEGER NOT NULL,
+  updated_at              TEXT NOT NULL,
+  updated_by              TEXT NOT NULL,
+  price_in_microusd       INTEGER,
+  price_out_microusd      INTEGER
 )`;
 }
 
@@ -4182,7 +4205,7 @@ const CHAT_TURN_COLUMNS = [
 
 /** v35: widen both persisted provider checks with exact-shape rebuilds. */
 export function rebuildChatProvidersForV35(db: Database): void {
-  rebuildExact(db, "chat_config", CHAT_CONFIG_V34_DDL, CHAT_CONFIG_V35_DDL, CHAT_CONFIG_COLUMNS);
+  rebuildExact(db, "chat_config", [CHAT_CONFIG_V34_DDL, CHAT_CONFIG_V34_APPENDED_DDL], CHAT_CONFIG_V35_DDL, CHAT_CONFIG_COLUMNS);
   rebuildExact(db, "chat_turn", CHAT_TURN_V34_DDL, CHAT_TURN_V35_DDL, CHAT_TURN_COLUMNS);
   db.exec("CREATE INDEX IF NOT EXISTS chat_turn_credential ON chat_turn (credential_key, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS chat_turn_approver ON chat_turn (approver, created_at)");
