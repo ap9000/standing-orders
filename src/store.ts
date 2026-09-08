@@ -11612,6 +11612,32 @@ export class Store {
     return { run: parked, tried: child !== undefined };
   }
 
+  /**
+   * The pinned base for a task's branch (run 1461's fix): the EARLIEST
+   * builder run's base_revision for this task_ref+branch, chronological by
+   * id. A branch is reused across attempts — a strike retry, a warm-cold
+   * resume, an operator re-dispatch after a short verdict — and every
+   * attempt after the first reads base_revision as wherever the PRIOR
+   * attempt's HEAD landed, not where the branch started. That is correct
+   * for the HEAD-immutability fence (each attempt owns only its own
+   * commits) but wrong for evidence: a whole-task rubric is judged once,
+   * against everything the branch has ever changed, so the terminal diff
+   * this attempt seals must run from the branch's true origin, not from
+   * its own incremental slice. A first attempt has no earlier row, so this
+   * returns null and the caller falls back to its own base_revision —
+   * legacy first-attempt behavior, unchanged byte-for-byte.
+   */
+  firstBuilderBase(taskRef: number, branch: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT base_revision FROM run
+          WHERE task_ref = ? AND branch = ? AND role = 'builder' AND base_revision IS NOT NULL
+          ORDER BY id ASC LIMIT 1`,
+      )
+      .get(taskRef, branch) as { base_revision: string } | undefined;
+    return row === undefined ? null : row.base_revision;
+  }
+
   finishRun(
     id: number,
     result: {

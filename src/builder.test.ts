@@ -6,6 +6,7 @@ import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { build, PROTECTED, type Runner } from "./builder.js";
 import { resetAttestationCache } from "./attest.js";
+import { readVerifiedArtifact } from "./evidence.js";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -391,6 +392,72 @@ describe("the builder's gates", () => {
     const handoff = artifacts.find(one => one.kind === "handoff");
     expect(handoff).toBeDefined();
     expect(handoff?.capture).toContain("machine-authored");
+  });
+
+  test("a resumed attempt seals the CUMULATIVE terminal diff, pinned to the branch's first builder base (run 1461)", async () => {
+    // A branch reused across two builder attempts: the first commits and
+    // advances HEAD, the second starts from there. The second attempt's
+    // own base_revision is the first attempt's head — correct for the
+    // moved-head fence, but a diff sealed against ONLY that base would
+    // drop everything attempt 1 already committed, and the unchanged
+    // whole-task rubric could no longer honestly cite those paths.
+    let currentHead = "orig-sha";
+    const commitHeads = ["mid-sha", "final-sha"];
+    let commitIndex = 0;
+    const statefulGit: Runner = async (_file, args) => {
+      if (args.includes("symbolic-ref")) {
+        return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+      }
+      if (args[0] === "commit") {
+        currentHead = commitHeads[commitIndex++] as string;
+        return { ...OK };
+      }
+      if (args.includes("rev-parse")) {
+        return args.includes("--abbrev-ref") ? { ...OK, stdout: "feat/a\n" } : { ...OK, stdout: `${currentHead}\n` };
+      }
+      if (args.includes("status")) return { ...OK, stdout: " M src/index.ts\n" };
+      if (args.includes("diff")) return { ...OK, stdout: "diff --git a/src/index.ts b/src/index.ts\n+guard\n" };
+      return { ...OK };
+    };
+
+    claimIt();
+    approveScope();
+
+    const first = request({ git: statefulGit });
+    const built = await build(store, first);
+    expect(built).toMatchObject({ ok: true, committed: true });
+    const firstRunId = first.runId as number;
+    expect(store.getRun(firstRunId)?.baseRevision).toBe("orig-sha");
+
+    const second = request({ git: statefulGit });
+    const resumed = await build(store, second);
+    expect(resumed).toMatchObject({ ok: true, committed: true });
+    const secondRunId = second.runId as number;
+    // The bug this regression closes: attempt 2 starts where attempt 1
+    // left off, not from the branch's true origin.
+    expect(store.getRun(secondRunId)?.baseRevision).toBe("mid-sha");
+
+    const evidenceRoot = join2(wt, ".evidence");
+    const statArtifact = store.artifactsFor(secondRunId).find(one => one.kind === "diff-stat");
+    expect(statArtifact).toBeDefined();
+    const read = readVerifiedArtifact(evidenceRoot, statArtifact!);
+    expect(read.ok).toBe(true);
+    if (read.ok) {
+      const parsed = JSON.parse(read.content.toString("utf8")) as { base: string; head: string };
+      // Pinned to attempt 1's base, not attempt 2's own base_revision.
+      expect(parsed.base).toBe("orig-sha");
+      expect(parsed.head).toBe("final-sha");
+    }
+
+    // A first attempt has no earlier row: legacy behavior is unchanged.
+    const firstStat = store.artifactsFor(firstRunId).find(one => one.kind === "diff-stat");
+    const firstRead = readVerifiedArtifact(evidenceRoot, firstStat!);
+    expect(firstRead.ok).toBe(true);
+    if (firstRead.ok) {
+      const parsed = JSON.parse(firstRead.content.toString("utf8")) as { base: string; head: string };
+      expect(parsed.base).toBe("orig-sha");
+      expect(parsed.head).toBe("mid-sha");
+    }
   });
 
   test("the phase vocabulary is closed, and a finished run's phase is history", () => {

@@ -1,5 +1,26 @@
 # Progress
 
+**2026-09-08 — Run 1461's fix: a resumed builder attempt seals the
+cumulative terminal diff, pinned to its branch's first base.** A branch
+is reused across attempts — a strike retry, a warm-cold resume, an
+operator re-dispatch after a `short` verdict — and every attempt after
+the first read `base_revision` as wherever the PRIOR attempt's HEAD
+landed, correct for the HEAD-immutability fence but wrong for evidence:
+the terminal diff/diff-stat `captureTerminalDiff` sealed ran only from
+that incremental slice, so the unchanged whole-task rubric could no
+longer honestly cite paths an earlier attempt already committed —
+`adjudicate`'s changed-path check would refuse them as absent from the
+sealed diff. `store.firstBuilderBase(taskRef, branch)` finds the
+EARLIEST builder run's `base_revision` for a task's branch; `builder.ts`
+now seals both the no-change and completed terminal diffs from that
+pinned base rather than the attempt's own, falling back to the attempt's
+own base when no earlier row exists — a first attempt is byte-identical
+to before. New regression in `src/builder.test.ts` drives two attempts
+on one branch and asserts the second's sealed diff-stat reads
+base→head as the FIRST attempt's base through the SECOND attempt's
+head, never the incremental slice, while the first attempt's own diff is
+untouched. Suite 100 files / 1900 tests.
+
 **2026-09-08 — Evidence review v1, audit hardening: full ID coverage, the
 check log and screenshots actually materialized, and one atomic ingest.**
 Still schema v40 (purely additive columns on the still-unreleased

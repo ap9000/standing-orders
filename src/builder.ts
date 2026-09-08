@@ -1355,6 +1355,16 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
         !looksLikeProtocolFile(line.trim().split("/").pop() ?? line.trim()),
     );
 
+  // The pinned base (run 1461's fix): a resumed attempt's own base_revision
+  // is wherever the PRIOR attempt's HEAD landed, so a diff against it alone
+  // would drop everything an earlier attempt already committed — the
+  // unchanged whole-task rubric could no longer honestly cite those paths.
+  // The terminal diff/diff-stat this attempt seals runs instead from the
+  // branch's earliest recorded builder base. A first attempt has no
+  // earlier row, so this is exactly baseRevision — legacy behavior,
+  // unchanged.
+  const pinnedBase = store.firstBuilderBase(taskRef, branch) ?? baseRevision;
+
   if (handoff.status === "no-change") {
     if (dirty.length > 0) {
       return {
@@ -1364,10 +1374,12 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       };
     }
     store.recordOutcomeFacts(request.runId, { headRevision: baseRevision, handoff: handoff.conclusion });
-    // The explicit zero: base against base, captured and recorded, because
-    // "no diff artifact" must never be how a no-change run says no change.
+    // Base against the pinned base, not the explicit zero this attempt's
+    // own base_revision would give on a resume — "no diff artifact" must
+    // never be how a no-change run says no change, and on a resume, the
+    // honest diff is whatever earlier attempts already committed.
     store.setRunPhase(request.runId, "capturing-evidence");
-    await captureTerminalDiff(store, git, worktree, baseRevision, baseRevision, root, request.runId, clock());
+    await captureTerminalDiff(store, git, worktree, pinnedBase, baseRevision, root, request.runId, clock());
     storeHandoffArtifact(store, root, {
       schema: 1,
       taskId,
@@ -1421,9 +1433,11 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
       // The terminal diff: the exact accepted base→head patch plus its
       // NUL-delimited stat, captured while the worktree still exists —
       // a built run's page must show its diff long after the checkout is
-      // released (M5.3).
+      // released (M5.3). Sealed from the pinned base, not this attempt's
+      // own base_revision, so a resumed attempt's diff is cumulative over
+      // the whole branch rather than just its own incremental slice.
       store.setRunPhase(request.runId, "capturing-evidence");
-      const diffEvidence = await captureTerminalDiff(store, git, worktree, baseRevision, head, root, request.runId, clock());
+      const diffEvidence = await captureTerminalDiff(store, git, worktree, pinnedBase, head, root, request.runId, clock());
       storeHandoffArtifact(store, root, {
         schema: 1,
         taskId,
