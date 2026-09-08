@@ -7791,6 +7791,51 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const codexPermissionField = /<fieldset class="permission-field">[\s\S]*?<\/fieldset>/.exec(codexPage)?.[0] ?? "";
     expect(codexPermissionField).toContain('name="permission-mode" value="bypassPermissions" checked');
   });
+
+  test("Settings chooses the global quality default and a task can sign its own override", async () => {
+    const cookie = await login();
+    let settings = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(settings).toContain("quality mode");
+    expect(settings).toContain('name="quality-mode" value="default" checked');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(settings)?.[1] ?? "";
+
+    const global = await fetch(`${base}/settings/quality-default`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, "quality-mode": "strict" }),
+      redirect: "manual",
+    });
+    expect(global.status).toBe(303);
+    expect(store.qualityDefault()).toMatchObject({ mode: "strict", updatedBy: "alex" });
+
+    const fresh = await (await fetch(`${base}/tasks/new`, { headers: { cookie } })).text();
+    expect(fresh).toContain('name="quality-mode" value="strict" checked');
+    const revision = /name="projectRevision" value="(\d+)"/.exec(fresh)?.[1] ?? "0";
+    const filed = await fetch(`${base}/tasks/add`, {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({
+        csrf,
+        projectRevision: revision,
+        title: "fast evidence exception",
+        goal: "use the fast path for this task",
+        acceptance: "c1: output is reviewed | manual-review",
+        "plan-first": "0",
+        "planning-policy": "choice",
+        "permission-mode": "auto",
+        "quality-mode": "default",
+      }),
+      redirect: "manual",
+    });
+    expect(filed.status).toBe(303);
+    const taskId = decodeURIComponent((filed.headers.get("location") ?? "").split("/").at(-1) ?? "");
+    expect(store.refFor("built-in", taskId).qualityMode).toBe("default");
+    expect(store.getScope(taskId)?.qualityMode).toBe("default");
+
+    const taskPage = await (await fetch(`${base}/t/${encodeURIComponent(taskId)}`, { headers: { cookie } })).text();
+    expect(taskPage).toContain('name="quality-mode" value="default" checked');
+    expect(taskPage).toContain("Default</strong>");
+  });
 });
 
 describe("the first account (setup review): sign up on the login page with the printed code", () => {

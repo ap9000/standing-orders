@@ -15,7 +15,7 @@ import { openStore, type Store } from "./store.js";
 import { storeEvidence } from "./evidence.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
-import { addApprover, propose } from "./scope.js";
+import { addApprover, approve, propose } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { maybeRequestAutoReview } from "./dispose.js";
 import {
@@ -228,6 +228,7 @@ describe("the reviewer role in the store", () => {
   let taskRef: number;
   let builtRun: number;
   let diffArtifact: number;
+  let approverToken: string;
 
   const seedBuilt = (patch: string = PATCH, opts: { truncated?: boolean; captureStatus?: "ok" | "failed" } = {}) => {
     const runId = store.startRun({
@@ -253,6 +254,7 @@ describe("the reviewer role in the store", () => {
     evidenceRoot = mkdtempSync(join(tmpdir(), "so-review-evidence-"));
     const alex = addApprover(store, "alex", T0);
     if (!alex.ok) throw new Error("bootstrap");
+    approverToken = alex.token;
     store.createTask({ id: "t-1", title: "wire the payout guard" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
@@ -1064,6 +1066,43 @@ describe("the reviewer role in the store", () => {
     );
     maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
     expect(store.openReviewRequests()).toHaveLength(0);
+  });
+
+  test("Strict / release queues its isolated reviewer from the signed scope; Default stays on the fast path", () => {
+    maybeRequestAutoReview(store, REPO, builtRun, true, false, T0);
+    expect(store.openReviewRequests()).toHaveLength(0);
+
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+    store.createTask({ id: "t-strict", title: "release the payout guard" }, T0);
+    const strictRef = store.refFor("built-in", "t-strict");
+    store.placeTask(strictRef.id, REPO);
+    const scope = propose(store, {
+      taskId: "t-strict",
+      goal: "release the guarded payout path",
+      qualityMode: "strict",
+      acceptance: [{ id: "c1", statement: "the payout path is guarded", how: null, evidence: ["changed-path"] }],
+      now: T0,
+    });
+    const approved = approve(store, "t-strict", "alex", T0, scope.digest, approverToken);
+    expect(approved.ok).toBe(true);
+
+    const strictRun = store.startRun({
+      taskRef: strictRef.id,
+      leaseId: "lease-strict",
+      runner: "builder-1",
+      branch: "standing-orders/t-strict",
+      worktree: "/pool/t-strict",
+      now: T0,
+    });
+    expect(store.getRun(strictRun)?.qualityMode).toBe("strict");
+    store.stampRun(strictRun, { scopeDigest: scope.digest });
+    storeEvidence(store, evidenceRoot, strictRun, "terminal-diff", "terminal-diff.patch", Buffer.from(PATCH), "git diff (exit 0)", T0, { captureStatus: "ok" });
+    store.finishRun(strictRun, { outcome: "built", committed: true, now: T0 });
+
+    maybeRequestAutoReview(store, REPO, strictRun, true, false, T0);
+    expect(store.openReviewRequests()).toMatchObject([
+      { run: strictRun, requestedBy: "alex", basis: "human", modeDigest: null },
+    ]);
   });
 
   test("the pre-typed upgrade fails closed: open requests from before basis existed are spent as legacy-untyped", () => {

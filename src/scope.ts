@@ -27,6 +27,7 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { hasForbiddenControls } from "./decision.js";
 import type { Store, Mutation } from "./store.js";
+import type { QualityMode } from "./quality.js";
 
 /** Same shape as a runner's credential, for the same reasons. */
 function mintToken(): string {
@@ -570,6 +571,9 @@ export type Scope = {
    * directly — a scope-producing ROAD enforces non-emptiness, never this
    * type, never `propose`, never the digest. */
   acceptance: AcceptanceCriterion[];
+  /** v41: evidence policy, signed with the scope. Default is omitted from
+   * the digest so every pre-v41 approval remains byte-for-byte valid. */
+  qualityMode?: QualityMode;
   /** The dollar cap per build attempt, integer micro-dollars (v15) —
    * approved spend, restated at the yes, enforced by the provider's own
    * stop. NULL = no per-attempt cap was asked for. */
@@ -620,6 +624,9 @@ export type ScopeInput = {
   /** A task-level permission choice. When absent, the task's stored choice
    * (if any), then the installation default, decides the concrete profile. */
   permissionMode?: UnattendedPermissionMode;
+  /** Concrete task quality choice. When absent, the task override and then
+   * the installation default are resolved by the store. */
+  qualityMode?: QualityMode;
   /** Integer micro-dollars per build attempt; digest-bound when present. */
   budgetMicrousd?: number | null;
   /** The mode road's escalated filing default (C7): the resolved profile
@@ -652,6 +659,7 @@ export function digestOf(
      * what it digested to before this field existed. `how` never enters
      * here (advisory, never signed); evidence kinds do. */
     acceptance?: readonly AcceptanceCriterion[];
+    qualityMode?: QualityMode;
   },
   // The execution target: a single profile (legacy v24), OR an explicit
   // fallback chain (v30). BOTH fold through the SAME outer `profileDigest`
@@ -683,6 +691,9 @@ export function digestOf(
         ...(scope.acceptance === undefined || scope.acceptance.length === 0
           ? {}
           : { acceptance: canonicalAcceptance(scope.acceptance) }),
+        // Default is the historical behavior and therefore hashes exactly
+        // like an absent v41 field. Strict is an explicit signed promise.
+        ...(scope.qualityMode === "strict" ? { qualityMode: "strict" } : {}),
         // The single outer key, whichever target produced its inner value:
         // absent => the golden and every profileless approval are untouched;
         // a legacy profile => its exact profileDigestOf; an explicit chain
@@ -700,9 +711,9 @@ export function digestOf(
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, acceptance = [], now, mutation = {}, profile, permissionMode, posture, proposedVia = null } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, acceptance = [], qualityMode = "default", now, mutation = {}, profile, permissionMode, posture, proposedVia = null } = input;
 
-  const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd, acceptance: [...acceptance] };
+  const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd, acceptance: [...acceptance], qualityMode };
   const previous = store.getScope(taskId);
 
   const scope: Scope = {
@@ -723,6 +734,7 @@ export function propose(store: Store, input: ScopeInput): Scope {
   store.saveScope(scope, mutation, {
     ...(profile === undefined ? {} : { profile }),
     ...(permissionMode === undefined ? {} : { permissionMode }),
+    ...(input.qualityMode === undefined ? {} : { qualityMode: input.qualityMode }),
     ...(posture === undefined ? {} : { posture }),
     proposedVia,
   });

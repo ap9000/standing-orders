@@ -111,15 +111,31 @@ const STANDALONE_BROKE_REASONS = new Set([
 ]);
 
 /**
- * The reviewAuto term (v29, R3): a live mode whose terms say so queues an
- * agent review for every built-with-changes outcome — queues, never runs,
- * so the request re-proves the mode again at dispatch (R-REVOKE: a run
- * finishing after revocation files nothing). Refusals are silently fine
- * here: no diff, a truncated diff, or an existing review just mean the
- * automatic road has nothing honest to ask for.
+ * Queue the semantic pass when either authority asked for it:
+ * - v41 Strict / release is signed into this run's approved scope, so the
+ *   approver who sealed those exact bytes is the requester;
+ * - the older reviewAuto operating-mode term stays intact and is re-proved
+ *   at dispatch as before.
+ *
+ * Both roads queue, never run inline. Refusals are silently fine here: no
+ * diff, a truncated capture, or an existing request means there is nothing
+ * honest to review (and the run page keeps that evidence visible).
  */
 export function maybeRequestAutoReview(store: Store, repo: string, runId: number, committed: boolean, noChange: boolean, now: Date): void {
   if (!committed || noChange) return;
+  const run = store.getRun(runId);
+  const ref = run === null ? null : store.refForId(run.taskRef);
+  const scope = ref === null ? null : store.getScope(ref.externalId);
+  if (
+    run?.qualityMode === "strict" &&
+    scope?.qualityMode === "strict" &&
+    scope.approvedBy !== null &&
+    scope.approvedDigest === scope.digest &&
+    run.scopeDigest === scope.digest
+  ) {
+    store.requestReview(runId, scope.approvedBy, now);
+    return;
+  }
   const mode = store.activeMode(repo, now);
   if (mode === null) return;
   const terms = modeTermsFromJson(mode.termsJson);

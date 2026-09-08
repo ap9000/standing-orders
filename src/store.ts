@@ -43,8 +43,9 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
+import type { QualityMode } from "./quality.js";
 
-export const SCHEMA_VERSION = 40;
+export const SCHEMA_VERSION = 41;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -110,6 +111,9 @@ export type TaskRef = {
    * the next time this task's scope is filed. Approved scopes still bind the
    * concrete provider argv and never change under a setting edit. */
   permissionMode?: UnattendedPermissionMode | null;
+  /** Durable per-task evidence-policy override. null inherits the
+   * installation default when a scope is next written. */
+  qualityMode?: QualityMode | null;
   /** Plan pins (P2/C7): read ONLY by the plan phase; precedence plan pin
    * > plan flags > plan config > installation > default. */
   planProvider: string | null;
@@ -514,6 +518,8 @@ export type Run = {
   /** v24 dispatch stamps; null on runs from before them. */
   scopeDigest?: string | null;
   profileDigest?: string | null;
+  /** v41: the scope-bound evidence policy this exact attempt ran under. */
+  qualityMode?: QualityMode;
   /** NULL on exactly the reviewer role (v29 exclusive CHECK): an
    * artifact-only run never had a workspace, and every consumer must say
    * so rather than dereference one that does not exist. */
@@ -990,6 +996,10 @@ CREATE TABLE IF NOT EXISTS task_ref (
   -- installation default when a scope is next filed; approvals bind the
   -- resulting concrete profile, never this mutable preference.
   permission_mode         TEXT CHECK (permission_mode IN ('auto','bypassPermissions')),
+  -- Per-task quality override (v41). NULL inherits the installation
+  -- default when the next scope is filed; the scope stores the concrete
+  -- signed choice.
+  quality_mode            TEXT CHECK (quality_mode IN ('default','strict')),
   -- A revision task (M6.8): which task's reviewed run it revises, and the
   -- immutable brief artifact carrying the exact comment batch. Every
   -- revision requires its own approval; nothing is inherited.
@@ -1319,6 +1329,17 @@ CREATE TABLE IF NOT EXISTS permission_default (
   updated_by TEXT
 );
 INSERT OR IGNORE INTO permission_default (id, mode) VALUES (1, 'auto');
+
+-- Evidence-quality default (v41). Separate from permissions and operating
+-- modes: it changes how much validation a task asks for, never what an agent
+-- is allowed to do. Existing scopes remain default and keep their digest.
+CREATE TABLE IF NOT EXISTS quality_default (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  mode       TEXT NOT NULL CHECK (mode IN ('default','strict')),
+  updated_at TEXT,
+  updated_by TEXT
+);
+INSERT OR IGNORE INTO quality_default (id, mode) VALUES (1, 'default');
 
 -- Fleet chat (v13, membership adapters in v35). Chat providers remain a
 -- separate type from build providers: direct APIs use pinned dollar prices;
@@ -2056,6 +2077,9 @@ CREATE TABLE IF NOT EXISTS task_scope (
   -- createConsoleTask, routine firing, the planner), never by this
   -- schema or by saveScope itself.
   acceptance_json       TEXT,
+  -- The concrete quality policy (v41), folded into digest only when strict
+  -- so every historical/default approval remains byte-identical.
+  quality_mode          TEXT NOT NULL DEFAULT 'default' CHECK (quality_mode IN ('default','strict')),
   approval_kind         TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))
 );
 
@@ -3684,6 +3708,13 @@ function migrate(db: Database): void {
   // tables and arrive through the fresh SCHEMA's IF NOT EXISTS on both
   // roads — nothing here rewrites a row that predates this migration.
   addColumn(db, "proof_verdict", "machine_verdict", "TEXT");
+
+  // v41 (two quality modes): additive and backwards-compatible. Default
+  // deliberately means the historical workflow; only an explicitly strict
+  // scope changes its digest and queues the isolated semantic reviewer.
+  addColumn(db, "task_ref", "quality_mode", "TEXT CHECK (quality_mode IN ('default','strict'))");
+  addColumn(db, "task_scope", "quality_mode", "TEXT NOT NULL DEFAULT 'default' CHECK (quality_mode IN ('default','strict'))");
+  addColumn(db, "run", "quality_mode", "TEXT NOT NULL DEFAULT 'default' CHECK (quality_mode IN ('default','strict'))");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -3816,6 +3847,17 @@ function V34_RUN_DDL(name: string): string {
     );
 }
 
+/** v41 is an additive column after every run-table rebuild. SQLite inserts
+ * the new column immediately before the table CHECK, so the exact recognizers
+ * must admit that known final shape on later opens without weakening to
+ * substring checks. */
+function V34_RUN_PLUS_V41_DDL(name: string): string {
+  return V34_RUN_DDL(name).replace(
+    "    chain_cycle INTEGER REFERENCES fallback_cycle(id), chain_index INTEGER, entry_digest TEXT, auth_mode TEXT, terminal_class TEXT,\n    CHECK",
+    "    chain_cycle INTEGER REFERENCES fallback_cycle(id), chain_index INTEGER, entry_digest TEXT, auth_mode TEXT, terminal_class TEXT, quality_mode TEXT NOT NULL DEFAULT 'default' CHECK (quality_mode IN ('default','strict')),\n    CHECK",
+  );
+}
+
 const V34_RUN_COLUMNS = [
   "id", "task_ref", "lease_id", "runner", "scope_digest", "profile_digest", "provider_version", "role", "provider",
   "parent_run", "session_id", "base_revision", "branch", "worktree", "model", "phase", "contestant", "outcome",
@@ -3835,7 +3877,7 @@ export function rebuildRunForV34(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run'").get();
   if (row === undefined) return;
   const stored = canonicalDdl(String(row["sql"]));
-  if (stored === canonicalDdl(V34_RUN_DDL("run"))) return;
+  if (stored === canonicalDdl(V34_RUN_DDL("run")) || stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run"))) return;
   if (stored !== canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL)) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
   }
@@ -4047,7 +4089,8 @@ function rebuildRunForV29(db: Database): void {
   if (
     stored === canonicalDdl(V29_RUN_DDL("run")) ||
     stored === canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL) ||
-    stored === canonicalDdl(V34_RUN_DDL("run"))
+    stored === canonicalDdl(V34_RUN_DDL("run")) ||
+    stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run"))
   ) return;
   if (stored !== canonicalDdl(V28_RUN_DDL("run"))) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
@@ -6509,7 +6552,7 @@ export class Store {
 
   // ---- scope --------------------------------------------------------------
 
-  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; permissionMode?: UnattendedPermissionMode; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
+  saveScope(scope: Scope, mutation: Mutation = {}, options: { profile?: ExecutionProfile; permissionMode?: UnattendedPermissionMode; qualityMode?: QualityMode; posture?: "escalated"; proposedVia?: "mate" | "coordinator" | "scout" | null } = {}): void {
     this.once(mutation, "saveScope", () => this.transact(() => {
       // THE filing invariant (foundations findings 5/13/19): every scope
       // row leaves this method either RESOLVED (working profile stamped,
@@ -6529,12 +6572,16 @@ export class Store {
         options.posture === "escalated"
           ? "bypassPermissions"
           : options.permissionMode ?? ref?.permissionMode ?? this.permissionDefault().mode;
+      const qualityMode: QualityMode = options.qualityMode ?? ref?.qualityMode ?? this.qualityDefault().mode;
       // A form/CLI choice is a durable TASK choice. The active operating
       // mode's escalated posture is intentionally not persisted here: when
       // that signed mode expires, a later rewrite falls back to the task's
       // own choice (or the installation default).
       if (options.permissionMode !== undefined && ref !== null) {
         this.db.prepare("UPDATE task_ref SET permission_mode = ? WHERE id = ?").run(options.permissionMode, ref.id);
+      }
+      if (options.qualityMode !== undefined && ref !== null) {
+        this.db.prepare("UPDATE task_ref SET quality_mode = ? WHERE id = ?").run(options.qualityMode, ref.id);
       }
       if (profile === null) {
         const resolved = resolveScopeProfile(
@@ -6562,12 +6609,18 @@ export class Store {
               ? { ...profile, approvalArgv: "yolo" }
               : { ...profile, sandboxMode: "danger-full-access" };
       }
-      const digest = profile === null
-        ? scope.digest
-        : digestOf(
-            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
-            profile,
-          );
+      const digestInput = {
+        goal: scope.goal,
+        outOfScope: scope.outOfScope,
+        touches: scope.touches,
+        budgetMicrousd: scope.budgetMicrousd,
+        acceptance: scope.acceptance,
+        qualityMode,
+      };
+      const digest =
+        profile === null
+          ? qualityMode === "strict" ? digestOf(digestInput) : scope.digest
+          : digestOf(digestInput, profile);
       // The fallback-chain binding (v30): when the scope resolved FROM CONFIG
       // (not an explicit routine/demo profile) and the repo has configured
       // fallbacks, the scope files as a CHAIN — the digest binds the whole
@@ -6595,7 +6648,7 @@ export class Store {
           if (chain.ok && chain.kind === "chain") {
             proposedChainJson = canonicalChainJson(chain.chain);
             boundDigest = digestOf(
-              { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
+              { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode },
               { chain: chain.chain },
             );
           } else if (!chain.ok) {
@@ -6607,7 +6660,7 @@ export class Store {
             // routing is fixed.
             profile = null;
             unresolvedReason = `the configured fallback chain cannot file: ${chain.problem} — fix \`config set fallback\` for this repository, or clear it`;
-            boundDigest = scope.digest;
+            boundDigest = qualityMode === "strict" ? digestOf(digestInput) : scope.digest;
           }
         }
       }
@@ -6615,8 +6668,8 @@ export class Store {
         .prepare(
           `INSERT INTO task_scope
              (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest,
-              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json, acceptance_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json, acceptance_json, quality_mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (task_id) DO UPDATE SET
              goal = excluded.goal, out_of_scope = excluded.out_of_scope,
              touches = excluded.touches, budget_microusd = excluded.budget_microusd,
@@ -6626,7 +6679,7 @@ export class Store {
              profile_json = excluded.profile_json, profile_state = excluded.profile_state,
              unresolved_reason = excluded.unresolved_reason, digest_version = excluded.digest_version,
              profile_provenance = excluded.profile_provenance, proposed_chain_json = excluded.proposed_chain_json,
-             acceptance_json = excluded.acceptance_json`,
+             acceptance_json = excluded.acceptance_json, quality_mode = excluded.quality_mode`,
         )
         .run(
           scope.taskId,
@@ -6646,6 +6699,7 @@ export class Store {
           provenance,
           proposedChainJson,
           scope.acceptance.length === 0 ? null : JSON.stringify(scope.acceptance),
+          qualityMode,
         );
       // Who wrote THIS text (mate arc, ruling 2): set per write, so a human
       // rewrite clears the mate's mark and a mate rewrite sets it.
@@ -9511,6 +9565,9 @@ export class Store {
       /** Durable task-level choice; absent means use the installation
        * default whenever this task's scope is next filed. */
       permissionMode?: UnattendedPermissionMode;
+      /** Durable per-task evidence depth; absent inherits installation
+       * default when the scope is filed. */
+      qualityMode?: QualityMode;
       posture?: "escalated";
       /** Revision tasks inherit these from the source scope (Codex M5-M8
        * audit, IV-2): a revision that silently drops the original's
@@ -9592,6 +9649,9 @@ export class Store {
       if (spec.permissionMode !== undefined) {
         this.db.prepare("UPDATE task_ref SET permission_mode = ? WHERE id = ?").run(spec.permissionMode, ref.id);
       }
+      if (spec.qualityMode !== undefined) {
+        this.db.prepare("UPDATE task_ref SET quality_mode = ? WHERE id = ?").run(spec.qualityMode, ref.id);
+      }
       if (spec.goal !== undefined) {
         const draft = {
           goal: spec.goal.trim(),
@@ -9613,6 +9673,7 @@ export class Store {
           {},
           {
             ...(spec.permissionMode === undefined ? {} : { permissionMode: spec.permissionMode }),
+            ...(spec.qualityMode === undefined ? {} : { qualityMode: spec.qualityMode }),
             ...(spec.posture === undefined ? {} : { posture: spec.posture }),
             proposedVia: spec.proposedVia ?? null,
           },
@@ -9807,6 +9868,23 @@ export class Store {
   setPermissionDefault(mode: UnattendedPermissionMode, by: string, now: Date): void {
     this.db
       .prepare("UPDATE permission_default SET mode = ?, updated_at = ?, updated_by = ? WHERE id = 1")
+      .run(mode, now.toISOString(), by);
+  }
+
+  /** Installation filing default for evidence depth. It never rewrites an
+   * existing scope: that scope already carries the concrete signed choice. */
+  qualityDefault(): { mode: QualityMode; updatedAt: string | null; updatedBy: string | null } {
+    const row = this.db.prepare("SELECT mode, updated_at, updated_by FROM quality_default WHERE id = 1").get();
+    return {
+      mode: row?.["mode"] === "strict" ? "strict" : "default",
+      updatedAt: row?.["updated_at"] == null ? null : String(row["updated_at"]),
+      updatedBy: row?.["updated_by"] == null ? null : String(row["updated_by"]),
+    };
+  }
+
+  setQualityDefault(mode: QualityMode, by: string, now: Date): void {
+    this.db
+      .prepare("UPDATE quality_default SET mode = ?, updated_at = ?, updated_by = ? WHERE id = 1")
       .run(mode, now.toISOString(), by);
   }
 
@@ -11514,10 +11592,24 @@ export class Store {
       | { role: "reviewer"; parentRun: number; branch?: undefined; worktree?: undefined }
     ),
   ): number {
+    const role = run.role ?? "builder";
+    const qualityMode: QualityMode =
+      role === "reviewer" && run.parentRun !== undefined
+        ? this.getRun(run.parentRun)?.qualityMode ?? "default"
+        : (() => {
+            const row = this.db
+              .prepare(
+                `SELECT task_scope.quality_mode FROM task_ref
+                  LEFT JOIN task_scope ON task_scope.task_id = task_ref.external_id AND task_ref.backend = ?
+                 WHERE task_ref.id = ?`,
+              )
+              .get(BUILT_IN, run.taskRef);
+            return row?.["quality_mode"] === "strict" ? "strict" : "default";
+          })();
     const inserted = this.db
       .prepare(
-        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO run (task_ref, lease_id, runner, branch, worktree, model, role, provider, parent_run, session_id, contestant, quality_mode, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.taskRef,
@@ -11526,11 +11618,12 @@ export class Store {
         run.branch ?? null,
         run.worktree ?? null,
         run.model ?? null,
-        run.role ?? "builder",
+        role,
         run.provider ?? "claude",
         run.parentRun ?? null,
         run.sessionId ?? null,
         run.contestant ?? null,
+        qualityMode,
         run.now.toISOString(),
       );
     return Number(inserted.lastInsertRowid);
@@ -16309,6 +16402,7 @@ function readRun(row: Record<string, unknown>): Run {
         : String(row["base_revision"]),
     scopeDigest: row["scope_digest"] === null || row["scope_digest"] === undefined ? null : String(row["scope_digest"]),
     profileDigest: row["profile_digest"] === null || row["profile_digest"] === undefined ? null : String(row["profile_digest"]),
+    qualityMode: row["quality_mode"] === "strict" ? "strict" : "default",
     attendedAuthorization:
       row["attended_authorization"] === null || row["attended_authorization"] === undefined
         ? null
@@ -16716,6 +16810,10 @@ function readTaskRef(row: Record<string, unknown>): TaskRef {
     permissionMode:
       row["permission_mode"] === "auto" || row["permission_mode"] === "bypassPermissions"
         ? row["permission_mode"]
+        : null,
+    qualityMode:
+      row["quality_mode"] === "default" || row["quality_mode"] === "strict"
+        ? row["quality_mode"]
         : null,
     planProvider:
       row["plan_provider"] === null || row["plan_provider"] === undefined
@@ -17370,6 +17468,7 @@ function readScope(row: Record<string, unknown>): Scope {
       row["approved_chain_json"] === null || row["approved_chain_json"] === undefined ? null : String(row["approved_chain_json"]),
     approvalKind: String(row["approval_kind"] ?? "profile") === "chain" ? "chain" : "profile",
     acceptance: readAcceptance(row["acceptance_json"]),
+    qualityMode: row["quality_mode"] === "strict" ? "strict" : "default",
   };
 }
 

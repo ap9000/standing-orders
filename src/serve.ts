@@ -111,6 +111,7 @@ import {
   type Scope,
   type UnattendedPermissionMode,
 } from "./scope.js";
+import { isQualityMode, qualityModeTitle, type QualityMode } from "./quality.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { readLiveWindow } from "./live.js";
@@ -1587,6 +1588,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           project,
           prefill,
           store.permissionDefault().mode,
+          store.qualityDefault().mode,
         ),
       );
     }
@@ -1703,7 +1705,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         .listTasksScoped(project, undefined, 100, null)
         .filter(one => one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
         .map(one => ({ id: one.id, title: one.title }));
-      return sendScreen(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable, store.permissionDefault().mode));
+      return sendScreen(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable, store.permissionDefault().mode, store.qualityDefault().mode));
     }
 
     const task = matchTaskPath(url.pathname, "");
@@ -2102,6 +2104,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         settingsPage(chromeFor(project, "settings"), existing, hasEnv, csrf, url.searchParams.get("said"), messaging, push, providerKeys, digest, {
           ...store.permissionDefault(),
+          canManage: who.role === "approver",
+        }, {
+          ...store.qualityDefault(),
           canManage: who.role === "approver",
         }),
       );
@@ -2935,6 +2940,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         spendDefaults: store.getSpendDefaults(),
         permissionDefault: store.permissionDefault().mode,
         permissionMode: ref?.permissionMode ?? null,
+        qualityDefault: store.qualityDefault().mode,
+        qualityMode: ref?.qualityMode ?? null,
         publication: (() => {
           // The latest publication across this task's runs, with its
           // OBSERVED CI state (audit SD-5): the reviewer learns PR and CI
@@ -3556,6 +3563,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/settings/quality-default" && options.telegramTokenFile !== undefined) {
+      const wanted = body.get("quality-mode");
+      if (!isQualityMode(wanted)) {
+        return refuse(response, who, 400, "quality must be Default or Strict / release", "/settings");
+      }
+      store.setQualityDefault(wanted, who.name, now);
+      return redirect(
+        response,
+        `/settings?said=${encodeURIComponent(
+          wanted === "strict"
+            ? "new tasks now default to Strict / release — existing scopes and approvals are unchanged"
+            : "new tasks now default to Default quality — existing scopes and approvals are unchanged",
+        )}`,
+      );
+    }
+
     if (url.pathname === "/settings/telegram-digest" && options.telegramTokenFile !== undefined) {
       // The cadence is a closed list of minutes — never a free number from
       // a form; "off" clears it. Any approver session may set it.
@@ -3743,6 +3766,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (permissionMode !== null && permissionMode !== "auto" && permissionMode !== "bypassPermissions") {
         return refuse(response, who, 400, "permissions must be Auto or Full access", "/tasks/new");
       }
+      const qualityMode = body.get("quality-mode");
+      if (qualityMode !== null && !isQualityMode(qualityMode)) {
+        return refuse(response, who, 400, "quality must be Default or Strict / release", "/tasks/new");
+      }
       // One filing door for every surface (Codex adoption review, finding 7).
       const made = fileTaskProposal(
         store,
@@ -3754,6 +3781,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           outOfScope: notThis === "" ? null : notThis,
           touches: touchesGiven,
           ...(permissionMode === null ? {} : { permissionMode }),
+          ...(qualityMode === null ? {} : { qualityMode }),
           ...(scout ? { deliverable: "report" as const } : {}),
           planning:
             scout
@@ -5642,6 +5670,16 @@ export function createDecisionServer(options: ServeOptions): Server {
             : permissionGiven === "auto"
               ? "auto"
               : ref.permissionMode ?? store.permissionDefault().mode;
+        const qualityGiven = body.get("quality-mode");
+        if (qualityGiven !== null && qualityGiven !== "" && !isQualityMode(qualityGiven)) {
+          return taskScreen(response, who, taskId, "quality must be Default or Strict / release", 400);
+        }
+        const qualityMode: QualityMode =
+          qualityGiven === "strict"
+            ? "strict"
+            : qualityGiven === "default"
+              ? "default"
+              : ref.qualityMode ?? store.qualityDefault().mode;
         // The optional per-attempt dollar cap (v15) rides the same form.
         const budgetGiven = (body.get("budget-usd") ?? "").trim();
         const budgetUsd = budgetGiven === "" ? null : Number(budgetGiven);
@@ -5727,6 +5765,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             touches: (body.get("touches") ?? "").split(/[\n,]/),
             acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")),
             permissionMode,
+            qualityMode,
             ...(budgetUsd !== null
               ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
               : coverage?.defaultBudgetMicrousd != null
@@ -10183,6 +10222,7 @@ function tasksPage(
   repo: string | null = null,
   prefill: { title: string; goal: string; not: string; touches: string; acceptance: string } | null = null,
   permissionDefault: UnattendedPermissionMode = "auto",
+  qualityDefault: QualityMode = "default",
 ): Screen {
   const filters = TASK_STATES.map(
     one => (one === state ? `<strong>${one}</strong>` : `<a href="/tasks?state=${one}">${one}</a>`),
@@ -10226,6 +10266,8 @@ function tasksPage(
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: let an agent inspect the repository and improve the scope before approval</span></span></label>`,
     `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
       `<p class="meta permission-note">Starts from the installation default. You can change it again on the task before approval.</p></fieldset>`,
+    `<fieldset class="permission-field"><legend>quality</legend>${qualityModeChoices("quality-mode", qualityDefault)}` +
+      `<p class="meta permission-note">Default is the fast path. Strict / release adds the isolated semantic review after the build.</p></fieldset>`,
     `<button type="submit">add</button>`,
     `</form></details>`,
   ].join("\n"), { chrome });
@@ -11607,6 +11649,7 @@ function newTaskPage(
   problem: string | null,
   candidates: { id: string; title: string }[] = [],
   permissionDefault: UnattendedPermissionMode = "auto",
+  qualityDefault: QualityMode = "default",
 ): Screen {
   return screen("new task", [
     `<h1>new task</h1>`,
@@ -11632,6 +11675,8 @@ function newTaskPage(
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="scout" value="1" style="margin-top:.35rem"><span>scout <span class="meta">— deliver a report instead of a branch: a read-only session investigates the goal as a question and writes up what it found; nothing in the repository changes</span></span></label>`,
     `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
       `<p class="meta permission-note">Starts from the installation default. You can change it again on the task before approval.</p></fieldset>`,
+    `<fieldset class="permission-field"><legend>quality</legend>${qualityModeChoices("quality-mode", qualityDefault)}` +
+      `<p class="meta permission-note">Default is streamlined. Strict / release adds semantic review and can feed the bounded repair loop.</p></fieldset>`,
     `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
     candidates.length === 0
       ? ""
@@ -11702,6 +11747,9 @@ function taskBody(data: {
   permissionDefault?: UnattendedPermissionMode;
   /** Durable choice for this task, when one was explicitly made. */
   permissionMode?: UnattendedPermissionMode | null;
+  /** Installation starting value and this task's explicit evidence depth. */
+  qualityDefault?: QualityMode;
+  qualityMode?: QualityMode | null;
   runs: Run[];
   /** Proof produced by the newest finished attempt. The two booleans are
    * machine facts about immutable, hash-addressed artifacts — never inferred
@@ -12002,6 +12050,7 @@ function taskBody(data: {
           `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
           scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
           scope.touches.length === 0 ? "" : `<p><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          `<p><strong>quality</strong> ${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</p>`,
           // The fallback chain, on the card the yes reads (Layer F): the
           // digest binds the WHOLE chain, so every entry — credential
           // included — is said before anyone signs.
@@ -12134,6 +12183,7 @@ function taskBody(data: {
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
           acceptanceCeremonyHtml(scope.acceptance),
+          `<p class="meta">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong>${scope.qualityMode === "strict" ? " — deterministic proof, then an isolated semantic review" : " — deterministic proof; semantic review only when an operating mode separately requests it"}</p>`,
           profileWords(scope),
           scope.budgetMicrousd === null
             ? ""
@@ -12248,6 +12298,12 @@ function taskBody(data: {
       return `<fieldset class="permission-field"><legend>agent permissions</legend>` +
         permissionModeChoices("permission-mode", selected) +
         `<p class="meta permission-note">This task’s choice is sealed into its scope. Full access prevents permission prompts or sandbox limits from pausing supported unattended agents.</p></fieldset>`;
+    })(),
+    (() => {
+      const selected: QualityMode = scope?.qualityMode ?? data.qualityMode ?? data.qualityDefault ?? "default";
+      return `<fieldset class="permission-field"><legend>quality</legend>` +
+        qualityModeChoices("quality-mode", selected) +
+        `<p class="meta permission-note">This choice is signed into the scope. Strict / release automatically sends a completed diff through the isolated reviewer; repair remains bounded by your operating-mode authorization.</p></fieldset>`;
     })(),
     (() => {
       // The tournament controls (operator request): how many agents compete,
@@ -12419,7 +12475,7 @@ function taskBody(data: {
     scope === null
       ? prop("scope", "none yet")
       : approval.approved
-        ? prop("approved scope", `<span class="seal">signs ${shortDigest(scope.digest)}</span> approved by ${escape(approval.by)} · ${escape(when(approval.at))}`)
+        ? prop("approved scope", `<span class="seal">signs ${shortDigest(scope.digest)}</span> · ${escape(qualityModeTitle(scope.qualityMode ?? "default"))} · approved by ${escape(approval.by)} · ${escape(when(approval.at))}`)
         : prop("scope", approval.reason === "changed" ? "rewritten since its approval — needs a new yes" : "not approved");
   const strikesRow = data.strikes > 0 ? prop("strikes", `${data.strikes} failed attempt(s)`) : "";
   const propsCard = `<div class="card props">${workerRow}${queueRow}${scopeRow}${publishesRow}${economics}${strikesRow}</div>`;
@@ -12938,6 +12994,7 @@ function runsPage(
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
               runOutcomeBadge(run, liveIds.has(run.id)) +
+              `${run.qualityMode === "strict" ? ` <span class="badge">strict review</span>` : ""}` +
               needsVerification +
               criterionMatrixSummary(verdicts.get(run.id)?.matrix ?? []) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
@@ -13308,6 +13365,7 @@ function runFactsRows(run: Run, taskId: string, live: boolean): string {
   const facts: [string, string | null, boolean?][] = [
     ["task", taskId, true],
     ["role", run.role],
+    ["quality", qualityModeTitle(run.qualityMode ?? "default")],
     ["outcome", live ? "running" : (run.outcome ?? "never finished")],
     ["phase", live && run.phase !== null ? phaseWords(run.phase) : null],
     ["reason", run.reason === null ? null : reasonWords(run.reason)],
@@ -13634,6 +13692,18 @@ function permissionModeChoices(name: string, selected: UnattendedPermissionMode)
     `</div>`;
 }
 
+/** One compact two-choice control for evidence depth. Permissions answer
+ * what the agent may do; this answers how much proof follows the work. */
+function qualityModeChoices(name: string, selected: QualityMode): string {
+  const choice = (value: QualityMode, title: string, detail: string): string =>
+    `<label class="permission-choice"><input type="radio" name="${escape(name)}" value="${escape(value)}"${value === selected ? " checked" : ""}>` +
+    `<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span></label>`;
+  return `<div class="permission-toggle" role="radiogroup" aria-label="quality mode">` +
+    choice("default", "Default", "Fast deterministic proof and the configured repository check.") +
+    choice("strict", "Strict / release", "Adds an isolated semantic review and bounded repair when authorized.") +
+    `</div>`;
+}
+
 function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): Screen {
   if (caps === null) {
     return screen("requirements", [
@@ -13690,6 +13760,7 @@ function settingsPage(
   providerKeys: { provider: string; envName: string; set: boolean; updatedAt: string | null; ambient: boolean; mode: "subscription" | "api-key"; subscriptionCapable: boolean }[] | null = null,
   digest: { everyMs: number | null; lastSentAt: string | null; held: number } | null = null,
   permissionDefault: { mode: UnattendedPermissionMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
+  qualityDefault: { mode: QualityMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -13708,6 +13779,24 @@ function settingsPage(
           permissionDefault.updatedAt === null
             ? ""
             : `<p class="meta">last changed ${escape(when(permissionDefault.updatedAt))}${permissionDefault.updatedBy === null ? "" : ` by ${escape(permissionDefault.updatedBy)}`}</p>`,
+        ].join("\n");
+  const qualityCard =
+    qualityDefault === null
+      ? ""
+      : [
+          "<h2>quality mode</h2>",
+          `<p class="meta">the starting evidence depth for new tasks. It is separate from permissions and autonomy, and each approved scope keeps the exact choice you signed.</p>`,
+          qualityDefault.canManage && csrf !== ""
+            ? `<form method="post" action="/settings/quality-default" class="card permission-policy">` +
+              `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+              `<p><strong>default for new tasks</strong></p>` +
+              qualityModeChoices("quality-mode", qualityDefault.mode) +
+              `<p class="meta permission-note">Strict / release adds the isolated semantic reviewer after deterministic proof. Repair still obeys the separately approved operating-mode terms.</p>` +
+              `<button type="submit">save default</button></form>`
+            : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">an approver can change this default</p></div>`,
+          qualityDefault.updatedAt === null
+            ? ""
+            : `<p class="meta">last changed ${escape(when(qualityDefault.updatedAt))}${qualityDefault.updatedBy === null ? "" : ` by ${escape(qualityDefault.updatedBy)}`}</p>`,
         ].join("\n");
   const digestCard =
     digest === null || csrf === ""
@@ -13863,6 +13952,7 @@ function settingsPage(
   return screen("settings", [
     "<h1>settings</h1>",
     permissionCard,
+    qualityCard,
     pushCard,
     keysCard,
     messagingCard,

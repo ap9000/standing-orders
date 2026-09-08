@@ -286,6 +286,25 @@ choice is durable through planning rewrites and is sealed into the approved
 execution profile; changing the installation default never broadens an
 existing scope or approval.
 
+### Quality modes
+
+The console's **Settings → quality mode** control chooses how deeply new
+tasks validate their output. **Default** is the streamlined path: the agent
+builds once, returns the signed acceptance matrix, checks, screenshots, and
+diff, and Standing Orders applies its deterministic verdict. A separately
+signed operating mode can still request semantic review on this path.
+
+**Strict / release** signs one additional promise into the task scope: after a
+changed build completes, its hash-verified evidence bundle and sealed diff are
+sent through the isolated reviewer. Reviewer findings are folded back into the
+criterion matrix. A bounded repair task is drafted only when the separately
+approved operating-mode terms authorize repair; Strict never silently expands
+agent permissions or autonomy.
+
+The same selector appears when a task is created and while its scope is still
+editable. The concrete choice is stamped on every run, survives global setting
+changes, and is visible on the task, approval, run-list, and run-detail views.
+
 ## The phone, both directions
 
 The Telegram bridge closes the loop without a terminal: a parked decision

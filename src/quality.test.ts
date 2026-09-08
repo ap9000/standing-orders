@@ -1,0 +1,92 @@
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
+import { digestOf, propose } from "./scope.js";
+
+const T0 = new Date("2026-09-07T12:00:00.000Z");
+
+describe("two quality modes", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+  });
+
+  afterEach(() => store.close());
+
+  test("Default preserves the historical digest while Strict / release is explicitly signed", () => {
+    const terms = { goal: "ship the guard", outOfScope: null, touches: ["src/guard.ts"] };
+    expect(digestOf(terms)).toBe(digestOf({ ...terms, qualityMode: "default" }));
+    expect(digestOf({ ...terms, qualityMode: "strict" })).not.toBe(digestOf(terms));
+  });
+
+  test("the installation default resolves into a concrete scope and exact run stamp", () => {
+    expect(store.qualityDefault()).toMatchObject({ mode: "default", updatedAt: null, updatedBy: null });
+    store.setQualityDefault("strict", "alex", T0);
+    store.createTask({ id: "release", title: "release it" }, T0);
+
+    const scope = propose(store, { taskId: "release", goal: "release it with proof", now: T0 });
+    expect(scope.qualityMode).toBe("strict");
+    expect(store.refFor("built-in", "release").qualityMode).toBeNull();
+
+    const run = store.startRun({
+      taskRef: store.refFor("built-in", "release").id,
+      leaseId: "lease-release",
+      runner: "builder-1",
+      branch: "standing-orders/release",
+      worktree: "/pool/release",
+      now: T0,
+    });
+    expect(store.getRun(run)?.qualityMode).toBe("strict");
+    expect(store.qualityDefault()).toMatchObject({ mode: "strict", updatedBy: "alex" });
+  });
+
+  test("a task override wins and later global edits do not rewrite an existing scope", () => {
+    store.setQualityDefault("strict", "alex", T0);
+    const made = store.createConsoleTask(
+      { id: "fast", title: "fast task", goal: "take the fast evidence path", acceptance: [{ id: "c1", statement: "done", evidence: ["manual-review"] }], qualityMode: "default" },
+      T0,
+    );
+    expect(made.ok).toBe(true);
+    const before = store.getScope("fast");
+    expect(before?.qualityMode).toBe("default");
+    expect(store.refFor("built-in", "fast").qualityMode).toBe("default");
+
+    store.setQualityDefault("default", "alex", new Date(T0.getTime() + 1_000));
+    expect(store.getScope("fast")?.digest).toBe(before?.digest);
+    expect(store.getScope("fast")?.qualityMode).toBe("default");
+  });
+
+  test("a v40 database upgrades additively and historical rows read as Default", () => {
+    const dir = mkdtempSync(join(tmpdir(), "standing-orders-v41-"));
+    const file = join(dir, "orders.db");
+    let legacy: Store | null = null;
+    try {
+      legacy = openStore(file);
+      legacy.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+      legacy.createTask({ id: "old", title: "old task" }, T0);
+      propose(legacy, { taskId: "old", goal: "keep the old workflow", now: T0 });
+      const ref = legacy.refFor("built-in", "old");
+      legacy.startRun({ taskRef: ref.id, leaseId: "legacy", runner: "builder", branch: "old", worktree: "/old", now: T0 });
+      legacy.raw().exec("ALTER TABLE run DROP COLUMN quality_mode");
+      legacy.raw().exec("ALTER TABLE task_scope DROP COLUMN quality_mode");
+      legacy.raw().exec("ALTER TABLE task_ref DROP COLUMN quality_mode");
+      legacy.raw().exec("DROP TABLE quality_default");
+      legacy.raw().prepare("UPDATE schema_version SET version = 40").run();
+      legacy.close();
+      legacy = null;
+      legacy = openStore(file);
+
+      expect(legacy.raw().prepare("SELECT version FROM schema_version").get()?.["version"]).toBe(SCHEMA_VERSION);
+      expect(legacy.getScope("old")?.qualityMode).toBe("default");
+      expect(legacy.getRun(1)?.qualityMode).toBe("default");
+      expect(legacy.qualityDefault().mode).toBe("default");
+    } finally {
+      legacy?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

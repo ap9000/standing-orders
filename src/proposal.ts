@@ -38,6 +38,7 @@ import {
 } from "./routine.js";
 import type { Store } from "./store.js";
 import { parseAcceptanceCriteria, type UnattendedPermissionMode } from "./scope.js";
+import type { QualityMode } from "./quality.js";
 
 /** Provenance tokens are part of the audit surface: lowercase, bounded,
  * nothing that could render as anything but itself. */
@@ -88,6 +89,9 @@ export type TaskProposalInput = {
   /** Concrete per-task unattended permission choice. When absent, the
    * installation default is resolved as the scope is filed. */
   permissionMode?: UnattendedPermissionMode;
+  /** Concrete per-task evidence depth. Absent inherits the installation
+   * default when the scope is filed. */
+  qualityMode?: QualityMode;
   /**
    * The caller's ceiling as canonical repo paths. undefined = the caller
    * genuinely has none (the CLI on the operator's own machine). A surface
@@ -236,6 +240,7 @@ export function fileTaskProposal(
       ...(repo.repo === undefined ? {} : { repo: repo.repo }),
       ...(input.goal === undefined ? {} : { goal: input.goal }),
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
+      ...(input.qualityMode === undefined ? {} : { qualityMode: input.qualityMode }),
       outOfScope,
       touches,
       acceptance: input.acceptance,
