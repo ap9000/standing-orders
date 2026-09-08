@@ -602,6 +602,19 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain('"reversible": true or false');
   });
 
+  test("the brief states the hard 500-byte cap on a criterion's \"how\", a 350-byte target, and tells the agent to measure before finalizing", async () => {
+    // Run 1458 came back short only because every criteria[].how in the proof
+    // ran over PROOF_LIMITS.criterionHow (500 bytes) — the whole proof was
+    // refused. The brief must make the cap, a safe target, and the act of
+    // measuring explicit, not just describe the field.
+    await build1();
+
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain('Each criterion\'s "how" has a hard cap of 500 bytes UTF-8');
+    expect(prompt).toContain("Target 350 bytes or fewer");
+    expect(prompt).toContain('measure every "how" string\'s UTF-8 byte length');
+  });
+
   test("steering notes land fenced in the brief, and delivery settles only on the stream's receipt (arc 1)", async () => {
     store.fileSteerNote("t-1", "alex", "start with the retry path, the guard can wait", T0);
     // This agent's stream fires the receipt — the prompt provably arrived.
