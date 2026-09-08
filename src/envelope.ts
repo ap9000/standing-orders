@@ -68,6 +68,10 @@ export const DOCUMENTED_REASONS: readonly string[] = [
   "not-a-repo", //        the path has no .git
   "stale-approval", //    what would run no longer matches what was approved
   "profile-unresolved", // the scope cannot say exactly what would run — restate it
+  "review-contradicted", // an independent reviewer contradicted a signed criterion
+  "repair-attempts-spent", // the chain's signed attempt cap is spent
+  "repair-no-progress", // two consecutive repair attempts failed to shrink the unresolved set
+  "repair-refused-integrity", // a refutation named an altered term, not a gap — no automatic repair
 ];
 
 export type EnvelopePayload = {

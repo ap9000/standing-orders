@@ -6517,6 +6517,57 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(accepted).not.toContain("accept anyway</button>");
   });
 
+  test("v40: the criterion matrix shows the reviewer's own judgement, and a repair chain renders on both the source and draft task pages", async () => {
+    store.createTask({ id: "t-review", title: "reviewed work" }, T0);
+    const ref = store.refFor("built-in", "t-review", "ours").id;
+    store.placeTask(ref, "/repo/main");
+    propose(store, { taskId: "t-review", goal: "wire the guard", acceptance: [{ id: "c1", statement: "it works", how: null, evidence: ["manual-review"] }], now: T0 });
+    sign("t-review");
+    const run = store.startRun({ taskRef: ref, leaseId: "l-review", runner: "night-shift-1", provider: "claude", branch: "b", worktree: "/wt", now: T0 });
+    store.finishRun(run, { outcome: "built", committed: true, now: T0 });
+    store.saveProofVerdict(
+      run,
+      "refuted",
+      ['reviewer:codex contradicts criterion "c1": never wired in'],
+      T0,
+      [
+        {
+          id: "c1",
+          statement: "it works",
+          requiredEvidence: ["manual-review"],
+          state: "failed",
+          detail: ['reviewer:codex contradicts criterion "c1": never wired in'],
+          answered: [],
+          review: { judgement: "contradicts", note: "never wired in", author: "reviewer:codex" },
+        },
+      ],
+      "short",
+    );
+    store.setTaskState("t-review", "done", T0);
+
+    const { maybeTriggerRepair } = await import("./dispose.js");
+    const trigger = maybeTriggerRepair(store, "/repo/main", evidenceRoot, run, "refuted", T0);
+    if (trigger.kind !== "drafted") throw new Error(`expected a draft, got ${trigger.kind}`);
+
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/t/t-review"), { headers: { cookie } })).text();
+    expect(html).toContain('data-review-judgement="contradicts"');
+    expect(html).toContain("reviewer: contradicted");
+    expect(html).toContain("the machine's own verdict was");
+    expect(html).toContain("repair chain");
+    expect(html).toContain(trigger.draftTaskId);
+
+    const draftHtml = await (await fetch(url(`/t/${trigger.draftTaskId}`), { headers: { cookie } })).text();
+    expect(draftHtml).toContain("repair chain");
+
+    // The inbox's "needs verification" row carries the SAME chain fact —
+    // one more word on the same chip, never a second card.
+    const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
+    expect(inbox).toContain("t-review");
+    expect(inbox).toContain("repair drafted, awaiting approval");
+  });
+
   test("the inbox surfaces a completed task with an unaccepted short or refuted verdict, and drops it once accepted", async () => {
     const ref = seed("t-proof", "show me the proof");
     const run = finished("t-proof", ref, "built", 0.25);

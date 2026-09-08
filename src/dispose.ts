@@ -12,6 +12,7 @@
  * inlined before.
  */
 
+import { createHash } from "node:crypto";
 import {
   completeFenced,
   finalizeFailureFenced,
@@ -22,8 +23,10 @@ import {
 } from "./claim.js";
 import { bodyHashOf, publicationBody } from "./publish.js";
 import { modeTermsFromJson } from "./modes.js";
+import { writeEvidenceFile } from "./evidence.js";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
+import type { ProofVerdict } from "./proof.js";
 
 /**
  * Which road is disposing. 'tick' = the unattended loop: full task
@@ -447,4 +450,211 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
   }
 
   return { kind: "invariant", reason: result.reason };
+}
+
+// ---- the bounded repair loop (v40, evidence-review-v1) --------------------
+
+/** Whether a run's proof reasons name a LIE about the signed terms — an
+ * altered criterion statement, or an overclaimed changed path — rather
+ * than a gap in the work. The exact phrases `adjudicate()` uses for those
+ * two rules, and no others; the integrity stop's own predicate. */
+function isIntegrityRefutation(reasons: readonly string[]): boolean {
+  return reasons.some(one => one.includes("was signed as") || one.includes("not in the sealed diff"));
+}
+
+/** Strict shrink: `to` is a proper subset of `from` — gnhf's no-progress
+ * rule (docs/DESIGN.md:229), extended: an attempt that does not strictly
+ * shrink the unresolved-criterion set counts as a failure. */
+function strictlyShrunk(from: readonly string[], to: readonly string[]): boolean {
+  if (to.length >= from.length) return false;
+  const fromSet = new Set(from);
+  return to.every(id => fromSet.has(id));
+}
+
+/** The public, envelope-documented name for each stop — distinct from the
+ * store's own short `repair_chain.outcome` word (the DB enum is a
+ * different namespace; these are the CLI/console-facing reason tokens,
+ * registered in envelope.ts's DOCUMENTED_REASONS). */
+export type RepairStopReason = "repair-attempts-spent" | "repair-no-progress" | "repair-refused-integrity";
+
+/**
+ * The chain's happy exit (v40): the instant one of its own attempts
+ * reaches `verified` or `attested`, the chain is done. Checked at every
+ * completed build's own verdict-save point — not only after a review —
+ * since a review can never UPGRADE a verdict past what `adjudicate`
+ * already found (foldReview's monotonicity), so only the structural save
+ * can ever produce one of these two words.
+ */
+export function maybeSettleRepairChain(store: Store, taskId: string, verdict: ProofVerdict, now: Date): void {
+  if (verdict !== "verified" && verdict !== "attested") return;
+  const chain = store.repairChainForDraft(taskId);
+  if (chain === null || chain.outcome !== "drafted") return;
+  store.settleRepairChain(chain.id, "resolved", now);
+}
+
+export type RepairTrigger =
+  | { kind: "drafted"; draftTaskId: string; attempt: number; approved: boolean }
+  | { kind: "stopped"; reason: RepairStopReason }
+  | { kind: "none" };
+
+/**
+ * The bounded repair loop's trigger (v40): fired after a review pass folds
+ * at least one criterion judgement into a run's proof verdict. Composes at
+ * most one durable revision draft naming exactly the unmet criterion ids,
+ * inheriting the source scope and rubric verbatim — or settles the chain
+ * at one of its four independent stops (integrity, no-progress, attempts
+ * cap; the fourth — existing spend/run rails — is the ordinary tick's own
+ * job once a mode-approved draft dispatches as a normal builder run).
+ *
+ * Never dispatches anything itself: a mode-authorized draft is
+ * auto-APPROVED here, but still builds through the ordinary tick, under
+ * the ordinary rails and strikes — this function only ever composes a
+ * task and, at most, one scope approval.
+ */
+export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: string, sourceRunId: number, verdict: ProofVerdict, now: Date): RepairTrigger {
+  if (verdict !== "short" && verdict !== "refuted") return { kind: "none" };
+  // One attempt per source run, ever (source_run UNIQUE) — checked first so
+  // a re-fired trigger is a silent no-op, never a duplicate.
+  if (store.repairChainFor(sourceRunId) !== null) return { kind: "none" };
+
+  const run = store.getRun(sourceRunId);
+  if (run === null) return { kind: "none" };
+  const stored = store.proofVerdictFor(sourceRunId);
+  if (stored === null) return { kind: "none" };
+  const unresolved = stored.matrix
+    .filter(row => row.state === "missing" || row.state === "failed")
+    .map(row => row.id)
+    .sort();
+  if (unresolved.length === 0) return { kind: "none" };
+
+  const brief = store.refById(run.taskRef);
+  const ref = brief === null ? null : store.lookupRef(brief.externalId);
+  if (ref === null) return { kind: "none" };
+
+  // Never repair: a scout task (a report, not a branch — nothing to build
+  // back into).
+  if (ref.deliverable === "report") return { kind: "none" };
+  // Never repair: a run already published or holding a merge blocker.
+  if (store.publicationForRun(sourceRunId) !== null) return { kind: "none" };
+  // Never repair: a task with an open decision or a pending steering note.
+  if (store.decisionsForTask(ref.id).some(d => d.state === "open" || d.state === "expired")) return { kind: "none" };
+  if (store.pendingSteerCount(ref.id) > 0) return { kind: "none" };
+  // Never repair: a run whose proof was already accepted.
+  if (store.proofAcceptance(sourceRunId) !== null) return { kind: "none" };
+
+  const task = store.getTask(ref.externalId);
+  const scope = store.getScope(ref.externalId);
+  if (task === null || scope === null) return { kind: "none" };
+
+  const priorChain = store.repairChainForDraft(ref.externalId);
+  const rootTask = priorChain?.rootTask ?? ref.externalId;
+  const attempt = (priorChain?.attempt ?? 0) + 1;
+
+  const mode = store.activeMode(repo, now);
+  const terms = mode === null ? null : modeTermsFromJson(mode.termsJson);
+  const auto = terms?.repairAuto === true;
+  const basis: "human" | "mode" = auto ? "mode" : "human";
+  const modeDigest = auto && mode !== null ? mode.digest : null;
+
+  // THE INTEGRITY STOP (unconditional, both roads): a refutation that lies
+  // about the signed terms is never handed back to the same machine
+  // unattended — park for a human instead.
+  if (isIntegrityRefutation(stored.reasons)) {
+    if (priorChain === null) {
+      store.recordRepairStop({ rootTask, sourceRun: sourceRunId, attempt, basis, modeDigest, unresolved, outcome: "integrity-refused" }, now);
+    } else {
+      store.settleRepairChain(priorChain.id, "integrity-refused", now);
+    }
+    return { kind: "stopped", reason: "repair-refused-integrity" };
+  }
+
+  // THE NO-PROGRESS STOP (unconditional, both roads): two consecutive
+  // attempts that fail to strictly shrink the unresolved set.
+  if (priorChain !== null) {
+    const history = store.repairChainForRoot(rootTask).map(row => [...row.unresolved].sort());
+    const sequence = [...history, unresolved];
+    if (sequence.length >= 3) {
+      const last = sequence[sequence.length - 1]!;
+      const mid = sequence[sequence.length - 2]!;
+      const first = sequence[sequence.length - 3]!;
+      if (!strictlyShrunk(mid, last) && !strictlyShrunk(first, mid)) {
+        store.settleRepairChain(priorChain.id, "no-progress", now);
+        return { kind: "stopped", reason: "repair-no-progress" };
+      }
+    }
+  }
+
+  // THE ATTEMPT CAP: bounds only the AUTOMATIC road (a mode's signed
+  // repairMaxAttempts) — the default road's loop is already bounded by
+  // requiring a fresh human "yes" for every attempt.
+  if (auto && terms !== null && attempt > terms.repairMaxAttempts) {
+    if (priorChain !== null) store.settleRepairChain(priorChain.id, "attempts-spent", now);
+    return { kind: "stopped", reason: "repair-attempts-spent" };
+  }
+
+  // THE DRAFT: no log content, no new instructions — exactly the unmet
+  // ids, their matrix detail sentences, and the reviewer's own
+  // contradiction notes.
+  const contradictions = store.criterionReviewsFor(sourceRunId).filter(one => one.judgement === "contradicts");
+  const unresolvedDetail = stored.matrix.filter(row => unresolved.includes(row.id)).map(row => ({ id: row.id, statement: row.statement, detail: row.detail }));
+  const draftBrief = {
+    schema: 1 as const,
+    kind: "criterion-repair" as const,
+    sourceTask: ref.externalId,
+    sourceRun: sourceRunId,
+    rootTask,
+    attempt,
+    unresolved: unresolvedDetail,
+    reviewerContradictions: contradictions.map(one => ({ id: one.criterionId, author: one.author, note: one.note })),
+  };
+  const briefBytes = Buffer.from(JSON.stringify(draftBrief, null, 2), "utf8");
+  const key = writeEvidenceFile(evidenceRoot, sourceRunId, `repair-brief-${sourceRunId}-${attempt}.json`, briefBytes);
+  // Suffixes survive truncation (the CI-repair rule, verbatim): the prefix
+  // gives way, the identity-bearing tail never does.
+  const suffix = `-fix-${attempt}`;
+  const draftId = `${rootTask.slice(0, 64 - suffix.length)}${suffix}`;
+  const drafted = store.openRepairDraft(
+    {
+      task: {
+        id: draftId,
+        title: `repair ${ref.externalId}: ${unresolved.length} criteri${unresolved.length === 1 ? "on" : "a"} unmet`,
+        repo,
+        goal: `${scope.goal} — repair exactly the unmet criteria named below; a comment cannot widen the scope. Unmet: ${unresolved.join(", ")}.`,
+        outOfScope: scope.outOfScope,
+        touches: scope.touches,
+        acceptance: scope.acceptance,
+      },
+      artifact: {
+        run: sourceRunId,
+        kind: "revision-brief",
+        key,
+        bytesOriginal: briefBytes.length,
+        bytesStored: briefBytes.length,
+        truncated: false,
+        sha256: createHash("sha256").update(briefBytes).digest("hex"),
+        capture: "machine-authored repair brief (exit 0)",
+      },
+      revisionOf: ref.externalId,
+      sourceRun: sourceRunId,
+      rootTask,
+      attempt,
+      basis,
+      modeDigest,
+      unresolved,
+    },
+    now,
+  );
+  if (!drafted.ok) return { kind: "none" };
+
+  let approved = false;
+  if (auto && mode !== null) {
+    const draftScope = store.getScope(drafted.id);
+    // A scope whose profile could not resolve is unapprovable by the human
+    // road; the mode road refuses the same way — the draft stays honestly
+    // unapproved rather than sealing an approval nobody could act on.
+    if (draftScope?.profileState === "resolved") {
+      approved = store.sealScopeApproval(drafted.id, `mode ${mode.name}`, now, {}, { kind: "mode", modeDigest: mode.digest });
+    }
+  }
+  return { kind: "drafted", draftTaskId: drafted.id, attempt, approved };
 }

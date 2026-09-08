@@ -1,5 +1,18 @@
 import { describe, test, expect } from "vitest";
-import { parseProof, serializeProof, adjudicate, verdictWords, dispatchStatusToken, PROOF_LIMITS, type AdjudicateInput } from "./proof.js";
+import {
+  parseProof,
+  serializeProof,
+  adjudicate,
+  verdictWords,
+  dispatchStatusToken,
+  foldReview,
+  passFraction,
+  PROOF_LIMITS,
+  type AdjudicateInput,
+  type AdjudicateResult,
+  type CriterionMatrixRow,
+  type CriterionJudgement,
+} from "./proof.js";
 
 const sound = {
   version: 1,
@@ -256,6 +269,87 @@ describe("adjudicate", () => {
     expect(adjudicate({ ...base, proofParse: empty, diffStat: { captured: true, truncated: false, paths: new Set() } })).toMatchObject({
       verdict: "attested",
     });
+  });
+});
+
+describe("foldReview (v40, evidence-review-v1)", () => {
+  const row = (id: string, state: CriterionMatrixRow["state"] = "pass"): CriterionMatrixRow => ({
+    id,
+    statement: `statement ${id}`,
+    requiredEvidence: ["manual-review"],
+    state,
+    detail: [],
+    answered: [],
+    review: null,
+  });
+
+  const judgement = (id: string, word: CriterionJudgement["judgement"], note = "note"): CriterionJudgement => ({
+    id,
+    judgement: word,
+    note,
+    author: "reviewer:codex",
+  });
+
+  test("identity fold: no judgements leaves the result untouched, even against an empty rubric", () => {
+    const base: AdjudicateResult = { verdict: "attested", reasons: ["r"], matrix: [] };
+    expect(foldReview(base, [])).toEqual(base);
+    const withRows: AdjudicateResult = { verdict: "short", reasons: ["r"], matrix: [row("c1", "missing")] };
+    expect(foldReview(withRows, [])).toEqual(withRows);
+  });
+
+  test("contradicts refutes: a signed criterion a second reader says is unmet fails the whole proof", () => {
+    const base: AdjudicateResult = { verdict: "attested", reasons: ["fine"], matrix: [row("c1"), row("c2")] };
+    const result = foldReview(base, [judgement("c1", "contradicts", "never implemented")]);
+    expect(result.verdict).toBe("refuted");
+    const failed = result.matrix.find(r => r.id === "c1");
+    expect(failed?.state).toBe("failed");
+    expect(failed?.detail.join(" ")).toContain("never implemented");
+    expect(failed?.review).toEqual({ judgement: "contradicts", note: "never implemented", author: "reviewer:codex" });
+    // an untouched row keeps its own state and gets no review
+    expect(result.matrix.find(r => r.id === "c2")).toMatchObject({ state: "pass", review: null });
+  });
+
+  test("cannot-tell changes nothing: recorded, never moves the verdict", () => {
+    const base: AdjudicateResult = { verdict: "short", reasons: ["gap"], matrix: [row("c1", "missing")] };
+    const result = foldReview(base, [judgement("c1", "cannot-tell", "the patch alone cannot settle this")]);
+    expect(result.verdict).toBe("short");
+    expect(result.reasons).toEqual(base.reasons);
+    expect(result.matrix[0]?.state).toBe("missing");
+    expect(result.matrix[0]?.review).toEqual({ judgement: "cannot-tell", note: "the patch alone cannot settle this", author: "reviewer:codex" });
+  });
+
+  test("upholds never upgrades: a short run stays short", () => {
+    const base: AdjudicateResult = { verdict: "short", reasons: ["gap"], matrix: [row("c1", "missing")] };
+    const result = foldReview(base, [judgement("c1", "upholds", "looks right to me")]);
+    expect(result.verdict).toBe("short");
+    expect(result.matrix[0]?.state).toBe("missing");
+    expect(result.matrix[0]?.review?.judgement).toBe("upholds");
+  });
+
+  test("upholds never upgrades: an attested run stays attested, never verified", () => {
+    const base: AdjudicateResult = { verdict: "attested", reasons: ["clean"], matrix: [row("c1")] };
+    const result = foldReview(base, [judgement("c1", "upholds")]);
+    expect(result.verdict).toBe("attested");
+  });
+
+  test("a judgement naming an id absent from the matrix is ignored", () => {
+    const base: AdjudicateResult = { verdict: "attested", reasons: ["clean"], matrix: [row("c1")] };
+    const result = foldReview(base, [judgement("unsigned-id", "contradicts", "n/a")]);
+    expect(result).toEqual(base);
+  });
+});
+
+describe("passFraction", () => {
+  test("counts pass rows against the total", () => {
+    const matrix: CriterionMatrixRow[] = [
+      { id: "c1", statement: "s", requiredEvidence: [], state: "pass", detail: [], answered: [], review: null },
+      { id: "c2", statement: "s", requiredEvidence: [], state: "missing", detail: [], answered: [], review: null },
+    ];
+    expect(passFraction(matrix)).toEqual({ passed: 1, total: 2 });
+  });
+
+  test("an empty matrix is 0/0", () => {
+    expect(passFraction([])).toEqual({ passed: 0, total: 0 });
   });
 });
 

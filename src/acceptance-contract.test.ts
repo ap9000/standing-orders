@@ -261,7 +261,15 @@ describe("adjudicate: the signed rubric's rules (v39)", () => {
     expect(result.verdict).toBe("short");
     expect(result.reasons[0]).toContain('does not answer approved criterion "c1"');
     expect(result.matrix).toEqual([
-      { id: "c1", statement: APPROVED[0]!.statement, requiredEvidence: ["screenshot"], state: "missing", detail: [expect.stringContaining("c1")], answered: [] },
+      {
+        id: "c1",
+        statement: APPROVED[0]!.statement,
+        requiredEvidence: ["screenshot"],
+        state: "missing",
+        detail: [expect.stringContaining("c1")],
+        answered: [],
+        review: null,
+      },
     ]);
   });
 

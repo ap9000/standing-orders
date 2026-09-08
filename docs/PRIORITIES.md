@@ -54,12 +54,16 @@ visible provenance and an operator-controlled reset.
 
 ## Current focus
 
-Priority 1 is active, and the first two Priority 2 slices have landed
+Priority 1 is active, and the first three Priority 2 slices have landed
 alongside it: completion carries a typed, hash-addressed proof the plane
 adjudicates against evidence it captured itself, rather than an agent's own
-assertion — and, as of Acceptance Contract v2, that proof answers a rubric
-the *operator* signed before the build ever started, not one the agent
-invented after seeing what it built.
+assertion; as of Acceptance Contract v2, that proof answers a rubric the
+*operator* signed before the build ever started, not one the agent invented
+after seeing what it built; and, as of evidence review v1, a structurally
+well-formed proof is no longer the last word — an independent reviewer
+judges whether the diff actually does what each signed criterion says, and
+a bounded loop can draft (never dispatch unattended, absent a freshly
+signed grant) exactly one fix naming what remains unmet.
 
 The first Priority 1 slice now pins the worker service to the installed Node
 runtime, requires a fresh worker heartbeat before installation reports success,
@@ -122,3 +126,30 @@ failed, or manual-review, per criterion, each row naming the proof's own
 answered evidence references (linked to the underlying artifact where
 one resolves) — renders identically on the task, run, done, builds,
 board, inbox, and chat surfaces, and in `task show`.
+
+The third Priority 2 slice, evidence review v1 (schema v40): a signed
+rubric being well-formed evidence is not the same claim as the diff doing
+what it says, and this closes that gap without a second agent invocation
+or a second review mechanism — it extends the existing reviewer pass
+(v29). The reviewer sees the same sealed artifacts it always has, plus,
+when this run signed a rubric, that rubric and the builder's own
+re-serialized proof — never the repository, never a second opinion
+dressed up as machine verification. It judges every signed criterion by
+exact id as *upholds*, *contradicts*, or *cannot-tell*; the fold can only
+LOWER the structural verdict, never raise it: a contradiction refutes,
+`cannot-tell` never moves anything, and `upholds` can never turn a
+*short* proof *verified*. A `short`/`refuted` run with named unresolved
+criteria gets at most one durable revision draft, inheriting the signed
+rubric verbatim and naming exactly the unmet ids — filed unapproved by
+default, with zero unattended spend and no new authority, consistent with
+the suggestion-first doctrine the CI-repair button already established.
+A newly signed mode term (`repairAuto`, `repairMaxAttempts` 0–3 — never
+inherited from a legacy signature) can authorize auto-approving that
+draft, bounded by a signed attempt cap, a no-progress stop (two
+consecutive attempts that fail to shrink what remains unmet), an
+integrity stop (a refutation that is a lie about the signed terms, not a
+gap, is never handed back to the same machine unattended), and the
+existing spend and run rails — the chain closes the instant any attempt
+reaches *verified* or *attested*, and the operator's own act
+(`standing-orders task repair <run-id> --yes`, or the console) is still
+the only road to unattended-cap-free approval.

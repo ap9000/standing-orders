@@ -31,7 +31,7 @@ import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import type { CriterionMatrixRow } from "./proof.js";
+import { foldReview, type CriterionMatrixRow, type CriterionJudgement, type CriterionJudgementWord } from "./proof.js";
 import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileFromJson, parseAcceptanceCriteria, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
 import { readAuthMode } from "./keys.js";
@@ -44,7 +44,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 39;
+export const SCHEMA_VERSION = 40;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2479,8 +2479,57 @@ CREATE TABLE IF NOT EXISTS proof_verdict (
   -- signed no rubric (adjudicate returns [] and this column stores NULL,
   -- not "[]", so a surface can tell "no matrix" from "an empty one" --
   -- not that the two currently read any differently).
-  matrix_json TEXT
+  matrix_json TEXT,
+  -- v40 (evidence-review-v1): the verdict adjudicate() computed, BEFORE an
+  -- independent reviewer's judgements were folded in — NULL means "no
+  -- review folded", reading back exactly as today. Never overwritten once
+  -- set: one review per source run, ever (one_review_per_source), so this
+  -- is written at most once, by the same transaction that folds it.
+  machine_verdict TEXT CHECK (machine_verdict IS NULL OR machine_verdict IN ('verified','attested','short','refuted'))
 );
+
+-- The independent evidence reviewer's per-criterion judgement (v40,
+-- evidence-review-v1): bound to the exact reviewed bytes — the sealed diff
+-- artifact and its hash, exactly like diff_comment — and immutable. One
+-- reviewer run may judge many criteria; parseReview refuses a payload that
+-- names the same id twice before this table ever sees it.
+CREATE TABLE IF NOT EXISTS criterion_review (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  reviewer_run  INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  source_run    INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  criterion_id  TEXT NOT NULL,
+  judgement     TEXT NOT NULL CHECK (judgement IN ('upholds','contradicts','cannot-tell')),
+  note          TEXT NOT NULL,
+  artifact      INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+  artifact_sha  TEXT NOT NULL,
+  author        TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+
+-- The bounded repair loop's ledger (v40, evidence-review-v1): one row per
+-- ATTEMPT, chained by root_task (the ORIGINAL task a chain repairs, never
+-- a mid-chain draft) and bound one-to-one to the source run it was drafted
+-- from. The single inbox item and the run/task pages read this ledger,
+-- never re-derive it. outcome starts 'drafted' and settles exactly once.
+-- draft_task is NULL exactly for the one edge case a draft is never made
+-- at all: the FIRST attempt in a chain refused outright by the integrity
+-- stop (no prior attempt exists to settle instead). Every other stop
+-- (attempts-spent, no-progress) settles an EXISTING drafted row.
+CREATE TABLE IF NOT EXISTS repair_chain (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  root_task       TEXT NOT NULL,
+  source_run      INTEGER NOT NULL UNIQUE REFERENCES run(id) ON DELETE CASCADE,
+  attempt         INTEGER NOT NULL,
+  draft_task      TEXT,
+  basis           TEXT NOT NULL CHECK (basis IN ('human','mode')),
+  mode_digest     TEXT,
+  unresolved_json TEXT NOT NULL,
+  outcome         TEXT NOT NULL DEFAULT 'drafted'
+                    CHECK (outcome IN ('drafted','attempts-spent','no-progress','integrity-refused','resolved')),
+  created_at      TEXT NOT NULL,
+  settled_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS repair_chain_root ON repair_chain (root_task, attempt);
 
 -- An operator's explicit acceptance of a short/refuted verdict (Priority
 -- 2): the one act that lets a task read "done" despite incomplete proof.
@@ -3615,6 +3664,13 @@ function migrate(db: Database): void {
   addColumn(db, "task_scope", "acceptance_json", "TEXT");
   addColumn(db, "routine", "acceptance_json", "TEXT");
   addColumn(db, "proof_verdict", "matrix_json", "TEXT");
+
+  // v40 (evidence-review-v1): purely additive, no CHECK widening, no table
+  // rebuild. machine_verdict is a nullable column on the existing
+  // proof_verdict table; criterion_review and repair_chain are wholly new
+  // tables and arrive through the fresh SCHEMA's IF NOT EXISTS on both
+  // roads — nothing here rewrites a row that predates this migration.
+  addColumn(db, "proof_verdict", "machine_verdict", "TEXT");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -7520,21 +7576,27 @@ export class Store {
 
   /** The machine's one verdict for a run, computed once at completion by
    * adjudicate() — overwritten only by a re-computation of the SAME run's
-   * proof, never by a later render. */
+   * proof, never by a later render. `machineVerdict` (v40) is the verdict
+   * BEFORE an independent reviewer's judgements are folded in; omitted (or
+   * explicitly `null`) leaves any already-stored value untouched — the
+   * builder's own save never touches it, only `ingestCriterionReviews`'s
+   * one fold does. */
   saveProofVerdict(
     runId: number,
     verdict: ProofVerdictRow["verdict"],
     reasons: readonly string[],
     now: Date,
     matrix: readonly CriterionMatrixRow[] = [],
+    machineVerdict?: ProofVerdictRow["verdict"] | null,
   ): void {
     this.db
       .prepare(
-        `INSERT INTO proof_verdict (run, verdict, reasons_json, decided_at, matrix_json) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO proof_verdict (run, verdict, reasons_json, decided_at, matrix_json, machine_verdict) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (run) DO UPDATE SET verdict = excluded.verdict, reasons_json = excluded.reasons_json,
-           decided_at = excluded.decided_at, matrix_json = excluded.matrix_json`,
+           decided_at = excluded.decided_at, matrix_json = excluded.matrix_json,
+           machine_verdict = COALESCE(excluded.machine_verdict, proof_verdict.machine_verdict)`,
       )
-      .run(runId, verdict, JSON.stringify(reasons), now.toISOString(), matrix.length === 0 ? null : JSON.stringify(matrix));
+      .run(runId, verdict, JSON.stringify(reasons), now.toISOString(), matrix.length === 0 ? null : JSON.stringify(matrix), machineVerdict ?? null);
   }
 
   proofVerdictFor(runId: number): ProofVerdictRow | null {
@@ -7577,6 +7639,87 @@ export class Store {
       note: r["note"] === null ? null : String(r["note"]),
       acceptedAt: String(r["accepted_at"]),
     };
+  }
+
+  // ---- criterion review (v40, evidence-review-v1) ------------------------
+
+  /** Every criterion judgement recorded against a run's proof, in the order
+   * they were saved — the task/run pages' own read, and the input to a
+   * repair draft's "named unmet ids". */
+  criterionReviewsFor(runId: number): CriterionReviewRow[] {
+    return this.db
+      .prepare("SELECT * FROM criterion_review WHERE source_run = ? ORDER BY id ASC")
+      .all(runId)
+      .map(row => readCriterionReview(row as Record<string, unknown>));
+  }
+
+  /**
+   * The independent reviewer's per-criterion judgements land through ONE
+   * proving transaction (the addReviewerComments/D8 pattern, extended):
+   * the authoring run must BE a reviewer, parented to exactly the judged
+   * run, sharing its task, and the artifact must be that run's own
+   * terminal diff. Every judgement row is immutable once inserted.
+   *
+   * Immediately afterward, in the SAME transaction, the judgements are
+   * FOLDED into the run's already-adjudicated verdict (`foldReview`) and
+   * saved back through `saveProofVerdict` — the one "re-computation of the
+   * SAME run's proof" its own contract allows. The verdict that existed
+   * before the fold is preserved as `machine_verdict`, exactly once (v39's
+   * `matrix_json` already made this contract precise: nothing here is
+   * silently rewritten, a surface can always say what the machine
+   * attested versus what a reviewer later contradicted).
+   *
+   * Called with `judgements: []` when a review carried comments but no
+   * criteria (every grandfathered review, and every task with no signed
+   * rubric) — a no-op that still proves the reviewer/run/artifact
+   * invariants, mirroring `addReviewerComments`' empty-array behavior.
+   */
+  ingestCriterionReviews(
+    args: {
+      reviewerRunId: number;
+      runId: number;
+      artifactId: number;
+      author: string;
+      judgements: readonly { id: string; judgement: CriterionJudgementWord; note: string }[];
+    },
+    now: Date,
+  ): { verdict: ProofVerdictRow["verdict"] } | null {
+    return this.transact(() => {
+      const reviewer = this.getRun(args.reviewerRunId);
+      if (reviewer === null || reviewer.role !== "reviewer") {
+        throw new Error(`run ${args.reviewerRunId} is not a reviewer — only the reviewer role authors criterion judgements`);
+      }
+      if (reviewer.parentRun !== args.runId) {
+        throw new Error(
+          `reviewer ${args.reviewerRunId} reviews run ${String(reviewer.parentRun)}, not ${args.runId} — judgements bind to the run the review was minted for`,
+        );
+      }
+      const source = this.getRun(args.runId);
+      if (source === null || source.taskRef !== reviewer.taskRef) {
+        throw new Error(`reviewer ${args.reviewerRunId} and run ${args.runId} do not share a task — nothing is ingested`);
+      }
+      const artifact = this.artifactsFor(args.runId).find(one => one.id === args.artifactId);
+      if (artifact === undefined || artifact.kind !== "terminal-diff") {
+        throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — judgements bind to the exact bytes reviewed`);
+      }
+      for (const judgement of args.judgements) {
+        this.db
+          .prepare(
+            `INSERT INTO criterion_review (reviewer_run, source_run, criterion_id, judgement, note, artifact, artifact_sha, author, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(args.reviewerRunId, args.runId, judgement.id, judgement.judgement, judgement.note, args.artifactId, artifact.sha256, args.author, now.toISOString());
+      }
+      if (args.judgements.length === 0) return null;
+      const existing = this.proofVerdictFor(args.runId);
+      if (existing === null) return null;
+      const folded = foldReview(
+        { verdict: existing.verdict, reasons: existing.reasons, matrix: existing.matrix },
+        args.judgements.map((j): CriterionJudgement => ({ id: j.id, judgement: j.judgement, note: j.note, author: args.author })),
+      );
+      this.saveProofVerdict(args.runId, folded.verdict, folded.reasons, now, folded.matrix, existing.machineVerdict ?? existing.verdict);
+      return { verdict: folded.verdict };
+    });
   }
 
   // ---- run notes (M6) -----------------------------------------------------
@@ -8800,6 +8943,100 @@ export class Store {
     } catch (error) {
       return { ok: false, reason: String((error as Error).message ?? error) };
     }
+  }
+
+  // ---- repair chain (v40, evidence-review-v1) -----------------------------
+
+  /**
+   * Draft one repair through the SAME `sealRevision` road CI repair already
+   * uses (`commentIds: null` — a repair draft never consumes a comment
+   * batch, only names unresolved criterion ids), then records the chain's
+   * ledger row in the same transaction. `source_run UNIQUE` is the backstop
+   * that makes "at most one draft per source run, ever" a database fact,
+   * not just caller discipline.
+   */
+  openRepairDraft(
+    args: {
+      task: { id: string; title: string; repo?: string; goal: string; outOfScope: string | null; touches: string[]; acceptance: unknown };
+      artifact: { run: number; kind: Artifact["kind"]; key: string; bytesOriginal: number; bytesStored: number; truncated: boolean; sha256: string; capture: string };
+      revisionOf: string;
+      sourceRun: number;
+      rootTask: string;
+      attempt: number;
+      basis: "human" | "mode";
+      modeDigest: string | null;
+      unresolved: readonly string[];
+    },
+    now: Date,
+  ): { ok: true; id: string; artifactId: number } | { ok: false; reason: string } {
+    return this.transact(() => {
+      const sealed = this.sealRevision({ task: args.task, artifact: args.artifact, revisionOf: args.revisionOf, commentIds: null, sourceRun: args.sourceRun }, now);
+      if (!sealed.ok) return sealed;
+      this.db
+        .prepare(
+          `INSERT INTO repair_chain (root_task, source_run, attempt, draft_task, basis, mode_digest, unresolved_json, outcome, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'drafted', ?)`,
+        )
+        .run(args.rootTask, args.sourceRun, args.attempt, sealed.id, args.basis, args.modeDigest, JSON.stringify(args.unresolved), now.toISOString());
+      return sealed;
+    });
+  }
+
+  /** The one chain-attempt row a given source run drafted, if any. */
+  repairChainFor(sourceRunId: number): RepairChainRow | null {
+    const row = this.db.prepare("SELECT * FROM repair_chain WHERE source_run = ?").get(sourceRunId);
+    return row === undefined ? null : readRepairChain(row as Record<string, unknown>);
+  }
+
+  /** The chain-attempt row that drafted a given task, if it IS a repair
+   * draft — the trigger's own way to find "what chain, and what attempt
+   * number, does this task continue" without walking task_ref.revision_of. */
+  repairChainForDraft(draftTaskId: string): RepairChainRow | null {
+    const row = this.db.prepare("SELECT * FROM repair_chain WHERE draft_task = ?").get(draftTaskId);
+    return row === undefined ? null : readRepairChain(row as Record<string, unknown>);
+  }
+
+  /**
+   * Record a chain stop that never produced a draft — the one edge case
+   * possible: the FIRST attempt in a chain, refused outright by the
+   * integrity stop, with no prior row to settle instead. Already-settled
+   * on arrival: there is no "later" for a row that was never drafted.
+   */
+  recordRepairStop(
+    args: {
+      rootTask: string;
+      sourceRun: number;
+      attempt: number;
+      basis: "human" | "mode";
+      modeDigest: string | null;
+      unresolved: readonly string[];
+      outcome: Exclude<RepairChainRow["outcome"], "drafted">;
+    },
+    now: Date,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO repair_chain (root_task, source_run, attempt, draft_task, basis, mode_digest, unresolved_json, outcome, created_at, settled_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(args.rootTask, args.sourceRun, args.attempt, args.basis, args.modeDigest, JSON.stringify(args.unresolved), args.outcome, now.toISOString(), now.toISOString());
+  }
+
+  /** Every attempt in a chain rooted at one original task, in attempt order
+   * — the attempt-cap count, the no-progress comparison, and the one
+   * inbox item's trajectory all read this. */
+  repairChainForRoot(rootTask: string): RepairChainRow[] {
+    return this.db
+      .prepare("SELECT * FROM repair_chain WHERE root_task = ? ORDER BY attempt ASC")
+      .all(rootTask)
+      .map(row => readRepairChain(row as Record<string, unknown>));
+  }
+
+  /** Settle a chain attempt exactly once — the four stops (attempts-spent,
+   * no-progress, integrity-refused) and the happy path (resolved) all
+   * funnel through here. A row already settled is left untouched. */
+  settleRepairChain(id: number, outcome: Exclude<RepairChainRow["outcome"], "drafted">, now: Date): void {
+    this.db.prepare("UPDATE repair_chain SET outcome = ?, settled_at = ? WHERE id = ? AND settled_at IS NULL").run(outcome, now.toISOString(), id);
   }
 
   notesForRun(runId: number): { id: number; author: string; note: string; createdAt: string }[] {
@@ -10203,8 +10440,12 @@ export class Store {
                   proof_verdict.verdict AS proof_verdict, proof_verdict.matrix_json AS proof_matrix_json
              FROM task JOIN task_ref ON task_ref.backend = '${BUILT_IN}' AND task_ref.external_id = task.id
              LEFT JOIN run ON run.id = (
+               -- v40 fix: a reviewer run finishes 'no-change' too, after
+               -- the build it reviews, and carries no proof verdict of its
+               -- own — excluded so it never outranks the builder's own
+               -- attempt as "the latest".
                SELECT MAX(final.id) FROM run AS final
-               WHERE final.task_ref = task_ref.id AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
+               WHERE final.task_ref = task_ref.id AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL AND final.role != 'reviewer'
              )
              LEFT JOIN proof_verdict ON proof_verdict.run = run.id
             WHERE task_ref.repo IN (${marks})
@@ -14495,7 +14736,7 @@ export class Store {
          LEFT JOIN run ON run.id = (
            SELECT MAX(final.id) FROM run AS final
            WHERE final.task_ref = completed.ref_id
-             AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
+             AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL AND final.role != 'reviewer'
          )
          LEFT JOIN publication ON publication.run = run.id
          LEFT JOIN proof_verdict ON proof_verdict.run = run.id
@@ -16702,6 +16943,10 @@ export type ProofVerdictRow = {
   /** v39: `[]` for a verdict decided before this migration, or for any
    * run whose scope signed no rubric. */
   matrix: CriterionMatrixRow[];
+  /** v40: the verdict `adjudicate()` computed, before an independent
+   * reviewer's judgements were folded in — `null` when no review has
+   * folded (reading back exactly as before this migration). */
+  machineVerdict: ProofVerdictRow["verdict"] | null;
 };
 
 /** The matrix column, re-proved the same defensive way `reasons_json`
@@ -16711,9 +16956,10 @@ function readMatrixJson(raw: unknown): CriterionMatrixRow[] {
   try {
     const parsed = JSON.parse(String(raw));
     if (!Array.isArray(parsed)) return [];
-    // `answered` is additive (post-v39 review finding): a row stored
-    // before that fix simply has none, never a throw at render.
-    return (parsed as CriterionMatrixRow[]).map(row => ({ ...row, answered: row.answered ?? [] }));
+    // `answered` and `review` are additive (post-v39/v40 review findings):
+    // a row stored before either fix simply has none, never a throw at
+    // render.
+    return (parsed as CriterionMatrixRow[]).map(row => ({ ...row, answered: row.answered ?? [], review: row.review ?? null }));
   } catch {
     return [];
   }
@@ -16733,6 +16979,78 @@ function readProofVerdict(row: Record<string, unknown>): ProofVerdictRow {
     reasons,
     matrix: readMatrixJson(row["matrix_json"]),
     decidedAt: String(row["decided_at"]),
+    machineVerdict: row["machine_verdict"] === null || row["machine_verdict"] === undefined ? null : (String(row["machine_verdict"]) as ProofVerdictRow["verdict"]),
+  };
+}
+
+/** One independent reviewer's typed judgement on one signed criterion
+ * (v40), as stored — immutable, bound to the exact reviewed artifact. */
+export type CriterionReviewRow = {
+  id: number;
+  reviewerRun: number;
+  sourceRun: number;
+  criterionId: string;
+  judgement: CriterionJudgementWord;
+  note: string;
+  artifact: number;
+  artifactSha: string;
+  author: string;
+  createdAt: string;
+};
+
+function readCriterionReview(row: Record<string, unknown>): CriterionReviewRow {
+  return {
+    id: Number(row["id"]),
+    reviewerRun: Number(row["reviewer_run"]),
+    sourceRun: Number(row["source_run"]),
+    criterionId: String(row["criterion_id"]),
+    judgement: String(row["judgement"]) as CriterionJudgementWord,
+    note: String(row["note"]),
+    artifact: Number(row["artifact"]),
+    artifactSha: String(row["artifact_sha"]),
+    author: String(row["author"]),
+    createdAt: String(row["created_at"]),
+  };
+}
+
+/** One attempt in a bounded repair chain (v40, evidence-review-v1) — the
+ * ledger row the single inbox item and the run/task pages read. */
+export type RepairChainRow = {
+  id: number;
+  rootTask: string;
+  sourceRun: number;
+  attempt: number;
+  /** null exactly when the integrity stop refused even the first attempt
+   * — no draft was ever made. */
+  draftTask: string | null;
+  basis: "human" | "mode";
+  modeDigest: string | null;
+  unresolved: string[];
+  outcome: "drafted" | "attempts-spent" | "no-progress" | "integrity-refused" | "resolved";
+  createdAt: string;
+  settledAt: string | null;
+};
+
+function readRepairChain(row: Record<string, unknown>): RepairChainRow {
+  let unresolved: string[] = [];
+  try {
+    const parsed = JSON.parse(String(row["unresolved_json"]));
+    if (Array.isArray(parsed)) unresolved = parsed.map(one => String(one));
+  } catch {
+    unresolved = [];
+  }
+  return {
+    id: Number(row["id"]),
+    rootTask: String(row["root_task"]),
+    sourceRun: Number(row["source_run"]),
+    attempt: Number(row["attempt"]),
+    draftTask: row["draft_task"] === null || row["draft_task"] === undefined ? null : String(row["draft_task"]),
+    basis: String(row["basis"]) as RepairChainRow["basis"],
+    modeDigest: row["mode_digest"] === null || row["mode_digest"] === undefined ? null : String(row["mode_digest"]),
+    unresolved,
+    outcome: String(row["outcome"]) as RepairChainRow["outcome"],
+    createdAt: String(row["created_at"]),
+    settledAt: row["settled_at"] === null || row["settled_at"] === undefined ? null : String(row["settled_at"]),
   };
 }
 

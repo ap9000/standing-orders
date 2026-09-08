@@ -9,6 +9,8 @@
  * never also "waiting" through the hold its own decision placed.
  */
 
+import { passFraction, type CriterionMatrixRow } from "./proof.js";
+
 export type BoardLane = "attention" | "queued" | "waiting" | "building";
 
 /** Everything one task contributes to the board, fetched in one snapshot. */
@@ -142,15 +144,30 @@ export type UnverifiedDoneFacts = {
    * attention card's `stalledSince`. */
   completedAt: string;
   proofVerdict: "short" | "refuted";
-  /** v39: how many of the signed rubric's criteria actually passed —
-   * folded into the plain-text `reason` chip, since a board card carries
+  /** v39: the signed rubric's own matrix — folded into the plain-text
+   * `reason` chip via the shared `passFraction` helper (v40 closes the
+   * hand-rolled copy this card used to keep), since a board card carries
    * no room for the full matrix. `[]` for a grandfathered task. */
-  proofMatrix?: { state: "pass" | "missing" | "failed" | "manual-review" }[];
+  proofMatrix?: readonly Pick<CriterionMatrixRow, "state">[];
+  /** v40: the bounded repair chain's own trajectory, when one exists —
+   * one more word on the SAME chip, never a second card (one task, one
+   * card, the board's own once-and-only-once rule). */
+  repairChain?: { attempt: number; outcome: "drafted" | "attempts-spent" | "no-progress" | "integrity-refused" | "resolved"; approved: boolean } | null;
 };
 
 export function attentionCardForUnverifiedDone(facts: UnverifiedDoneFacts): BoardCard {
   const matrix = facts.proofMatrix ?? [];
-  const matrixWords = matrix.length === 0 ? "" : ` (${matrix.filter(one => one.state === "pass").length}/${matrix.length} criteria)`;
+  const { passed, total } = passFraction(matrix as CriterionMatrixRow[]);
+  const matrixWords = total === 0 ? "" : ` (${passed}/${total} criteria)`;
+  const chain = facts.repairChain ?? null;
+  const repairWords =
+    chain === null
+      ? ""
+      : chain.outcome === "drafted"
+        ? ` — repair attempt ${chain.attempt} ${chain.approved ? "approved" : "awaiting approval"}`
+        : chain.outcome === "resolved"
+          ? ` — repair resolved`
+          : ` — repair ${chain.outcome} at attempt ${chain.attempt}`;
   return {
     lane: "attention",
     taskId: facts.taskId,
@@ -164,7 +181,7 @@ export function attentionCardForUnverifiedDone(facts: UnverifiedDoneFacts): Boar
     routineName: null,
     priority: 0,
     assignedRunner: null,
-    reason: (facts.proofVerdict === "refuted" ? "complete — proof refuted" : "complete — needs verification") + matrixWords,
+    reason: (facts.proofVerdict === "refuted" ? "complete — proof refuted" : "complete — needs verification") + matrixWords + repairWords,
   };
 }
 

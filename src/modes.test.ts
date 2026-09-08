@@ -32,6 +32,56 @@ describe("mode terms: digest, rehydration, words", () => {
     expect(modeTermsFromJson(JSON.stringify(loose))).toBeNull();
   });
 
+  describe("v40: repairAuto/repairMaxAttempts — the allowPaidFallback precedent", () => {
+    test("both presets default repairAuto false and repairMaxAttempts 0", () => {
+      for (const name of ["standard", "hands-off"] as const) {
+        const terms = presetTerms(name, expiry);
+        expect(terms.repairAuto).toBe(false);
+        expect(terms.repairMaxAttempts).toBe(0);
+      }
+    });
+
+    test("legacy JSON with no repairAuto/repairMaxAttempts fields rehydrates to false/0, never inherited", () => {
+      const legacy = JSON.parse(modeTermsJson(presetTerms("standard", expiry))) as Record<string, unknown>;
+      delete legacy["repairAuto"];
+      delete legacy["repairMaxAttempts"];
+      const back = modeTermsFromJson(JSON.stringify(legacy));
+      expect(back).not.toBeNull();
+      expect(back?.repairAuto).toBe(false);
+      expect(back?.repairMaxAttempts).toBe(0);
+    });
+
+    test("a non-boolean repairAuto or an out-of-range repairMaxAttempts is a bad envelope, null", () => {
+      const base = JSON.parse(modeTermsJson(presetTerms("standard", expiry))) as Record<string, unknown>;
+      expect(modeTermsFromJson(JSON.stringify({ ...base, repairAuto: "yes" }))).toBeNull();
+      expect(modeTermsFromJson(JSON.stringify({ ...base, repairMaxAttempts: 4 }))).toBeNull();
+      expect(modeTermsFromJson(JSON.stringify({ ...base, repairMaxAttempts: -1 }))).toBeNull();
+      expect(modeTermsFromJson(JSON.stringify({ ...base, repairMaxAttempts: 1.5 }))).toBeNull();
+    });
+
+    test("repairMaxAttempts 0..3 all round-trip", () => {
+      for (const n of [0, 1, 2, 3] as const) {
+        const terms: ModeTerms = { ...presetTerms("standard", expiry), repairAuto: true, repairMaxAttempts: n };
+        const back = modeTermsFromJson(modeTermsJson(terms));
+        expect(back?.repairMaxAttempts).toBe(n);
+      }
+    });
+
+    test("flipping repairAuto or repairMaxAttempts moves the digest", () => {
+      const base = presetTerms("standard", expiry);
+      expect(modeDigestOf({ ...base, repairAuto: true, repairMaxAttempts: 1 })).not.toBe(modeDigestOf(base));
+      expect(modeDigestOf({ ...base, repairAuto: true, repairMaxAttempts: 2 })).not.toBe(modeDigestOf({ ...base, repairAuto: true, repairMaxAttempts: 1 }));
+    });
+
+    test("modeWords states the authority plainly, off by default", () => {
+      const off = modeWords(presetTerms("standard", expiry)).join(" ");
+      expect(off).toContain("grants no automatic repair");
+      const on = modeWords({ ...presetTerms("standard", expiry), repairAuto: true, repairMaxAttempts: 2 }).join(" ");
+      expect(on).toContain("auto-approves its own drafted repair");
+      expect(on).toContain("2 attempt(s)");
+    });
+  });
+
   test("hands-off words carry the reversal sentence verbatim", () => {
     const words = modeWords(presetTerms("hands-off", expiry)).join(" ");
     expect(words).toContain("your signed-in browser session becomes a spend credential for this repository");

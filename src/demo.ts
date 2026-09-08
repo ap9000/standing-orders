@@ -37,6 +37,7 @@ import { approveRoutine, fireRoutine } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import { storeEvidence, budgetedStatJson, imageDimensions, type DiffStat } from "./evidence.js";
 import { parseProof, adjudicate } from "./proof.js";
+import { maybeTriggerRepair } from "./dispose.js";
 import { deflateSync } from "node:zlib";
 
 // The demo demonstrates a CONFIGURED install: routing is named once, the
@@ -620,6 +621,202 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   store.saveProofVerdict(copyReviewRun, copyReviewAdjudicated.verdict, copyReviewAdjudicated.reasons, hoursAgo(3.5), copyReviewAdjudicated.matrix);
   store.finishRun(copyReviewRun, { outcome: "built", committed: true, now: hoursAgo(3.5) });
   store.setTaskState(copyReview, "done", hoursAgo(3.5));
+
+  // --- reviewed + repaired: an independent reviewer contradicts a signed
+  // criterion, and the bounded repair loop drafts one unapproved fix
+  // (evidence-review-v1) — every step through the REAL functions the tick
+  // itself runs: adjudicate(), addReviewerComments/ingestCriterionReviews
+  // (the same fold reviewPass performs), and maybeTriggerRepair. Nothing
+  // here hand-authors a verdict or a chain row.
+  const reviewed = task(
+    "guard-payout-limiter",
+    "Guard the payout limiter against concurrent settlement",
+    repos.api,
+    "Add a per-account concurrency guard so two settlements never race the same payout limiter.",
+  );
+  const reviewedProposed = propose(store, {
+    profile: DEMO_PROFILE,
+    taskId: reviewed,
+    goal: "Add a per-account concurrency guard so two settlements never race the same payout limiter.",
+    outOfScope: "No changes to the limiter's public API.",
+    touches: ["src/payout-limiter.ts"],
+    acceptance: [
+      {
+        id: "c1",
+        statement: "Two concurrent settlements for the same account cannot both pass the limiter.",
+        how: "Read the guard; an independent reviewer confirms it actually locks.",
+        evidence: ["manual-review"],
+      },
+      { id: "c2", statement: "The existing limiter tests still pass.", how: null, evidence: ["check"] },
+    ],
+    now: hoursAgo(6),
+  });
+  approve(store, reviewed, "demo", hoursAgo(5.8), reviewedProposed.digest, token);
+  const reviewedRun = store.startRun({
+    taskRef: store.refFor("built-in", reviewed).id,
+    leaseId: "demo-lease-reviewed",
+    runner: "night-shift-1",
+    branch: `standing-orders/${reviewed}`,
+    worktree: join(repos.api, ".demo-worktree-4"),
+    now: hoursAgo(5),
+  });
+  store.stampRun(reviewedRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
+  const DEMO_REPAIR_PATCH = `diff --git a/src/payout-limiter.ts b/src/payout-limiter.ts
+--- a/src/payout-limiter.ts
++++ b/src/payout-limiter.ts
+@@ -1,3 +1,4 @@
++// TODO: lock per account
+ export function settleWithLimiter(accountId: string, cents: number): number {
+   return settle(cents, currentRate(accountId));
+ }
+`;
+  const reviewedDiffArtifact = storeEvidence(
+    store,
+    evidenceRoot,
+    reviewedRun,
+    "terminal-diff",
+    "terminal-diff.patch",
+    Buffer.from(DEMO_REPAIR_PATCH, "utf8"),
+    "git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [demo: synthetic]",
+    hoursAgo(4.6),
+  );
+  const reviewedStat: DiffStat = {
+    schema: 1,
+    base: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    head: "aa11bb22cc33dd44ee55ff6600112233445566aa",
+    fileCount: 1,
+    additions: 1,
+    deletions: 0,
+    binaryCount: 0,
+    files: [{ path: "src/payout-limiter.ts", additions: 1, deletions: 0 }],
+    filesTruncated: false,
+  };
+  storeEvidence(
+    store,
+    evidenceRoot,
+    reviewedRun,
+    "diff-stat",
+    "diff-stat.json",
+    budgetedStatJson(reviewedStat),
+    "parsed from git diff --numstat -z [demo: synthetic]",
+    hoursAgo(4.6),
+  );
+  const DEMO_REPAIR_HANDOFF = {
+    summary: "Added a TODO comment marking the per-account lock — ran out of turns before wiring the actual guard.",
+    filesTouched: ["src/payout-limiter.ts"],
+  };
+  storeEvidence(
+    store,
+    evidenceRoot,
+    reviewedRun,
+    "handoff",
+    "handoff.json",
+    Buffer.from(JSON.stringify(DEMO_REPAIR_HANDOFF, null, 2), "utf8"),
+    "composed at completion [demo: synthetic]",
+    hoursAgo(4.5),
+  );
+  const DEMO_REPAIR_PROOF = {
+    version: 1,
+    criteria: [
+      {
+        id: "c1",
+        statement: "Two concurrent settlements for the same account cannot both pass the limiter.",
+        verdict: "met",
+        how: "Added the lock.",
+        evidence: [{ kind: "manual-review", ref: "see src/payout-limiter.ts" }],
+      },
+      { id: "c2", statement: "The existing limiter tests still pass.", verdict: "met", how: "npm test", evidence: [{ kind: "check", ref: "npm test" }] },
+    ],
+    checks: [{ command: "npm test", exitCode: 0, summary: "214 tests passed." }],
+    changed: ["src/payout-limiter.ts"],
+    caveats: [],
+    screenshots: [],
+  };
+  storeEvidence(
+    store,
+    evidenceRoot,
+    reviewedRun,
+    "proof",
+    "proof.json",
+    Buffer.from(JSON.stringify(DEMO_REPAIR_PROOF, null, 2), "utf8"),
+    "agent-authored proof (validated, re-serialized) [demo: synthetic]",
+    hoursAgo(4.5),
+  );
+  // The verdict, computed by the real adjudicate() — the proof's OWN
+  // self-declared "met" reads clean until the independent reviewer looks.
+  const reviewedProofParse = parseProof(JSON.stringify(DEMO_REPAIR_PROOF));
+  const reviewedAdjudicated = adjudicate({
+    proofArtifactPresent: true,
+    proofParse: reviewedProofParse,
+    handoffPresent: true,
+    terminalDiffPresent: true,
+    terminalDiffCaptureStatus: "ok",
+    diffStat: { captured: true, truncated: false, paths: new Set(reviewedStat.files.map(one => one.path)) },
+    verifyCommand: { configured: true, ran: true, exitCode: 0 },
+    screenshots: [],
+    approvedCriteria: reviewedProposed.acceptance,
+  });
+  store.saveProofVerdict(reviewedRun, reviewedAdjudicated.verdict, reviewedAdjudicated.reasons, hoursAgo(4.4), reviewedAdjudicated.matrix);
+  store.finishRun(reviewedRun, { outcome: "built", committed: true, now: hoursAgo(4.4) });
+  store.setTaskState(reviewed, "done", hoursAgo(4.4));
+
+  // The independent reviewer: a real reviewer run, its comments AND its
+  // criterion judgement folded through the SAME store methods reviewPass
+  // itself calls (addReviewerComments, ingestCriterionReviews) — the fold
+  // is the real foldReview, never a hand-authored verdict.
+  const reviewerRun = store.startRun({
+    taskRef: store.refFor("built-in", reviewed).id,
+    leaseId: "demo-lease-reviewer",
+    runner: "night-shift-1",
+    role: "reviewer",
+    parentRun: reviewedRun,
+    provider: "codex",
+    now: hoursAgo(3.9),
+  });
+  store.addReviewerComments(
+    {
+      reviewerRunId: reviewerRun,
+      runId: reviewedRun,
+      artifactId: reviewedDiffArtifact,
+      author: "reviewer:codex",
+      comments: [
+        {
+          path: "src/payout-limiter.ts",
+          line: 1,
+          note: "This is a TODO, not a lock — two concurrent calls both still read the same rate before either settles.",
+          severity: "problem",
+        },
+      ],
+    },
+    hoursAgo(3.9),
+  );
+  const folded = store.ingestCriterionReviews(
+    {
+      reviewerRunId: reviewerRun,
+      runId: reviewedRun,
+      artifactId: reviewedDiffArtifact,
+      author: "reviewer:codex",
+      judgements: [
+        {
+          id: "c1",
+          judgement: "contradicts",
+          note: "The diff adds a TODO comment, not an actual lock — two concurrent settlements still race the limiter.",
+        },
+      ],
+    },
+    hoursAgo(3.9),
+  );
+  if (folded === null) throw new Error("seed reviewed+repaired: the fold produced nothing");
+  store.finishRun(reviewerRun, { outcome: "no-change", reason: `reviewed — 1 comment(s), 1 judgement(s) (${"review-contradicted"})`, now: hoursAgo(3.9) });
+
+  // The bounded repair loop's own trigger — the SAME function the tick
+  // calls after a review pass settles a verdict. No mode is signed, so
+  // the draft it composes waits unapproved, exactly as the default road
+  // promises.
+  const repairTrigger = maybeTriggerRepair(store, repos.api, evidenceRoot, reviewedRun, folded.verdict, hoursAgo(3.9));
+  if (repairTrigger.kind !== "drafted") {
+    throw new Error(`seed reviewed+repaired: expected a draft, got ${repairTrigger.kind}`);
+  }
 
   // --- waiting: a dependency and a hold ----------------------------------
   task("design-tokens", "Extract the design tokens package", repos.web);

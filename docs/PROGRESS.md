@@ -1,5 +1,95 @@
 # Progress
 
+**2026-09-07 — Evidence review v1: an independent reviewer judges the
+signed rubric by exact id, and a bounded repair loop drafts one unmet-
+criteria fix.** Schema v40, closes Priority 2's remaining gap ("the
+evidence is well-formed" vs. "the outcome was delivered") and Priority 1's
+"fails with a repair path" for the commonest nameable failure: a criterion
+the plane can see is unmet. Two halves, both extending machinery that
+already existed rather than adding a second agent invocation or a second
+review mechanism.
+
+**Half 1 (the reviewer).** The existing v29 review pass (`reviewPass`,
+still at most once per source run) now also materializes `REVIEW-
+RUBRIC.json` and a re-serialized `REVIEW-PROOF.json` beside `REVIEW-
+DIFF.patch` — sealed the same way the patch always has (write-time hash,
+re-checked after the agent runs; a tampered rubric or proof ingests
+nothing) — and only when the run actually signed a rubric, so a
+grandfathered run's scratch is byte-identical to before. The mailbox gains
+an optional `criteria` array (`{ id, judgement, note }`); `parseReview`
+folds it into the SAME wholesale law its `comments` array already
+enforces — an id absent from the rubric, a duplicate, an unknown
+judgement word, or an oversize note refuses the entire payload, not just
+the offending entry. `src/proof.ts` gains `foldReview`, a pure fold with
+exactly three rules and no fourth: `contradicts` → `refuted` (the row
+becomes `failed`, the reviewer's note attributed in `detail`);
+`cannot-tell` changes nothing (recorded, never moves the verdict — the
+codebase's own maxim, "we could not check" is not "the claim is false",
+now literally true for a second reader too); `upholds` never upgrades (a
+`short` run stays `short` — the law that stops a second model laundering
+a bad proof). `CriterionMatrixRow` gains `review: {judgement, note,
+author} | null`; `proof_verdict` gains nullable `machine_verdict`, the
+pre-fold verdict, so a render can say "the machine attested it;
+reviewer:codex contradicted c2" instead of pretending the two never
+differed. The store's `ingestCriterionReviews` folds and re-saves inside
+ONE proving transaction — the same D8 invariants `addReviewerComments`
+already checks (reviewer role, exact parentage, shared task, artifact
+binding), extended to the judgements.
+
+**Half 2 (the bounded repair loop).** `maybeTriggerRepair` (`src/
+dispose.ts`) fires the instant a review pass folds a `short`/`refuted`
+verdict naming at least one `missing`/`failed` criterion, and composes AT
+MOST ONE durable revision draft through `sealRevision`'s own machinery
+(`store.openRepairDraft`, `commentIds: null` — the CI-repair road,
+reused) — the signed rubric copied verbatim, a `revision-brief` artifact
+naming exactly the unmet ids, their matrix detail, and the reviewer's own
+contradiction notes, no log content, no new instructions. Never repairs a
+scout task, a published or merge-blocked run, a task with an open
+decision or pending steering note, or an already-accepted proof. Four
+independent stops, each its own test: the INTEGRITY stop (an altered
+signed statement or an overclaimed changed path is a lie about the terms,
+not a gap — `repair-refused-integrity`, parked for a human, unconditional
+on both roads) fires first; NO-PROGRESS (two consecutive attempts that
+fail to strictly shrink the unresolved set — `repair-no-progress`, also
+unconditional) fires next; the ATTEMPT CAP (`repair-attempts-spent`)
+bounds only the automatic road, since the default road's loop is already
+bounded by requiring a fresh human "yes" per attempt; the fourth — the
+existing spend and run rails — is simply the ordinary tick's own job once
+a mode-approved draft dispatches as a normal builder run. `ModeTerms`
+gains `repairAuto: boolean` and `repairMaxAttempts: number` (0..3) — the
+`allowPaidFallback` precedent verbatim: both presets ship it off, legacy
+JSON rehydrates to false/0, never inherited, only freshly signed. A chain
+closes ("resolved") the instant any of its own attempts reaches
+`verified`/`attested` — checked at the ordinary builder save point
+(`maybeSettleRepairChain`), since `foldReview`'s monotonicity means a
+review can never produce those verdicts itself. `standing-orders task
+repair <run-id> [--yes]` is the first CLI road to a revision at all.
+
+**A latent bug the reviewer role's own runs exposed, fixed alongside**:
+four call sites (`src/serve.ts` task page and accept-proof, `src/
+operate.ts` `task show` and `task accept`) and two SQL queries (chat
+snapshot, `listCompletedWorkScoped`) picked "the latest finished run" by
+id/timestamp alone, with no role filter — a reviewer run, finishing after
+the build it reviews, could silently hijack the task's own completion
+card with its own contentless `no-change` outcome. Never manifested until
+a reviewed task's page was actually rendered end to end (this slice's own
+demo scenario was the first to do it); now excluded everywhere by
+`role != "reviewer"` / `role !== "reviewer"`.
+
+`src/demo.ts` gains a sixth seeded task (`guard-payout-limiter`) built
+entirely through the real functions — `adjudicate`, `addReviewerComments`
++ `ingestCriterionReviews` (the exact fold `reviewPass` performs), and
+`maybeTriggerRepair` — showing a refuted proof, a contradicted criterion
+badge, and an unapproved repair chain card live in a fresh sandbox.
+Contract: `proof.test.ts`, `acceptance-contract.test.ts`, `scope.test.ts`
+still pass byte for byte unmodified except the one matrix literal that
+gained the new `review: null` field — the grandfathering promise holds.
+New: `src/repair-loop.test.ts` (the four stops, the happy path, the
+never-repair conditions), and `unattended.test.ts` (the idle-spend
+invariant: an unapproved draft dispatches nothing; approving it is not
+itself a spend; the next tick spends exactly one dispatch). Suite 100
+files / 1887 tests.
+
 **2026-09-08 — Acceptance Contract v2, three review findings closed: a
 global diff check, a manual-review gate, and answered evidence on the
 matrix.** Still schema v39, `src/proof.ts`. (1) The changed-path exactness

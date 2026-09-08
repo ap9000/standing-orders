@@ -179,6 +179,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("task requeue", "exit a stall: incidents resolved, strikes cleared, queued again"),
   operator("task review", "ask an agent to review a finished run's sealed diff — its comments land for you to prune and seal"),
   operator("task accept", "accept a short or refuted proof anyway — the one act that lets a task read done despite incomplete evidence"),
+  operator("task repair", "show the repair a short/refuted run's review drafted, or --yes to approve it — the first CLI road to a revision at all"),
   operator("task reopen", "resume external work its tracker closed and has been SEEN open again"),
 
   // ---- leases (runner surface) ----

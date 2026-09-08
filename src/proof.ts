@@ -450,6 +450,24 @@ export type CriterionMatrixRow = {
    * show what was actually cited (and link the artifact behind it, where
    * one exists). `[]` when the criterion went unanswered. */
   answered: readonly CriterionEvidenceRef[];
+  /** v40: the independent reviewer's judgement on this criterion, folded in
+   * by `foldReview` after `adjudicate` has already run — `null` until a
+   * review has settled, and for every criterion no review addressed. */
+  review: { judgement: CriterionJudgementWord; note: string; author: string } | null;
+};
+
+/** v40: the three words an evidence reviewer can say about one signed
+ * criterion, and nothing else — `cannot-tell` is a CORRECT answer whenever
+ * the sealed patch alone cannot settle a criterion, not a hedge. */
+export type CriterionJudgementWord = "upholds" | "contradicts" | "cannot-tell";
+
+/** One reviewer's typed judgement on one signed criterion (v40), ready to
+ * fold into an already-adjudicated result. */
+export type CriterionJudgement = {
+  id: string;
+  judgement: CriterionJudgementWord;
+  note: string;
+  author: string;
 };
 
 /** Set equality, exactly — the "must equal the complete sealed git diff
@@ -486,7 +504,7 @@ function criterionMatrix(
     diffStat !== null && diffStat.captured && !diffStat.truncated ? setEquals(changedSet, diffStat.paths) : null;
 
   return approvedCriteria.map((approved): CriterionMatrixRow => {
-    const base = { id: approved.id, statement: approved.statement, requiredEvidence: approved.evidence };
+    const base = { id: approved.id, statement: approved.statement, requiredEvidence: approved.evidence, review: null };
     const answer = answers.get(approved.id);
     if (answer === undefined) {
       return { ...base, state: "missing", detail: [`the proof does not answer approved criterion "${approved.id}"`], answered: [] };
@@ -697,6 +715,63 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
   return { verdict: "attested", reasons: ["the proof agrees with the sealed diff; no verification command is configured to re-run"], matrix };
 }
 
+/**
+ * Folds an independent reviewer's per-criterion judgements into an ALREADY
+ * ADJUDICATED result (v40, evidence-review-v1) — pure, and never re-derives
+ * verdict facts that were not persisted (verify-command outcome, screenshot
+ * bytes): it folds over the STORED result, it does not re-run `adjudicate`.
+ *
+ * Three rules, and they are the whole contract:
+ *  - `contradicts` -> refuted. A second reader saying a signed term is not
+ *    met is the same severity as a proof that altered the term: the
+ *    matching row becomes `failed`, with the reviewer's note as an
+ *    attributed `detail` line.
+ *  - `cannot-tell` changes nothing. Recorded and rendered, never moves the
+ *    verdict — "we could not check" is not "the claim is false" (the same
+ *    maxim `adjudicate` already lives by for an unavailable diff or a
+ *    failed verify-command attempt).
+ *  - `upholds` never upgrades. A `short` (or `attested`) run stays exactly
+ *    what it was — this is the law that stops a second model laundering a
+ *    bad proof, and the reason `foldReview` can only LOWER a verdict, never
+ *    raise one.
+ *
+ * A judgement naming a criterion absent from `base.matrix` is ignored —
+ * `parseReview` already refuses a payload naming an unsigned id, so this is
+ * belt and suspenders, never a live path.
+ */
+export function foldReview(base: AdjudicateResult, judgements: readonly CriterionJudgement[]): AdjudicateResult {
+  if (judgements.length === 0) return base;
+  const byId = new Map(judgements.map(j => [j.id, j] as const));
+  let anyContradiction = false;
+  const matrix = base.matrix.map((row): CriterionMatrixRow => {
+    const judgement = byId.get(row.id);
+    if (judgement === undefined) return row;
+    const review = { judgement: judgement.judgement, note: judgement.note, author: judgement.author };
+    if (judgement.judgement !== "contradicts") return { ...row, review };
+    anyContradiction = true;
+    return {
+      ...row,
+      state: "failed",
+      detail: [...row.detail, `${judgement.author} contradicts criterion "${row.id}": ${judgement.note}`],
+      review,
+    };
+  });
+  if (!anyContradiction) return { ...base, matrix };
+  const contradictions = matrix.filter(row => row.review?.judgement === "contradicts");
+  return {
+    verdict: "refuted",
+    reasons: [...base.reasons, ...contradictions.flatMap(row => (row.review === null ? [] : [`${row.review.author} contradicts criterion "${row.id}": ${row.review.note}`]))],
+    matrix,
+  };
+}
+
+/** The pass fraction of a criterion matrix — the one number every list
+ * surface (board, chat) needs, shared so "N/M criteria" is computed in
+ * exactly one place (v40 closes the two hand-rolled copies). */
+export function passFraction(matrix: readonly CriterionMatrixRow[]): { passed: number; total: number } {
+  return { passed: matrix.filter(row => row.state === "pass").length, total: matrix.length };
+}
+
 /** The matrix in plain lines, for a text surface (the CLI, `brief`) — the
  * same shared vocabulary `criterionMatrixHtml` renders in the console, so
  * the words never drift between the two (Priority 2's rule, extended). */
@@ -709,6 +784,9 @@ export function matrixWords(matrix: readonly CriterionMatrixRow[]): string[] {
       lines.push(`      answered: ${row.answered.map(a => `${a.kind}: ${a.ref}`).join("; ")}`);
     }
     for (const detail of row.detail) lines.push(`      ${detail}`);
+    if (row.review !== null) {
+      lines.push(`      review (${row.review.author}): ${row.review.judgement} — ${row.review.note}`);
+    }
   }
   return lines;
 }

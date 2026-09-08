@@ -50,7 +50,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { verdictWords as proofVerdictWords, dispatchStatusToken, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import { verdictWords as proofVerdictWords, dispatchStatusToken, passFraction, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -155,7 +155,7 @@ import { isProviderId, reportsCost, PROVIDER_IDS, validModelId } from "./provide
 import { authenticateAccount, hashPassword, modeFilingCoverage } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
-import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription } from "./store.js";
+import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
@@ -988,7 +988,14 @@ export function createDecisionServer(options: ServeOptions): Server {
           needsVerification: store
             .listCompletedWorkScoped(project, 10, admission)
             .filter(one => visible(one.repo) && (one.proofVerdict === "short" || one.proofVerdict === "refuted") && !one.proofAccepted)
-            .map(one => ({ taskId: one.taskId, title: one.title, verdict: one.proofVerdict as "short" | "refuted", repo: one.repo, matrix: one.proofMatrix })),
+            .map(one => ({
+              taskId: one.taskId,
+              title: one.title,
+              verdict: one.proofVerdict as "short" | "refuted",
+              repo: one.repo,
+              matrix: one.proofMatrix,
+              repairChain: one.runId === null ? null : store.repairChainFor(one.runId),
+            })),
           cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
           wizard: wizardSteps(now),
@@ -1205,16 +1212,28 @@ export function createDecisionServer(options: ServeOptions): Server {
         row => (row.proofVerdict === "short" || row.proofVerdict === "refuted") && !row.proofAccepted,
       );
       const verifiedDone = done.filter(row => !unverifiedDone.includes(row));
-      const unverifiedCards = unverifiedDone.map(row =>
-        attentionCardForUnverifiedDone({
+      const unverifiedCards = unverifiedDone.map(row => {
+        // v40: the SAME chip gains one more word when a repair chain
+        // exists for this row's own run — never a second card.
+        const chain = row.runId === null ? null : store.repairChainFor(row.runId);
+        const repairChain =
+          chain === null
+            ? null
+            : {
+                attempt: chain.attempt,
+                outcome: chain.outcome,
+                approved: chain.draftTask !== null && (store.getScope(chain.draftTask)?.approvedAt ?? null) !== null,
+              };
+        return attentionCardForUnverifiedDone({
           taskId: row.taskId,
           title: row.title,
           repo: row.repo,
           completedAt: row.completedAt,
           proofVerdict: row.proofVerdict as "short" | "refuted",
           proofMatrix: row.proofMatrix,
-        }),
-      );
+          repairChain,
+        });
+      });
       // Instances belong to their track row, not the main lanes — the board
       // is for one-off work; tracks are the heartbeat. The one exception is
       // attention: anything needing a person surfaces, wearing its routine.
@@ -1378,6 +1397,11 @@ export function createDecisionServer(options: ServeOptions): Server {
                 `<option value="">never switch to a paid API key on its own (the default, every preset)</option>` +
                 `<option value="1">allow the approved fallback — spend moves to that account</option>` +
                 `</select></label>`,
+              `<label>a short or refuted run's drafted repair<select name="repair-auto">` +
+                `<option value="">wait for my approval (the default, every preset)</option>` +
+                `<option value="1">auto-approve it, within the attempt cap below</option>` +
+                `</select></label>`,
+              `<label>repair attempt cap <span class="meta">(0–3, only while repair auto-approves)</span><input type="number" name="repair-max-attempts" value="1" min="0" max="3"></label>`,
               `<button type="submit">read the full terms</button>`,
               `</form>`,
               `</div>`,
@@ -2790,7 +2814,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         : "";
     const runs = ref === null ? [] : store.runsFor(ref.id);
     const completion = (() => {
-      const latest = runs.find(one => one.finishedAt !== null);
+      // v40 fix: a reviewer run finishes AFTER the build it reviews and
+      // carries no proof verdict of its own — without this filter, its
+      // "no-change" outcome would hijack the task's own completion card
+      // the instant a review lands, showing "proof missing" for a proof
+      // that is right there on the builder's run.
+      const latest = runs.find(one => one.finishedAt !== null && one.role !== "reviewer");
       if (latest === undefined) return null;
       const artifacts = store.artifactsFor(latest.id);
       const verdict = store.proofVerdictFor(latest.id);
@@ -2803,10 +2832,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         // at completion by adjudicate() and never re-inferred here — null
         // only for a run that predates the proof system.
         proofVerdict: verdict?.verdict ?? null,
+        machineVerdict: verdict?.machineVerdict ?? null,
         proofReasons: verdict?.reasons ?? [],
         proofMatrix: verdict?.matrix ?? [],
         proofMatrixLinks: evidenceLinksFor(artifacts),
         proofAccepted: store.proofAcceptance(latest.id) !== null,
+        // Either direction: the ORIGINAL task's page finds the chain by
+        // its own latest run (the one that triggered a draft); a DRAFT
+        // task's page finds the SAME chain by being named as the draft.
+        repairChain: store.repairChainFor(latest.id) ?? store.repairChainForDraft(taskId),
       };
     })();
     return {
@@ -2817,6 +2851,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         deliverable: ref?.deliverable ?? "branch",
         report: ref === null ? null : readVerifiedReport(store, evidenceRoot, ref.id),
         revision,
+        // v40: the fallback for a task page with no completed run yet (a
+        // freshly drafted, unapproved repair) — completion's own branches
+        // cover every case once a run exists.
+        repairChain: completion !== null ? null : store.repairChainForDraft(taskId),
         repo: ref?.repo ?? null,
         filedVia: store.filedViaOf(taskId),
         coordinator: (() => {
@@ -3921,6 +3959,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         // The paid-fallback grant is NEVER a preset default (R8): unchecked
         // stays false on every preset — only the explicit box grants it.
         allowPaidFallback: body.get("allow-paid-fallback") === "1",
+        // The repair-auto grant is the SAME rule (v40): unchecked stays
+        // false on every preset — only the explicit box grants it, and the
+        // attempt cap it carries is meaningless without it.
+        repairAuto: body.get("repair-auto") === "1",
+        repairMaxAttempts: body.get("repair-auto") === "1" ? Math.max(0, Math.min(3, Math.floor(Number(body.get("repair-max-attempts") ?? "0")) || 0)) : 0,
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
       if (terms.publication === "automerge" && !store.hasMergeCapableGrant(project, now)) {
@@ -3938,7 +3981,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
           `<input type="hidden" name="digest" value="${escape(digest)}">` +
-          ["name", "days", "publication", "auto-approve", "review-auto", "allow-paid-fallback"]
+          ["name", "days", "publication", "auto-approve", "review-auto", "allow-paid-fallback", "repair-auto", "repair-max-attempts"]
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
@@ -5825,7 +5868,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (who.via !== "cookie") {
           return refuse(response, who, 403, "accepting a proof is a browser session's act");
         }
-        const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null);
+        // v40 fix: a reviewer run is never the attempt whose proof is
+        // being accepted.
+        const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null && one.role !== "reviewer");
         if (latest === undefined) {
           return taskScreen(response, who, taskId, "this task has no finished attempt to accept", 404);
         }
@@ -6159,21 +6204,56 @@ function matrixStateBadge(state: CriterionMatrixRow["state"]): string {
   return `<span class="badge ${cls}" data-matrix-state="${escape(state)}">${escape(word)}</span>`;
 }
 
+/** v40: the bounded repair chain's own line — one card, one chain, the
+ * criterion-by-criterion trajectory named plainly. Renders on the task
+ * page and the run page identically (the shared-surface rule, extended). */
+function repairChainHtml(chain: RepairChainRow | null): string {
+  if (chain === null) return "";
+  const basisWords = chain.basis === "mode" ? "a signed mode auto-approved" : "awaiting your approval";
+  const unresolvedWords = chain.unresolved.length === 0 ? "" : ` (${chain.unresolved.join(", ")})`;
+  const outcomeWords =
+    chain.outcome === "drafted"
+      ? `attempt ${chain.attempt}, ${chain.draftTask === null ? "no draft" : basisWords}`
+      : chain.outcome === "resolved"
+        ? `resolved at attempt ${chain.attempt} — the chain is closed`
+        : chain.outcome === "attempts-spent"
+          ? `stopped: the signed attempt cap is spent at attempt ${chain.attempt}`
+          : chain.outcome === "no-progress"
+            ? `stopped: two consecutive attempts made no progress (attempt ${chain.attempt})`
+            : `stopped: attempt ${chain.attempt} refused automatic repair — an altered term, not a gap; a human should look`;
+  const link = chain.draftTask === null ? "" : ` <a href="${taskHref(chain.draftTask)}">${escape(chain.draftTask)}</a>`;
+  return `<div class="card repair-chain" data-repair-outcome="${escape(chain.outcome)}"><p class="row"><strong>repair chain</strong> — ${escape(outcomeWords)}${escape(unresolvedWords)}${link}</p></div>`;
+}
+
+/** v40: the independent reviewer's own judgement on one criterion — a
+ * SECOND badge beside the machine's own matrixStateBadge, never a
+ * replacement for it, so a render can say "the machine attested it;
+ * reviewer:codex contradicted c2" instead of pretending the machine
+ * always disagreed. Reuses the matrix's own three badge colors (done /
+ * failed / manual-review) rather than inventing a fourth vocabulary —
+ * `contradicts` reads exactly as alarming as `failed` already does. */
+function reviewJudgementBadge(review: CriterionMatrixRow["review"]): string {
+  if (review === null) return "";
+  const cls = review.judgement === "upholds" ? "badge-done" : review.judgement === "contradicts" ? "badge-failed" : "badge-manual-review";
+  const word = review.judgement === "upholds" ? "upheld" : review.judgement === "contradicts" ? "contradicted" : "uncertain";
+  return ` <span class="badge ${cls}" data-review-judgement="${escape(review.judgement)}" title="${escape(review.author)}: ${escape(review.note)}">reviewer: ${escape(word)}</span>`;
+}
+
 /** A one-line summary of the matrix for list rows too dense for the full
  * table (done, builds, board, inbox) — "2/3 criteria", plus a worst-state
  * badge so trouble is visible without opening the row. `[]` renders
  * nothing. */
 function criterionMatrixSummary(matrix: readonly CriterionMatrixRow[]): string {
   if (matrix.length === 0) return "";
-  const passed = matrix.filter(row => row.state === "pass").length;
+  const { passed, total } = passFraction(matrix);
   const worst = matrix.some(row => row.state === "missing" || row.state === "failed")
     ? "failed"
     : matrix.some(row => row.state === "manual-review")
       ? "manual-review"
       : "pass";
   return worst === "pass"
-    ? ` <span class="badge badge-done">${passed}/${matrix.length} criteria</span>`
-    : `${matrixStateBadge(worst)} <span class="badge">${passed}/${matrix.length} criteria</span>`;
+    ? ` <span class="badge badge-done">${passed}/${total} criteria</span>`
+    : `${matrixStateBadge(worst)} <span class="badge">${passed}/${total} criteria</span>`;
 }
 
 /** Where a criterion's own typed evidence ref resolves to a stored
@@ -6231,7 +6311,7 @@ function criterionMatrixHtml(
     matrix
       .map(
         row =>
-          `<li>${matrixStateBadge(row.state)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
+          `<li>${matrixStateBadge(row.state)}${reviewJudgementBadge(row.review)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
           ` <span class="meta">[requires: ${row.requiredEvidence.map(escape).join(", ")}]</span>` +
           answeredHtml(row) +
           (compact || row.detail.length === 0 ? "" : `<br><span class="meta">${row.detail.map(escape).join("; ")}</span>`) +
@@ -8396,7 +8476,7 @@ function inboxPage(chrome: Chrome, data: {
   /** A completed task whose proof is short or refuted and not yet accepted
    * (Priority 2) — reads "needs verification" here too, never silently
    * "done" just because the inbox does not otherwise look at finished work. */
-  needsVerification: { taskId: string; title: string; verdict: "short" | "refuted"; repo?: string | null; matrix?: CriterionMatrixRow[] }[];
+  needsVerification: { taskId: string; title: string; verdict: "short" | "refuted"; repo?: string | null; matrix?: CriterionMatrixRow[]; repairChain?: RepairChainRow | null }[];
   /** The first-run checklist; null once the installation has succeeded once. */
   wizard: { done: boolean; title: string; detail: string }[] | null;
   /** Whether any worker is answering right now — said at the top when none is. */
@@ -8474,7 +8554,9 @@ function inboxPage(chrome: Chrome, data: {
           .map(
             one =>
               `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> ${escape(one.title)}${chip(one.repo)}` +
-              ` <span class="badge badge-failed">${one.verdict === "refuted" ? "proof refuted" : "needs verification"}</span>${criterionMatrixSummary(one.matrix ?? [])}</p>`,
+              ` <span class="badge badge-failed">${one.verdict === "refuted" ? "proof refuted" : "needs verification"}</span>${criterionMatrixSummary(one.matrix ?? [])}` +
+              (one.repairChain == null ? "" : ` <span class="meta">— repair ${one.repairChain.outcome === "drafted" ? "drafted, awaiting approval" : one.repairChain.outcome}</span>`) +
+              `</p>`,
           )
           .join("\n");
 
@@ -9097,7 +9179,7 @@ function chatFleetOverview(
     rows.push(
       `<a class="chat-overview-item failed" href="${taskHref(task.id)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
-        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${task.proofVerdict === "refuted" ? "proof refuted" : "needs verification"}${criterionMatrixSummary(task.proofMatrix).length > 0 ? ` · ${task.proofMatrix.filter(one => one.state === "pass").length}/${task.proofMatrix.length} criteria` : ""}</span></span>` +
+        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${task.proofVerdict === "refuted" ? "proof refuted" : "needs verification"}${task.proofMatrix.length > 0 ? ` · ${passFraction(task.proofMatrix).passed}/${passFraction(task.proofMatrix).total} criteria` : ""}</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
     );
   }
@@ -11576,6 +11658,12 @@ function taskBody(data: {
   deliverable?: "branch" | "report";
   report?: ReportView | null;
   revision?: RevisionView | null;
+  /** v40: this task's own place in a bounded repair chain — computed
+   * independent of `completion` (a freshly drafted, unapproved repair has
+   * no run yet, so it must not wait for one to say so). `completion`'s own
+   * branches render it too, once a run exists; this is the fallback for
+   * the moment before that, so "awaiting approval" is never invisible. */
+  repairChain?: RepairChainRow | null;
   publication?: Publication | null;
   repo: string | null;
   /** Immutable filing provenance (v12) — the approver sees which door
@@ -11626,10 +11714,16 @@ function taskBody(data: {
     hasTerminalDiff: boolean;
     hasHandoff: boolean;
     proofVerdict: ProofVerdict | null;
+    /** v40: the verdict BEFORE an independent reviewer's judgements were
+     * folded in — null when no review has folded (every run before this
+     * migration, and every run no review has touched). */
+    machineVerdict: ProofVerdict | null;
     proofReasons: string[];
     proofMatrix: CriterionMatrixRow[];
     proofMatrixLinks: EvidenceLinkMap;
     proofAccepted: boolean;
+    /** v40: this run's own place in a bounded repair chain, if any. */
+    repairChain: RepairChainRow | null;
   } | null;
   decisions: Decision[];
   incidents: Incident[];
@@ -11762,11 +11856,19 @@ function taskBody(data: {
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
             `<input type="text" name="note" maxlength="500" placeholder="optional note">` +
             `<button type="submit">accept anyway</button></form>`;
+      // v40: the machine's own pre-fold verdict, restated when a review
+      // moved it — "the machine attested it; reviewer:codex contradicted
+      // c2" — never pretending the machine always disagreed.
+      const machineNote =
+        proof.machineVerdict === null || proof.machineVerdict === proof.proofVerdict
+          ? ""
+          : `<p class="meta">the machine's own verdict was ${escape(proofVerdictWords(proof.machineVerdict, []).word)}; an independent review lowered it</p>`;
+      const chainHtml = repairChainHtml(proof.repairChain);
       if (proof.proofVerdict === "verified") {
-        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks });
+        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) + machineNote + chainHtml;
       }
       if (proof.proofVerdict === "attested") {
-        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks });
+        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) + machineNote + chainHtml;
       }
       if (proof.proofVerdict === "refuted") {
         return (
@@ -11774,7 +11876,7 @@ function taskBody(data: {
             accepted ? "ok" : "problem",
             "Proof refuted",
             `<a href="/r/${proof.runId}">Build #${proof.runId}</a>'s proof disagrees with what the machine captured${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
-          ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })
+          ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) + machineNote + chainHtml
         );
       }
       // "short", or no verdict at all (a legacy run, or one where
@@ -11784,7 +11886,7 @@ function taskBody(data: {
           accepted ? "ok" : "problem",
           "Needs verification",
           `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, but its proof is incomplete${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
-        ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })
+        ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) + machineNote + chainHtml
       );
     }
     if (task.state === "cancelled") {
@@ -12612,7 +12714,11 @@ function taskBody(data: {
     section("attempts", runs, true, data.runs.length),
     section("usage", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
-    section("scope", ["<h2>scope</h2>", scopeCard, revisionCard, attendedCard, scopeForm].join("\n"), true),
+    section(
+      "scope",
+      ["<h2>scope</h2>", scopeCard, revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
+      true,
+    ),
     section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),
     cancelAct,
@@ -12913,6 +13019,11 @@ type ProofBundleView = {
   /** v39 review finding: where a row's answered evidence ref resolves to a
    * stored artifact, for `criterionMatrixHtml` to link. */
   matrixLinks: EvidenceLinkMap;
+  /** v40: the verdict BEFORE an independent reviewer's judgements were
+   * folded in — null when no review has folded. */
+  machineVerdict: ProofVerdict | null;
+  /** v40: this run's own place in a bounded repair chain, if any. */
+  repairChain: RepairChainRow | null;
 };
 
 const SCREENSHOT_CAPTURE = /^agent-claimed screenshot at (.+) \(validated (?:png|jpeg)\)/;
@@ -12961,6 +13072,11 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
     screenshots,
     matrix: verdictRow?.matrix ?? [],
     matrixLinks: evidenceLinksFor(artifacts),
+    machineVerdict: verdictRow?.machineVerdict ?? null,
+    repairChain: store.repairChainFor(run.id) ?? (() => {
+      const ref = store.refById(run.taskRef);
+      return ref === null ? null : store.repairChainForDraft(ref.externalId);
+    })(),
   };
 }
 
@@ -13131,6 +13247,10 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
   }
 
   parts.push(criterionMatrixHtml(view.matrix, { runId, links: view.matrixLinks }));
+  if (view.machineVerdict !== null && view.machineVerdict !== view.verdict) {
+    parts.push(`<p class="meta">the machine's own verdict was ${escape(proofVerdictWords(view.machineVerdict, []).word)}; an independent review lowered it</p>`);
+  }
+  parts.push(repairChainHtml(view.repairChain));
 
   if (view.proofProblem !== null) {
     parts.push(`<p class="meta">proof: ${escape(view.proofProblem)}</p>`);

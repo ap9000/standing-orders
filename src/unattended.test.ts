@@ -253,3 +253,100 @@ describe("the night: twelve tasks, one fake clock", () => {
     expect(brief.stranded).toHaveLength(0);
   }, 120_000);
 });
+
+describe("v40: a drafted, unapproved repair moves the idle-spend invariant not at all", () => {
+  let base: string;
+  let repo: string;
+  let db: string;
+  let pool: string;
+  let evidenceRoot: string;
+  let lines: string[] = [];
+  let spawns = 0;
+
+  const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
+  const zeroSpendAgent: Runner = async (_file, args, options) => {
+    spawns++;
+    const cwd = options?.cwd ?? "";
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+    if (done !== undefined && cwd !== "") {
+      await writeFile(join(cwd, "guarded.ts"), "export const guarded = true;\n");
+      await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: "completed", conclusion: "guarded it." }));
+    }
+    return { ...OK, stdout: JSON.stringify({ result: "built." }) };
+  };
+  const run = (argv: string[], now: Date) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now, agentRunner: zeroSpendAgent, evidenceRoot });
+  };
+  const payload = () => JSON.parse(lines.join("\n"));
+
+  beforeEach(async () => {
+    base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-repair-idle-")));
+    repo = join(base, "repo");
+    db = join(base, "queue.db");
+    pool = join(base, "pool");
+    evidenceRoot = join(base, "evidence");
+    spawns = 0;
+    await mkdir(repo, { recursive: true });
+    await git(["init", "-q", "-b", "main"]);
+    await git(["config", "user.email", "test@example.com"]);
+    await git(["config", "user.name", "Test"]);
+    await writeFile(join(repo, "README.md"), "hello\n");
+    await git(["add", "."]);
+    await git(["commit", "-qm", "first"]);
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("a chain drafted (via the real trigger, no mode) dispatches nothing on the next tick — it waits for a person", async () => {
+    const boot = openStore(db);
+    register(boot, { name: "builder-1", host: "test", capacity: 4, repos: [repo], now: T0, newToken: () => "tok-builder-1" });
+    boot.close();
+    await run(["approver", "add", "alex", "--json"], T0);
+    const approverToken = payload().token as string;
+    await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"], T0);
+
+    // Seed a short-verdict run and let the REAL trigger draft a repair —
+    // the same function a review pass calls, exercised directly here so
+    // the test stays about the tick's spend, not about faking a reviewer.
+    const store = openStore(db);
+    store.createTask({ id: "t-guard", title: "guard the thing" }, T0);
+    const ref = store.refFor("built-in", "t-guard");
+    store.placeTask(ref.id, repo);
+    const { propose } = await import("./scope.js");
+    const { maybeTriggerRepair } = await import("./dispose.js");
+    propose(store, { taskId: "t-guard", goal: "guard it", acceptance: [{ id: "c1", statement: "it is guarded", how: null, evidence: ["manual-review"] }], now: T0 });
+    const sourceRun = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "builder-1", branch: "b", worktree: "/wt", now: T0 });
+    store.finishRun(sourceRun, { outcome: "built", committed: true, now: T0 });
+    store.saveProofVerdict(sourceRun, "short", ["needs a look"], T0, [
+      { id: "c1", statement: "it is guarded", requiredEvidence: ["manual-review"], state: "missing", detail: ['criterion "c1" needs work'], answered: [], review: null },
+    ]);
+    const trigger = maybeTriggerRepair(store, repo, evidenceRoot, sourceRun, "short", T0);
+    if (trigger.kind !== "drafted") throw new Error(`expected a draft, got ${trigger.kind}`);
+    expect(trigger.approved).toBe(false);
+    store.close();
+
+    // The idle tick: an unapproved draft is not dispatchable — it must
+    // move zero agent spawns, exactly the M4 invariant this file proves
+    // for the twelve-task night, now proved for the repair loop's own
+    // "waits for a person" promise.
+    const ticked = await run(["tick", "--runner", "builder-1", "--token", "tok-builder-1", "--repo", repo, "--pool", pool, "--max", "4", "--json"], at(1));
+    expect(ticked).toBe(EXIT.refused);
+    expect(payload().reason).toBe("nothing-dispatched");
+    expect(spawns).toBe(0);
+
+    // Approving it is the one act that makes it dispatchable — and ONLY
+    // that act; nothing here spent unattended.
+    const approve = await run(["task", "repair", String(sourceRun), "--yes", "--as", "alex", "--token", approverToken, "--json"], at(1));
+    expect(approve).toBe(EXIT.ok);
+    expect(spawns).toBe(0);
+
+    const afterApproval = await run(["tick", "--runner", "builder-1", "--token", "tok-builder-1", "--repo", repo, "--pool", pool, "--max", "4", "--json"], at(2));
+    expect(afterApproval).toBe(EXIT.ok);
+    expect(spawns).toBe(1); // one dispatch — the approved draft, and only it
+  });
+});

@@ -477,7 +477,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "plan",
-  "review", "accept",
+  "review", "accept", "repair",
 ] as const;
 export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -8272,6 +8272,8 @@ function taskCommand(
       return reviewTaskCommand(rest, flags, context);
     case "accept":
       return acceptTaskProof(rest, flags, context);
+    case "repair":
+      return repairTaskCommand(rest, flags, context);
     default:
       return fail(
         context.write,
@@ -8637,7 +8639,10 @@ function showTask(positional: readonly string[], context: Context): number {
   const ref = store.refFor(BUILT_IN, id);
   const scope = store.getScope(id);
   const runs = store.runsFor(ref.id);
-  const latestFinished = runs.find(one => one.finishedAt !== null) ?? null;
+  // v40 fix: a reviewer run finishes after the build it reviews and
+  // carries no proof verdict of its own — excluded so its outcome never
+  // hijacks the task's own reported verdict.
+  const latestFinished = runs.find(one => one.finishedAt !== null && one.role !== "reviewer") ?? null;
   const proofVerdict = latestFinished === null ? null : store.proofVerdictFor(latestFinished.id);
   const proofAccepted = latestFinished !== null && store.proofAcceptance(latestFinished.id) !== null;
   const detail = {
@@ -8721,7 +8726,8 @@ async function acceptTaskProof(
   }
 
   const ref = store.refFor(BUILT_IN, id);
-  const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null);
+  // v40 fix: a reviewer run is never the attempt whose proof is accepted.
+  const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null && one.role !== "reviewer");
   if (latest === undefined) {
     return fail(write, json, "task accept", "no-run", `${id} has no finished attempt to accept`, EXIT.refused);
   }
@@ -8735,6 +8741,67 @@ async function acceptTaskProof(
   store.acceptProof(latest.id, acting.name, note, now);
   return succeed(write, json, "task accept", { id, run: latest.id, acceptedBy: acting.name }, () => [
     `Accepted: ${id}'s build #${latest.id} reads done despite its proof, on ${acting.name}'s say-so.`,
+  ]);
+}
+
+/**
+ * `task repair <run-id>` (v40, evidence-review-v1) — the first CLI road to
+ * a revision at all. Reads the chain the trigger already drafted for that
+ * source run; `--yes` approves it, the same act `approve()` already offers
+ * on any scope. Never mints a draft itself — that is the trigger's job,
+ * fired from a review pass, never from a CLI invocation.
+ */
+async function repairTaskCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [runText] = positional;
+  const runId = Number(runText ?? "");
+  if (runText === undefined || !Number.isInteger(runId) || runId < 1) {
+    return fail(write, json, "task repair", "usage", "`standing-orders task repair <run-id> [--yes] --as <you> --token <t>`", EXIT.usage);
+  }
+  const chain = store.repairChainFor(runId);
+  if (chain === null) {
+    return fail(write, json, "task repair", "unknown-task", `run ${runId} has no drafted repair — a repair is only drafted after a review names unmet criteria`, EXIT.refused);
+  }
+  if (chain.draftTask === null) {
+    return fail(write, json, "task repair", "refused", `no draft was ever made for run ${runId} — the chain stopped at ${chain.outcome} before drafting one`, EXIT.refused);
+  }
+  const draftId = chain.draftTask;
+  const yes = flags.get("yes") === true;
+  if (!yes) {
+    const draftScope = store.getScope(draftId);
+    return succeed(
+      write,
+      json,
+      "task repair",
+      { run: runId, draft: draftId, attempt: chain.attempt, unresolved: chain.unresolved, basis: chain.basis, outcome: chain.outcome, approved: draftScope?.approvedAt !== null && draftScope?.approvedAt !== undefined },
+      () => [
+        `${draftId} — attempt ${chain.attempt}, drafted by ${chain.basis === "mode" ? "a signed mode" : "the review pass"}, repairing: ${chain.unresolved.join(", ")}.`,
+        draftScope?.approvedAt != null ? "Already approved — it builds on the next dispatch." : "Unapproved. Add --yes --as <you> --token <t> to approve it now.",
+      ],
+    );
+  }
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, "task repair", "usage", "approving a repair draft is a person's act — it takes `--as <you> --token <t>`", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  if (!authenticated.ok) {
+    return fail(write, json, "task repair", authenticated.reason, describeApproveFailure(authenticated.reason, draftId), EXIT.refused);
+  }
+  const draftScope = store.getScope(draftId);
+  if (draftScope === null) {
+    return fail(write, json, "task repair", "no-scope", `${draftId} has no scope to approve`, EXIT.refused);
+  }
+  const approved = approve(store, draftId, acting.name, clock(), draftScope.digest, acting.token);
+  if (!approved.ok) {
+    return fail(write, json, "task repair", approved.reason, describeApproveFailure(approved.reason, draftId), EXIT.refused);
+  }
+  return succeed(write, json, "task repair", { run: runId, draft: draftId, approvedBy: acting.name }, () => [
+    `Approved: ${draftId} (attempt ${chain.attempt}) will build on the next dispatch.`,
   ]);
 }
 

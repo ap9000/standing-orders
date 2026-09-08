@@ -66,6 +66,7 @@ import {
   SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
 import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
+import { maybeSettleRepairChain } from "./dispose.js";
 
 export type Runner = (
   file: string,
@@ -1625,6 +1626,10 @@ async function settleProof(
     approvedCriteria,
   });
   store.saveProofVerdict(runId, verdict, reasons, now(), matrix);
+  // v40: a repair attempt that reaches verified/attested closes its chain
+  // right here — a review can only ever lower this verdict, never raise
+  // it, so this structural save is the one place "resolved" can fire.
+  maybeSettleRepairChain(store, request.taskId, verdict, now());
 }
 
 /** A stable, filesystem-safe tag for a claimed screenshot's stored evidence

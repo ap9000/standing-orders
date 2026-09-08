@@ -1184,6 +1184,101 @@ describe("task show and task accept speak the machine's own proof verdict (Prior
   });
 });
 
+describe("task repair: the first CLI road to a revision (v40, evidence-review-v1)", () => {
+  let dir: string;
+  let db: string;
+  let lines: string[];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "standing-orders-repair-cli-"));
+    db = join(dir, "orders.db");
+    lines = [];
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+  const run = (argv: string[], now: Date = T0) => {
+    const [command = "", ...rest] = argv;
+    lines = [];
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, now });
+  };
+  const out = () => lines.join("\n");
+  const payload = () => JSON.parse(out());
+
+  /** A short run against a rubric-bearing task, with a drafted repair —
+   * exactly what a review pass's trigger leaves behind, seeded directly. */
+  const seedDraftedRepair = async (): Promise<{ runId: number; draftId: string }> => {
+    const { openStore: open } = await import("./store.js");
+    const { propose: proposeFn } = await import("./scope.js");
+    const { maybeTriggerRepair } = await import("./dispose.js");
+    const store = open(db);
+    try {
+      store.setPhaseConfig("installation", "build", "claude", "sonnet", "alex", T0);
+      store.createTask({ id: "t-1", title: "the work" }, T0);
+      const ref = store.refFor("built-in", "t-1");
+      store.placeTask(ref.id, "/repo");
+      proposeFn(store, { taskId: "t-1", goal: "do the work", acceptance: [{ id: "c1", statement: "it works", how: null, evidence: ["manual-review"] }], now: T0 });
+      const runId = store.startRun({ taskRef: ref.id, leaseId: "l-1", runner: "r-1", branch: "b", worktree: "/wt", now: T0 });
+      store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
+      store.saveProofVerdict(runId, "short", ["needs a look"], T0, [
+        { id: "c1", statement: "it works", requiredEvidence: ["manual-review"], state: "missing", detail: ['criterion "c1" needs work'], answered: [], review: null },
+      ]);
+      const trigger = maybeTriggerRepair(store, "/repo", dir, runId, "short", T0);
+      if (trigger.kind !== "drafted") throw new Error(`expected a draft, got ${trigger.kind}`);
+      return { runId, draftId: trigger.draftTaskId };
+    } finally {
+      store.close();
+    }
+  };
+
+  test("without --yes, shows the drafted repair — unapproved by default", async () => {
+    const { runId, draftId } = await seedDraftedRepair();
+    const code = await run(["task", "repair", String(runId), "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({ run: runId, draft: draftId, attempt: 1, unresolved: ["c1"], basis: "human", outcome: "drafted", approved: false });
+  });
+
+  test("--yes without credentials is a usage error", async () => {
+    const { runId } = await seedDraftedRepair();
+    const code = await run(["task", "repair", String(runId), "--yes"]);
+    expect(code).toBe(EXIT.usage);
+  });
+
+  test("--yes with credentials approves the draft", async () => {
+    const { runId, draftId } = await seedDraftedRepair();
+    await run(["approver", "add", "alex", "--json"]);
+    const token = payload().token as string;
+    const code = await run(["task", "repair", String(runId), "--yes", "--as", "alex", "--token", token, "--json"]);
+    expect(code).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({ run: runId, draft: draftId, approvedBy: "alex" });
+
+    await run(["task", "show", draftId, "--json"]);
+    expect(payload()).toMatchObject({ task: { id: draftId } });
+
+    // Re-reading without --yes now shows it approved.
+    const shown = await run(["task", "repair", String(runId), "--json"]);
+    expect(shown).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({ approved: true });
+  });
+
+  test("a run with no drafted repair refuses by name", async () => {
+    const store = openStore(db);
+    store.createTask({ id: "t-plain", title: "plain" }, T0);
+    const ref = store.refFor("built-in", "t-plain");
+    const runId = store.startRun({ taskRef: ref.id, leaseId: "l-2", runner: "r-1", branch: "b", worktree: "/wt", now: T0 });
+    store.finishRun(runId, { outcome: "built", committed: true, now: T0 });
+    store.close();
+    const code = await run(["task", "repair", String(runId), "--json"]);
+    expect(code).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "unknown-task" });
+  });
+
+  test("a malformed run id is a usage error", async () => {
+    const code = await run(["task", "repair", "not-a-number"]);
+    expect(code).toBe(EXIT.usage);
+  });
+});
+
 describe("providers — identification without spend", () => {
   let dir: string;
   let db: string;

@@ -50,6 +50,18 @@ export type ModeTerms = {
    * must be an explicit, freshly-signed grant. A subscription->subscription
    * fallback is not "paid" and needs no grant. */
   allowPaidFallback: boolean;
+  /** Whether this mode AUTHORIZES the bounded repair loop to draft AND
+   * auto-approve its own repair attempts (v40, evidence-review-v1) — the
+   * allowPaidFallback precedent, verbatim: legacy modes default FALSE, a
+   * new authority is never inherited, only freshly signed. Without it, a
+   * short/refuted run with named unresolved criteria still gets exactly
+   * one drafted repair — it simply waits unapproved. */
+  repairAuto: boolean;
+  /** The signed cap on repair attempts per chain (0..3), counted over the
+   * chain rooted at the original task. Meaningless (read as 0) unless
+   * `repairAuto` is also true — a mode may sign a cap without signing the
+   * authority, but never the reverse. */
+  repairMaxAttempts: number;
   absoluteExpiry: string;
 };
 
@@ -70,6 +82,8 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         dailyRunCap: null,
         publication: "notify",
         allowPaidFallback: false,
+        repairAuto: false,
+        repairMaxAttempts: 0,
         absoluteExpiry,
       }
     : {
@@ -83,6 +97,8 @@ export function presetTerms(name: ModeName, absoluteExpiry: string): ModeTerms {
         dailyRunCap: null,
         publication: "notify",
         allowPaidFallback: false,
+        repairAuto: false,
+        repairMaxAttempts: 0,
         absoluteExpiry,
       };
 }
@@ -143,6 +159,14 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
     // freshly-signed grant). A present value must be a strict boolean;
     // anything else is a bad envelope, null.
     (t["allowPaidFallback"] === undefined || typeof t["allowPaidFallback"] === "boolean") &&
+    // repairAuto/repairMaxAttempts: the SAME precedent, verbatim (v40). A
+    // legacy mode has NO such fields — that MUST read as false/0, never
+    // inherited. A present repairAuto must be a strict boolean; a present
+    // repairMaxAttempts must be an integer 0..3. Anything else is a bad
+    // envelope, null.
+    (t["repairAuto"] === undefined || typeof t["repairAuto"] === "boolean") &&
+    (t["repairMaxAttempts"] === undefined ||
+      (typeof t["repairMaxAttempts"] === "number" && Number.isInteger(t["repairMaxAttempts"]) && t["repairMaxAttempts"] >= 0 && t["repairMaxAttempts"] <= 3)) &&
     typeof t["absoluteExpiry"] === "string" &&
     !Number.isNaN(Date.parse(t["absoluteExpiry"]))
   ) {
@@ -157,6 +181,8 @@ export function modeTermsFromJson(json: string | null): ModeTerms | null {
       dailyRunCap: runs,
       publication: t["publication"],
       allowPaidFallback: t["allowPaidFallback"] === true,
+      repairAuto: t["repairAuto"] === true,
+      repairMaxAttempts: typeof t["repairMaxAttempts"] === "number" ? t["repairMaxAttempts"] : 0,
       absoluteExpiry: t["absoluteExpiry"],
     };
   }
@@ -194,6 +220,9 @@ export function modeWords(terms: ModeTerms): string[] {
     terms.allowPaidFallback
       ? "when a subscription is exhausted mid-build, an approved fallback that spends (an API key) may run automatically — spend moves to that account"
       : "automatic fallback never switches to a paid API key on its own; a subscription that runs out stops and waits for you",
+    terms.repairAuto
+      ? `a short or refuted run with named unmet criteria auto-approves its own drafted repair, up to ${terms.repairMaxAttempts} attempt(s) — it stops on no progress, an integrity refusal, or the existing spend and run rails, whichever comes first`
+      : "a short or refuted run's drafted repair waits for your approval — this mode grants no automatic repair",
     `everything above ends at ${terms.absoluteExpiry.slice(0, 16).replace("T", " ")} — revoking it earlier is one click, and every act it covered falls back to its own ceremony`,
   ];
 }
