@@ -3736,7 +3736,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project, null, store.permissionDefault().mode),
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project, null, store.permissionDefault().mode, store.qualityDefault().mode),
         );
       }
       let repo = effective;
@@ -3749,7 +3749,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(
             response,
             403,
-            tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project, null, store.permissionDefault().mode),
+            tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, `${effective} is outside what this server was configured to show`, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
           );
         }
         repo = canonical;
@@ -3799,7 +3799,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           made.reason === "backlog-full" ? 429 : 400,
-          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, null, store.permissionDefault().mode),
+          tasksPage(chromeFor(project, "tasks"), store.listTasksScoped(project, undefined, 200, null), null, csrf, made.message, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
         );
       }
       // A proved root-mode placement joins the project table (finding 15):
@@ -6788,6 +6788,73 @@ const STYLE = `
   .permission-choice small { margin-top: .16rem; color: var(--muted-foreground); font-size: .6875rem; font-weight: 400; line-height: 1.35; }
   .permission-note { margin: .55rem 0 0; }
   .scope-editor .permission-toggle { grid-template-columns: 1fr; }
+  /* New work starts like a conversation, not a configuration sheet. The
+     planner turns the one intent into the detailed, signed contract; these
+     controls expose the uncommon overrides without making them the door. */
+  main:has(.task-intake) { max-width: 68rem; }
+  .task-intake { width: min(100%, 50rem); margin: clamp(1rem, 5vh, 4rem) auto 0; }
+  .task-intake-hero { text-align: center; margin: 0 auto 1.35rem; max-width: 38rem; }
+  .task-intake-mark {
+    display: grid; place-items: center; width: 3rem; height: 3rem; margin: 0 auto .85rem;
+    border: 1px solid var(--glass-border); border-radius: 1rem;
+    background: linear-gradient(145deg, color-mix(in srgb, var(--running) 18%, var(--glass-strong)), var(--glass));
+    box-shadow: 0 18px 45px -28px var(--running), 0 1px 0 var(--glass-highlight) inset;
+    font: 600 .72rem/1 var(--font-mono); letter-spacing: -.05em;
+  }
+  .task-intake-hero h1 { margin: 0; font-size: clamp(1.65rem, 4vw, 2.2rem); letter-spacing: -.045em; }
+  .task-intake-hero p { margin: .45rem 0 0; color: var(--muted-foreground); }
+  .task-composer { padding: .75rem; border-radius: 1.45rem; box-shadow: var(--shadow-overlay), 0 1px 0 var(--glass-highlight) inset; }
+  .task-prompt { margin: 0; font-size: 0; }
+  .task-prompt textarea {
+    min-height: 8.5rem; max-height: 18rem; margin: 0; padding: .9rem 1rem; resize: vertical;
+    border: 0; background: transparent; box-shadow: none; font-size: 1.05rem; line-height: 1.55;
+  }
+  .task-prompt textarea:hover, .task-prompt textarea:focus-visible { border: 0; box-shadow: none; }
+  .task-repo { margin: .25rem .45rem .7rem; }
+  .task-composer-footer { display: flex; align-items: center; gap: .5rem; padding: .25rem; }
+  .task-context { display: flex; align-items: center; gap: .4rem; flex: 1 1 auto; min-width: 0; }
+  .task-context-chip {
+    display: inline-flex; align-items: center; min-height: 2rem; max-width: 13rem; padding: .25rem .65rem;
+    border: 1px solid var(--glass-border); border-radius: 999px; color: var(--muted-foreground);
+    background: color-mix(in srgb, var(--glass) 76%, transparent); font-size: .72rem; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .task-quality { margin: 0; flex: none; font-size: 0; }
+  .task-quality select {
+    width: auto; min-height: 2rem; margin: 0; padding: .25rem 1.75rem .25rem .65rem;
+    border-radius: 999px; color: var(--muted-foreground); font-size: .72rem; background-color: var(--glass);
+  }
+  .task-submit {
+    flex: none; min-height: 2.45rem; padding: .45rem .95rem; border-radius: 999px;
+    background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600;
+  }
+  .task-submit:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); border-color: transparent; }
+  details.task-options {
+    margin: .65rem .25rem 0; padding: .15rem .5rem 0; border: 0; border-top: 1px solid var(--glass-border);
+    border-radius: 0; background: transparent;
+  }
+  details.task-options[open] { padding-bottom: .25rem; }
+  .task-options > summary { display: flex; align-items: center; gap: .5rem; list-style: none; }
+  .task-options > summary::-webkit-details-marker { display: none; }
+  .task-options > summary::after {
+    content: ""; width: .4rem; height: .4rem; margin-left: auto; margin-right: .25rem;
+    border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground);
+    transform: rotate(45deg) translateY(-.1rem); transition: transform .15s;
+  }
+  .task-options[open] > summary::after { transform: rotate(225deg) translateY(-.1rem); }
+  .task-options > summary small { color: var(--muted-foreground); font-weight: 400; }
+  .task-options-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 .8rem; padding: 0 .25rem .5rem; }
+  .task-options-grid .wide, .task-options-grid .permission-field { grid-column: 1 / -1; }
+  .task-check { display: flex; gap: .55rem; align-items: flex-start; }
+  .task-check input { margin-top: .2rem; }
+  .task-check > span { display: grid; gap: .1rem; }
+  .task-check small { display: block; font-weight: 400; line-height: 1.45; }
+  .task-agent-note { text-align: center; max-width: 42rem; margin: .85rem auto 0; }
+  .visually-hidden {
+    position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important;
+    margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important; border: 0 !important;
+  }
   input[type=password] { font-family: var(--font-mono); }
   input:focus-visible, textarea:focus-visible, select:focus-visible {
     outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 25%, transparent);
@@ -7064,6 +7131,28 @@ const STYLE = `
   .approve-form .ceremony-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; margin: 0 0 .5rem; }
   .approve-form .ceremony-head a { font-size: .8125rem; color: var(--muted-foreground); white-space: nowrap; }
   .approve-form .recap { margin: .125rem 0 .5rem; }
+  .approval-card { padding: 1.2rem 1.3rem; border-radius: calc(var(--radius) + 3px); }
+  .approval-card .ceremony-head { align-items: flex-start; padding-bottom: .85rem; border-bottom: 1px solid var(--glass-border); }
+  .approval-title { display: grid; gap: .15rem; }
+  .approval-kicker { color: var(--muted-foreground); font: 500 .66rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+  .approval-title strong { font-size: 1.05rem; letter-spacing: -.02em; }
+  .approval-label { margin: .9rem 0 .2rem; color: var(--muted-foreground); font: 500 .66rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+  .approval-goal { margin: 0; font-size: 1rem; line-height: 1.55; white-space: pre-wrap; }
+  .approval-boundaries { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin-top: .75rem; }
+  .approval-boundary { padding: .7rem .8rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--muted) 45%, transparent); }
+  .approval-boundary .approval-label { margin: 0 0 .2rem; }
+  .approval-boundary p { margin: 0; color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
+  .approval-chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .8rem 0 .3rem; }
+  .approval-chip { padding: .25rem .6rem; border: 1px solid var(--glass-border); border-radius: 999px; color: var(--muted-foreground); background: var(--glass); font-size: .7rem; }
+  .approval-confirm { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--glass-border); }
+  .approval-confirm label { margin: 0; }
+  .approval-confirm button { min-height: 2.5rem; }
+  details.planner-plan { margin-top: .75rem; background: color-mix(in srgb, var(--glass) 72%, transparent); }
+  .planner-status { display: flex; gap: .8rem; align-items: flex-start; }
+  .planner-orb { position: relative; flex: 0 0 2.15rem; width: 2.15rem; height: 2.15rem; border-radius: .75rem; background: var(--running-soft); }
+  .planner-orb::after { content: ""; position: absolute; inset: .65rem; border-radius: 999px; background: var(--running); animation: pulse 1.25s ease-in-out infinite; }
+  .planner-status p { margin: 0; }
+  .planner-status .meta { display: block; margin-top: .2rem; }
   .ceremony-road { margin: .75rem 0 0; }
   .button-link {
     display: inline-flex; align-items: center; justify-content: center; min-height: 2.25rem; padding: 0 .875rem;
@@ -7687,6 +7776,23 @@ const STYLE = `
     .workspace-pulse { grid-template-columns: 1fr; }
     .workspace-stats .pulse-stat { padding: .375rem .125rem; font-size: .625rem; letter-spacing: -.01em; }
     .permission-toggle { grid-template-columns: 1fr; }
+    .task-intake { margin-top: .25rem; }
+    .task-intake-hero { text-align: left; margin-bottom: .9rem; }
+    .task-intake-mark { display: none; }
+    .task-composer { margin-inline: 0; padding: .55rem; border-radius: 1.15rem; }
+    .task-prompt textarea { min-height: 7.25rem; padding: .75rem; font-size: 1rem; }
+    .task-composer-footer { flex-wrap: wrap; }
+    .task-context { order: 1; flex-basis: calc(100% - 7rem); }
+    .task-context-chip:first-child { max-width: 9.5rem; }
+    .task-context-chip:nth-child(2) { display: none; }
+    .task-quality { order: 2; }
+    .task-submit { order: 3; width: 100%; }
+    .task-options { order: 4; }
+    .task-options-grid { grid-template-columns: 1fr; }
+    .task-options-grid .wide, .task-options-grid .permission-field { grid-column: auto; }
+    .approval-card { padding: 1rem; }
+    .approval-boundaries, .approval-confirm { grid-template-columns: 1fr; }
+    .approval-confirm .sticky-actions { margin-top: 0; }
   }
 
   /* Runner lanes (queue + fleet): one column per worker. */
@@ -10213,6 +10319,74 @@ function homePage(chrome: Chrome, data: {
   ].join("\n"), { chrome, refreshSeconds: refresh });
 }
 
+type TaskComposerPrefill = { title: string; goal: string; not: string; touches: string; acceptance: string };
+
+/** The one front door for new work. The common path is one prompt and one
+ * button; the detailed contract remains available in-place for templates,
+ * experts, and the rare task that should skip repository-aware planning. */
+function taskComposerHtml(data: {
+  csrf: string;
+  project: string | null;
+  projectRevision?: number;
+  prefill?: TaskComposerPrefill | null;
+  candidates?: { id: string; title: string }[];
+  permissionDefault: UnattendedPermissionMode;
+  qualityDefault: QualityMode;
+}): string {
+  const prefill = data.prefill ?? null;
+  const candidates = data.candidates ?? [];
+  const projectLabel = data.project === null ? "repository required" : projectName(data.project);
+  return [
+    `<form method="post" action="/tasks/add" class="card task-composer">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    data.projectRevision === undefined
+      ? ""
+      : `<input type="hidden" name="projectRevision" value="${data.projectRevision}">`,
+    `<input type="hidden" name="planning-policy" value="choice">`,
+    prefill === null
+      ? ""
+      : `<p class="meta" style="margin:.35rem .75rem .15rem">pre-filled from a template. Change anything; it still waits for your approval.</p>`,
+    `<label class="task-prompt"><span class="visually-hidden">What should get done?</span>` +
+      `<textarea name="title" rows="4" maxlength="200" required autofocus placeholder="Describe the outcome you want. The planner will inspect the repository and work out the implementation details.">${prefill === null ? "" : escape(prefill.title)}</textarea></label>`,
+    data.project === null
+      ? `<label class="task-repo">repository <span class="meta">— required because no project is open, so the task must say where it belongs</span><input type="text" name="repo" required placeholder="/path/to/repository"></label>`
+      : "",
+    `<div class="task-composer-footer">`,
+    `<div class="task-context">` +
+      `<span class="task-context-chip" title="${escape(data.project ?? "Choose a repository for this task")}">${escape(projectLabel)}</span>` +
+      `<span class="task-context-chip">planner inspects first</span>` +
+      `</div>`,
+    `<label class="task-quality"><span class="visually-hidden">quality mode</span><select name="quality-mode" aria-label="quality mode">` +
+      `<option value="default"${data.qualityDefault === "default" ? " selected" : ""}>Default quality</option>` +
+      `<option value="strict"${data.qualityDefault === "strict" ? " selected" : ""}>Strict / release</option>` +
+      `</select></label>`,
+    `<button type="submit" class="task-submit">${prefill === null ? "Plan task" : "Continue"} →</button>`,
+    `</div>`,
+    `<details class="task-options"${prefill === null ? "" : " open"}>`,
+    `<summary><span>Edit details</span><small>optional · defaults are remembered</small></summary>`,
+    `<div class="task-options-grid">`,
+    `<label class="wide">goal <span class="meta">— only when skipping planning; the planner normally drafts this</span>` +
+      `<textarea name="goal" rows="3" placeholder="What success looks like">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
+    `<label class="wide">acceptance <span class="meta">— needed only when you skip planning; one per line: <code>statement | evidence,kinds | how</code></span>` +
+      `<textarea name="acceptance" rows="3" placeholder="Requests over the limit return 429 | check">${prefill === null ? "" : escape(prefill.acceptance)}</textarea></label>`,
+    `<label>not this <span class="meta">— optional boundary</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
+    `<label>likely touches <span class="meta">— paths, comma-separated</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
+    `<label class="wide task-check"><input type="checkbox" name="plan-first" value="1" checked><span><strong>Let the planner inspect first</strong><small class="meta">Recommended. It drafts the goal, acceptance criteria, and implementation approach, and asks only when a missing answer materially changes the work.</small></span></label>`,
+    `<label class="wide task-check"><input type="checkbox" name="scout" value="1"><span><strong>Research only</strong><small class="meta">Deliver a read-only report instead of changing the repository.</small></span></label>`,
+    `<label>task id <span class="meta">— optional</span><input type="text" name="id" placeholder="made from the request"></label>`,
+    candidates.length === 0
+      ? ""
+      : `<label>starts after <span class="meta">— optional</span><select name="after"><option value="">right away</option>` +
+        candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
+        `</select></label>`,
+    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", data.permissionDefault)}` +
+      `<p class="meta permission-note">Inherited from Settings. You can still change it on the proposed scope before approval.</p></fieldset>`,
+    `</div>`,
+    `</details>`,
+    `</form>`,
+  ].join("\n");
+}
+
 function tasksPage(
   chrome: Chrome,
   tasks: Task[],
@@ -10220,7 +10394,7 @@ function tasksPage(
   csrf: string,
   problem: string | null,
   repo: string | null = null,
-  prefill: { title: string; goal: string; not: string; touches: string; acceptance: string } | null = null,
+  prefill: TaskComposerPrefill | null = null,
   permissionDefault: UnattendedPermissionMode = "auto",
   qualityDefault: QualityMode = "default",
 ): Screen {
@@ -10248,28 +10422,7 @@ function tasksPage(
     `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
     rows,
     `<h2>add a task</h2>`,
-    `<form method="post" action="/tasks/add" class="card">`,
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<input type="hidden" name="planning-policy" value="choice">`,
-    prefill === null
-      ? ""
-      : `<p class="meta">pre-filled from a template — edit anything; it files UNAPPROVED like every task</p>`,
-    `<label>id<input type="text" name="id" placeholder="fix-payout-guard"></label>`,
-    `<label>title<input type="text" name="title" value="${prefill === null ? "" : escape(prefill.title)}"></label>`,
-    repo === null
-      ? `<label>repo <span class="meta">(required — no project is open, so the task must say where it belongs)</span><input type="text" name="repo" required></label>`
-      : `<label>repo <span class="meta">(optional — empty files into the open project)</span><input type="text" name="repo"></label>`,
-    `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
-    `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
-    `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
-    `<label>acceptance <span class="meta">(required if you fill in a goal directly — leave both blank and let "plan first" draft the rubric instead; one criterion per line: <code>statement | evidence,kinds | how</code>)</span><textarea name="acceptance" rows="3">${prefill === null ? "" : escape(prefill.acceptance)}</textarea></label>`,
-    `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: let an agent inspect the repository and improve the scope before approval</span></span></label>`,
-    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
-      `<p class="meta permission-note">Starts from the installation default. You can change it again on the task before approval.</p></fieldset>`,
-    `<fieldset class="permission-field"><legend>quality</legend>${qualityModeChoices("quality-mode", qualityDefault)}` +
-      `<p class="meta permission-note">Default is the fast path. Strict / release adds the isolated semantic review after the build.</p></fieldset>`,
-    `<button type="submit">add</button>`,
-    `</form></details>`,
+    taskComposerHtml({ csrf, project: repo, prefill, permissionDefault, qualityDefault }),
   ].join("\n"), { chrome });
 }
 
@@ -11652,40 +11805,22 @@ function newTaskPage(
   qualityDefault: QualityMode = "default",
 ): Screen {
   return screen("new task", [
-    `<h1>new task</h1>`,
-    `<p class="meta">plain words for work you want done${
-      project === null ? "" : ` in <span class="mono">${escape(project)}</span>`
-    } — it builds unattended once you approve its scope on the next screen</p>`,
+    `<section class="task-intake">`,
+    `<div class="task-intake-hero"><span class="task-intake-mark" aria-hidden="true">s·o</span>` +
+      `<h1>What should get done?</h1>` +
+      `<p>Describe the outcome in plain language. The planner will inspect the repository and turn it into a scope you can review.</p></div>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
-    `<form method="post" action="/tasks/add" class="card">`,
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<input type="hidden" name="projectRevision" value="${projectRevision}">`,
-    `<input type="hidden" name="planning-policy" value="choice">`,
-    // No project open: the placement must be said (verification finding 1 —
-    // the server refuses an empty one, this field is how you answer it).
-    project === null
-      ? `<label>repo <span class="meta">(required — no project is open, so the task must say where it belongs)</span><input type="text" name="repo" required></label>`
-      : "",
-    `<label>title<input type="text" name="title" placeholder="Add a sliding-window rate limiter to the public API"></label>`,
-    `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
-      `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
-    `<label>acceptance <span class="meta">(required if you fill in a goal directly — leave both blank and let "plan first" draft the rubric instead; one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review)</span>` +
-      `<textarea name="acceptance" rows="3" placeholder="Requests over the limit get 429 with Retry-After | check"></textarea></label>`,
-    `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: inspect the repository and draft a stronger scope before you approve anything; long planning continues while the agent is making progress</span></span></label>`,
-    `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="scout" value="1" style="margin-top:.35rem"><span>scout <span class="meta">— deliver a report instead of a branch: a read-only session investigates the goal as a question and writes up what it found; nothing in the repository changes</span></span></label>`,
-    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
-      `<p class="meta permission-note">Starts from the installation default. You can change it again on the task before approval.</p></fieldset>`,
-    `<fieldset class="permission-field"><legend>quality</legend>${qualityModeChoices("quality-mode", qualityDefault)}` +
-      `<p class="meta permission-note">Default is streamlined. Strict / release adds semantic review and can feed the bounded repair loop.</p></fieldset>`,
-    `<label>id <span class="meta">(optional — made from the title when blank)</span><input type="text" name="id"></label>`,
-    candidates.length === 0
-      ? ""
-      : `<label>starts after <span class="meta">(optional — waits for that task to finish before a worker takes this one)</span>` +
-        `<select name="after"><option value="">right away</option>` +
-        candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
-        `</select></label>`,
-    `<button type="submit">create task</button>`,
-    `</form>`,
+    taskComposerHtml({
+      csrf,
+      project,
+      projectRevision,
+      candidates,
+      permissionDefault,
+      qualityDefault,
+    }),
+    `<p class="meta task-agent-note">The agent asks only when an answer materially changes the work. Nothing builds until you approve the proposed scope. ` +
+      `<a href="/chat">Prefer a conversation? Open workspace chat.</a></p>`,
+    `</section>`,
   ].join("\n"), { chrome });
 }
 
@@ -12112,14 +12247,11 @@ function taskBody(data: {
   const planCard =
     data.planDocument === null
       ? data.plan === "requested"
-        ? `<div class="card"><p><strong>planning requested</strong></p><p class="meta">a planner will read the repository and propose a scope \u2014 its questions reach you like any decision</p></div>`
+        ? `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>planning requested</strong>` +
+          `<span class="meta">The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work.</span></p></div>`
         : ""
-      : [
-          `<div class="card">`,
-          `<p><strong>the plan</strong> <span class="meta">drafted by a planning session \u2014 review it, then approve the scope it proposes</span></p>`,
-          `<pre class="recap plan-doc">${escape(data.planDocument)}</pre>`,
-          `</div>`,
-        ].join("\n");
+      : `<details class="planner-plan"><summary><strong>Planner’s approach</strong> <span class="meta">— review the plan or approve the concise scope below</span></summary>` +
+        `<pre class="recap plan-doc">${escape(data.planDocument)}</pre></details>`;
 
   // The revision batch (M6.8), restated on the SAME screen as the approval
   // it belongs to: the approver sees exactly the comments the brief carries.
@@ -12152,6 +12284,15 @@ function taskBody(data: {
   // binds, and puts the approve act above the fold — the consent-sheet
   // shape. An unapprovable scope gets the problem and the edit road
   // instead of a password it cannot use.
+  const approvalProfile = scope?.profile ?? null;
+  const approvalPermission =
+    approvalProfile === null
+      ? null
+      : approvalProfile.provider === "claude"
+        ? approvalProfile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
+        : approvalProfile.provider === "gemini"
+          ? approvalProfile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
+          : approvalProfile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
   const approveForm =
     scope === null || approval.approved || data.plan === "requested"
       ? ""
@@ -12162,11 +12303,13 @@ function taskBody(data: {
             profileWords(scope) +
             `<p class="ceremony-road"><a class="button-link" href="#scope">edit the scope to fix it →</a></p></div>`
         : [
-          `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form" id="approve">`,
+          `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form approval-card" id="approve">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
           `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
-          `<p class="ceremony-head"><strong>This task is waiting on you — approve exactly this:</strong> <a href="#scope">edit instead →</a></p>`,
+          `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">`,
+          `<div class="ceremony-head"><span class="approval-title"><span class="approval-kicker">ready to run · approve exactly this:</span>` +
+            `<strong>Review the proposed scope</strong></span><a href="#scope">Edit details</a></div>`,
           // The deliverable INSIDE the ceremony (mate arc §10): a yes on a
           // scout task authorizes a read-only session and a report, never
           // a branch — said where the signature is given.
@@ -12179,11 +12322,16 @@ function taskBody(data: {
           data.coordinator === null || data.coordinator === undefined
             ? ""
             : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAgo)}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
-          `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
-          `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
-          `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          `<p class="approval-label">goal</p><p class="approval-goal">${escape(scope.goal)}</p>`,
+          `<div class="approval-boundaries">`,
+          `<div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>`,
+          `<div class="approval-boundary"><p class="approval-label">touches</p><p>${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p></div>`,
+          `</div>`,
           acceptanceCeremonyHtml(scope.acceptance),
-          `<p class="meta">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong>${scope.qualityMode === "strict" ? " — deterministic proof, then an isolated semantic review" : " — deterministic proof; semantic review only when an operating mode separately requests it"}</p>`,
+          `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
+            (approvalProfile === null ? "" : `<span class="approval-chip">${escape(approvalProfile.provider)} · ${escape(approvalProfile.model)}</span>`) +
+            (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
+            `</div>`,
           profileWords(scope),
           scope.budgetMicrousd === null
             ? ""
@@ -12207,8 +12355,8 @@ function taskBody(data: {
                 `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
                 `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
                 `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
-          `<label>your password, typed again \u2014 a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>`,
-          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "approve this scope" : data.raceTerms.kind === "comparison" ? "approve scope and comparison — one yes covers both" : "approve scope and tournament — one yes covers both"}</button></div>`,
+          `<div class="approval-confirm"><label>your password, typed again <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>`,
+          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "Approve & start" : data.raceTerms.kind === "comparison" ? "Approve comparison" : "Approve tournament"}</button></div></div>`,
           `</form>`,
         ].join("\n");
 
@@ -12675,7 +12823,9 @@ function taskBody(data: {
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
     `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
-    dispatchStatus,
+    // The planner and approval cards already answer "what now?". Avoid a
+    // second status box above the one action the operator came here for.
+    approveForm === "" && data.plan !== "requested" ? dispatchStatus : "",
     planCard,
     approveForm === "" ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
@@ -12773,7 +12923,7 @@ function taskBody(data: {
     section(
       "scope",
       ["<h2>scope</h2>", scopeCard, revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
-      true,
+      data.plan !== "requested" && approveForm === "",
     ),
     section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),

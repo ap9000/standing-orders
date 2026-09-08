@@ -1740,7 +1740,14 @@ describe("the board — the pipeline as lanes, live in place", () => {
   test("new implementation tasks recommend and request planning before approval", async () => {
     const cookie = await login();
     const form = await (await fetch(url("/tasks/new"), { headers: { cookie } })).text();
+    expect(form).toContain("What should get done?");
+    expect(form).toContain('class="card task-composer"');
+    expect(form).toContain("The planner will inspect the repository");
+    expect(form).toContain('<details class="task-options">');
+    expect(form.indexOf('name="title"')).toBeLessThan(form.indexOf('<details class="task-options">'));
+    expect(form.indexOf('name="goal"')).toBeGreaterThan(form.indexOf('<details class="task-options">'));
     expect(form).toContain('name="plan-first" value="1" checked');
+    expect(form).toContain("Plan task →");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(form)?.[1] as string;
     const revision = /name="projectRevision" value="([0-9]+)"/.exec(form)?.[1] as string;
     const created = await fetch(url("/tasks/add"), {
@@ -1761,6 +1768,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const page = await (await fetch(url("/t/planned-from-create"), { headers: { cookie } })).text();
     expect(page).toContain("planning requested");
     expect(page).not.toContain("approve exactly this");
+    expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
   });
 
   test("a requested plan blocks an approval submitted from a stale form", async () => {
@@ -2702,7 +2710,7 @@ describe("the first-run checklist (adoption track, step 3)", () => {
     expect(routines).toContain('value="daily:03:30"');
     expect(routines).toContain("pre-filled from a template");
     const tasks = await (await fetch(url("/tasks?template=lint-sweep"), { headers: { cookie } })).text();
-    expect(tasks).toContain('value="One lint-clean sweep"');
+    expect(tasks).toContain(">One lint-clean sweep</textarea>");
     expect(tasks).toContain("pre-filled from a template");
     // An unknown template name is just an unfilled form, not an error.
     const plain = await (await fetch(url("/tasks?template=nope"), { headers: { cookie } })).text();
@@ -7133,14 +7141,18 @@ describe("the project switcher (board pass): one tap from any screen, forms with
       proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
     });
     const page = await (await fetch(url("/t/t-yes"), { headers: { cookie } })).text();
-    const ceremony = page.indexOf('<form method="post" action="/t/t-yes/approve" class="card approve-form" id="approve">');
+    const ceremony = page.indexOf('<form method="post" action="/t/t-yes/approve" class="card approve-form approval-card" id="approve">');
     const title = page.indexOf("<h1>needs the yes ");
     const bar = page.indexOf('<div class="acts-bar">');
     const layout = page.indexOf('<div class="task-layout">');
     expect(ceremony).toBeGreaterThan(title);
     expect(bar).toBeGreaterThan(ceremony);
     expect(layout).toBeGreaterThan(bar);
-    expect(page).toContain('<p class="ceremony-head"><strong>This task is waiting on you — approve exactly this:</strong> <a href="#scope">edit instead →</a></p>');
+    expect(page).toContain('<span class="approval-kicker">ready to run · approve exactly this:</span>');
+    expect(page).toContain("Review the proposed scope");
+    expect(page).toContain('href="#scope">Edit details</a>');
+    expect(page).toContain('name="username" autocomplete="username" class="visually-hidden"');
+    expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
     expect(page).toContain("approve exactly this:");
     // No other act wears primary while the ceremony leads; the old
     // "needs your approval" card is gone (the ceremony says it).
@@ -7809,7 +7821,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     expect(store.qualityDefault()).toMatchObject({ mode: "strict", updatedBy: "alex" });
 
     const fresh = await (await fetch(`${base}/tasks/new`, { headers: { cookie } })).text();
-    expect(fresh).toContain('name="quality-mode" value="strict" checked');
+    expect(fresh).toContain('<option value="strict" selected>Strict / release</option>');
     const revision = /name="projectRevision" value="(\d+)"/.exec(fresh)?.[1] ?? "0";
     const filed = await fetch(`${base}/tasks/add`, {
       method: "POST",

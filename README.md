@@ -69,16 +69,19 @@ in the repository, which is the console and the worker in one process.
 
 1. **Sign in** with the login `up` printed. You land on the **inbox**:
    everything that waits on you, and nothing else.
-2. **File a task** with **+ new task**: a title and a goal in plain words.
-   Tick **scout** if you want a report instead of a branch — a read-only
-   investigation that answers the goal as a question.
-3. **Write the acceptance rubric, then approve it.** A scope needs at
-   least one criterion — a plain outcome statement and the evidence kind
-   (check, screenshot, changed-path, or manual review) that will answer
-   it — before it can be signed; the planner drafts one for you when you
-   plan first. The task page opens on the approval ceremony: the exact
-   scope AND rubric you are signing, the provider and model it will run
-   on, and your password. Nothing spends a token until this yes.
+2. **Describe the outcome** with **+ new task**. The normal path is one
+   ChatGPT-style prompt: the planner inspects the open repository, drafts the
+   goal, boundaries, acceptance rubric, and implementation approach, then asks
+   only when a missing answer would materially change the work. Project and
+   quality stay in the compact footer; **Edit details** reveals the full
+   contract, research-only mode, permissions, dependencies, and expert fields.
+3. **Review and approve the proposed scope.** A scope needs at least one
+   criterion — a plain outcome statement and the evidence kind (check,
+   screenshot, changed-path, or manual review) that will answer it — before it
+   can be signed. The task page leads with a concise approval card; the full
+   planner document and editable contract remain one click away. It restates
+   the exact scope AND rubric you are signing, the provider and model it will
+   run on, and your password. Nothing spends a token until this yes.
 4. **Watch it build.** The **board** moves the card to *building*; the
    card's own page shows the stage and the live transcript; **peek**
    (`/peek`, or *peek at the live ones →* on the builds page) shows every
