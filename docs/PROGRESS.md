@@ -1,5 +1,51 @@
 # Progress
 
+**2026-09-08 — Evidence review v1, audit hardening: full ID coverage, the
+check log and screenshots actually materialized, and one atomic ingest.**
+Still schema v40 (purely additive columns on the still-unreleased
+`criterion_review` table), `src/reviewer.ts` + `src/store.ts`. Three gaps
+an audit of the slice above found, all closed together. (1)
+`parseReview` validated every SUBMITTED judgement against the signed
+rubric but never checked the rubric was fully ANSWERED — a reviewer that
+wrote no `criteria` at all against a rubric-bearing run, or covered only
+some of its ids, still landed its comments and the run read "reviewed".
+Full coverage is now required whenever `approvedCriteriaIds` is
+non-empty: a missing id refuses the WHOLE payload, the same wholesale law
+an unsigned or duplicate id already triggers. A task with no signed
+rubric is untouched — grandfathering holds exactly as before. (2) The
+scratch only ever held the diff, the rubric, and the re-serialized proof
+— a criterion citing `check` or `screenshot` evidence was judged from the
+proof's bare claim about them, never the actual verification output or
+image bytes, both of which the plane already captures and stores as
+first-class artifacts (`check-log`, `screenshot`). The pass now
+materializes both, sealed and tamper-checked the identical way the
+rubric and proof already are — binary-safe, since a screenshot is not
+UTF-8 — and named in the brief so the reviewer knows to actually open
+them rather than trust the claim. Absent either (nothing configured, no
+screenshots claimed) writes neither file: an omission, never a
+fabrication. (3) `criterion_review` rows bound only the diff, and
+comments landed through a separate `transact()` call from judgements — a
+crash between the two could leave one without the other, and nothing
+recorded whether the scope, head, proof, or check log the reviewer was
+actually shown still matched anything by the time judgements landed.
+`criterion_review` gains `scope_digest`, `head_sha`, `proof_artifact`/
+`proof_sha`, `check_log_artifact`/`check_log_sha`, and
+`screenshots_json` — every one RE-VALIDATED against the live store at
+ingest, never trusted from the caller, inside the SAME transaction a new
+`store.ingestReview` uses to land comments and judgements together (it
+wraps the existing `addReviewerComments`/`ingestCriterionReviews`, which
+stay reentrant-safe for direct callers). A mismatch — a scope revised, an
+artifact's stored hash no longer matching what materialization read —
+throws, `review()` converts that to a typed `stale-evidence` failure, and
+the whole ingest rolls back: neither the comments nor the judgements
+land. New tests cover all four angles the fix needed: omission (no check
+log or screenshot exists), tamper (either forged in the scratch),
+staleness (a proof artifact or the scope itself changed mid-review), and
+rollback (a stale ingest leaves zero rows, not a partial one). `src/
+demo.ts`'s reviewed+repaired scenario now seeds through the same
+`ingestReview` call `reviewPass` itself makes, bindings included. Suite
+100 files / 1897 tests.
+
 **2026-09-07 — Evidence review v1: an independent reviewer judges the
 signed rubric by exact id, and a bounded repair loop drafts one unmet-
 criteria fix.** Schema v40, closes Priority 2's remaining gap ("the

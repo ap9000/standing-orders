@@ -2503,7 +2503,20 @@ CREATE TABLE IF NOT EXISTS criterion_review (
   artifact      INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
   artifact_sha  TEXT NOT NULL,
   author        TEXT NOT NULL,
-  created_at    TEXT NOT NULL
+  created_at    TEXT NOT NULL,
+  -- Audit hardening (still evidence-review-v1, unreleased): every input the
+  -- reviewer was actually shown, hash-bound and RE-VALIDATED against the
+  -- live store at ingest time by ingestReview() -- never trusted from the
+  -- caller's say-so. NULL exactly when that input never existed for this
+  -- run (no verify command configured, no screenshots claimed): an
+  -- omission, recorded as one, never confused with a mismatch.
+  scope_digest       TEXT,
+  head_sha           TEXT,
+  proof_artifact     INTEGER,
+  proof_sha          TEXT,
+  check_log_artifact INTEGER,
+  check_log_sha      TEXT,
+  screenshots_json   TEXT NOT NULL DEFAULT '[]'
 );
 
 -- The bounded repair loop's ledger (v40, evidence-review-v1): one row per
@@ -7660,6 +7673,20 @@ export class Store {
    * run, sharing its task, and the artifact must be that run's own
    * terminal diff. Every judgement row is immutable once inserted.
    *
+   * Audit hardening (still evidence-review-v1, unreleased): `bindings`
+   * names every OTHER input the reviewer was materialized — the scope
+   * digest it read the rubric against, the run's head, and (when they
+   * exist) the proof, check log, and screenshot artifacts — exactly as
+   * the reviewer pass captured them at materialization time. Every one is
+   * RE-VALIDATED here, against the LIVE store, at ingest time: a caller's
+   * claim about what it showed the agent is worth nothing on its own. A
+   * mismatch (the scope was revised, an artifact's stored hash no longer
+   * matches what was captured) throws and the whole ingest rolls back —
+   * "stale" is refused, never silently accepted. `null`/`[]` inside
+   * `bindings` means that input never existed for this run (no verify
+   * command configured, no screenshots claimed): an omission, which
+   * validates trivially, never a mismatch.
+   *
    * Immediately afterward, in the SAME transaction, the judgements are
    * FOLDED into the run's already-adjudicated verdict (`foldReview`) and
    * saved back through `saveProofVerdict` — the one "re-computation of the
@@ -7673,6 +7700,7 @@ export class Store {
    * criteria (every grandfathered review, and every task with no signed
    * rubric) — a no-op that still proves the reviewer/run/artifact
    * invariants, mirroring `addReviewerComments`' empty-array behavior.
+   * `bindings` is ignored entirely in that case: there is nothing to bind.
    */
   ingestCriterionReviews(
     args: {
@@ -7681,6 +7709,13 @@ export class Store {
       artifactId: number;
       author: string;
       judgements: readonly { id: string; judgement: CriterionJudgementWord; note: string }[];
+      bindings?: {
+        scopeDigest: string | null;
+        headSha: string | null;
+        proof: { artifactId: number; sha256: string } | null;
+        checkLog: { artifactId: number; sha256: string } | null;
+        screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
+      };
     },
     now: Date,
   ): { verdict: ProofVerdictRow["verdict"] } | null {
@@ -7702,15 +7737,80 @@ export class Store {
       if (artifact === undefined || artifact.kind !== "terminal-diff") {
         throw new Error(`artifact ${args.artifactId} is not run ${args.runId}'s terminal diff — judgements bind to the exact bytes reviewed`);
       }
+      if (args.judgements.length === 0) return null;
+
+      // Re-derive and re-validate every OTHER input the reviewer was
+      // shown — never trust the caller's claim about what it showed the
+      // agent. A run with no `bindings` at all (a pre-hardening caller,
+      // or a test exercising the fold in isolation) skips this section
+      // entirely rather than binding to nothing.
+      const bindings = args.bindings;
+      let screenshotsJson = "[]";
+      if (bindings !== undefined) {
+        if (bindings.scopeDigest !== null) {
+          const taskId = this.externalIdFor(source.taskRef);
+          const liveScope = taskId === null ? null : this.getScope(taskId);
+          if (liveScope === null || liveScope.digest !== bindings.scopeDigest) {
+            throw new Error(
+              `run ${args.runId}'s scope no longer matches the digest the reviewer was shown — the signed rubric moved between materialization and ingest; nothing is ingested`,
+            );
+          }
+        }
+        if (bindings.headSha !== null) {
+          const liveHead = source.headRevision ?? source.baseRevision;
+          if (liveHead !== bindings.headSha) {
+            throw new Error(`run ${args.runId}'s head no longer matches what the reviewer was shown — nothing is ingested`);
+          }
+        }
+        if (bindings.proof !== null) {
+          const proofArtifact = this.artifactsFor(args.runId).find(one => one.id === bindings.proof?.artifactId);
+          if (proofArtifact === undefined || proofArtifact.kind !== "proof" || proofArtifact.sha256 !== bindings.proof.sha256) {
+            throw new Error(`run ${args.runId}'s proof no longer matches what the reviewer was shown — nothing is ingested`);
+          }
+        }
+        if (bindings.checkLog !== null) {
+          const checkLogArtifact = this.artifactsFor(args.runId).find(one => one.id === bindings.checkLog?.artifactId);
+          if (checkLogArtifact === undefined || checkLogArtifact.kind !== "check-log" || checkLogArtifact.sha256 !== bindings.checkLog.sha256) {
+            throw new Error(`run ${args.runId}'s check log no longer matches what the reviewer was shown — nothing is ingested`);
+          }
+        }
+        const runArtifacts = this.artifactsFor(args.runId);
+        for (const shot of bindings.screenshots) {
+          const shotArtifact = runArtifacts.find(one => one.id === shot.artifactId);
+          if (shotArtifact === undefined || shotArtifact.kind !== "screenshot" || shotArtifact.sha256 !== shot.sha256) {
+            throw new Error(`run ${args.runId}'s screenshot set no longer matches what the reviewer was shown — nothing is ingested`);
+          }
+        }
+        screenshotsJson = JSON.stringify(bindings.screenshots.map(s => ({ artifact: s.artifactId, sha256: s.sha256, path: s.path })));
+      }
+
       for (const judgement of args.judgements) {
         this.db
           .prepare(
-            `INSERT INTO criterion_review (reviewer_run, source_run, criterion_id, judgement, note, artifact, artifact_sha, author, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO criterion_review
+               (reviewer_run, source_run, criterion_id, judgement, note, artifact, artifact_sha, author, created_at,
+                scope_digest, head_sha, proof_artifact, proof_sha, check_log_artifact, check_log_sha, screenshots_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(args.reviewerRunId, args.runId, judgement.id, judgement.judgement, judgement.note, args.artifactId, artifact.sha256, args.author, now.toISOString());
+          .run(
+            args.reviewerRunId,
+            args.runId,
+            judgement.id,
+            judgement.judgement,
+            judgement.note,
+            args.artifactId,
+            artifact.sha256,
+            args.author,
+            now.toISOString(),
+            bindings?.scopeDigest ?? null,
+            bindings?.headSha ?? null,
+            bindings?.proof?.artifactId ?? null,
+            bindings?.proof?.sha256 ?? null,
+            bindings?.checkLog?.artifactId ?? null,
+            bindings?.checkLog?.sha256 ?? null,
+            screenshotsJson,
+          );
       }
-      if (args.judgements.length === 0) return null;
       const existing = this.proofVerdictFor(args.runId);
       if (existing === null) return null;
       const folded = foldReview(
@@ -7719,6 +7819,53 @@ export class Store {
       );
       this.saveProofVerdict(args.runId, folded.verdict, folded.reasons, now, folded.matrix, existing.machineVerdict ?? existing.verdict);
       return { verdict: folded.verdict };
+    });
+  }
+
+  /**
+   * The whole review, ingested atomically (audit hardening — still
+   * evidence-review-v1, unreleased): comments and criterion judgements
+   * used to commit through two separate `transact()` calls from the
+   * caller — reentrant, so never actually torn in production, but two
+   * calls a crash between could still leave comments landed with no
+   * judgements, or vice versa. This is the ONE call the reviewer pass
+   * makes: everything above rolls back together, or none of it lands.
+   */
+  ingestReview(
+    args: {
+      reviewerRunId: number;
+      runId: number;
+      artifactId: number;
+      author: string;
+      comments: readonly { path: string; line: number | null; note: string; severity: "note" | "question" | "problem" }[];
+      judgements: readonly { id: string; judgement: CriterionJudgementWord; note: string }[];
+      bindings?: {
+        scopeDigest: string | null;
+        headSha: string | null;
+        proof: { artifactId: number; sha256: string } | null;
+        checkLog: { artifactId: number; sha256: string } | null;
+        screenshots: readonly { artifactId: number; sha256: string; path?: string }[];
+      };
+    },
+    now: Date,
+  ): { commentIds: number[]; folded: { verdict: ProofVerdictRow["verdict"] } | null } {
+    return this.transact(() => {
+      const commentIds = this.addReviewerComments(
+        { reviewerRunId: args.reviewerRunId, runId: args.runId, artifactId: args.artifactId, author: args.author, comments: args.comments },
+        now,
+      );
+      const folded = this.ingestCriterionReviews(
+        {
+          reviewerRunId: args.reviewerRunId,
+          runId: args.runId,
+          artifactId: args.artifactId,
+          author: args.author,
+          judgements: args.judgements,
+          ...(args.bindings === undefined ? {} : { bindings: args.bindings }),
+        },
+        now,
+      );
+      return { commentIds, folded };
     });
   }
 
@@ -16983,8 +17130,17 @@ function readProofVerdict(row: Record<string, unknown>): ProofVerdictRow {
   };
 }
 
+/** One binding this review's judgements rest on — an artifact the reviewer
+ * was shown, its hash, and (for a screenshot) the claimed path it answered. */
+export type ReviewBindingArtifact = { artifact: number; sha256: string; path?: string };
+
 /** One independent reviewer's typed judgement on one signed criterion
- * (v40), as stored — immutable, bound to the exact reviewed artifact. */
+ * (v40), as stored — immutable, bound to the exact reviewed artifact.
+ * Audit hardening: also carries every OTHER input the reviewer was shown
+ * — scope, head, proof, check log, screenshot set — hash-bound and
+ * re-validated against the live store at ingest time by `ingestReview`.
+ * `null`/`[]` means that input never existed for this run, never that it
+ * went unchecked. */
 export type CriterionReviewRow = {
   id: number;
   reviewerRun: number;
@@ -16996,9 +17152,33 @@ export type CriterionReviewRow = {
   artifactSha: string;
   author: string;
   createdAt: string;
+  scopeDigest: string | null;
+  headSha: string | null;
+  proof: ReviewBindingArtifact | null;
+  checkLog: ReviewBindingArtifact | null;
+  screenshots: ReviewBindingArtifact[];
 };
 
+function readReviewBindingList(raw: unknown): ReviewBindingArtifact[] {
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((one): one is Record<string, unknown> => typeof one === "object" && one !== null)
+      .map(one => ({
+        artifact: Number(one["artifact"]),
+        sha256: String(one["sha256"]),
+        ...(typeof one["path"] === "string" ? { path: one["path"] } : {}),
+      }));
+  } catch {
+    return [];
+  }
+}
+
 function readCriterionReview(row: Record<string, unknown>): CriterionReviewRow {
+  const proofArtifact = row["proof_artifact"];
+  const checkLogArtifact = row["check_log_artifact"];
   return {
     id: Number(row["id"]),
     reviewerRun: Number(row["reviewer_run"]),
@@ -17010,6 +17190,17 @@ function readCriterionReview(row: Record<string, unknown>): CriterionReviewRow {
     artifactSha: String(row["artifact_sha"]),
     author: String(row["author"]),
     createdAt: String(row["created_at"]),
+    scopeDigest: row["scope_digest"] === null || row["scope_digest"] === undefined ? null : String(row["scope_digest"]),
+    headSha: row["head_sha"] === null || row["head_sha"] === undefined ? null : String(row["head_sha"]),
+    proof:
+      proofArtifact === null || proofArtifact === undefined
+        ? null
+        : { artifact: Number(proofArtifact), sha256: String(row["proof_sha"]) },
+    checkLog:
+      checkLogArtifact === null || checkLogArtifact === undefined
+        ? null
+        : { artifact: Number(checkLogArtifact), sha256: String(row["check_log_sha"]) },
+    screenshots: readReviewBindingList(row["screenshots_json"]),
   };
 }
 

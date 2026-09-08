@@ -8,7 +8,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -18,7 +18,18 @@ import { acquire } from "./claim.js";
 import { addApprover, propose } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { maybeRequestAutoReview } from "./dispose.js";
-import { diffPathsOf, parseReview, review, reviewPass, REVIEW_LIMITS, REVIEW_PATCH_NAME, REVIEW_RUBRIC_NAME, REVIEW_PROOF_NAME } from "./reviewer.js";
+import {
+  diffPathsOf,
+  parseReview,
+  review,
+  reviewPass,
+  REVIEW_LIMITS,
+  REVIEW_PATCH_NAME,
+  REVIEW_RUBRIC_NAME,
+  REVIEW_PROOF_NAME,
+  REVIEW_CHECK_LOG_NAME,
+  reviewScreenshotName,
+} from "./reviewer.js";
 import type { Runner } from "./builder.js";
 import type { CriterionMatrixRow } from "./proof.js";
 
@@ -96,20 +107,46 @@ describe("diff paths and the strict parser", () => {
     const paths = diffPathsOf(PATCH);
     const rubricIds = new Set(["c1", "c2"]);
 
-    test("absent criteria still parses — every task with no signed rubric, and every grandfathered review", () => {
-      const parsed = parseReview(JSON.stringify({ version: 1, comments: [] }), paths, rubricIds);
+    test("absent criteria still parses when NO rubric was signed — every task with no signed rubric, and every grandfathered review", () => {
+      const parsed = parseReview(JSON.stringify({ version: 1, comments: [] }), paths, new Set());
       if (!parsed.ok) throw new Error("expected ok");
       expect(parsed.criteria).toEqual([]);
     });
 
-    test("a well-formed judgement for a signed id parses", () => {
+    test("audit hardening: absent criteria against a SIGNED rubric refuses the whole payload — full coverage is required", () => {
+      const parsed = parseReview(JSON.stringify({ version: 1, comments: [] }), paths, rubricIds);
+      if (parsed.ok) throw new Error("expected refusal");
+      expect(parsed.problems.map(one => one.reason).join(", ")).toMatch(/missing judgement.*c1.*c2|missing judgement.*c2.*c1/);
+    });
+
+    test("audit hardening: a PARTIAL judgement set (some signed ids uncovered) refuses the whole payload", () => {
       const parsed = parseReview(
-        JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "contradicts", note: "  never implemented  " }] }),
+        JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "contradicts", note: "never implemented" }] }),
+        paths,
+        rubricIds,
+      );
+      if (parsed.ok) throw new Error("expected refusal");
+      expect(parsed.problems.map(one => one.reason).join(", ")).toMatch(/missing judgement.*c2/);
+    });
+
+    test("a well-formed judgement covering every signed id parses", () => {
+      const parsed = parseReview(
+        JSON.stringify({
+          version: 1,
+          comments: [],
+          criteria: [
+            { id: "c1", judgement: "contradicts", note: "  never implemented  " },
+            { id: "c2", judgement: "upholds", note: "this one is fine" },
+          ],
+        }),
         paths,
         rubricIds,
       );
       if (!parsed.ok) throw new Error("expected ok");
-      expect(parsed.criteria).toEqual([{ id: "c1", judgement: "contradicts", note: "never implemented" }]);
+      expect(parsed.criteria).toEqual([
+        { id: "c1", judgement: "contradicts", note: "never implemented" },
+        { id: "c2", judgement: "upholds", note: "this one is fine" },
+      ]);
     });
 
     test("a judgement for an id absent from the signed rubric refuses the WHOLE payload, comments included", () => {
@@ -598,6 +635,18 @@ describe("the reviewer role in the store", () => {
       };
       storeEvidence(store, evidenceRoot, runId, "proof", "proof.json", Buffer.from(JSON.stringify(proof), "utf8"), "agent-authored", T0);
     };
+    const CHECK_LOG_TEXT = "$ npm test\n(exit 0)\n\n--- stdout ---\n214 tests passed.\n\n--- stderr ---\n";
+    const seedCheckLog = (runId: number): number =>
+      storeEvidence(store, evidenceRoot, runId, "check-log", "check-log.txt", Buffer.from(CHECK_LOG_TEXT, "utf8"), 'sh -c "npm test" (exit 0)', T0);
+    // A real, tiny (1x1) PNG — the same fixture proof.ts's own screenshot
+    // tests use: a valid signature and header, never a placeholder.
+    const ONE_BY_ONE_PNG = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const seedScreenshot = (runId: number): number =>
+      storeEvidence(store, evidenceRoot, runId, "screenshot", "screenshot-abc.png", ONE_BY_ONE_PNG, "agent-claimed screenshot at docs/before.png (validated png)", T0);
+
     const seedVerdict = (runId: number, verdict: "short" | "attested" = "short") => {
       const row: CriterionMatrixRow = {
         id: "c1",
@@ -759,17 +808,192 @@ describe("the reviewer role in the store", () => {
       expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
     });
 
-    test("a review with no criteria field still ingests comments exactly as before, even against a signed rubric", async () => {
+    test("a review with no criteria field against a signed rubric is refused wholesale — full coverage is required, comments included", async () => {
       seedRubric();
       seedVerdict(builtRun);
+      store.requestReview(builtRun, "alex", T0);
+      const reports = await passOnce(reviewingAgentFactory({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "looks fine" }] }));
+      expect(reports[0]?.outcome).toBe("failed");
+      expect(reports[0]?.detail).toBe("malformed-review");
+      expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+      expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+      // Nothing folded: the verdict is untouched.
+      expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
+      expect(store.proofVerdictFor(builtRun)?.machineVerdict).toBeNull();
+    });
+
+    test("a review against a task with NO signed rubric still ingests comments exactly as before — grandfathering holds", async () => {
+      // No propose() call at all: t-1 carries no acceptance rubric.
       store.requestReview(builtRun, "alex", T0);
       const reports = await passOnce(reviewingAgentFactory({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "looks fine" }] }));
       expect(reports[0]?.outcome).toBe("reviewed");
       expect(store.liveDiffComments(builtRun)).toHaveLength(1);
       expect(store.criterionReviewsFor(builtRun)).toEqual([]);
-      // Nothing folded: the verdict is untouched.
-      expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
-      expect(store.proofVerdictFor(builtRun)?.machineVerdict).toBeNull();
+    });
+
+    describe("audit hardening: check log, screenshots, and hash-bound bindings", () => {
+      test("omission: no check log or screenshot artifacts exist — neither file is materialized, and the review still succeeds", async () => {
+        seedRubric();
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        let sawCheckLog = false;
+        let sawScreenshot = false;
+        const inspectingAgent: Runner = async (_file, args, options) => {
+          const cwd = options?.cwd ?? "";
+          sawCheckLog = existsSync(join(cwd, REVIEW_CHECK_LOG_NAME));
+          sawScreenshot = readdirSync(cwd).some(one => one.startsWith("REVIEW-SCREENSHOT-"));
+          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+          const name = REVIEW_FILE.exec(prompt)?.[0];
+          if (name !== undefined && cwd !== "") {
+            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "no log or screenshot exists" }] }));
+          }
+          return { ...OK, stdout: SAID };
+        };
+        const reports = await passOnce(inspectingAgent);
+        expect(sawCheckLog).toBe(false);
+        expect(sawScreenshot).toBe(false);
+        expect(reports[0]?.outcome).toBe("reviewed");
+        const saved = store.criterionReviewsFor(builtRun);
+        expect(saved).toHaveLength(1);
+        expect(saved[0]?.checkLog).toBeNull();
+        expect(saved[0]?.screenshots).toEqual([]);
+      });
+
+      test("materialization: an existing check log and screenshot are written into the scratch with their real bytes, and bound at ingest", async () => {
+        seedRubric();
+        seedCheckLog(builtRun);
+        const shotArtifactId = seedScreenshot(builtRun);
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        let checkLogBytes: Buffer | null = null;
+        let screenshotBytes: Buffer | null = null;
+        const inspectingAgent: Runner = async (_file, args, options) => {
+          const cwd = options?.cwd ?? "";
+          if (existsSync(join(cwd, REVIEW_CHECK_LOG_NAME))) checkLogBytes = readFileSync(join(cwd, REVIEW_CHECK_LOG_NAME));
+          const shotName = reviewScreenshotName(shotArtifactId, "png");
+          if (existsSync(join(cwd, shotName))) screenshotBytes = readFileSync(join(cwd, shotName));
+          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+          expect(prompt).toContain(REVIEW_CHECK_LOG_NAME);
+          expect(prompt).toContain(shotName);
+          const name = REVIEW_FILE.exec(prompt)?.[0];
+          if (name !== undefined && cwd !== "") {
+            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "checked the log and the screenshot" }] }));
+          }
+          return { ...OK, stdout: SAID };
+        };
+        const reports = await passOnce(inspectingAgent);
+        expect(checkLogBytes).toEqual(Buffer.from(CHECK_LOG_TEXT, "utf8"));
+        expect(screenshotBytes).toEqual(ONE_BY_ONE_PNG);
+        expect(reports[0]?.outcome).toBe("reviewed");
+        const saved = store.criterionReviewsFor(builtRun);
+        expect(saved).toHaveLength(1);
+        expect(saved[0]?.checkLog?.artifact).toBe(store.artifactsFor(builtRun).find(a => a.kind === "check-log")?.id);
+        expect(saved[0]?.screenshots).toEqual([{ artifact: shotArtifactId, sha256: expect.any(String), path: expect.any(String) }]);
+        expect(saved[0]?.scopeDigest).toBe(store.getScope("t-1")?.digest ?? null);
+        expect(saved[0]?.headSha).toBe("head-aaa");
+      });
+
+      test("tamper: overwriting REVIEW-CHECK-LOG.txt refuses the whole pass — nothing ingested", async () => {
+        seedRubric();
+        seedCheckLog(builtRun);
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        const tamperingAgent: Runner = async (_file, args, options) => {
+          const cwd = options?.cwd ?? "";
+          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+          const name = REVIEW_FILE.exec(prompt)?.[0];
+          if (name !== undefined && cwd !== "") {
+            writeFileSync(join(cwd, REVIEW_CHECK_LOG_NAME), "forged: everything passed");
+            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }));
+          }
+          return { ...OK, stdout: SAID };
+        };
+        const reports = await passOnce(tamperingAgent);
+        expect(reports[0]?.detail).toBe("dirty-scratch");
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+      });
+
+      test("tamper: overwriting a screenshot's bytes refuses the whole pass — nothing ingested", async () => {
+        seedRubric();
+        const shotArtifactId = seedScreenshot(builtRun);
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        const tamperingAgent: Runner = async (_file, args, options) => {
+          const cwd = options?.cwd ?? "";
+          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+          const name = REVIEW_FILE.exec(prompt)?.[0];
+          if (name !== undefined && cwd !== "") {
+            writeFileSync(join(cwd, reviewScreenshotName(shotArtifactId, "png")), Buffer.from([0x00, 0x01, 0x02]));
+            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }));
+          }
+          return { ...OK, stdout: SAID };
+        };
+        const reports = await passOnce(tamperingAgent);
+        expect(reports[0]?.detail).toBe("dirty-scratch");
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+      });
+
+      test("stale: a proof artifact rotted between materialization and ingestion refuses ingestion — rollback leaves neither comments nor judgements", async () => {
+        seedRubric();
+        seedProofArtifact(builtRun);
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        const proofArtifactId = store.artifactsFor(builtRun).find(a => a.kind === "proof")?.id;
+        if (proofArtifactId === undefined) throw new Error("seed");
+        const staleAgent: Runner = async (_file, args, options) => {
+          const cwd = options?.cwd ?? "";
+          // Simulate the proof artifact's stored bytes rotting AFTER the
+          // reviewer was shown it but BEFORE ingestion — the exact race
+          // ingestReview's re-validation exists to refuse.
+          store.raw().prepare("UPDATE artifact SET sha256 = ? WHERE id = ?").run("f".repeat(64), proofArtifactId);
+          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+          const name = REVIEW_FILE.exec(prompt)?.[0];
+          if (name !== undefined && cwd !== "") {
+            writeFileSync(
+              join(cwd, name),
+              JSON.stringify({
+                version: 1,
+                comments: [{ path: "src/payouts.ts", line: 2, note: "fine" }],
+                criteria: [{ id: "c1", judgement: "contradicts", note: "not actually wired in" }],
+              }),
+            );
+          }
+          return { ...OK, stdout: SAID };
+        };
+        const reports = await passOnce(staleAgent);
+        expect(reports[0]?.outcome).toBe("failed");
+        expect(reports[0]?.detail).toBe("stale-evidence");
+        // Rollback (atomicity): neither the comment nor the judgement
+        // landed — a partial ingest would be worse than none.
+        expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+        expect(store.proofVerdictFor(builtRun)?.verdict).toBe("short");
+        expect(store.proofVerdictFor(builtRun)?.machineVerdict).toBeNull();
+      });
+
+      test("stale: a scope revised between materialization and ingestion refuses ingestion", async () => {
+        seedRubric();
+        seedVerdict(builtRun);
+        store.requestReview(builtRun, "alex", T0);
+        const revisingAgent: Runner = async (_file, args, options) => {
+          const cwd = options?.cwd ?? "";
+          // The scope moves mid-review — a different signed rubric than
+          // the one this reviewer was actually shown.
+          propose(store, { taskId: "t-1", goal: "wire the payout guard", acceptance: [{ ...CRITERION, statement: "The payout guard is wired in AND alarmed." }], now: T0 });
+          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
+          const name = REVIEW_FILE.exec(prompt)?.[0];
+          if (name !== undefined && cwd !== "") {
+            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }));
+          }
+          return { ...OK, stdout: SAID };
+        };
+        const reports = await passOnce(revisingAgent);
+        expect(reports[0]?.outcome).toBe("failed");
+        expect(reports[0]?.detail).toBe("stale-evidence");
+        expect(store.criterionReviewsFor(builtRun)).toEqual([]);
+      });
     });
 
     function reviewingAgentFactory(payload: unknown): Runner {

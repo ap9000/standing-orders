@@ -732,7 +732,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     caveats: [],
     screenshots: [],
   };
-  storeEvidence(
+  const reviewedProofArtifact = storeEvidence(
     store,
     evidenceRoot,
     reviewedRun,
@@ -761,9 +761,10 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   store.setTaskState(reviewed, "done", hoursAgo(4.4));
 
   // The independent reviewer: a real reviewer run, its comments AND its
-  // criterion judgement folded through the SAME store methods reviewPass
-  // itself calls (addReviewerComments, ingestCriterionReviews) — the fold
-  // is the real foldReview, never a hand-authored verdict.
+  // criterion judgement ingested through the SAME atomic store method
+  // reviewPass itself calls (ingestReview) — the fold is the real
+  // foldReview, never a hand-authored verdict, and the bindings are the
+  // real scope digest and proof artifact this run actually carries.
   const reviewerRun = store.startRun({
     taskRef: store.refFor("built-in", reviewed).id,
     leaseId: "demo-lease-reviewer",
@@ -773,7 +774,8 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     provider: "codex",
     now: hoursAgo(3.9),
   });
-  store.addReviewerComments(
+  const reviewedProofSha = store.getArtifact(reviewedProofArtifact)?.sha256 ?? null;
+  const { folded } = store.ingestReview(
     {
       reviewerRunId: reviewerRun,
       runId: reviewedRun,
@@ -787,15 +789,6 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
           severity: "problem",
         },
       ],
-    },
-    hoursAgo(3.9),
-  );
-  const folded = store.ingestCriterionReviews(
-    {
-      reviewerRunId: reviewerRun,
-      runId: reviewedRun,
-      artifactId: reviewedDiffArtifact,
-      author: "reviewer:codex",
       judgements: [
         {
           id: "c1",
@@ -803,6 +796,13 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
           note: "The diff adds a TODO comment, not an actual lock — two concurrent settlements still race the limiter.",
         },
       ],
+      bindings: {
+        scopeDigest: reviewedProposed.digest,
+        headSha: store.getRun(reviewedRun)?.headRevision ?? store.getRun(reviewedRun)?.baseRevision ?? null,
+        proof: reviewedProofSha === null ? null : { artifactId: reviewedProofArtifact, sha256: reviewedProofSha },
+        checkLog: null,
+        screenshots: [],
+      },
     },
     hoursAgo(3.9),
   );
