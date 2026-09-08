@@ -176,6 +176,30 @@ export const claudeHeldArgv = (invocation: Omit<Invocation, "brief">): string[] 
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
 ];
 
+/**
+ * Reviewer isolation (fail-closed for the phase that must never mutate):
+ * the SAME flag family `subscription-chat.ts` already uses for its own
+ * sealed-scratch turn — no session left behind, no tool but reading the
+ * sealed files, no prompt that can stall a headless run waiting on an
+ * approval nobody can answer, and no MCP server (global OR project) loaded
+ * at all. A reviewer that goes looking for tools beyond its scratch
+ * directory is exactly the leak this closes: `--permission-mode plan`
+ * alone governs EDITS, not an MCP server's own tools or an interactive
+ * prompt, and a headless `-p` turn that stalls on either just sits idle
+ * until the timeout kills it, having spent the money on nothing.
+ */
+const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
+  "--safe-mode",
+  "--no-session-persistence",
+  "--tools",
+  "Read",
+  "--permission-prompts",
+  "none",
+  "--strict-mcp-config",
+  "--mcp-config",
+  '{"mcpServers":{}}',
+];
+
 const claudeArgv = (invocation: Invocation): string[] => [
   "-p",
   invocation.brief,
@@ -195,6 +219,7 @@ const claudeArgv = (invocation: Invocation): string[] => [
     : ["--permission-mode", invocation.permissionMode]),
   ...(invocation.model === null ? [] : ["--model", invocation.model]),
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
+  ...(invocation.phase === "review" ? CLAUDE_REVIEW_ISOLATION_ARGV : []),
 ];
 
 /** A claude envelope object, whichever line carried it. */
@@ -303,14 +328,44 @@ function claudeParse(stdout: string): ParsedEnvelope {
  * combined bypass flag; that exact choice came from the sealed profile.
  * Never `--ephemeral`: repair resumes.
  */
+/**
+ * Codex's own fail-closed equivalent of `CLAUDE_REVIEW_ISOLATION_ARGV`:
+ * read-only sandbox rather than the ordinary `workspace-write` (a reviewer
+ * dispatched to codex was, until this, handed a write-capable sandbox —
+ * the same class of leak the claude side had), approvals that REFUSE
+ * rather than wait on a prompt a headless turn can never answer, and the
+ * user's own `~/.codex/config.toml` — which can name arbitrary MCP
+ * servers, exactly the surface `--strict-mcp-config` closes for claude —
+ * ignored outright.
+ */
+const CODEX_REVIEW_ISOLATION_ARGV: readonly string[] = [
+  "--ignore-user-config",
+  "--sandbox",
+  "read-only",
+  "-c",
+  'approval_policy="never"',
+  "-c",
+  'web_search="disabled"',
+  "-c",
+  "features.shell_tool=false",
+  "-c",
+  "features.unified_exec=false",
+  "-c",
+  "features.multi_agent=false",
+  "-c",
+  "apps._default.enabled=false",
+];
+
 const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string[] => [
   "exec",
   ...(invocation.resumeSession === null ? [] : ["resume", invocation.resumeSession]),
   "--json",
   "--skip-git-repo-check",
-  ...(invocation.skipPermissions
-    ? ["--dangerously-bypass-approvals-and-sandbox"]
-    : ["--sandbox", "workspace-write"]),
+  ...(invocation.phase === "review"
+    ? CODEX_REVIEW_ISOLATION_ARGV
+    : invocation.skipPermissions
+      ? ["--dangerously-bypass-approvals-and-sandbox"]
+      : ["--sandbox", "workspace-write"]),
   ...(invocation.model === null ? [] : ["-m", invocation.model]),
   ...extra,
   invocation.brief,
@@ -416,7 +471,11 @@ const geminiArgv = (invocation: Invocation): string[] => [
   // the resolver's default is always claude), so trusting the workspace is
   // the operator's own deliberate choice, not an ambient grant. A per-run
   // config-isolation boundary (isolated GEMINI_DIR) is the tracked
-  // follow-up if gemini ever becomes a default.
+  // follow-up if gemini ever becomes a default. Until that lands, gemini
+  // has no fail-closed equivalent of the claude/codex review isolation
+  // above — `resolvePhaseAgent` (agentconfig.ts) refuses gemini for the
+  // review phase outright rather than let a documented, untracked leak
+  // pose as a confined reviewer.
   "--skip-trust",
   "--output-format",
   "stream-json",

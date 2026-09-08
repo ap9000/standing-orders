@@ -1,11 +1,17 @@
 /**
- * The reviewer (v29, R1–R4 + the D5/D8 rulings): an agent pass over one
- * finished run's SEALED terminal diff — and nothing else. No worktree, no
- * branch, no repository at all: the pass materializes the verified
- * artifact bytes into an empty scratch directory, the agent reads the
- * patch and writes ONE mailbox, and everything it says binds back to the
- * exact bytes it was shown. A truncated artifact is refused before any
- * money; a pass that writes anything beyond its mailbox files nothing.
+ * The reviewer (v29, R1–R4 + the D5/D8 rulings, isolation hardening): an
+ * agent pass over one finished run's SEALED terminal diff — and nothing
+ * else. No worktree, no branch, no repository at all: the pass
+ * materializes the verified artifact bytes into an empty scratch
+ * directory, the agent reads them and REPLIES with its review as the
+ * provider's own final message, and everything it says binds back to the
+ * exact bytes it was shown. Nothing is written to disk for the harness to
+ * read back: a reviewer that can only read has nothing a permission
+ * prompt, a stalled MCP tool, or a denied write can ever block, so a
+ * headless pass either answers or times out — it cannot half-succeed by
+ * writing a file nobody asked for. A truncated artifact is refused before
+ * any money; a pass that writes ANYTHING into its scratch — the old
+ * mailbox convention included — files nothing and ingests nothing.
  *
  * Sealing stays human (R3): comments land beside the operator's own on
  * the run page, author `reviewer:<provider>`, and the operator prunes
@@ -13,14 +19,16 @@
  * request, one review per run, ever (R4 + one_review_per_source).
  *
  * The confinement boundary, named honestly: READ confinement rests on
- * the provider's read-only permission stance (the planner's posture and
- * limits) — a policy, not a proof; OS-level sandboxing is the tracked
- * follow-up it has always been. What IS proved is ingestion: the patch
- * is re-verified against the artifact's hash on a no-follow descriptor
- * AFTER the agent ran, the scratch may hold nothing else, and every
- * comment binds to those exact bytes through the D8 transaction. An
- * agent that read the world can still only SAY things about the sealed
- * patch, into one validated mailbox, signed as the agent it was.
+ * the provider's read-only tool/sandbox posture (provider.ts's dedicated
+ * review-phase isolation argv — an empty MCP config, prompts that refuse
+ * rather than hang, and no tool but reading) — a policy, not a proof;
+ * OS-level sandboxing is the tracked follow-up it has always been. What
+ * IS proved is ingestion: the patch is re-verified against the artifact's
+ * hash on a no-follow descriptor AFTER the agent ran, the scratch may
+ * hold nothing but what was sealed into it, and every comment binds to
+ * those exact bytes through the D8 transaction. An agent that read the
+ * world can still only SAY things about the sealed patch, in its one
+ * final message, signed as the agent it was.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -33,7 +41,7 @@ import { invokeAgent } from "./invoke.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
-import { evidenceRoot, readMailbox, readVerifiedArtifact, reviewFileName, sniffImageKind } from "./evidence.js";
+import { evidenceRoot, readMailbox, readVerifiedArtifact, sniffImageKind } from "./evidence.js";
 import type { Runner } from "./builder.js";
 import { CLAUDE_LIMITS } from "./scope.js";
 import { parseProof, serializeProof, type ApprovedCriterion, type CriterionJudgementWord, type ProofVerdict } from "./proof.js";
@@ -269,7 +277,6 @@ function inert(text: string): string {
 function reviewerBrief(
   taskTitle: string,
   scope: { goal: string; outOfScope: string | null } | null,
-  mailbox: string,
   criteria: readonly ApprovedCriterion[],
   hasProof: boolean,
   hasCheckLog: boolean,
@@ -320,8 +327,11 @@ function reviewerBrief(
           "`upholds` and `contradicts` are for when you can actually tell.",
         ]),
     "",
-    "Read the file(s) and write your review as JSON to a file named exactly",
-    `\`${mailbox}\`:`,
+    "Read the file(s), then REPLY with your review — your entire final",
+    "message must be exactly this JSON and nothing else: no code fences, no",
+    "commentary before or after it. You have no write tool and must not try",
+    "to use one; the file(s) named above are the only thing(s) you can",
+    "read, and this reply is the only thing you say:",
     "{",
     '  "version": 1,',
     '  "comments": [',
@@ -346,7 +356,9 @@ function reviewerBrief(
     ...(criteria.length === 0
       ? []
       : [`Every signed criterion id above needs exactly one judgement in "criteria" — no more, no fewer, no id twice.`]),
-    "Write NOTHING else: any other file discards your session.",
+    "Create, write, or edit NOTHING: any file found in your scratch",
+    "directory afterward that you did not start with discards your whole",
+    "session, and only your final message is ever read.",
   ].join("\n");
 }
 
@@ -484,7 +496,6 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
   const headAtReview = source.headRevision ?? source.baseRevision;
 
   const scratch = mkdtempSync(join(request.scratchRoot ?? tmpdir(), "standing-orders-review-"));
-  const mailbox = reviewFileName();
   try {
     writeFileSync(join(scratch, REVIEW_PATCH_NAME), verified.content, { mode: 0o600 });
     const rubricSealed = rubric.length === 0 ? null : writeSealedText(scratch, REVIEW_RUBRIC_NAME, JSON.stringify(rubric));
@@ -503,15 +514,17 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
           brief: reviewerBrief(
             request.taskTitle,
             scope === null ? null : { goal: scope.goal, outOfScope: scope.outOfScope },
-            mailbox,
             rubric,
             proofSealed !== null,
             checkLogSealed !== null,
             screenshotsSealed.map(one => one.name),
           ),
           maxTurns: request.maxTurns ?? DEFAULT_REVIEW_TURNS,
-          // The planner's posture exactly: read-only by policy, and the
-          // scratch scan below is the law.
+          // provider.ts's dedicated review-phase isolation argv is the
+          // real fence (no MCP servers, no tool but reading, prompts that
+          // refuse rather than hang); plan/no-bypass here is defense in
+          // depth, never the only thing standing between the agent and a
+          // mutation.
           permissionMode: "plan",
           skipPermissions: false,
           resumeSession: null,
@@ -555,17 +568,19 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     }
 
     // THE PROOF COMES FIRST (R2's clean-tree law, scratch-shaped): the
-    // directory may hold exactly the files WE sealed (the patch, and — v40
-    // — the rubric, re-serialized proof, check log, and screenshots when
-    // this run has them) plus the mailbox the agent wrote — as REGULAR
-    // FILES, no symlinks, no directories — and every sealed file must
-    // still hash to what was written (Codex reviewer round 1, finding 3,
-    // extended to every materialized input: any of them the agent
-    // overwrote means its judgements describe evidence nobody actually
-    // showed it — ingest nothing). Anything else and nothing is ingested.
+    // directory may hold EXACTLY the files WE sealed (the patch, and —
+    // v40 — the rubric, re-serialized proof, check log, and screenshots
+    // when this run has them) — as REGULAR FILES, no symlinks, no
+    // directories, and nothing else at all. There is no mailbox to permit
+    // any more (the reviewer's answer rides its own final message, never
+    // the scratch), so ANY file the agent added — the old mailbox
+    // convention included — is foreign. Every sealed file must still hash
+    // to what was written (Codex reviewer round 1, finding 3, extended to
+    // every materialized input: any of them the agent overwrote means its
+    // judgements describe evidence nobody actually showed it — ingest
+    // nothing). Anything foreign and nothing is ingested.
     const permitted = new Set([
       REVIEW_PATCH_NAME,
-      mailbox,
       ...(rubricSealed === null ? [] : [rubricSealed.name]),
       ...(proofSealed === null ? [] : [proofSealed.name]),
       ...(checkLogSealed === null ? [] : [checkLogSealed.name]),
@@ -577,7 +592,7 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       return {
         ok: false,
         reason: "dirty-scratch",
-        message: `the reviewer wrote ${foreign.length} thing(s) beyond its mailbox (${foreign.slice(0, 3).join(", ")}${foreign.length > 3 ? ", …" : ""}) — a reviewer reads; nothing it wrote is ingested`,
+        message: `the reviewer wrote ${foreign.length} thing(s) it was never asked to (${foreign.slice(0, 3).join(", ")}${foreign.length > 3 ? ", …" : ""}) — a reviewer reads; nothing it wrote is ingested`,
       };
     }
     const patchBack = readMailbox(join(scratch, REVIEW_PATCH_NAME), diff.bytesStored);
@@ -623,11 +638,16 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
       }
     }
 
-    const spoken = readMailbox(join(scratch, mailbox), REVIEW_LIMITS.payload);
-    if (!spoken.ok) {
+    // No mailbox to read: the review IS the provider's own final message
+    // (AgentOutcome.finalMessage) — nothing else was ever written, and the
+    // scratch scan above already proved that. An absent, empty, or
+    // oversize reply reads exactly as an old missing mailbox did: money
+    // spent on silence.
+    const spoken = result.finalMessage;
+    if (spoken === null || spoken.trim() === "" || Buffer.byteLength(spoken, "utf8") > REVIEW_LIMITS.payload) {
       return { ok: false, reason: "no-op", message: "the reviewer ended without a review — a session that says nothing spent money on silence" };
     }
-    const parsed = parseReview(spoken.raw.toString("utf8"), patchPaths, new Set(rubric.map(c => c.id)));
+    const parsed = parseReview(spoken, patchPaths, new Set(rubric.map(c => c.id)));
     if (!parsed.ok) {
       return {
         ok: false,

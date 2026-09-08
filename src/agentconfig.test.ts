@@ -88,6 +88,22 @@ describe("phase-agent resolution", () => {
     });
   });
 
+  test("gemini has no fail-closed isolation for review yet — refused however it was resolved: config, flag, or pin", () => {
+    store.setPhaseConfig(INSTALLATION_SCOPE, "review", "gemini", "gemini-2.5-pro", "alex", T0);
+    expect(resolvePhaseAgent(store, "review", "/repo", {})).toMatchObject({ ok: false });
+    // build is untouched — the refusal is review-specific.
+    store.setPhaseConfig(INSTALLATION_SCOPE, "build", "gemini", "gemini-2.5-pro", "alex", T0);
+    expect(resolvePhaseAgent(store, "build", "/repo", {})).toMatchObject({ ok: true, spec: { provider: "gemini" } });
+
+    expect(resolvePhaseAgent(store, "review", "/repo", { provider: "gemini", model: "gemini-2.5-pro" })).toMatchObject({ ok: false });
+
+    store.createTask({ id: "t-gem", title: "w" }, T0);
+    const ref = store.refFor(BUILT_IN, "t-gem");
+    store.pinTaskAgent(ref.id, "gemini", "gemini-2.5-pro");
+    const pinned = store.refFor(BUILT_IN, "t-gem");
+    expect(resolvePhaseAgent(store, "review", "/repo", {}, pinned)).toMatchObject({ ok: false });
+  });
+
   test("a pinned task agent outranks every flag — the critical finding", () => {
     store.createTask({ id: "t-pin", title: "w" }, T0);
     const ref = store.refFor(BUILT_IN, "t-pin");

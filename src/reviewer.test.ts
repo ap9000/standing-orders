@@ -35,8 +35,13 @@ import type { CriterionMatrixRow } from "./proof.js";
 
 const T0 = new Date("2026-08-27T12:00:00.000Z");
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
-const SAID = JSON.stringify({ result: "reviewing" });
-const REVIEW_FILE = /STANDING-ORDERS-REVIEW-[0-9a-f]{16}\.json/;
+/** The reviewer's answer now rides the provider's own final message — the
+ * buffered claude envelope's `result` field — never a file written to
+ * disk. Every stubbed agent below "speaks" its review through this. */
+const spoken = (payload: unknown): string => JSON.stringify({ result: JSON.stringify(payload) });
+/** A harmless spoken reply for fixtures where the content never matters
+ * (the pass returns before it would be read). */
+const SAID = spoken({ version: 1, comments: [] });
 const REPO = "/repos/thing";
 
 const PATCH = [
@@ -402,15 +407,10 @@ describe("the reviewer role in the store", () => {
 
     const reviewingAgent =
       (payload: unknown, extraFile: string | null = null): Runner =>
-      async (_file, args, options) => {
+      async (_file, _args, options) => {
         const cwd = options?.cwd ?? "";
-        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") {
-          writeFileSync(join(cwd, name), JSON.stringify(payload));
-          if (extraFile !== null) writeFileSync(join(cwd, extraFile), "sneaky");
-        }
-        return { ...OK, stdout: SAID };
+        if (extraFile !== null && cwd !== "") writeFileSync(join(cwd, extraFile), "sneaky");
+        return { ...OK, stdout: spoken(payload) };
       };
 
     const passOnce = (agent: Runner) =>
@@ -585,20 +585,48 @@ describe("the reviewer role in the store", () => {
 
     test("an overwritten patch is dirty scratch: comments must bind to the sealed bytes", async () => {
       store.requestReview(builtRun, "alex", T0);
-      const tamperingAgent: Runner = async (_file, args, options) => {
+      const tamperingAgent: Runner = async (_file, _args, options) => {
         const cwd = options?.cwd ?? "";
-        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") {
-          writeFileSync(join(cwd, REVIEW_PATCH_NAME), PATCH + "+tampered\n");
-          writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [] }));
-        }
-        return { ...OK, stdout: SAID };
+        if (cwd !== "") writeFileSync(join(cwd, REVIEW_PATCH_NAME), PATCH + "+tampered\n");
+        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
       };
       const reports = await passOnce(tamperingAgent);
       expect(reports[0]?.outcome).toBe("failed");
       expect(reports[0]?.detail).toBe("dirty-scratch");
       expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    });
+
+    test("a written file — even the old mailbox convention's exact name — is not read back: the answer must ride the final message", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      const oldStyleAgent: Runner = async (_file, _args, options) => {
+        const cwd = options?.cwd ?? "";
+        if (cwd !== "") {
+          writeFileSync(
+            join(cwd, "STANDING-ORDERS-REVIEW-0123456789abcdef.json"),
+            JSON.stringify({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "should never be read" }] }),
+          );
+        }
+        // No finalMessage at all: an agent reverting to the old
+        // write-a-file habit says nothing the new protocol listens for.
+        return { ...OK, stdout: JSON.stringify({}) };
+      };
+      const reports = await passOnce(oldStyleAgent);
+      expect(reports[0]?.outcome).toBe("failed");
+      expect(reports[0]?.detail).toBe("dirty-scratch");
+      expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    });
+
+    test("a normal review writes nothing to the scratch at all — the whole answer is the final message", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      let sawFiles: string[] = [];
+      const inspectingAgent: Runner = async (_file, _args, options) => {
+        const cwd = options?.cwd ?? "";
+        sawFiles = cwd === "" ? [] : readdirSync(cwd);
+        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
+      };
+      const reports = await passOnce(inspectingAgent);
+      expect(sawFiles).toEqual([REVIEW_PATCH_NAME]);
+      expect(reports[0]?.outcome).toBe("reviewed");
     });
 
     test("a mode-derived request under a live reviewAuto mode runs", async () => {
@@ -662,15 +690,12 @@ describe("the reviewer role in the store", () => {
 
     const criteriaAgent =
       (criteria: readonly { id: string; judgement: string; note: string }[], extra: Record<string, string> = {}): Runner =>
-      async (_file, args, options) => {
+      async (_file, _args, options) => {
         const cwd = options?.cwd ?? "";
-        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") {
-          writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria }));
-          for (const [file, content] of Object.entries(extra)) writeFileSync(join(cwd, file), content);
+        for (const [file, content] of Object.entries(extra)) {
+          if (cwd !== "") writeFileSync(join(cwd, file), content);
         }
-        return { ...OK, stdout: SAID };
+        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria }) };
       };
 
     const passOnce = (agent: Runner) => reviewPass(store, { runner: "builder-1", token: "tok-builder-1", now: T0, evidenceRoot, scratchRoot, agent });
@@ -688,11 +713,7 @@ describe("the reviewer role in the store", () => {
         sawProof = existsSync(join(cwd, REVIEW_PROOF_NAME));
         const prompt = String(args[args.indexOf("-p") + 1] ?? "");
         expect(prompt).toContain(CRITERION.statement);
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") {
-          writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "the patch alone does not show this" }] }));
-        }
-        return { ...OK, stdout: SAID };
+        return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "the patch alone does not show this" }] }) };
       };
       const reports = await passOnce(inspectingAgent);
       expect(sawRubric).toBe(true);
@@ -705,14 +726,11 @@ describe("the reviewer role in the store", () => {
       store.requestReview(builtRun, "alex", T0);
       let sawRubric = false;
       let sawProof = false;
-      const inspectingAgent: Runner = async (_file, args, options) => {
+      const inspectingAgent: Runner = async (_file, _args, options) => {
         const cwd = options?.cwd ?? "";
         sawRubric = existsSync(join(cwd, REVIEW_RUBRIC_NAME));
         sawProof = existsSync(join(cwd, REVIEW_PROOF_NAME));
-        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [] }));
-        return { ...OK, stdout: SAID };
+        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
       };
       const reports = await passOnce(inspectingAgent);
       expect(sawRubric).toBe(false);
@@ -735,15 +753,10 @@ describe("the reviewer role in the store", () => {
       seedRubric();
       seedVerdict(builtRun);
       store.requestReview(builtRun, "alex", T0);
-      const tamperingAgent: Runner = async (_file, args, options) => {
+      const tamperingAgent: Runner = async (_file, _args, options) => {
         const cwd = options?.cwd ?? "";
-        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") {
-          writeFileSync(join(cwd, REVIEW_RUBRIC_NAME), "[]");
-          writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [] }));
-        }
-        return { ...OK, stdout: SAID };
+        if (cwd !== "") writeFileSync(join(cwd, REVIEW_RUBRIC_NAME), "[]");
+        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
       };
       const reports = await passOnce(tamperingAgent);
       expect(reports[0]?.detail).toBe("dirty-scratch");
@@ -755,15 +768,10 @@ describe("the reviewer role in the store", () => {
       seedProofArtifact(builtRun);
       seedVerdict(builtRun);
       store.requestReview(builtRun, "alex", T0);
-      const tamperingAgent: Runner = async (_file, args, options) => {
+      const tamperingAgent: Runner = async (_file, _args, options) => {
         const cwd = options?.cwd ?? "";
-        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") {
-          writeFileSync(join(cwd, REVIEW_PROOF_NAME), '{"version":1}');
-          writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [] }));
-        }
-        return { ...OK, stdout: SAID };
+        if (cwd !== "") writeFileSync(join(cwd, REVIEW_PROOF_NAME), '{"version":1}');
+        return { ...OK, stdout: spoken({ version: 1, comments: [] }) };
       };
       const reports = await passOnce(tamperingAgent);
       expect(reports[0]?.detail).toBe("dirty-scratch");
@@ -838,16 +846,11 @@ describe("the reviewer role in the store", () => {
         store.requestReview(builtRun, "alex", T0);
         let sawCheckLog = false;
         let sawScreenshot = false;
-        const inspectingAgent: Runner = async (_file, args, options) => {
+        const inspectingAgent: Runner = async (_file, _args, options) => {
           const cwd = options?.cwd ?? "";
           sawCheckLog = existsSync(join(cwd, REVIEW_CHECK_LOG_NAME));
           sawScreenshot = readdirSync(cwd).some(one => one.startsWith("REVIEW-SCREENSHOT-"));
-          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-          const name = REVIEW_FILE.exec(prompt)?.[0];
-          if (name !== undefined && cwd !== "") {
-            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "no log or screenshot exists" }] }));
-          }
-          return { ...OK, stdout: SAID };
+          return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "cannot-tell", note: "no log or screenshot exists" }] }) };
         };
         const reports = await passOnce(inspectingAgent);
         expect(sawCheckLog).toBe(false);
@@ -875,11 +878,7 @@ describe("the reviewer role in the store", () => {
           const prompt = String(args[args.indexOf("-p") + 1] ?? "");
           expect(prompt).toContain(REVIEW_CHECK_LOG_NAME);
           expect(prompt).toContain(shotName);
-          const name = REVIEW_FILE.exec(prompt)?.[0];
-          if (name !== undefined && cwd !== "") {
-            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "checked the log and the screenshot" }] }));
-          }
-          return { ...OK, stdout: SAID };
+          return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "checked the log and the screenshot" }] }) };
         };
         const reports = await passOnce(inspectingAgent);
         expect(checkLogBytes).toEqual(Buffer.from(CHECK_LOG_TEXT, "utf8"));
@@ -898,15 +897,10 @@ describe("the reviewer role in the store", () => {
         seedCheckLog(builtRun);
         seedVerdict(builtRun);
         store.requestReview(builtRun, "alex", T0);
-        const tamperingAgent: Runner = async (_file, args, options) => {
+        const tamperingAgent: Runner = async (_file, _args, options) => {
           const cwd = options?.cwd ?? "";
-          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-          const name = REVIEW_FILE.exec(prompt)?.[0];
-          if (name !== undefined && cwd !== "") {
-            writeFileSync(join(cwd, REVIEW_CHECK_LOG_NAME), "forged: everything passed");
-            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }));
-          }
-          return { ...OK, stdout: SAID };
+          if (cwd !== "") writeFileSync(join(cwd, REVIEW_CHECK_LOG_NAME), "forged: everything passed");
+          return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }) };
         };
         const reports = await passOnce(tamperingAgent);
         expect(reports[0]?.detail).toBe("dirty-scratch");
@@ -919,15 +913,10 @@ describe("the reviewer role in the store", () => {
         const shotArtifactId = seedScreenshot(builtRun);
         seedVerdict(builtRun);
         store.requestReview(builtRun, "alex", T0);
-        const tamperingAgent: Runner = async (_file, args, options) => {
+        const tamperingAgent: Runner = async (_file, _args, options) => {
           const cwd = options?.cwd ?? "";
-          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-          const name = REVIEW_FILE.exec(prompt)?.[0];
-          if (name !== undefined && cwd !== "") {
-            writeFileSync(join(cwd, reviewScreenshotName(shotArtifactId, "png")), Buffer.from([0x00, 0x01, 0x02]));
-            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }));
-          }
-          return { ...OK, stdout: SAID };
+          if (cwd !== "") writeFileSync(join(cwd, reviewScreenshotName(shotArtifactId, "png")), Buffer.from([0x00, 0x01, 0x02]));
+          return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }) };
         };
         const reports = await passOnce(tamperingAgent);
         expect(reports[0]?.detail).toBe("dirty-scratch");
@@ -942,25 +931,19 @@ describe("the reviewer role in the store", () => {
         store.requestReview(builtRun, "alex", T0);
         const proofArtifactId = store.artifactsFor(builtRun).find(a => a.kind === "proof")?.id;
         if (proofArtifactId === undefined) throw new Error("seed");
-        const staleAgent: Runner = async (_file, args, options) => {
-          const cwd = options?.cwd ?? "";
+        const staleAgent: Runner = async () => {
           // Simulate the proof artifact's stored bytes rotting AFTER the
           // reviewer was shown it but BEFORE ingestion — the exact race
           // ingestReview's re-validation exists to refuse.
           store.raw().prepare("UPDATE artifact SET sha256 = ? WHERE id = ?").run("f".repeat(64), proofArtifactId);
-          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-          const name = REVIEW_FILE.exec(prompt)?.[0];
-          if (name !== undefined && cwd !== "") {
-            writeFileSync(
-              join(cwd, name),
-              JSON.stringify({
-                version: 1,
-                comments: [{ path: "src/payouts.ts", line: 2, note: "fine" }],
-                criteria: [{ id: "c1", judgement: "contradicts", note: "not actually wired in" }],
-              }),
-            );
-          }
-          return { ...OK, stdout: SAID };
+          return {
+            ...OK,
+            stdout: spoken({
+              version: 1,
+              comments: [{ path: "src/payouts.ts", line: 2, note: "fine" }],
+              criteria: [{ id: "c1", judgement: "contradicts", note: "not actually wired in" }],
+            }),
+          };
         };
         const reports = await passOnce(staleAgent);
         expect(reports[0]?.outcome).toBe("failed");
@@ -977,17 +960,11 @@ describe("the reviewer role in the store", () => {
         seedRubric();
         seedVerdict(builtRun);
         store.requestReview(builtRun, "alex", T0);
-        const revisingAgent: Runner = async (_file, args, options) => {
-          const cwd = options?.cwd ?? "";
+        const revisingAgent: Runner = async () => {
           // The scope moves mid-review — a different signed rubric than
           // the one this reviewer was actually shown.
           propose(store, { taskId: "t-1", goal: "wire the payout guard", acceptance: [{ ...CRITERION, statement: "The payout guard is wired in AND alarmed." }], now: T0 });
-          const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-          const name = REVIEW_FILE.exec(prompt)?.[0];
-          if (name !== undefined && cwd !== "") {
-            writeFileSync(join(cwd, name), JSON.stringify({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }));
-          }
-          return { ...OK, stdout: SAID };
+          return { ...OK, stdout: spoken({ version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "looks fine" }] }) };
         };
         const reports = await passOnce(revisingAgent);
         expect(reports[0]?.outcome).toBe("failed");
@@ -997,13 +974,7 @@ describe("the reviewer role in the store", () => {
     });
 
     function reviewingAgentFactory(payload: unknown): Runner {
-      return async (_file, args, options) => {
-        const cwd = options?.cwd ?? "";
-        const prompt = String(args[args.indexOf("-p") + 1] ?? "");
-        const name = REVIEW_FILE.exec(prompt)?.[0];
-        if (name !== undefined && cwd !== "") writeFileSync(join(cwd, name), JSON.stringify(payload));
-        return { ...OK, stdout: SAID };
-      };
+      return async () => ({ ...OK, stdout: spoken(payload) });
     }
   });
 

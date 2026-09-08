@@ -54,6 +54,49 @@ describe("argv dialects", () => {
     expect(resumed.slice(0, 3)).toEqual(["exec", "resume", "thread-1"]);
   });
 
+  test("claude review phase gets the isolation argv: no MCP, no persistence, read-only tools, prompts that refuse", () => {
+    const build = adapterFor("claude").argv({ ...ASK, phase: "build" });
+    expect(build).not.toContain("--strict-mcp-config");
+    expect(build).not.toContain("--safe-mode");
+
+    const argv = adapterFor("claude").argv({ ...ASK, phase: "review" });
+    expect(argv).toEqual(
+      expect.arrayContaining([
+        "--safe-mode",
+        "--no-session-persistence",
+        "--tools", "Read",
+        "--permission-prompts", "none",
+        "--strict-mcp-config",
+        "--mcp-config", '{"mcpServers":{}}',
+      ]),
+    );
+    // Every ordinary flag still rides — this is additive, not a swap.
+    expect(argv).toEqual(expect.arrayContaining(["--permission-mode", "auto", "--max-turns", "40"]));
+  });
+
+  test("codex review phase gets a read-only sandbox, refusing approvals, and ignores the user's own config — never workspace-write", () => {
+    const build = adapterFor("codex").argv({ ...ASK, phase: "build" });
+    expect(build).toContain("workspace-write");
+    expect(build).not.toContain("--ignore-user-config");
+
+    const argv = adapterFor("codex").argv({ ...ASK, phase: "review" });
+    expect(argv).not.toContain("workspace-write");
+    expect(argv).toEqual(
+      expect.arrayContaining([
+        "--ignore-user-config",
+        "--sandbox", "read-only",
+        "-c", 'approval_policy="never"',
+        "-c", 'web_search="disabled"',
+      ]),
+    );
+    // Reviewer is never dispatched with skipPermissions, but even if a
+    // caller somehow asked, review isolation wins — no bypass road exists
+    // for the one phase that must never mutate.
+    const bypassAttempt = adapterFor("codex").argv({ ...ASK, phase: "review", skipPermissions: true });
+    expect(bypassAttempt).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(bypassAttempt).toContain("read-only");
+  });
+
   test("openrouter rides codex under a private provider key, TOML-quoted, key shell-excluded", () => {
     const argv = adapterFor("openrouter").argv({ ...ASK, model: "anthropic/claude-sonnet-4.5" });
     expect(adapterFor("openrouter").binary).toBe(adapterFor("codex").binary);

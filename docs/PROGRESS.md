@@ -1,5 +1,57 @@
 # Progress
 
+**2026-09-08 — Run 1464's fix: reviewer isolation — no MCP servers, no
+tool but reading, and no mailbox to hang on.** Run 1464 no-op'd after 8
+minutes and, per the operator's own read of it, loaded global MCP servers
+despite running under `--permission-mode plan`. Root cause: the review
+phase's claude invocation carried no MCP or prompt isolation at all —
+`--permission-mode plan` governs edits, not an MCP server's own tools or
+an interactive approval prompt, so a headless `-p` turn that goes looking
+for either just sits idle until the timeout kills it, having spent money
+on nothing. `provider.ts`'s `claudeArgv` now appends a dedicated
+`CLAUDE_REVIEW_ISOLATION_ARGV` for `phase === "review"` only (`--safe-mode
+--no-session-persistence --tools Read --permission-prompts none
+--strict-mcp-config --mcp-config '{"mcpServers":{}}'`) — the same flag
+family `subscription-chat.ts` already uses for its own sealed turn. Since
+a write tool was the other half of the leak surface (a reviewer needs
+none — see below), codex gets its own fail-closed equivalent
+(`CODEX_REVIEW_ISOLATION_ARGV`): `--sandbox read-only` in place of the
+`workspace-write` a codex-routed reviewer was silently handed before this
+fix, `approval_policy="never"` and friends so a prompt refuses rather
+than hangs, and `--ignore-user-config` so the operator's own
+`~/.codex/config.toml` (which can name arbitrary MCP servers) never
+loads. Gemini has no such isolation flag in this codebase yet — its own
+`.gemini/settings.json` loads hooks and MCP unconditionally, a leak
+DESIGN.md already tracks as a follow-up — so rather than pose as confined
+without being so, `resolvePhaseAgent` (`agentconfig.ts`) now refuses
+gemini for the review phase outright, however it was resolved (pinned,
+flagged, or configured); build and plan are untouched.
+
+**The other half: the reviewer no longer writes anything, ever.** The
+mailbox-file protocol (`STANDING-ORDERS-REVIEW-<nonce>.json`, written by
+the agent into its scratch directory) needed a write tool, which is
+exactly the permission surface the isolation above closes off for good
+reason — a reviewer that can write is not the reviewer this slice
+promised. The reviewer's answer now rides the provider's own final
+message (`AgentOutcome.finalMessage`, already captured by every
+adapter's parser) instead: `reviewerBrief` asks for the JSON as the
+agent's literal last word, `review()` reads `result.finalMessage` in
+place of `readMailbox`, and the scratch-hygiene scan — unchanged in
+spirit — now treats ANY file the agent adds as foreign, the old mailbox
+name included. `reviewFileName()` (evidence.ts) is gone; the
+`STANDING-ORDERS-REVIEW-` naming pattern stays recognized by the general
+protocol-file sweep only as a legacy cleanup target. `reviewer.test.ts`'s
+~30 stubbed-agent fixtures were rewritten off the old
+regex-the-prompt-for-a-filename convention onto a `spoken(payload)`
+helper that encodes the review straight into the stubbed process's
+stdout envelope; two new regression tests assert a normal review writes
+nothing to the scratch at all, and that an agent reverting to the old
+mailbox habit is read as dirty scratch, never as an answer. New argv
+regressions in `provider.test.ts` (claude and codex review isolation,
+each proven absent on `build`) and `agentconfig.test.ts` (gemini refused
+for review via config, flag, and pin alike). Suite 100 files / 1906
+tests (12 skipped).
+
 **2026-09-08 — Run 1462's fix: the brief tells the builder to default to
 exactly the signed criteria and states the evidence-array cap.** Run 1462's
 code was fine, but its proof was refused wholesale: an extra (unsigned)

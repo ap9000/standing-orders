@@ -43,7 +43,10 @@ export const MAILBOX_PREFIX = "STANDING-ORDERS-PARK-";
 export const HANDOFF_PREFIX = "STANDING-ORDERS-DONE-";
 /** The planner's terminal handoff: the proposed scope and the plan document. */
 export const PLAN_PREFIX = "STANDING-ORDERS-PLAN-";
-/** The reviewer's comment mailbox (v29): its only legitimate output. */
+/** The reviewer's former comment mailbox (v29–evidence-review-v1): the
+ * reviewer now replies in its final message and writes nothing, but the
+ * pattern stays recognized so a sweep still cleans up a stray file this
+ * name left by an older build. */
 export const REVIEW_PREFIX = "STANDING-ORDERS-REVIEW-";
 /** The scout's terminal handoff (v34): the report, its only deliverable. */
 export const REPORT_PREFIX = "STANDING-ORDERS-REPORT-";
@@ -119,10 +122,6 @@ export function handoffName(): string {
 
 export function planFileName(): string {
   return `${PLAN_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
-}
-
-export function reviewFileName(): string {
-  return `${REVIEW_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 /** The build's optional proof manifest (Priority 2), named exactly like

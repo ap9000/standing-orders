@@ -33,6 +33,20 @@ export type Resolution =
   | { ok: true; spec: AgentSpec; source: "pinned" | "flag" | "project" | "installation" | "default" }
   | { ok: false; problem: string };
 
+/**
+ * Fail-closed (not a fallback to claude — a refusal): gemini's own
+ * `.gemini/` config loads hooks and MCP servers unconditionally
+ * (provider.ts's geminiArgv), a leak claude and codex both now close for
+ * review with a dedicated isolation argv. Until gemini earns the same, it
+ * is not eligible to run the reviewer phase at all — however it got
+ * resolved: pinned, flagged, or configured.
+ */
+function reviewEligible(phase: Phase, spec: AgentSpec): string | null {
+  return phase === "review" && spec.provider === "gemini"
+    ? "gemini has no isolation posture for the review phase yet (its own config can load hooks and MCP servers) — pin review to claude or codex"
+    : null;
+}
+
 export function resolvePhaseAgent(
   store: Store,
   phase: Phase,
@@ -48,6 +62,8 @@ export function resolvePhaseAgent(
       return { ok: false, problem: `the task is pinned to unknown provider \`${ref.agentProvider}\`` };
     }
     const spec: AgentSpec = { provider: ref.agentProvider, model: ref.agentModel };
+    const ineligible = reviewEligible(phase, spec);
+    if (ineligible !== null) return { ok: false, problem: ineligible };
     const valid = validateSpec(spec);
     return valid.ok ? { ok: true, spec, source: "pinned" } : { ok: false, problem: valid.problem };
   }
@@ -57,6 +73,8 @@ export function resolvePhaseAgent(
       return { ok: false, problem: `unknown provider \`${flags.provider}\`` };
     }
     const spec: AgentSpec = { provider: flags.provider, model: flags.model ?? null };
+    const ineligible = reviewEligible(phase, spec);
+    if (ineligible !== null) return { ok: false, problem: ineligible };
     const valid = validateSpec(spec);
     return valid.ok ? { ok: true, spec, source: "flag" } : { ok: false, problem: valid.problem };
   }
@@ -89,6 +107,8 @@ export function resolvePhaseAgent(
   // whole from the row that named the provider.
   const model = flags.model ?? (row !== null ? row.model : null);
   const spec: AgentSpec = { provider, model };
+  const ineligible = reviewEligible(phase, spec);
+  if (ineligible !== null) return { ok: false, problem: ineligible };
   const valid = validateSpec(spec);
   return valid.ok ? { ok: true, spec, source: flags.model !== undefined ? "flag" : source } : { ok: false, problem: valid.problem };
 }
