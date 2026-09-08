@@ -68,6 +68,8 @@ describe("Never Stuck dispatch diagnosis", () => {
       condition: "waiting",
       code: "no-worker-registered",
       action: "start-worker",
+      summary: "Builder not connected",
+      detail: "This project has not been connected to a builder yet.",
     });
 
     enroll(store);

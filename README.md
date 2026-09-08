@@ -90,21 +90,21 @@ Node, so it works too). `npm install -g standing-orders` gives you the
 bare `standing-orders` command for later.
 
 `up` prints your login once (and saves it beside the database as
-`up-login.txt`), opens the console in your browser, registers this machine
-as a worker, and watches the repository. Sign in with that login; from
+`up-login.txt`), opens the app in your browser, connects this machine as the
+project's builder, and watches the repository. Sign in with that login; from
 then on the console is the product. Starting it again later asks for your
 password once and reuses everything.
 
 To reach it from your phone over a tailnet:
 `standing-orders up --host 0.0.0.0 --allow-host <your-machine>.ts.net:4180`.
 
-If the inbox says **Nothing will build: no worker is answering**, run
-`standing-orders up` on the machine that should build; `standing-orders
-runner register <name> --repo <path> --token-file <path>` is the long-hand
-road for a worker on another machine.
+If the inbox says **Builder disconnected**, reopen Standing Orders on the
+machine where that project lives; queued work resumes automatically. If the
+project has never had a builder, run `standing-orders up` from that project on
+the machine that should do the work.
 
-If you would rather bring your own account name and password, start the
-console alone with `standing-orders serve --repo .`: with no account yet it
+Advanced deployments can start the console alone with
+`standing-orders serve --repo .`: with no account yet it
 prints a six-digit setup code, and the login page offers **create the
 first account** — enter the code, pick a username and password, and you are
 in. A second person joins by invite link from the people page, never by
@@ -113,13 +113,14 @@ another setup code.
 ```sh
 npx standing-orders demo               # a seeded sandbox — see it working in 90 seconds, zero spend
 npx standing-orders                    # what's in flight across your repos — read-only, zero config
-npx standing-orders daemon install …   # the unattended loop, as a verified OS service — no crontab
 ```
 
 ## Getting started
 
-Two roads to the same plane. Both start with `standing-orders up` running
-in the repository, which is the console and the worker in one process.
+There is one normal road: keep `standing-orders up` running in the repository.
+It is the app and its builder together. The separate console, worker, and OS
+service commands documented later are advanced deployment tools for people
+splitting those parts across machines.
 
 ### In the console
 
@@ -299,9 +300,11 @@ One pass: take the ready set, skip what nobody approved, claim what is left — 
 
 It is deliberately a pass and not a daemon: point cron at it and the fences make repetition safe — a second pass finds the first's work done and converges to `empty` (exit 3) instead of building anything twice. A broken build marks its task `failed` and the pass exits 1 even if other tasks succeeded, because exit 0 has to mean "nothing needs you". Refusals that are really a person's pending decision — a scope nobody approved, or one that changed after approval — leave the task queued and untouched.
 
-## No crontab required
+## Advanced: a separate background builder
 
-The loop manages itself as an OS service — launchd on macOS, systemd on
+Normal local use does not require this section: `standing-orders up` is the
+product command. For a remote or split deployment, the builder loop can manage
+itself as an OS service — launchd on macOS, systemd on
 Linux, Task Scheduler on Windows, chosen automatically — so "set it
 running" is one command, and reboots and crashes are the supervisor's
 problem:

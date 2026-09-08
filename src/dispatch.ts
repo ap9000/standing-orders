@@ -255,14 +255,21 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   const eligible = ref.assignedRunner === null ? bound : bound.filter(one => one.name === ref.assignedRunner);
   if (eligible.length === 0) {
     const detail = ref.assignedRunner === null
-      ? all.length === 0 ? "No worker is registered yet." : "Workers exist, but none is registered for this project."
-      : `This task is reserved for ${ref.assignedRunner}, but that worker is not registered for this project.`;
-    return answer("no-worker-registered", "waiting", "No eligible worker", `${detail} Run standing-orders up on the machine that should build.`, { action: "start-worker", role });
+      ? all.length === 0
+        ? "This project has not been connected to a builder yet."
+        : "Your connected builders do not include this project yet."
+      : `This task is assigned to ${ref.assignedRunner}, but that builder is not connected to this project.`;
+    return answer("no-worker-registered", "waiting", "Builder not connected", detail, { action: "start-worker", role });
   }
   const alive = eligible.filter(one => isAlive(one, now));
   if (alive.length === 0) {
-    const last = eligible.map(one => one.heartbeatAt).sort().at(-1) ?? null;
-    return answer("no-worker-online", "waiting", "No worker online", `The eligible worker${eligible.length === 1 ? " is" : "s are"} not answering${last === null ? "" : `; last heard ${last}`}. Nothing will start until it answers. Run standing-orders up on the machine that should build.`, { action: "start-worker", role });
+    return answer(
+      "no-worker-online",
+      "waiting",
+      "Builder disconnected",
+      `${eligible.length === 1 ? "The builder for this project has" : "All builders for this project have"} stopped checking in. This task starts automatically when ${eligible.length === 1 ? "it reconnects" : "one reconnects"}.`,
+      { action: "start-worker", role },
+    );
   }
   const available = alive.filter(one => store.liveClaimCount(one.name, now) < one.capacity);
   if (available.length === 0) return answer("worker-at-capacity", "retrying", "Waiting for worker capacity", "Every eligible worker is busy; this task starts when a slot is released.", { role });

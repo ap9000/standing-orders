@@ -70,9 +70,13 @@ runtime, requires a fresh worker heartbeat before installation reports success,
 and shows the exact dispatch gate on every task. A second slice gives every
 actionable gate one **Get this task running** entrance on the task page and in
 focused chat, derived from that same diagnosis and routed to the nearest
-existing guarded repair. The worker-liveness path teaches one foreground
-command (`standing-orders up`) and keeps reboot-safe daemon installation as an
-optional follow-up. A real-Git successor certification now proves that a stale
+existing guarded repair. The builder-liveness path distinguishes a project
+that has never been connected from a known builder that disconnected:
+first-time setup teaches the single normal lifecycle command
+(`standing-orders up`), while reconnection says to reopen Standing Orders and
+that the existing task resumes automatically. Split console, worker, and OS
+service commands stay advanced plumbing rather than normal UI choices. A
+real-Git successor certification now proves that a stale
 worker is interrupted, exactly one successor completes with typed proof and
 terminal diff evidence, and a later dispatch cannot duplicate the result.
 Unattended permissions are now

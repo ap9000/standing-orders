@@ -315,10 +315,10 @@ External trackers — build what a tracker nominates, under local approvals
                                         [--base <ref>] for first attempts.
                                         Never pushes.
   standing-orders up [--repo <path>]...     one command to a working cockpit:
-                                        console + worker + browser. Mints
+                                        app + builder + browser. Mints
                                         your login on first run (saved to
                                         up-login.txt beside the database),
-                                        registers this machine as a worker,
+                                        connects this machine as a builder,
                                         and watches every named repository
                                         (none named: the current one).
                                         --no-open skips the browser;
@@ -7310,9 +7310,9 @@ async function upCommand(
       } else {
         write(`  login     one of: ${approverPlan2.approvers.join(", ")}`);
       }
-      write(`  worker    ${runnerName} is watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`);
+      write(`  builder   ${runnerName} is watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`);
       write("  The inbox checklist shows what remains before approved work builds unattended.");
-      write("  Ctrl-C stops the console and the worker together.");
+      write("  Ctrl-C stops Standing Orders on this machine.");
     }
     if (!json && !flags.has("no-open") && process.stdout.isTTY === true) openBrowser(url);
   }
@@ -7353,7 +7353,7 @@ async function upCommand(
   }
   const ticks = results.reduce((sum, one) => sum + one.result.ticks, 0);
   const built = results.reduce((sum, one) => sum + one.result.built, 0);
-  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. The worker is retired; the next \`up\` reuses its name.`);
+  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`standing-orders up\` here to reconnect this builder.`);
   return EXIT.ok;
 }
 

@@ -7248,6 +7248,15 @@ const STYLE = `
   .dispatch-recovery-body p { margin: 0; }
   .dispatch-recovery-body p + p { margin-top: .5rem; }
   .dispatch-recovery-command { display: block; margin-top: .45rem; padding: .55rem .65rem; overflow-wrap: anywhere; border-radius: .5rem; background: var(--muted); }
+  .dispatch-status[data-dispatch-status="no-worker-registered"],
+  .dispatch-status[data-dispatch-status="no-worker-online"] {
+    color: var(--foreground); border-color: color-mix(in srgb, var(--warning) 30%, var(--border));
+    background: color-mix(in srgb, var(--warning-soft) 48%, var(--glass));
+  }
+  .dispatch-status[data-dispatch-status="no-worker-registered"] .dispatch-copy > strong,
+  .dispatch-status[data-dispatch-status="no-worker-online"] .dispatch-copy > strong { color: color-mix(in srgb, var(--warning) 72%, var(--foreground)); }
+  .builder-notice { border-color: color-mix(in srgb, var(--warning) 30%, var(--border)); background: color-mix(in srgb, var(--warning-soft) 48%, var(--glass)); }
+  .builder-notice strong { color: color-mix(in srgb, var(--warning) 72%, var(--foreground)); }
   .dispatch-status[data-dispatch-status="terminal-dependency"] {
     color: var(--foreground); border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
     background: color-mix(in srgb, var(--warning-soft) 72%, var(--glass));
@@ -8968,7 +8977,7 @@ function inboxPage(chrome: Chrome, data: {
       ? ""
       : `<div class="card">` +
         `<p><strong>Getting started</strong> <span class="meta">\u2014 disappears after the first successful run</span></p>` +
-        `<p class="meta">or run <span class="mono">standing-orders up</span> in a repository \u2014 it starts the console and a worker for you.</p>` +
+        `<p class="meta">Start Standing Orders from a repository with <span class="mono">standing-orders up</span> \u2014 one command opens the app and connects that project's builder.</p>` +
         data.wizard
           .map(
             step =>
@@ -8989,11 +8998,11 @@ function inboxPage(chrome: Chrome, data: {
   const noWorker =
     data.worker.answering > 0
       ? ""
-      : `<div class="problem"><strong>Nothing will build: no worker is answering.</strong> ` +
+      : `<div class="card builder-notice" data-builder-status="${data.worker.registered === 0 ? "not-connected" : "disconnected"}">` +
         (data.worker.registered === 0
-          ? `No machine is registered as a worker yet. `
-          : `${data.worker.registered} registered, last heard ${data.worker.lastHeard === null ? "never" : escape(when(data.worker.lastHeard))}. `) +
-        `On the machine that should build, run <span class="mono">standing-orders up</span> \u2014 it registers that machine and runs the worker beside the console. Approvals below wait until then.</div>`;
+          ? `<strong>No builder is connected yet.</strong> Standing Orders is open, but no machine is connected to do project work. On the machine where the project lives, open that folder and run <span class="mono">standing-orders up</span>. Keep Standing Orders running; approved work starts automatically.`
+          : `<strong>Builder disconnected.</strong> ${data.worker.registered} builder${data.worker.registered === 1 ? " is" : "s are"} configured, last checked in ${data.worker.lastHeard === null ? "never" : escape(when(data.worker.lastHeard))}. Reopen Standing Orders on that machine. Queued work starts automatically when a builder reconnects.`) +
+        `</div>`;
 
   return screen("inbox", [
     `<h1>inbox</h1>`,
@@ -9067,7 +9076,7 @@ function systemPage(chrome: Chrome, data: {
       const sessions = data.heldSessions?.get(one.name) ?? 0;
       return (
         `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
-        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
+        `<span class="v">builder \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
       );
     });
   const worktreeCards = data.worktrees.map(tree => {
@@ -9083,7 +9092,7 @@ function systemPage(chrome: Chrome, data: {
   const watchCard =
     data.episode === null
       ? ""
-      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>background service</span>` +
+      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Standing Orders</span>` +
         `<span class="v">${
           data.episode.endedAt === null
             ? `running since ${escape(when(data.episode.startedAt))}`
@@ -9125,10 +9134,10 @@ function systemPage(chrome: Chrome, data: {
 
   return screen("system", [
     `<h1>system</h1>`,
-    `<p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p>`,
+    `<p class="hint">builders execute tasks in isolated temporary copies of each project</p>`,
     agentsCard,
     cards.length === 0
-      ? `<p class="meta">no worker machine registered yet \u2014 <code>standing-orders runner register &lt;name&gt;</code>, then <code>standing-orders daemon install</code> keeps the background service running</p>`
+      ? `<p class="meta">No builder is connected yet. On the machine where the project lives, open that folder and run <code>standing-orders up</code>.</p>`
       : `<div class="cards">${cards.join("")}</div>`,
     data.outboxPending > 0 ? `<p class="meta">notifications: ${data.outboxPending} pending delivery</p>` : "",
     (data.externalWork ?? []).length === 0
@@ -10659,7 +10668,7 @@ function homePage(chrome: Chrome, data: {
       const sessions = data.heldSessions?.get(one.name) ?? 0;
       return (
         `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
-        `<span class="v">worker \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
+        `<span class="v">builder \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
       );
     });
   const worktreeCards = data.worktrees.map(tree => {
@@ -10675,7 +10684,7 @@ function homePage(chrome: Chrome, data: {
   const watchCard =
     data.episode === null
       ? ""
-      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>background service</span>` +
+      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Standing Orders</span>` +
         `<span class="v">${
           data.episode.endedAt === null
             ? `running since ${escape(when(data.episode.startedAt))}`
@@ -10684,8 +10693,8 @@ function homePage(chrome: Chrome, data: {
   const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const fleet =
     fleetCards.length === 0
-      ? `<h2>system status</h2><p class="hint">no worker machine registered yet \u2014 <code>standing-orders runner register &lt;name&gt;</code>, then <code>standing-orders daemon install</code> keeps the background service running</p>`
-      : `<h2>system status</h2><p class="hint">workers execute builds; the background service starts them; each workspace is a temporary copy of your repo for one task</p><div class="cards">${fleetCards.join("")}</div>`;
+      ? `<h2>system status</h2><p class="hint">No builder is connected yet. On the machine where the project lives, open that folder and run <code>standing-orders up</code>.</p>`
+      : `<h2>system status</h2><p class="hint">builders execute tasks in isolated temporary copies of each project</p><div class="cards">${fleetCards.join("")}</div>`;
 
   const startHere =
     data.taskCount === 0
@@ -10694,7 +10703,7 @@ function homePage(chrome: Chrome, data: {
           `<p><strong>Nothing is queued yet — here is the whole loop:</strong></p>`,
           `<p>1. <a href="/tasks">Add a task</a> — plain words for work you want done${data.repo === null ? "" : ` in <span class="mono">${escape(data.repo)}</span>`}.</p>`,
           `<p>2. Open it and write its scope — the goal, and what it must not become. Approve exactly that.</p>`,
-          `<p>3. Leave <code>standing-orders watch</code> (or the daemon) running. Approved tasks build unattended, each on its own branch.</p>`,
+          `<p>3. Keep Standing Orders running on the builder machine. Approved tasks build unattended, each on its own branch.</p>`,
           `<p class="meta">When an agent is unsure it stops and asks — those questions land here, under \u201cwaiting on you\u201d.</p>`,
           `</div>`,
         ].join("\n")
@@ -12471,12 +12480,17 @@ function taskBody(data: {
       const recoveryControl = (() => {
         if (diagnosis.action === null || diagnosis.action === "repair-dependency") return "";
         if (diagnosis.action === "start-worker") {
+          const firstConnection = diagnosis.code === "no-worker-registered";
           return (
             `<details class="dispatch-recovery" open><summary>Get this task running</summary><div class="dispatch-recovery-body">` +
-            `<p>On the machine that should do the work, open a terminal in this project and run:</p>` +
+            (firstConnection
+              ? `<p>Standing Orders is open, but this project has not been connected to a builder yet.</p><p>On the machine where the project lives, open that folder and run:</p>`
+              : `<p>Standing Orders is open, but this project's builder stopped checking in. Reopen Standing Orders on the machine where the project lives.</p><p>If you normally start it from a terminal, open the project folder and run:</p>`) +
             `<code class="dispatch-recovery-command">standing-orders up</code>` +
-            `<p class="meta">That one command registers the machine, starts the worker and console, and immediately rechecks approved tasks. For reboot-safe operation, install the background service once from that machine with <code>standing-orders daemon install</code>.</p>` +
-            `<p><a href="/system">Check worker status →</a></p></div></details>`
+            (firstConnection
+              ? `<p class="meta">This is the normal start command: it opens the app, connects the project, and starts its builder. Keep Standing Orders running; approved tasks begin automatically.</p>`
+              : `<p class="meta">This task resumes automatically when the builder reconnects. You do not need to file or approve it again.</p>`) +
+            `<p><a href="/system">See connection status →</a></p></div></details>`
           );
         }
         const href = taskRecoveryHref(task.id, diagnosis);

@@ -6471,23 +6471,25 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // The runner was registered at T0 and has gone quiet. The task must not
     // merely say queued: it names the blocking gate and the one-command road.
     const offline = await (await fetch(url("/t/t-ready"), { headers: { cookie } })).text();
-    expect(offline).toContain('data-dispatch-status="no-worker-online"');
-    expect(offline).toContain("Nothing will start until it answers.");
+    expect(offline).toContain('id="run-status" data-dispatch-status="no-worker-online"');
+    expect(offline).toContain("Builder disconnected");
+    expect(offline).toContain("stopped checking in");
     expect(offline).toContain("standing-orders up");
     expect(offline).toContain("Get this task running");
     expect(offline).toContain('<details class="dispatch-recovery" open>');
     expect(offline).toContain('class="dispatch-recovery-command">standing-orders up</code>');
-    expect(offline).toContain("registers the machine, starts the worker and console");
-    expect(offline).toContain("standing-orders daemon install");
+    expect(offline).toContain("Reopen Standing Orders on the machine where the project lives");
+    expect(offline).toContain("This task resumes automatically when the builder reconnects");
+    expect(offline).not.toContain("standing-orders daemon install");
     expect(offline).not.toContain('data-dispatch-status="ready-to-run"');
 
     // A current heartbeat for a worker bound to this project changes the
     // same durable task to a positive, equally explicit readiness answer.
     store.touchRunner("night-shift-1", new Date());
     const ready = await (await fetch(url("/t/t-ready"), { headers: { cookie } })).text();
-    expect(ready).toContain('data-dispatch-status="ready-to-run"');
+    expect(ready).toContain('id="run-status" data-dispatch-status="ready-to-run"');
     expect(ready).toContain("every dispatch gate currently passes");
-    expect(ready).not.toContain('data-dispatch-status="no-worker-online"');
+    expect(ready).not.toContain('id="run-status" data-dispatch-status="no-worker-online"');
     expect(ready).not.toContain("Get this task running");
   });
 
@@ -8232,18 +8234,24 @@ describe("the inbox says when nothing will build (install review)", () => {
   test("no worker registered, a stale worker, and an answering worker each say the right thing", async () => {
     const cookie = await login();
     let inbox = await (await fetch(`${base}/`, { headers: { cookie } })).text();
-    expect(inbox).toContain("Nothing will build: no worker is answering.");
-    expect(inbox).toContain("No machine is registered as a worker yet.");
+    expect(inbox).toContain('data-builder-status="not-connected"');
+    expect(inbox).toContain("No builder is connected yet.");
+    expect(inbox).toContain("Standing Orders is open, but no machine is connected to do project work.");
     expect(inbox).toContain("standing-orders up");
+    expect(inbox).not.toContain("standing-orders daemon install");
 
     register(store, { name: "old-1", host: "h", capacity: 1, repos: ["/repo/main"], now: new Date(Date.now() - 30 * 24 * 60 * 60_000), newToken: () => "tok-old" });
     inbox = await (await fetch(`${base}/`, { headers: { cookie } })).text();
-    expect(inbox).toContain("Nothing will build: no worker is answering.");
-    expect(inbox).toContain("1 registered, last heard");
+    expect(inbox).toContain('data-builder-status="disconnected"');
+    expect(inbox).toContain("Builder disconnected.");
+    expect(inbox).toContain("1 builder is configured, last checked in");
+    expect(inbox).toContain("Reopen Standing Orders on that machine.");
+    expect(inbox).toContain("Queued work starts automatically when a builder reconnects.");
 
     store.touchRunner("old-1", new Date());
     inbox = await (await fetch(`${base}/`, { headers: { cookie } })).text();
-    expect(inbox).not.toContain("Nothing will build");
+    expect(inbox).not.toContain("data-builder-status=");
+    expect(inbox).not.toContain("Builder disconnected.");
   });
 });
 

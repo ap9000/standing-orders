@@ -1,5 +1,22 @@
 # Progress
 
+**2026-09-08 — One product lifecycle, with recovery copy that matches the
+actual state.** `standing-orders up` is now the only normal lifecycle exposed
+to users: it opens the app, connects the project, and runs its builder. The
+separate console, watch loop, and OS service remain available for advanced
+split or remote deployments, but normal setup, CLI help, and operator-facing
+screens no longer make people choose among that plumbing. Dispatch and UI copy
+now distinguish **Builder not connected** (this project has never been attached
+to a machine) from **Builder disconnected** (a known builder stopped checking
+in). First-time recovery explains where to start Standing Orders; reconnection
+explains that the task is already filed and approved, asks the person to reopen
+Standing Orders on the project machine, and promises automatic resume. Inbox,
+task, activity, and system-status surfaces use the same contextual language and
+do not prescribe daemon installation during an ordinary task recovery. A real
+browser pass exercised both states at 390px with no overflow or console errors.
+Final verification: 104 files / 1,928 tests passed, 12 skipped; typecheck and
+production build passed.
+
 **2026-09-08 — Never Stuck now has one front door and a certified recovery
 path.** Every actionable dispatch diagnosis on the task page and in a focused
 chat now leads with **Get this task running**. The button is derived from the

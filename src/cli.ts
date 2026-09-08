@@ -91,7 +91,7 @@ Usage
   standing-orders skills list      the guides this exact binary serves
   standing-orders skills get <name>  print one guide (version-matched, never stale)
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
-  standing-orders up               console + worker + browser, one command — the real thing
+  standing-orders up               app + builder + browser, one command — the normal start
 
 Operating the queue — \`standing-orders task\` prints the whole surface,
 and any queue command + --help prints it too
@@ -110,10 +110,10 @@ and any queue command + --help prints it too
   standing-orders chat --as <you> --token <t>
                                talk to the mate: one conversation across every
                                project; it proposes, you confirm (--say "…" for one turn)
-  standing-orders serve --repo <path>  the console; watch, decide, approve
+  standing-orders serve --repo <path>  advanced: run only the console
                                (--editor vscode with --runner: file links
                                open in VS Code on the device you browse from)
-  standing-orders watch / daemon install   the unattended loop, kept running
+  standing-orders watch / daemon install   advanced: run only the builder
   standing-orders reconcile        recover what the last stretch left behind
 
 With nothing connected it reports everything it can find below the working
