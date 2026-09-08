@@ -7236,6 +7236,18 @@ const STYLE = `
   .dispatch-status { padding: .8rem .9rem; border-radius: var(--radius); overflow: hidden; }
   .dispatch-copy { display: flex; align-items: baseline; flex-wrap: wrap; gap: .2rem .35rem; min-width: 0; }
   .dispatch-copy .meta { min-width: 0; }
+  .dispatch-action-link { margin-top: .65rem; }
+  details.dispatch-recovery { margin-top: .65rem; border: 0; padding: 0; background: transparent; box-shadow: none; }
+  details.dispatch-recovery > summary {
+    display: inline-flex; align-items: center; min-height: 2.25rem; padding: 0 .875rem; list-style: none;
+    border: 1px solid var(--primary); border-radius: calc(var(--radius) - 2px); cursor: pointer;
+    background: var(--primary); color: var(--primary-foreground); font-size: .8125rem; font-weight: 600;
+  }
+  details.dispatch-recovery > summary::-webkit-details-marker { display: none; }
+  .dispatch-recovery-body { margin-top: .65rem; padding: .7rem .75rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--glass); color: var(--foreground); }
+  .dispatch-recovery-body p { margin: 0; }
+  .dispatch-recovery-body p + p { margin-top: .5rem; }
+  .dispatch-recovery-command { display: block; margin-top: .45rem; padding: .55rem .65rem; overflow-wrap: anywhere; border-radius: .5rem; background: var(--muted); }
   .dispatch-status[data-dispatch-status="terminal-dependency"] {
     color: var(--foreground); border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
     background: color-mix(in srgb, var(--warning-soft) 72%, var(--glass));
@@ -7594,7 +7606,9 @@ const STYLE = `
   .task-chat-facts div { min-width: 0; padding: .45rem .5rem; border-radius: calc(var(--radius) - 5px); background: color-mix(in srgb, var(--muted) 58%, transparent); }
   .task-chat-facts dt { color: var(--muted-foreground); font: 400 .58rem/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }
   .task-chat-facts dd { margin: .15rem 0 0; font-size: .68rem; overflow-wrap: anywhere; }
-  .task-chat-overview-link { display: block; margin-top: .75rem; font-size: .72rem; text-decoration: none; }
+  .task-chat-overview-actions { display: grid; justify-items: start; gap: .55rem; margin-top: .75rem; }
+  .task-chat-overview-link { display: block; font-size: .72rem; text-decoration: none; }
+  .task-chat-recovery-link { min-height: 2rem; padding-inline: .7rem; font-size: .7rem; }
   .chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: .5rem .25rem 0; }
   .chat-head h1 { margin-bottom: .2rem; font-size: 1.65rem; letter-spacing: -.04em; }
   .chat-head .badge-running { margin-top: .2rem; background: color-mix(in srgb, var(--success) 11%, var(--glass)); color: var(--success); }
@@ -8025,6 +8039,8 @@ button { min-height: 44px; }
   .task-main-title { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .4rem; }
   .dispatch-copy { display: grid; gap: .2rem; }
   .dispatch-copy > strong { line-height: 1.35; }
+  .dispatch-action-link, details.dispatch-recovery > summary { width: 100%; box-sizing: border-box; justify-content: center; }
+  .dispatch-recovery-body { padding: .7rem; }
   .dependency-repair-actions { display: grid; grid-template-columns: 1fr; gap: .5rem; margin-top: .75rem; }
   .dependency-repair-actions form { display: flex; width: 100%; max-width: none; margin: 0; }
   .dependency-repair-actions form > button[type=submit] { width: 100%; }
@@ -9506,6 +9522,39 @@ type TaskChatFocus = {
 
 const taskChatHref = (taskId: string): string => `/chat?task=${encodeURIComponent(taskId)}`;
 
+/** The one task-level road from a truthful dispatch diagnosis to its nearest
+ * existing repair. This is navigation, never authority: every destination
+ * still owns its original confirmation, password, CSRF, and transactional
+ * checks. Keeping the map here also means the focused chat and task overview
+ * cannot send a person to different fixes for the same gate. */
+function taskRecoveryHref(taskId: string, diagnosis: DispatchDiagnosis | null): string | null {
+  if (diagnosis?.action === null || diagnosis?.action === undefined) return null;
+  const task = taskHref(taskId);
+  switch (diagnosis.action) {
+    case "start-worker":
+    case "repair-dependency":
+      return `${task}#run-status`;
+    case "retry-task":
+    case "unhold":
+    case "write-scope":
+      return `${task}#task-actions`;
+    case "select-agent":
+      return `${task}#scope`;
+    case "approve-scope":
+      return `${task}#approve`;
+    case "answer-decision":
+      return `${task}#decisions`;
+    case "inspect-hold":
+      return `${task}#holds`;
+    case "repair-capability":
+      return "/caps";
+    case "place-task":
+      return "/projects";
+    case "open-result":
+      return task;
+  }
+}
+
 function taskViewSwitch(taskId: string, active: "overview" | "ask"): string {
   return (
     `<nav class="task-view-switch" aria-label="task view">` +
@@ -9519,6 +9568,7 @@ function taskChatContext(focus: TaskChatFocus): string {
   const positive = focus.dispatch?.condition === "running" || focus.dispatch?.code === "ready" || focus.dispatch?.code === "planning-ready" || focus.dispatch?.code === "scouting-ready";
   const dispatchSummary = focus.dispatch?.summary ?? "Status unavailable";
   const dispatchDetail = focus.dispatch?.detail ?? "Refresh the task overview before relying on its scheduler state.";
+  const recoveryHref = taskRecoveryHref(focus.id, focus.dispatch);
   return (
     `<aside class="task-chat-context" aria-label="current task">` +
     `<div class="task-chat-context-head"><span class="eyebrow">current task</span><span class="badge badge-${escape(focus.state)}">${escape(focus.state)}</span></div>` +
@@ -9526,7 +9576,9 @@ function taskChatContext(focus: TaskChatFocus): string {
     `<p class="meta mono">${escape(focus.id)}${focus.project === null ? "" : ` · ${escape(focus.project)}`}</p>` +
     `<div class="task-chat-status${positive ? " ready" : ""}"><strong>${escape(dispatchSummary)}</strong><span>${escape(dispatchDetail)}</span></div>` +
     `<dl class="task-chat-facts"><div><dt>scope</dt><dd>${escape(focus.scope)}</dd></div><div><dt>new messages</dt><dd>task attached</dd></div></dl>` +
-    `<a class="task-chat-overview-link" href="${taskHref(focus.id)}">Open full overview →</a>` +
+    `<div class="task-chat-overview-actions">` +
+    (recoveryHref === null ? "" : `<a class="button-link task-chat-recovery-link" href="${recoveryHref}">Get this task running</a>`) +
+    `<a class="task-chat-overview-link" href="${taskHref(focus.id)}">Open full overview →</a></div>` +
     `</aside>`
   );
 }
@@ -12367,7 +12419,7 @@ function taskBody(data: {
   // it from the rest of the page.
   const dispatchStatus = (() => {
     const box = (kind: "ok" | "problem", title: string, detail: string, status?: string, controls = ""): string =>
-      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
+      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
       `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${detail}</span></div>${controls}</div>`;
 
     if (task.state !== "done") {
@@ -12416,6 +12468,20 @@ function taskBody(data: {
             `<button type="submit" class="quiet">Wait for selected task</button></form>`;
         return `<div class="dependency-repair-actions" aria-label="ways to continue this task"><p class="meta dependency-repair-help">Choose another task that must finish first, or let this task continue without it.</p>${retry}${replace}${unlink}</div>`;
       })();
+      const recoveryControl = (() => {
+        if (diagnosis.action === null || diagnosis.action === "repair-dependency") return "";
+        if (diagnosis.action === "start-worker") {
+          return (
+            `<details class="dispatch-recovery" open><summary>Get this task running</summary><div class="dispatch-recovery-body">` +
+            `<p>On the machine that should do the work, open a terminal in this project and run:</p>` +
+            `<code class="dispatch-recovery-command">standing-orders up</code>` +
+            `<p class="meta">That one command registers the machine, starts the worker and console, and immediately rechecks approved tasks. For reboot-safe operation, install the background service once from that machine with <code>standing-orders daemon install</code>.</p>` +
+            `<p><a href="/system">Check worker status →</a></p></div></details>`
+          );
+        }
+        const href = taskRecoveryHref(task.id, diagnosis);
+        return href === null ? "" : `<a class="button-link dispatch-action-link" href="${href}">Get this task running</a>`;
+      })();
       const positive = diagnosis.code === "running" || diagnosis.code === "ready" || diagnosis.code === "planning-ready" || diagnosis.code === "scouting-ready";
       const status = diagnosis.code === "ready" ? "ready-to-run" : diagnosis.code;
       const repairingDependency = diagnosis.action === "repair-dependency" && blocker !== null;
@@ -12428,7 +12494,7 @@ function taskBody(data: {
         repairingDependency ? "Choose what happens next" : diagnosis.summary,
         repairingDependency ? dependencyDetail : `${escape(diagnosis.detail)}${action}`,
         status,
-        repairControls,
+        repairControls || recoveryControl,
       );
     }
 
@@ -13164,7 +13230,7 @@ function taskBody(data: {
     `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason">` +
     `<button type="submit">hold next attempt</button></form>`;
   const actsBar = [
-    `<div class="acts-bar">`,
+    `<span id="task-actions"></span><div class="acts-bar">`,
     // While a ceremony leads the page, no other act competes as primary.
     primaryAct === null ? "" : approveForm === "" ? `<span class="primary">${primaryAct.html}</span>` : primaryAct.html,
     task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0

@@ -67,7 +67,15 @@ signed grant) exactly one fix naming what remains unmet.
 
 The first Priority 1 slice now pins the worker service to the installed Node
 runtime, requires a fresh worker heartbeat before installation reports success,
-and shows the exact dispatch gate on every task. Unattended permissions are now
+and shows the exact dispatch gate on every task. A second slice gives every
+actionable gate one **Get this task running** entrance on the task page and in
+focused chat, derived from that same diagnosis and routed to the nearest
+existing guarded repair. The worker-liveness path teaches one foreground
+command (`standing-orders up`) and keeps reboot-safe daemon installation as an
+optional follow-up. A real-Git successor certification now proves that a stale
+worker is interrupted, exactly one successor completes with typed proof and
+terminal diff evidence, and a later dispatch cannot duplicate the result.
+Unattended permissions are now
 an installation default plus a durable per-task choice: `auto` keeps the guarded
 provider classifier, while Full access seals Claude's
 `--dangerously-skip-permissions`, Codex's combined approval/sandbox bypass, or

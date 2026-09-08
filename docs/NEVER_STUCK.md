@@ -40,6 +40,10 @@ breaking automation that branches on the code.
 6. **Crashes do not create duplicate authority.** Leases expire, generation
    fences reject late writers, and a replacement runner re-proves readiness
    before taking over.
+7. **One recovery entrance, existing authority.** Operator surfaces derive
+   **Get this task running** from the typed diagnosis and route to the nearest
+   guarded action. The entrance never performs a second mutation, bypasses a
+   confirmation, or converts diagnosis into permission.
 
 ## Acceptance scenarios
 
@@ -52,6 +56,8 @@ paths:
 - failed dependency → repair card → retry blocker → edge preserved → claim still refused until the blocker completes;
 - cancelled/failed dependency → repair card → atomic replace or explicit unlink → immediate readiness re-evaluation;
 - no registered or answering worker → one-command repair;
+- crashed worker with an open run → successor interrupts and recovers it → one
+  evidence-backed completion → another dispatch proves no duplicate;
 - full worker or exhausted provider quota → retrying with honest capacity or
   reset detail;
 - completed UI work → criterion matrix plus screenshot/check/diff evidence.

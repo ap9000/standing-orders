@@ -59,6 +59,33 @@ const concludeDone = async (
   }
 };
 
+/** A real typed proof manifest for the recovery certification path. The
+ * nonce comes only from the builder brief, exactly as a provider sees it. */
+const proveChangedPath = async (
+  cwd: string,
+  args: readonly string[],
+  statement: string,
+  path: string,
+): Promise<void> => {
+  const prompt = args[args.indexOf("-p") + 1] ?? "";
+  const name = /STANDING-ORDERS-PROOF-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
+  if (name === undefined || cwd === "") return;
+  await writeFile(join(cwd, name), JSON.stringify({
+    version: 1,
+    criteria: [{
+      id: "c1",
+      statement,
+      verdict: "met",
+      how: `confirmed ${path} in the completed diff`,
+      evidence: [{ kind: "changed-path", ref: path }],
+    }],
+    checks: [],
+    changed: [path],
+    caveats: [],
+    screenshots: [],
+  }));
+};
+
 describe("tick, against real git", () => {
   let base: string;
   let repo: string;
@@ -1824,9 +1851,9 @@ describe("watch — the loop, zero tokens idle", () => {
     return { runnerToken, approverToken };
   };
 
-  const approved = async (id: string, approverToken: string) => {
+  const approved = async (id: string, approverToken: string, acceptance = "It is fixed and verified.|manual-review") => {
     await run(["task", "add", "the work", "--id", id, "--repo", repo]);
-    await run(["task", "scope", id, "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
+    await run(["task", "scope", id, "--goal", "add a guard on the payout path", "--acceptance", acceptance]);
     await run(["task", "approve", id, "--json"]);
     const digest = payload().scope.digest as string;
     await run(["task", "approve", id, "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
@@ -1902,9 +1929,10 @@ describe("watch — the loop, zero tokens idle", () => {
     expect(payload()).toMatchObject({ ok: false, reason: "watch-busy" });
   });
 
-  test("a successor recovers its predecessor's mid-flight claims before dispatching", async () => {
+  test("Never Stuck certification: a successor recovers a crashed worker, proves one result, and never duplicates it", async () => {
     const { runnerToken, approverToken } = await setup();
-    await approved("t-1", approverToken);
+    const criterion = "The recovered task commits the requested guard file.";
+    await approved("t-1", approverToken, `${criterion}|changed-path`);
 
     // The predecessor: an expired watch lease and a claim it never released,
     // its task stranded mid-flight — the crash liveness cannot see, because
@@ -1924,11 +1952,18 @@ describe("watch — the loop, zero tokens idle", () => {
     });
     store.close();
 
+    const recoveryAgent: Runner = async (_file, args, options) => {
+      const cwd = options?.cwd ?? "";
+      await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
+      await concludeDone(cwd, args, "completed", "Recovered the interrupted task and added the guard.");
+      await proveChangedPath(cwd, args, criterion, "guard.ts");
+      return { ...OK, stdout: JSON.stringify({ result: "Recovered the interrupted task and added the guard." }) };
+    };
     const code = await run([
       "watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
       "--for", "4000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
       "--json",
-    ]);
+    ], recoveryAgent);
 
     expect(code).toBe(EXIT.ok);
     // The dead incarnation's claim was recovered, and the task then built.
@@ -1941,8 +1976,24 @@ describe("watch — the loop, zero tokens idle", () => {
         .prepare("SELECT COUNT(*) AS n FROM run WHERE reason = 'interrupted'")
         .get();
       expect(Number(interrupted?.["n"])).toBe(1);
+      const runs = after.runsFor(ref);
+      expect(runs).toHaveLength(2);
+      expect(runs.map(one => one.outcome).sort()).toEqual(["built", "failed"]);
+      const built = runs.find(one => one.outcome === "built");
+      expect(built).toBeDefined();
+      expect(after.proofVerdictFor(built?.id ?? -1)?.verdict).toBe("attested");
+      expect(after.artifactsFor(built?.id ?? -1).map(one => one.kind)).toEqual(expect.arrayContaining(["handoff", "terminal-diff", "diff-stat", "proof"]));
+      const claims = after.handle.prepare("SELECT lease_id, released_at, released_by FROM claim WHERE task_ref = ? ORDER BY lease_generation").all(ref);
+      expect(claims).toHaveLength(2);
+      expect(claims.every(one => one["released_at"] !== null)).toBe(true);
+      expect(claims.filter(one => one["released_by"] === "completed")).toHaveLength(1);
     } finally {
       after.close();
     }
+
+    // A later pass converges: the accepted result cannot be built again.
+    const second = await run(["tick", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], recoveryAgent);
+    expect(second).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "empty" });
   });
 });

@@ -6474,6 +6474,11 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(offline).toContain('data-dispatch-status="no-worker-online"');
     expect(offline).toContain("Nothing will start until it answers.");
     expect(offline).toContain("standing-orders up");
+    expect(offline).toContain("Get this task running");
+    expect(offline).toContain('<details class="dispatch-recovery" open>');
+    expect(offline).toContain('class="dispatch-recovery-command">standing-orders up</code>');
+    expect(offline).toContain("registers the machine, starts the worker and console");
+    expect(offline).toContain("standing-orders daemon install");
     expect(offline).not.toContain('data-dispatch-status="ready-to-run"');
 
     // A current heartbeat for a worker bound to this project changes the
@@ -6483,6 +6488,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(ready).toContain('data-dispatch-status="ready-to-run"');
     expect(ready).toContain("every dispatch gate currently passes");
     expect(ready).not.toContain('data-dispatch-status="no-worker-online"');
+    expect(ready).not.toContain("Get this task running");
   });
 
   test("a cancelled dependency is shown as repair on both the task and queue", async () => {
@@ -7452,6 +7458,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain('class="chat-workspace task-chat-workspace"');
     expect(html).toContain('aria-label="current task"');
     expect(html).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
+    expect(html).toContain('href="/t/a#approve">Get this task running</a>');
     expect(html).toContain('name="return" value="/chat?task=a"');
     expect(html).not.toContain('id="chat-project-panel"');
     expect(html).not.toContain('data-card-kind="fleet-overview"');

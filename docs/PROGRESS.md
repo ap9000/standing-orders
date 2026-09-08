@@ -1,5 +1,28 @@
 # Progress
 
+**2026-09-08 — Never Stuck now has one front door and a certified recovery
+path.** Every actionable dispatch diagnosis on the task page and in a focused
+chat now leads with **Get this task running**. The button is derived from the
+same typed diagnosis used by the queue and atomic claim, then routes to the
+nearest existing guarded repair: scope, approval, decision, hold, capability,
+dependency, placement, retry, or worker setup. It grants no new authority and
+does not duplicate any mutation path. When the only gate is an offline worker,
+the task page explains the single foreground command, `standing-orders up`,
+which registers the machine, starts the worker and console, and immediately
+rechecks approved work; reboot-safe installation remains an explicit optional
+follow-up. Desktop and 390px browser passes verified the task and focused-chat
+flows without clipping.
+
+The crash path is now an end-to-end Never Stuck certification rather than only
+a lease unit test: a successor watch encounters a stale predecessor with an
+open run and a still-live claim, recovers it before dispatch, executes exactly
+one replacement build through the real Git path, captures a typed proof plus
+terminal diff evidence, and reaches an attested terminal result. The test then
+runs dispatch again and proves the queue is empty: two run records total (one
+interrupted predecessor, one accepted successor), one completed claim
+generation, and no duplicate execution. Final verification: 104 files / 1,928
+tests passed, 12 skipped; typecheck and production build passed.
+
 **2026-09-08 — Waiting-task recovery now speaks in outcomes, not graph
 jargon.** The task page says which named task did not finish, then asks the
 operator to choose what happens next: try failed work again, choose another
