@@ -78,6 +78,17 @@ describe("parseProof", () => {
         problemsOf({ ...sound, criteria: [{ id: "c1", statement: "look]0;pwned", verdict: "met", how: "h" }] }),
       ).toContain("criteria[0].statement-controls");
     });
+    test("how is capped at PROOF_LIMITS.criterionHow bytes: exact cap accepted, one byte over refused", () => {
+      const atCap = "h".repeat(PROOF_LIMITS.criterionHow);
+      const atCapResult = parse({ ...sound, criteria: [{ id: "c1", statement: "s", verdict: "met", how: atCap }] });
+      expect(atCapResult.ok).toBe(true);
+      if (atCapResult.ok) expect(atCapResult.proof.criteria[0].how).toBe(atCap);
+
+      const overCap = "h".repeat(PROOF_LIMITS.criterionHow + 1);
+      expect(problemsOf({ ...sound, criteria: [{ id: "c1", statement: "s", verdict: "met", how: overCap }] })).toContain(
+        "criteria[0].how-too-long",
+      );
+    });
   });
 
   describe("checks", () => {
