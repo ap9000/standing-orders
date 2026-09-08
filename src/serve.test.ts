@@ -2833,7 +2833,9 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     await boot();
     const cookie = await login();
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
-    expect(html).toContain("demo database");
+    expect(html).toContain("Chat isn’t available in demo mode");
+    expect(html).toContain("Demo data never contacts an external model. Start Standing Orders with a real project to use chat.");
+    expect(html).not.toContain("chat is off.");
   });
 
   test("the live chat overview uses the shared repair diagnosis", async () => {

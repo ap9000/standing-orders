@@ -9861,10 +9861,14 @@ function chatPage(chrome: Chrome, data: {
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
-    parts.push(`<div class="card"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`);
+    const code = (data.enabled as { code?: string }).code;
+    parts.push(
+      code === "demo"
+        ? `<div class="card"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Standing Orders with a real project to use chat.</p></div>`
+        : `<div class="card"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
+    );
     // The ceiling refusals need a restart to fix; configuration does not —
     // it is a first-class act of this console (operator request).
-    const code = (data.enabled as { code?: string }).code;
     if (data.canManage && (code === "unconfigured" || code === "unpriced" || code === "no-key")) {
       parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
     }
