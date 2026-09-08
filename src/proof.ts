@@ -445,6 +445,11 @@ export type CriterionMatrixRow = {
   state: CriterionMatrixState;
   /** Why this row is not a plain pass — empty for `pass`. */
   detail: string[];
+  /** The proof's OWN typed evidence references for this criterion, exactly
+   * as it answered them — never only the required kinds, so a render can
+   * show what was actually cited (and link the artifact behind it, where
+   * one exists). `[]` when the criterion went unanswered. */
+  answered: readonly CriterionEvidenceRef[];
 };
 
 /** Set equality, exactly — the "must equal the complete sealed git diff
@@ -484,13 +489,14 @@ function criterionMatrix(
     const base = { id: approved.id, statement: approved.statement, requiredEvidence: approved.evidence };
     const answer = answers.get(approved.id);
     if (answer === undefined) {
-      return { ...base, state: "missing", detail: [`the proof does not answer approved criterion "${approved.id}"`] };
+      return { ...base, state: "missing", detail: [`the proof does not answer approved criterion "${approved.id}"`], answered: [] };
     }
     if (answer.statement.trim() !== approved.statement.trim()) {
       return {
         ...base,
         state: "failed",
         detail: [`criterion "${approved.id}" was signed as "${approved.statement}" and the proof restates it as "${answer.statement}"`],
+        answered: answer.evidence,
       };
     }
     const detail: string[] = [];
@@ -506,6 +512,7 @@ function criterionMatrix(
       }
       if (kind === "manual-review") {
         anyManual = true;
+        detail.push(`criterion "${approved.id}" requires manual-review evidence — an operator must accept it before this can verify`);
         continue;
       }
       if (kind === "check") {
@@ -551,7 +558,7 @@ function criterionMatrix(
       }
     }
     const state: CriterionMatrixState = anyMissing ? "missing" : anyFailed ? "failed" : anyManual ? "manual-review" : "pass";
-    return { ...base, state, detail };
+    return { ...base, state, detail, answered: answer.evidence };
   });
 }
 
@@ -566,10 +573,18 @@ function criterionMatrix(
  * diff-stat and verify-command rules and BEFORE the legacy unmet check,
  * exactly as approved in the v2 plan: a proof that alters a signed
  * criterion's statement is REFUTED (the same severity as any other
- * altered term); an unanswered criterion or an evidence reference that
- * does not resolve is SHORT (a gap, not a lie). The legacy self-declared
+ * altered term); an unanswered criterion, an evidence reference that does
+ * not resolve, or a criterion capped at manual-review is SHORT (a gap, or
+ * a review a machine cannot finish, never a lie). The legacy self-declared
  * `verdict` field still runs afterward and can only downgrade further,
  * never upgrade past what the evidence proved.
+ *
+ * The changed[] vs. sealed-diff exactness check (review finding, post-v39)
+ * runs GLOBALLY, ahead of the rubric rules and independent of whether any
+ * criterion cites changed-path evidence at all — a rubric with none of
+ * those must not let an untruthful or incomplete changed[] through
+ * unchecked. An unavailable or truncated diff-stat cannot prove either
+ * direction, so it can only ever produce SHORT, never REFUTED.
  */
 export function adjudicate(input: AdjudicateInput): AdjudicateResult {
   const approvedCriteria = input.approvedCriteria ?? [];
@@ -596,12 +611,36 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     return { verdict: "short", reasons: ["the machine-captured diff is missing or failed to capture"], matrix };
   }
 
-  if (input.diffStat !== null && input.diffStat.captured && !input.diffStat.truncated) {
-    const overclaimed = proof.changed.filter(path => !input.diffStat!.paths.has(path));
+  // The claimed changed[] must equal the COMPLETE sealed diff exactly —
+  // globally, whether or not any signed criterion cites changed-path
+  // evidence at all (a rubric with none of those would otherwise let an
+  // untruthful or incomplete changed[] through unchecked). An unavailable
+  // or truncated stat cannot prove either direction, so it cannot verify:
+  // short, never refuted — "we could not check" is not "the claim is
+  // false" (the same ruling the verify-command facts make below).
+  if (input.diffStat === null || !input.diffStat.captured || input.diffStat.truncated) {
+    return {
+      verdict: "short",
+      reasons: ["the sealed diff is unavailable or truncated; the claimed changed paths cannot be verified against it"],
+      matrix,
+    };
+  }
+  {
+    const diffPaths = input.diffStat.paths;
+    const claimed = new Set(proof.changed);
+    const overclaimed = proof.changed.filter(path => !diffPaths.has(path));
     if (overclaimed.length > 0) {
       return {
         verdict: "refuted",
         reasons: [`claimed changed path${overclaimed.length > 1 ? "s" : ""} not in the sealed diff: ${overclaimed.join(", ")}`],
+        matrix,
+      };
+    }
+    const underclaimed = [...diffPaths].filter(path => !claimed.has(path));
+    if (underclaimed.length > 0) {
+      return {
+        verdict: "short",
+        reasons: [`the sealed diff touched path${underclaimed.length > 1 ? "s" : ""} the proof never claimed as changed: ${underclaimed.join(", ")}`],
         matrix,
       };
     }
@@ -620,7 +659,12 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     if (restated.length > 0) {
       return { verdict: "refuted", reasons: restated.flatMap(row => row.detail), matrix };
     }
-    const unresolved = matrix.filter(row => row.state === "missing" || row.state === "failed");
+    // manual-review folds in here too (v39 review finding): a row that
+    // needs a human's eyes is never machine-verifiable, so it must never
+    // reach "verified" or "attested" on its own — it stays "short" until
+    // an operator explicitly accepts the proof (the same act that already
+    // lets a short/refuted run read as done).
+    const unresolved = matrix.filter(row => row.state === "missing" || row.state === "failed" || row.state === "manual-review");
     if (unresolved.length > 0) {
       return { verdict: "short", reasons: unresolved.flatMap(row => row.detail), matrix };
     }
@@ -661,6 +705,9 @@ export function matrixWords(matrix: readonly CriterionMatrixRow[]): string[] {
   const lines: string[] = ["  acceptance matrix"];
   for (const row of matrix) {
     lines.push(`    [${row.state}] ${row.id}: ${row.statement} (requires: ${row.requiredEvidence.join(", ")})`);
+    if (row.answered.length > 0) {
+      lines.push(`      answered: ${row.answered.map(a => `${a.kind}: ${a.ref}`).join("; ")}`);
+    }
     for (const detail of row.detail) lines.push(`      ${detail}`);
   }
   return lines;

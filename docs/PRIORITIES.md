@@ -103,11 +103,22 @@ rubric verbatim and requires the proof to answer every criterion by its
 exact id, with typed evidence references into the same proof's checks,
 screenshots, and changed paths — never a self-declared verdict alone.
 Adjudication treats an unanswered criterion, an evidence reference that
-does not resolve, or a claimed changed-path set that does not equal the
-sealed diff exactly, as *short*; a proof that alters a signed criterion's
-statement is *refuted*, the same severity as any other altered term. A
+does not resolve, or a criterion still needing a human's `manual-review`,
+as *short* — the same bucket, so a signed rubric can never read
+*verified* or *attested* on the strength of a row nobody has actually
+looked at; an operator clears it with the same accept-anyway act a
+short/refuted proof already offers. A proof that alters a signed
+criterion's statement is *refuted*, the same severity as any other
+altered term. The claimed changed-path set is checked against the
+sealed diff GLOBALLY — every criterion, whether or not any of them cite
+`changed-path` evidence — for exact equality in both directions: a
+claimed path absent from the diff is *refuted* (a lie about presence), a
+diff path never claimed is *short* (a gap), and an unavailable or
+truncated diff-stat is *short* outright, never silently skipped. A
 screenshot answering a criterion must be a real PNG or JPEG of meaningful
 byte size and at least 320×200 pixels, read from the file's own header,
 never a claim. One shared criterion-to-evidence matrix — pass, missing,
-failed, or manual-review, per criterion — renders identically on the task,
-run, done, builds, board, inbox, and chat surfaces, and in `task show`.
+failed, or manual-review, per criterion, each row naming the proof's own
+answered evidence references (linked to the underlying artifact where
+one resolves) — renders identically on the task, run, done, builds,
+board, inbox, and chat surfaces, and in `task show`.

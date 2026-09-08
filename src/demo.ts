@@ -124,6 +124,53 @@ const DEMO_PROOF = {
   screenshots: [{ path: "evidence/payout-dashboard.png", caption: "Payout dashboard after the fix — totals match the ledger." }],
 };
 
+const DEMO_COPY_PATCH = `diff --git a/src/inbox-copy.ts b/src/inbox-copy.ts
+index a1b2c3d..d4e5f6a 100644
+--- a/src/inbox-copy.ts
++++ b/src/inbox-copy.ts
+@@ -8,5 +8,7 @@ export const EMPTY_STATE = {
+-  body: "Nothing here.",
++  body: "Nothing needs you right now — approvals, decisions, and proofs waiting on a human all land in this list.",
+ };
++
++export const EMPTY_STATE_ILLUSTRATION = "quiet-inbox";
+`;
+
+const DEMO_COPY_HANDOFF = {
+  schema: 1,
+  outcome: "built",
+  committed: true,
+  conclusion: "Rewrote the inbox's empty-state copy so it explains why the list is empty instead of just saying so.",
+  changes: ["Replaced the empty-state body copy in src/inbox-copy.ts."],
+  verification: ["Opened the inbox pane with zero items and read the new copy."],
+  followUps: [],
+  decisionsIncorporated: [],
+};
+
+/** A criterion whose only required evidence is `manual-review` (Acceptance
+ * Contract v2, review finding): no check, no screenshot, nothing a machine
+ * can resolve on its own — a human has to read the copy and say it is
+ * good. The seeded verdict below is computed by the REAL adjudicate(),
+ * so the sandbox proves the fix live: this build reads "needs
+ * verification", never "verified" or "attested", until an operator uses
+ * the same "accept anyway" act a short/refuted proof already offers. */
+const DEMO_COPY_PROOF = {
+  version: 1 as const,
+  criteria: [
+    {
+      id: "c1",
+      statement: "An operator confirms the new empty-state copy reads clearly.",
+      verdict: "met" as const,
+      how: "Opened the inbox pane with zero items and read the new copy aloud.",
+      evidence: [{ kind: "manual-review" as const, ref: "read the new copy in src/inbox-copy.ts" }],
+    },
+  ],
+  checks: [],
+  changed: ["src/inbox-copy.ts"],
+  caveats: [],
+  screenshots: [],
+};
+
 /**
  * A minimal, real, uncompressed-per-scanline PNG encoder — no image
  * library, just IHDR + one zlib-deflated IDAT + IEND. Used only to give
@@ -470,6 +517,109 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(5.5),
   });
   store.setTaskState(failed, "failed", hoursAgo(5.5));
+
+  // --- attention: needs verification (manual-review, unaccepted) --------
+  // Acceptance Contract v2's own review finding, made visible: a signed
+  // rubric can require a human's eyes ("manual-review" evidence), and
+  // that alone must cap the build below verified/attested until an
+  // operator explicitly accepts it — the SAME "accept anyway" act a
+  // short/refuted proof already uses, never a new mechanism.
+  const copyReview = task(
+    "confirm-empty-state-copy",
+    "Confirm the new inbox empty-state copy reads well",
+    repos.web,
+    "Rewrite the inbox's empty-state copy so it explains why nothing is there yet.",
+  );
+  const copyReviewProposed = propose(store, {
+    profile: DEMO_PROFILE,
+    taskId: copyReview,
+    goal: "Rewrite the inbox's empty-state copy so it explains why nothing is there yet.",
+    acceptance: [
+      {
+        id: "c1",
+        statement: "An operator confirms the new empty-state copy reads clearly.",
+        how: "Open the inbox pane with zero items and read it.",
+        evidence: ["manual-review"],
+      },
+    ],
+    now: hoursAgo(10),
+  });
+  approve(store, copyReview, "demo", hoursAgo(9), copyReviewProposed.digest, token);
+  const copyReviewRun = store.startRun({
+    taskRef: store.refFor("built-in", copyReview).id,
+    leaseId: "demo-lease-copy",
+    runner: "night-shift-1",
+    branch: `standing-orders/${copyReview}`,
+    worktree: join(repos.web, ".demo-worktree-5"),
+    now: hoursAgo(4),
+  });
+  store.stampRun(copyReviewRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
+  storeEvidence(
+    store,
+    evidenceRoot,
+    copyReviewRun,
+    "terminal-diff",
+    "terminal-diff.patch",
+    Buffer.from(DEMO_COPY_PATCH, "utf8"),
+    "git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [demo: synthetic]",
+    hoursAgo(3.6),
+  );
+  const copyStat: DiffStat = {
+    schema: 1,
+    base: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    head: "1c2d3e4f52aa01c9f3d7700e54bf8d69288fbe999",
+    fileCount: 1,
+    additions: 3,
+    deletions: 1,
+    binaryCount: 0,
+    files: [{ path: "src/inbox-copy.ts", additions: 3, deletions: 1 }],
+    filesTruncated: false,
+  };
+  storeEvidence(
+    store,
+    evidenceRoot,
+    copyReviewRun,
+    "diff-stat",
+    "diff-stat.json",
+    budgetedStatJson(copyStat),
+    "parsed from git diff --numstat -z [demo: synthetic]",
+    hoursAgo(3.6),
+  );
+  storeEvidence(
+    store,
+    evidenceRoot,
+    copyReviewRun,
+    "handoff",
+    "handoff.json",
+    Buffer.from(JSON.stringify(DEMO_COPY_HANDOFF, null, 2), "utf8"),
+    "composed at completion [demo: synthetic]",
+    hoursAgo(3.5),
+  );
+  storeEvidence(
+    store,
+    evidenceRoot,
+    copyReviewRun,
+    "proof",
+    "proof.json",
+    Buffer.from(JSON.stringify(DEMO_COPY_PROOF, null, 2), "utf8"),
+    "agent-authored proof (validated, re-serialized) [demo: synthetic]",
+    hoursAgo(3.5),
+  );
+  const copyReviewProofParse = parseProof(JSON.stringify(DEMO_COPY_PROOF));
+  const copyReviewAdjudicated = adjudicate({
+    proofArtifactPresent: true,
+    proofParse: copyReviewProofParse,
+    handoffPresent: true,
+    terminalDiffPresent: true,
+    terminalDiffCaptureStatus: "ok",
+    diffStat: { captured: true, truncated: false, paths: new Set(copyStat.files.map(one => one.path)) },
+    verifyCommand: { configured: false },
+    screenshots: [],
+    approvedCriteria: copyReviewProposed.acceptance,
+  });
+  store.saveProofVerdict(copyReviewRun, copyReviewAdjudicated.verdict, copyReviewAdjudicated.reasons, hoursAgo(3.5), copyReviewAdjudicated.matrix);
+  store.finishRun(copyReviewRun, { outcome: "built", committed: true, now: hoursAgo(3.5) });
+  store.setTaskState(copyReview, "done", hoursAgo(3.5));
 
   // --- waiting: a dependency and a hold ----------------------------------
   task("design-tokens", "Extract the design tokens package", repos.web);

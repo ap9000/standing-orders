@@ -17,7 +17,7 @@ import {
   type AcceptanceCriterion,
 } from "./scope.js";
 import { openStore, type Store } from "./store.js";
-import { adjudicate, type AdjudicateInput, type ApprovedCriterion, parseProof } from "./proof.js";
+import { adjudicate, type AdjudicateInput, type ApprovedCriterion, parseProof, PROOF_LIMITS } from "./proof.js";
 import { imageDimensions, validateScreenshotBytes } from "./evidence.js";
 
 const T0 = new Date("2026-09-07T00:00:00.000Z");
@@ -169,6 +169,63 @@ describe("proposeGuarded: the rubric is mandatory on this road, never on the bar
   });
 });
 
+// ------------------------------------------ parseProof: criterion evidence
+
+describe("parseProof: a criterion's typed evidence refs (v39) — fail closed, byte-capped, kind-checked", () => {
+  const withEvidence = (evidence: unknown) => ({
+    version: 1,
+    criteria: [{ id: "c1", statement: "s", verdict: "met", how: "h", evidence }],
+    checks: [], changed: [], caveats: [], screenshots: [],
+  });
+  const problemsOf = (evidence: unknown): string[] => {
+    const result = parseProof(JSON.stringify(withEvidence(evidence)));
+    return result.ok ? [] : result.problems.map(p => p.reason);
+  };
+
+  test("absent evidence parses to [] — a criterion the agent added beyond the rubric", () => {
+    const result = parseProof(JSON.stringify(withEvidence(undefined)));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.proof.criteria[0]?.evidence).toEqual([]);
+  });
+
+  test("must be an array", () => {
+    expect(problemsOf("nope")).toContain("bad-criteria[0].evidence");
+  });
+
+  test("caps at PROOF_LIMITS.evidencePerCriterion entries", () => {
+    const many = Array.from({ length: PROOF_LIMITS.evidencePerCriterion + 1 }, () => ({ kind: "check", ref: "npm test" }));
+    expect(problemsOf(many)).toContain("criteria[0].evidence-too-many");
+  });
+
+  test("kind must draw from the four signed kinds", () => {
+    expect(problemsOf([{ kind: "vibes", ref: "x" }])).toContain("criteria[0].evidence[0]-bad-kind");
+  });
+
+  test("ref is required prose, capped at PROOF_LIMITS.evidenceRef bytes, control-free", () => {
+    expect(problemsOf([{ kind: "check", ref: "" }])).toContain("missing-criteria[0].evidence[0].ref");
+    expect(problemsOf([{ kind: "check", ref: "x".repeat(PROOF_LIMITS.evidenceRef + 1) }])).toContain(
+      "criteria[0].evidence[0].ref-too-long",
+    );
+    expect(problemsOf([{ kind: "check", ref: "look\x1b]0;pwned\x07" }])).toContain("criteria[0].evidence[0].ref-controls");
+  });
+
+  test("a non-object entry is refused", () => {
+    expect(problemsOf(["not-an-object"])).toContain("criteria[0].evidence[0]-shape");
+  });
+
+  test("a sound multi-kind evidence list round-trips exactly", () => {
+    const sound = [
+      { kind: "check", ref: "npm test" },
+      { kind: "screenshot", ref: "e/a.png" },
+      { kind: "changed-path", ref: "src/x.ts" },
+      { kind: "manual-review", ref: "a human looked" },
+    ];
+    const result = parseProof(JSON.stringify(withEvidence(sound)));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.proof.criteria[0]?.evidence).toEqual(sound);
+  });
+});
+
 // ------------------------------------------------------------- adjudication
 
 const APPROVED: ApprovedCriterion[] = [{ id: "c1", statement: "The button opens the settings panel.", evidence: ["screenshot"] }];
@@ -204,7 +261,7 @@ describe("adjudicate: the signed rubric's rules (v39)", () => {
     expect(result.verdict).toBe("short");
     expect(result.reasons[0]).toContain('does not answer approved criterion "c1"');
     expect(result.matrix).toEqual([
-      { id: "c1", statement: APPROVED[0]!.statement, requiredEvidence: ["screenshot"], state: "missing", detail: [expect.stringContaining("c1")] },
+      { id: "c1", statement: APPROVED[0]!.statement, requiredEvidence: ["screenshot"], state: "missing", detail: [expect.stringContaining("c1")], answered: [] },
     ]);
   });
 
@@ -344,7 +401,72 @@ describe("adjudicate: the signed rubric's rules (v39)", () => {
     expect(unavailable.verdict).toBe("short");
   });
 
-  test("manual-review evidence always resolves, but caps the matrix row at manual-review, never a plain pass", () => {
+  describe("the changed[] vs. sealed-diff exactness check is GLOBAL (review finding), not tied to a changed-path criterion", () => {
+    // None of these rubrics ask for changed-path evidence at all — a
+    // rubric of pure screenshot/manual-review criteria must not let an
+    // untruthful or unverifiable changed[] slip through just because
+    // nothing in the signed matrix happens to cite it.
+    const noChangedPathCriterion: ApprovedCriterion[] = [{ id: "c1", statement: "A human liked the copy.", evidence: ["manual-review"] }];
+    const proofWith = (changed: string[]) =>
+      parseProof(
+        JSON.stringify({
+          version: 1,
+          criteria: [{ id: "c1", statement: "A human liked the copy.", verdict: "met", how: "read it", evidence: [{ kind: "manual-review", ref: "read it" }] }],
+          checks: [], changed, caveats: [], screenshots: [],
+        }),
+      );
+
+    test("an unavailable diff-stat is short globally, even with no changed-path criterion in the rubric", () => {
+      const result = adjudicate({
+        ...baseInput({ approvedCriteria: noChangedPathCriterion }),
+        proofParse: proofWith([]),
+        diffStat: { captured: false, truncated: false, paths: new Set() },
+      });
+      expect(result.verdict).toBe("short");
+      expect(result.reasons[0]).toContain("unavailable or truncated");
+    });
+
+    test("a truncated diff-stat is short globally, even with no changed-path criterion in the rubric", () => {
+      const result = adjudicate({
+        ...baseInput({ approvedCriteria: noChangedPathCriterion }),
+        proofParse: proofWith([]),
+        diffStat: { captured: true, truncated: true, paths: new Set(["src/x.ts"]) },
+      });
+      expect(result.verdict).toBe("short");
+      expect(result.reasons[0]).toContain("unavailable or truncated");
+    });
+
+    test("an overclaimed changed path (not in the sealed diff) is refuted globally — a lie about presence", () => {
+      const result = adjudicate({
+        ...baseInput({ approvedCriteria: noChangedPathCriterion }),
+        proofParse: proofWith(["src/nope.ts"]),
+        diffStat: { captured: true, truncated: false, paths: new Set(["src/real.ts"]) },
+      });
+      expect(result.verdict).toBe("refuted");
+      expect(result.reasons[0]).toContain("src/nope.ts");
+    });
+
+    test("an underclaimed sealed-diff path (touched but never claimed) is short globally — a gap, not a lie", () => {
+      const result = adjudicate({
+        ...baseInput({ approvedCriteria: noChangedPathCriterion }),
+        proofParse: proofWith(["src/x.ts"]),
+        diffStat: { captured: true, truncated: false, paths: new Set(["src/x.ts", "src/hidden.ts"]) },
+      });
+      expect(result.verdict).toBe("short");
+      expect(result.reasons[0]).toContain("src/hidden.ts");
+    });
+
+    test("an exact match still reaches the honest floor globally", () => {
+      const result = adjudicate({
+        ...baseInput({ approvedCriteria: [] }),
+        proofParse: proofWith(["src/x.ts"]),
+        diffStat: { captured: true, truncated: false, paths: new Set(["src/x.ts"]) },
+      });
+      expect(result.verdict).toBe("attested");
+    });
+  });
+
+  test("manual-review evidence always resolves the row, but never lets the BUILD read verified or attested on its own (review finding)", () => {
     const approvedManual: ApprovedCriterion[] = [{ id: "c1", statement: "A human liked the copy.", evidence: ["manual-review"] }];
     const proof = parseProof(
       JSON.stringify({
@@ -353,11 +475,32 @@ describe("adjudicate: the signed rubric's rules (v39)", () => {
         checks: [], changed: [], caveats: [], screenshots: [],
       }),
     );
-    const result = adjudicate({ ...baseInput({ approvedCriteria: approvedManual }) , proofParse: proof });
-    // Still reaches the honest floor — manual-review does not block the
-    // build from reading complete; it flags that a human still looks.
-    expect(result.verdict).toBe("attested");
+    const result = adjudicate({ ...baseInput({ approvedCriteria: approvedManual }), proofParse: proof });
+    // A row needing a human's eyes is never machine-verifiable: it stays
+    // "short" (needs verification) until an operator explicitly accepts
+    // the proof — the SAME accept-anyway act that already lets a
+    // short/refuted run read as done, not a new mechanism.
+    expect(result.verdict).toBe("short");
     expect(result.matrix[0]?.state).toBe("manual-review");
+    expect(result.matrix[0]?.answered).toEqual([{ kind: "manual-review", ref: "read the new copy in src/ui.ts" }]);
+    expect(result.reasons[0]).toContain("an operator must accept it");
+  });
+
+  test("manual-review still blocks 'verified' even when the approved verify command passes clean (the actual gap the review found)", () => {
+    const approvedManual: ApprovedCriterion[] = [{ id: "c1", statement: "A human liked the copy.", evidence: ["manual-review"] }];
+    const proof = parseProof(
+      JSON.stringify({
+        version: 1,
+        criteria: [{ id: "c1", statement: "A human liked the copy.", verdict: "met", how: "read it", evidence: [{ kind: "manual-review", ref: "read the new copy" }] }],
+        checks: [], changed: [], caveats: [], screenshots: [],
+      }),
+    );
+    const result = adjudicate({
+      ...baseInput({ approvedCriteria: approvedManual }),
+      proofParse: proof,
+      verifyCommand: { configured: true, ran: true, exitCode: 0 },
+    });
+    expect(result.verdict).toBe("short");
   });
 
   test("the legacy self-declared verdict can still downgrade an otherwise-resolved criterion, never upgrade one", () => {

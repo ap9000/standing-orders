@@ -1,5 +1,40 @@
 # Progress
 
+**2026-09-08 — Acceptance Contract v2, three review findings closed: a
+global diff check, a manual-review gate, and answered evidence on the
+matrix.** Still schema v39, `src/proof.ts`. (1) The changed-path exactness
+rule from the entry below was, in fact, only enforced INSIDE a
+criterion that itself required `changed-path` evidence — a rubric of
+pure `check`/`screenshot`/`manual-review` criteria let an untruthful or
+incomplete `changed[]` through unchecked. `adjudicate` now runs the
+exact-equality check GLOBALLY, ahead of the rubric rules: an
+unavailable or truncated diff-stat is `short` (never silently skipped),
+an overclaimed path (claimed, not in the sealed diff) is `refuted` — a
+lie about presence — and an underclaimed one (in the diff, never
+claimed) is `short` — a gap, not a lie. (2) A `manual-review` row
+resolved unconditionally before, capping nothing — a rubric with a
+verify command configured and green could read `verified` despite a
+criterion nobody had actually looked at. `manual-review` now folds into
+the same "unresolved" bucket as `missing`/`failed`: it holds the build
+at `short` until an operator uses the SAME accept-anyway act a
+short/refuted proof already offers (`proof_acceptance`, unchanged) —
+no new verdict, no new mechanism. (3) `CriterionMatrixRow` gains
+`answered`: the proof's own typed evidence refs for that criterion, not
+only the signed required kinds, persisted in `matrix_json` for free
+(additive on an already-additive column) and rendered on the task and
+run pages — linked to the underlying artifact (`evidenceLinksFor` in
+`src/serve.ts`) when a screenshot, check-log, or terminal-diff artifact
+resolves the ref, plain text otherwise. `src/demo.ts` gains a fifth
+seeded task (`confirm-empty-state-copy`) whose only criterion requires
+`manual-review` evidence, so a fresh sandbox shows finding (2) fixed
+live — "needs verification", not "verified", with the accept-anyway
+form. Contract: `proof.test.ts`, `scope.test.ts`, `builder.test.ts`,
+`stale-approval.test.ts` still pass byte for byte unmodified — none of
+this touches the digest or the grandfathering path, only what
+`adjudicate` does with a rubric already signed. Refreshed the desktop
+and mobile demo screenshots to show both fixes live. Suite 99 files /
+1825 tests.
+
 **2026-09-07 — Acceptance Contract v2: the rubric a build is judged
 against is signed before the build starts, not authored by the build
 after it sees what it did.** Priority 2's second slice, schema v39.

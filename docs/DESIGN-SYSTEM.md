@@ -74,7 +74,7 @@ ring at 2px offset on buttons and links; a ring-colored border with a soft
 | Facts | `.facts` (`.fact > .k + .v`) | `KeyValueRow` | dim mono key, ink mono value |
 | Seal | `.seal` | `DigestSeal` | the signed digest, mono, boxed in the hairline |
 | Acceptance rubric | `acceptanceCeremonyHtml` (`<ul class="recap acceptance-rubric">`) | — | one line per signed criterion — mono id, sans statement, its required evidence kinds after it; restated text above the seal, never a second amber action |
-| Criterion matrix | `.badge-manual-review` (+ existing `.badge-done`/`-failed`); `criterionMatrixHtml` / `criterionMatrixSummary` | — | one row per criterion — a state badge (pass/missing/failed/manual review), mono id, statement, required evidence; the SAME states and words on the task page, the run page, done, builds, board, inbox, and `task show` |
+| Criterion matrix | `.badge-manual-review` (+ existing `.badge-done`/`-failed`); `criterionMatrixHtml` / `criterionMatrixSummary` | — | one row per criterion — a state badge (pass/missing/failed/manual review), mono id, statement, required evidence, and the proof's own answered evidence refs (a link to the underlying artifact where one resolves, plain text otherwise); the SAME states and words on the task page, the run page, done, builds, board, inbox, and `task show` |
 | Card | `.card` | `Card` | surface, hairline, 0.5rem radius, faint shadow; never nested |
 | Buttons | `button` (secondary), `form.card > [type=submit]` (primary), `.approve-form [type=submit]` (amber), `.danger` | `Button` | one primary per form; approve is the only amber verb |
 | Fields | `input`, `textarea`, `select` | `Input` | surface-colored, hairline, hover darkens, focus halo |

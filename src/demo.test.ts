@@ -73,6 +73,24 @@ describe("the demo sandbox", () => {
     }
   });
 
+  test("a manual-review criterion caps the seeded build below verified/attested until accepted (Acceptance Contract v2 review finding)", () => {
+    const { sandbox, store } = createDemoSandbox(T0);
+    try {
+      const copyTask = store.listTasks().find(one => one.id === "confirm-empty-state-copy");
+      expect(copyTask?.state).toBe("done");
+      const runs = store.runsFor(store.refFor("built-in", "confirm-empty-state-copy").id);
+      const verdict = store.proofVerdictFor((runs[0] ?? { id: -1 }).id);
+      expect(verdict?.verdict).toBe("short");
+      expect(verdict?.matrix[0]?.state).toBe("manual-review");
+      // Unaccepted: the seed never calls acceptProof for this run — the
+      // same "accept anyway" act a short/refuted proof already offers.
+      expect(store.proofAcceptance((runs[0] ?? { id: -1 }).id)).toBeNull();
+    } finally {
+      store.close();
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
   test("the board classifier sees a full house", () => {
     const { sandbox, store } = createDemoSandbox(T0);
     try {

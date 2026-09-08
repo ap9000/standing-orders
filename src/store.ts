@@ -16710,7 +16710,10 @@ function readMatrixJson(raw: unknown): CriterionMatrixRow[] {
   if (raw === null || raw === undefined) return [];
   try {
     const parsed = JSON.parse(String(raw));
-    return Array.isArray(parsed) ? (parsed as CriterionMatrixRow[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    // `answered` is additive (post-v39 review finding): a row stored
+    // before that fix simply has none, never a throw at render.
+    return (parsed as CriterionMatrixRow[]).map(row => ({ ...row, answered: row.answered ?? [] }));
   } catch {
     return [];
   }

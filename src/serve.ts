@@ -50,7 +50,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { verdictWords as proofVerdictWords, dispatchStatusToken, type ProofVerdict, type CriterionMatrixRow } from "./proof.js";
+import { verdictWords as proofVerdictWords, dispatchStatusToken, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -2805,6 +2805,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         proofVerdict: verdict?.verdict ?? null,
         proofReasons: verdict?.reasons ?? [],
         proofMatrix: verdict?.matrix ?? [],
+        proofMatrixLinks: evidenceLinksFor(artifacts),
         proofAccepted: store.proofAcceptance(latest.id) !== null,
       };
     })();
@@ -6175,14 +6176,56 @@ function criterionMatrixSummary(matrix: readonly CriterionMatrixRow[]): string {
     : `${matrixStateBadge(worst)} <span class="badge">${passed}/${matrix.length} criteria</span>`;
 }
 
+/** Where a criterion's own typed evidence ref resolves to a stored
+ * artifact, keyed `${kind}:${ref}` — built once per run from its
+ * artifacts (v39 review finding: "link artifacts where possible"). A
+ * `changed-path` ref never gets its own per-file artifact, so every one of
+ * those shares the single terminal-diff patch, under the wildcard key. A
+ * `manual-review` ref never resolves — it names nothing machine-checkable. */
+type EvidenceLinkMap = ReadonlyMap<string, number>;
+const CHECK_LOG_CAPTURE = /^sh -c "(.+)" \(exit \d+(?:, timed out)?\)$/;
+function evidenceLinksFor(artifacts: readonly Artifact[]): EvidenceLinkMap {
+  const map = new Map<string, number>();
+  for (const artifact of artifacts) {
+    if (artifact.kind === "screenshot") {
+      const path = SCREENSHOT_CAPTURE.exec(artifact.capture)?.[1];
+      if (path !== undefined) map.set(`screenshot:${path}`, artifact.id);
+    } else if (artifact.kind === "check-log") {
+      const command = CHECK_LOG_CAPTURE.exec(artifact.capture)?.[1];
+      if (command !== undefined) map.set(`check:${command}`, artifact.id);
+    } else if (artifact.kind === "terminal-diff") {
+      map.set("changed-path:*", artifact.id);
+    }
+  }
+  return map;
+}
+
 /** The shared criterion-to-evidence matrix — one table, rendered
  * identically everywhere a build's result appears (v39). `[]` renders
  * nothing: a grandfathered run's result card is unchanged. `compact`
  * drops the per-row detail line, for surfaces that only have room for a
- * summary (board, inbox, chat, builds list). */
-function criterionMatrixHtml(matrix: readonly CriterionMatrixRow[], options: { compact?: boolean } = {}): string {
+ * summary (board, inbox, chat, builds list). Each row also names the
+ * proof's OWN answered evidence refs, not only the required kinds (review
+ * finding) — linked to the underlying artifact when `runId`/`links` are
+ * given and a link resolves; plain text otherwise. */
+function criterionMatrixHtml(
+  matrix: readonly CriterionMatrixRow[],
+  options: { compact?: boolean; runId?: number; links?: EvidenceLinkMap } = {},
+): string {
   if (matrix.length === 0) return "";
   const compact = options.compact === true;
+  const answeredHtml = (row: CriterionMatrixRow): string => {
+    const answered = row.answered ?? [];
+    if (answered.length === 0) return "";
+    const items = answered.map((a: CriterionEvidenceRef) => {
+      const text = `${escape(a.kind)}: ${escape(a.ref)}`;
+      const artifactId = options.links?.get(`${a.kind}:${a.ref}`) ?? (a.kind === "changed-path" ? options.links?.get("changed-path:*") : undefined);
+      return artifactId !== undefined && options.runId !== undefined
+        ? `<a href="/r/${options.runId}/evidence/${artifactId}">${text}</a>`
+        : text;
+    });
+    return ` <span class="meta">[answered: ${items.join(", ")}]</span>`;
+  };
   return (
     `<div class="result-section criterion-matrix"><strong>acceptance</strong><ul>` +
     matrix
@@ -6190,6 +6233,7 @@ function criterionMatrixHtml(matrix: readonly CriterionMatrixRow[], options: { c
         row =>
           `<li>${matrixStateBadge(row.state)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
           ` <span class="meta">[requires: ${row.requiredEvidence.map(escape).join(", ")}]</span>` +
+          answeredHtml(row) +
           (compact || row.detail.length === 0 ? "" : `<br><span class="meta">${row.detail.map(escape).join("; ")}</span>`) +
           `</li>`,
       )
@@ -11584,6 +11628,7 @@ function taskBody(data: {
     proofVerdict: ProofVerdict | null;
     proofReasons: string[];
     proofMatrix: CriterionMatrixRow[];
+    proofMatrixLinks: EvidenceLinkMap;
     proofAccepted: boolean;
   } | null;
   decisions: Decision[];
@@ -11718,10 +11763,10 @@ function taskBody(data: {
             `<input type="text" name="note" maxlength="500" placeholder="optional note">` +
             `<button type="submit">accept anyway</button></form>`;
       if (proof.proofVerdict === "verified") {
-        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true });
+        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks });
       }
       if (proof.proofVerdict === "attested") {
-        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true });
+        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks });
       }
       if (proof.proofVerdict === "refuted") {
         return (
@@ -11729,7 +11774,7 @@ function taskBody(data: {
             accepted ? "ok" : "problem",
             "Proof refuted",
             `<a href="/r/${proof.runId}">Build #${proof.runId}</a>'s proof disagrees with what the machine captured${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
-          ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true })
+          ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })
         );
       }
       // "short", or no verdict at all (a legacy run, or one where
@@ -11739,7 +11784,7 @@ function taskBody(data: {
           accepted ? "ok" : "problem",
           "Needs verification",
           `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, but its proof is incomplete${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
-        ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true })
+        ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })
       );
     }
     if (task.state === "cancelled") {
@@ -12865,6 +12910,9 @@ type ProofBundleView = {
   /** v39: the criterion-to-evidence matrix, one row per signed criterion —
    * `[]` when the scope this run built against signed no rubric. */
   matrix: CriterionMatrixRow[];
+  /** v39 review finding: where a row's answered evidence ref resolves to a
+   * stored artifact, for `criterionMatrixHtml` to link. */
+  matrixLinks: EvidenceLinkMap;
 };
 
 const SCREENSHOT_CAPTURE = /^agent-claimed screenshot at (.+) \(validated (?:png|jpeg)\)/;
@@ -12912,6 +12960,7 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
     checkLog,
     screenshots,
     matrix: verdictRow?.matrix ?? [],
+    matrixLinks: evidenceLinksFor(artifacts),
   };
 }
 
@@ -13081,7 +13130,7 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
     );
   }
 
-  parts.push(criterionMatrixHtml(view.matrix));
+  parts.push(criterionMatrixHtml(view.matrix, { runId, links: view.matrixLinks }));
 
   if (view.proofProblem !== null) {
     parts.push(`<p class="meta">proof: ${escape(view.proofProblem)}</p>`);
