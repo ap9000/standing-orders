@@ -16,8 +16,63 @@ interrupted only for decisions that genuinely need a human.**
 
 [Design](docs/DESIGN.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
 
-<img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/demo.svg" alt="Queue tasks, install the daemon, leave; a parked decision is answered from a phone and the tasks come back as pull requests." width="760">
+<img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/unified-chat.png" alt="Standing Orders unified chat showing a live portfolio overview across projects, active builds, decisions, and proposed next actions." width="920">
 
+<sub>One conversation across every project, backed by durable tasks—not a chat-only copy of the work.</sub>
+
+</div>
+
+## One command center, the whole loop
+
+Tell Standing Orders what outcome you want. Its planner reads the repository,
+drafts the scope and proof rubric, and asks only when an answer would materially
+change the work. You approve the exact contract once; long-running agents can
+build, review, and repair it while the control plane handles queues, dependencies,
+crashes, and decisions. The result comes back with the diff, checks, screenshots,
+and a criterion-by-criterion verdict.
+
+### Hand off in one prompt; approve exactly what will run
+
+Project and quality stay close to the prompt; expert fields appear only when
+you open them. Before execution, the approval card restates the goal,
+boundaries, evidence requirements, model, and permissions.
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/task-handoff-mobile.png" alt="Mobile chat-first task composer with one outcome prompt and progressive details." width="260">
+  &nbsp;
+  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/scope-approval.png" alt="Desktop scope approval card showing the goal, boundaries, evidence requirement, model, permissions, and approval action." width="640">
+</div>
+
+### What is in the current build
+
+- **Unified portfolio chat.** Read every project, prioritize queues, answer
+  decisions, and confirm rich action cards from one conversation. The chat
+  proposes; durable workflow state remains the source of truth.
+- **Chat-first task handoff.** The default form is one outcome prompt. The
+  repository-aware planner drafts the goal, boundaries, acceptance criteria,
+  likely files, and execution approach. Expert controls remain under **Edit
+  details**.
+- **Long-running, recoverable execution.** There is no arbitrary task
+  countdown. Installed workers survive terminal closure and reboot, recover
+  expired claims, and continue until a terminal result, a real decision, or a
+  signed no-progress/runaway breaker.
+- **Subscription-native agents.** Use the Codex and Claude logins already on
+  the machine. Dollar caps are optional; subscription usage is labeled as an
+  API-price equivalent, never presented as an API charge.
+- **Per-task autonomy with a global default.** Choose **Auto** or **Full
+  access** for the installation, then override it on any task. The exact
+  provider permission mode is sealed into the approved scope.
+- **Two quality paths.** **Default** returns deterministic proof quickly.
+  **Strict / release** adds isolated semantic review and a bounded repair loop
+  without silently widening scope or authority.
+- **Evidence-backed completion.** Every signed criterion resolves to checks,
+  changed paths, screenshots, or manual review. Missing or contradictory proof
+  says **needs verification** instead of pretending the task is done.
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/verified-result.png" alt="A verified Standing Orders result card with checks, follow-up notes, and evidence-backed completion details." width="720">
+  <br>
+  <sub>Completion is a proof bundle and a closed verdict—not an agent saying “done.”</sub>
 </div>
 
 ## Install
