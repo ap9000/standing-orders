@@ -1,7 +1,11 @@
 import { describe, test, expect } from "vitest";
 import { openStore } from "./store.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, type ModeTerms } from "./modes.js";
-import { fileAndSealUnderMode, addApprover } from "./scope.js";
+import { fileAndSealUnderMode, addApprover, type AcceptanceCriterion } from "./scope.js";
+
+const RUBRIC: AcceptanceCriterion[] = [{ id: "c1", statement: "the change is reviewed", how: null, evidence: ["manual-review"] }];
+
+
 
 const T0 = new Date("2026-08-27T12:00:00.000Z");
 const expiry = new Date(T0.getTime() + 24 * 60 * 60_000).toISOString();
@@ -119,7 +123,7 @@ describe("the mode store roads: sign, active, revoke, renew, rails", () => {
     store.createTask({ id: "t-auto", title: "auto" }, T0);
     sign(store, "/repo", "hands-off", "alex");
     const sealed = fileAndSealUnderMode(store, {
-      taskId: "t-auto", goal: "add a guard", now: T0, repo: "/repo", actor: "alex",
+      taskId: "t-auto", goal: "add a guard", acceptance: RUBRIC, now: T0, repo: "/repo", actor: "alex",
     });
     expect(sealed.ok).toBe(true);
     const scope = store.getScope("t-auto");

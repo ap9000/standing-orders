@@ -12,7 +12,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { openStore, type Store } from "./store.js";
-import { addApprover, authenticateAccount, authenticateApprover, fileAndSealUnderMode, hashPassword } from "./scope.js";
+import { addApprover, authenticateAccount, authenticateApprover, fileAndSealUnderMode, hashPassword, type AcceptanceCriterion } from "./scope.js";
+
+const RUBRIC: AcceptanceCriterion[] = [{ id: "c1", statement: "the change is reviewed", how: null, evidence: ["manual-review"] }];
+
 import { acquire, acquireIfReady } from "./claim.js";
 import { register } from "./runner.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
@@ -265,6 +268,7 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
       goal: "a guard",
       outOfScope: null,
       touches: [],
+      acceptance: RUBRIC,
       now: T0,
       repo: REPO,
       actor: "alex",
@@ -293,7 +297,7 @@ describe("the round-1 closures: escalation, mode-derived approvals, the join rac
     );
     store.createTask({ id: "t-1", title: "the work" }, T0);
     store.placeTask(store.refFor("built-in", "t-1").id, REPO);
-    const sealed = fileAndSealUnderMode(store, { taskId: "t-1", goal: "a guard", outOfScope: null, touches: [], now: T0, repo: REPO, actor: "bob" });
+    const sealed = fileAndSealUnderMode(store, { taskId: "t-1", goal: "a guard", outOfScope: null, touches: [], acceptance: RUBRIC, now: T0, repo: REPO, actor: "bob" });
     if (!sealed.ok) throw new Error("seal");
     expect(store.revokeAccount("bob", "alex", T0).ok).toBe(true);
     expect(store.getScope("t-1")?.approvedAt ?? null).toBeNull();
@@ -520,7 +524,7 @@ describe("the join road and the People screen, over HTTP", () => {
     const filed = await fetch(url("/t/t-bearer/scope"), {
       method: "POST",
       headers: { authorization: `Bearer alex:${approverToken}` },
-      body: new URLSearchParams({ goal: "guard the payout", sawDigest: "" }),
+      body: new URLSearchParams({ goal: "guard the payout", acceptance: "c1: the payout is guarded | manual-review", sawDigest: "" }),
       redirect: "manual",
     });
     expect([200, 303]).toContain(filed.status);

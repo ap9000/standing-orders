@@ -189,7 +189,7 @@ describe("the mate's turn", () => {
     store.hold(store.refFor("built-in", "in-3").id, `blocked on ${OTHER} per alex`, null, T0);
     const script = scripted([
       answer([call("recap"), call("list_repos"), call("list_decisions"), call("queue", { repo: "r1" })]),
-      answer([call("get_task", { task: "in-3" }), call("list_tasks", {}), call("propose_next", { task: "in-2" }), call("propose_task", { repo: "r2", title: "a new one", goal: "do the thing", touches: ["src/a.ts"] })]),
+      answer([call("get_task", { task: "in-3" }), call("list_tasks", {}), call("propose_next", { task: "in-2" }), call("propose_task", { repo: "r2", title: "a new one", goal: "do the thing", touches: ["src/a.ts"], acceptance: [{ id: "c1", statement: "the thing is done", evidence: ["manual-review"] }] })]),
       text("done looking"),
     ]);
     const outcome = await turn("look at everything", script.fetcher);
@@ -496,7 +496,7 @@ describe("the mate's turn", () => {
     expect(store.sealScopeApproval("in-2", "alex", T0, {}, { kind: "mode", modeDigest: "m".repeat(32) })).toBe(false);
     propose(store, { taskId: "in-2", goal: "the operator's goal", now: T0 });
     expect(store.sealScopeApproval("in-2", "alex", T0, {}, { kind: "mode", modeDigest: "m".repeat(32) })).toBe(true);
-    const filed = fileTaskProposal(store, { id: "mate-1", title: "filed by the mate", repo: INSIDE, goal: "g", filedVia: "mate", proposedVia: "mate" }, T0);
+    const filed = fileTaskProposal(store, { id: "mate-1", title: "filed by the mate", repo: INSIDE, goal: "g", acceptance: [{ id: "c1", statement: "g happens.", evidence: ["manual-review"] }], filedVia: "mate", proposedVia: "mate" }, T0);
     expect(filed).toMatchObject({ ok: true });
     expect(store.sealScopeApproval("mate-1", "alex", T0, {}, { kind: "mode", modeDigest: "m".repeat(32) })).toBe(false);
   });
@@ -577,7 +577,7 @@ describe("the mate's turn", () => {
     const ctx = { store, who, now: clock(), draft: () => 1, step: 1, readDecisions: new Map<number, number>() };
     expect(executeMateTool(ctx, "queue", { repo: "r9" })).toMatchObject({ ok: false });
     expect(executeMateTool(ctx, "list_tasks", { repo: INSIDE })).toMatchObject({ ok: false });
-    expect(executeMateTool(ctx, "propose_task", { repo: "r1", title: "x", goal: "<script>alert(1)</script>" })).toMatchObject({ ok: true });
+    expect(executeMateTool(ctx, "propose_task", { repo: "r1", title: "x", goal: "<script>alert(1)</script>", acceptance: [{ id: "c1", statement: "x", evidence: ["manual-review"] }] })).toMatchObject({ ok: true });
     expect(executeMateTool(ctx, "propose_unhold", { task: "in-1" })).toMatchObject({ ok: false, message: expect.stringContaining("no hold") });
     expect(executeMateTool(ctx, "propose_reserve", { task: "in-1", worker: "nobody" })).toMatchObject({ ok: false });
     expect(executeMateTool(ctx, "propose_cancel", { task: "out-1", reason: "r" })).toMatchObject({ ok: false, message: expect.stringContaining("not-found") });

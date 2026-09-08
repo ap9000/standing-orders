@@ -50,7 +50,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { verdictWords as proofVerdictWords, dispatchStatusToken, type ProofVerdict } from "./proof.js";
+import { verdictWords as proofVerdictWords, dispatchStatusToken, type ProofVerdict, type CriterionMatrixRow } from "./proof.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
   buildDataDocument,
@@ -102,6 +102,11 @@ import {
   chainFromJson,
   profileDigestOf,
   proposeGuarded,
+  acceptanceLinesToInput,
+  acceptanceToLines,
+  acceptanceWords,
+  parseAcceptanceCriteria,
+  type AcceptanceCriterion,
   type AttendedTerms,
   type Scope,
   type UnattendedPermissionMode,
@@ -983,7 +988,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           needsVerification: store
             .listCompletedWorkScoped(project, 10, admission)
             .filter(one => visible(one.repo) && (one.proofVerdict === "short" || one.proofVerdict === "refuted") && !one.proofAccepted)
-            .map(one => ({ taskId: one.taskId, title: one.title, verdict: one.proofVerdict as "short" | "refuted", repo: one.repo })),
+            .map(one => ({ taskId: one.taskId, title: one.title, verdict: one.proofVerdict as "short" | "refuted", repo: one.repo, matrix: one.proofMatrix })),
           cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
           wizard: wizardSteps(now),
@@ -1207,6 +1212,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           repo: row.repo,
           completedAt: row.completedAt,
           proofVerdict: row.proofVerdict as "short" | "refuted",
+          proofMatrix: row.proofMatrix,
         }),
       );
       // Instances belong to their track row, not the main lanes — the board
@@ -1539,7 +1545,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       const picked = fromTemplate === null ? null : templateByName(fromTemplate);
       const prefill =
         picked !== null && picked.kind === "task"
-          ? { title: picked.title, goal: picked.goal, not: picked.outOfScope ?? "", touches: picked.touches.join(", ") }
+          ? {
+              title: picked.title, goal: picked.goal, not: picked.outOfScope ?? "", touches: picked.touches.join(", "),
+              acceptance: acceptanceToLines(picked.acceptance).join("\n"),
+            }
           : null;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       return sendScreen(
@@ -1901,6 +1910,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 not: picked.outOfScope ?? "",
                 touches: picked.touches.join(", "),
                 schedule: picked.schedule,
+                acceptance: acceptanceToLines(picked.acceptance).join("\n"),
               }
             : null,
       }));
@@ -2794,6 +2804,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // only for a run that predates the proof system.
         proofVerdict: verdict?.verdict ?? null,
         proofReasons: verdict?.reasons ?? [],
+        proofMatrix: verdict?.matrix ?? [],
         proofAccepted: store.proofAcceptance(latest.id) !== null,
       };
     })();
@@ -3700,7 +3711,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ...(id === "" ? {} : { id }),
           title,
           ...(repo === "" ? {} : { repo }),
-          ...(goal === "" ? {} : { goal }),
+          ...(goal === "" ? {} : { goal, acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")) }),
           outOfScope: notThis === "" ? null : notThis,
           touches: touchesGiven,
           ...(permissionMode === null ? {} : { permissionMode }),
@@ -4620,9 +4631,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       // Re-validated at the act: the door runs every field check again, and
       // the fields are scanned for secrets before they become durable.
+      const acceptanceFields = candidate.draft.acceptance.flatMap(c => [c.statement, ...(c.how === null ? [] : [c.how])]);
       const fields = candidate.draft.kind === "task"
-        ? [candidate.draft.title, candidate.draft.goal, candidate.draft.outOfScope ?? "", ...candidate.draft.touches]
-        : [candidate.draft.name, candidate.draft.goal, candidate.draft.outOfScope ?? "", ...candidate.draft.touches];
+        ? [candidate.draft.title, candidate.draft.goal, candidate.draft.outOfScope ?? "", ...candidate.draft.touches, ...acceptanceFields]
+        : [candidate.draft.name, candidate.draft.goal, candidate.draft.outOfScope ?? "", ...candidate.draft.touches, ...acceptanceFields];
       if (scanForSecrets(fields.join("\n")).length > 0) {
         chat.candidates.delete(key);
         return refuse(response, who, 400, "that draft contains something credential-shaped — discarded", "/chat");
@@ -4637,6 +4649,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             goal: candidate.draft.goal,
             outOfScope: candidate.draft.outOfScope,
             touches: candidate.draft.touches,
+            acceptance: candidate.draft.acceptance,
             filedVia,
             admittedRepos: [...ceiling.repos],
           },
@@ -4657,6 +4670,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           goal: candidate.draft.goal,
           outOfScope: candidate.draft.outOfScope,
           touches: candidate.draft.touches,
+          acceptance: candidate.draft.acceptance,
           requirements: [],
           schedule: candidate.draft.schedule,
           costCeilingUsd: null,
@@ -4736,6 +4750,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           goal: (body.get("goal") ?? "").trim(),
           outOfScope: (body.get("not") ?? "").trim() || null,
           touches: (body.get("touches") ?? "").split(/[\n,]/).map(one => one.trim()).filter(one => one !== ""),
+          acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")),
           requirements: [],
           schedule: (body.get("schedule") ?? "").trim(),
           costCeilingUsd: ceilingGiven === "" ? null : Number(ceilingGiven),
@@ -4944,6 +4959,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               ` — apply the review comments recorded on build #${id}; the revision brief carries the exact batch`,
             outOfScope: sourceScope?.outOfScope ?? null,
             touches: sourceScope?.touches ?? [],
+            acceptance: sourceScope !== null && sourceScope.acceptance.length > 0
+              ? sourceScope.acceptance
+              : [{ id: "c1", statement: "The operator has reviewed this revision and written a real rubric before approving it.", how: null, evidence: ["manual-review"] as const }],
             ...(coverage?.defaultBudgetMicrousd != null ? { budgetMicrousd: coverage.defaultBudgetMicrousd } : {}),
             ...(coverage?.escalated === true ? { posture: "escalated" as const } : {}),
           },
@@ -5035,6 +5053,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               `Read the failing checks on GitHub before approving; this draft carries no log content.`,
             outOfScope: sourceScope?.outOfScope ?? null,
             touches: sourceScope?.touches ?? [],
+            acceptance: sourceScope !== null && sourceScope.acceptance.length > 0
+              ? sourceScope.acceptance
+              : [{ id: "c1", statement: "The operator has reviewed this revision and written a real rubric before approving it.", how: null, evidence: ["manual-review"] as const }],
           },
           artifact: {
             run: id,
@@ -5529,6 +5550,13 @@ export function createDecisionServer(options: ServeOptions): Server {
             title: followUp.title,
             repo: ref.repo,
             goal: followUp.goal,
+            // v39: the scout's report format does not yet draft a rubric
+            // per follow-up — a placeholder names the operator's own
+            // review as the outstanding work, the same posture a
+            // coordinator's bare intent takes.
+            acceptance: [
+              { id: "c1", statement: "The operator has reviewed this follow-up and written a real rubric before approving it.", how: null, evidence: ["manual-review"] },
+            ],
             filedVia: "console",
             proposedVia: "scout",
             ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
@@ -5653,6 +5681,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             goal: body.get("goal") ?? "",
             outOfScope: body.get("not") ?? null,
             touches: (body.get("touches") ?? "").split(/[\n,]/),
+            acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")),
             permissionMode,
             ...(budgetUsd !== null
               ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
@@ -6118,6 +6147,77 @@ export function editorFileHref(worktree: string, path: string, line?: number | n
 /** The execution profile in plain words (v24): what the password signs
  * says WHAT RUNS — provider, exact model, permissions, and the real
  * bounds — or says honestly that it cannot yet. */
+/** The state badges the criterion-to-evidence matrix renders with — one
+ * shared vocabulary, so a "failed" row reads the same shade of trouble on
+ * the task page, the run page, the board, done, builds, the inbox, and
+ * chat (v39, extending Priority 2's "one surface, six places" rule from
+ * the verdict word to the per-criterion state). */
+function matrixStateBadge(state: CriterionMatrixRow["state"]): string {
+  const cls = state === "pass" ? "badge-done" : state === "failed" ? "badge-failed" : state === "missing" ? "badge-failed" : "badge-manual-review";
+  const word = state === "pass" ? "pass" : state === "missing" ? "missing" : state === "failed" ? "failed" : "manual review";
+  return `<span class="badge ${cls}" data-matrix-state="${escape(state)}">${escape(word)}</span>`;
+}
+
+/** A one-line summary of the matrix for list rows too dense for the full
+ * table (done, builds, board, inbox) — "2/3 criteria", plus a worst-state
+ * badge so trouble is visible without opening the row. `[]` renders
+ * nothing. */
+function criterionMatrixSummary(matrix: readonly CriterionMatrixRow[]): string {
+  if (matrix.length === 0) return "";
+  const passed = matrix.filter(row => row.state === "pass").length;
+  const worst = matrix.some(row => row.state === "missing" || row.state === "failed")
+    ? "failed"
+    : matrix.some(row => row.state === "manual-review")
+      ? "manual-review"
+      : "pass";
+  return worst === "pass"
+    ? ` <span class="badge badge-done">${passed}/${matrix.length} criteria</span>`
+    : `${matrixStateBadge(worst)} <span class="badge">${passed}/${matrix.length} criteria</span>`;
+}
+
+/** The shared criterion-to-evidence matrix — one table, rendered
+ * identically everywhere a build's result appears (v39). `[]` renders
+ * nothing: a grandfathered run's result card is unchanged. `compact`
+ * drops the per-row detail line, for surfaces that only have room for a
+ * summary (board, inbox, chat, builds list). */
+function criterionMatrixHtml(matrix: readonly CriterionMatrixRow[], options: { compact?: boolean } = {}): string {
+  if (matrix.length === 0) return "";
+  const compact = options.compact === true;
+  return (
+    `<div class="result-section criterion-matrix"><strong>acceptance</strong><ul>` +
+    matrix
+      .map(
+        row =>
+          `<li>${matrixStateBadge(row.state)} <code>${escape(row.id)}</code> ${escape(row.statement)}` +
+          ` <span class="meta">[requires: ${row.requiredEvidence.map(escape).join(", ")}]</span>` +
+          (compact || row.detail.length === 0 ? "" : `<br><span class="meta">${row.detail.map(escape).join("; ")}</span>`) +
+          `</li>`,
+      )
+      .join("") +
+    `</ul></div>`
+  );
+}
+
+/** The rubric, restated above the seal (v39) — the same claim the digest
+ * line already makes ("approval binds to this exact wording") extended to
+ * the acceptance terms: an id in Plex Mono (a machine fact the proof must
+ * answer by), a statement in Plex Sans, the signed evidence kinds after
+ * it. `how` never renders here — it is advisory, never signed. Empty
+ * renders nothing: a grandfathered scope's ceremony is unchanged. */
+function acceptanceCeremonyHtml(criteria: readonly AcceptanceCriterion[]): string {
+  if (criteria.length === 0) return "";
+  return (
+    `<p class="meta">acceptance</p><ul class="recap acceptance-rubric">` +
+    criteria
+      .map(
+        c =>
+          `<li><code>${escape(c.id)}</code> ${escape(c.statement)} <span class="meta">[requires: ${c.evidence.map(escape).join(", ")}]</span></li>`,
+      )
+      .join("") +
+    `</ul>`
+  );
+}
+
 function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion" | "proposedChainJson">): string {
   if (scope.profileState === "unresolved") {
     return `<p class="meta"><strong>filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}. Restate the scope to fix it.</p>`;
@@ -6405,6 +6505,14 @@ const STYLE = `
   .badge-overdue {
     background: color-mix(in srgb, var(--muted) 58%, var(--card)); color: var(--foreground);
     border-color: var(--border);
+  }
+  /* The criterion matrix's fourth state (v39): neither a pass nor a
+     failure — evidence resolved everywhere except a manual-review kind,
+     which by design nothing here can machine-verify. Quieter than
+     badge-failed; still visibly distinct from a plain pass. */
+  .badge-manual-review {
+    background: color-mix(in srgb, var(--muted) 58%, var(--card));
+    color: color-mix(in srgb, var(--muted-foreground) 80%, var(--foreground)); border-color: var(--border);
   }
   /* "open" and "parked" are neutral facts (an open PR, a parked decision);
      the AMBER form is the attention count — the number that waits on you.
@@ -8244,7 +8352,7 @@ function inboxPage(chrome: Chrome, data: {
   /** A completed task whose proof is short or refuted and not yet accepted
    * (Priority 2) — reads "needs verification" here too, never silently
    * "done" just because the inbox does not otherwise look at finished work. */
-  needsVerification: { taskId: string; title: string; verdict: "short" | "refuted"; repo?: string | null }[];
+  needsVerification: { taskId: string; title: string; verdict: "short" | "refuted"; repo?: string | null; matrix?: CriterionMatrixRow[] }[];
   /** The first-run checklist; null once the installation has succeeded once. */
   wizard: { done: boolean; title: string; detail: string }[] | null;
   /** Whether any worker is answering right now — said at the top when none is. */
@@ -8322,7 +8430,7 @@ function inboxPage(chrome: Chrome, data: {
           .map(
             one =>
               `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> ${escape(one.title)}${chip(one.repo)}` +
-              ` <span class="badge badge-failed">${one.verdict === "refuted" ? "proof refuted" : "needs verification"}</span></p>`,
+              ` <span class="badge badge-failed">${one.verdict === "refuted" ? "proof refuted" : "needs verification"}</span>${criterionMatrixSummary(one.matrix ?? [])}</p>`,
           )
           .join("\n");
 
@@ -8807,7 +8915,7 @@ function donePage(
                 : "";
             return (
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
-              `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}${needsVerification}</p>` +
+              `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}${needsVerification}${criterionMatrixSummary(row.proofMatrix)}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
               `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}</p></div>`
             );
@@ -8933,6 +9041,19 @@ function chatFleetOverview(
       `<a class="chat-overview-item failed" href="${taskHref(task.id)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 9v4"/><path d="M12 17h.01"/><path d="m10.3 2.9-8.6 15A2 2 0 0 0 3.4 21h17.2a2 2 0 0 0 1.7-3.1l-8.6-15a2 2 0 0 0-3.4 0z"/>`)}</span>` +
         `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · failed</span></span>` +
+        `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
+    );
+  }
+  // v39: a finished task whose proof is short or refuted reads here too —
+  // the mate's own result card, one shared verdict word and matrix
+  // summary with every other surface.
+  for (const task of snapshot.tasks
+    .filter(one => one.state === "done" && (one.proofVerdict === "short" || one.proofVerdict === "refuted"))
+    .slice(0, Math.max(0, 3 - rows.length))) {
+    rows.push(
+      `<a class="chat-overview-item failed" href="${taskHref(task.id)}">` +
+        `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
+        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${task.proofVerdict === "refuted" ? "proof refuted" : "needs verification"}${criterionMatrixSummary(task.proofMatrix).length > 0 ? ` · ${task.proofMatrix.filter(one => one.state === "pass").length}/${task.proofMatrix.length} criteria` : ""}</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
     );
   }
@@ -9610,7 +9731,7 @@ function routinesPage(
     csrf: string;
     revision: number;
     problem: string | null;
-    prefill?: { name: string; goal: string; not: string; touches: string; schedule: string } | null;
+    prefill?: { name: string; goal: string; not: string; touches: string; schedule: string; acceptance: string } | null;
   },
 ): Screen {
   const fill = form.prefill ?? null;
@@ -9632,6 +9753,7 @@ function routinesPage(
           `<label>goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2">${fill === null ? "" : escape(fill.goal)}</textarea></label>`,
           `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${fill === null ? "" : escape(fill.not)}"></label>`,
           `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${fill === null ? "" : escape(fill.touches)}"></label>`,
+          `<label>acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The full test suite passes | check">${fill === null ? "" : escape(fill.acceptance)}</textarea></label>`,
           `<label>schedule <span class="meta">(every:&lt;minutes&gt; or daily:&lt;HH:MM&gt; UTC)</span><input type="text" name="schedule" placeholder="daily:03:30" value="${fill === null ? "" : escape(fill.schedule)}"></label>`,
           `<label>budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem"></label>`,
           `<button type="submit">file it \u2192 approve the standing order next</button>`,
@@ -9671,6 +9793,11 @@ function routineScreenPage(chrome: Chrome, data: {
     `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(routine.goal)}</p>` +
     `<p class="meta">not this</p><p class="recap" style="margin-top:0">${routine.outOfScope === null ? "<em>no exclusions</em>" : escape(routine.outOfScope)}</p>` +
     `<p class="meta">touches · ${routine.touches.length === 0 ? "anything" : routine.touches.map(one => escape(one)).join(", ")}</p>` +
+    (routine.acceptance.length === 0
+      ? ""
+      : `<p class="meta">acceptance</p><ul class="recap">${routine.acceptance
+          .map(c => `<li><code>${escape(c.id)}</code> ${escape(c.statement)} <span class="meta">[requires: ${c.evidence.map(escape).join(", ")}]</span></li>`)
+          .join("")}</ul>`) +
     `<p class="meta">needs · ${routine.requirements.length === 0 ? "nothing beyond the repository" : routine.requirements.map(one => escape(one)).join(", ")}</p>` +
     `<p class="meta">schedule · ${escape(scheduleSaid)}</p>` +
     `<p class="meta">budget · ${routine.costCeilingUsd === null ? "no ceiling" : `$${routine.costCeilingUsd.toFixed(2)} per rolling 7 days`}</p>` +
@@ -9928,7 +10055,7 @@ function tasksPage(
   csrf: string,
   problem: string | null,
   repo: string | null = null,
-  prefill: { title: string; goal: string; not: string; touches: string } | null = null,
+  prefill: { title: string; goal: string; not: string; touches: string; acceptance: string } | null = null,
   permissionDefault: UnattendedPermissionMode = "auto",
 ): Screen {
   const filters = TASK_STATES.map(
@@ -9969,6 +10096,7 @@ function tasksPage(
     `<label>goal <span class="meta">(optional — creates an unapproved scope)</span><textarea name="goal" rows="3">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
     `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
     `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
+    `<label>acceptance <span class="meta">(required if you fill in a goal directly — leave both blank and let "plan first" draft the rubric instead; one criterion per line: <code>statement | evidence,kinds | how</code>)</span><textarea name="acceptance" rows="3">${prefill === null ? "" : escape(prefill.acceptance)}</textarea></label>`,
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: let an agent inspect the repository and improve the scope before approval</span></span></label>`,
     `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
       `<p class="meta permission-note">Starts from the installation default. You can change it again on the task before approval.</p></fieldset>`,
@@ -11372,6 +11500,8 @@ function newTaskPage(
     `<label>title<input type="text" name="title" placeholder="Add a sliding-window rate limiter to the public API"></label>`,
     `<label>goal <span class="meta">(becomes the scope you approve — what success looks like)</span>` +
       `<textarea name="goal" rows="4" placeholder="Sliding-window rate limiting on /api/public/*, returning 429 with Retry-After"></textarea></label>`,
+    `<label>acceptance <span class="meta">(required if you fill in a goal directly — leave both blank and let "plan first" draft the rubric instead; one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review)</span>` +
+      `<textarea name="acceptance" rows="3" placeholder="Requests over the limit get 429 with Retry-After | check"></textarea></label>`,
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="plan-first" value="1" checked style="margin-top:.35rem"><span>plan first <span class="meta">— recommended: inspect the repository and draft a stronger scope before you approve anything; long planning continues while the agent is making progress</span></span></label>`,
     `<label style="display:flex;gap:.5rem;align-items:flex-start"><input type="checkbox" name="scout" value="1" style="margin-top:.35rem"><span>scout <span class="meta">— deliver a report instead of a branch: a read-only session investigates the goal as a question and writes up what it found; nothing in the repository changes</span></span></label>`,
     `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", permissionDefault)}` +
@@ -11453,6 +11583,7 @@ function taskBody(data: {
     hasHandoff: boolean;
     proofVerdict: ProofVerdict | null;
     proofReasons: string[];
+    proofMatrix: CriterionMatrixRow[];
     proofAccepted: boolean;
   } | null;
   decisions: Decision[];
@@ -11587,10 +11718,10 @@ function taskBody(data: {
             `<input type="text" name="note" maxlength="500" placeholder="optional note">` +
             `<button type="submit">accept anyway</button></form>`;
       if (proof.proofVerdict === "verified") {
-        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`);
+        return box("ok", "Complete — verified", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true });
       }
       if (proof.proofVerdict === "attested") {
-        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`);
+        return box("ok", "Complete with evidence", `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}. Review its acceptance criteria, checks, and machine-captured diff; each is labeled by source.`) + criterionMatrixHtml(proof.proofMatrix, { compact: true });
       }
       if (proof.proofVerdict === "refuted") {
         return (
@@ -11598,7 +11729,7 @@ function taskBody(data: {
             accepted ? "ok" : "problem",
             "Proof refuted",
             `<a href="/r/${proof.runId}">Build #${proof.runId}</a>'s proof disagrees with what the machine captured${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
-          ) + acceptForm
+          ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true })
         );
       }
       // "short", or no verdict at all (a legacy run, or one where
@@ -11608,7 +11739,7 @@ function taskBody(data: {
           accepted ? "ok" : "problem",
           "Needs verification",
           `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, but its proof is incomplete${detail}.${accepted ? " An operator accepted it anyway." : ""}`,
-        ) + acceptForm
+        ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true })
       );
     }
     if (task.state === "cancelled") {
@@ -11740,6 +11871,7 @@ function taskBody(data: {
               )
               .join("; ")}</p>`;
           })(),
+          acceptanceCeremonyHtml(scope.acceptance),
           `<p class="meta"><span class="seal">signs ${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>`,
           approval.approved
             ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
@@ -11854,6 +11986,7 @@ function taskBody(data: {
           `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope.goal)}</p>`,
           `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>`,
           `<p class="meta">touches \u00b7 ${scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          acceptanceCeremonyHtml(scope.acceptance),
           profileWords(scope),
           scope.budgetMicrousd === null
             ? ""
@@ -11939,6 +12072,9 @@ function taskBody(data: {
     `<label>not this<textarea name="not" rows="2">${escape(scope?.outOfScope ?? "")}</textarea></label>`,
     `<label>touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
       (scope?.touches ?? []).join("\n"),
+    )}</textarea></label>`,
+    `<label>acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The button opens the settings panel | screenshot">${escape(
+      acceptanceToLines(scope?.acceptance ?? []).join("\n"),
     )}</textarea></label>`,
     (() => {
       const defaults = data.spendDefaults ?? null;
@@ -12634,7 +12770,7 @@ function runsPage(
   rows: (Run & { taskId: string })[],
   liveIds: ReadonlySet<number>,
   nextCursor: number | null,
-  verdicts: Map<number, { verdict: ProofVerdict }> = new Map(),
+  verdicts: Map<number, { verdict: ProofVerdict; matrix?: CriterionMatrixRow[] }> = new Map(),
   accepted: ReadonlySet<number> = new Set(),
 ): Screen {
   const list =
@@ -12652,6 +12788,7 @@ function runsPage(
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
               runOutcomeBadge(run, liveIds.has(run.id)) +
               needsVerification +
+              criterionMatrixSummary(verdicts.get(run.id)?.matrix ?? []) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
               `<span class="right meta mono">${escape(when(run.startedAt))}` +
               `${run.providerStartedAt === null && run.tokensIn === null && run.tokensOut === null && run.costUsd === null ? "" : ` \u00b7 ${escape(runCostWords(run, liveIds.has(run.id)))}`}</span></p>`
@@ -12725,6 +12862,9 @@ type ProofBundleView = {
   proofProblem: string | null;
   checkLog: { text: string; artifactId: number; truncated: boolean } | null;
   screenshots: { path: string; caption: string; artifactId: number }[];
+  /** v39: the criterion-to-evidence matrix, one row per signed criterion —
+   * `[]` when the scope this run built against signed no rubric. */
+  matrix: CriterionMatrixRow[];
 };
 
 const SCREENSHOT_CAPTURE = /^agent-claimed screenshot at (.+) \(validated (?:png|jpeg)\)/;
@@ -12771,6 +12911,7 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
     proofProblem: proofView !== null && !proofView.ok ? proofView.problem : null,
     checkLog,
     screenshots,
+    matrix: verdictRow?.matrix ?? [],
   };
 }
 
@@ -12939,6 +13080,8 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
       `<p class="meta">accepted by <span class="mono">${escape(view.accepted.by)}</span> · ${escape(when(view.accepted.at))}${view.accepted.note === null ? "" : ` — ${escape(view.accepted.note)}`}</p>`,
     );
   }
+
+  parts.push(criterionMatrixHtml(view.matrix));
 
   if (view.proofProblem !== null) {
     parts.push(`<p class="meta">proof: ${escape(view.proofProblem)}</p>`);
@@ -13636,6 +13779,7 @@ function nextPage(chrome: Chrome, data: {
       `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? item.approval.goal)}</p>` +
       `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
       `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
+      (scope === null ? "" : acceptanceCeremonyHtml(scope.acceptance)) +
       `<label>your password, typed again — a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>` +
       `<div class="sticky-actions"><button type="submit">approve this scope</button></div>` +
       `</form>` +

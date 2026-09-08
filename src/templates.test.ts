@@ -26,6 +26,7 @@ describe("the template library is honest data", () => {
             goal: one.goal,
             outOfScope: one.outOfScope,
             touches: one.touches,
+            acceptance: one.acceptance,
             requirements: one.requirements,
             schedule: one.schedule,
             singleFlight: true,

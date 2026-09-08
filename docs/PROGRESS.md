@@ -1,5 +1,47 @@
 # Progress
 
+**2026-09-07 — Acceptance Contract v2: the rubric a build is judged
+against is signed before the build starts, not authored by the build
+after it sees what it did.** Priority 2's second slice, schema v39.
+`src/scope.ts`: `AcceptanceCriterion` (`id`, `statement`, advisory `how`,
+signed `evidence` kinds drawn from `check`/`screenshot`/`changed-path`/
+`manual-review`) and a 422 parser (`parseAcceptanceCriteria`) shared by
+every authoring surface; `digestOf` folds the canonicalized rubric in
+only when non-empty — sorted by id, `how` dropped — the same
+absent-equals-empty rule `budgetMicrousd` set in v15, so a scope proposed
+before this migration digests to the exact bytes it always has. The
+rubric is mandatory, but not through the digest or the primitive: `propose`
+stays permissive (existing fixtures, routines, and internal callers are
+untouched); every ROAD that produces a scope now refuses an empty one —
+`proposeGuarded` (the task editor, mate scope rewrites), `store.createConsoleTask`
+(the door every filing surface funnels through: new-task forms, chat,
+templates, intake, coordinator filings), `validateRoutineTerms` (routine
+creation — a firing copies the template's rubric forward, never
+re-authors one), and `parsePlan` (the planner drafts one alongside goal
+and touches, required like every other contract field). `src/builder.ts`:
+the brief quotes the signed rubric verbatim inside the fenced scope block,
+and the proof instructions ask for typed evidence references — `checks`'
+command, `screenshots`' path, or a `changed` path, by exact criterion id —
+instead of a self-declared claim alone. `src/proof.ts`: `adjudicate` gains
+`approvedCriteria` (empty runs the v1 rules byte for byte — the
+grandfathering promise, golden-tested) and a `criterionMatrix` computed
+once alongside the verdict: an unanswered criterion or an evidence
+reference that does not resolve reads `short`; a proof that restates a
+signed statement reads `refuted`, the same severity as any other altered
+term; `changed-path` evidence now requires the proof's claimed paths to
+equal the sealed diff exactly (both directions, not the v1 subset check),
+and an unavailable or truncated diff cannot satisfy it. `src/evidence.ts`:
+`imageDimensions` reads PNG IHDR and JPEG SOF headers directly (never
+decoding, never trusting a claim) — screenshot evidence needs a real file
+of at least 1024 bytes and 320×200 pixels or it cannot verify. The matrix
+(`pass`/`missing`/`failed`/`manual-review` per criterion) is computed once,
+stored beside the verdict (`proof_verdict.matrix_json`), and rendered by
+one shared function on the task page, the run page's evidence bundle,
+`/done`, `/runs`, the board's unverified-done card, the inbox, and
+`task show`. The rubric itself renders above the approval seal on both
+ceremony surfaces and the read-only scope card — restated text, never a
+second amber action. Suite 99 files / 1810 tests.
+
 **2026-09-07 — Verified done: a typed proof, adjudicated against the
 plane's own evidence, replaces presence-only "complete with evidence."**
 Priority 2's first slice. `src/proof.ts` (new): a scout-report-shaped 422

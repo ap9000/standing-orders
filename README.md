@@ -72,9 +72,13 @@ in the repository, which is the console and the worker in one process.
 2. **File a task** with **+ new task**: a title and a goal in plain words.
    Tick **scout** if you want a report instead of a branch — a read-only
    investigation that answers the goal as a question.
-3. **Approve it.** The task page opens on the approval ceremony: the exact
-   scope you are signing, the provider and model it will run on, and your
-   password. Nothing spends a token until this yes.
+3. **Write the acceptance rubric, then approve it.** A scope needs at
+   least one criterion — a plain outcome statement and the evidence kind
+   (check, screenshot, changed-path, or manual review) that will answer
+   it — before it can be signed; the planner drafts one for you when you
+   plan first. The task page opens on the approval ceremony: the exact
+   scope AND rubric you are signing, the provider and model it will run
+   on, and your password. Nothing spends a token until this yes.
 4. **Watch it build.** The **board** moves the card to *building*; the
    card's own page shows the stage and the live transcript; **peek**
    (`/peek`, or *peek at the live ones →* on the builds page) shows every
@@ -84,8 +88,9 @@ in the repository, which is the console and the worker in one process.
    arrives in the inbox, on `/next`, and on your phone if Telegram is
    paired; one tap answers it and the build resumes.
 6. **Collect the result.** A build lands in *done recently* with its diff,
-   its evidence bundle — acceptance criteria, checks, screenshots for
-   UI-facing work — and a closed verdict: *verified* when the repository's
+   its evidence bundle — a matrix answering your signed rubric by exact
+   criterion id, pass/missing/failed/manual-review, checks, screenshots
+   for UI-facing work — and a closed verdict: *verified* when the repository's
    approved verification command passed, *attested* when none is
    configured and nothing contradicts the proof, or *needs verification*
    when the proof is missing, incomplete, or disagrees with what the
@@ -106,7 +111,8 @@ conversation across every project, which only ever proposes.
 
 ```sh
 standing-orders task add "Give outbound webhooks a bounded retry policy" --id retries --repo .
-standing-orders task scope retries --goal "Exponential backoff, dead-letter after 24h, no payload changes"
+standing-orders task scope retries --goal "Exponential backoff, dead-letter after 24h, no payload changes" \
+  --acceptance "A failing webhook retries with exponential backoff and dead-letters after 24h.|check"
 standing-orders task show retries --json          # the scope's digest is what you sign
 standing-orders task approve retries --as you --digest <digest> --yes   # asks for your password
 

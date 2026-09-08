@@ -53,7 +53,7 @@ describe("coordinator proposals (mate arc v3): the gateway proposes, an admitted
   });
 
   test("a coordinator-written scope never seals under a mode; a stale card refuses; the hourly rate and the pending cap hold", () => {
-    expect(proposeAsCoordinator(store, token, "scope", { ref: "a", goal: "the bot's goal" }, T0)).toMatchObject({ ok: true, id: 1 });
+    expect(proposeAsCoordinator(store, token, "scope", { ref: "a", goal: "the bot's goal", acceptance: [{ id: "c1", statement: "the bot's goal happens", evidence: ["manual-review"] }] }, T0)).toMatchObject({ ok: true, id: 1 });
     const alex = principal("alex", [REPO]);
     expect(confirmCoordinatorProposal(store, alex, 1, T0, { via: "cli" })).toMatchObject({ ok: true });
     expect(store.getScope("a")?.goal).toBe("the bot's goal");

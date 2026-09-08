@@ -231,6 +231,7 @@ describe("boardScoped — one snapshot, all the facts", () => {
       goal: "do the thing",
       outOfScope: null,
       touches: [],
+      acceptance: [],
       proposedAt: T0.toISOString(),
       digest: "d1",
       approvedAt: T0.toISOString(),

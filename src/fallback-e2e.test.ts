@@ -171,7 +171,7 @@ describe("the fallback chain end-to-end (E3d)", () => {
     }
 
     // Scope + approve: the signed digest binds the WHOLE chain.
-    await run(["task", "scope", "t-fb", "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", "t-fb", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-fb", "--json"]);
     const digest = payload().scope.digest as string;
     await run(["task", "approve", "t-fb", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
@@ -234,7 +234,7 @@ describe("the fallback chain end-to-end (E3d)", () => {
       store.setFallbackConfig(repo, [{ provider: "gemini", model: "gemini-2.5-pro", authMode: "api-key" }], "alex", T0);
       store.close();
     }
-    await run(["task", "scope", "t-nogrant", "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", "t-nogrant", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-nogrant", "--json"]);
     const digest = payload().scope.digest as string;
     await run(["task", "approve", "t-nogrant", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);

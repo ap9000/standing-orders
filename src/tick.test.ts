@@ -132,7 +132,7 @@ describe("tick, against real git", () => {
 
   const queueApproved = async (id: string, approverToken: string) => {
     await run(["task", "add", "the work", "--id", id, "--repo", repo]);
-    await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", id, "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", id, "--json"]);
     const digest = payload().scope.digest as string;
     await run([
@@ -729,7 +729,7 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
 
     for (const id of ["t-1", "t-2", "t-3"]) {
       await run(["task", "add", "the work", "--id", id, "--repo", repo]);
-      await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
+      await run(["task", "scope", id, "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
       await run(["task", "approve", id, "--json"]);
       const digest = payload().scope.digest as string;
       await run([
@@ -808,7 +808,7 @@ describe("gaps", () => {
 
   const approvedTask = async (id: string, approverToken: string, caps: string) => {
     await run(["task", "add", "the work", "--id", id, "--repo", repo]);
-    await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", id, "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", id, "--json"]);
     const digest = payload().scope.digest as string;
     await run([
@@ -980,7 +980,7 @@ describe("the outbox", () => {
     // v24: approvals bind exact routing — the install names its model once.
     await runWith(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approver, "--json"]);
     await runWith(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
-    await runWith(["task", "scope", "t-1", "--goal", "add a guard"]);
+    await runWith(["task", "scope", "t-1", "--goal", "add a guard", "--acceptance", "It is fixed and verified.|manual-review"]);
     await runWith(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
     await runWith(["task", "approve", "t-1", "--yes", "--digest", digest, "--as", "alex", "--token", approver]);
@@ -1051,7 +1051,7 @@ describe("the morning briefing", () => {
 
   const approvedTask = async (id: string, approver: string) => {
     await run(["task", "add", "the work", "--id", id, "--repo", repo]);
-    await run(["task", "scope", id, "--goal", "add a guard"]);
+    await run(["task", "scope", id, "--goal", "add a guard", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", id, "--json"]);
     const digest = payload().scope.digest as string;
     await run(["task", "approve", id, "--yes", "--digest", digest, "--as", "alex", "--token", approver]);
@@ -1178,7 +1178,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
-    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
     await run([
@@ -1377,7 +1377,7 @@ describe("decide, end to end — the morning answers and the machine hears it", 
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
-    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
     await run([
@@ -1611,7 +1611,7 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
-    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
     await run(["task", "approve", "t-1", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
@@ -1709,7 +1709,7 @@ describe("the bridge, end to end — a tap on a phone resumes the night", () => 
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "the work", "--id", "t-1", "--repo", repo]);
-    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", "t-1", "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", "t-1", "--json"]);
     const digest = payload().scope.digest as string;
     await run(["task", "approve", "t-1", "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);
@@ -1826,7 +1826,7 @@ describe("watch — the loop, zero tokens idle", () => {
 
   const approved = async (id: string, approverToken: string) => {
     await run(["task", "add", "the work", "--id", id, "--repo", repo]);
-    await run(["task", "scope", id, "--goal", "add a guard on the payout path"]);
+    await run(["task", "scope", id, "--goal", "add a guard on the payout path", "--acceptance", "It is fixed and verified.|manual-review"]);
     await run(["task", "approve", id, "--json"]);
     const digest = payload().scope.digest as string;
     await run(["task", "approve", id, "--yes", "--digest", digest, "--as", "alex", "--token", approverToken]);

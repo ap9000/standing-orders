@@ -789,7 +789,7 @@ describe("agreeing to a scope from the command line", () => {
     // v24: approvals bind exact routing — the install names its model once.
     await run(["config", "set", "build", "--provider", "claude", "--model", "sonnet", "--as", "alex", "--token", approverToken, "--json"]);
     await run(["task", "add", "fix the payouts flow", "--id", "pay"]);
-    await run(["task", "scope", "pay", "--goal", "add a guard", "--json"]);
+    await run(["task", "scope", "pay", "--goal", "add a guard", "--acceptance", "It is fixed and verified.|manual-review", "--json"]);
     return payload().scope.digest as string;
   };
   let approverToken = "";
@@ -831,7 +831,7 @@ describe("agreeing to a scope from the command line", () => {
 
   test("naming a scope that has since been rewritten is refused", async () => {
     const stale = await scopeIt();
-    await run(["task", "scope", "pay", "--goal", "rewrite the billing model"]);
+    await run(["task", "scope", "pay", "--goal", "rewrite the billing model", "--acceptance", "It is fixed and verified.|manual-review"]);
 
     const code = await run([
       "task", "approve", "pay", "--yes", "--digest", stale,
@@ -882,7 +882,7 @@ describe("routine — standing orders from the command line", () => {
 
     const filed = await run([
       "routine", "add", "nightly-deps",
-      "--repo", dir, "--goal", "Refresh the lockfile",
+      "--repo", dir, "--goal", "Refresh the lockfile", "--acceptance", "It is fixed and verified.|manual-review",
       "--schedule", "daily:03:30", "--ceiling", "5",
     ]);
     expect(filed).toBe(EXIT.ok);
@@ -925,7 +925,7 @@ describe("routine — standing orders from the command line", () => {
   test("a bad definition names every problem at once and stores nothing", async () => {
     const bad = await run([
       "routine", "add", "bad-one",
-      "--repo", dir, "--goal", "", "--schedule", "hourly", "--ceiling", "-3",
+      "--repo", dir, "--goal", "", "--acceptance", "It is fixed and verified.|manual-review", "--schedule", "hourly", "--ceiling", "-3",
     ]);
     expect(bad).toBe(EXIT.usage);
     expect(out()).toContain("goal");

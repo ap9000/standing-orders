@@ -72,6 +72,7 @@ describe("the chat snapshot", () => {
         goal: "refresh",
         outOfScope: null,
         touches: [],
+        acceptance: [{ id: "c1", statement: "It is refreshed.", evidence: ["manual-review"] }],
         requirements: [],
         schedule: "daily:03:30",
         costCeilingUsd: null,

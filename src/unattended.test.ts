@@ -154,7 +154,7 @@ describe("the night: twelve tasks, one fake clock", () => {
 
     for (const id of TASKS) {
       await run(["task", "add", `night work ${id}`, "--id", id, "--repo", repo], T0);
-      await run(["task", "scope", id, "--goal", `do exactly ${id}`], T0);
+      await run(["task", "scope", id, "--goal", `do exactly ${id}`, "--acceptance", "It is fixed and verified.|manual-review"], T0);
     }
     // t-10's approval deliberately waits until the night is underway.
     for (const id of TASKS.filter(one => one !== "t-10")) {

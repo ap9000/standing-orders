@@ -150,7 +150,7 @@ describe("standing-orders up", () => {
     configured.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date());
     configured.close();
     lines = [];
-    expect(await runOperate("task", ["scope", "t-remembered", "--goal", "a goal", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    expect(await runOperate("task", ["scope", "t-remembered", "--goal", "a goal", "--acceptance", "It is fixed and verified.|manual-review", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
     const digest = String((envelope()["scope"] as Record<string, unknown>)["digest"]);
     lines = [];
     expect(await runOperate("task", ["approve", "t-remembered", "--yes", "--digest", digest, "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
@@ -163,7 +163,7 @@ describe("standing-orders up", () => {
     lines = [];
     expect(await runOperate("task", ["add", "hands-off work", "--id", "t-hands-off", "--repo", repo, "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
     lines = [];
-    expect(await runOperate("task", ["scope", "t-hands-off", "--goal", "a goal", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
+    expect(await runOperate("task", ["scope", "t-hands-off", "--goal", "a goal", "--acceptance", "It is fixed and verified.|manual-review", "--json"], line => lines.push(line), { databaseFile: db }), lines.join("\n")).toBe(0);
     const sealed = envelope()["scope"] as Record<string, unknown>;
     expect((sealed["profile"] as Record<string, unknown>)["permissionArgv"]).toBe("bypassPermissions");
     expect(envelope()["approvedUnderMode"]).toBe(true);

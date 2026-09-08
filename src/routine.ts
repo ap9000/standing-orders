@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { hasForbiddenControls } from "./decision.js";
 import { BUILT_IN, parseCapabilityKey, type Routine, type Store } from "./store.js";
-import { authenticateApprover, digestOf, profileDigestOf, type ExecutionProfile } from "./scope.js";
+import { authenticateApprover, digestOf, profileDigestOf, parseAcceptanceCriteria, canonicalAcceptance, acceptanceWords, type ExecutionProfile, type AcceptanceCriterion } from "./scope.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
 import { reportsCost } from "./provider.js";
 
@@ -110,6 +110,9 @@ export type RoutineTerms = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  /** v39: the signed rubric every instance's scope copies forward, byte
+   * for byte, at fire time — never re-authored per firing. */
+  acceptance: AcceptanceCriterion[];
   requirements: string[];
   schedule: string;
   singleFlight: boolean;
@@ -131,6 +134,10 @@ export function routineDigestOf(terms: RoutineTerms, profile?: ExecutionProfile 
         goal: terms.goal.trim(),
         outOfScope: terms.outOfScope?.trim() ?? null,
         touches: [...terms.touches].sort(),
+        // v39: the same absent/[] equivalence a scope digest gives its
+        // rubric — a routine created before this migration, or one whose
+        // stored acceptance somehow reads back empty, digests unchanged.
+        ...(terms.acceptance.length === 0 ? {} : { acceptance: canonicalAcceptance(terms.acceptance) }),
         requirements: [...terms.requirements].sort(),
         schedule: terms.schedule,
         singleFlight: terms.singleFlight,
@@ -169,6 +176,16 @@ export function validateRoutineTerms(terms: RoutineTerms): RoutineProblem[] {
   if (terms.requirements.length > 20 || terms.requirements.some(one => parseCapabilityKey(one) === null)) {
     problems.push({ field: "requirements", problem: "capability keys, `kind:name`, at most 20" });
   }
+  // v39: this is the ONLY place a routine's rubric is authored — every
+  // firing copies it forward unchanged, never re-asks. A track that never
+  // gains one never gets past this validation, so `fireRoutine` can trust
+  // a stored routine's acceptance is non-empty without re-checking it.
+  const acceptanceParse = parseAcceptanceCriteria(terms.acceptance);
+  if (acceptanceParse.problems.length > 0) {
+    problems.push({ field: "acceptance", problem: acceptanceParse.problems.map(p => p.message).join("; ") });
+  } else if (acceptanceParse.criteria.length === 0) {
+    problems.push({ field: "acceptance", problem: "a standing order needs at least one signed acceptance criterion" });
+  }
   if (parseSchedule(terms.schedule) === null) {
     problems.push({
       field: "schedule",
@@ -195,6 +212,7 @@ export function termsOf(routine: Routine): RoutineTerms {
     goal: routine.goal,
     outOfScope: routine.outOfScope,
     touches: routine.touches,
+    acceptance: routine.acceptance,
     requirements: routine.requirements,
     schedule: routine.schedule,
     singleFlight: routine.singleFlight,
@@ -501,6 +519,7 @@ export function fireRoutine(
       goal: routine.goal,
       outOfScope: routine.outOfScope,
       touches: [...routine.touches],
+      acceptance: [...routine.acceptance],
       ...(routine.budgetPerRunMicrousd == null ? {} : { budgetMicrousd: routine.budgetPerRunMicrousd }),
     };
     // v24 (foundations 3d): the instance's profile is the routine's
@@ -548,6 +567,7 @@ export function describeRoutine(routine: Routine): string[] {
     `  goal         ${routine.goal}`,
     ...(routine.outOfScope === null ? [] : [`  not this     ${routine.outOfScope}`]),
     ...(routine.touches.length === 0 ? [] : [`  touches      ${routine.touches.join(", ")}`]),
+    ...acceptanceWords(routine.acceptance),
     ...(routine.requirements.length === 0 ? [] : [`  needs        ${routine.requirements.join(", ")}`]),
     `  project      ${routine.repo}`,
     `  schedule     ${schedule === null ? routine.schedule : describeSchedule(schedule)}`,

@@ -23,6 +23,7 @@
 import { createHash } from "node:crypto";
 import { hasForbiddenControls, hasDisguisedText } from "./decision.js";
 import { ROUTINE_NAME, parseSchedule } from "./routine.js";
+import { parseAcceptanceCriteria, type AcceptanceCriterion } from "./scope.js";
 import type { ChatProviderId, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 
 // ---------------------------------------------------------------- limits
@@ -295,6 +296,10 @@ export type ChatTaskDraft = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  /** v39: the signed rubric — mandatory, like every other scope-producing
+   * road. The model drafts it; the operator still confirms with a
+   * password before it becomes a real, unapproved scope. */
+  acceptance: AcceptanceCriterion[];
 };
 
 export type ChatRoutineDraft = {
@@ -304,6 +309,7 @@ export type ChatRoutineDraft = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  acceptance: AcceptanceCriterion[];
   schedule: string;
 };
 
@@ -332,9 +338,9 @@ function readDraft(raw: unknown): ChatDraft | null {
   const body = raw as Record<string, unknown>;
   const kind = body["kind"];
   if (kind === "task") {
-    if (!exactKeys(body, ["kind", "repoId", "title", "goal", "outOfScope", "touches"])) return null;
+    if (!exactKeys(body, ["kind", "repoId", "title", "goal", "outOfScope", "touches", "acceptance"])) return null;
   } else if (kind === "routine") {
-    if (!exactKeys(body, ["kind", "repoId", "name", "goal", "outOfScope", "touches", "schedule"])) return null;
+    if (!exactKeys(body, ["kind", "repoId", "name", "goal", "outOfScope", "touches", "schedule", "acceptance"])) return null;
   } else {
     return null;
   }
@@ -349,10 +355,15 @@ function readDraft(raw: unknown): ChatDraft | null {
   for (const one of touches) {
     if (typeof one !== "string" || one.trim() === "" || !honest(one, 200, 800)) return null;
   }
+  // v39: mandatory, like every other scope-producing road — a model
+  // proposal that names none, or one that does not parse, is not a draft.
+  const acceptanceParse = parseAcceptanceCriteria(body["acceptance"]);
+  if (acceptanceParse.problems.length > 0 || acceptanceParse.criteria.length === 0) return null;
+  const acceptance = acceptanceParse.criteria;
   if (kind === "task") {
     const title = body["title"];
     if (typeof title !== "string" || title.trim() === "" || !honest(title, 200, 800)) return null;
-    return { kind, repoId, title, goal, outOfScope: outOfScope as string | null, touches: touches as string[] };
+    return { kind, repoId, title, goal, outOfScope: outOfScope as string | null, touches: touches as string[], acceptance };
   }
   const name = body["name"];
   const schedule = body["schedule"];
@@ -365,6 +376,7 @@ function readDraft(raw: unknown): ChatDraft | null {
     goal,
     outOfScope: outOfScope as string | null,
     touches: touches as string[],
+    acceptance,
     schedule,
   };
 }
@@ -773,9 +785,10 @@ const SYSTEM_RULES = [
   "Answer with EXACTLY one JSON document and nothing else:",
   '{"chatEnvelope": 1, "reply": "<markdown-free plain text>", "proposals": []}',
   "A proposal is either",
-  '{"kind":"task","repoId":"r1","title":"…","goal":"…","outOfScope":null,"touches":[]}',
+  '{"kind":"task","repoId":"r1","title":"…","goal":"…","outOfScope":null,"touches":[],"acceptance":[…]}',
   "or",
-  '{"kind":"routine","repoId":"r1","name":"lowercase-dashes","goal":"…","outOfScope":null,"touches":[],"schedule":"daily:03:30 or every:<minutes>"}.',
+  '{"kind":"routine","repoId":"r1","name":"lowercase-dashes","goal":"…","outOfScope":null,"touches":[],"schedule":"daily:03:30 or every:<minutes>","acceptance":[…]}.',
+  'acceptance is REQUIRED and non-empty: [{"id":"c1","statement":"<one testable outcome>","evidence":["check"|"screenshot"|"changed-path"|"manual-review",…],"how":"<optional guidance, or null>"}]. A proposal with no acceptance criterion is dropped, whole.',
   "At most 3 proposals. repoId must be one of the ids in the data document.",
 ].join("\n");
 

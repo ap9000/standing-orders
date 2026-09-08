@@ -514,7 +514,7 @@ describe("stage 3a — the CLI: filing with --race, one yes for both documents, 
     lines = [];
     const scoped = await run([
       "task", "scope", "race-cli",
-      "--goal", "Build the export twice and let me pick",
+      "--goal", "Build the export twice and let me pick", "--acceptance", "It is fixed and verified.|manual-review",
       "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5",
       "--race-per-usd", "5",
       "--race-total-usd", "20",
@@ -554,7 +554,7 @@ describe("stage 3a — the CLI: filing with --race, one yes for both documents, 
     lines = [];
     const codex = await run([
       "task", "scope", "race-cli",
-      "--goal", "g",
+      "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
       "--race", "codex:gpt-5.2,claude:claude-sonnet-5",
       "--race-per-usd", "5", "--race-total-usd", "50",
       "--json",
@@ -621,7 +621,7 @@ describe("stage 3b — a whole tournament through the real tick, against real gi
       await run(["task", "add", "the raced work", "--id", "race-e2e", "--repo", repo]);
       await run([
         "task", "scope", "race-e2e",
-        "--goal", "add the guard twice and let me pick",
+        "--goal", "add the guard twice and let me pick", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5",
         "--race-per-usd", "5", "--race-total-usd", "20",
         "--json",
@@ -762,7 +762,7 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
       await run(["task", "add", "the parked race", "--id", "race-park", "--repo", repo]);
       await run([
         "task", "scope", "race-park",
-        "--goal", "export the data",
+        "--goal", "export the data", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5",
         "--race-per-usd", "5", "--race-total-usd", "20", "--json",
       ]);
@@ -894,18 +894,18 @@ describe("v15 — dollar thresholds: per-task terms, global defaults, real enfor
     const { EXIT } = await import("./operate.js");
     await run(["task", "add", "capped", "--id", "capped", "--json"]);
     lines = [];
-    expect(await run(["task", "scope", "capped", "--goal", "do the thing", "--budget-usd", "3.50", "--json"])).toBe(EXIT.ok);
+    expect(await run(["task", "scope", "capped", "--goal", "do the thing", "--acceptance", "It is fixed and verified.|manual-review", "--budget-usd", "3.50", "--json"])).toBe(EXIT.ok);
     const scoped = payload().scope;
     expect(scoped.budgetMicrousd).toBe(3_500_000);
     // Editing the budget changes the digest — the old approval strands.
     lines = [];
-    await run(["task", "scope", "capped", "--goal", "do the thing", "--budget-usd", "9", "--json"]);
+    await run(["task", "scope", "capped", "--goal", "do the thing", "--acceptance", "It is fixed and verified.|manual-review", "--budget-usd", "9", "--json"]);
     expect(payload().scope.digest).not.toBe(scoped.digest);
     // And a scope WITHOUT a budget digests exactly as it always did.
     lines = [];
     await run(["task", "add", "plain", "--id", "plain", "--json"]);
     lines = [];
-    await run(["task", "scope", "plain", "--goal", "do the thing", "--json"]);
+    await run(["task", "scope", "plain", "--goal", "do the thing", "--acceptance", "It is fixed and verified.|manual-review", "--json"]);
     expect(payload().scope.budgetMicrousd).toBeNull();
   });
 
@@ -917,7 +917,7 @@ describe("v15 — dollar thresholds: per-task terms, global defaults, real enfor
     // A filing with no flags inherits; the race digest binds the numbers.
     await run(["task", "add", "defaulted", "--id", "defaulted", "--json"]);
     lines = [];
-    await run(["task", "scope", "defaulted", "--goal", "g", "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--json"]);
+    await run(["task", "scope", "defaulted", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review", "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--json"]);
     const filed = payload();
     expect(filed.scope.budgetMicrousd).toBe(2_000_000);
     expect(filed.race.perAgentBudgetMicrousd).toBe(4_000_000);
@@ -926,7 +926,7 @@ describe("v15 — dollar thresholds: per-task terms, global defaults, real enfor
     // Explicit beats default.
     await run(["task", "add", "explicit", "--id", "explicit", "--json"]);
     lines = [];
-    await run(["task", "scope", "explicit", "--goal", "g", "--budget-usd", "7", "--json"]);
+    await run(["task", "scope", "explicit", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review", "--budget-usd", "7", "--json"]);
     expect(payload().scope.budgetMicrousd).toBe(7_000_000);
   });
 });
@@ -1252,7 +1252,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
 
       lines.length = 0;
       expect(await run([
-        "task", "scope", "count-cli", "--goal", "g",
+        "task", "scope", "count-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5", "--race-count", "3",
         "--race-per-usd", "5", "--race-total-usd", "30", "--json",
       ])).toBe(EXIT.ok);
@@ -1260,14 +1260,14 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
 
       lines.length = 0;
       expect(await run([
-        "task", "scope", "count-cli", "--goal", "g",
+        "task", "scope", "count-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--race-count", "3",
         "--race-per-usd", "5", "--race-total-usd", "30", "--json",
       ])).toBe(EXIT.usage);
       expect(JSON.parse(lines.join("\n")).message).toContain("make them agree");
 
       lines.length = 0;
-      expect(await run(["task", "scope", "count-cli", "--goal", "g", "--race-count", "3", "--json"])).toBe(EXIT.usage);
+      expect(await run(["task", "scope", "count-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review", "--race-count", "3", "--json"])).toBe(EXIT.usage);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1297,7 +1297,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
       // One named agent, no count: the default replicates it to three.
       lines.length = 0;
       expect(await run([
-        "task", "scope", "default-cli", "--goal", "g",
+        "task", "scope", "default-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5", "--json",
       ])).toBe(EXIT.ok);
       expect(JSON.parse(lines.join("\n")).race.agents).toHaveLength(3);
@@ -1305,7 +1305,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
       // An explicit two-agent lineup stays two — the default never edits it.
       lines.length = 0;
       expect(await run([
-        "task", "scope", "default-cli", "--goal", "g",
+        "task", "scope", "default-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5,claude:claude-haiku-4-5", "--json",
       ])).toBe(EXIT.ok);
       expect(JSON.parse(lines.join("\n")).race.agents).toHaveLength(2);
@@ -1318,7 +1318,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
       expect(await run(["config", "clear", "budgets", "--as", "alex", "--token", added.token, "--json"])).toBe(EXIT.ok);
       lines.length = 0;
       expect(await run([
-        "task", "scope", "default-cli", "--goal", "g",
+        "task", "scope", "default-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5", "--race-per-usd", "5", "--race-total-usd", "30", "--json",
       ])).toBe(EXIT.refused);
       expect(JSON.parse(lines.join("\n")).message).toContain("2 to 4");
@@ -1348,7 +1348,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
       // "positive dollar budget" riddle (round-4 finding 11).
       lines.length = 0;
       expect(await run([
-        "task", "scope", "msg-cli", "--goal", "g",
+        "task", "scope", "msg-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5,claude:claude-opus-5", "--json",
       ])).toBe(EXIT.usage);
       let refusal = JSON.parse(lines.join("\n"));
@@ -1359,7 +1359,7 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
       // Per-agent present, total absent: the OTHER flag is named.
       lines.length = 0;
       expect(await run([
-        "task", "scope", "msg-cli", "--goal", "g",
+        "task", "scope", "msg-cli", "--goal", "g", "--acceptance", "It is fixed and verified.|manual-review",
         "--race", "claude:claude-sonnet-5,claude:claude-opus-5", "--race-per-usd", "5", "--json",
       ])).toBe(EXIT.usage);
       refusal = JSON.parse(lines.join("\n"));
@@ -1388,13 +1388,13 @@ describe("stage 6 — the agent count knob, per-run routine caps, cleanup, and t
       if (!added.ok) throw new Error("bootstrap");
 
       // The conditional-inclusion rule: absent term, identical digest.
-      const bare = { repo: "/r", goal: "g", outOfScope: null, touches: [], requirements: [], schedule: "every:60", singleFlight: true, costCeilingUsd: null };
+      const bare = { repo: "/r", goal: "g", outOfScope: null, touches: [], acceptance: [], requirements: [], schedule: "every:60", singleFlight: true, costCeilingUsd: null };
       expect(routineDigestOf({ ...bare, budgetPerRunMicrousd: null })).toBe(routineDigestOf(bare));
       expect(routineDigestOf({ ...bare, budgetPerRunMicrousd: 2_000_000 })).not.toBe(routineDigestOf(bare));
 
       const filed = fileRoutineProposal(
         store,
-        { name: "capped", repo: "/r", goal: "keep deps fresh", outOfScope: null, touches: [], requirements: [], schedule: "every:60", costCeilingUsd: null, budgetPerRunMicrousd: 2_500_000, filedVia: "cli" },
+        { name: "capped", repo: "/r", goal: "keep deps fresh", outOfScope: null, touches: [], acceptance: [{ id: "c1", statement: "Deps stay fresh.", evidence: ["manual-review"] }], requirements: [], schedule: "every:60", costCeilingUsd: null, budgetPerRunMicrousd: 2_500_000, filedVia: "cli" },
         T0,
       );
       if (!filed.ok) throw new Error(filed.reason);
@@ -1769,7 +1769,7 @@ describe("slice B e2e — a mixed comparison through the real tick: claude, code
       await run(["task", "add", "the compared work", "--id", "cmp-e2e", "--repo", repo]);
       await run([
         "task", "scope", "cmp-e2e",
-        "--goal", "export the data three ways and let me pick",
+        "--goal", "export the data three ways and let me pick", "--acceptance", "It is fixed and verified.|manual-review",
         "--compare", "claude:claude-sonnet-5,codex:gpt-5-codex,gemini:gemini-2.5-pro",
         "--json",
       ]);

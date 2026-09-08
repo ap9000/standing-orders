@@ -356,6 +356,207 @@ export function profileFromJson(json: string | null): ExecutionProfile | null {
   return null;
 }
 
+// ---- acceptance rubric (v39, Acceptance Contract v2) -----------------------
+//
+// The rubric an operator signs alongside the goal: what a finished build has
+// to answer, by exact id, with typed references to evidence the plane itself
+// captured. Every prior digest-bound field (budgetMicrousd, profile, chain)
+// is additive and digests identically when absent — the rubric follows the
+// same rule, so grandfathering an approval sealed before this migration is
+// structural, not a special case. What makes the rubric MANDATORY is not the
+// digest (which stays permissive, exactly like every field before it) — it is
+// every authoring road refusing to save an empty one going forward
+// (`proposeGuarded` and its siblings in routines, templates, the demo, mate
+// proposals, and the planner). `propose` itself, the primitive every one of
+// those calls, stays permissive so a scope already on file — approved or not,
+// written before this code existed — is never retroactively invalidated.
+export type EvidenceKind = "check" | "screenshot" | "changed-path" | "manual-review";
+
+export const EVIDENCE_KINDS: readonly EvidenceKind[] = ["check", "screenshot", "changed-path", "manual-review"];
+
+export type AcceptanceCriterion = {
+  id: string;
+  /** The signed outcome statement. Restating it differently in a proof is
+   * refuted, not short — the same severity as any other altered term. */
+  statement: string;
+  /** Advisory guidance for HOW to satisfy the statement. Never enters the
+   * digest and is never a term the approval binds — an operator can leave
+   * it, change it, or ignore it without touching what was signed. */
+  how: string | null;
+  /** SIGNED: the evidence kinds a proof must reference, by exact id, to
+   * answer this criterion. Never empty. */
+  evidence: EvidenceKind[];
+};
+
+export const ACCEPTANCE_LIMITS = {
+  criteria: 12,
+  id: 40,
+  statement: 300,
+  how: 500,
+  evidenceKinds: EVIDENCE_KINDS.length,
+} as const;
+
+export type AcceptanceProblem = { reason: string; message: string };
+
+function acceptanceDescribe(value: unknown): string {
+  if (value === undefined) return "nothing";
+  if (value === null) return "null";
+  if (typeof value === "string") return `a ${value.length}-char string`;
+  return `a ${Array.isArray(value) ? "array" : typeof value}`;
+}
+
+function acceptanceProse(
+  value: unknown,
+  field: string,
+  cap: number,
+  required: boolean,
+  problems: AcceptanceProblem[],
+): string | null {
+  if (value === undefined || value === null || value === "") {
+    if (required) problems.push({ reason: `missing-${field}`, message: `${field} is required` });
+    return null;
+  }
+  if (typeof value !== "string") {
+    problems.push({ reason: `bad-${field}`, message: `${field} must be a string (got ${acceptanceDescribe(value)})` });
+    return null;
+  }
+  if (Buffer.byteLength(value, "utf8") > cap) {
+    problems.push({ reason: `${field}-too-long`, message: `${field} is over ${cap} bytes` });
+    return null;
+  }
+  if (hasForbiddenControls(value)) {
+    problems.push({ reason: `${field}-controls`, message: `${field} carries control characters that could become terminal escapes` });
+    return null;
+  }
+  return value;
+}
+
+/**
+ * Parse a rubric from already-JSON-parsed input (the planner's handoff, a
+ * console form, a routine or template definition): fail closed, every
+ * problem reported at once, stable reasons — the same discipline as every
+ * other quoted-data parser in this codebase (`plan.ts`, `proof.ts`). An
+ * absent or empty `value` parses to `[]` with no problems: whether that is
+ * ALLOWED is a question for the caller (`propose` says yes; every authoring
+ * road says no), never for this parser.
+ */
+export function parseAcceptanceCriteria(value: unknown): { criteria: AcceptanceCriterion[]; problems: AcceptanceProblem[] } {
+  const problems: AcceptanceProblem[] = [];
+  if (value === undefined || value === null) return { criteria: [], problems };
+  if (!Array.isArray(value)) {
+    problems.push({ reason: "bad-acceptance", message: `acceptance must be an array (got ${acceptanceDescribe(value)})` });
+    return { criteria: [], problems };
+  }
+  if (value.length > ACCEPTANCE_LIMITS.criteria) {
+    problems.push({ reason: "acceptance-too-many", message: `acceptance lists ${value.length} — cap is ${ACCEPTANCE_LIMITS.criteria}` });
+    return { criteria: [], problems };
+  }
+  const criteria: AcceptanceCriterion[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      problems.push({ reason: `acceptance[${index}]-shape`, message: `acceptance[${index}] must be an object` });
+      continue;
+    }
+    const one = entry as Record<string, unknown>;
+    const id = acceptanceProse(one["id"], `acceptance[${index}].id`, ACCEPTANCE_LIMITS.id, true, problems);
+    if (id !== null && seen.has(id)) {
+      problems.push({ reason: `acceptance[${index}]-duplicate-id`, message: `criterion id "${id}" appears twice` });
+    } else if (id !== null) {
+      seen.add(id);
+    }
+    const statement = acceptanceProse(one["statement"], `acceptance[${index}].statement`, ACCEPTANCE_LIMITS.statement, true, problems);
+    const how = acceptanceProse(one["how"], `acceptance[${index}].how`, ACCEPTANCE_LIMITS.how, false, problems);
+
+    const rawEvidence = one["evidence"];
+    let evidence: EvidenceKind[] | null = null;
+    if (!Array.isArray(rawEvidence)) {
+      problems.push({
+        reason: `acceptance[${index}]-bad-evidence`,
+        message: `acceptance[${index}].evidence must be a non-empty array of evidence kinds (got ${acceptanceDescribe(rawEvidence)})`,
+      });
+    } else if (rawEvidence.length === 0 || rawEvidence.length > ACCEPTANCE_LIMITS.evidenceKinds) {
+      problems.push({
+        reason: `acceptance[${index}]-evidence-count`,
+        message: `acceptance[${index}].evidence must name 1-${ACCEPTANCE_LIMITS.evidenceKinds} evidence kinds`,
+      });
+    } else {
+      const kinds: EvidenceKind[] = [];
+      const seenKinds = new Set<string>();
+      let bad = false;
+      for (const k of rawEvidence) {
+        if (typeof k !== "string" || !EVIDENCE_KINDS.includes(k as EvidenceKind)) {
+          problems.push({
+            reason: `acceptance[${index}]-bad-evidence-kind`,
+            message: `acceptance[${index}].evidence must draw from ${EVIDENCE_KINDS.join(", ")} (got ${acceptanceDescribe(k)})`,
+          });
+          bad = true;
+          continue;
+        }
+        if (seenKinds.has(k)) {
+          problems.push({ reason: `acceptance[${index}]-duplicate-evidence-kind`, message: `evidence kind "${k}" appears twice` });
+          bad = true;
+          continue;
+        }
+        seenKinds.add(k);
+        kinds.push(k as EvidenceKind);
+      }
+      if (!bad) evidence = kinds;
+    }
+
+    if (id === null || statement === null || evidence === null) continue;
+    criteria.push({ id, statement, how, evidence });
+  }
+  return { criteria, problems };
+}
+
+/** The exact bytes a rubric's SIGNED terms reduce to for the digest: sorted
+ * by id, `how` dropped (advisory, never signed), evidence kinds sorted so
+ * two equivalent lists never digest differently. */
+/**
+ * The plain-text rubric encoding shared by every non-JSON authoring
+ * surface — the console's rubric textarea (one line each) and the CLI's
+ * `--acceptance` flag (one line per `;`-separated entry): one criterion
+ * per line, shaped
+ *
+ *   [id:] statement | evidence,kinds [| how]
+ *
+ * `id` is optional — auto-numbered `c1`, `c2`, ... in encounter order when
+ * every line omits it, so a person can write the rubric without inventing
+ * ids by hand. This function never validates; it only turns text into the
+ * same plain-object shape `parseAcceptanceCriteria` already validates, so
+ * both entry points can never drift on what counts as a valid criterion.
+ */
+export function acceptanceLinesToInput(lines: readonly string[]): unknown[] {
+  const out: unknown[] = [];
+  let auto = 1;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const idMatch = /^([A-Za-z0-9_-]{1,40}):\s*(.*)$/.exec(line);
+    const id = idMatch?.[1];
+    const rest = idMatch ? (idMatch[2] ?? "") : line;
+    const parts = rest.split("|").map(p => p.trim());
+    const statement = parts[0] ?? "";
+    const evidence = (parts[1] ?? "").split(",").map(k => k.trim()).filter(k => k !== "");
+    const how = parts[2] !== undefined && parts[2] !== "" ? parts[2] : null;
+    out.push({ id: id ?? `c${auto++}`, statement, evidence, how });
+  }
+  return out;
+}
+
+/** The inverse of `acceptanceLinesToInput`, for pre-filling an editor from
+ * a stored rubric — round-trips through `parseAcceptanceCriteria` exactly. */
+export function acceptanceToLines(criteria: readonly AcceptanceCriterion[]): string[] {
+  return criteria.map(c => `${c.id}: ${c.statement} | ${c.evidence.join(",")}${c.how === null ? "" : ` | ${c.how}`}`);
+}
+
+export function canonicalAcceptance(criteria: readonly AcceptanceCriterion[]): { id: string; statement: string; evidence: EvidenceKind[] }[] {
+  return [...criteria]
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map(c => ({ id: c.id, statement: c.statement.trim(), evidence: [...c.evidence].sort() }));
+}
+
 export type Scope = {
   taskId: string;
   /** What success looks like, in the operator's words. */
@@ -364,6 +565,11 @@ export type Scope = {
   outOfScope: string | null;
   /** Paths the work is expected to touch. Advisory, and worth stating. */
   touches: string[];
+  /** v39: the signed acceptance rubric. `[]` on every scope proposed before
+   * this migration and on any legacy road that still calls `propose`
+   * directly — a scope-producing ROAD enforces non-emptiness, never this
+   * type, never `propose`, never the digest. */
+  acceptance: AcceptanceCriterion[];
   /** The dollar cap per build attempt, integer micro-dollars (v15) —
    * approved spend, restated at the yes, enforced by the provider's own
    * stop. NULL = no per-attempt cap was asked for. */
@@ -422,6 +628,10 @@ export type ScopeInput = {
   /** Who wrote this text (mate arc, ruling 2): `mate` for a confirmed mate
    * proposal — mode coverage then never seals it; a human rewrite clears it. */
   proposedVia?: "mate" | "coordinator" | null;
+  /** v39: the signed acceptance rubric. Absent digests exactly like `[]` —
+   * see `Scope.acceptance`. `propose` itself never requires this to be
+   * non-empty; the roads that call it do. */
+  acceptance?: readonly AcceptanceCriterion[];
   now: Date;
   mutation?: Mutation;
 };
@@ -434,7 +644,15 @@ export type ScopeInput = {
  * approval it invalidates would be an approval of something else.
  */
 export function digestOf(
-  scope: Pick<Scope, "goal" | "outOfScope" | "touches"> & { budgetMicrousd?: number | null },
+  scope: Pick<Scope, "goal" | "outOfScope" | "touches"> & {
+    budgetMicrousd?: number | null;
+    /** v39: the rubric, folded in ONLY when non-empty — the same absent/`[]`
+     * equivalence budgetMicrousd has always used, so a scope proposed before
+     * this migration, or by a road that never sends one, digests to exactly
+     * what it digested to before this field existed. `how` never enters
+     * here (advisory, never signed); evidence kinds do. */
+    acceptance?: readonly AcceptanceCriterion[];
+  },
   // The execution target: a single profile (legacy v24), OR an explicit
   // fallback chain (v30). BOTH fold through the SAME outer `profileDigest`
   // key — the discriminator lives INSIDE the digest value (a chain digest
@@ -459,6 +677,12 @@ export function digestOf(
         // Absent and null digest identically, so every pre-v15 approval
         // stays exactly as approved.
         ...(scope.budgetMicrousd == null ? {} : { budget: scope.budgetMicrousd }),
+        // Same absent/[] equivalence as budget, one key up: a rubric-less
+        // scope (every scope before v39, and any road that sends none)
+        // digests identically to today.
+        ...(scope.acceptance === undefined || scope.acceptance.length === 0
+          ? {}
+          : { acceptance: canonicalAcceptance(scope.acceptance) }),
         // The single outer key, whichever target produced its inner value:
         // absent => the golden and every profileless approval are untouched;
         // a legacy profile => its exact profileDigestOf; an explicit chain
@@ -476,9 +700,9 @@ export function digestOf(
 }
 
 export function propose(store: Store, input: ScopeInput): Scope {
-  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, now, mutation = {}, profile, permissionMode, posture, proposedVia = null } = input;
+  const { taskId, goal, outOfScope = null, touches = [], budgetMicrousd = null, acceptance = [], now, mutation = {}, profile, permissionMode, posture, proposedVia = null } = input;
 
-  const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd };
+  const draft = { goal, outOfScope, touches: [...touches], budgetMicrousd, acceptance: [...acceptance] };
   const previous = store.getScope(taskId);
 
   const scope: Scope = {
@@ -511,7 +735,7 @@ export type GuardedProposeResult =
   | { ok: true; scope: Scope }
   | {
       ok: false;
-      reason: "changed" | "claimed" | "bad-goal" | "bad-out-of-scope" | "bad-touches";
+      reason: "changed" | "claimed" | "bad-goal" | "bad-out-of-scope" | "bad-touches" | "bad-acceptance" | "acceptance-required";
     };
 
 /**
@@ -523,10 +747,19 @@ export type GuardedProposeResult =
  * at start, and rewording the agreement under it would make the digest lie
  * about what the work was agreed to. Field caps and control-character rules
  * live here because every one of these strings will later be rendered.
+ *
+ * v39: this is a scope-producing ROAD, not the `propose` primitive, so it is
+ * where the rubric becomes mandatory — every edit through here (a fresh
+ * proposal or a rewrite of an already-approved one) must carry at least one
+ * criterion, or it is refused with a clear `acceptance-required` reason
+ * rather than silently filing without one. A scope that already carries a
+ * live, unrewritten approval from before this code existed never reaches
+ * this function again unless somebody edits it — which is exactly when the
+ * requirement should start applying.
  */
 export function proposeGuarded(
   store: Store,
-  input: ScopeInput & { sawDigest: string | null; taskRef: number | null },
+  input: Omit<ScopeInput, "acceptance"> & { sawDigest: string | null; taskRef: number | null; acceptance?: unknown },
 ): GuardedProposeResult {
   const goal = input.goal.trim();
   if (goal === "" || goal.length > 2_000 || hasForbiddenControls(goal)) {
@@ -540,6 +773,13 @@ export function proposeGuarded(
   if (touches.length > 50 || touches.some(one => one.length > 200 || hasForbiddenControls(one))) {
     return { ok: false, reason: "bad-touches" };
   }
+  const acceptanceParse = parseAcceptanceCriteria(input.acceptance);
+  if (acceptanceParse.problems.length > 0) {
+    return { ok: false, reason: "bad-acceptance" };
+  }
+  if (acceptanceParse.criteria.length === 0) {
+    return { ok: false, reason: "acceptance-required" };
+  }
 
   return store.transact(() => {
     if (input.taskRef !== null && store.hasLiveClaim(input.taskRef, input.now)) {
@@ -549,7 +789,7 @@ export function proposeGuarded(
     if ((previous?.digest ?? null) !== input.sawDigest) {
       return { ok: false as const, reason: "changed" as const };
     }
-    const scope = propose(store, { ...input, goal, outOfScope, touches });
+    const scope = propose(store, { ...input, goal, outOfScope, touches, acceptance: acceptanceParse.criteria });
     return { ok: true as const, scope };
   });
 }
@@ -716,7 +956,7 @@ export function modeFilingCoverage(
 export function fileAndSealUnderMode(
   store: Store,
   input: ScopeInput & { repo: string | null; actor: string },
-): { ok: true; scope: Scope; basis: "mode" } | { ok: false; reason: "no-mode" | "not-signer" | "not-covered" | "coordinator-filed" } {
+): { ok: true; scope: Scope; basis: "mode" } | { ok: false; reason: "no-mode" | "not-signer" | "not-covered" | "coordinator-filed" | "acceptance-required" } {
   return store.transact(() => {
     const mode = input.repo === null ? null : store.activeMode(input.repo, input.now);
     if (mode === null) return { ok: false as const, reason: "no-mode" as const };
@@ -733,6 +973,12 @@ export function fileAndSealUnderMode(
       autoApprove = false;
     }
     if (!autoApprove) return { ok: false as const, reason: "not-covered" as const };
+    // v39: a mode auto-approves a filing with NOBODY reading it at that
+    // instant — of every road, this one can least afford to seal a scope
+    // with no rubric to answer.
+    if (parseAcceptanceCriteria(input.acceptance).criteria.length === 0) {
+      return { ok: false as const, reason: "acceptance-required" as const };
+    }
     const scope = propose(store, {
       ...input,
       ...(input.budgetMicrousd == null && defaultBudget !== null ? { budgetMicrousd: defaultBudget } : {}),
@@ -809,6 +1055,18 @@ export function approvalOf(scope: Scope | null): Approval {
   return { approved: true, at: scope.approvedAt, by: scope.approvedBy };
 }
 
+/** The rubric's approval-card lines (v39): one per criterion, the id in
+ * front (the exact string a proof must answer by) and its required
+ * evidence kinds after it — `how` is deliberately absent here, the same way
+ * it is absent from the digest: it is guidance, never a signed term. */
+export function acceptanceWords(criteria: readonly AcceptanceCriterion[]): string[] {
+  if (criteria.length === 0) return [];
+  return [
+    `  acceptance   ${criteria[0]!.id}: ${criteria[0]!.statement} [requires: ${criteria[0]!.evidence.join(", ")}]`,
+    ...criteria.slice(1).map(c => `               ${c.id}: ${c.statement} [requires: ${c.evidence.join(", ")}]`),
+  ];
+}
+
 /** The scope, in the words an operator has to be able to agree or disagree with. */
 export function describeScope(scope: Scope): string[] {
   const approval = approvalOf(scope);
@@ -816,6 +1074,7 @@ export function describeScope(scope: Scope): string[] {
     `  goal         ${scope.goal}`,
     ...(scope.outOfScope === null ? [] : [`  not this     ${scope.outOfScope}`]),
     ...(scope.touches.length === 0 ? [] : [`  touches      ${scope.touches.join(", ")}`]),
+    ...acceptanceWords(scope.acceptance),
     ...(scope.budgetMicrousd === null
       ? []
       : [`  budget       $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} per build attempt — the agent is stopped at this figure`]),

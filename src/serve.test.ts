@@ -130,7 +130,7 @@ describe("the web decision view", () => {
     const saved = await fetch(url("/t/t-1/scope"), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf, sawDigest: "", goal: "build it twice and let me pick", not: "", touches: "",
         "budget-usd": "2.50", "race-count": "2", "race-model": "claude-sonnet-5",
         "race-per-usd": "5", "race-total-usd": "14",
@@ -165,7 +165,7 @@ describe("the web decision view", () => {
     const single = await fetch(url("/t/t-1/scope"), {
       method: "POST",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf: csrf2, sawDigest: scope?.digest ?? "", goal: "just build it once", not: "", touches: "", "race-count": "",
       }),
       redirect: "manual",
@@ -782,7 +782,7 @@ describe("the operations console", () => {
     const { propose } = await import("./scope.js");
     store.createTask({ id: "t-lim", title: "bounded work" }, T0);
     const ref = store.refFor("built-in", "t-lim").id;
-    propose(store, { taskId: "t-lim", goal: "fix the rounding", outOfScope: "authentication", touches: ["src/payments/"], now: T0 });
+    propose(store, { taskId: "t-lim", goal: "fix the rounding", outOfScope: "authentication", touches: ["src/payments/"], acceptance: [{ id: "c1", statement: "The rounding is fixed.", evidence: ["check"] }], now: T0 });
     const run = store.startRun({ taskRef: ref, leaseId: "l-lim", runner: "b-1", branch: "so/t-lim", worktree: "/w", now: T0 });
     store.finishRun(run, { outcome: "built", now: T0 });
     mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
@@ -1005,6 +1005,7 @@ describe("the operations console", () => {
       id: "from-web",
       title: "console-born",
       goal: "one clear goal",
+      acceptance: "c1: ok | manual-review",
     });
     expect(added.status).toBe(303);
     expect(added.headers.get("location")).toBe("/t/from-web");
@@ -1021,13 +1022,13 @@ describe("the operations console", () => {
     const csrf = await csrfFrom(cookie);
 
     // First proposal: saw nothing, creates the scope.
-    const first = await post("/t/t-s/scope", cookie, { csrf, sawDigest: "", goal: "narrow goal", not: "", touches: "" });
+    const first = await post("/t/t-s/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "narrow goal", not: "", touches: "" });
     expect(first.status).toBe(303);
     const digest = store.getScope("t-s")?.digest ?? "";
     expect(digest).not.toBe("");
 
     // A second tab still holding the empty form is refused, not merged.
-    const stale = await post("/t/t-s/scope", cookie, { csrf, sawDigest: "", goal: "rival goal", not: "", touches: "" });
+    const stale = await post("/t/t-s/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "rival goal", not: "", touches: "" });
     expect(stale.status).toBe(409);
     expect(store.getScope("t-s")?.goal).toBe("narrow goal");
 
@@ -1037,7 +1038,7 @@ describe("the operations console", () => {
     const approved = await post("/t/t-s/approve", cookie, { csrf, nonce, digest, token: approverToken });
     expect(approved.status).toBe(303);
 
-    const edited = await post("/t/t-s/scope", cookie, { csrf, sawDigest: digest, goal: "wider goal", not: "", touches: "" });
+    const edited = await post("/t/t-s/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: digest, goal: "wider goal", not: "", touches: "" });
     expect(edited.status).toBe(303);
     const after = await (await fetch(url("/t/t-s"), { headers: { cookie } })).text();
     expect(after).toContain("approved once, then rewritten");
@@ -1047,7 +1048,7 @@ describe("the operations console", () => {
     store.createTask({ id: "t-a", title: "approve me" }, T0);
     const cookie = await login();
     const csrf = await csrfFrom(cookie);
-    await post("/t/t-a/scope", cookie, { csrf, sawDigest: "", goal: "the goal", not: "", touches: "" });
+    await post("/t/t-a/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "the goal", not: "", touches: "" });
     const digest = store.getScope("t-a")?.digest ?? "";
 
     const readNonce = async (): Promise<string> => {
@@ -1082,7 +1083,7 @@ describe("the operations console", () => {
     store.createTask({ id: "t-b", title: "api approve" }, T0);
     const cookie = await login();
     const csrf = await csrfFrom(cookie);
-    await post("/t/t-b/scope", cookie, { csrf, sawDigest: "", goal: "the goal", not: "", touches: "" });
+    await post("/t/t-b/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "the goal", not: "", touches: "" });
     const digest = store.getScope("t-b")?.digest ?? "";
 
     const approved = await fetch(url("/t/t-b/approve"), {
@@ -1144,7 +1145,7 @@ describe("the operations console", () => {
     store.createTask({ id: "t-approve", title: "awaiting yes" }, T0);
     const cookie = await login();
     const csrf = await csrfFrom(cookie);
-    await post("/t/t-approve/scope", cookie, { csrf, sawDigest: "", goal: "a goal", not: "", touches: "" });
+    await post("/t/t-approve/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "a goal", not: "", touches: "" });
 
     const inbox = await (await fetch(url("/"), { headers: { cookie } })).text();
     // The approval card links to the step-up screen; it never carries a
@@ -1325,7 +1326,7 @@ describe("the operations console", () => {
     store.finishRun(run, { outcome: "failed", reason: `reason ${probe}`, now: T0 });
     const cookie = await login();
     const csrf = await csrfFrom(cookie);
-    await post("/t/t-x/scope", cookie, { csrf, sawDigest: "", goal: `goal ${probe}`, not: `not ${probe}`, touches: `touch-${probe}` });
+    await post("/t/t-x/scope", cookie, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: `goal ${probe}`, not: `not ${probe}`, touches: `touch-${probe}` });
 
     for (const path of ["/", "/tasks", "/t/t-x", "/runs", `/r/${run}`]) {
       const html = await (await fetch(url(path), { headers: { cookie } })).text();
@@ -1554,6 +1555,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
 
     const created = await post("/tasks/add", cookie, {
       csrf, title: "Add a Rate Limiter!", goal: "sliding windows on the public api",
+      acceptance: "c1: ok | manual-review",
     });
     expect(created.status).toBe(303);
     expect(created.headers.get("location")).toBe("/t/add-a-rate-limiter");
@@ -1651,7 +1653,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     store.placeTask(ref, "/repo/main");
     register(store, { name: "builder-1", host: "here", capacity: 2, repos: ["/repo/main"], now: T0, newToken: () => "tok-builder-1" });
     store.saveScope({
-      taskId: "t-live", goal: "build it", outOfScope: null, touches: [],
+      taskId: "t-live", goal: "build it", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "d1",
       approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d1",
     });
@@ -1664,7 +1666,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     });
     store.createTask({ id: "t-ready", title: "all set" }, T0);
     store.saveScope({
-      taskId: "t-ready", goal: "go", outOfScope: null, touches: [],
+      taskId: "t-ready", goal: "go", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "d2",
       approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d2",
     });
@@ -1821,7 +1823,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     // The draft arrives: proposed scope + plan state; the board flips to
     // review, and the task screen shows the document with the approve card.
     store.saveScope({
-      taskId: "t-plan", goal: "The negotiated goal", outOfScope: null, touches: [],
+      taskId: "t-plan", goal: "The negotiated goal", outOfScope: null, touches: [], acceptance: [],
       proposedAt: new Date().toISOString(), digest: "dg-negotiated",
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -1948,7 +1950,7 @@ describe("the rolled-up board — every project, one ceiling", () => {
     store.addEdge("t-waiting", "t-secret");
     store.setTaskState("t-secret", "running", new Date());
     store.saveScope({
-      taskId: "t-waiting", goal: "wait politely", outOfScope: null, touches: [],
+      taskId: "t-waiting", goal: "wait politely", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "dg-w",
       approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "dg-w",
     });
@@ -1987,6 +1989,7 @@ describe("routines — standing orders on the console", () => {
     goal: "Refresh the notes",
     outOfScope: null,
     touches: [] as string[],
+    acceptance: [{ id: "c1", statement: "The notes are refreshed.", how: null, evidence: ["manual-review"] as const }],
     requirements: [] as string[],
     schedule: "every:60",
     singleFlight: true,
@@ -2160,7 +2163,7 @@ describe("routines — standing orders on the console", () => {
     const bad = await fetch(url("/routines/add"), {
       method: "POST",
       headers: { cookie, origin: base },
-      body: new URLSearchParams({ csrf, projectRevision: revision, name: "Bad Name", goal: "", schedule: "hourly" }),
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review", csrf, projectRevision: revision, name: "Bad Name", goal: "", schedule: "hourly" }),
     });
     expect(bad.status).toBe(400);
     const badHtml = await bad.text();
@@ -2173,7 +2176,7 @@ describe("routines — standing orders on the console", () => {
     const made = await fetch(url("/routines/add"), {
       method: "POST",
       headers: { cookie, origin: base },
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf, projectRevision: revision,
         name: "weekly-notes", goal: "Refresh the notes", schedule: "daily:03:30",
       }),
@@ -2350,7 +2353,7 @@ describe("/next — clearing the queue one thing at a time", () => {
     }, T0);
     store.createTask({ id: "t-a", title: "needs a yes" }, T0);
     store.saveScope({
-      taskId: "t-a", goal: "do the thing", outOfScope: "not the other thing", touches: ["src/x.ts"],
+      taskId: "t-a", goal: "do the thing", outOfScope: "not the other thing", touches: ["src/x.ts"], acceptance: [],
       proposedAt: T0.toISOString(), digest: "d".repeat(32),
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -2398,7 +2401,7 @@ describe("/next — clearing the queue one thing at a time", () => {
   test("not-now sets an item aside without touching it, and all-clear remembers the held ones", async () => {
     store.createTask({ id: "t-1", title: "one" }, T0);
     store.saveScope({
-      taskId: "t-1", goal: "g", outOfScope: null, touches: [],
+      taskId: "t-1", goal: "g", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "a".repeat(32),
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -2418,7 +2421,7 @@ describe("/next — clearing the queue one thing at a time", () => {
     expect(idle).not.toContain("clear the queue");
     store.createTask({ id: "t-w", title: "w" }, T0);
     store.saveScope({
-      taskId: "t-w", goal: "g", outOfScope: null, touches: [],
+      taskId: "t-w", goal: "g", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "b".repeat(32),
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -2496,7 +2499,7 @@ describe("quick capture — from thought to the approve card in two steps", () =
       const made = await fetch(`${base}/tasks/add`, {
         method: "POST",
         headers: { cookie, origin: base },
-        body: new URLSearchParams({
+        body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
           csrf, projectRevision: revision,
           title: "Guard the webhook", goal: "Reject unsigned payloads at the edge",
         }),
@@ -2529,7 +2532,7 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
       store.createTask({ id, title: `work in ${repo}` }, T0);
       store.placeTask(store.refFor("built-in", id).id, repo);
       store.saveScope({
-        taskId: id, goal: `goal of ${id}`, outOfScope: null, touches: [],
+        taskId: id, goal: `goal of ${id}`, outOfScope: null, touches: [], acceptance: [],
         proposedAt: T0.toISOString(), digest: id.padEnd(32, "0").slice(0, 32),
         approvedAt: null, approvedBy: null, approvedDigest: null,
       });
@@ -2539,7 +2542,7 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
     seed("t-secret", "/repo/secret"); // outside the ceiling
     store.createTask({ id: "t-free", title: "unplaced work" }, T0);
     store.saveScope({
-      taskId: "t-free", goal: "anywhere", outOfScope: null, touches: [],
+      taskId: "t-free", goal: "anywhere", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "f".repeat(32),
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -2829,7 +2832,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     fetcherResult = async () =>
       anthropicWrapper(
         envelope("One draft ready.", [
-          { kind: "task", repoId: "r1", title: "Deflake the webhook test", goal: "Pin the clock in the retry test.", outOfScope: null, touches: [] },
+          { kind: "task", repoId: "r1", title: "Deflake the webhook test", goal: "Pin the clock in the retry test.", outOfScope: null, touches: [], acceptance: [{ id: "c1", statement: "The retry test's clock is pinned.", how: null, evidence: ["check"] }] },
         ]),
       );
     await boot();
@@ -3375,7 +3378,7 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
     );
     store.createTask({ id: "t-move", title: "movable" }, T0);
     store.saveScope({
-      taskId: "t-move", goal: "go", outOfScope: null, touches: [],
+      taskId: "t-move", goal: "go", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "d", approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d",
     });
     const revision = store.queueRevision();
@@ -4559,7 +4562,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
   test("sensitivity is judged per response: /next with a step-up is bare, all-clear is chromed", async () => {
     store.createTask({ id: "t-a", title: "needs a yes" }, T0);
     store.saveScope({
-      taskId: "t-a", goal: "do the thing", outOfScope: null, touches: [],
+      taskId: "t-a", goal: "do the thing", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "d".repeat(32),
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -4574,6 +4577,62 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const clear = await (await fetch(url("/next"), { headers: { cookie } })).text();
     expect(clear).not.toContain("approve this scope");
     expect(clear).toContain('id="palette-index"');
+  });
+
+  test("the signed rubric restates above the seal on the ceremony, the read-only card, and /next — never a second amber form (v39)", async () => {
+    store.createTask({ id: "t-rubric", title: "needs a yes with a rubric" }, T0);
+    store.saveScope({
+      taskId: "t-rubric", goal: "guard the payout path", outOfScope: null, touches: ["src/payout.ts"],
+      acceptance: [
+        { id: "c1", statement: "The payout guard rejects a negative amount.", how: "unit test it", evidence: ["check"] },
+        { id: "c2", statement: "The settings panel still opens.", how: null, evidence: ["screenshot"] },
+      ],
+      proposedAt: T0.toISOString(), digest: "e".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const cookie = await login();
+    const page = await (await fetch(url("/t/t-rubric"), { headers: { cookie } })).text();
+    // Restated in the ceremony, above the seal, with id/statement/evidence.
+    const ceremonyMarker = page.indexOf('id="approve"');
+    const ceremonyStart = page.lastIndexOf("<form", ceremonyMarker);
+    const ceremonyEnd = page.indexOf("</form>", ceremonyMarker);
+    expect(ceremonyMarker).toBeGreaterThan(-1);
+    const approveForm = page.slice(ceremonyStart, ceremonyEnd);
+    const ceremonyAcceptance = approveForm.indexOf(">acceptance<");
+    const ceremonySeal = approveForm.indexOf("your password, typed again");
+    expect(ceremonyAcceptance).toBeGreaterThan(-1);
+    expect(ceremonyAcceptance).toBeLessThan(ceremonySeal);
+    expect(approveForm).toContain("<code>c1</code> The payout guard rejects a negative amount.");
+    expect(approveForm).toContain("[requires: check]");
+    expect(approveForm).toContain("<code>c2</code> The settings panel still opens.");
+    expect(approveForm).toContain("[requires: screenshot]");
+    // No competing primary: exactly one submit button inside the ceremony form.
+    expect((approveForm.match(/<button type="submit"/g) ?? []).length).toBe(1);
+    // Advisory `how` never renders inside the ceremony form itself — only
+    // in the separate, later scope-EDIT textarea, which legitimately shows
+    // it back for editing.
+    expect(approveForm).not.toContain("unit test it");
+
+    // The read-only scope card (post-approval) restates it too, above its seal.
+    const granted = approve(store, "t-rubric", "alex", T0, store.getScope("t-rubric")?.digest as string, approverToken);
+    expect(granted.ok).toBe(true);
+    const after = await (await fetch(url("/t/t-rubric"), { headers: { cookie } })).text();
+    const cardAcceptance = after.indexOf(">acceptance<");
+    const cardSeal = after.indexOf("approval binds to this exact wording");
+    expect(cardAcceptance).toBeGreaterThan(-1);
+    expect(cardAcceptance).toBeLessThan(cardSeal);
+
+    // /next restates it identically for a second, unapproved task.
+    store.createTask({ id: "t-rubric-2", title: "another" }, T0);
+    store.saveScope({
+      taskId: "t-rubric-2", goal: "g", outOfScope: null, touches: [],
+      acceptance: [{ id: "c1", statement: "It works.", how: null, evidence: ["manual-review"] }],
+      proposedAt: T0.toISOString(), digest: "f".repeat(32),
+      approvedAt: null, approvedBy: null, approvedDigest: null,
+    });
+    const next = await (await fetch(url("/next"), { headers: { cookie } })).text();
+    expect(next).toContain("<code>c1</code> It works.");
+    expect(next).toContain("[requires: manual-review]");
   });
 
   test("a decision's option-per-card forms are never sticky-wrapped", async () => {
@@ -5237,7 +5296,7 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     const filed = await fetch(url("/routines/add"), {
       method: "POST",
       headers: { cookie, origin: base },
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf, name: "nightly-check", goal: "look things over", schedule: "daily:03:00",
         projectRevision: revision,
       }),
@@ -5443,7 +5502,7 @@ describe("the attended authorization ceremony (Phase 2E)", () => {
       method: "POST",
       headers: { cookie },
       redirect: "manual",
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf,
         goal: "raced goal",
         not: "",
@@ -5464,7 +5523,7 @@ describe("the attended authorization ceremony (Phase 2E)", () => {
       method: "POST",
       headers: { cookie },
       redirect: "manual",
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf,
         goal: "raced goal",
         not: "",
@@ -5981,7 +6040,7 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     // A task whose page carries the password approval ceremony.
     seedTaskIn("t-approve", "needs signing", "/repo/main");
     store.saveScope({
-      taskId: "t-approve", goal: "sign me", outOfScope: null, touches: [],
+      taskId: "t-approve", goal: "sign me", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "c".repeat(32),
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -6089,7 +6148,7 @@ describe("the queue (portfolio arc, slice 1b): move-to-front resolved server-sid
     const ref = store.refFor("built-in", id).id;
     if (repo !== null) store.placeTask(ref, repo);
     store.saveScope({
-      taskId: id, goal: "go", outOfScope: null, touches: [],
+      taskId: id, goal: "go", outOfScope: null, touches: [], acceptance: [],
       proposedAt: at.toISOString(), digest: `d-${id}`, approvedAt: at.toISOString(), approvedBy: "alex", approvedDigest: `d-${id}`,
     });
     return ref;
@@ -6324,7 +6383,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const ref = store.refFor("built-in", id, "ours").id;
     store.placeTask(ref, "/repo/main");
     store.saveScope({
-      taskId: id, goal: `goal of ${id}`, outOfScope: null, touches: [],
+      taskId: id, goal: `goal of ${id}`, outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
     });
     sign(id);
@@ -6909,7 +6968,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
 
   test("chat is a projectless, all-project surface when several projects are served", async () => {
     for (const [id, repo] of [["chat-alpha", repoA], ["chat-beta", repoB]] as const) {
-      const made = store.createConsoleTask({ id, title: id, repo, goal: `do ${id}`, filedVia: "test" }, T0);
+      const made = store.createConsoleTask({ id, title: id, repo, goal: `do ${id}`, acceptance: [{ id: "c1", statement: `${id} is done.`, evidence: ["manual-review"] }], filedVia: "test" }, T0);
       expect(made.ok).toBe(true);
     }
     const cookie = await login();
@@ -7019,7 +7078,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     store.createTask({ id: "t-yes", title: "needs the yes" }, T0);
     store.placeTask(store.refFor("built-in", "t-yes").id, repoA);
     store.saveScope({
-      taskId: "t-yes", goal: "the goal", outOfScope: "not that", touches: ["src/a.ts"],
+      taskId: "t-yes", goal: "the goal", outOfScope: "not that", touches: ["src/a.ts"], acceptance: [],
       proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
     });
     const page = await (await fetch(url("/t/t-yes"), { headers: { cookie } })).text();
@@ -7047,7 +7106,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     store.createTask({ id: "t-fix", title: "cannot be approved yet" }, T0);
     store.placeTask(store.refFor("built-in", "t-fix").id, repoA);
     store.saveScope({
-      taskId: "t-fix", goal: "the goal", outOfScope: null, touches: [],
+      taskId: "t-fix", goal: "the goal", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
     });
     const fix = await (await fetch(url("/t/t-fix"), { headers: { cookie } })).text();
@@ -7070,7 +7129,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     store.createTask({ id: "t-sign", title: "needs the yes" }, T0);
     store.placeTask(store.refFor("built-in", "t-sign").id, repoA);
     store.saveScope({
-      taskId: "t-sign", goal: "the goal", outOfScope: null, touches: [],
+      taskId: "t-sign", goal: "the goal", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
     });
     const page = await (await fetch(url("/t/t-sign"), { headers: { cookie } })).text();
@@ -7140,7 +7199,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     approverToken = added.token;
     store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 100_000_000, priceInMicrousd: 3, priceOutMicrousd: 15 }, "alex", T0);
     for (const id of ["a", "b"]) {
-      const made = store.createConsoleTask({ id, title: `task ${id}`, repo: repoDir, goal: `do ${id}`, filedVia: "cli" }, T0);
+      const made = store.createConsoleTask({ id, title: `task ${id}`, repo: repoDir, goal: `do ${id}`, acceptance: [{ id: "c1", statement: `${id} is done.`, evidence: ["manual-review"] }], filedVia: "cli" }, T0);
       if (!made.ok) throw new Error(made.reason);
     }
     server = createDecisionServer({
@@ -7511,7 +7570,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const filed = await fetch(`${base}/tasks/add`, {
       method: "POST",
       headers: { cookie, origin: base },
-      body: new URLSearchParams({ csrf, projectRevision: revision, title: "why does login flake", goal: "find out", repo: "/repo/main", scout: "1" }),
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review", csrf, projectRevision: revision, title: "why does login flake", goal: "find out", repo: "/repo/main", scout: "1" }),
       redirect: "manual",
     });
     expect(filed.status).toBe(303);
@@ -7568,7 +7627,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const form = await (await fetch(`${base}/tasks/new`, { headers: { cookie } })).text();
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(form)?.[1] ?? "";
     const revision = /name="projectRevision" value="(\d+)"/.exec(form)?.[1] ?? "0";
-    await fetch(`${base}/tasks/add`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, projectRevision: revision, title: "scout me", goal: "find out", repo: "/repo/main", scout: "1" }), redirect: "manual" });
+    await fetch(`${base}/tasks/add`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ acceptance: "c1: ok | manual-review", csrf, projectRevision: revision, title: "scout me", goal: "find out", repo: "/repo/main", scout: "1" }), redirect: "manual" });
     const next = await (await fetch(`${base}/next`, { headers: { cookie } })).text();
     expect(next).toContain("approve exactly this:");
     expect(next).toContain("a read-only session investigates this goal and delivers a report");
@@ -7624,7 +7683,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const filed = await fetch(`${base}/tasks/add`, {
       method: "POST",
       headers: { cookie, origin: base },
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf,
         projectRevision: revision,
         title: "unattended permissions proof",
@@ -7648,7 +7707,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const changed = await fetch(`${base}/t/${encodeURIComponent(taskId)}/scope`, {
       method: "POST",
       headers: { cookie, origin: base },
-      body: new URLSearchParams({
+      body: new URLSearchParams({ acceptance: "c1: ok | manual-review",
         csrf,
         sawDigest,
         goal: "prove the permission policy flows end to end",

@@ -73,6 +73,8 @@ ring at 2px offset on buttons and links; a ring-colored border with a soft
 | Row | `.row` (2.25rem, hairline below, hover fill) | `LedgerRow` | title · mono facts · chip at the end |
 | Facts | `.facts` (`.fact > .k + .v`) | `KeyValueRow` | dim mono key, ink mono value |
 | Seal | `.seal` | `DigestSeal` | the signed digest, mono, boxed in the hairline |
+| Acceptance rubric | `acceptanceCeremonyHtml` (`<ul class="recap acceptance-rubric">`) | — | one line per signed criterion — mono id, sans statement, its required evidence kinds after it; restated text above the seal, never a second amber action |
+| Criterion matrix | `.badge-manual-review` (+ existing `.badge-done`/`-failed`); `criterionMatrixHtml` / `criterionMatrixSummary` | — | one row per criterion — a state badge (pass/missing/failed/manual review), mono id, statement, required evidence; the SAME states and words on the task page, the run page, done, builds, board, inbox, and `task show` |
 | Card | `.card` | `Card` | surface, hairline, 0.5rem radius, faint shadow; never nested |
 | Buttons | `button` (secondary), `form.card > [type=submit]` (primary), `.approve-form [type=submit]` (amber), `.danger` | `Button` | one primary per form; approve is the only amber verb |
 | Fields | `input`, `textarea`, `select` | `Input` | surface-colored, hairline, hover darkens, focus halo |
@@ -120,7 +122,18 @@ top-down and every long thing folds.
    follows it with no competing primary. A scope the store cannot route
    gets the problem and a primary "edit the scope to fix it" road instead
    of a password. Otherwise the decision cards and the "this task is
-   waiting on you" card, linking to the section that resolves it.
+   waiting on you" card, linking to the section that resolves it. The
+   acceptance rubric restates immediately above the seal, in the same
+   restated-text register as the goal and the touches above it — never a
+   second thing to sign.
+4a. **The criterion-to-evidence matrix** — a done task's dispatch-status
+   box, and the run page's evidence bundle, gain one row per signed
+   criterion beneath the verdict: a state badge (pass · missing · failed ·
+   manual review), the criterion's id in mono, its statement in sans, and
+   the evidence kinds it required. Denser surfaces (done, builds, board,
+   inbox) collapse the same facts to a count chip ("2/3 criteria") plus
+   the worst state present, rather than dropping the matrix — a
+   grandfathered task with no rubric renders nothing extra at all.
 5. **Property list** (the rail on a desktop, above the sections on a phone):
    worker or last attempt · queue place · scope with its seal · publishes as
    · this attempt · task total · strikes — one row grammar, dim key, mono

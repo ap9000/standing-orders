@@ -61,6 +61,7 @@ describe("planning mode, against real git", () => {
           goal: "Guard the payout endpoint with a rate limiter",
           outOfScope: "No schema changes",
           touches: ["src/payouts.ts"],
+          acceptance: [{ id: "c1", statement: "The payout endpoint is rate limited.", evidence: ["check"] }],
           plan: "## Approach\nWrap the handler in a sliding-window limiter.\n",
         }),
       );

@@ -125,6 +125,7 @@ describe("firing pins the agent and re-proves the ceiling against it", () => {
     goal: "Refresh the notes",
     outOfScope: null,
     touches: [],
+    acceptance: [{ id: "c1", statement: "The notes are refreshed.", how: null, evidence: ["manual-review"] }],
     requirements: [],
     schedule: "every:60",
     singleFlight: true,

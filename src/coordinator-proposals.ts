@@ -11,7 +11,7 @@
  */
 import type { CoordinatorProposalKind, Store } from "./store.js";
 import { authenticateCoordinator, type VerifiedCoordinator } from "./coordinator.js";
-import { decisionOver, honestText, readOptionalText, readTouches } from "./mate-tools.js";
+import { decisionOver, honestText, readOptionalText, readTouches, readAcceptanceArg } from "./mate-tools.js";
 
 export const PER_CID_PENDING_PROPOSALS = 20;
 
@@ -131,9 +131,11 @@ function buildPayload(store: Store, who: VerifiedCoordinator, kind: CoordinatorP
     if (not === undefined) return bad("not is plain text ≤2000");
     const touches = readTouches(args["touches"]);
     if (touches === null) return bad("touches is up to 50 plain paths");
+    const acceptance = readAcceptanceArg(args["acceptance"]);
+    if (acceptance === null) return bad("acceptance is required: at least one criterion with an id, statement, and evidence kinds");
     if (store.hasLiveClaim(task.refId, now)) return { ok: false, reason: "not-proposable", message: "a worker is building that task right now — its scope cannot change under it" };
     const scope = store.getScope(task.taskId);
-    return { ok: true, repo: task.repo, payload: { task: task.taskId, goal: args["goal"], not, touches, sawDigest: scope?.digest ?? null }, awaiting: "the operator's confirmation, then a password to approve" };
+    return { ok: true, repo: task.repo, payload: { task: task.taskId, goal: args["goal"], not, touches, acceptance, sawDigest: scope?.digest ?? null }, awaiting: "the operator's confirmation, then a password to approve" };
   }
   if (kind === "cancel") {
     if (!honestText(args["reason"], 200)) return bad("reason is plain text ≤200");

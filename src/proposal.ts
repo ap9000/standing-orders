@@ -37,7 +37,7 @@ import {
   type RoutineTerms,
 } from "./routine.js";
 import type { Store } from "./store.js";
-import type { UnattendedPermissionMode } from "./scope.js";
+import { parseAcceptanceCriteria, type UnattendedPermissionMode } from "./scope.js";
 
 /** Provenance tokens are part of the audit surface: lowercase, bounded,
  * nothing that could render as anything but itself. */
@@ -55,6 +55,8 @@ export type ProposalRefusal = {
     | "bad-repo"
     | "outside-ceiling"
     | "bad-provenance"
+    | "bad-acceptance"
+    | "acceptance-required"
     | "backlog-full"
     | "duplicate";
   message: string;
@@ -67,6 +69,10 @@ export type TaskProposalInput = {
   goal?: string;
   outOfScope?: string | null;
   touches?: string[];
+  /** v39: the signed acceptance rubric — unparsed, checked by
+   * `store.createConsoleTask` the same way every other filing text is
+   * checked here: identically for every caller of this one door. */
+  acceptance?: unknown;
   /** Which door filed this: 'cli', 'console', 'intake', 'template:<name>'. */
   filedVia: string;
   /** The scope text's author when it is an LLM's (ruling 2; §10 for a
@@ -119,6 +125,8 @@ export type RoutineProposalInput = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  /** v39: the signed rubric every instance's scope copies forward. */
+  acceptance: unknown;
   requirements: string[];
   schedule: string;
   costCeilingUsd: number | null;
@@ -230,6 +238,7 @@ export function fileTaskProposal(
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       outOfScope,
       touches,
+      acceptance: input.acceptance,
       filedVia: input.filedVia,
       proposedVia: input.proposedVia ?? null,
       ...(input.deliverable === undefined ? {} : { deliverable: input.deliverable }),
@@ -243,7 +252,9 @@ export function fileTaskProposal(
         ? "the backlog is full — finish or cancel something first"
         : made.reason === "duplicate"
           ? "a task with that id already exists"
-          : `the store refused the filing: ${made.reason}`,
+          : made.reason === "acceptance-required"
+            ? "a goal needs at least one signed acceptance criterion before it can be filed"
+            : `the store refused the filing: ${made.reason}`,
     );
   }
   let planning = false;
@@ -266,11 +277,14 @@ export function fileRoutineProposal(
   if (!repo.ok) return repo;
   if (repo.repo === undefined) return refuse("bad-repo", "a routine needs the repository it runs in");
 
+  const acceptanceParse = parseAcceptanceCriteria(input.acceptance);
+
   const terms: RoutineTerms = {
     repo: repo.repo,
     goal: input.goal,
     outOfScope: input.outOfScope,
     touches: input.touches,
+    acceptance: acceptanceParse.criteria,
     requirements: input.requirements,
     schedule: input.schedule,
     // v1 routines run one instance at a time, period — hardcoded, not accepted.
@@ -281,6 +295,9 @@ export function fileRoutineProposal(
   // EVERY problem at once — an operator fixing a form deserves the whole
   // list, not one complaint per submission.
   const problems = validateRoutineTerms(terms);
+  if (acceptanceParse.problems.length > 0) {
+    problems.push({ field: "acceptance", problem: acceptanceParse.problems.map(p => p.message).join("; ") });
+  }
   if (!ROUTINE_NAME.test(input.name)) {
     problems.unshift({ field: "name", problem: "lowercase letters, digits, and dashes — it becomes each instance's id" });
   }

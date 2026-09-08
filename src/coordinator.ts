@@ -309,7 +309,20 @@ export function fileCoordinatorProposal(
       {
         title: input.title,
         repo: input.repo,
-        ...(input.intent === undefined ? {} : { goal: input.intent }),
+        ...(input.intent === undefined
+          ? {}
+          : {
+              goal: input.intent,
+              // v39: a coordinator's intent is provisional pending the
+              // operator's own review (the quarantine already refuses to
+              // auto-approve anything a coordinator wrote) — a placeholder
+              // criterion names that review as the outstanding work,
+              // rather than blocking the filing on a rubric a remote
+              // caller has no real standing to author.
+              acceptance: [
+                { id: "c1", statement: "The operator has reviewed this filing's intent and written a real rubric before approving it.", how: null, evidence: ["manual-review"] },
+              ],
+            }),
         ...(input.deliverable === undefined ? {} : { deliverable: input.deliverable }),
         filedVia: `mcp:${who.name}`,
         admittedRepos: who.repos,

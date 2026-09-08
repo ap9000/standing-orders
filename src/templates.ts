@@ -20,6 +20,8 @@
  * this library later changes nothing anybody filed.
  */
 
+import type { AcceptanceCriterion } from "./scope.js";
+
 export type TaskTemplate = {
   kind: "task";
   name: string;
@@ -28,6 +30,10 @@ export type TaskTemplate = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  /** v39: baked in, like every other term — a template ships a signed
+   * rubric because it ships a scope, and a scope-producing road never
+   * gets to omit one. */
+  acceptance: AcceptanceCriterion[];
   /** The fields most installations change — shown in `show` and preview. */
   edit: string[];
 };
@@ -40,6 +46,7 @@ export type RoutineTemplate = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  acceptance: AcceptanceCriterion[];
   requirements: string[];
   schedule: string;
   costCeilingUsd: number | null;
@@ -68,6 +75,9 @@ export const TEMPLATES: readonly Template[] = [
     outOfScope:
       "No major version bumps. No edits to application code beyond what the lockfile refresh itself forces. No changes to CI configuration.",
     touches: [],
+    acceptance: [
+      { id: "c1", statement: "The full test suite passes against the refreshed lockfile.", how: null, evidence: ["check"] },
+    ],
     requirements: [],
     schedule: "daily:03:30",
     costCeilingUsd: null,
@@ -82,6 +92,9 @@ export const TEMPLATES: readonly Template[] = [
       "Pick ONE module that is under-tested — no tests at all beats thin tests — and write focused tests for its observable behavior: inputs, outputs, and failure paths, not implementation details. One module per firing, then stop. If the module cannot be tested without refactoring it, do not refactor: park with a note naming the obstacle so a human can decide.",
     outOfScope: "No refactoring of the code under test. No snapshot tests. No changes outside the chosen module's test file(s).",
     touches: [],
+    acceptance: [
+      { id: "c1", statement: "The chosen module's new tests pass and exercise inputs, outputs, and failure paths.", how: null, evidence: ["check", "changed-path"] },
+    ],
     requirements: [],
     schedule: "daily:05:00",
     costCeilingUsd: null,
@@ -96,6 +109,9 @@ export const TEMPLATES: readonly Template[] = [
       "Read the README and any docs/ pages against the code as it is today. Fix what has drifted: commands that moved, flags that changed, features that shipped undocumented, claims that stopped being true. Prefer deleting a stale claim over guessing a new one. Summarize every correction in the handoff.",
     outOfScope: "No restructuring or rewriting for style. No new documentation pages. No changes to code.",
     touches: ["README.md", "docs/"],
+    acceptance: [
+      { id: "c1", statement: "Every correction made is named in the handoff.", how: null, evidence: ["manual-review"] },
+    ],
     requirements: [],
     schedule: "every:10080",
     costCeilingUsd: null,
@@ -110,6 +126,9 @@ export const TEMPLATES: readonly Template[] = [
       "Run the project's linter and typechecker. Fix every mechanical violation — unused imports, obvious type narrowings, formatting the tools can prove — and nothing judgment-shaped: no renames for taste, no restructuring, no behavior changes. If a rule demands a behavioral fix, list it in the handoff instead of fixing it.",
     outOfScope: "No behavioral changes. No disabling or reconfiguring rules. No dependency changes.",
     touches: [],
+    acceptance: [
+      { id: "c1", statement: "The linter and typechecker report no mechanical violations left to fix.", how: null, evidence: ["check"] },
+    ],
     edit: ["goal (name your lint command if it is not the obvious one)", "touches (fence off generated code)"],
   },
   {

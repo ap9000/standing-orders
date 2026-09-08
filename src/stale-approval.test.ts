@@ -65,7 +65,7 @@ describe("a stale approval holds the task instead of retrying every pass", () =>
     await run(["approver", "add", "alex", "--json"]);
     const approverToken = payload().token as string;
     await run(["task", "add", "dedupe listings", "--id", "dedupe", "--repo", repo, "--json"]);
-    await run(["task", "scope", "dedupe", "--goal", "Dedupe the listings", "--json"]);
+    await run(["task", "scope", "dedupe", "--goal", "Dedupe the listings", "--acceptance", "Duplicate listings no longer appear.|manual-review", "--json"]);
     const before = openStore(db);
     const digest = before.getScope("dedupe")?.digest as string;
     before.close();

@@ -22,7 +22,7 @@ const T0 = new Date("2026-08-11T22:00:00.000Z");
  * (Codex planning review, finding 2) — these tests approve by hand. */
 function approveScopeFor(store: Store, taskId: string): void {
   store.saveScope({
-    taskId, goal: "the work", outOfScope: null, touches: [],
+    taskId, goal: "the work", outOfScope: null, touches: [], acceptance: [],
     proposedAt: "2026-08-11T00:00:00.000Z", digest: `dg-${taskId}`,
     approvedAt: "2026-08-11T00:00:00.000Z", approvedBy: "alex", approvedDigest: `dg-${taskId}`,
   });

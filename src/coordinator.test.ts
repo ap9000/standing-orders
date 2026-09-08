@@ -16,8 +16,12 @@ import {
 } from "./coordinator.js";
 import { register } from "./runner.js";
 import { acquire, acquireIfReady } from "./claim.js";
-import { addApprover, fileAndSealUnderMode } from "./scope.js";
+import { addApprover, fileAndSealUnderMode, type AcceptanceCriterion } from "./scope.js";
+
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
+
+const RUBRIC: AcceptanceCriterion[] = [{ id: "c1", statement: "the change is reviewed", how: null, evidence: ["manual-review"] }];
+
 
 const T0 = new Date("2026-08-30T12:00:00.000Z");
 const later = (ms: number) => new Date(T0.getTime() + ms);
@@ -178,7 +182,7 @@ describe("the coordinator quarantine", () => {
     // A concrete scope row to seal — the primitive tests drive
     // sealScopeApproval directly, the way claim.test's approveScopeFor does.
     store.saveScope({
-      taskId, goal: "the work", outOfScope: null, touches: [],
+      taskId, goal: "the work", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: `dg-${taskId}`,
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -203,7 +207,7 @@ describe("the coordinator quarantine", () => {
     const ordinary = store.createConsoleTask({ title: "ordinary", repo: REPO, filedVia: "console" }, T0);
     if (!ordinary.ok) throw new Error("filing failed");
     store.saveScope({
-      taskId: ordinary.id, goal: "ordinary work", outOfScope: null, touches: [],
+      taskId: ordinary.id, goal: "ordinary work", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: `dg-${ordinary.id}`,
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });
@@ -291,7 +295,7 @@ describe("the coordinator quarantine", () => {
     );
 
     const refused = fileAndSealUnderMode(store, {
-      taskId, goal: "auto-approved?", outOfScope: null, touches: [], now: later(1_000), repo: REPO, actor: "alex",
+      taskId, goal: "auto-approved?", outOfScope: null, touches: [], acceptance: RUBRIC, now: later(1_000), repo: REPO, actor: "alex",
     });
     expect(refused).toEqual({ ok: false, reason: "coordinator-filed" });
     expect(store.scopeSealed(taskId)).toBe(false);
@@ -302,7 +306,7 @@ describe("the coordinator quarantine", () => {
     const ordinary = store.createConsoleTask({ title: "covered", repo: REPO, filedVia: "console" }, T0);
     if (!ordinary.ok) throw new Error("filing failed");
     const sealed = fileAndSealUnderMode(store, {
-      taskId: ordinary.id, goal: "covered work", outOfScope: null, touches: [], now: later(1_500), repo: REPO, actor: "alex",
+      taskId: ordinary.id, goal: "covered work", outOfScope: null, touches: [], acceptance: RUBRIC, now: later(1_500), repo: REPO, actor: "alex",
     });
     expect(sealed).toMatchObject({ ok: true, basis: "mode" });
     expect(store.scopeSealed(ordinary.id)).toBe(true);
@@ -454,7 +458,7 @@ describe("the outstanding caps and credential-scoped reads", () => {
     // A live SEAL stops counting: scope + password seal on ids[2] opens a slot.
     const sealed = ids[2] as string;
     store.saveScope({
-      taskId: sealed, goal: "sealed work", outOfScope: null, touches: [],
+      taskId: sealed, goal: "sealed work", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: `dg-${sealed}`,
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });

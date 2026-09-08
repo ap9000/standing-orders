@@ -7,6 +7,7 @@
  */
 
 import { hasForbiddenControls } from "./decision.js";
+import { parseAcceptanceCriteria, type AcceptanceCriterion } from "./scope.js";
 
 export type PlanProblem = { reason: string; message: string };
 
@@ -14,6 +15,11 @@ export type ParsedPlan = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  /** v39: the rubric the planner drafts alongside the goal — mandatory,
+   * because the planner is a scope-producing road like any other (the
+   * scope text names it explicitly). A malformed or empty rubric fails
+   * the whole plan the same way a missing goal always has. */
+  acceptance: AcceptanceCriterion[];
   /** The plan document, markdown, rendered fenced-inert everywhere. */
   plan: string;
 };
@@ -109,9 +115,17 @@ export function parsePlan(raw: string): PlanParseResult {
     }
   }
 
+  const acceptanceParse = parseAcceptanceCriteria(body["acceptance"]);
+  for (const problem of acceptanceParse.problems) {
+    problems.push({ reason: problem.reason, message: problem.message });
+  }
+  if (acceptanceParse.problems.length === 0 && acceptanceParse.criteria.length === 0) {
+    problems.push({ reason: "missing-acceptance", message: "acceptance is required — at least one signed criterion the build will be judged against" });
+  }
+
   if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
-    plan: { goal: goal as string, outOfScope, touches, plan: document as string },
+    plan: { goal: goal as string, outOfScope, touches, acceptance: acceptanceParse.criteria, plan: document as string },
   };
 }

@@ -335,7 +335,7 @@ describe("the MCP stdio server", () => {
     // Quarantined until the password seal — then ordinary.
     expect(acquire(store, taskRef, "b-1", { now: T0, token: "tok-b-1" })).toMatchObject({ ok: false, reason: "coordinator-filed" });
     store.saveScope({
-      taskId, goal: "e2e work", outOfScope: null, touches: [],
+      taskId, goal: "e2e work", outOfScope: null, touches: [], acceptance: [],
       proposedAt: T0.toISOString(), digest: `dg-${taskId}`,
       approvedAt: null, approvedBy: null, approvedDigest: null,
     });

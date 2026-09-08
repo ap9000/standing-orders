@@ -257,6 +257,63 @@ export function validateScreenshotBytes(bytes: Buffer): { ok: true; kind: "png" 
 }
 
 /**
+ * Pixel dimensions read straight from the format's own header — never
+ * decoded, never trusting a claimed size (v39, screenshot evidence:
+ * "meaningful byte size and at least 320 by 200 dimensions"). `null` when
+ * the bytes are a valid signature but the header could not be read (a
+ * genuinely corrupt or truncated file) — the caller treats that the same
+ * as failing the size floor, never as passing it.
+ *
+ * PNG: the IHDR chunk is fixed at bytes 8-25 for every valid PNG — width
+ * and height are the two big-endian uint32s right after it starts.
+ *
+ * JPEG: scan markers from byte 2. Every marker except the two without a
+ * payload (SOI 0xD8, EOI 0xD9) and the RST markers (0xD0-0xD7) carries a
+ * two-byte big-endian length; the SOF markers (0xC0-0xCF, excluding the
+ * DHT/JPG/DAC markers 0xC4/0xC8/0xCC, which share the range but are not
+ * frame headers) hold precision(1) + height(2) + width(2) right after
+ * that length field.
+ */
+export function imageDimensions(bytes: Buffer, kind: "png" | "jpeg"): { width: number; height: number } | null {
+  if (kind === "png") {
+    if (bytes.length < 26) return null;
+    // Bytes 12-15 must literally spell IHDR, or this is not a PNG this
+    // reader understands well enough to trust the offsets that follow.
+    if (bytes.toString("ascii", 12, 16) !== "IHDR") return null;
+    const width = bytes.readUInt32BE(16);
+    const height = bytes.readUInt32BE(20);
+    if (width <= 0 || height <= 0) return null;
+    return { width, height };
+  }
+  // JPEG: walk markers looking for a Start Of Frame.
+  let offset = 2;
+  const SOF_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+  while (offset + 1 < bytes.length) {
+    if (bytes[offset] !== 0xff) return null; // not a marker boundary — malformed
+    let marker = bytes[offset + 1] as number;
+    offset += 2;
+    // Fill bytes (0xFF padding) between markers.
+    while (marker === 0xff && offset < bytes.length) {
+      marker = bytes[offset] as number;
+      offset += 1;
+    }
+    if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) continue; // no payload
+    if (offset + 1 >= bytes.length) return null;
+    const length = bytes.readUInt16BE(offset);
+    if (SOF_MARKERS.has(marker)) {
+      if (offset + 7 >= bytes.length) return null;
+      const height = bytes.readUInt16BE(offset + 3);
+      const width = bytes.readUInt16BE(offset + 5);
+      if (width <= 0 || height <= 0) return null;
+      return { width, height };
+    }
+    if (marker === 0xda) return null; // Start Of Scan — image data follows, no SOF was found first
+    offset += length;
+  }
+  return null;
+}
+
+/**
  * Write one evidence file and record it. The row is written through the
  * store the caller passed — inside whatever transaction the caller holds.
  */

@@ -142,9 +142,15 @@ export type UnverifiedDoneFacts = {
    * attention card's `stalledSince`. */
   completedAt: string;
   proofVerdict: "short" | "refuted";
+  /** v39: how many of the signed rubric's criteria actually passed —
+   * folded into the plain-text `reason` chip, since a board card carries
+   * no room for the full matrix. `[]` for a grandfathered task. */
+  proofMatrix?: { state: "pass" | "missing" | "failed" | "manual-review" }[];
 };
 
 export function attentionCardForUnverifiedDone(facts: UnverifiedDoneFacts): BoardCard {
+  const matrix = facts.proofMatrix ?? [];
+  const matrixWords = matrix.length === 0 ? "" : ` (${matrix.filter(one => one.state === "pass").length}/${matrix.length} criteria)`;
   return {
     lane: "attention",
     taskId: facts.taskId,
@@ -158,7 +164,7 @@ export function attentionCardForUnverifiedDone(facts: UnverifiedDoneFacts): Boar
     routineName: null,
     priority: 0,
     assignedRunner: null,
-    reason: facts.proofVerdict === "refuted" ? "complete — proof refuted" : "complete — needs verification",
+    reason: (facts.proofVerdict === "refuted" ? "complete — proof refuted" : "complete — needs verification") + matrixWords,
   };
 }
 

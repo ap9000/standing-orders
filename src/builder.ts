@@ -62,6 +62,7 @@ import {
   redactSecretLines,
   storeEvidence,
   validateScreenshotBytes,
+  imageDimensions,
   SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
 import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
@@ -380,10 +381,10 @@ export function proveApprovedProfile(
     const rederived =
       (scope.digestVersion ?? 1) >= 2
         ? digestOf(
-            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
             snapshot,
           )
-        : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd });
+        : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance });
     if (rederived !== scope.approvedDigest) {
       return { ok: false, message: "the approval record does not verify against the stored terms — re-approve (stale-approval)" };
     }
@@ -1537,7 +1538,10 @@ async function settleProof(
             `agent-claimed screenshot at ${shot.path} (validated ${checked.kind})`,
             now(),
           );
-          return { path: shot.path, ok: true };
+          // v39: read straight off the header, never trusted — feeds the
+          // screenshot-evidence floor (real bytes, real dimensions) a
+          // criterion's evidence is checked against, never the claim alone.
+          return { path: shot.path, ok: true, bytes: found.raw.length, dims: imageDimensions(found.raw, checked.kind) };
         })
       : [];
 
@@ -1603,7 +1607,13 @@ async function settleProof(
   const handoffArtifact = store.artifactsFor(runId).find(one => one.kind === "handoff") ?? null;
   const terminalDiffArtifact = store.artifactsFor(runId).find(one => one.kind === "terminal-diff") ?? null;
 
-  const { verdict, reasons } = adjudicate({
+  // v39: the SIGNED rubric this run built against — read from the task's
+  // CURRENT scope, which cannot have changed since dispatch (a live claim
+  // refuses every guarded scope edit) — never re-authored here.
+  const scope = store.getScope(request.taskId);
+  const approvedCriteria = (scope?.acceptance ?? []).map(c => ({ id: c.id, statement: c.statement, evidence: c.evidence }));
+
+  const { verdict, reasons, matrix } = adjudicate({
     proofArtifactPresent,
     proofParse,
     handoffPresent: handoffArtifact !== null,
@@ -1612,8 +1622,9 @@ async function settleProof(
     diffStat,
     verifyCommand,
     screenshots,
+    approvedCriteria,
   });
-  store.saveProofVerdict(runId, verdict, reasons, now());
+  store.saveProofVerdict(runId, verdict, reasons, now(), matrix);
 }
 
 /** A stable, filesystem-safe tag for a claimed screenshot's stored evidence
@@ -1933,6 +1944,16 @@ function brief(
     fence(`Goal: ${scope.goal}`),
     ...(scope.outOfScope === null ? [] : [fence(`Explicitly out of scope: ${scope.outOfScope}`)]),
     ...(scope.touches.length === 0 ? [] : [fence(`Expected to touch: ${scope.touches.join(", ")}`)]),
+    ...(scope.acceptance.length === 0
+      ? []
+      : [
+          fence(
+            "Acceptance criteria — your proof must answer EVERY one of these below, by its exact id, restating its statement verbatim:",
+          ),
+          ...scope.acceptance.map(c =>
+            fence(`  ${c.id}: ${c.statement} (requires evidence: ${c.evidence.join(", ")})`),
+          ),
+        ]),
     "--- END AGREED SCOPE ---",
     "",
     // The plan a planner drafted and the operator approved alongside the
@@ -2061,9 +2082,17 @@ function brief(
     "  but a completed task with no proof reads as needing verification, not",
     "  done. JSON object:",
     '    { "version": 1,',
-    '      "criteria": [ { "id": "<short-id>", "statement": "<acceptance',
-    '        criterion>", "verdict": "met" | "not-met" | "not-checked", "how":',
-    '        "<how you checked it>" }, ... up to 12 ],',
+    '      "criteria": [ { "id": "<the EXACT id of an acceptance criterion',
+    '        above, or a new id for something you found worth recording>",',
+    '        "statement": "<restate that criterion\'s statement VERBATIM — an',
+    '        answer that alters the signed wording is refuted, not verified>",',
+    '        "verdict": "met" | "not-met" | "not-checked", "how": "<how you',
+    '        checked it>", "evidence": [ { "kind": "check" | "screenshot" |',
+    '        "changed-path" | "manual-review", "ref": "<for check: the exact',
+    '        command string from checks below; for screenshot: the exact path',
+    '        from screenshots below; for changed-path: an exact path from',
+    '        changed below; for manual-review: a short note>" }, ... ] },',
+    "        ... up to 12 ],",
     '      "checks": [ { "command": "<the command you ran>", "exitCode":',
     '        <0-255>, "summary": "<what it reported>" }, ... up to 12 ],',
     '      "changed": ["<repository-relative path you changed>", ... up to 64],',
@@ -2071,13 +2100,26 @@ function brief(
     '      "screenshots": [ { "path": "<repository-relative path to a PNG or',
     '        JPEG file in the worktree>", "caption": "<what it shows>" },',
     "        ... up to 8 ] }",
-    "  Screenshots are required evidence for UI-facing changes — the machine",
-    "  reads the actual file at each claimed path, checks it is really a",
-    "  bounded PNG or JPEG, and stores it as evidence; a path that is not one",
-    "  fails verification. Every claimed changed path is checked against the",
-    "  machine's own diff, and a repository's approved verification command,",
-    "  if one is configured, is re-run by the machine itself — never by you.",
-    "  Write it to a temporary name first, then rename it into place.",
+    ...(scope.acceptance.length === 0
+      ? []
+      : [
+          "  A rubric was signed above: answer EVERY one of its criteria, by",
+          "  exact id, with the evidence kind(s) it names — an unanswered",
+          "  criterion, one whose evidence does not resolve, or one whose",
+          "  statement you changed reads as short or refuted, never verified.",
+          "  You may add criteria of your own beyond the signed rubric; they",
+          "  are advisory and cannot turn a signed criterion's failure into a",
+          "  pass.",
+        ]),
+    "  Screenshot evidence must be a real PNG or JPEG, at least 320 by 200",
+    "  pixels, of meaningful byte size — the machine reads the actual file at",
+    "  each claimed path, checks its signature and dimensions, and stores it",
+    "  as evidence; a placeholder image fails verification. changed-path",
+    "  evidence is checked against the machine's own sealed diff — an",
+    "  unavailable or truncated diff cannot verify it. A repository's",
+    "  approved verification command, if one is configured, is re-run by the",
+    "  machine itself — never by you. Write it to a temporary name first,",
+    "  then rename it into place.",
     ...(answers.length === 0
       ? []
       : [

@@ -54,9 +54,12 @@ visible provenance and an operator-controlled reset.
 
 ## Current focus
 
-Priority 1 is active, and the first Priority 2 slice has landed alongside it:
-completion now carries a typed, hash-addressed proof the plane adjudicates
-against evidence it captured itself, rather than an agent's own assertion.
+Priority 1 is active, and the first two Priority 2 slices have landed
+alongside it: completion carries a typed, hash-addressed proof the plane
+adjudicates against evidence it captured itself, rather than an agent's own
+assertion — and, as of Acceptance Contract v2, that proof answers a rubric
+the *operator* signed before the build ever started, not one the agent
+invented after seeing what it built.
 
 The first Priority 1 slice now pins the worker service to the installed Node
 runtime, requires a fresh worker heartbeat before installation reports success,
@@ -82,3 +85,29 @@ words. A `short` or `refuted` verdict reads "needs verification," not
 done, until an operator explicitly accepts it (`task accept`, or the
 console's accept button); the branch and diff stay exactly as reviewable
 either way — missing or malformed proof never destroys committed work.
+
+The second Priority 2 slice, Acceptance Contract v2 (schema v39): the
+rubric a build is judged against is now a *signed term*, not an assertion.
+A scope carries an ordered list of acceptance criteria — a stable id, an
+outcome statement, and the evidence kinds (`check`, `screenshot`,
+`changed-path`, `manual-review`) required to answer it — folded into the
+same digest the operator's password signs, restated above the seal on
+every approval surface. `how` rides alongside each criterion as advisory
+guidance only; it is never part of what is signed. Every scope-producing
+road — the planner, the task editor, new-task filing, chat and mate
+proposals, coordinator filings, routines, templates, and the demo — now
+requires at least one criterion before a scope can be proposed through it;
+a scope already approved before this migration keeps its digest and its
+approval exactly as they were. The builder's brief quotes the signed
+rubric verbatim and requires the proof to answer every criterion by its
+exact id, with typed evidence references into the same proof's checks,
+screenshots, and changed paths — never a self-declared verdict alone.
+Adjudication treats an unanswered criterion, an evidence reference that
+does not resolve, or a claimed changed-path set that does not equal the
+sealed diff exactly, as *short*; a proof that alters a signed criterion's
+statement is *refuted*, the same severity as any other altered term. A
+screenshot answering a criterion must be a real PNG or JPEG of meaningful
+byte size and at least 320×200 pixels, read from the file's own header,
+never a claim. One shared criterion-to-evidence matrix — pass, missing,
+failed, or manual-review, per criterion — renders identically on the task,
+run, done, builds, board, inbox, and chat surfaces, and in `task show`.

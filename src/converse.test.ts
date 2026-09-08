@@ -35,7 +35,10 @@ describe("the assistant envelope — exactly one shape, atomic proposals", () =>
     chatEnvelope: 1,
     reply: "Two tasks are stalled behind the vendor hold.",
     proposals: [
-      { kind: "task", repoId: "r1", title: "Fix the flaky webhook test", goal: "Deflake it.", outOfScope: null, touches: [] },
+      {
+        kind: "task", repoId: "r1", title: "Fix the flaky webhook test", goal: "Deflake it.", outOfScope: null, touches: [],
+        acceptance: [{ id: "c1", statement: "The webhook test no longer flakes.", how: null, evidence: ["check"] }],
+      },
     ],
   };
 
@@ -78,7 +81,10 @@ describe("the assistant envelope — exactly one shape, atomic proposals", () =>
     const routine = {
       ...good,
       proposals: [
-        { kind: "routine", repoId: "r2", name: "nightly-deps", goal: "g", outOfScope: null, touches: [], schedule: "daily:03:30" },
+        {
+          kind: "routine", repoId: "r2", name: "nightly-deps", goal: "g", outOfScope: null, touches: [], schedule: "daily:03:30",
+          acceptance: [{ id: "c1", statement: "g happens.", how: null, evidence: ["manual-review"] }],
+        },
       ],
     };
     expect(parseAssistantEnvelope(JSON.stringify(routine))).toMatchObject({ ok: true, proposalsDiscarded: false });

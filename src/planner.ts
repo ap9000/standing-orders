@@ -38,7 +38,7 @@ import type { Runner } from "./builder.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { openLiveLog } from "./live.js";
 import { proveTreeUntouched, snapshotIgnored } from "./tree-proof.js";
-import { CLAUDE_LIMITS } from "./scope.js";
+import { CLAUDE_LIMITS, ACCEPTANCE_LIMITS } from "./scope.js";
 
 const GIT = "git";
 const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
@@ -156,11 +156,20 @@ function plannerBrief(
     '  "goal": "what success looks like, one paragraph",',
     '  "outOfScope": "what this task must not become (or null)",',
     '  "touches": ["paths/you/expect/to/change"],',
+    '  "acceptance": [ { "id": "<short-id>", "statement": "<one testable',
+    '    outcome>", "evidence": ["check"|"screenshot"|"changed-path"|',
+    '    "manual-review", ...], "how": "<optional advisory guidance, or',
+    `    null>" }, ... 1 to ${ACCEPTANCE_LIMITS.criteria} ],`,
     '  "plan": "the plan as markdown: the approach, the steps, the risks"',
     "}",
-    `The plan field is capped at ${PLAN_LIMITS.document} bytes. The goal and`,
-    "outOfScope become the scope the operator approves — write them as the",
-    "contract, and put everything else in the plan.",
+    `The plan field is capped at ${PLAN_LIMITS.document} bytes. The goal,`,
+    "outOfScope, and acceptance become the CONTRACT the operator approves —",
+    "write them as what will be checked, and put everything else in the",
+    "plan. acceptance is REQUIRED: at least one criterion, each with a",
+    "stable id, a statement the finished build will answer BY THAT EXACT",
+    "ID, and the evidence kinds that will be required to answer it. The",
+    "operator signs the id, the statement, and the evidence kinds — `how`",
+    "is advisory guidance only and is never part of what is signed.",
   ].join("\n");
 }
 

@@ -233,7 +233,7 @@ describe("scout tasks, against real git", () => {
     const approverToken = payload().token as string;
     await run(["task", "add", "why does login flake", "--id", "flaky", "--repo", repo, "--report", "--json"], reportingAgent);
     expect(payload().ok).toBe(true);
-    await run(["task", "scope", "flaky", "--goal", "Find out why the login test flakes on CI and say what would fix it", "--json"], reportingAgent);
+    await run(["task", "scope", "flaky", "--goal", "Find out why the login test flakes on CI and say what would fix it", "--acceptance", "It is fixed and verified.|manual-review", "--json"], reportingAgent);
     expect(payload().ok).toBe(true);
     const store = openStore(db);
     const digest = store.getScope("flaky")?.digest as string;
@@ -284,7 +284,7 @@ describe("scout tasks, against real git", () => {
     expect(store.pendingPublications()).toHaveLength(0);
 
     // The follow-up files through the one door with the scout's authorship — mode coverage never seals it.
-    const filed = fileTaskProposal(store, { title: "Await the session cookie", repo, goal: "wait first", filedVia: "console", proposedVia: "scout" }, T0);
+    const filed = fileTaskProposal(store, { title: "Await the session cookie", repo, goal: "wait first", acceptance: [{ id: "c1", statement: "The session cookie is awaited.", evidence: ["manual-review"] }], filedVia: "console", proposedVia: "scout" }, T0);
     expect(filed.ok).toBe(true);
     if (filed.ok) {
       expect(store.handle.prepare("SELECT proposed_via FROM task_scope WHERE task_id = ?").get(filed.id)?.["proposed_via"]).toBe("scout");

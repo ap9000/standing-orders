@@ -51,7 +51,7 @@ import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
 import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision.js";
 import { readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
-import { verdictWords as proofVerdictWords } from "./proof.js";
+import { verdictWords as proofVerdictWords, matrixWords } from "./proof.js";
 import { probeRepo, isVerified } from "./probe.js";
 
 import { createDecisionServer } from "./serve.js";
@@ -149,7 +149,7 @@ import {
 import { mintCoordinator, revokeCoordinator, listCoordinators } from "./coordinator.js";
 import { serveMcp } from "./mcp.js";
 import { createInterface } from "node:readline";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage } from "./scope.js";
+import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import {
@@ -495,7 +495,7 @@ export const KEYS_ACTIONS = ["status", "set", "clear", "verify", "auth"] as cons
 export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "key", "db", "runner", "ttl", "state", "on", "reason", "until", "id", "backend",
   "allow", "selector", "paths", "credentials", "repo", "token", "capacity",
-  "goal", "not", "touches", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
+  "goal", "not", "touches", "acceptance", "by", "digest", "as", "branch", "pool", "base", "model", "turns",
   "max", "cap", "probe", "kind", "expires", "cmd", "since", "repair-model",
   "choose", "note", "max-open-decisions", "max-held-sessions", "name", "days", "publication", "auto-approve", "review-auto", "entries", "port", "host", "allow-host",
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
@@ -5626,6 +5626,9 @@ async function intakeCommand(
           title: `GH#${one.number}: ${one.title}`,
           repo,
           goal: `Imported from GitHub issue #${one.number} in ${grant.github} (label "${grant.label}"). Only the title was imported — read the issue at https://github.com/${grant.github}/issues/${one.number} for full context, then edit and approve this scope before anything builds.`,
+          acceptance: [
+            { id: "c1", statement: "The linked GitHub issue's request is read and addressed.", how: null, evidence: ["manual-review"] },
+          ],
           filedVia: "intake",
         },
         clock(),
@@ -5868,7 +5871,7 @@ function templateCommand(
     }
     const made = fileTaskProposal(
       store,
-      { title, repo: repoGiven, goal, outOfScope, touches, filedVia: `template:${template.name}` },
+      { title, repo: repoGiven, goal, outOfScope, touches, acceptance: template.acceptance, filedVia: `template:${template.name}` },
       clock(),
     );
     if (!made.ok) return fail(write, json, "template apply", made.reason, made.message, made.reason === "duplicate" ? EXIT.refused : EXIT.usage);
@@ -5900,6 +5903,7 @@ function templateCommand(
       goal,
       outOfScope,
       touches,
+      acceptance: template.acceptance,
       requirements: template.requirements,
       schedule,
       costCeilingUsd,
@@ -5930,6 +5934,7 @@ function templateCommand(
       goal,
       outOfScope,
       touches,
+      acceptance: template.acceptance,
       requirements: template.requirements,
       schedule,
       costCeilingUsd,
@@ -5992,7 +5997,15 @@ async function routineCommand(
     const goal = text(flags, "goal");
     const schedule = text(flags, "schedule");
     if (repoGiven === undefined || goal === undefined || schedule === undefined) {
-      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>] [--budget-usd <n>]`", EXIT.usage);
+      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM> --acceptance <rubric> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>] [--budget-usd <n>]`", EXIT.usage);
+    }
+    const acceptanceGiven = text(flags, "acceptance");
+    if (acceptanceGiven === undefined) {
+      return fail(
+        write, json, "routine add", "acceptance-required",
+        "a standing order needs at least one signed acceptance criterion — `--acceptance \"<statement>|<evidence,kinds>\"`, `;`-separated for more than one; evidence kinds are check, screenshot, changed-path, manual-review",
+        EXIT.usage,
+      );
     }
     const ceilingGiven = text(flags, "ceiling");
     // --budget-usd on a routine caps EACH instance (v16): it becomes the
@@ -6013,6 +6026,7 @@ async function routineCommand(
         goal,
         outOfScope: text(flags, "not") ?? null,
         touches: (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
+        acceptance: acceptanceLinesToInput(acceptanceGiven.split(";")),
         requirements: (text(flags, "require") ?? "").split(",").map(one => one.trim()).filter(one => one !== ""),
         schedule,
         costCeilingUsd: ceilingGiven === undefined ? null : Number(ceilingGiven),
@@ -8641,6 +8655,7 @@ function showTask(positional: readonly string[], context: Context): number {
     report: readVerifiedReport(store, context.evidenceRoot, ref.id),
     proofVerdict: proofVerdict?.verdict ?? null,
     proofReasons: proofVerdict?.reasons ?? [],
+    proofMatrix: proofVerdict?.matrix ?? [],
     proofAccepted,
   };
 
@@ -8655,6 +8670,7 @@ function showTask(positional: readonly string[], context: Context): number {
       : [
           `  proof: ${proofVerdictWords(detail.proofVerdict, detail.proofReasons).word}${detail.proofAccepted ? " (accepted)" : ""}`,
           ...(detail.proofReasons.length > 0 ? [`    ${detail.proofReasons.join("; ")}`] : []),
+          ...matrixWords(detail.proofMatrix),
         ]),
     ...(detail.report === null
       ? []
@@ -9044,10 +9060,28 @@ function scopeTask(
   const id = positional[0];
   const goal = text(flags, "goal");
   if (id === undefined || goal === undefined) {
-    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is> [--not <text>] [--touches a,b] [--budget-usd <n>] [--race provider:model[,provider:model…]] [--race-count 2..4] [--race-per-usd <n>] [--race-total-usd <n>]`", EXIT.usage);
+    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is> --acceptance <rubric> [--not <text>] [--touches a,b] [--budget-usd <n>] [--race provider:model[,provider:model…]] [--race-count 2..4] [--race-per-usd <n>] [--race-total-usd <n>]`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task scope", "unknown-task", `no task \`${id}\``, EXIT.refused);
+  }
+  // v39: this road bypasses proposeGuarded (a trusted local operator, not a
+  // web form re-authenticating staleness) but not the rubric requirement —
+  // every scope-producing road signs one, this one included.
+  const acceptanceGiven = text(flags, "acceptance");
+  if (acceptanceGiven === undefined) {
+    return fail(
+      write, json, "task scope", "acceptance-required",
+      "a scope needs at least one signed acceptance criterion — `--acceptance \"<statement>|<evidence,kinds>\"`, `;`-separated for more than one; evidence kinds are check, screenshot, changed-path, manual-review",
+      EXIT.usage,
+    );
+  }
+  const acceptanceParse = parseAcceptanceCriteria(acceptanceLinesToInput(acceptanceGiven.split(";")));
+  if (acceptanceParse.problems.length > 0) {
+    return fail(write, json, "task scope", "bad-acceptance", acceptanceParse.problems.map(p => p.message).join("; "), EXIT.usage);
+  }
+  if (acceptanceParse.criteria.length === 0) {
+    return fail(write, json, "task scope", "acceptance-required", "--acceptance named no valid criteria", EXIT.usage);
   }
 
   const touches = (text(flags, "touches") ?? "").split(",").map(one => one.trim()).filter(Boolean);
@@ -9203,6 +9237,7 @@ function scopeTask(
       goal,
       outOfScope: text(flags, "not") ?? null,
       touches,
+      acceptance: acceptanceParse.criteria,
       ...(budgetUsd !== null
         ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
         : coverage?.defaultBudgetMicrousd != null

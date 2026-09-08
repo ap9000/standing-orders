@@ -86,6 +86,7 @@ const TERMS: RoutineTerms = {
   goal: "Refresh the dependency lockfile and note anything major",
   outOfScope: "No version bumps beyond patch",
   touches: ["package.json"],
+  acceptance: [{ id: "c1", statement: "The refreshed lockfile still installs cleanly.", how: null, evidence: ["check"] }],
   requirements: [],
   schedule: "every:60",
   singleFlight: true,

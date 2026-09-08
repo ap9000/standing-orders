@@ -20,15 +20,35 @@
  */
 
 import { hasForbiddenControls } from "./decision.js";
+import { EVIDENCE_KINDS, type EvidenceKind } from "./scope.js";
 
 export type ProofVerdict = "verified" | "attested" | "short" | "refuted";
+
+/** One typed reference the proof cites to answer a criterion's required
+ * evidence: `ref` names an existing check's command, an existing
+ * screenshot's path, a path inside `changed`, or (kind `manual-review`)
+ * free-text pointing at nothing machine-checkable. Additive (v39): a
+ * criterion with no `evidence` array parses the same as one that always
+ * had none — legacy proofs, and every proof against a rubric-less scope,
+ * are untouched. */
+export type CriterionEvidenceRef = { kind: EvidenceKind; ref: string };
 
 export type ParsedCriterion = {
   id: string;
   statement: string;
   verdict: "met" | "not-met" | "not-checked";
   how: string;
+  /** v39: typed references answering a SIGNED criterion by exact id.
+   * `[]` for a criterion the agent added beyond the rubric, or for any
+   * proof written before this migration. */
+  evidence: CriterionEvidenceRef[];
 };
+
+/** v39: the rubric side of a criterion, as `adjudicate` reads it — the
+ * SIGNED id, statement, and required evidence kinds. Never `how` (never
+ * signed). Empty = nothing signed: `adjudicate` runs the v1 rules,
+ * byte for byte. */
+export type ApprovedCriterion = { id: string; statement: string; evidence: readonly EvidenceKind[] };
 
 export type ParsedCheck = {
   command: string;
@@ -68,6 +88,8 @@ export const PROOF_LIMITS = {
   criterionId: 40,
   criterionStatement: 300,
   criterionHow: 500,
+  evidencePerCriterion: 4,
+  evidenceRef: 300,
   checks: 12,
   checkCommand: 300,
   checkSummary: 300,
@@ -129,6 +151,48 @@ function relativePath(value: unknown, field: string, cap: number, problems: Proo
   return raw;
 }
 
+/** `evidence` is optional on a criterion (absent → `[]`, exactly like every
+ * other list here) — the mandatory PRESENCE of an answer for a SIGNED
+ * criterion is `adjudicate`'s concern, not the parser's; this only proves
+ * the shape of what is there. */
+function parseEvidenceRefs(value: unknown, field: string, problems: ProofProblem[]): CriterionEvidenceRef[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    problems.push({ reason: `bad-${field}`, message: `${field} must be an array (got ${describe(value)})` });
+    return null;
+  }
+  if (value.length > PROOF_LIMITS.evidencePerCriterion) {
+    problems.push({ reason: `${field}-too-many`, message: `${field} lists ${value.length} — cap is ${PROOF_LIMITS.evidencePerCriterion}` });
+    return null;
+  }
+  const refs: CriterionEvidenceRef[] = [];
+  let bad = false;
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      problems.push({ reason: `${field}[${index}]-shape`, message: `${field}[${index}] must be an object` });
+      bad = true;
+      continue;
+    }
+    const one = entry as Record<string, unknown>;
+    const kind = one["kind"];
+    if (typeof kind !== "string" || !EVIDENCE_KINDS.includes(kind as EvidenceKind)) {
+      problems.push({
+        reason: `${field}[${index}]-bad-kind`,
+        message: `${field}[${index}].kind must draw from ${EVIDENCE_KINDS.join(", ")} (got ${describe(kind)})`,
+      });
+      bad = true;
+      continue;
+    }
+    const ref = prose(one["ref"], `${field}[${index}].ref`, PROOF_LIMITS.evidenceRef, problems);
+    if (ref === null) {
+      bad = true;
+      continue;
+    }
+    refs.push({ kind: kind as EvidenceKind, ref });
+  }
+  return bad ? null : refs;
+}
+
 function parseCriteria(value: unknown, problems: ProofProblem[]): ParsedCriterion[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
@@ -163,8 +227,9 @@ function parseCriteria(value: unknown, problems: ProofProblem[]): ParsedCriterio
       });
       continue;
     }
-    if (id === null || statement === null || how === null) continue;
-    criteria.push({ id, statement, how, verdict });
+    const evidence = parseEvidenceRefs(one["evidence"], `criteria[${index}].evidence`, problems);
+    if (id === null || statement === null || how === null || evidence === null) continue;
+    criteria.push({ id, statement, how, verdict, evidence });
   }
   return criteria;
 }
@@ -304,7 +369,21 @@ export type ScreenshotOutcome = {
   ok: boolean;
   /** Set when ok is false — why the claimed file did not become evidence. */
   problem?: string;
+  /** v39: set when ok is true — the bytes actually read, for the
+   * "meaningful byte size" half of the screenshot-evidence rule. */
+  bytes?: number;
+  /** v39: set when ok is true and dimensions could be read from the
+   * image header; null when the format parsed but dimensions could not
+   * be determined. Absent entirely for a pre-v39 caller. */
+  dims?: { width: number; height: number } | null;
 };
+
+/** v39: the floor a criterion's screenshot evidence must clear — "real,
+ * not placeholder-sized" in exact numbers (scope: "meaningful byte size
+ * and at least 320 by 200 dimensions"). */
+export const SCREENSHOT_EVIDENCE_MIN_BYTES = 1024;
+export const SCREENSHOT_EVIDENCE_MIN_WIDTH = 320;
+export const SCREENSHOT_EVIDENCE_MIN_HEIGHT = 200;
 
 /** What `captureTerminalDiff` gives back, restated for adjudication:
  * whether the sealed stat parsed at all, whether the file list was cut to
@@ -339,42 +418,191 @@ export type AdjudicateInput = {
   /** One entry per screenshot the proof claimed, in the order claimed.
    * Empty when the proof named none. */
   screenshots: readonly ScreenshotOutcome[];
+  /** v39: the SIGNED rubric this run's scope carried at dispatch, in id
+   * order. `[]` (the default) is the grandfathering promise made good:
+   * every rule below that reads this is skipped whole, and adjudication
+   * runs exactly the v1 rules that follow it. */
+  approvedCriteria?: readonly ApprovedCriterion[];
 };
 
-export type AdjudicateResult = { verdict: ProofVerdict; reasons: string[] };
+export type AdjudicateResult = { verdict: ProofVerdict; reasons: string[]; matrix: CriterionMatrixRow[] };
+
+/** One row of the criterion-to-evidence matrix every result-facing surface
+ * renders identically (task, run, done, builds, board, inbox, chat —
+ * Priority 2's "one surface, six places" rule, extended). `pass`: every
+ * required evidence kind resolved. `missing`: the criterion went
+ * unanswered, or a required kind has no reference at all. `failed`: a
+ * reference exists but did not resolve (wrong check exit code, invalid
+ * screenshot, a changed-path claim the sealed diff does not back).
+ * `manual-review`: every required kind resolved EXCEPT at least one
+ * `manual-review` kind, which is never machine-verifiable by design — the
+ * row still needs a human's eyes even though nothing failed. */
+export type CriterionMatrixState = "pass" | "missing" | "failed" | "manual-review";
+export type CriterionMatrixRow = {
+  id: string;
+  statement: string;
+  requiredEvidence: readonly EvidenceKind[];
+  state: CriterionMatrixState;
+  /** Why this row is not a plain pass — empty for `pass`. */
+  detail: string[];
+};
+
+/** Set equality, exactly — the "must equal the complete sealed git diff
+ * exactly" rule (v39) needs both directions, unlike the legacy subset
+ * check. */
+function setEquals(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const one of a) if (!b.has(one)) return false;
+  return true;
+}
+
+/**
+ * The criterion-to-evidence matrix, computed once and shared by every
+ * surface (v39) — best-effort from whatever is available: `proof` is null
+ * when no proof parsed at all, in which case every approved criterion is
+ * simply unanswered. `[]` whenever no rubric was signed, so a
+ * grandfathered run renders no matrix at all rather than a wall of
+ * "missing" rows nobody signed up for.
+ */
+function criterionMatrix(
+  approvedCriteria: readonly ApprovedCriterion[],
+  proof: ParsedProof | null,
+  diffStat: DiffStatFacts | null,
+  screenshots: readonly ScreenshotOutcome[],
+): CriterionMatrixRow[] {
+  if (approvedCriteria.length === 0) return [];
+  const answers = new Map((proof?.criteria ?? []).map(c => [c.id, c] as const));
+  const screenshotsByPath = new Map(screenshots.map(s => [s.path, s] as const));
+  const checksByCommand = new Map((proof?.checks ?? []).map(c => [c.command, c] as const));
+  const changedSet = new Set(proof?.changed ?? []);
+  // null = cannot know either way (diff unavailable or truncated) — never
+  // treated as agreement, per "an unavailable or truncated diff cannot verify".
+  const diffExact =
+    diffStat !== null && diffStat.captured && !diffStat.truncated ? setEquals(changedSet, diffStat.paths) : null;
+
+  return approvedCriteria.map((approved): CriterionMatrixRow => {
+    const base = { id: approved.id, statement: approved.statement, requiredEvidence: approved.evidence };
+    const answer = answers.get(approved.id);
+    if (answer === undefined) {
+      return { ...base, state: "missing", detail: [`the proof does not answer approved criterion "${approved.id}"`] };
+    }
+    if (answer.statement.trim() !== approved.statement.trim()) {
+      return {
+        ...base,
+        state: "failed",
+        detail: [`criterion "${approved.id}" was signed as "${approved.statement}" and the proof restates it as "${answer.statement}"`],
+      };
+    }
+    const detail: string[] = [];
+    let anyMissing = false;
+    let anyFailed = false;
+    let anyManual = false;
+    for (const kind of approved.evidence) {
+      const ref = answer.evidence.find(e => e.kind === kind);
+      if (ref === undefined) {
+        anyMissing = true;
+        detail.push(`criterion "${approved.id}" requires ${kind} evidence, which the proof does not reference`);
+        continue;
+      }
+      if (kind === "manual-review") {
+        anyManual = true;
+        continue;
+      }
+      if (kind === "check") {
+        const check = checksByCommand.get(ref.ref);
+        if (check === undefined) {
+          anyFailed = true;
+          detail.push(`criterion "${approved.id}"'s check evidence "${ref.ref}" does not match any reported check`);
+        } else if (check.exitCode !== 0) {
+          anyFailed = true;
+          detail.push(`criterion "${approved.id}"'s check "${ref.ref}" exited ${check.exitCode}`);
+        }
+        continue;
+      }
+      if (kind === "screenshot") {
+        const shot = screenshotsByPath.get(ref.ref);
+        if (shot === undefined || !shot.ok) {
+          anyFailed = true;
+          detail.push(`criterion "${approved.id}"'s screenshot evidence "${ref.ref}" could not be verified${shot?.problem ? `: ${shot.problem}` : ""}`);
+        } else if (
+          (shot.bytes ?? 0) < SCREENSHOT_EVIDENCE_MIN_BYTES ||
+          shot.dims == null ||
+          shot.dims.width < SCREENSHOT_EVIDENCE_MIN_WIDTH ||
+          shot.dims.height < SCREENSHOT_EVIDENCE_MIN_HEIGHT
+        ) {
+          anyFailed = true;
+          detail.push(
+            `criterion "${approved.id}"'s screenshot "${ref.ref}" is missing or placeholder-sized (needs a real PNG or JPEG of at least ${SCREENSHOT_EVIDENCE_MIN_BYTES} bytes and ${SCREENSHOT_EVIDENCE_MIN_WIDTH}x${SCREENSHOT_EVIDENCE_MIN_HEIGHT})`,
+          );
+        }
+        continue;
+      }
+      // changed-path
+      if (!changedSet.has(ref.ref)) {
+        anyFailed = true;
+        detail.push(`criterion "${approved.id}"'s changed-path evidence "${ref.ref}" is not among the proof's claimed changed paths`);
+      } else if (diffExact !== true) {
+        anyFailed = true;
+        detail.push(
+          diffExact === null
+            ? `criterion "${approved.id}"'s changed-path evidence cannot verify — the sealed diff is unavailable or truncated`
+            : `criterion "${approved.id}"'s changed-path evidence cannot verify — the proof's changed paths do not exactly match the sealed diff`,
+        );
+      }
+    }
+    const state: CriterionMatrixState = anyMissing ? "missing" : anyFailed ? "failed" : anyManual ? "manual-review" : "pass";
+    return { ...base, state, detail };
+  });
+}
 
 /**
  * Ordered rules; the first that fires wins. Every reason is a sentence the
  * surfaces print verbatim — this function is the only place that decides
  * wording, so the task page, run page, board, CLI, and chat cards cannot
  * drift from each other (Priority 2, the "one surface, six places" rule).
+ *
+ * v39: `input.approvedCriteria` empty runs the rules below byte for byte —
+ * the grandfathering promise. Non-empty inserts the rubric rules AFTER the
+ * diff-stat and verify-command rules and BEFORE the legacy unmet check,
+ * exactly as approved in the v2 plan: a proof that alters a signed
+ * criterion's statement is REFUTED (the same severity as any other
+ * altered term); an unanswered criterion or an evidence reference that
+ * does not resolve is SHORT (a gap, not a lie). The legacy self-declared
+ * `verdict` field still runs afterward and can only downgrade further,
+ * never upgrade past what the evidence proved.
  */
 export function adjudicate(input: AdjudicateInput): AdjudicateResult {
+  const approvedCriteria = input.approvedCriteria ?? [];
+  const matrixOf = (proof: ParsedProof | null): CriterionMatrixRow[] =>
+    criterionMatrix(approvedCriteria, proof, input.diffStat, input.screenshots);
+
   if (!input.proofArtifactPresent) {
-    return { verdict: "short", reasons: ["no proof was written"] };
+    return { verdict: "short", reasons: ["no proof was written"], matrix: matrixOf(null) };
   }
   if (input.proofParse === null || !input.proofParse.ok) {
     const detail =
       input.proofParse !== null && !input.proofParse.ok
         ? input.proofParse.problems.map(p => p.message).join("; ")
         : "the proof could not be read";
-    return { verdict: "short", reasons: [`the proof is malformed: ${detail}`] };
+    return { verdict: "short", reasons: [`the proof is malformed: ${detail}`], matrix: matrixOf(null) };
   }
   const proof = input.proofParse.proof;
+  const matrix = matrixOf(proof);
 
   if (!input.handoffPresent) {
-    return { verdict: "short", reasons: ["the terminal handoff is missing"] };
+    return { verdict: "short", reasons: ["the terminal handoff is missing"], matrix };
   }
   if (!input.terminalDiffPresent || input.terminalDiffCaptureStatus === "failed") {
-    return { verdict: "short", reasons: ["the machine-captured diff is missing or failed to capture"] };
+    return { verdict: "short", reasons: ["the machine-captured diff is missing or failed to capture"], matrix };
   }
 
   if (input.diffStat !== null && input.diffStat.captured && !input.diffStat.truncated) {
-    const missing = proof.changed.filter(path => !input.diffStat!.paths.has(path));
-    if (missing.length > 0) {
+    const overclaimed = proof.changed.filter(path => !input.diffStat!.paths.has(path));
+    if (overclaimed.length > 0) {
       return {
         verdict: "refuted",
-        reasons: [`claimed changed path${missing.length > 1 ? "s" : ""} not in the sealed diff: ${missing.join(", ")}`],
+        reasons: [`claimed changed path${overclaimed.length > 1 ? "s" : ""} not in the sealed diff: ${overclaimed.join(", ")}`],
+        matrix,
       };
     }
   }
@@ -383,7 +611,19 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     return {
       verdict: "refuted",
       reasons: [`the repository's approved verification command exited ${input.verifyCommand.exitCode}`],
+      matrix,
     };
+  }
+
+  if (approvedCriteria.length > 0) {
+    const restated = matrix.filter(row => row.detail.some(d => d.includes("was signed as")));
+    if (restated.length > 0) {
+      return { verdict: "refuted", reasons: restated.flatMap(row => row.detail), matrix };
+    }
+    const unresolved = matrix.filter(row => row.state === "missing" || row.state === "failed");
+    if (unresolved.length > 0) {
+      return { verdict: "short", reasons: unresolved.flatMap(row => row.detail), matrix };
+    }
   }
 
   const unmet = proof.criteria.filter(c => c.verdict !== "met");
@@ -391,6 +631,7 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     return {
       verdict: "short",
       reasons: unmet.map(c => `criterion "${c.statement}" is ${c.verdict === "not-met" ? "not met" : "not checked"}`),
+      matrix,
     };
   }
 
@@ -399,16 +640,30 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
     return {
       verdict: "short",
       reasons: badScreenshots.map(s => `claimed screenshot "${s.path}" could not be verified${s.problem ? `: ${s.problem}` : ""}`),
+      matrix,
     };
   }
 
   if (input.verifyCommand.configured && input.verifyCommand.ran && input.verifyCommand.exitCode === 0) {
-    return { verdict: "verified", reasons: ["the approved verification command passed"] };
+    return { verdict: "verified", reasons: ["the approved verification command passed"], matrix };
   }
   if (input.verifyCommand.configured && !input.verifyCommand.ran) {
-    return { verdict: "short", reasons: ["the approved verification command could not be run"] };
+    return { verdict: "short", reasons: ["the approved verification command could not be run"], matrix };
   }
-  return { verdict: "attested", reasons: ["the proof agrees with the sealed diff; no verification command is configured to re-run"] };
+  return { verdict: "attested", reasons: ["the proof agrees with the sealed diff; no verification command is configured to re-run"], matrix };
+}
+
+/** The matrix in plain lines, for a text surface (the CLI, `brief`) — the
+ * same shared vocabulary `criterionMatrixHtml` renders in the console, so
+ * the words never drift between the two (Priority 2's rule, extended). */
+export function matrixWords(matrix: readonly CriterionMatrixRow[]): string[] {
+  if (matrix.length === 0) return [];
+  const lines: string[] = ["  acceptance matrix"];
+  for (const row of matrix) {
+    lines.push(`    [${row.state}] ${row.id}: ${row.statement} (requires: ${row.requiredEvidence.join(", ")})`);
+    for (const detail of row.detail) lines.push(`      ${detail}`);
+  }
+  return lines;
 }
 
 /** Plain words for a verdict, shared by every surface (the `summary.ts`

@@ -34,7 +34,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
     token = added.token;
     store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 100_000_000, priceInMicrousd: 3, priceOutMicrousd: 15 }, "alex", T0);
     for (const id of ["a", "b"]) {
-      const made = store.createConsoleTask({ id, title: `task ${id}`, repo, goal: `do ${id}`, filedVia: "cli" }, T0);
+      const made = store.createConsoleTask({ id, title: `task ${id}`, repo, goal: `do ${id}`, acceptance: [{ id: "c1", statement: `${id} is done.`, evidence: ["manual-review"] }], filedVia: "cli" }, T0);
       if (!made.ok) throw new Error(made.reason);
     }
     store.close();
@@ -190,7 +190,7 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
 
   test("--end ends a live session; a stale card refuses in words; a password-class act points at its ceremony", async () => {
     script.push(
-      () => answer([{ type: "tool_use", id: "c1", name: "propose_scope", input: { task: "a", goal: "a better goal" } }, { type: "tool_use", id: "c2", name: "propose_next", input: { task: "b" } }]),
+      () => answer([{ type: "tool_use", id: "c1", name: "propose_scope", input: { task: "a", goal: "a better goal", acceptance: [{ id: "c1", statement: "the better goal happens", evidence: ["manual-review"] }] } }, { type: "tool_use", id: "c2", name: "propose_next", input: { task: "b" } }]),
       () => text("Two."),
     );
     expect(await run(["chat", "--as", "alex", "--token", token, "--repo", repo, "--say", "improve a"])).toBe(0);

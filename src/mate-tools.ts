@@ -15,6 +15,7 @@ import type { VerifiedApprover } from "./principal.js";
 import type { MateToolSchema } from "./converse.js";
 import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
 import { readVerifiedReport, scanForSecrets } from "./evidence.js";
+import { parseAcceptanceCriteria, ACCEPTANCE_LIMITS, EVIDENCE_KINDS, type AcceptanceCriterion } from "./scope.js";
 
 export const MATE_MAX_PROPOSALS_PER_TURN = 5;
 
@@ -154,6 +155,32 @@ export function readTouches(value: unknown): string[] | null {
   return value as string[];
 }
 
+/** v39: the rubric a mate or coordinator proposal drafts — mandatory,
+ * parsed the same way every other authoring road parses one. `null` means
+ * the argument did not even parse into a non-empty rubric. */
+export function readAcceptanceArg(value: unknown): AcceptanceCriterion[] | null {
+  const parsed = parseAcceptanceCriteria(value);
+  if (parsed.problems.length > 0 || parsed.criteria.length === 0) return null;
+  return parsed.criteria;
+}
+
+const ACCEPTANCE_ARG_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  maxItems: ACCEPTANCE_LIMITS.criteria,
+  items: {
+    type: "object",
+    properties: {
+      id: { type: "string", maxLength: ACCEPTANCE_LIMITS.id },
+      statement: { type: "string", maxLength: ACCEPTANCE_LIMITS.statement },
+      evidence: { type: "array", minItems: 1, items: { type: "string", enum: [...EVIDENCE_KINDS] } },
+      how: { type: ["string", "null"], maxLength: ACCEPTANCE_LIMITS.how },
+    },
+    required: ["id", "statement", "evidence"],
+    additionalProperties: false,
+  },
+} as const;
+
 const tooMany = (): MateToolResult => ({ ok: false, message: `this turn already holds ${MATE_MAX_PROPOSALS_PER_TURN} proposals` });
 const notFound = (): MateToolResult => ({ ok: false, message: "not-found: no such task in your projects" });
 
@@ -212,6 +239,9 @@ export function recapOver(store: Store, repos: readonly string[], now: Date, sin
       queued: mine(snapshot.tasks).filter(one => one.state === "queued").length,
       finished: mine(tasks).filter(one => one.state === "done").length,
       failed: mine(tasks).filter(one => one.state === "failed").length,
+      // v39: a finished task whose proof is short or refuted reads as
+      // waiting on you too — the same split the inbox and board make.
+      needsVerification: mine(tasks).filter(one => one.state === "done" && (one.proofVerdict === "short" || one.proofVerdict === "refuted")).length,
     };
   });
   return {
@@ -391,8 +421,8 @@ export const MATE_TOOLS: MateTool[] = [
     name: "propose_task",
     description: "Propose filing a new task. It becomes a card the operator confirms; nothing is filed until then, and a filed task still needs its scope approved. report: true proposes a SCOUT task — a read-only investigation whose only deliverable is a report, never a branch.",
     inputSchema: schema(
-      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, report: { type: "boolean" } },
-      ["repo", "title", "goal"],
+      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA, report: { type: "boolean" } },
+      ["repo", "title", "goal", "acceptance"],
     ),
     handle: (ctx, args) => {
       const repo = repoPathOf(ctx.who, args["repo"]);
@@ -402,9 +432,11 @@ export const MATE_TOOLS: MateTool[] = [
       if (not === undefined) return { ok: false, message: "not is plain text ≤2000" };
       const touches = readTouches(args["touches"]);
       if (touches === null) return { ok: false, message: "touches is up to 50 plain paths" };
+      const acceptance = readAcceptanceArg(args["acceptance"]);
+      if (acceptance === null) return { ok: false, message: "acceptance is required: at least one criterion with an id, statement, and evidence kinds" };
       if (args["report"] !== undefined && typeof args["report"] !== "boolean") return { ok: false, message: "report is true or false" };
       const report = args["report"] === true;
-      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches, report });
+      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches, acceptance, report });
       if (id === null) return tooMany();
       return { ok: true, body: { proposal: id, kind: "task", repo: args["repo"], deliverable: report ? "report" : "branch", awaiting: "the operator's confirmation" } };
     },
@@ -485,8 +517,8 @@ export const MATE_TOOLS: MateTool[] = [
     description:
       "Propose rewriting a task's scope (goal, what not to do, paths it may touch). The operator confirms the rewrite, then approves it with a password — a scope you wrote never approves itself.",
     inputSchema: schema(
-      { task: TASK_ARG, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 } },
-      ["task", "goal"],
+      { task: TASK_ARG, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA },
+      ["task", "goal", "acceptance"],
     ),
     handle: (ctx, args) => {
       const taskId = taskIdOf(args);
@@ -497,9 +529,11 @@ export const MATE_TOOLS: MateTool[] = [
       if (not === undefined) return { ok: false, message: "not is plain text ≤2000" };
       const touches = readTouches(args["touches"]);
       if (touches === null) return { ok: false, message: "touches is up to 50 plain paths" };
+      const acceptance = readAcceptanceArg(args["acceptance"]);
+      if (acceptance === null) return { ok: false, message: "acceptance is required: at least one criterion with an id, statement, and evidence kinds" };
       if (ctx.store.hasLiveClaim(ref.id, ctx.now)) return { ok: false, message: "a worker is building that task right now — its scope cannot change under it" };
       const scope = ctx.store.getScope(taskId);
-      const id = ctx.draft("scope", { task: taskId, repoId: ref.repoId, goal: args["goal"], not, touches, sawDigest: scope?.digest ?? null });
+      const id = ctx.draft("scope", { task: taskId, repoId: ref.repoId, goal: args["goal"], not, touches, acceptance, sawDigest: scope?.digest ?? null });
       if (id === null) return tooMany();
       return { ok: true, body: { proposal: id, kind: "scope", task: taskId, awaiting: "the operator's confirmation, then a password to approve" } };
     },

@@ -30,12 +30,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { openStore, type Store } from "./store.js";
-import { addApprover, propose, approve } from "./scope.js";
+import { addApprover, propose, approve, type AcceptanceCriterion } from "./scope.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { approveRoutine, fireRoutine } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
-import { storeEvidence, budgetedStatJson, type DiffStat } from "./evidence.js";
+import { storeEvidence, budgetedStatJson, imageDimensions, type DiffStat } from "./evidence.js";
+import { parseProof, adjudicate } from "./proof.js";
+import { deflateSync } from "node:zlib";
 
 // The demo demonstrates a CONFIGURED install: routing is named once, the
 // way `config set build` would, so approvals bind it like production.
@@ -90,14 +92,31 @@ const DEMO_HANDOFF = {
   decisionsIncorporated: [],
 };
 
-/** The evidence bundle's own manifest (Priority 2) — the seeded sandbox
- * shows a fully "verified" build, so a fresh install sees the honest
- * ceiling of the feature on the first look. */
+/** The evidence bundle's own manifest (Acceptance Contract v2 demo): the
+ * seeded sandbox answers its OWN signed rubric by exact id, with typed
+ * evidence references — the same shape a real builder writes — so a
+ * fresh install sees the finished feature end to end, not a stub. */
 const DEMO_PROOF = {
   version: 1 as const,
   criteria: [
-    { id: "c1", statement: "Settlement no longer drifts at half-cent boundaries.", verdict: "met" as const, how: "Added and ran boundary tests against the ledger fixtures." },
-    { id: "c2", statement: "The human console formatter still renders payout dashboards.", verdict: "met" as const, how: "Ran the dashboard's own snapshot tests." },
+    {
+      id: "c1",
+      statement: "Ledger-fixture tests demonstrate the half-cent drift is gone.",
+      verdict: "met" as const,
+      how: "Added and ran boundary tests against the ledger fixtures.",
+      evidence: [
+        { kind: "check" as const, ref: "npm test" },
+        { kind: "changed-path" as const, ref: "src/payout.ts" },
+        { kind: "changed-path" as const, ref: "src/payout.test.ts" },
+      ],
+    },
+    {
+      id: "c2",
+      statement: "The human console formatter still renders payout dashboards.",
+      verdict: "met" as const,
+      how: "Ran the dashboard's own snapshot tests.",
+      evidence: [{ kind: "screenshot" as const, ref: "evidence/payout-dashboard.png" }],
+    },
   ],
   checks: [{ command: "npm test", exitCode: 0, summary: "214 tests passed, including the new rounding boundary cases." }],
   changed: ["src/payout.ts", "src/payout.test.ts"],
@@ -105,13 +124,65 @@ const DEMO_PROOF = {
   screenshots: [{ path: "evidence/payout-dashboard.png", caption: "Payout dashboard after the fix — totals match the ledger." }],
 };
 
-/** A one-pixel transparent PNG (Priority 2 demo): a real, signature-valid
- * screenshot the evidence bundle can thumbnail, without shipping a real
- * image asset for a synthetic run nobody actually captured. */
-const DEMO_SCREENSHOT_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64",
-);
+/**
+ * A minimal, real, uncompressed-per-scanline PNG encoder — no image
+ * library, just IHDR + one zlib-deflated IDAT + IEND. Used only to give
+ * the demo's screenshot evidence REAL, non-placeholder dimensions and
+ * byte size (Acceptance Contract v2: a screenshot criterion needs a real
+ * file of at least 320×200 and meaningful bytes to verify) without
+ * shipping a binary asset for a run nobody actually captured.
+ */
+function encodeDemoPng(width: number, height: number, rgb: readonly [number, number, number]): Buffer {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc32 = (buf: Buffer): number => {
+    let c = 0xffffffff;
+    for (const byte of buf) c = crcTable[(c ^ byte) & 0xff]! ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    const typed = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(typed), 0);
+    return Buffer.concat([len, typed, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type: RGB
+  // A faint vertical gradient so the file is not one repeated byte —
+  // "meaningful", not merely large.
+  const stride = width * 3;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (stride + 1);
+    raw[rowStart] = 0; // filter: none
+    const shade = Math.round((y / Math.max(1, height - 1)) * 40);
+    for (let x = 0; x < width; x++) {
+      const p = rowStart + 1 + x * 3;
+      raw[p] = Math.min(255, rgb[0] + shade);
+      raw[p + 1] = Math.min(255, rgb[1] + shade);
+      raw[p + 2] = Math.min(255, rgb[2] + shade);
+    }
+  }
+  const idat = deflateSync(raw);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", idat),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** A real 640×400 PNG — comfortably past the 320×200 / meaningful-byte-size
+ * floor a screenshot criterion needs to verify. */
+const DEMO_SCREENSHOT_PNG = encodeDemoPng(640, 400, [16, 24, 32]);
 
 /**
  * Seed a believable fleet mid-flight. The store MUST already carry the
@@ -140,10 +211,13 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(30),
   });
 
-  const task = (id: string, title: string, repo: string, goal?: string): string => {
+  const genericAcceptance: AcceptanceCriterion[] = [
+    { id: "c1", statement: "The described change is made and verified.", how: null, evidence: ["manual-review"] },
+  ];
+  const task = (id: string, title: string, repo: string, goal?: string, acceptance: AcceptanceCriterion[] = genericAcceptance): string => {
     const made = fileTaskProposal(
       store,
-      { id, title, repo, ...(goal === undefined ? {} : { goal }), filedVia: "demo" },
+      { id, title, repo, ...(goal === undefined ? {} : { goal, acceptance }), filedVia: "demo" },
       hoursAgo(30),
     );
     if (!made.ok) throw new Error(`seed task ${id}: ${made.reason}`);
@@ -212,6 +286,9 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     goal: "Add per-endpoint concurrency caps and timeout budgets to webhook delivery.",
     outOfScope: "No changes to the public webhook payload shape.",
     touches: ["src/webhooks/"],
+    acceptance: [
+      { id: "c1", statement: "Slow consumers cannot starve other endpoints' delivery.", how: "Load-test one slow and one healthy endpoint together.", evidence: ["check"] },
+    ],
     now: hoursAgo(21),
   });
   approve(store, building, "demo", hoursAgo(20), proposedBuilding.digest, token);
@@ -246,6 +323,10 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     goal: "Find and fix the half-cent drift in payout settlement; prove it with ledger-fixture tests.",
     outOfScope: "No ledger schema changes.",
     touches: ["src/payout.ts", "src/payout.test.ts"],
+    acceptance: [
+      { id: "c1", statement: "Ledger-fixture tests demonstrate the half-cent drift is gone.", how: null, evidence: ["check", "changed-path"] },
+      { id: "c2", statement: "The human console formatter still renders payout dashboards.", how: null, evidence: ["screenshot"] },
+    ],
     now: hoursAgo(27),
   });
   approve(store, done, "demo", hoursAgo(26), doneProposed.digest, token);
@@ -336,7 +417,24 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     `sh -c "npm test" (exit 0) [demo: synthetic]`,
     hoursAgo(8.4),
   );
-  store.saveProofVerdict(doneRun, "verified", ["the approved verification command passed"], hoursAgo(8.4));
+  // The verdict AND the criterion-to-evidence matrix are computed by the
+  // real adjudicate() — same function, same rules the builder runs —
+  // never hand-authored, so the seeded sandbox shows exactly what the
+  // feature actually renders, dimensions read from the real PNG above.
+  const demoProofParse = parseProof(JSON.stringify(DEMO_PROOF));
+  const demoPngDims = imageDimensions(DEMO_SCREENSHOT_PNG, "png");
+  const demoAdjudicated = adjudicate({
+    proofArtifactPresent: true,
+    proofParse: demoProofParse,
+    handoffPresent: true,
+    terminalDiffPresent: true,
+    terminalDiffCaptureStatus: "ok",
+    diffStat: { captured: true, truncated: false, paths: new Set(stat.files.map(one => one.path)) },
+    verifyCommand: { configured: true, ran: true, exitCode: 0 },
+    screenshots: [{ path: "evidence/payout-dashboard.png", ok: true, bytes: DEMO_SCREENSHOT_PNG.length, dims: demoPngDims }],
+    approvedCriteria: doneProposed.acceptance,
+  });
+  store.saveProofVerdict(doneRun, demoAdjudicated.verdict, demoAdjudicated.reasons, hoursAgo(8.4), demoAdjudicated.matrix);
   store.finishRun(doneRun, { outcome: "built", committed: true, now: hoursAgo(8.4) });
   store.setTaskState(done, "done", hoursAgo(8.4));
   store.addRunNote(doneRun, "demo", "Reviewed the diff — the fixture numbers check out. Shipping.", hoursAgo(3));
@@ -352,6 +450,9 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     profile: DEMO_PROFILE,
     taskId: failed,
     goal: "Remove LEGACY_PAYOUT and every branch behind it.",
+    acceptance: [
+      { id: "c1", statement: "No reference to LEGACY_PAYOUT remains in the codebase.", how: null, evidence: ["changed-path"] },
+    ],
     now: hoursAgo(16),
   });
   approve(store, failed, "demo", hoursAgo(15), failedProposed.digest, token);
@@ -387,6 +488,9 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
       goal: "Refresh the lockfile within existing ranges, run the suite, summarize anything notable.",
       outOfScope: "No major version bumps.",
       touches: [],
+      acceptance: [
+        { id: "c1", statement: "The full test suite passes against the refreshed lockfile.", how: null, evidence: ["check"] },
+      ],
       requirements: [],
       schedule: "daily:03:30",
       costCeilingUsd: null,

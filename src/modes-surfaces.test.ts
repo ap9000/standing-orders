@@ -12,11 +12,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { openStore, type Store } from "./store.js";
-import { addApprover, approvalOf, fileAndSealUnderMode, modeFilingCoverage } from "./scope.js";
+import { addApprover, approvalOf, fileAndSealUnderMode, modeFilingCoverage, type AcceptanceCriterion } from "./scope.js";
+
 import { presetTerms, modeTermsJson, modeDigestOf, type ModeTerms } from "./modes.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
 import { runOperate } from "./operate.js";
+
+const RUBRIC: AcceptanceCriterion[] = [{ id: "c1", statement: "the change is reviewed", how: null, evidence: ["manual-review"] }];
+
 
 const T0 = new Date("2026-08-27T12:00:00.000Z");
 const REPO = "/repos/thing";
@@ -114,7 +118,7 @@ describe("the C7 escalation matrix, sealed where profiles are sealed", () => {
       { repo: REPO, name, termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication },
       T0,
     );
-    const sealed = fileAndSealUnderMode(store, { taskId: "t-1", goal: "a guard", outOfScope: null, touches: [], now: T0, repo: REPO, actor: "alex" });
+    const sealed = fileAndSealUnderMode(store, { taskId: "t-1", goal: "a guard", outOfScope: null, touches: [], acceptance: RUBRIC, now: T0, repo: REPO, actor: "alex" });
     if (!sealed.ok) throw new Error(`seal: ${sealed.reason}`);
     return store.getScope("t-1");
   };
@@ -169,7 +173,7 @@ describe("the round-1 closures: bearer fencing, revision defaults, sign-time gra
   test("revision filing defaults ride the digest: escalated posture and the mode budget bind at creation (finding 2)", () => {
     const sealed = store.sealRevision(
       {
-        task: { title: "revise t-x: 1 comment", repo: REPO, goal: "apply the batch", budgetMicrousd: 2_500_000, posture: "escalated" },
+        task: { title: "revise t-x: 1 comment", repo: REPO, goal: "apply the batch", acceptance: RUBRIC, budgetMicrousd: 2_500_000, posture: "escalated" },
         artifact: { run: seedRun(store), kind: "revision-brief", key: "1/brief.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "0".repeat(64), capture: "test" },
         revisionOf: "t-x",
         commentIds: null,
@@ -223,7 +227,7 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   test("task scope with --as/--token under the signer's mode files AND approves in one act", async () => {
-    const code = await run("task", ["scope", "t-1", "--goal", "guard the payout", "--as", "alex", "--token", token]);
+    const code = await run("task", ["scope", "t-1", "--goal", "guard the payout", "--acceptance", "It is fixed and verified.|manual-review", "--as", "alex", "--token", token]);
     expect(code).toBe(0);
     expect(lines.join("\n")).toContain("approved");
     const store = openStore(db);
@@ -236,7 +240,7 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
   });
 
   test("the same filing WITHOUT credentials lands unapproved — anonymous roads never auto-seal", async () => {
-    const code = await run("task", ["scope", "t-1", "--goal", "guard the payout"]);
+    const code = await run("task", ["scope", "t-1", "--goal", "guard the payout", "--acceptance", "It is fixed and verified.|manual-review"]);
     expect(code).toBe(0);
     const store = openStore(db);
     expect(approvalOf(store.getScope("t-1")).approved).toBe(false);
@@ -244,13 +248,13 @@ describe("the credentialed-CLI auto-approve road and the plan pins", () => {
   });
 
   test("a replayed --key returns the FIRST file-and-seal answer whole (finding 3)", async () => {
-    const first = await run("task", ["scope", "t-1", "--goal", "guard the payout", "--as", "alex", "--token", token, "--key", "file-1"]);
+    const first = await run("task", ["scope", "t-1", "--goal", "guard the payout", "--acceptance", "It is fixed and verified.|manual-review", "--as", "alex", "--token", token, "--key", "file-1"]);
     expect(first).toBe(0);
     const firstWords = lines.join("\n");
     expect(firstWords).toContain("approved");
     // Replay: same key, DIFFERENT goal — the recorded answer comes back;
     // the scope is not rewritten and not re-sealed.
-    const second = await run("task", ["scope", "t-1", "--goal", "something else entirely", "--as", "alex", "--token", token, "--key", "file-1"]);
+    const second = await run("task", ["scope", "t-1", "--goal", "something else entirely", "--acceptance", "It is fixed and verified.|manual-review", "--as", "alex", "--token", token, "--key", "file-1"]);
     expect(second).toBe(0);
     const store = openStore(db);
     expect(store.getScope("t-1")?.goal).toBe("guard the payout");

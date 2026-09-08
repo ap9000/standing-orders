@@ -26,7 +26,7 @@ describe("the one filing door", () => {
   test("files an unapproved task with provenance stamped", () => {
     const made = fileTaskProposal(
       store,
-      { title: "tighten the payout guard", repo, goal: "add the missing bounds check", filedVia: "console" },
+      { title: "tighten the payout guard", repo, goal: "add the missing bounds check", acceptance: [{ id: "c1", statement: "The bounds check is added.", evidence: ["check"] }], filedVia: "console" },
       T0,
     );
     if (!made.ok) throw new Error(made.reason);
@@ -132,6 +132,7 @@ describe("the one filing door", () => {
         goal: "refresh the lockfile and note anything major",
         outOfScope: null,
         touches: [],
+        acceptance: [{ id: "c1", statement: "The lockfile is refreshed and anything major is noted.", evidence: ["check"] }],
         requirements: [],
         schedule: "daily:03:30",
         costCeilingUsd: null,

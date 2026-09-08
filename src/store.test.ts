@@ -1195,7 +1195,7 @@ describe("console mutation semantics, re-proved server-side", () => {
     });
 
     const made = store.createConsoleTask(
-      { id: "t-2", title: "wire the API", repo: "/code/thing", goal: "wire it end to end" },
+      { id: "t-2", title: "wire the API", repo: "/code/thing", goal: "wire it end to end", acceptance: [{ id: "c1", statement: "It works end to end.", evidence: ["manual-review"] }] },
       T0,
     );
     expect(made).toMatchObject({ ok: true });
@@ -1444,7 +1444,7 @@ describe("migration from a v6 database (planning, v7)", () => {
       const created = store.createRoutine(
         {
           name: "deps", repo: "/work/repo", goal: "refresh", outOfScope: null,
-          touches: [], requirements: [], schedule: "every:60",
+          touches: [], acceptance: [], requirements: [], schedule: "every:60",
           singleFlight: true, costCeilingUsd: null, digest: "d".repeat(32),
         },
         new Date("2026-08-12T03:00:00.000Z"),

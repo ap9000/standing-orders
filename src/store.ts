@@ -31,7 +31,8 @@ import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileFromJson, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode } from "./scope.js";
+import type { CriterionMatrixRow } from "./proof.js";
+import { digestOf, canonicalProfileJson, canonicalChainJson, chainFromJson, chainDigestOf, entryDigestOf, profileFromJson, parseAcceptanceCriteria, CLAUDE_LIMITS, CODEX_SHAPED_LIMITS, GEMINI_LIMITS, type ExecutionProfile, type ChainEntry, type UnattendedPermissionMode, type AcceptanceCriterion } from "./scope.js";
 import { resolveScopeProfile, resolveScopeChain } from "./agentconfig.js";
 import { readAuthMode } from "./keys.js";
 import { isFallbackEligible, recognizesEligible, classMatchesAuthMode, type TerminalClass } from "./exhaustion.js";
@@ -43,7 +44,7 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 
-export const SCHEMA_VERSION = 38;
+export const SCHEMA_VERSION = 39;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -232,7 +233,19 @@ export type ChatProviderId = DirectChatProviderId | SubscriptionChatProviderId;
  * repos list itself stays server-side; only indexes leave as opaque ids. */
 export type ChatSnapshot = {
   repos: string[];
-  tasks: { repoIndex: number; id: string; title: string; state: string; ageHours: number; strikes: number }[];
+  tasks: {
+    repoIndex: number;
+    id: string;
+    title: string;
+    state: string;
+    ageHours: number;
+    strikes: number;
+    /** v39: the closed verdict of the newest finished attempt, and the
+     * criterion-to-evidence matrix it decided alongside — null/`[]` for a
+     * task with no finished attempt, or one whose scope signed no rubric. */
+    proofVerdict: "verified" | "attested" | "short" | "refuted" | null;
+    proofMatrix: CriterionMatrixRow[];
+  }[];
   tasksSaturated: boolean;
   decisions: { repoIndex: number; id: number; question: string; optionLabels: string[]; taskId: string; options: { id: string; label: string; reversible: boolean }[]; ageHours: number }[];
   decisionsSaturated: boolean;
@@ -373,6 +386,8 @@ export type Routine = {
   goal: string;
   outOfScope: string | null;
   touches: string[];
+  /** v39: the signed rubric every instance's scope copies forward. */
+  acceptance: AcceptanceCriterion[];
   requirements: string[];
   /** 'every:<minutes>' or 'daily:<HH:MM>' (UTC). */
   schedule: string;
@@ -1109,7 +1124,12 @@ CREATE TABLE IF NOT EXISTS routine (
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL,
   -- Immutable provenance (v12), same contract as task_ref.filed_via.
-  filed_via        TEXT
+  filed_via        TEXT,
+  -- v39: the signed rubric every instance's scope copies forward. A
+  -- routine is validated mandatory-non-empty at creation/edit time
+  -- (validateRoutineTerms) -- by the time a firing reads this column it
+  -- is guaranteed present, so fireRoutine never re-checks it.
+  acceptance_json  TEXT
 );
 
 -- Append-only installation facts (v12): set-once markers about THIS
@@ -2027,6 +2047,15 @@ CREATE TABLE IF NOT EXISTS task_scope (
   -- which the approval sealed: 'profile' (legacy) or 'chain'.
   proposed_chain_json   TEXT,
   approved_chain_json   TEXT,
+  -- The signed acceptance rubric (v39, Acceptance Contract v2): the SAME
+  -- additive shape as every digest-bound field before it. NULL/absent
+  -- reads back as [] and digests exactly as a rubric-less scope always
+  -- has -- grandfathering is this column simply not existing on a row
+  -- nobody has rewritten since. What makes a rubric MANDATORY going
+  -- forward is enforced by the authoring roads (proposeGuarded,
+  -- createConsoleTask, routine firing, the planner), never by this
+  -- schema or by saveScope itself.
+  acceptance_json       TEXT,
   approval_kind         TEXT NOT NULL DEFAULT 'profile' CHECK (approval_kind IN ('profile','chain'))
 );
 
@@ -2443,7 +2472,14 @@ CREATE TABLE IF NOT EXISTS proof_verdict (
   run         INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
   verdict     TEXT NOT NULL CHECK (verdict IN ('verified','attested','short','refuted')),
   reasons_json TEXT NOT NULL,
-  decided_at  TEXT NOT NULL
+  decided_at  TEXT NOT NULL,
+  -- v39: the criterion-to-evidence matrix adjudicate() computed alongside
+  -- the verdict -- one shared render, never re-derived. NULL for every
+  -- verdict decided before this migration, and for any run whose scope
+  -- signed no rubric (adjudicate returns [] and this column stores NULL,
+  -- not "[]", so a surface can tell "no matrix" from "an empty one" --
+  -- not that the two currently read any differently).
+  matrix_json TEXT
 );
 
 -- An operator's explicit acceptance of a short/refuted verdict (Priority
@@ -3570,6 +3606,15 @@ function migrate(db: Database): void {
   // tables and arrive through the fresh SCHEMA's IF NOT EXISTS on both roads.
   rebuildArtifactForV38(db);
   rebuildIncidentForV38(db);
+
+  // v39 (Acceptance Contract v2): purely additive, no CHECK widening, no
+  // table rebuild — a nullable column an absent value reads back as `[]`
+  // from, which is exactly the golden-digest grandfathering this migration
+  // promises: every row from before this code existed keeps the digest it
+  // already has.
+  addColumn(db, "task_scope", "acceptance_json", "TEXT");
+  addColumn(db, "routine", "acceptance_json", "TEXT");
+  addColumn(db, "proof_verdict", "matrix_json", "TEXT");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -6451,7 +6496,7 @@ export class Store {
       const digest = profile === null
         ? scope.digest
         : digestOf(
-            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
             profile,
           );
       // The fallback-chain binding (v30): when the scope resolved FROM CONFIG
@@ -6481,7 +6526,7 @@ export class Store {
           if (chain.ok && chain.kind === "chain") {
             proposedChainJson = canonicalChainJson(chain.chain);
             boundDigest = digestOf(
-              { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+              { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
               { chain: chain.chain },
             );
           } else if (!chain.ok) {
@@ -6501,8 +6546,8 @@ export class Store {
         .prepare(
           `INSERT INTO task_scope
              (task_id, goal, out_of_scope, touches, budget_microusd, proposed_at, digest, approved_at, approved_by, approved_digest,
-              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              profile_json, profile_state, unresolved_reason, digest_version, profile_provenance, proposed_chain_json, acceptance_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (task_id) DO UPDATE SET
              goal = excluded.goal, out_of_scope = excluded.out_of_scope,
              touches = excluded.touches, budget_microusd = excluded.budget_microusd,
@@ -6511,7 +6556,8 @@ export class Store {
              approved_by = excluded.approved_by, approved_digest = excluded.approved_digest,
              profile_json = excluded.profile_json, profile_state = excluded.profile_state,
              unresolved_reason = excluded.unresolved_reason, digest_version = excluded.digest_version,
-             profile_provenance = excluded.profile_provenance, proposed_chain_json = excluded.proposed_chain_json`,
+             profile_provenance = excluded.profile_provenance, proposed_chain_json = excluded.proposed_chain_json,
+             acceptance_json = excluded.acceptance_json`,
         )
         .run(
           scope.taskId,
@@ -6530,6 +6576,7 @@ export class Store {
           profile === null ? 1 : 2,
           provenance,
           proposedChainJson,
+          scope.acceptance.length === 0 ? null : JSON.stringify(scope.acceptance),
         );
       // Who wrote THIS text (mate arc, ruling 2): set per write, so a human
       // rewrite clears the mate's mark and a mate rewrite sets it.
@@ -7474,13 +7521,20 @@ export class Store {
   /** The machine's one verdict for a run, computed once at completion by
    * adjudicate() — overwritten only by a re-computation of the SAME run's
    * proof, never by a later render. */
-  saveProofVerdict(runId: number, verdict: ProofVerdictRow["verdict"], reasons: readonly string[], now: Date): void {
+  saveProofVerdict(
+    runId: number,
+    verdict: ProofVerdictRow["verdict"],
+    reasons: readonly string[],
+    now: Date,
+    matrix: readonly CriterionMatrixRow[] = [],
+  ): void {
     this.db
       .prepare(
-        `INSERT INTO proof_verdict (run, verdict, reasons_json, decided_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT (run) DO UPDATE SET verdict = excluded.verdict, reasons_json = excluded.reasons_json, decided_at = excluded.decided_at`,
+        `INSERT INTO proof_verdict (run, verdict, reasons_json, decided_at, matrix_json) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (run) DO UPDATE SET verdict = excluded.verdict, reasons_json = excluded.reasons_json,
+           decided_at = excluded.decided_at, matrix_json = excluded.matrix_json`,
       )
-      .run(runId, verdict, JSON.stringify(reasons), now.toISOString());
+      .run(runId, verdict, JSON.stringify(reasons), now.toISOString(), matrix.length === 0 ? null : JSON.stringify(matrix));
   }
 
   proofVerdictFor(runId: number): ProofVerdictRow | null {
@@ -7709,7 +7763,7 @@ export class Store {
     // the current scope fields + this chain and require an exact match, so a
     // snapshot that does not correspond to the approved digest never governs.
     const rederived = digestOf(
-      { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd },
+      { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
       { chain },
     );
     if (rederived !== scope.approvedDigest) return null;
@@ -8718,7 +8772,7 @@ export class Store {
    */
   sealRevision(
     args: {
-      task: { id?: string; title: string; repo?: string; goal: string; outOfScope?: string | null; touches?: string[]; budgetMicrousd?: number | null; posture?: "escalated" };
+      task: { id?: string; title: string; repo?: string; goal: string; outOfScope?: string | null; touches?: string[]; acceptance?: unknown; budgetMicrousd?: number | null; posture?: "escalated" };
       artifact: { run: number; kind: Artifact["kind"]; key: string; bytesOriginal: number; bytesStored: number; truncated: boolean; sha256: string; capture: string };
       revisionOf: string;
       /** Comments to consume, or null when the brief has no comment batch (CI repair). */
@@ -9080,6 +9134,12 @@ export class Store {
        * exclusions" over work that had them. */
       outOfScope?: string | null;
       touches?: string[];
+      /** v39: the signed acceptance rubric — unparsed input, validated here
+       * the same way `proposeGuarded` validates it, because this is the
+       * OTHER road every filing door funnels through. Absent/empty refuses
+       * whenever a `goal` is also being set (a scope is about to exist);
+       * a bare title with no goal creates no scope yet, so nothing to sign. */
+      acceptance?: unknown;
       /** Immutable provenance (v12): which door filed this. Stamped in the
        * same transaction as the create; there is no API to change it. */
       filedVia?: string;
@@ -9094,7 +9154,7 @@ export class Store {
     cap = 500,
   ):
     | { ok: true; id: string }
-    | { ok: false; reason: "backlog-full" | "bad-id" | "bad-title" | "bad-goal" | "duplicate" } {
+    | { ok: false; reason: "backlog-full" | "bad-id" | "bad-title" | "bad-goal" | "bad-acceptance" | "acceptance-required" | "duplicate" } {
     if (spec.id !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(spec.id)) {
       return { ok: false, reason: "bad-id" };
     }
@@ -9103,6 +9163,19 @@ export class Store {
     }
     if (spec.goal !== undefined && (spec.goal.trim() === "" || spec.goal.length > 2_000 || hasForbiddenControls(spec.goal))) {
       return { ok: false, reason: "bad-goal" };
+    }
+    // v39: a goal being set here is a scope about to exist — every road that
+    // funnels through this method (fileTaskProposal's ~16 callers, and
+    // sealRevision) is subject to the same rubric-required gate proposeGuarded
+    // enforces on an edit. No goal, no scope, nothing to sign — a bare-title
+    // filing (a coordinator's intent-less filing, `task add --backend`) is
+    // untouched.
+    const acceptanceParse = spec.goal === undefined ? null : parseAcceptanceCriteria(spec.acceptance);
+    if (acceptanceParse !== null && acceptanceParse.problems.length > 0) {
+      return { ok: false, reason: "bad-acceptance" };
+    }
+    if (acceptanceParse !== null && acceptanceParse.criteria.length === 0) {
+      return { ok: false, reason: "acceptance-required" };
     }
     return this.transact(() => {
       const backlog = this.db
@@ -9140,6 +9213,7 @@ export class Store {
           goal: spec.goal.trim(),
           outOfScope: spec.outOfScope ?? null,
           touches: spec.touches ?? ([] as string[]),
+          acceptance: acceptanceParse?.criteria ?? ([] as AcceptanceCriterion[]),
         };
         const budgeted = { ...draft, budgetMicrousd: spec.budgetMicrousd ?? null };
         this.saveScope(
@@ -9455,6 +9529,7 @@ export class Store {
       goal: string;
       outOfScope: string | null;
       touches: string[];
+      acceptance: AcceptanceCriterion[];
       requirements: string[];
       schedule: string;
       singleFlight: boolean;
@@ -9478,8 +9553,8 @@ export class Store {
           `INSERT INTO routine
              (name, repo, goal, out_of_scope, touches, requirements, schedule,
               single_flight, cost_ceiling_usd, budget_per_run_microusd, digest, created_at, updated_at, filed_via,
-              profile_json, digest_version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              profile_json, digest_version, acceptance_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           spec.name,
@@ -9498,6 +9573,7 @@ export class Store {
           spec.filedVia ?? null,
           spec.profile === undefined ? null : canonicalProfileJson(spec.profile),
           spec.profile === undefined ? 1 : 2,
+          spec.acceptance.length === 0 ? null : JSON.stringify(spec.acceptance),
         );
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
     });
@@ -10123,8 +10199,14 @@ export class Store {
     return this.transact(() => {
       const taskRows = this.db
         .prepare(
-          `SELECT task.id AS id, task.title AS title, task.state AS state, task.updated_at AS updated_at, task_ref.repo AS repo, task_ref.strikes AS strikes
+          `SELECT task.id AS id, task.title AS title, task.state AS state, task.updated_at AS updated_at, task_ref.repo AS repo, task_ref.strikes AS strikes,
+                  proof_verdict.verdict AS proof_verdict, proof_verdict.matrix_json AS proof_matrix_json
              FROM task JOIN task_ref ON task_ref.backend = '${BUILT_IN}' AND task_ref.external_id = task.id
+             LEFT JOIN run ON run.id = (
+               SELECT MAX(final.id) FROM run AS final
+               WHERE final.task_ref = task_ref.id AND final.outcome IN ('built','no-change') AND final.finished_at IS NOT NULL
+             )
+             LEFT JOIN proof_verdict ON proof_verdict.run = run.id
             WHERE task_ref.repo IN (${marks})
             ORDER BY task.updated_at DESC LIMIT 61`,
         )
@@ -10182,6 +10264,11 @@ export class Store {
           state: String(row["state"]),
           ageHours: hours(row["updated_at"]),
           strikes: Number(row["strikes"] ?? 0),
+          proofVerdict:
+            row["proof_verdict"] === null || row["proof_verdict"] === undefined
+              ? null
+              : (String(row["proof_verdict"]) as "verified" | "attested" | "short" | "refuted"),
+          proofMatrix: readMatrixJson(row["proof_matrix_json"]),
         })),
         tasksSaturated: taskRows.length > 60,
         decisions: decisionRows.slice(0, 20).map(row => ({
@@ -10604,6 +10691,11 @@ export class Store {
       goal: string;
       outOfScope: string | null;
       touches: string[];
+      /** v39: absent leaves the stored rubric untouched (a caller editing
+       * goal/touches without an opinion on acceptance); present REPLACES
+       * it — never merged, so the digest the caller computed from these
+       * exact terms is what ends up stored. */
+      acceptance?: AcceptanceCriterion[];
       requirements: string[];
       schedule: string;
       costCeilingUsd: number | null;
@@ -10617,7 +10709,8 @@ export class Store {
       .prepare(
         `UPDATE routine SET goal = ?, out_of_scope = ?, touches = ?, requirements = ?,
                             schedule = ?, cost_ceiling_usd = ?, digest = ?, updated_at = ?,
-                            profile_json = COALESCE(?, profile_json)
+                            profile_json = COALESCE(?, profile_json),
+                            acceptance_json = COALESCE(?, acceptance_json)
           WHERE id = ?`,
       )
       .run(
@@ -10630,6 +10723,7 @@ export class Store {
         terms.digest,
         now.toISOString(),
         terms.profile === undefined || terms.profile === null ? null : canonicalProfileJson(terms.profile),
+        terms.acceptance === undefined ? null : terms.acceptance.length === 0 ? null : JSON.stringify(terms.acceptance),
         id,
       );
     return Number(changes) > 0;
@@ -14374,6 +14468,7 @@ export class Store {
     publicationState: string | null;
     runId: number | null;
     proofVerdict: ProofVerdictRow["verdict"] | null;
+    proofMatrix: CriterionMatrixRow[];
     proofAccepted: boolean;
   }[] {
     const page = Math.max(1, Math.min(Math.floor(limit), 100));
@@ -14395,7 +14490,7 @@ export class Store {
          )
          SELECT completed.*, run.id AS run_id, run.outcome, run.handoff, run.cost_usd, run.provider, run.auth_mode, run.started_at, run.finished_at,
                 publication.state AS pub_state, publication.pr_number, publication.pr_url,
-                proof_verdict.verdict AS proof_verdict, proof_acceptance.run AS proof_accepted_run
+                proof_verdict.verdict AS proof_verdict, proof_verdict.matrix_json AS proof_matrix_json, proof_acceptance.run AS proof_accepted_run
          FROM completed
          LEFT JOIN run ON run.id = (
            SELECT MAX(final.id) FROM run AS final
@@ -14430,6 +14525,7 @@ export class Store {
         publicationState: row["pub_state"] === null ? null : String(row["pub_state"]),
         runId: row["run_id"] === null || row["run_id"] === undefined ? null : Number(row["run_id"]),
         proofVerdict: row["proof_verdict"] === null || row["proof_verdict"] === undefined ? null : (String(row["proof_verdict"]) as ProofVerdictRow["verdict"]),
+        proofMatrix: readMatrixJson(row["proof_matrix_json"]),
         proofAccepted: row["proof_accepted_run"] !== null && row["proof_accepted_run"] !== undefined,
       }));
   }
@@ -16235,6 +16331,7 @@ function readRoutine(row: Record<string, unknown>): Routine {
     goal: String(row["goal"]),
     outOfScope: row["out_of_scope"] === null ? null : String(row["out_of_scope"]),
     touches: readJsonArray(row["touches"]),
+    acceptance: readAcceptance(row["acceptance_json"]),
     requirements: readJsonArray(row["requirements"]),
     schedule: String(row["schedule"]),
     singleFlight: Number(row["single_flight"]) === 1,
@@ -16602,7 +16699,22 @@ export type ProofVerdictRow = {
   verdict: "verified" | "attested" | "short" | "refuted";
   reasons: string[];
   decidedAt: string;
+  /** v39: `[]` for a verdict decided before this migration, or for any
+   * run whose scope signed no rubric. */
+  matrix: CriterionMatrixRow[];
 };
+
+/** The matrix column, re-proved the same defensive way `reasons_json`
+ * always has been: absent or unparseable reads as `[]`, never a throw. */
+function readMatrixJson(raw: unknown): CriterionMatrixRow[] {
+  if (raw === null || raw === undefined) return [];
+  try {
+    const parsed = JSON.parse(String(raw));
+    return Array.isArray(parsed) ? (parsed as CriterionMatrixRow[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 function readProofVerdict(row: Record<string, unknown>): ProofVerdictRow {
   let reasons: string[] = [];
@@ -16616,6 +16728,7 @@ function readProofVerdict(row: Record<string, unknown>): ProofVerdictRow {
     run: Number(row["run"]),
     verdict: String(row["verdict"]) as ProofVerdictRow["verdict"],
     reasons,
+    matrix: readMatrixJson(row["matrix_json"]),
     decidedAt: String(row["decided_at"]),
   };
 }
@@ -16677,6 +16790,18 @@ export function contestantProfileOf(
         };
 }
 
+/** The stored rubric, re-proved through the same strict parser that admits
+ * one on the way in — never trusted bytes back out. Malformed or absent
+ * reads back as `[]`, matching every rubric-less scope. */
+function readAcceptance(value: unknown): AcceptanceCriterion[] {
+  if (value === null || value === undefined) return [];
+  try {
+    return parseAcceptanceCriteria(JSON.parse(String(value))).criteria;
+  } catch {
+    return [];
+  }
+}
+
 function readScope(row: Record<string, unknown>): Scope {
   return {
     taskId: String(row["task_id"]),
@@ -16706,6 +16831,7 @@ function readScope(row: Record<string, unknown>): Scope {
     approvedChainJson:
       row["approved_chain_json"] === null || row["approved_chain_json"] === undefined ? null : String(row["approved_chain_json"]),
     approvalKind: String(row["approval_kind"] ?? "profile") === "chain" ? "chain" : "profile",
+    acceptance: readAcceptance(row["acceptance_json"]),
   };
 }
 
