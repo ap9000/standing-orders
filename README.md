@@ -442,7 +442,7 @@ terminal, or with `--json`, it prints one snapshot and exits.
 conversation across every project you serve. The mate reads the fleet
 and **only proposes**: file a task (or a scout), move one to the front,
 reserve it for a worker, hold it, rewrite a scope, retry/replace/unlink a
-terminal dependency, cancel, or suggest an answer to a parked decision. Every
+terminal dependency, guide a task's next attempt, cancel, or suggest an answer to a parked decision. Every
 proposal is a card you confirm, with
 every consequence and the builder's recommendation shown beside the
 mate's pick; a scope the mate wrote never seals under an operating mode.
@@ -450,6 +450,13 @@ It never sees a path, a digest, or an account name. Direct API use spends
 against a ceiling you set per conversation. The console keeps a live pulse for every
 admitted project beside that shared thread, with one-click fleet questions
 and a direct road to each project's board.
+
+Every task has an **Overview / Ask** switch. **Ask** opens a focused companion
+to that task without creating another conversation: Standing Orders attaches
+the current task to each new message, keeps the live status beside the thread,
+and offers plain-language starters for status, scope revision, steering, and
+proof review. Proposed guidance is inert until you confirm its card, then it
+reaches the next attempt without interrupting work already running.
 
 The chat setup screen defaults to **Codex membership · default model**.
 Run `codex login` once on the machine serving Standing Orders, choose that
@@ -470,7 +477,7 @@ standing-orders serve --repo /path/to/project-a --repo /path/to/project-b
 Coding agents you run elsewhere reach the same plane through the MCP
 gateway: `standing-orders mcp` serves a coordinator credential you mint,
 bound to named repositories, that can read the fleet, file quarantined
-proposals, and propose the same seven acts — `standing-orders proposals`
+proposals, and propose the same guarded acts — `standing-orders proposals`
 and the task page are where you confirm them. Both roads keep the one
 rule: the plane never acts on a model's word.
 

@@ -7439,6 +7439,60 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain('action="/chat/mate/end"');
   });
 
+  test("a task's Ask view stays in the unified thread and confirms guidance without losing context", async () => {
+    const cookie = await login();
+    const taskHtml = await (await fetch(url("/t/a"), { headers: { cookie } })).text();
+    expect(taskHtml).toContain('aria-label="task view"');
+    expect(taskHtml).toContain('href="/t/a" class="active" aria-current="page">Overview</a>');
+    expect(taskHtml).toContain('href="/chat?task=a">Ask</a>');
+
+    let html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(html).toContain('class="chat-workspace task-chat-workspace"');
+    expect(html).toContain('aria-label="current task"');
+    expect(html).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
+    expect(html).toContain('name="return" value="/chat?task=a"');
+    expect(html).not.toContain('id="chat-project-panel"');
+    expect(html).not.toContain('data-card-kind="fleet-overview"');
+    const csrf = csrfFrom(html);
+
+    const minted = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5", token: approverToken, return: "/chat?task=a" });
+    expect(minted.status).toBe(303);
+    expect(minted.headers.get("location")).toBe("/chat?task=a");
+
+    const unknown = await post(cookie, "/chat", { csrf, task: "not-in-this-workspace", message: "do something" });
+    expect(decodeURIComponent(unknown.headers.get("location") ?? "")).toContain("not available in this workspace");
+    expect(store.recentMateTurns("alex", 5)).toEqual([]);
+
+    script.push(
+      () => answer([
+        { type: "tool_use", id: "r1", name: "get_task", input: { task: "a" } },
+        { type: "tool_use", id: "s1", name: "propose_steer", input: { task: "a", note: "Polish the compact mobile navigation before broadening the sidebar." } },
+      ]),
+      () => answer([{ type: "text", text: "I drafted focused guidance for the next attempt." }]),
+    );
+    const sent = await post(cookie, "/chat", { csrf, task: "a", message: "Make the next pass focus on the mobile navigation." });
+    expect(sent.status).toBe(303);
+    expect(sent.headers.get("location")).toBe("/chat?task=a#latest");
+    await settle();
+
+    html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(html).toContain('data-card-kind="steer"');
+    expect(html).toContain("Guidance for next attempt");
+    expect(html).toContain("without changing the task’s scope");
+    expect(html).toContain('name="task" value="a"');
+    expect(html).toContain('name="return" value="/chat?task=a"');
+    expect(html).toContain('data-message-role="operator"><p style="white-space:pre-wrap">Make the next pass focus on the mobile navigation.</p>');
+    expect(html).not.toContain("Current task: a.");
+    expect(store.listSteerNotes(store.refFor("built-in", "a").id)).toEqual([]);
+
+    const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf, return: "/chat?task=a" });
+    expect(confirmed.status).toBe(303);
+    expect(confirmed.headers.get("location")).toBe("/chat?task=a#latest");
+    expect(store.listSteerNotes(store.refFor("built-in", "a").id)).toMatchObject([
+      { note: "Polish the compact mobile navigation before broadening the sidebar.", author: "alex", authorshipState: "verified", attachedRun: null },
+    ]);
+  });
+
   test("a logged-in Codex membership has no dollar maximum in setup, minting, or the live conversation", async () => {
     const cookie = await login();
     let html = await page(cookie);

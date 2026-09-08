@@ -45,7 +45,7 @@ import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 
-export const SCHEMA_VERSION = 42;
+export const SCHEMA_VERSION = 43;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -331,7 +331,7 @@ export type MateThread = { id: number; approver: string; ceilingDigest: string; 
 
 export type MateMessage = { id: number; thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity: string | null; createdAt: string };
 
-export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "scope" | "cancel" | "answer" | "repair";
+export type MateProposalKind = "task" | "next" | "reserve" | "hold" | "unhold" | "steer" | "scope" | "cancel" | "answer" | "repair";
 
 /** A coordinator's proposal over the MCP gateway (mate arc v3): the same
  * kinds as the mate's (no `task` — filing has its own door), confirmed by
@@ -1460,7 +1460,7 @@ CREATE TABLE IF NOT EXISTS mate_proposal (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   thread         INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
   turn           INTEGER NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','scope','cancel','answer','repair')),
+  kind           TEXT NOT NULL CHECK (kind IN ('task','next','reserve','hold','unhold','steer','scope','cancel','answer','repair')),
   payload_json   TEXT NOT NULL,
   ceiling_digest TEXT NOT NULL,
   state          TEXT NOT NULL CHECK (state IN ('drafting','pending','confirming','confirmed','refused','dismissed','expired')),
@@ -3725,6 +3725,12 @@ function migrate(db: Database): void {
   // authority and re-prove live graph state when the card is confirmed.
   rebuildMateProposalForV42(db);
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+
+  // v43 (task companion): chat may draft one operator steering note. The
+  // note remains inert until the operator confirms its card; the existing
+  // credentialed steering primitive is still the only write authority.
+  rebuildMateProposalForV43(db);
+  db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -3943,6 +3949,8 @@ const MATE_PROPOSAL_V33_DDL = (name: string): string => `CREATE TABLE ${name} (
 )`;
 const MATE_PROPOSAL_V42_DDL = (name: string): string =>
   MATE_PROPOSAL_V33_DDL(name).replace("'cancel','answer'", "'cancel','answer','repair'");
+const MATE_PROPOSAL_V43_DDL = (name: string): string =>
+  MATE_PROPOSAL_V42_DDL(name).replace("'hold','unhold'", "'hold','unhold','steer'");
 
 /**
  * v33 (mate v3): `answer` joins mate_proposal's kinds — an EXACT recognizer
@@ -3955,10 +3963,10 @@ export function rebuildMateProposalForV33(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
   if (row === undefined) return;
   const stored = canonicalDdl(String(row["sql"]));
-  // A fresh v42 database already carries the later widening. Older
+  // A fresh database already carries the later widening. Older
   // normalizers run on every open, so they must recognize later canonical
   // shapes as complete rather than trying to migrate them backwards.
-  if (stored === canonicalDdl(MATE_PROPOSAL_V42_DDL("mate_proposal"))) return;
+  if (stored === canonicalDdl(MATE_PROPOSAL_V42_DDL("mate_proposal")) || stored === canonicalDdl(MATE_PROPOSAL_V43_DDL("mate_proposal"))) return;
   const target = canonicalDdl(MATE_PROPOSAL_V33_DDL("mate_proposal_next")).replace("mate_proposal_next", "mate_proposal");
   if (stored === target) return;
   if (stored !== canonicalDdl(MATE_PROPOSAL_V32_DDL).replace("IF NOT EXISTS ", "")) {
@@ -3988,11 +3996,26 @@ export function rebuildMateProposalForV33(db: Database): void {
 /** v42: `repair` joins the mate proposal kinds through the same exact,
  * row-preserving copy-rename used for v33. */
 export function rebuildMateProposalForV42(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mate_proposal'").get();
+  if (row !== undefined && canonicalDdl(String(row["sql"])) === canonicalDdl(MATE_PROPOSAL_V43_DDL("mate_proposal"))) return;
   rebuildExact(
     db,
     "mate_proposal",
     name => MATE_PROPOSAL_V33_DDL(name),
     name => MATE_PROPOSAL_V42_DDL(name),
+    ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+}
+
+/** v43: `steer` joins the mate proposal kinds through the same exact,
+ * row-preserving copy-rename used for v33 and v42. */
+export function rebuildMateProposalForV43(db: Database): void {
+  rebuildExact(
+    db,
+    "mate_proposal",
+    name => MATE_PROPOSAL_V42_DDL(name),
+    name => MATE_PROPOSAL_V43_DDL(name),
     ["id", "thread", "turn", "kind", "payload_json", "ceiling_digest", "state", "created_at", "resolved_at", "resolved_by", "outcome_json"],
   );
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");

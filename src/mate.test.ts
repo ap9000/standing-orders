@@ -142,6 +142,20 @@ describe("the mate's turn", () => {
     expect(script.bodies[0]).not.toContain(KEY);
   });
 
+  test("server-authored task context reaches the model without cluttering the visible conversation", async () => {
+    const script = scripted([text("I will focus on that task.")]);
+    const outcome = await turn("what should happen next?", script.fetcher, {
+      context: "Current task: in-2. Read it with get_task before proposing changes.",
+    });
+    expect(outcome).toMatchObject({ ok: true });
+    expect(script.bodies[0]).toContain("Current task: in-2");
+    expect(script.bodies[0]).toContain("what should happen next?");
+    expect(store.listMateMessages(thread().id, 10).map(one => one.text)).toEqual([
+      "what should happen next?",
+      "I will focus on that task.",
+    ]);
+  });
+
   test("a conversation remains live across days until it is explicitly ended", async () => {
     const live = session();
     const first = scripted([text("I will remember that.")]);
@@ -614,6 +628,27 @@ describe("the mate's turn", () => {
 
     store.setTaskState("in-3", "cancelled", clock());
     expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-3", operation: "retry" })).toMatchObject({ ok: false, message: expect.stringContaining("cancelled") });
+  });
+
+  test("steering is drafted as a confirmation card and never writes guidance directly", () => {
+    let drafted: { kind: string; payload: Record<string, unknown> } | null = null;
+    const result = executeMateTool({
+      store,
+      who,
+      now: clock(),
+      draft: (kind, payload) => {
+        drafted = { kind, payload };
+        return 14;
+      },
+      step: 1,
+      readDecisions: new Map(),
+    }, "propose_steer", { task: "in-2", note: "Polish the narrow layout first." });
+    expect(result).toMatchObject({ ok: true, body: { proposal: 14, kind: "steer", task: "in-2" } });
+    expect(drafted).toEqual({
+      kind: "steer",
+      payload: { task: "in-2", taskTitle: "rotate the webhook secret", repoId: "r1", note: "Polish the narrow layout first." },
+    });
+    expect(store.listSteerNotes(store.refFor("built-in", "in-2").id)).toEqual([]);
   });
 
   test("the tools refuse bad arguments with typed messages, count decisions per task, and place the queue by column", () => {

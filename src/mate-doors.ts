@@ -13,7 +13,7 @@
  * scope was rewritten, the decision answered) is a refusal, never a
  * silent re-read.
  */
-import type { CoordinatorProposal, MateProposal, Store } from "./store.js";
+import { verifiedAuthor, type CoordinatorProposal, type MateProposal, type Store } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
 import { fileTaskProposal } from "./proposal.js";
@@ -290,6 +290,25 @@ function executeProposal(
     if (standing === null || standing.id !== holdId) return refuse("stale", "that hold is no longer the one standing — look again");
     store.unhold(ref.id);
     return { ok: true, kind, said: `${taskId} released from its hold`, taskId };
+  }
+
+  if (kind === "steer") {
+    const note = payloadString(payload, "note");
+    if (note === null) return refuse("refused", "this proposal carries no guidance");
+    const filed = store.fileSteerNote(taskId, verifiedAuthor(actor.name), note, now);
+    if (!filed.ok) {
+      const said =
+        filed.reason === "contest-open"
+          ? "agents are racing on this task — guidance can be added after the comparison finishes"
+          : filed.reason === "task-finished"
+            ? "this task is finished — guidance has no next attempt to reach"
+            : filed.reason === "invalid-note"
+              ? (filed.problem ?? "that guidance could not be saved")
+              : "no such task";
+      return refuse(filed.reason === "contest-open" ? "contest-open" : "refused", said);
+    }
+    const taskName = payloadString(payload, "taskTitle") ?? taskId;
+    return { ok: true, kind, said: `Guidance saved for ${taskName}'s next attempt`, taskId };
   }
 
   if (kind === "repair") {

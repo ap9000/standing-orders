@@ -1951,8 +1951,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       store.sweepStaleMateTurns(now);
       store.sweepCoordinatorProposals(now);
       sweepChatDrafts(Date.now());
+      const requestedTask = url.searchParams.get("task");
+      const focusTask = taskChatFocus(requestedTask, now);
+      const focusProblem = requestedTask !== null && focusTask === null
+        ? "That task is not available in this workspace."
+        : null;
       // Pending cards, and the recently answered ones so the door's words are read (last 30).
-      const coordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos: [...ceiling.repos], states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
+      const allCoordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos: [...ceiling.repos], states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
+      const coordinatorRows = focusTask === null
+        ? allCoordinatorRows
+        : allCoordinatorRows.filter(one => one.payload["task"] === focusTask.id);
       const enabled = chatEnablement();
       const pending = store.liveChatTurnFor(who.name);
       const latched = enabled.ok ? store.latchedChatTurns(enabled.credentialKey) : [];
@@ -2005,8 +2013,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               weeklySpent: store.chatWeeklySpendMicrousd(enabled.credentialKey, now),
               projects: chatProjects,
               fleetSnapshot,
+              focusTask,
               csrf: who.session.csrf,
-              problem: url.searchParams.get("said") ?? said,
+              problem: url.searchParams.get("said") ?? focusProblem ?? said,
               now,
             }),
           );
@@ -2025,6 +2034,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
           projects: chatProjects,
           fleetSnapshot,
+          focusTask,
           canManage: who.role === "approver",
           config: store.getChatConfig(),
           keyFacts: (["anthropic-api", "openrouter-api"] as const).map(one => {
@@ -2039,10 +2049,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           csrf: who.session.csrf,
           problem:
             url.searchParams.get("said") ??
+            focusProblem ??
             (ceilingStale ? "the admitted projects changed since your mate session was minted — start a new conversation below; that ends the old one" : null) ??
             takeMateNote(who.session.csrf, null),
-          ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled) } : {}),
-          ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now) } : {}),
+          ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled, focusTask === null ? "/chat" : taskChatHref(focusTask.id)) } : {}),
+          ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now, true, focusTask === null ? null : taskChatHref(focusTask.id)) } : {}),
         }),
       );
     }
@@ -3028,6 +3039,24 @@ export function createDecisionServer(options: ServeOptions): Server {
         })(),
         now,
       };
+  }
+
+  /** Resolve a task-scoped chat lens without trusting its query string.
+   * Only an admitted task becomes model context or visible page copy. */
+  function taskChatFocus(taskId: string | null, now: Date): TaskChatFocus | null {
+    if (taskId === null || taskId.length === 0 || taskId.length > 64 || hasForbiddenControls(taskId)) return null;
+    const task = store.getTask(taskId);
+    const ref = store.lookupRef(taskId);
+    if (task === null || ref === null || !visible(ref.repo)) return null;
+    const scope = store.getScope(taskId);
+    return {
+      id: task.id,
+      title: task.title,
+      state: task.state,
+      project: ref.repo === null ? null : projectName(ref.repo),
+      dispatch: diagnoseTaskDispatch(store, taskId, now),
+      scope: scope === null ? "none" : approvalOf(scope).approved ? "approved" : "needs approval",
+    };
   }
 
   function taskScreen(
@@ -4442,18 +4471,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       // write is audited under their name, and the KEY still never
       // touches a form or this database — environment only.
       if (who.via !== "cookie") return refuse(response, who, 403, "chat setup is a browser surface");
+      const back = safeChatReturn(body.get("return"));
       const password = body.get("token") ?? "";
       if (password === "" || !authenticateApprover(store, who.name, password).ok) {
-        return redirect(response, `/chat?said=${encodeURIComponent("configuring chat spend takes your password, typed again")}`);
+        return redirect(response, chatReturnWithSaid(back, "configuring chat spend takes your password, typed again"));
       }
       if (body.get("off") === "1") {
         store.clearChatConfig();
-        return redirect(response, `/chat?said=${encodeURIComponent("chat is off — its settings were removed")}`);
+        return redirect(response, chatReturnWithSaid(back, "chat is off — its settings were removed"));
       }
       const forget = body.get("forget-key") ?? "";
       if (forget === "anthropic-api" || forget === "openrouter-api") {
         forgetChatKey(forget);
-        return redirect(response, `/chat?said=${encodeURIComponent("the stored key file is gone (an environment variable, if set, still applies)")}`);
+        return redirect(response, chatReturnWithSaid(back, "the stored key file is gone (an environment variable, if set, still applies)"));
       }
       const provider = body.get("provider") ?? "";
       const requestedModel = (body.get("model") ?? "").trim();
@@ -4461,21 +4491,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       const weekly = Number(weeklyText);
       const daily = (body.get("daily-turns") ?? "").trim() === "" ? 50 : Number(body.get("daily-turns"));
       if (provider !== "anthropic-api" && provider !== "openrouter-api" && provider !== "claude-subscription" && provider !== "codex-subscription") {
-        return redirect(response, `/chat?said=${encodeURIComponent("pick a chat provider")}`);
+        return redirect(response, chatReturnWithSaid(back, "pick a chat provider"));
       }
       const subscription = isSubscriptionChatProvider(provider);
       const model = requestedModel === "" && subscription ? "default" : requestedModel;
       if (!validModelId(model)) {
-        return redirect(response, `/chat?said=${encodeURIComponent("the model id must be 1–128 letters, digits, dots, slashes, colons, underscores, or dashes")}`);
+        return redirect(response, chatReturnWithSaid(back, "the model id must be 1–128 letters, digits, dots, slashes, colons, underscores, or dashes"));
       }
       // The key, when pasted, is stored FIRST (0600 file, Telegram-token
       // precedent) so the catalog fetch below can already use it. It never
       // touches the database and is never echoed back.
       const pastedKey = (body.get("key") ?? "").trim();
       if (pastedKey !== "") {
-        if (subscription) return redirect(response, `/chat?said=${encodeURIComponent("subscription chat uses the CLI's cached login — do not paste an API key")}`);
+        if (subscription) return redirect(response, chatReturnWithSaid(back, "subscription chat uses the CLI's cached login — do not paste an API key"));
         const stored = storeChatKey(provider as DirectChatProviderId, pastedKey);
-        if (!stored.ok) return redirect(response, `/chat?said=${encodeURIComponent(stored.message)}`);
+        if (!stored.ok) return redirect(response, chatReturnWithSaid(back, stored.message));
       }
       // The pin: anthropic models come from the compiled table; openrouter
       // models come from OpenRouter's OWN catalog, priced by the authority
@@ -4487,13 +4517,13 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (hit !== undefined) pin = hit.price;
       }
       if (!subscription && pin === null) {
-        return redirect(response, `/chat?said=${encodeURIComponent(provider === "openrouter-api" ? "that model is not in OpenRouter's catalog (or the catalog is unreachable) — chat cannot reserve spend it cannot bound" : "that model has no pinned price — chat cannot reserve spend it cannot bound")}`);
+        return redirect(response, chatReturnWithSaid(back, provider === "openrouter-api" ? "that model is not in OpenRouter's catalog (or the catalog is unreachable) — chat cannot reserve spend it cannot bound" : "that model has no pinned price — chat cannot reserve spend it cannot bound"));
       }
       if (!subscription && (!Number.isFinite(weekly) || weekly <= 0)) {
-        return redirect(response, `/chat?said=${encodeURIComponent("the weekly ceiling is a positive dollar amount — chat without one is unbounded, not configured")}`);
+        return redirect(response, chatReturnWithSaid(back, "the weekly ceiling is a positive dollar amount — chat without one is unbounded, not configured"));
       }
       if (!Number.isInteger(daily) || daily <= 0 || daily > 1_000) {
-        return redirect(response, `/chat?said=${encodeURIComponent("daily turns is a whole number between 1 and 1000")}`);
+        return redirect(response, chatReturnWithSaid(back, "daily turns is a whole number between 1 and 1000"));
       }
       store.setChatConfig(
         {
@@ -4507,24 +4537,25 @@ export function createDecisionServer(options: ServeOptions): Server {
         who.name,
         now,
       );
-      return redirect(response, "/chat");
+      return redirect(response, back);
     }
 
     // ---- the mate (mate arc §5) ------------------------------------------
     if (url.pathname === "/chat/mate/mint") {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const back = safeChatReturn(body.get("return"));
       const enabled = chatEnablement();
-      if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
+      if (!enabled.ok) return redirect(response, chatReturnWithSaid(back, enabled.why));
       // The one password ceremony of a conversation (§1): it restates the
       // terms — this spend ceiling, over these projects — and mints the
       // session every later turn debits without asking again.
       const ceilingText = (body.get("ceiling-usd") ?? "").trim();
       const ceilingUsd = enabled.billing === "subscription" ? 0 : Number(ceilingText);
       if (enabled.billing === "metered" && (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000)) {
-        return redirect(response, `/chat?said=${encodeURIComponent("the session ceiling is a dollar amount between 0 and 1000")}`);
+        return redirect(response, chatReturnWithSaid(back, "the session ceiling is a dollar amount between 0 and 1000"));
       }
       const verified = verifyApproverByPassword(store, who.name, body.get("token") ?? "", ceiling.repos);
-      if (!verified.ok) return redirect(response, `/chat?said=${encodeURIComponent("minting a session takes your password, typed again")}`);
+      if (!verified.ok) return redirect(response, chatReturnWithSaid(back, "minting a session takes your password, typed again"));
       const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
       const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${verified.who.ceilingDigest}`).digest("hex");
       store.mintMateSession(
@@ -4533,49 +4564,52 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
       store.openMateThread(who.name, verified.who.ceilingDigest, now);
       mateSaid.delete(who.session.csrf);
-      return redirect(response, "/chat");
+      return redirect(response, back);
     }
     if (url.pathname === "/chat/mate/end") {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const back = safeChatReturn(body.get("return"));
       // Ending spend and forgetting the thread takes no password: any
       // approver may revoke (§1), and the thread is theirs to drop (ruling 11).
       store.failLiveMateTurnsFor(who.name, "ended", now);
       store.endMateSessionsFor(who.name, who.name, now);
       store.closeMateThreadsFor(who.name, now);
       mateSaid.delete(who.session.csrf);
-      return redirect(response, "/chat");
+      return redirect(response, back);
     }
     if (url.pathname === "/chat/mate/stop") {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const back = safeChatReturn(body.get("return"));
       const wanted = Number(body.get("turn") ?? "");
       const live = store.liveMateTurnFor(who.name);
       if (!Number.isInteger(wanted) || live === null || live.id !== wanted) {
         noteMate(who.session.csrf, null, "that turn has already finished");
-        return redirect(response, "/chat#latest");
+        return redirect(response, chatReturnWithLatest(back));
       }
       // A stopped direct-API turn is conservatively charged its reserved
       // worst case: dispatch may already have happened. Membership turns
       // reserve zero. The conversation itself stays live.
       store.failLiveMateTurnsFor(who.name, "stopped", now);
       noteMate(who.session.csrf, live.id, "stopped — the conversation is still open");
-      return redirect(response, "/chat#latest");
+      return redirect(response, chatReturnWithLatest(back));
     }
     const mateProposal = /^\/chat\/proposal\/([0-9]{1,15})\/(confirm|dismiss)$/.exec(url.pathname);
     if (mateProposal !== null) {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
+      const back = safeChatReturn(body.get("return"));
       const principal = matePrincipal(who);
-      if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
+      if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", back);
       const id = Number(mateProposal[1]);
       if (mateProposal[2] === "dismiss") {
         if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
-        return redirect(response, "/chat#latest");
+        return redirect(response, chatReturnWithLatest(back));
       }
       const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web" });
       if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
-        return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, "/chat");
+        return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, back);
       }
       if (!outcome.ok && outcome.reason === "needs-confirm") noteMate(who.session.csrf, null, outcome.said);
-      return redirect(response, "/chat#latest");
+      return redirect(response, chatReturnWithLatest(back));
     }
     // Coordinator proposals (mate arc v3): confirmed by any approver whose
     // ceiling admits the repo; the card lives on /chat and on the task.
@@ -4600,26 +4634,35 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     if (url.pathname === "/chat") {
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
+      const requestedTask = body.get("task");
+      const focusTask = taskChatFocus(requestedTask, now);
+      if (requestedTask !== null && focusTask === null) {
+        return redirect(response, chatReturnWithSaid("/chat", "That task is not available in this workspace."));
+      }
+      const back = focusTask === null ? "/chat" : taskChatHref(focusTask.id);
       const enabled = chatEnablement();
-      if (!enabled.ok) return redirect(response, `/chat?said=${encodeURIComponent(enabled.why)}`);
+      if (!enabled.ok) return redirect(response, chatReturnWithSaid(back, enabled.why));
       // A live mate session: the message is a mate turn — no password, the
       // session's ceremony already covered it (§1); the engine refuses on
       // its own terms and the thread shows why.
       const mateSession = who.role === "approver" ? store.activeMateSession(who.name) : null;
       if (mateSession !== null) {
         const principal = matePrincipal(who);
-        if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", "/chat");
+        if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", back);
         const message = (body.get("message") ?? "").trim();
         if (message === "" || message.length > MATE_MESSAGE_MAX_CHARS) {
-          return redirect(response, `/chat?said=${encodeURIComponent(`a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`)}`);
+          return redirect(response, chatReturnWithSaid(back, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`));
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Keep this turn about that task unless the operator explicitly asks to broaden it.` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
           .catch(() => noteMate(who.session.csrf, null, "the turn failed unexpectedly"));
-        return redirect(response, "/chat#latest");
+        return redirect(response, chatReturnWithLatest(back));
+      }
+      if (focusTask !== null) {
+        return redirect(response, chatReturnWithSaid(back, "Start the conversation first, then ask about this task without another password prompt."));
       }
       if (enabled.billing === "subscription") {
         return redirect(response, `/chat?said=${encodeURIComponent("start the conversation first — the one password ceremony opens the subscription-backed session")}`);
@@ -7170,6 +7213,19 @@ const STYLE = `
   /* The task page (task page pass): eyebrow, title, the acts in one row,
      then folding sections; the rail is the property list. */
   .task-eyebrow { margin: 0 0 .25rem; }
+  .task-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+  .task-title-row .task-main-title { min-width: 0; margin-bottom: .85rem; }
+  .task-view-switch {
+    display: inline-grid; grid-template-columns: repeat(2, auto); flex: none; padding: .2rem;
+    border: 1px solid var(--glass-border); border-radius: .72rem; background: color-mix(in srgb, var(--glass) 82%, transparent);
+    box-shadow: 0 1px 0 var(--glass-highlight) inset;
+  }
+  .task-view-switch a {
+    min-width: 4.6rem; padding: .4rem .72rem; border-radius: .52rem; color: var(--muted-foreground);
+    font-size: .72rem; font-weight: 550; text-align: center; text-decoration: none;
+  }
+  .task-view-switch a:hover { color: var(--foreground); background: color-mix(in srgb, var(--muted) 70%, transparent); }
+  .task-view-switch a.active { color: var(--foreground); background: var(--glass-strong); box-shadow: 0 1px 5px rgb(0 0 0 / .1), 0 1px 0 var(--glass-highlight) inset; }
   .acts-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .75rem 0 .25rem; }
   .acts-bar form.inline { margin: 0; display: inline-flex; align-items: center; gap: .375rem; }
   .acts-bar form.inline button { width: auto; }
@@ -7520,10 +7576,34 @@ const STYLE = `
   .chat-workspace.projects-hidden { grid-template-columns: minmax(0, 56rem); }
   .chat-workspace.projects-hidden .chat-projects { display: none; }
   .chat-main { min-width: 0; max-width: 56rem; }
+  .task-chat-workspace { grid-template-columns: minmax(15rem, 18rem) minmax(0, 56rem); }
+  .task-chat-context {
+    position: sticky; top: 6rem; align-self: start; padding: 1rem;
+    border: 1px solid var(--glass-border); border-radius: calc(var(--radius) + 3px);
+    background: var(--glass); box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
+    -webkit-backdrop-filter: blur(20px) saturate(130%); backdrop-filter: blur(20px) saturate(130%);
+  }
+  .task-chat-context-head { display: flex; align-items: center; justify-content: space-between; gap: .65rem; }
+  .task-chat-context h2 { margin: .7rem 0 .25rem; color: var(--foreground); font-size: 1rem; line-height: 1.35; letter-spacing: -.025em; }
+  .task-chat-context > .meta { margin: 0; overflow-wrap: anywhere; font-size: .65rem; }
+  .task-chat-status { display: grid; gap: .2rem; margin-top: .85rem; padding: .7rem; border-radius: calc(var(--radius) - 3px); background: var(--warning-soft); }
+  .task-chat-status.ready { background: var(--running-soft); }
+  .task-chat-status strong { font-size: .75rem; }
+  .task-chat-status span { color: var(--muted-foreground); font-size: .68rem; line-height: 1.45; }
+  .task-chat-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; margin: .65rem 0; }
+  .task-chat-facts div { min-width: 0; padding: .45rem .5rem; border-radius: calc(var(--radius) - 5px); background: color-mix(in srgb, var(--muted) 58%, transparent); }
+  .task-chat-facts dt { color: var(--muted-foreground); font: 400 .58rem/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }
+  .task-chat-facts dd { margin: .15rem 0 0; font-size: .68rem; overflow-wrap: anywhere; }
+  .task-chat-overview-link { display: block; margin-top: .75rem; font-size: .72rem; text-decoration: none; }
   .chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: .5rem .25rem 0; }
   .chat-head h1 { margin-bottom: .2rem; font-size: 1.65rem; letter-spacing: -.04em; }
   .chat-head .badge-running { margin-top: .2rem; background: color-mix(in srgb, var(--success) 11%, var(--glass)); color: var(--success); }
   .chat-head-actions { display: flex; align-items: center; justify-content: flex-end; gap: .45rem; flex-wrap: wrap; }
+  .task-chat-head > div { min-width: 0; flex: 1; }
+  .chat-task-back { margin: 0 0 .55rem; font-size: .6875rem; }
+  .chat-task-back a { text-decoration: none; }
+  .task-chat-title-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+  .task-chat-title-line > div { min-width: 0; }
   .chat-project-toggle {
     display: inline-flex; align-items: center; gap: .4rem; min-height: 2rem; padding: .25rem .55rem;
     color: var(--muted-foreground); font-size: .6875rem; box-shadow: none;
@@ -7735,6 +7815,9 @@ const STYLE = `
     .app.sidebar-collapsed .chat-workspace.projects-open .chat-projects { left: calc(64px + 1.25rem); }
     .chat-project-close { display: grid; place-items: center; }
   }
+  @media (min-width: 900px) and (max-width: 1199px) {
+    .task-chat-workspace { grid-template-columns: minmax(14rem, 16rem) minmax(0, 1fr); gap: 1.25rem; }
+  }
   @media (max-width: 760px) {
     main:has(.chat-workspace) { padding: 1rem 1rem calc(9rem + env(safe-area-inset-bottom, 0rem)); }
     .chat-workspace, .chat-workspace.projects-hidden { display: block; }
@@ -7754,6 +7837,16 @@ const STYLE = `
     .chat-head { padding-inline: 0; }
     .chat-head h1 { font-size: 1.4rem; }
     .chat-head-actions { align-items: flex-start; }
+    .task-chat-workspace .task-chat-context { position: static; margin-bottom: .85rem; padding: .75rem; }
+    .task-chat-context h2, .task-chat-context > .meta { display: none; }
+    .task-chat-status { margin-top: .6rem; padding: .55rem .6rem; }
+    .task-chat-status span { display: none; }
+    .task-chat-facts { display: none; }
+    .task-chat-overview-link { margin-top: .55rem; }
+    .task-chat-head { display: block; }
+    .task-chat-head > .badge { display: none; }
+    .task-chat-title-line { display: grid; gap: .65rem; }
+    .task-chat-title-line .task-view-switch { justify-self: start; }
     .chat-budget { gap: .3rem; margin: .65rem 0 .9rem; }
     .chat-budget > span { padding: .25rem .48rem; }
     .chat-budget > span:first-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
@@ -7777,6 +7870,11 @@ const STYLE = `
       position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));
       z-index: 29; margin: 0; padding: .45rem; border-radius: 1.1rem; box-shadow: var(--shadow-overlay);
     }
+    /* A confirmation is the primary act. Let the composer return to the
+       document flow while one is pending so it can never cover the card's
+       explanation or buttons on a short phone viewport. */
+    .chat-main:has(.proposal.pending) { padding-bottom: 0; }
+    .chat-main:has(.proposal.pending) .composer { position: static; width: 100%; margin-top: .5rem; }
     .composer textarea { min-height: 2.75rem; padding: .55rem .65rem; font-size: .9375rem; }
   }
   main:has(.mate-mint) { max-width: 68rem; }
@@ -7921,6 +8019,9 @@ button { min-height: 44px; }
   /* Task actions are composed for a thumb, not allowed to wrap according
      to their intrinsic text widths. Every row owns the available width. */
   .task-eyebrow { line-height: 1.55; overflow-wrap: anywhere; }
+  .task-title-row { display: grid; gap: .6rem; margin-bottom: .8rem; }
+  .task-title-row .task-main-title { margin-bottom: 0; }
+  .task-title-row .task-view-switch { justify-self: start; }
   .task-main-title { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .4rem; }
   .dispatch-copy { display: grid; gap: .2rem; }
   .dispatch-copy > strong { line-height: 1.35; }
@@ -9392,6 +9493,59 @@ type ChatProjectPulse = {
   peek: ProjectPeek | null;
 };
 
+/** A task attached by the server to one chat turn. The thread remains the
+ * unified conversation; this is a focused lens, not a second chat silo. */
+type TaskChatFocus = {
+  id: string;
+  title: string;
+  state: TaskState;
+  project: string | null;
+  dispatch: DispatchDiagnosis | null;
+  scope: "none" | "needs approval" | "approved";
+};
+
+const taskChatHref = (taskId: string): string => `/chat?task=${encodeURIComponent(taskId)}`;
+
+function taskViewSwitch(taskId: string, active: "overview" | "ask"): string {
+  return (
+    `<nav class="task-view-switch" aria-label="task view">` +
+    `<a href="${taskHref(taskId)}"${active === "overview" ? ' class="active" aria-current="page"' : ""}>Overview</a>` +
+    `<a href="${taskChatHref(taskId)}"${active === "ask" ? ' class="active" aria-current="page"' : ""}>Ask</a>` +
+    `</nav>`
+  );
+}
+
+function taskChatContext(focus: TaskChatFocus): string {
+  const positive = focus.dispatch?.condition === "running" || focus.dispatch?.code === "ready" || focus.dispatch?.code === "planning-ready" || focus.dispatch?.code === "scouting-ready";
+  const dispatchSummary = focus.dispatch?.summary ?? "Status unavailable";
+  const dispatchDetail = focus.dispatch?.detail ?? "Refresh the task overview before relying on its scheduler state.";
+  return (
+    `<aside class="task-chat-context" aria-label="current task">` +
+    `<div class="task-chat-context-head"><span class="eyebrow">current task</span><span class="badge badge-${escape(focus.state)}">${escape(focus.state)}</span></div>` +
+    `<h2>${escape(focus.title)}</h2>` +
+    `<p class="meta mono">${escape(focus.id)}${focus.project === null ? "" : ` · ${escape(focus.project)}`}</p>` +
+    `<div class="task-chat-status${positive ? " ready" : ""}"><strong>${escape(dispatchSummary)}</strong><span>${escape(dispatchDetail)}</span></div>` +
+    `<dl class="task-chat-facts"><div><dt>scope</dt><dd>${escape(focus.scope)}</dd></div><div><dt>new messages</dt><dd>task attached</dd></div></dl>` +
+    `<a class="task-chat-overview-link" href="${taskHref(focus.id)}">Open full overview →</a>` +
+    `</aside>`
+  );
+}
+
+function taskChatHeading(focus: TaskChatFocus): string {
+  return (
+    `<div class="chat-head task-chat-head"><div>` +
+    `<p class="meta chat-task-back"><a href="${taskHref(focus.id)}">← task overview</a></p>` +
+    `<div class="task-chat-title-line"><div><h1>${escape(focus.title)}</h1><p class="meta">Ask, steer, or revise this task in the same unified conversation.</p></div>${taskViewSwitch(focus.id, "ask")}</div>` +
+    `</div></div>`
+  );
+}
+
+function chatWorkspace(content: string, projects: readonly ChatProjectPulse[], csrf: string, inert: boolean, focus: TaskChatFocus | null): string {
+  return focus === null
+    ? `<div class="chat-workspace">${chatProjectRail(projects, csrf, inert)}<section class="chat-main">${content}</section></div>`
+    : `<div class="chat-workspace task-chat-workspace">${taskChatContext(focus)}<section class="chat-main">${content}</section></div>`;
+}
+
 /** A live, server-derived portfolio card. It is deliberately independent
  * of the model's prose: the numbers and links always reflect the current
  * control plane, while chat remains the place to ask what they mean. */
@@ -9529,16 +9683,24 @@ function chatProjectRail(projects: readonly ChatProjectPulse[], csrf: string, in
 }
 
 /** Spend-authorized one-click questions: ordinary /chat posts, not a new door. */
-function matePromptStarters(csrf: string): string {
-  const prompts = [
-    ["brief me", "Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."],
-    ["decisions", "Walk me through the open decisions, their options, and what you recommend I inspect first."],
-    ["building now", "What is building right now across every project? Call out anything preventing progress or any unusual risk."],
-    ["prioritize queues", "Review every project's queue and propose the most valuable reversible reprioritization."],
-    ["draft next task", "Based on the current fleet, suggest one high-leverage task or scout investigation and draft it as a proposal."],
-  ] as const;
+function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): string {
+  const prompts = focus === null
+    ? [
+        ["brief me", "Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."],
+        ["decisions", "Walk me through the open decisions, their options, and what you recommend I inspect first."],
+        ["building now", "What is building right now across every project? Call out anything preventing progress or any unusual risk."],
+        ["prioritize queues", "Review every project's queue and propose the most valuable reversible reprioritization."],
+        ["draft next task", "Based on the current fleet, suggest one high-leverage task or scout investigation and draft it as a proposal."],
+      ] as const
+    : [
+        ["what’s happening", "Read this task and explain its current status, what is blocking it, and what should happen next."],
+        ["revise scope", "Read this task and propose a tighter scope if that would improve the outcome. Explain why before I confirm anything."],
+        ["steer next attempt", "Read this task and propose concise guidance for its next attempt. Keep it inside the approved scope."],
+        ["check the proof", "Review the evidence recorded for this task and tell me what is proven and what is still unverified."],
+      ] as const;
   return `<div class="chat-prompts" aria-label="suggested questions">${prompts.map(([label, message]) =>
     `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    (focus === null ? "" : `<input type="hidden" name="task" value="${escape(focus.id)}">`) +
     `<button type="submit" name="message" value="${escape(message)}" class="quiet">${escape(label)}</button></form>`,
   ).join("")}</div>`;
 }
@@ -9628,6 +9790,8 @@ function chatPage(chrome: Chrome, data: {
   weeklySpent: number;
   projects: ChatProjectPulse[];
   fleetSnapshot: ChatSnapshot | null;
+  /** Optional task lens into the same unified conversation. */
+  focusTask: TaskChatFocus | null;
   canManage: boolean;
   config: import("./store.js").ChatConfig | null;
   /** Where each provider's key comes from — never the key itself. */
@@ -9649,6 +9813,7 @@ function chatPage(chrome: Chrome, data: {
     return [
       `<form method="post" action="/chat/config" class="card">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<input type="hidden" name="return" value="${escape(data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id))}">`,
       `<label>provider<select name="provider">`,
       `<option value="codex-subscription"${current?.provider === "codex-subscription" ? " selected" : ""}>Codex membership (logged-in CLI)</option>`,
       `<option value="claude-subscription"${current?.provider === "claude-subscription" ? " selected" : ""}>Anthropic membership (logged-in CLI)</option>`,
@@ -9690,7 +9855,9 @@ function chatPage(chrome: Chrome, data: {
     ].join("\n");
   };
   const parts: string[] = [
-    chatHeading("one place to understand every project and shape what happens next", data.projects.length, false, data.enabled.ok),
+    data.focusTask === null
+      ? chatHeading("one place to understand every project and shape what happens next", data.projects.length, false, data.enabled.ok)
+      : taskChatHeading(data.focusTask),
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
@@ -9701,7 +9868,7 @@ function chatPage(chrome: Chrome, data: {
     if (data.canManage && (code === "unconfigured" || code === "unpriced" || code === "no-key")) {
       parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
     }
-    return screen("chat", parts.join("\n"), { chrome });
+    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT } });
   }
   const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
   const subscription = isSubscriptionChatProvider(config.provider);
@@ -9709,7 +9876,7 @@ function chatPage(chrome: Chrome, data: {
     `<div class="chat-budget"><span class="mono">answering with ${escape(config.provider)} · ${escape(config.model)}</span>` +
       `<span>${data.turnsToday} / ${config.dailyTurns} turns today</span>` +
       `<span>${subscription ? "membership login · no dollar ceiling" : `${chatMoney(data.weeklySpent)} of ${chatMoney(config.weeklyCeilingMicrousd)} this week`}</span></div>`,
-    chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false),
+    data.focusTask === null ? chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false) : "",
   );
   if (!data.canManage) {
     parts.push(`<div class="card chat-readonly"><strong>Read-only view</strong><p class="meta">An approver can start the unified conversation and confirm its proposed actions. You can still open every live card and project board here.</p></div>`);
@@ -9725,7 +9892,7 @@ function chatPage(chrome: Chrome, data: {
   if (data.pending !== null) {
     parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id} · up to ${chatMoney(data.pending.reservedMicrousd)} reserved · this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
-    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
+    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
   }
   const last = data.chat?.lastTurn ?? null;
   if (last !== null) {
@@ -9756,7 +9923,7 @@ function chatPage(chrome: Chrome, data: {
         `</div>`,
     );
   }
-  if (!subscription && data.canManage) {
+  if (!subscription && data.canManage && data.focusTask === null) {
     parts.push(
       `<h2>ask</h2>`,
       `<form method="post" action="/chat" class="card">`,
@@ -9773,6 +9940,7 @@ function chatPage(chrome: Chrome, data: {
       configForm(data.config),
       `<form method="post" action="/chat/config" class="inline">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+      `<input type="hidden" name="return" value="${escape(data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id))}">`,
       `<input type="hidden" name="off" value="1">`,
       `<input type="password" name="token" placeholder="your password" autocomplete="current-password">`,
       `<button type="submit">turn chat off</button>`,
@@ -9783,6 +9951,7 @@ function chatPage(chrome: Chrome, data: {
           one =>
             `<form method="post" action="/chat/config" class="inline">` +
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+            `<input type="hidden" name="return" value="${escape(data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id))}">` +
             `<input type="hidden" name="forget-key" value="${escape(one.provider)}">` +
             `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
             `<button type="submit">forget the stored ${escape(one.provider)} key</button></form>`,
@@ -9801,7 +9970,7 @@ function chatPage(chrome: Chrome, data: {
       );
     }
   }
-  return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${parts.join("\n")}</section></div>`, { chrome, functional: { script: CHAT_UI_SCRIPT } });
+  return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT } });
 }
 
 function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): Screen {
@@ -9826,6 +9995,7 @@ function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string
 function mateMintCard(
   csrf: string,
   enabled: { billing: "metered" | "subscription"; config: { provider: ChatProviderId; weeklyCeilingMicrousd: number } },
+  returnTo = "/chat",
 ): string {
   const subscription = enabled.billing === "subscription";
   return [
@@ -9833,6 +10003,7 @@ function mateMintCard(
     `<p><strong>talk to the mate.</strong> <span class="meta">one conversation across every project this console serves — it reads, recaps, and proposes; you confirm each act on a card</span></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<input type="hidden" name="return" value="${escape(returnTo)}">`,
     `<div class="mate-terms">`,
     subscription
       ? `<span>using your logged-in ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership · no dollar maximum</span>`
@@ -9878,7 +10049,7 @@ type ProposalCardView = {
  * irreversible option — the explicit confirmation field the decision
  * page itself uses (ruling 12).
  */
-function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, decision: Decision | null): string {
+function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, decision: Decision | null, returnTo: string | null = null): string {
   const payload = view.payload;
   const text = (key: string): string => (typeof payload[key] === "string" ? (payload[key] as string) : "");
   const task = text("task");
@@ -9889,6 +10060,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     reserve: { label: "Worker assignment", action: payload["worker"] === null ? "release" : "reserve", icon: `<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>` },
     hold: { label: "Pause work", action: "hold", icon: `<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>` },
     unhold: { label: "Resume work", action: "release hold", icon: `<path d="m7 4 13 8-13 8z"/>` },
+    steer: { label: "Guidance for next attempt", action: "add guidance", icon: `<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>` },
     scope: { label: "Scope revision", action: "save scope", icon: `<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>` },
     answer: { label: "Decision answer", action: "confirm answer", icon: `<path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>` },
     cancel: { label: "Cancel task", action: "open task", icon: `<path d="m15 9-6 6"/><path d="m9 9 6 6"/><circle cx="12" cy="12" r="9"/>` },
@@ -9921,6 +10093,13 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     what = `<h3>Hold <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("reason"))}</p>` + facts(["project", `<span class="mono">${escape(repoId)}</span>`]);
   } else if (view.kind === "unhold") {
     what = `<h3>Release <a href="${taskHref(task)}">${escape(task)}</a> from its hold</h3>` + facts(["project", `<span class="mono">${escape(repoId)}</span>`]);
+  } else if (view.kind === "steer") {
+    const taskTitle = text("taskTitle") || task;
+    what =
+      `<h3>Guide <a href="${taskHref(task)}">${escape(taskTitle)}</a>'s next attempt</h3>` +
+      `<p class="proposal-summary">${escape(text("note"))}</p>` +
+      facts(["when", "next attempt"], ["project", `<span class="mono">${escape(repoId)}</span>`]) +
+      `<p class="meta proposal-disclosure">This guides the next attempt without changing the task’s scope. It does not interrupt work already running.</p>`;
   } else if (view.kind === "scope") {
     what =
       `<h3>Rewrite <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("goal"))}</p>` +
@@ -9985,17 +10164,18 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   const said = outcome !== null && typeof outcome.said === "string" ? outcome.said : null;
   const irreversible = view.kind === "answer" && payload["reversible"] === false;
   const provenance = view.by.mate ? "mate" : `${escape(view.by.name)} · ${escape(view.by.ago)}`;
+  const returnField = returnTo === null ? "" : `<input type="hidden" name="return" value="${escape(returnTo)}">`;
   let acts = "";
   if (view.state === "pending" && !inert) {
     acts =
       view.kind === "cancel"
         ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
-          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>`
+          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>`
         : `<div class="acts">` +
-          `<form method="post" action="${view.actionBase}/${view.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+          `<form method="post" action="${view.actionBase}/${view.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}` +
           (irreversible ? `<label class="arm"><input type="checkbox" name="confirm" value="yes"> I understand this cannot be undone</label>` : "") +
           `<button type="submit">${escape(presentation.action)}</button></form>` +
-          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" class="quiet">dismiss</button></form>` +
+          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>` +
           `</div>`;
   } else if (view.state === "pending") {
     acts = `<p class="meta proposal-wait">Available when the current turn finishes.</p>`;
@@ -10021,16 +10201,17 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   );
 }
 
-function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean, decision: Decision | null): string {
-  return proposalCard({ id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: true }, actionBase: "/chat/proposal" }, csrf, inert, decision);
+function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean, decision: Decision | null, returnTo: string | null = null): string {
+  return proposalCard({ id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: true }, actionBase: "/chat/proposal" }, csrf, inert, decision, returnTo);
 }
 
-function coordinatorProposalCard(proposal: CoordinatorProposal, csrf: string, now: Date, decision: Decision | null): string {
+function coordinatorProposalCard(proposal: CoordinatorProposal, csrf: string, now: Date, decision: Decision | null, returnTo: string | null = null): string {
   return proposalCard(
     { id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: false, name: proposal.name, ago: relativeAge(proposal.createdAt, now) }, actionBase: "/proposals" },
     csrf,
     false,
     decision,
+    returnTo,
   );
 }
 
@@ -10042,12 +10223,12 @@ function relativeAge(iso: string, now: Date): string {
 }
 
 /** The section shared by /chat (both modes) and the task page: pending coordinator proposals as cards. */
-function coordinatorProposalsSection(proposals: readonly CoordinatorProposal[], decisions: Map<number, Decision>, csrf: string, now: Date, heading = true): string {
+function coordinatorProposalsSection(proposals: readonly CoordinatorProposal[], decisions: Map<number, Decision>, csrf: string, now: Date, heading = true, returnTo: string | null = null): string {
   if (proposals.length === 0) return "";
   return (
     (heading ? `<h2>proposed by coordinators <span class="meta">${proposals.length}</span></h2>` : "") +
     `<div class="coordinator-proposals">` +
-    proposals.map(one => coordinatorProposalCard(one, csrf, now, decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null)).join("") +
+    proposals.map(one => coordinatorProposalCard(one, csrf, now, decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, returnTo)).join("") +
     `</div>`
   );
 }
@@ -10067,20 +10248,25 @@ function matePage(chrome: Chrome, data: {
   weeklySpent: number;
   projects: ChatProjectPulse[];
   fleetSnapshot: ChatSnapshot | null;
+  /** Optional task lens into the same unified thread. */
+  focusTask: TaskChatFocus | null;
   csrf: string;
   problem: string | null;
   now: Date;
 }): Screen {
   const subscription = isSubscriptionChatProvider(data.config.provider);
+  const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
   const conversation: string[] = [
-    chatHeading("one conversation across every project · understand, prioritize, and act from here", data.projects.length, true),
+    data.focusTask === null
+      ? chatHeading("one conversation across every project · understand, prioritize, and act from here", data.projects.length, true)
+      : taskChatHeading(data.focusTask),
     `<div class="chat-budget"><span class="mono">answering with ${escape(data.config.provider)} · ${escape(data.config.model)}</span>` +
       (subscription
         ? `<span>membership login · no dollar ceiling</span>`
         : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
           `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
       `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span></div>`,
-    chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null),
+    data.focusTask === null ? chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null) : "",
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -10096,12 +10282,12 @@ function matePage(chrome: Chrome, data: {
     byTurn.set(one.turn, list);
   }
   const inert = data.pending !== null;
-  conversation.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now));
+  conversation.push(coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now, true, data.focusTask === null ? null : returnTo));
   conversation.push(`<div class="thread">`);
   if (data.messages.length === 0) {
     conversation.push(
-      `<div class="chat-empty"><strong>What should we look at first?</strong>` +
-      `<p class="meta">Ask in your own words, or start with a fleet question.</p>${matePromptStarters(data.csrf)}</div>`,
+      `<div class="chat-empty"><strong>${data.focusTask === null ? "What should we look at first?" : "What do you want to understand or change?"}</strong>` +
+      `<p class="meta">${data.focusTask === null ? "Ask in your own words, or start with a fleet question." : "I’ll read the current task first. Ask naturally, or choose a useful starting point."}</p>${matePromptStarters(data.csrf, data.focusTask)}</div>`,
     );
   }
   for (const message of data.messages) {
@@ -10113,7 +10299,7 @@ function matePage(chrome: Chrome, data: {
     conversation.push(
       `<div class="msg mate" data-message-role="assistant">` +
         renderChatText(message.text) +
-        cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null)).join("") +
+        cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, data.focusTask === null ? null : returnTo)).join("") +
         `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, data.now))}</time></div>` +
         `</div>`,
     );
@@ -10121,23 +10307,24 @@ function matePage(chrome: Chrome, data: {
   conversation.push(`</div>`);
   if (data.pending !== null) {
     conversation.push(
-      `<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working across your projects</strong>` +
+      `<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>${data.focusTask === null ? "Working across your projects" : `Working on ${escape(data.focusTask.title)}`}</strong>` +
       `<span class="meta">turn #${data.pending.id} · ${data.pending.steps} step${data.pending.steps === 1 ? "" : "s"}${subscription ? " · membership-backed" : ` · up to ${chatMoney(data.pending.reservedMicrousd)} reserved`}</span></p>` +
-      `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
+      `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
       `<button type="submit" class="quiet">stop</button></form></div>`,
     );
-    return screen("chat", `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, true)}<section class="chat-main">${conversation.join("\n")}</section></div>`, { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
+    return screen("chat", chatWorkspace(conversation.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
   }
   conversation.push(
-    data.messages.length === 0 ? "" : matePromptStarters(data.csrf),
+    data.messages.length === 0 ? "" : matePromptStarters(data.csrf, data.focusTask),
     `<form method="post" action="/chat" class="card composer" id="latest" aria-label="message the mate">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="Ask about projects, prioritize work, or draft the next task…"></textarea></label>`,
+    data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
+    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Ask about projects, prioritize work, or draft the next task…" : "Ask about status, revise scope, or steer the next attempt…"}"></textarea></label>`,
     `<button type="submit" aria-label="send message">send</button>`,
     `</form>`,
     `<details><summary class="meta">this conversation</summary>`,
     `<p class="meta">started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · stays live until you end it · only bounded recent context is sent to the model</p>`,
-    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,
+    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,
     data.recent.length === 0
       ? ""
       : `<p class="meta">recent turns: ${data.recent
@@ -10148,7 +10335,7 @@ function matePage(chrome: Chrome, data: {
   );
   return screen(
     "chat",
-    `<div class="chat-workspace">${chatProjectRail(data.projects, data.csrf, false)}<section class="chat-main">${conversation.join("\n")}</section></div>`,
+    chatWorkspace(conversation.join("\n"), data.projects, data.csrf, false, data.focusTask),
     { chrome, functional: { script: CHAT_UI_SCRIPT } },
   );
 }
@@ -11571,6 +11758,28 @@ function safeReturn(raw: string | null | undefined): string {
   if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\") || /[\r\n\t\u0000-\u001f]/.test(raw) || raw.length > 512) return "/";
   return raw;
 }
+
+/** Chat actions may return only to the unified chat or one task-focused
+ * lens. Other same-site paths are valid elsewhere, but not for chat forms. */
+function safeChatReturn(raw: string | null | undefined): string {
+  const safe = safeReturn(raw);
+  try {
+    const parsed = new URL(safe, "http://standing-orders.local");
+    if (parsed.pathname !== "/chat") return "/chat";
+    const task = parsed.searchParams.get("task");
+    return task !== null && task.length > 0 && task.length <= 64 && !hasForbiddenControls(task)
+      ? taskChatHref(task)
+      : "/chat";
+  } catch {
+    return "/chat";
+  }
+}
+
+function chatReturnWithSaid(back: string, said: string): string {
+  return `${back}${back.includes("?") ? "&" : "?"}said=${encodeURIComponent(said)}`;
+}
+
+const chatReturnWithLatest = (back: string): string => `${back}#latest`;
 
 /** The no-script "move to the front" sentinel: the form cannot name the
  * front of a partition, so the handler resolves it (slice 1b, fix 1). */
@@ -13003,7 +13212,7 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    `<h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>${data.csrf === "" ? "" : taskViewSwitch(task.id, "overview")}</div>`,
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",

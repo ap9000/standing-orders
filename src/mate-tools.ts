@@ -520,6 +520,24 @@ export const MATE_TOOLS: MateTool[] = [
     },
   },
   {
+    name: "propose_steer",
+    description:
+      "Propose guidance for a task's next attempt. The note refines priorities without changing the task's scope and never interrupts a running attempt. The operator confirms because the note will speak in their voice.",
+    inputSchema: schema({ task: TASK_ARG, note: { type: "string", maxLength: 2_000 } }, ["task", "note"]),
+    handle: (ctx, args) => {
+      const taskId = taskIdOf(args);
+      const ref = taskId === null ? null : admittedRef(ctx, taskId);
+      const task = taskId === null ? null : ctx.store.getTask(taskId);
+      if (taskId === null || ref === null || task === null) return notFound();
+      if (!honest(args["note"], 2_000)) return { ok: false, message: "guidance is plain text up to 2,000 characters" };
+      if (task.state === "done" || task.state === "cancelled") return { ok: false, message: "that task is finished, so guidance has no next attempt to reach" };
+      if (ctx.store.openContestFor(ref.id) !== null) return { ok: false, message: "agents are racing on that task — wait until the comparison finishes" };
+      const id = ctx.draft("steer", { task: taskId, taskTitle: task.title, repoId: ref.repoId, note: args["note"] });
+      if (id === null) return tooMany();
+      return { ok: true, body: { proposal: id, kind: "steer", task: taskId, awaiting: "the operator's confirmation" } };
+    },
+  },
+  {
     name: "propose_dependency_repair",
     description:
       "Propose repairing a task stranded behind a failed or cancelled dependency. Read the dependent task with get_task first, then choose: retry (failed blocker only), unlink, or replace (replacement required). The operator sees the exact graph change and confirms it; nothing is changed by this tool.",

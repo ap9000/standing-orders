@@ -55,6 +55,10 @@ export type MateTurnInput = {
   /** Direct API key; subscription providers use their cached harness login. */
   key: string | null;
   message: string;
+  /** Safe, server-authored context for this turn only. Kept out of the
+   * visible thread so a task-scoped composer still reads like a normal
+   * conversation. */
+  context?: string;
   fetcher?: typeof fetch;
   /** Injected by tests; production invokes the isolated local harness. */
   subscriptionRunner?: SubscriptionMateRunner;
@@ -166,7 +170,8 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   const view = mateViewContextFor(store, who);
   const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(who.repos, now), now);
   const document = redactForMate(buildDataDocument(snapshot).document, view);
-  const history: MateHistoryMessage[] = [...historyFor(store, thread.id), { role: "operator", text: message }];
+  const historyMessage = input.context === undefined ? message : `${input.context}\n\n${message}`;
+  const history: MateHistoryMessage[] = [...historyFor(store, thread.id), { role: "operator", text: historyMessage }];
   const composeDirect = (key: string): { url: string; headers: Record<string, string>; body: string } => {
     if (!direct) throw new Error("not a direct chat provider");
     return composeMateRequest({ provider: directProvider as DirectChatProviderId, model: config.model, key, system: MATE_CONTRACT, dataDocument: document, history, tools: MATE_TOOL_SCHEMAS });

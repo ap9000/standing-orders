@@ -23,7 +23,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   const session = () =>
     store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
-  const pending = (kind: "next" | "reserve" | "hold" | "answer" | "repair", payload: Record<string, unknown>): number => {
+  const pending = (kind: "next" | "reserve" | "hold" | "steer" | "answer" | "repair", payload: Record<string, unknown>): number => {
     const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
     const live = store.activeMateSession("alex")!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
@@ -96,6 +96,20 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     store.hold(store.refFor("built-in", "b").id, "by hand", null, clock());
     expect(confirmMateProposal(store, who, again, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "stale" });
     expect(store.activeHolds(store.refFor("built-in", "b").id, clock()).map(one => one.reason)).toEqual(["by hand"]);
+  });
+
+  test("a steering card becomes verified guidance for the next attempt only after confirmation", () => {
+    session();
+    const id = pending("steer", { task: "a", taskTitle: "task a", note: "Start with the mobile flow." });
+    expect(store.listSteerNotes(store.refFor("built-in", "a").id)).toEqual([]);
+    expect(confirmMateProposal(store, who, id, clock(), { via: "web" })).toMatchObject({
+      ok: true,
+      said: "Guidance saved for task a's next attempt",
+      taskId: "a",
+    });
+    expect(store.listSteerNotes(store.refFor("built-in", "a").id)).toMatchObject([
+      { author: "alex", authorshipState: "verified", note: "Start with the mobile flow.", deliveredAt: null },
+    ]);
   });
 
   test("dependency repair cards retry, atomically replace, unlink, and refuse stale graph state", () => {
