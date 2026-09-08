@@ -98,6 +98,18 @@ describe("the chat snapshot", () => {
   test("the serialized document carries opaque ids and NONE of the excluded content", () => {
     seed();
     const snapshot = store.chatSnapshot([INSIDE], T0);
+    if (snapshot.tasks[0] !== undefined) {
+      snapshot.tasks[0].dispatch = {
+        condition: "waiting",
+        code: "missing-requirement",
+        summary: "Missing a requirement",
+        detail: `needs cli:git — unrecorded for ${INSIDE}/PRIVATE-DISPATCH-PATH`,
+        action: "repair-capability",
+        nextAt: null,
+        role: "builder",
+        blockerTaskId: null,
+      };
+    }
     const { document } = buildDataDocument(snapshot);
     // Opaque repo ids only — no paths, no basenames.
     expect(document).toContain('"id":"r1"');
@@ -115,6 +127,9 @@ describe("the chat snapshot", () => {
     expect(document).not.toContain("/pool/");
     expect(document).not.toContain("standing-orders/in-1");
     expect(document).not.toContain("runner-1");
+    expect(document).not.toContain("PRIVATE-DISPATCH-PATH");
+    expect(document).not.toContain("unrecorded for");
+    expect(document).toContain('"code":"missing-requirement"');
     // What IS there: option labels and the operator's own titles.
     expect(document).toContain("Fail open");
     expect(document).toContain("tighten the payout guard");

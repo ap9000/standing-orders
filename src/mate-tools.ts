@@ -16,6 +16,7 @@ import type { MateToolSchema } from "./converse.js";
 import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
 import { readVerifiedReport, scanForSecrets } from "./evidence.js";
 import { parseAcceptanceCriteria, ACCEPTANCE_LIMITS, EVIDENCE_KINDS, type AcceptanceCriterion } from "./scope.js";
+import { diagnoseTaskDispatch, withDispatchDiagnoses } from "./dispatch.js";
 
 export const MATE_MAX_PROPOSALS_PER_TURN = 5;
 
@@ -295,11 +296,11 @@ export function decisionOver(store: Store, repos: readonly string[], decisionId:
 
 export function queueOver(store: Store, repo: string, now: Date): Record<string, unknown> {
   const rows = store.queueScoped(repo, now).filter(one => one.repo === repo);
-  const columns = new Map<string, { position: number; task: string; title: string; approved: boolean; blockers: unknown; beingTaken: boolean }[]>();
+  const columns = new Map<string, { position: number; task: string; title: string; approved: boolean; blockers: unknown; beingTaken: boolean; dispatch: ReturnType<typeof diagnoseTaskDispatch> }[]>();
   for (const one of rows) {
     const column = one.assignedRunner ?? "shared";
     const list = columns.get(column) ?? [];
-    list.push({ position: list.length + 1, task: one.id, title: one.title, approved: one.approved, blockers: one.blockers, beingTaken: one.taken });
+    list.push({ position: list.length + 1, task: one.id, title: one.title, approved: one.approved, blockers: one.blockers, beingTaken: one.taken, dispatch: diagnoseTaskDispatch(store, one.id, now) });
     columns.set(column, list);
   }
   const ordered = [...columns.entries()].sort(([a], [b]) => (a === "shared" ? -1 : b === "shared" ? 1 : a.localeCompare(b)));
@@ -343,12 +344,12 @@ export const MATE_TOOLS: MateTool[] = [
     handle: (ctx, args) => {
       const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
       if (args["repo"] !== undefined && repo === null) return { ok: false, message: "repo must be one of the ids from list_repos" };
-      const snapshot = ctx.store.chatSnapshot(ctx.who.repos, ctx.now);
+      const snapshot = withDispatchDiagnoses(ctx.store, ctx.store.chatSnapshot(ctx.who.repos, ctx.now), ctx.now);
       const limit = typeof args["limit"] === "number" ? Math.min(50, Math.max(1, Math.floor(args["limit"]))) : 20;
       const rows = snapshot.tasks
         .filter(one => (repo === null || ctx.who.repos[one.repoIndex] === repo) && (args["state"] === undefined || one.state === args["state"]))
         .slice(0, limit)
-        .map(one => ({ repo: `r${one.repoIndex + 1}`, task: one.id, title: one.title, state: one.state, ageHours: one.ageHours, strikes: one.strikes }));
+        .map(one => ({ repo: `r${one.repoIndex + 1}`, task: one.id, title: one.title, state: one.state, ageHours: one.ageHours, strikes: one.strikes, dispatch: one.dispatch ?? null }));
       return { ok: true, body: { tasks: rows, truncated: snapshot.tasksSaturated } };
     },
   },
@@ -374,6 +375,7 @@ export const MATE_TOOLS: MateTool[] = [
           task: taskId,
           title: task.title,
           state: task.state,
+          dispatch: diagnoseTaskDispatch(ctx.store, taskId, ctx.now),
           deliverable: ctx.store.refForId(ref.id)?.deliverable ?? "branch",
           report: reportSummaryFor(ctx.store, ctx.evidenceRoot, ref.id),
           scope: scopeStandingOf(ctx.store, taskId),

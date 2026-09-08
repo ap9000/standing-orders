@@ -14,7 +14,7 @@ interrupted only for decisions that genuinely need a human.**
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Design](docs/DESIGN.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
+[Design](docs/DESIGN.md) · [Never Stuck contract](docs/NEVER_STUCK.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
 
 <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/unified-chat.png" alt="Standing Orders unified chat showing a live portfolio overview across projects, active builds, decisions, and proposed next actions." width="920">
 
@@ -322,11 +322,12 @@ service unit never carries it. Cron remains first-class if you prefer it —
 cron's cadence, and a stray cron tick alongside a watch is safe (ordinary
 claims settle the race), it just is not needed.
 
-An honesty note for Windows: the scheduled-task definition follows the Task
+An honesty note for Windows: every pull request now type-checks, builds, and
+runs the native Task Scheduler/link tests plus the core dispatch contract on
+Windows with Node 22 and 24. The scheduled-task definition follows the Task
 Scheduler XML schema and every `schtasks` interaction is covered by scripted
-tests, but it has not yet been exercised on a physical Windows machine —
-if you are the first, `daemon install --dry-run` shows exactly what it
-would register, and an issue report is very welcome.
+tests. A physical Windows install has not yet been certified; the broader
+provider/worktree end-to-end matrix is the next portability slice.
 
 ### Unattended permissions
 

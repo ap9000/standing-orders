@@ -249,6 +249,9 @@ export type ChatSnapshot = {
      * task with no finished attempt, or one whose scope signed no rubric. */
     proofVerdict: "verified" | "attested" | "short" | "refuted" | null;
     proofMatrix: CriterionMatrixRow[];
+    /** Read surfaces may attach the shared scheduler diagnosis after this
+     * bounded snapshot is read. The store itself remains dependency-free. */
+    dispatch?: import("./dispatch.js").DispatchDiagnosis | null;
   }[];
   tasksSaturated: boolean;
   decisions: { repoIndex: number; id: number; question: string; optionLabels: string[]; taskId: string; options: { id: string; label: string; reversible: boolean }[]; ageHours: number }[];
@@ -15865,6 +15868,30 @@ export class Store {
       state: String(row["state"]) as "exhausted" | "half-open",
       reason: String(row["reason"]),
       resetAt: row["reset_at"] === null ? null : String(row["reset_at"]),
+    };
+  }
+
+  /** Read-only quota observation for status surfaces. A passed reset reads
+   * half-open, matching quotaState's lazy transition, but this method never
+   * consumes or changes the probe slot. */
+  readQuotaState(
+    runner: string,
+    provider: string,
+    scope: string,
+    now: Date,
+    authMode: "subscription" | "api-key" = "subscription",
+    credentialFp = "",
+  ): { state: "exhausted" | "half-open"; reason: string; resetAt: string | null } | null {
+    const row = this.db
+      .prepare("SELECT state, reason, reset_at FROM quota WHERE runner = ? AND provider = ? AND scope = ? AND auth_mode = ? AND credential_fp = ?")
+      .get(runner, provider, scope, authMode, credentialFp);
+    if (row === undefined) return null;
+    const resetAt = row["reset_at"] === null ? null : String(row["reset_at"]);
+    const resetPassed = resetAt !== null && resetAt <= now.toISOString();
+    return {
+      state: resetPassed ? "half-open" : String(row["state"]) as "exhausted" | "half-open",
+      reason: String(row["reason"]),
+      resetAt,
     };
   }
 

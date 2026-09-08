@@ -310,9 +310,11 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     return { ...base, lane: "waiting", reason };
   }
   if (facts.unmetDependency !== null) {
-    // The blocker's own state changes what waiting means: behind a build
-    // that is running, this is patience; behind one that failed, it is a
-    // problem wearing a calm lane.
+    // A terminal blocker will never clear itself. Say repair instead of
+    // presenting an impossible dependency as ordinary patience.
+    if (facts.blockerState === "failed" || facts.blockerState === "cancelled") {
+      return { ...base, lane: "waiting", reason: `dependency needs repair — ${facts.unmetDependency} is ${facts.blockerState}` };
+    }
     const doing =
       facts.blockerState === null
         ? ""

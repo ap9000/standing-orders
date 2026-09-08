@@ -53,6 +53,11 @@ import { hasDisguisedText, hasForbiddenControls, validateNote } from "./decision
 import { readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
 import { verdictWords as proofVerdictWords, matrixWords } from "./proof.js";
 import { probeRepo, isVerified } from "./probe.js";
+import {
+  diagnoseTaskDispatch,
+  diagnosisIsDispatchable,
+  scopeApprovedForDispatch,
+} from "./dispatch.js";
 
 import { createDecisionServer } from "./serve.js";
 import {
@@ -863,8 +868,18 @@ async function readyCommand(
 
   const ready = store.listReady(now);
 
+  const described = ready.map(ref => describeRef(store, ref, now));
+  const dispatchableCount = described.filter(one => diagnosisIsDispatchable(one.dispatch)).length;
+
   if (json) {
-    write(envelopeJson({ ok: ready.length > 0, command: "ready", ...(ready.length > 0 ? {} : { reason: "empty", message: "nothing is ready to dispatch" }), count: ready.length, tasks: ready.map(ref => describeRef(store, ref, now)) }));
+    write(envelopeJson({
+      ok: ready.length > 0,
+      command: "ready",
+      ...(ready.length > 0 ? {} : { reason: "empty", message: "nothing is task-locally ready" }),
+      count: ready.length,
+      dispatchableCount,
+      tasks: described,
+    }));
     return ready.length > 0 ? EXIT.ok : EXIT.refused;
   }
 
@@ -873,10 +888,11 @@ async function readyCommand(
     return EXIT.refused;
   }
 
-  write(`${ready.length} ready (each worker takes its own reserved work first — this is the shared view):`);
+  write(`${ready.length} task-local candidate${ready.length === 1 ? "" : "s"} (${dispatchableCount} can dispatch with the fleet as it stands):`);
   for (const ref of ready) {
     const task = store.getTask(ref.externalId);
-    write(`  ${ref.externalId}  ${task === null ? "" : task.title}${ref.assignedRunner === null ? "" : `  (reserved for ${ref.assignedRunner})`}`);
+    const diagnosis = diagnoseTaskDispatch(store, ref.externalId, now);
+    write(`  ${ref.externalId}  ${task === null ? "" : task.title}${ref.assignedRunner === null ? "" : `  (reserved for ${ref.assignedRunner})`}${diagnosis === null ? "" : ` — ${diagnosis.summary.toLowerCase()}`}`);
   }
   return EXIT.ok;
 }
@@ -891,6 +907,7 @@ function describeRef(store: Store, ref: { externalId: string; backend: string; i
     state: task?.state ?? null,
     reservedFor: ref.assignedRunner ?? null,
     claim: currentClaim(store, ref.id, now),
+    dispatch: diagnoseTaskDispatch(store, ref.externalId, now),
   };
 }
 
@@ -2205,7 +2222,7 @@ async function tickCommand(
     // naming THIS runner is authority for one watched attempt, and the
     // skip for everything short of that is its own typed word, never the
     // generic `unapproved` the round-5 review caught masking it.
-    const scopeApproved = approvalOf(store.getScope(id)).approved;
+    const scopeApproved = scopeApprovedForDispatch(store, ref.id, clock());
     const wantsPlan = ref.plan === "requested" && !scopeApproved;
     // A report task with an approved scope dispatches a SCOUT (mate arc
     // §10): the same approval, the planner's read-only road, a report back.
@@ -2426,7 +2443,7 @@ async function tickCommand(
           leaseId: lease,
           incarnation: text(flags, "incarnation") ?? null,
           scopeDigest: scopeRow?.digest ?? "",
-          scopeApproved: scopeRow !== null && approvalOf(scopeRow).approved,
+          scopeApproved: scopeRow !== null && scopeApprovedForDispatch(store, ref.id, clock()),
           // 'tasks' capacity mode keeps the claim-counted contract; the
           // slot ledger records regardless (finding 26).
           capacity: null,
@@ -8662,6 +8679,7 @@ function showTask(positional: readonly string[], context: Context): number {
     proofReasons: proofVerdict?.reasons ?? [],
     proofMatrix: proofVerdict?.matrix ?? [],
     proofAccepted,
+    dispatch: diagnoseTaskDispatch(store, id, now),
   };
 
   return succeed(write, json, "task show", detail, () => [
@@ -8692,6 +8710,7 @@ function showTask(positional: readonly string[], context: Context): number {
       : [`  position  ${detail.position.position} of ${detail.position.total}${detail.position.column === null ? " in the shared queue" : ` in ${detail.position.column}'s queue`}`]),
     ...(detail.hold === null ? [] : [`  held: ${detail.hold.reason}`]),
     ...(detail.claim === null ? [] : [`  claimed by ${detail.claim.runner} until ${detail.claim.expiresAt}`]),
+    ...(detail.dispatch === null ? [] : [`  dispatch: ${detail.dispatch.summary} — ${detail.dispatch.detail}`]),
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
       : describeScope(scope)),

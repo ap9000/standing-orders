@@ -31,6 +31,12 @@
 import { randomUUID } from "node:crypto";
 import { attendedLivenessState, type AttendedLiveness } from "./liveness.js";
 import { authenticate } from "./runner.js";
+import {
+  DEFAULT_MAX_OPEN_DECISIONS,
+  missingCapability,
+  scopeApprovedForDispatch,
+  taskReadinessBlocker,
+} from "./dispatch.js";
 
 /** attendedLivenessState over the store's ISO columns. */
 function attendedWatchState(lastBeatAt: string | null, now: Date, absoluteExpiry: string): AttendedLiveness {
@@ -42,7 +48,6 @@ function attendedWatchState(lastBeatAt: string | null, now: Date, absoluteExpiry
 }
 import {
   BUILT_IN,
-  parseCapabilityKey,
   type Store,
   type Mutation,
   type TaskState,
@@ -353,8 +358,9 @@ export type NotReady = {
   message: string;
 };
 
-/** DESIGN §8 gate 6: above this many open decisions, stop dispatching the parkers. */
-export const DEFAULT_MAX_OPEN_DECISIONS = 5;
+/** DESIGN §8 gate 6: above this many open decisions, stop dispatching the parkers.
+ * `missingCapability` remains re-exported for callers of the old claim seam. */
+export { DEFAULT_MAX_OPEN_DECISIONS, missingCapability } from "./dispatch.js";
 
 /**
  * Take the task, if it is free *and still worth taking*.
@@ -388,8 +394,8 @@ export function acquireIfReady(
 ): AcquireResult | NotReady {
   const role = options.dispatchRole ?? "builder";
   return inTransaction(store, () => {
-    const why = notReady(store, taskRef, options.now);
-    if (why !== null) return { ok: false as const, reason: "not-ready" as const, message: why };
+    const why = taskReadinessBlocker(store, taskRef, options.now);
+    if (why !== null) return { ok: false as const, reason: "not-ready" as const, message: why.message };
 
     // The role's own precondition, re-read where the write lock has pinned
     // it — never an early return past the shared gates below. A planner
@@ -398,24 +404,13 @@ export function acquireIfReady(
     // mode-sealed approval additionally re-proves its signature is STILL
     // the live mode (belt to the demotion sweep — R-REVOKE's next gate
     // holds even in the window before an expired mode is durably closed).
-    const approvedScope = store.handle
-      .prepare(
-        `SELECT 1 AS hit FROM task_scope
-         JOIN task_ref ON task_ref.id = ? AND task_scope.task_id = task_ref.external_id
-         WHERE task_scope.approved_digest = task_scope.digest AND task_scope.approved_at IS NOT NULL AND (COALESCE(task_scope.approval_basis, 'password') <> 'mode'
-                OR EXISTS (SELECT 1 FROM operating_mode om
-                            JOIN approver signer ON signer.name = om.signed_by
-                           WHERE om.repo = task_ref.repo AND om.revoked_at IS NULL
-                             AND om.absolute_expiry > ? AND om.digest = task_scope.mode_digest
-                             AND signer.revoked_at IS NULL AND signer.role = 'approver'))`,
-      )
-      .get(taskRef, options.now.toISOString());
+    const approvedScope = scopeApprovedForDispatch(store, taskRef, options.now);
     if (role === "planner") {
       const ref = store.refForId(taskRef);
       if (ref?.plan !== "requested") {
         return { ok: false as const, reason: "not-ready" as const, message: "no plan was requested" };
       }
-      if (approvedScope !== undefined) {
+      if (approvedScope) {
         return { ok: false as const, reason: "not-ready" as const, message: "the scope is already approved — nothing left to plan" };
       }
     }
@@ -430,12 +425,12 @@ export function acquireIfReady(
       if (role === "builder" && deliverable === "report") {
         return { ok: false as const, reason: "not-ready" as const, message: "this task delivers a report — a scout, never a builder, takes it" };
       }
-      if (role === "scout" && approvedScope === undefined) {
+      if (role === "scout" && !approvedScope) {
         return { ok: false as const, reason: "not-ready" as const, message: "the scope is not approved" };
       }
     }
     let attendedAuthority = false;
-    if (role !== "planner" && approvedScope === undefined) {
+    if (role !== "planner" && !approvedScope) {
       // The authority union (v6 W1): an unapproved scope still dispatches
       // when a LIVE attended authorization names THIS runner and its one
       // attempt is unspent — the authorization IS the authority. Everything
@@ -653,92 +648,6 @@ export function acquireFallback(
     return taken;
   });
 }
-
-/**
- * The first requirement this task fails, in words, or null. A requirement
- * whose capability was never recorded fails too — fail closed is the only
- * honest reading of "a task whose capabilities are not verified does not
- * dispatch" when nobody has even written the capability down.
- */
-export function missingCapability(
-  store: Store,
-  taskRef: number,
-  dispatchRepo: string | null,
-  now: Date,
-): string | null {
-  const db = store.handle;
-  const row = db
-    .prepare("SELECT repo, capability_requirements FROM task_ref WHERE id = ?")
-    .get(taskRef);
-  if (row === undefined) return "no such task reference";
-
-  let keys: string[];
-  try {
-    keys = JSON.parse(String(row["capability_requirements"] ?? "[]")) as string[];
-  } catch {
-    keys = [];
-  }
-  if (keys.length === 0) return null;
-
-  // The task's own placement wins; a task placed nowhere is judged against
-  // the repo this dispatch is for.
-  const repo = row["repo"] === null || row["repo"] === undefined ? dispatchRepo : String(row["repo"]);
-  if (repo === null) return `requires ${keys[0]} but is placed in no repository`;
-
-  const stamp = now.toISOString();
-  for (const key of keys) {
-    const parsed = parseCapabilityKey(key);
-    if (parsed === null) return `requirement \`${key}\` is not a capability key`;
-    const found = db
-      .prepare(
-        `SELECT status, expires_at FROM capability
-          WHERE repo = ? AND kind = ? AND name = ?`,
-      )
-      .get(repo, parsed.kind, parsed.name);
-    if (found === undefined) return `needs ${key} — unrecorded for ${repo}`;
-    if (String(found["status"]) !== "verified") return `needs ${key} — not verified`;
-    const expires = found["expires_at"];
-    if (expires !== null && String(expires) <= stamp) return `needs ${key} — verification expired`;
-  }
-  return null;
-}
-
-/** The first readiness condition this reference fails, in words, or null. */
-function notReady(store: Store, taskRef: number, now: Date): string | null {
-  const db = store.handle;
-  const stamp = now.toISOString();
-
-  const task = db
-    .prepare(
-      `SELECT task.id, task.state FROM task
-       JOIN task_ref ON task_ref.external_id = task.id AND task_ref.backend = ?
-       WHERE task_ref.id = ?`,
-    )
-    .get(BUILT_IN, taskRef);
-  if (task === undefined) return "no such task";
-  if (String(task["state"]) !== "queued") return `state is ${String(task["state"])}, not queued`;
-
-  const hold = db
-    .prepare(
-      `SELECT reason FROM hold
-       WHERE task_ref = ? AND (until IS NULL OR until > ?) LIMIT 1`,
-    )
-    .get(taskRef, stamp);
-  if (hold !== undefined) return `held: ${String(hold["reason"])}`;
-
-  const blocker = db
-    .prepare(
-      `SELECT blocker.id FROM task_edge
-       JOIN task AS blocker ON blocker.id = task_edge.blocker
-       WHERE task_edge.blocked = ? AND blocker.state <> 'done'
-       ORDER BY blocker.id LIMIT 1`,
-    )
-    .get(String(task["id"]));
-  if (blocker !== undefined) return `waiting on ${String(blocker["id"])}`;
-
-  return null;
-}
-
 
 /**
  * "I am still here." Extends the lease, and tells a superseded runner that it

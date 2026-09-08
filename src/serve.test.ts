@@ -2836,6 +2836,21 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     expect(html).toContain("demo database");
   });
 
+  test("the live chat overview uses the shared repair diagnosis", async () => {
+    for (const id of ["t-blocker", "t-dependent"]) {
+      store.createTask({ id, title: id === "t-dependent" ? "must not wait forever" : "obsolete prerequisite" }, T0);
+      store.placeTask(store.refFor("built-in", id).id, repoDir);
+    }
+    expect(store.addEdge("t-dependent", "t-blocker")).toEqual({ ok: true });
+    expect(store.cancelTask("t-blocker", T0, "replaced")).toMatchObject({ ok: true });
+    await boot();
+    const cookie = await login();
+
+    const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+    expect(html).toContain('data-dispatch-status="terminal-dependency"');
+    expect(html).toContain("dependency needs repair");
+  });
+
   test("the whole loop: password-gated ask, reply, draft card, password-gated file through the door", async () => {
     fetcherResult = async () =>
       anthropicWrapper(
@@ -6466,6 +6481,27 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(ready).toContain('data-dispatch-status="ready-to-run"');
     expect(ready).toContain("every dispatch gate currently passes");
     expect(ready).not.toContain('data-dispatch-status="no-worker-online"');
+  });
+
+  test("a cancelled dependency is shown as repair on both the task and queue", async () => {
+    seed("t-blocker", "obsolete prerequisite");
+    seed("t-dependent", "must not wait forever");
+    expect(store.addEdge("t-dependent", "t-blocker")).toEqual({ ok: true });
+    expect(store.cancelTask("t-blocker", T0, "replaced")).toMatchObject({ ok: true });
+    await boot();
+    const cookie = await login();
+
+    const task = await (await fetch(url("/t/t-dependent"), { headers: { cookie } })).text();
+    expect(task).toContain('data-dispatch-status="terminal-dependency"');
+    expect(task).toContain("Dependency needs repair");
+    expect(task).toContain("t-blocker is cancelled");
+    expect(task).toContain("Open the blocker");
+
+    const queue = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
+    expect(queue).toContain('data-task="t-dependent"');
+    expect(queue).toContain('data-dispatch-status="terminal-dependency"');
+    expect(queue).toContain("dependency needs repair");
+
   });
 
   test("a completed task speaks the machine's own verdict (Priority 2) — never inferred at render", async () => {

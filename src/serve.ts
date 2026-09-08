@@ -42,6 +42,7 @@
  */
 
 import { listCoordinators } from "./coordinator.js";
+import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
 import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
@@ -1977,7 +1978,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       let fleetSnapshot: ChatSnapshot | null = null;
       if (ceiling.repos.length > 0) {
         try {
-          fleetSnapshot = store.chatSnapshot(ceiling.repos, now);
+          fleetSnapshot = withDispatchDiagnoses(store, store.chatSnapshot(ceiling.repos, now), now);
         } catch {
           // The project rail already degrades each pulse independently.
           // A failed briefing query must not make the conversation vanish.
@@ -2850,6 +2851,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     })();
     return {
         task: found,
+        dispatch: diagnoseTaskDispatch(store, taskId, now),
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
         planDocument: ref === null ? null : planDocumentOf(ref.id),
@@ -4636,7 +4638,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `/chat?said=${encodeURIComponent("that looks like a credential — chat never forwards or stores those")}`);
       }
       store.sweepStaleChatTurns(now);
-      const snapshot = store.chatSnapshot(ceiling.repos, now);
+      const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(ceiling.repos, now), now);
       const { document } = buildDataDocument(snapshot);
       // The WHOLE outbound body is scanned — a token in a task title
       // refuses the turn exactly like one typed in the box (v2 ruling 4).
@@ -5976,7 +5978,10 @@ export function createDecisionServer(options: ServeOptions): Server {
    * place dragging exists, because reordering and reserving are scheduling,
    * never authority). */
   function queueRegionFor(project: string | null, csrf: string, revision: number, now: Date): string {
-    const tasks = store.queueScoped(project, now);
+    const tasks = store.queueScoped(project, now).map(one => ({
+      ...one,
+      dispatch: diagnoseTaskDispatch(store, one.id, now),
+    }));
     const owned = new Set(tasks.map(one => one.assignedRunner).filter((one): one is string => one !== null));
     const building = new Map<string, number>();
     for (const claim of store.liveClaims(project, now)) {
@@ -9304,6 +9309,17 @@ function chatFleetOverview(
       `<a class="chat-overview-item decision" href="/d/${decision.id}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
         `<span class="chat-overview-copy"><strong>${escape(decision.question)}</strong><span>${escape(projectOf(decision.repoIndex))} · ${escape(decision.taskId)} · decision #${decision.id}</span></span>` +
+      `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
+    );
+  }
+  for (const task of snapshot.tasks
+    .filter(one => one.dispatch?.condition === "waiting")
+    .slice(0, Math.max(0, 3 - rows.length))) {
+    const dispatch = task.dispatch as DispatchDiagnosis;
+    rows.push(
+      `<a class="chat-overview-item decision" href="${taskHref(task.id)}" data-dispatch-status="${escape(dispatch.code)}">` +
+        `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 8v4"/><path d="M12 16h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
+        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${escape(dispatch.summary.toLowerCase())}</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
     );
   }
@@ -11496,7 +11512,9 @@ const CHEVRON_ICON =
  * (touch-action: none), so a finger on it drags instead of scrolling. */
 const GRIP_HANDLE = `<span class="queue-handle" aria-hidden="true">${GRIP_ICON}</span>`;
 
-function queueCard(one: { id: string; title: string; approved: boolean; blockers: number; taken: boolean }, csrf: string, revision: number, queueRevision: number, workers: { name: string; retired: boolean }[], column: string): string {
+type QueueCardTask = ReturnType<Store["queueScoped"]>[number] & { dispatch?: DispatchDiagnosis | null };
+
+function queueCard(one: QueueCardTask, csrf: string, revision: number, queueRevision: number, workers: { name: string; retired: boolean }[], column: string): string {
   // Presentation over queueScoped()'s shape only: state, scope, blockers,
   // and the reservation owner. Money is not in this query and is not
   // invented here — it stays on the task page, labeled.
@@ -11507,8 +11525,7 @@ function queueCard(one: { id: string; title: string; approved: boolean; blockers
       : `<span class="badge">reserved for ${escape(column)}</span>`;
   const chips =
     ` ${state}` +
-    `${one.approved ? "" : ` <a class="badge" href="${taskHref(one.id)}">scope unapproved</a>`}` +
-    `${one.blockers > 0 ? ` <span class="badge">${one.blockers} blocker${one.blockers > 1 ? "s" : ""}</span>` : ""}`;
+    `${one.dispatch === null || one.dispatch === undefined ? "" : ` <a class="badge" href="${taskHref(one.id)}">${escape(one.dispatch.summary.toLowerCase())}</a>`}`;
   const hidden =
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="projectRevision" value="${revision}">` +
@@ -11526,7 +11543,7 @@ function queueCard(one: { id: string; title: string; approved: boolean; blockers
       workers.filter(worker => !worker.retired).map(worker => `<option value="${escape(worker.name)}"${column === worker.name ? " selected" : ""}>${escape(worker.name)}</option>`).join("") +
       `</select><button type="submit">move</button></form>`;
   return (
-    `<div class="card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}">` +
+    `<div class="card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}"${one.dispatch === null || one.dispatch === undefined ? "" : ` data-dispatch-status="${escape(one.dispatch.code)}"`}>` +
     `<p class="row">${one.taken ? "" : `${GRIP_HANDLE}`}` +
     `<a href="${taskHref(one.id)}">${escape(one.title)}</a>${chips}</p>` +
     `<p class="row meta"><span class="mono">${escape(one.id)}</span> ${controls}</p>` +
@@ -11536,7 +11553,7 @@ function queueCard(one: { id: string; title: string; approved: boolean; blockers
 
 /** The queue columns fragment — shared queue first, then each worker. */
 function queueBody(
-  tasks: ReturnType<Store["queueScoped"]>,
+  tasks: QueueCardTask[],
   workers: { name: string; retired: boolean; note: string | null; capacity: number; building: number }[],
   csrf: string,
   revision: number,
@@ -11831,6 +11848,8 @@ type RevisionView =
 
 function taskBody(data: {
   task: Task;
+  /** Shared read-side lifecycle answer; the atomic claim still re-proves it. */
+  dispatch?: DispatchDiagnosis | null;
   strikes: number;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
@@ -11991,13 +12010,40 @@ function taskBody(data: {
   // gives the nearest concrete repair rather than making the operator infer
   // it from the rest of the page.
   const dispatchStatus = (() => {
-    const approval = approvalOf(scope);
-    const waitingOn = (data.waitsFor ?? []).filter(one => one.state !== "done" && one.state !== "cancelled");
-    const worker = data.worker ?? { answering: 0, registered: 0, totalRegistered: 0, lastHeard: null };
-    const gaps = data.gaps ?? [];
-    const box = (kind: "ok" | "problem", title: string, detail: string): string =>
-      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" data-dispatch-status="${escape(title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
+    const box = (kind: "ok" | "problem", title: string, detail: string, status?: string): string =>
+      `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
       `<strong>${escape(title)}</strong> <span class="meta">${detail}</span></div>`;
+
+    if (task.state !== "done") {
+      const diagnosis = data.dispatch ?? null;
+      if (diagnosis === null) return box("problem", "Dispatch unknown", "Refresh this task before relying on its scheduler state.", "unknown");
+      if (diagnosis.code === "running" && liveRun !== undefined) {
+        return box("ok", diagnosis.summary, `Worker <span class="mono">${escape(liveRun.runner)}</span> owns <a href="/r/${liveRun.id}">build #${liveRun.id}</a>.`, diagnosis.code);
+      }
+      const blocker = diagnosis.blockerTaskId === null
+        ? null
+        : (data.waitsFor ?? []).find(one => one.id === diagnosis.blockerTaskId);
+      const action = (() => {
+        switch (diagnosis.action) {
+          case "start-worker": return "";
+          case "write-scope": return ` <a href="#scope">Write the success contract</a> or use <strong>plan first</strong>.`;
+          case "select-agent": return ` <a href="#scope">Choose an available provider and model</a>.`;
+          case "approve-scope": return ` <a href="#approve">Review and sign the exact scope</a>.`;
+          case "answer-decision": return ` <a href="#decisions">Answer the waiting question</a>.`;
+          case "unhold": return ` Use <strong>unhold</strong> below when it may continue.`;
+          case "retry-task": return ` Review the incident, then use <strong>retry</strong> below.`;
+          case "repair-capability": return ` <a href="/caps">Repair the requirement</a>.`;
+          case "repair-dependency":
+            return blocker?.admitted === true
+              ? ` <a href="${taskHref(blocker.id)}">Open the blocker</a> to retry, replace, or unlink it.`
+              : ` Retry, replace, or unlink the blocker.`;
+          default: return "";
+        }
+      })();
+      const positive = diagnosis.code === "running" || diagnosis.code === "ready" || diagnosis.code === "planning-ready" || diagnosis.code === "scouting-ready";
+      const status = diagnosis.code === "ready" ? "ready-to-run" : diagnosis.code;
+      return box(positive ? "ok" : "problem", diagnosis.summary, `${escape(diagnosis.detail)}${action}`, status);
+    }
 
     if (task.state === "done") {
       const proof = data.completion ?? null;
@@ -12072,50 +12118,7 @@ function taskBody(data: {
         ) + acceptForm + criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) + machineNote + chainHtml
       );
     }
-    if (task.state === "cancelled") {
-      return box("problem", "Cancelled", "Nothing else will run for this task.");
-    }
-    if (data.claimed && liveRun !== undefined) {
-      return box("ok", "Running now", `Worker <span class="mono">${escape(liveRun.runner)}</span> owns <a href="/r/${liveRun.id}">build #${liveRun.id}</a>.`);
-    }
-    if (task.state === "failed" || data.incidents.some(one => one.resolvedAt === null)) {
-      return box("problem", "Needs a retry", `The last attempt stopped. Review the incident, then use <strong>retry</strong> below; its branch and workspace are preserved.`);
-    }
-    if (data.repo === null) {
-      return box("problem", "Needs a project", "Place this task in a repository before a worker can claim it.");
-    }
-    if (scope === null) {
-      if (data.plan !== "requested") {
-        return box("problem", "Needs a scope", `<a href="#scope">Write the success contract</a> or use <strong>plan first</strong>. Nothing spends until it is approved.`);
-      }
-    } else if (scope.profileState === "unresolved") {
-      return box("problem", "Needs an agent profile", `<a href="#scope">Choose an available provider and model</a>; this scope cannot be approved or dispatched yet.`);
-    } else if (!approval.approved && data.plan !== "requested") {
-      return box("problem", "Needs your approval", `<a href="#approve">Review and sign the exact scope</a>. No worker can claim it before that.`);
-    }
-    if (data.holds.length > 0) {
-      return box("problem", "On hold", `${escape(data.holds[0]?.reason ?? "A hold blocks the next attempt.")} Use <strong>unhold</strong> below when it may continue.`);
-    }
-    if (waitingOn.length > 0) {
-      const first = waitingOn[0] as (typeof waitingOn)[number];
-      const link = first.admitted ? `<a href="${taskHref(first.id)}" class="mono">${escape(first.id)}</a>` : `<span class="mono">${escape(first.id)}</span>`;
-      return box("problem", "Waiting on another task", `${link} must finish first${waitingOn.length > 1 ? `, with ${waitingOn.length - 1} more blocker${waitingOn.length > 2 ? "s" : ""}` : ""}.`);
-    }
-    if (gaps.length > 0) {
-      return box("problem", "Missing a requirement", `<a href="/caps">Repair ${escape(gaps[0]?.key ?? "the missing capability")}</a>${gaps.length > 1 ? ` and ${gaps.length - 1} more` : ""}; dispatch checks these before spending.`);
-    }
-    if (worker.answering === 0) {
-      const history = worker.registered === 0
-        ? worker.totalRegistered > 0
-          ? "Workers exist, but none is registered for this project."
-          : "No worker has been registered."
-        : `The ${worker.registered} registered worker${worker.registered === 1 ? " is" : "s are"} offline; last heard ${worker.lastHeard === null ? "never" : escape(when(worker.lastHeard))}.`;
-      return box("problem", "No worker online", `${history} On the machine that should build, run <span class="mono">standing-orders up</span>. Nothing will start until it answers.`);
-    }
-    if (data.plan === "requested") {
-      return box("ok", "Planner ready", `${worker.answering} eligible worker${worker.answering === 1 ? " is" : "s are"} online; planning may start on the next pass.`);
-    }
-    return box("ok", "Ready to run", `${worker.answering} eligible worker${worker.answering === 1 ? " is" : "s are"} online and every dispatch gate currently passes.`);
+    return box("problem", "Dispatch unknown", "Refresh this task before relying on its scheduler state.", "unknown");
   })();
 
   const contest = data.contest ?? null;

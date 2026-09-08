@@ -1,5 +1,30 @@
 # Progress
 
+**2026-09-08 — Never Stuck P0+P1: one lifecycle contract, one dispatch
+diagnosis, and the first real Windows gate.** `dispatch.ts` now owns the
+typed read-side answer to “will this task run?”: four top-level conditions
+(`running`, `retrying`, `waiting`, `terminal`) refined by stable reason codes,
+an optional next wake, and the nearest repair. The atomic claim remains the
+authority and now imports the same task-state, hold, dependency, live-mode
+approval, and capability predicates, re-proving them under its write
+transaction. Task detail, order queue, `ready`, `task show`, the path-free chat
+brief, and mate task/queue tools consume that diagnosis; the board also names a
+failed or cancelled blocker as **dependency needs repair**, never an ordinary
+wait. A dedicated regression proves the cancelled dependency is refused at the
+claim and shown identically on the task and queue. Quota status gained a
+read-only observer, so rendering cannot consume the half-open probe. The
+outbound chat document carries only stable dispatch vocabulary — never detail
+that could contain a repo path, runner name, or human hold reason. The contract
+and its non-goals are recorded in `docs/NEVER_STUCK.md`.
+
+CI keeps the full macOS/Linux Node 22/24 matrix and adds a Windows Node 22/24
+baseline: type-check, production build, Task Scheduler/link behavior, and the
+core lifecycle contract. This is deliberately an honest baseline, not a false
+full-parity claim; physical Task Scheduler plus real provider/worktree E2E is
+the next bounded portability slice. Verified locally with type-check,
+production build, the 35-test Windows-equivalent slice (12 platform skips), and
+the full suite: 102 files / 1915 passed / 12 skipped.
+
 **2026-09-08 — Run 1467's fix: a strict `--json-schema` for claude review
 turns, and a bounded diagnostic for when one still slips through.** Run
 1467 proved reviewer isolation end to end but Opus's reply came back as

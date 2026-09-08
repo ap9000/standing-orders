@@ -26,3 +26,26 @@ jobs:
       - run: npm test
         env:
           CI: "true"
+
+  windows-baseline:
+    name: windows baseline · node ${{ matrix.node }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      # The first Windows gate covers the native service/link path and the
+      # scheduler's Never Stuck contract. POSIX-only harness fixtures stay in
+      # the Unix matrix until their fake executables are cross-platform.
+      - run: npx vitest run src/daemon.test.ts src/link.test.ts src/dispatch.test.ts
+        env:
+          CI: "true"

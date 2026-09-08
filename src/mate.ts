@@ -38,6 +38,7 @@ import { scanForSecrets } from "./evidence.js";
 import { MATE_CONTRACT } from "./mate-contract.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMateTool, mateViewContextFor, redactForMate, toolResultBytes } from "./mate-tools.js";
 import { composeSubscriptionMatePrompt, performSubscriptionMateRequest, type SubscriptionMateRunner } from "./subscription-chat.js";
+import { withDispatchDiagnoses } from "./dispatch.js";
 
 export const MATE_MESSAGE_MAX_CHARS = 2_000;
 /** The thread's recent history the model sees, most recent first until the cap. */
@@ -163,7 +164,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   store.sweepStaleMateTurns(now);
 
   const view = mateViewContextFor(store, who);
-  const snapshot = store.chatSnapshot(who.repos, now);
+  const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(who.repos, now), now);
   const document = redactForMate(buildDataDocument(snapshot).document, view);
   const history: MateHistoryMessage[] = [...historyFor(store, thread.id), { role: "operator", text: message }];
   const composeDirect = (key: string): { url: string; headers: Record<string, string>; body: string } => {

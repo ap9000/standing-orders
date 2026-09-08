@@ -99,6 +99,25 @@ describe("operating the queue from the command line", () => {
       expect(await run(["ready"])).toBe(EXIT.ok);
     });
 
+    test("ready and task show expose the same typed dispatch reason", async () => {
+      await run(["task", "add", "place me first", "--id", "t-place"]);
+
+      await run(["ready", "--json"]);
+      expect(payload()).toMatchObject({ dispatchableCount: 0 });
+      expect(payload().tasks[0].dispatch).toMatchObject({
+        condition: "waiting",
+        code: "needs-project",
+        action: "place-task",
+      });
+
+      await run(["task", "show", "t-place", "--json"]);
+      expect(payload().dispatch).toMatchObject({
+        condition: "waiting",
+        code: "needs-project",
+        action: "place-task",
+      });
+    });
+
     test("says bad usage with its own code, not as a refusal", async () => {
       expect(await claim(["claim", "t-1"])).toBe(EXIT.usage);
       expect(await run(["task", "state", "t-1", "sideways"])).toBe(EXIT.usage);
