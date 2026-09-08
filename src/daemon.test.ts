@@ -31,6 +31,13 @@ function scripted(answers: Record<string, { code?: number; stdout?: string }> = 
   return { run, calls };
 }
 
+const portablePath = (path: string): string => path.replaceAll("\\", "/");
+
+/** POSIX mode bits are not an access-control assertion on Windows. */
+function expectPrivateMode(path: string): void {
+  if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
+}
+
 describe("the daemon plan", () => {
   let dir: string;
 
@@ -64,7 +71,7 @@ describe("the daemon plan", () => {
   test("the launchd unit runs watch with a token file — never the token", () => {
     const made = plan("darwin");
 
-    expect(made.unitPath).toContain("Library/LaunchAgents");
+    expect(portablePath(made.unitPath)).toContain("Library/LaunchAgents");
     expect(made.unitContent).toContain("<string>watch</string>");
     expect(made.unitContent).toContain("<key>WorkingDirectory</key>");
     expect(made.unitContent).toContain("<string>/Users/alex/code/thing</string>");
@@ -100,7 +107,7 @@ describe("the daemon plan", () => {
   test("the systemd unit says restart-on-failure and appends to its log", () => {
     const made = plan("linux");
 
-    expect(made.unitPath).toContain(".config/systemd/user");
+    expect(portablePath(made.unitPath)).toContain(".config/systemd/user");
     expect(made.unitContent).toContain("Restart=on-failure");
     expect(made.unitContent).toContain("WorkingDirectory=/Users/alex/code/thing");
     expect(made.unitContent).toContain("--token-file");
@@ -127,7 +134,7 @@ describe("the daemon plan", () => {
     const installed = await installDaemon(made, "secret-token", script.run);
 
     expect(installed).toMatchObject({ ok: true });
-    expect(statSync(made.tokenFile).mode & 0o777).toBe(0o600);
+    expectPrivateMode(made.tokenFile);
     expect(readFileSync(made.tokenFile, "utf8").trim()).toBe("secret-token");
     expect(readFileSync(made.unitPath, "utf8")).toContain("watch");
     expect(script.calls[0]?.file).toBe("launchctl");
@@ -206,7 +213,7 @@ describe("the daemon plan", () => {
     expect(removed).toMatchObject({ ok: true, existed: true });
     expect(() => statSync(made.unitPath)).toThrow();
     // The token file survives — it is the database's neighbor, not the unit's.
-    expect(statSync(made.tokenFile).mode & 0o777).toBe(0o600);
+    expectPrivateMode(made.tokenFile);
   });
 });
 

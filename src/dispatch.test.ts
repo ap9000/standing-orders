@@ -9,9 +9,10 @@ import {
 import { register } from "./runner.js";
 import { addApprover, approve } from "./scope.js";
 import { openStore, type Store } from "./store.js";
+import { resolve } from "node:path";
 
 const T0 = new Date("2026-09-08T16:00:00.000Z");
-const REPO = "/repo/never-stuck";
+const REPO = resolve("never-stuck-test-repo");
 const TOKEN = "runner-token";
 let approverToken = "";
 
