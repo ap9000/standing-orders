@@ -682,6 +682,33 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain('measure every "how" string\'s UTF-8 byte length');
   });
 
+  test("the brief tells the agent to default to exactly the signed criteria and states the hard 4-entry cap on a criterion's evidence array", async () => {
+    // Run 1462 came back short only because an extra (unsigned) criterion
+    // carried 5 evidence entries, over PROOF_LIMITS.evidencePerCriterion (4)
+    // — the whole proof was refused and the signed criteria, which were
+    // otherwise fine, were never checked. The brief must say plainly that an
+    // extra criterion is optional and risky, and state the evidence-array
+    // cap explicitly, the same way it already does for "how" and caveats.
+    propose(store, {
+      taskId: "t-1",
+      goal: "add a guard on the payout path",
+      outOfScope: "do not touch the billing model",
+      touches: ["src/payouts.ts"],
+      acceptance: [{ id: "c1", statement: "the guard rejects a negative payout", how: null, evidence: ["check"] }],
+      now: T0,
+    });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    await build1();
+
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("Default to exactly the signed criteria above and nothing more");
+    expect(prompt).toContain("it cannot turn a signed criterion's");
+    expect(prompt).toContain("failure into a pass.");
+    expect(prompt).toContain("evidence array — signed or extra — has a hard cap of");
+    expect(prompt).toContain("a 5th entry refuses the ENTIRE proof");
+    expect(prompt).toContain("Every evidence ref must exactly match its source");
+  });
+
   test("the brief states the hard 300-byte cap on a caveat, a 180-byte target, and tells the agent to measure before finalizing", async () => {
     // Run 1460 came back short only because two caveats ran over
     // PROOF_LIMITS.caveat (300 bytes) — the whole proof was refused. The

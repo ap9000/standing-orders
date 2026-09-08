@@ -1,5 +1,22 @@
 # Progress
 
+**2026-09-08 — Run 1462's fix: the brief tells the builder to default to
+exactly the signed criteria and states the evidence-array cap.** Run 1462's
+code was fine, but its proof was refused wholesale: an extra (unsigned)
+criterion carried 5 evidence entries against `PROOF_LIMITS.evidencePerCriterion`
+(4), and because a proof is accepted or refused as one payload, the 8
+signed criteria — all otherwise answerable — were never checked. The brief
+in `src/builder.ts` (`brief()`) never named that cap at all, unlike the
+"how" and caveat byte caps it already spells out. It now tells the agent to
+default to exactly the signed criteria and add an extra one only when
+genuinely worth recording, since an extra is judged by the same rules and
+cannot rescue a signed criterion's failure; states the 4-entry evidence cap
+explicitly, next to the existing "how"/caveat cap language; and says every
+evidence ref must exactly match its source (a check command from `checks`,
+a path from `changed`, or a path from `screenshots`). New regression in
+`src/builder.test.ts` signs a one-criterion rubric and asserts the brief
+carries all of this. Suite 100 files / 1901 tests.
+
 **2026-09-08 — Run 1461's fix: a resumed builder attempt seals the
 cumulative terminal diff, pinned to its branch's first base.** A branch
 is reused across attempts — a strike retry, a warm-cold resume, an
