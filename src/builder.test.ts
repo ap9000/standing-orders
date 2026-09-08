@@ -460,6 +460,55 @@ describe("the builder's gates", () => {
     }
   });
 
+  test("a retry's brief names the pinned first base, so its own \"changed\" claim can be cumulative (run 1465)", async () => {
+    // Run 1465's proof read short: the sealed diff-stat is already pinned to
+    // the branch's first builder base (run 1461, above), but nothing ever
+    // TOLD the agent that — so its self-reported proof.changed[] listed only
+    // its own attempt's paths and undercounted the sealed diff adjudicate()
+    // checks it against. The fix is in the brief the agent reads, not the
+    // diff capture, which was already correct.
+    let currentHead = "orig-sha";
+    const commitHeads = ["mid-sha", "final-sha"];
+    let commitIndex = 0;
+    const statefulGit: Runner = async (_file, args) => {
+      if (args.includes("symbolic-ref")) {
+        return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+      }
+      if (args[0] === "commit") {
+        currentHead = commitHeads[commitIndex++] as string;
+        return { ...OK };
+      }
+      if (args.includes("rev-parse")) {
+        return args.includes("--abbrev-ref") ? { ...OK, stdout: "feat/a\n" } : { ...OK, stdout: `${currentHead}\n` };
+      }
+      if (args.includes("status")) return { ...OK, stdout: " M src/index.ts\n" };
+      if (args.includes("diff")) return { ...OK, stdout: "diff --git a/src/index.ts b/src/index.ts\n+guard\n" };
+      return { ...OK };
+    };
+
+    claimIt();
+    approveScope();
+
+    const first = request({ git: statefulGit });
+    await build(store, first);
+    expect(agentCalls).toHaveLength(1);
+    const firstPrompt = agentCalls[0]?.[agentCalls[0]!.indexOf("-p") + 1] ?? "";
+    // A first attempt has no earlier committed row: nothing cumulative to
+    // name, so the ordinary instructions stand unchanged.
+    expect(firstPrompt).not.toContain("already carries earlier attempts");
+
+    const second = request({ git: statefulGit });
+    await build(store, second);
+    expect(agentCalls).toHaveLength(2);
+    const secondPrompt = agentCalls[1]?.[agentCalls[1]!.indexOf("-p") + 1] ?? "";
+    expect(secondPrompt).toContain("already carries earlier attempts");
+    // Names the SAME pinned base the diff-stat capture used above — not
+    // this attempt's own base_revision ("mid-sha").
+    expect(secondPrompt).toContain("orig-sha");
+    expect(secondPrompt).not.toContain("mid-sha");
+    expect(secondPrompt).toContain("git diff --name-only orig-sha");
+  });
+
   test("the phase vocabulary is closed, and a finished run's phase is history", () => {
     const runId = store.startRun({
       taskRef, leaseId: "lease-p", runner: "builder-1", branch: "b", worktree: wt, now: T0,

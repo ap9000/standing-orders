@@ -999,7 +999,17 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // Every streaming transport emits events now (peek); a file that cannot
   // open is a null, and a null never costs a build.
   const liveLog = openLiveLog(root, request.runId);
-  const briefText = brief(scope as Scope, branch, mailbox, done, proof, answers, planDocument, revisionBrief, previousHandoff, steering);
+  // The retry base (steering fix for run 1465's proof): the SAME pinned
+  // base the machine will use to capture the sealed diff (settleProof
+  // below, mirroring store.firstBuilderBase's own doc). Null on a first
+  // attempt — there is nothing earlier to be cumulative WITH, so the
+  // ordinary instructions already suffice. Non-null only when the branch
+  // already carries a prior builder attempt's commits, which is exactly
+  // when a proof's self-reported "changed" must widen past this attempt
+  // alone or it undercounts the sealed diff and reads short.
+  const pinnedBase = store.firstBuilderBase(taskRef, branch);
+  const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
+  const briefText = brief(scope as Scope, branch, mailbox, done, proof, answers, planDocument, revisionBrief, previousHandoff, steering, retryBase);
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
   // coordinator at the spawn point. Everything build() armed that its
@@ -1951,6 +1961,7 @@ function brief(
   revisionBrief: string | null = null,
   previousHandoff: string | null = null,
   steering: readonly SteerNote[] = [],
+  retryBase: string | null = null,
 ): string {
   return [
     "You are building one task, unattended, in an isolated git worktree.",
@@ -2159,6 +2170,20 @@ function brief(
     "  approved verification command, if one is configured, is re-run by the",
     "  machine itself — never by you. Write it to a temporary name first,",
     "  then rename it into place.",
+    ...(retryBase === null
+      ? []
+      : [
+          `- This branch already carries earlier attempts' committed work,`,
+          `  starting from revision ${retryBase}. The machine's sealed diff for`,
+          "  this proof spans the WHOLE branch from that revision to your",
+          '  final worktree, not just what you touch now — so "changed" must',
+          "  equal every repo-relative path that differs from that revision,",
+          "  including paths only an earlier attempt touched. Before you",
+          `  finalize the proof, run \`git diff --name-only ${retryBase}\` (one`,
+          "  ref, so it also covers your own uncommitted edits) and use",
+          `  exactly that list, capped at ${PROOF_LIMITS.changed} paths — never just the files`,
+          "  you personally edited this attempt.",
+        ]),
     ...(answers.length === 0
       ? []
       : [
