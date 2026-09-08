@@ -6486,9 +6486,12 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
   test("a cancelled dependency is shown as repair on both the task and queue", async () => {
     seed("t-blocker", "obsolete prerequisite");
     seed("t-dependent", "must not wait forever");
+    seed("t-replacement", "replacement prerequisite");
     expect(store.addEdge("t-dependent", "t-blocker")).toEqual({ ok: true });
     expect(store.cancelTask("t-blocker", T0, "replaced")).toMatchObject({ ok: true });
-    await boot();
+    // All-project session: replacement candidates still come from the
+    // dependent task's own project, not the sidebar's current selection.
+    await boot({ repo: undefined, repos: ["/repo/main"] });
     const cookie = await login();
 
     const task = await (await fetch(url("/t/t-dependent"), { headers: { cookie } })).text();
@@ -6496,12 +6499,62 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(task).toContain("Dependency needs repair");
     expect(task).toContain("t-blocker is cancelled");
     expect(task).toContain("Open the blocker");
+    expect(task).toContain('aria-label="dependency repair actions"');
+    expect(task).toContain('name="operation" value="replace"');
+    expect(task).toContain('name="operation" value="unlink"');
+    expect(task).not.toContain('name="operation" value="retry"');
 
     const queue = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(queue).toContain('data-task="t-dependent"');
     expect(queue).toContain('data-dispatch-status="terminal-dependency"');
     expect(queue).toContain("dependency needs repair");
 
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(task)?.[1];
+    if (csrf === undefined) throw new Error("no csrf on task");
+    const replaced = await fetch(url("/t/t-dependent/repair-dependency"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, blocker: "t-blocker", operation: "replace", replacement: "t-replacement" }),
+      redirect: "manual",
+    });
+    expect(replaced.status).toBe(303);
+    expect(store.blockers("t-dependent")).toEqual(["t-replacement"]);
+
+    expect(store.cancelTask("t-replacement", T0, "also obsolete")).toMatchObject({ ok: true });
+    const afterReplace = await (await fetch(url("/t/t-dependent"), { headers: { cookie } })).text();
+    const csrfAgain = /name="csrf" value="([0-9a-f]{64})"/.exec(afterReplace)?.[1];
+    if (csrfAgain === undefined) throw new Error("no csrf after replacement");
+    const unlinked = await fetch(url("/t/t-dependent/repair-dependency"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf: csrfAgain, blocker: "t-replacement", operation: "unlink" }),
+      redirect: "manual",
+    });
+    expect(unlinked.status).toBe(303);
+    expect(store.blockers("t-dependent")).toEqual([]);
+  });
+
+  test("a failed dependency can be retried in place without dropping the edge", async () => {
+    seed("t-failed-blocker", "repair this first");
+    seed("t-after", "still needs the prerequisite");
+    store.addEdge("t-after", "t-failed-blocker");
+    store.setTaskState("t-failed-blocker", "failed", T0);
+    await boot();
+    const cookie = await login();
+    const task = await (await fetch(url("/t/t-after"), { headers: { cookie } })).text();
+    expect(task).toContain('name="operation" value="retry"');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(task)?.[1];
+    if (csrf === undefined) throw new Error("no csrf on task");
+
+    const retried = await fetch(url("/t/t-after/repair-dependency"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, blocker: "t-failed-blocker", operation: "retry" }),
+      redirect: "manual",
+    });
+    expect(retried.status).toBe(303);
+    expect(store.getTask("t-failed-blocker")?.state).toBe("queued");
+    expect(store.blockers("t-after")).toEqual(["t-failed-blocker"]);
   });
 
   test("a completed task speaks the machine's own verdict (Priority 2) — never inferred at render", async () => {
@@ -7466,6 +7519,36 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const session = store.activeMateSession("alex");
     expect(session?.spentMicrousd).toBe(4 * (100 * 3 + 20 * 15));
     expect(html).toContain("this conversation: $0.00 of $50.00");
+  });
+
+  test("unified chat renders and confirms a rich dependency repair card", async () => {
+    expect(store.addEdge("b", "a")).toEqual({ ok: true });
+    expect(store.cancelTask("a", T0, "obsolete")).toMatchObject({ ok: true });
+    const cookie = await login();
+    const csrf = await mint(cookie);
+    script.push(
+      () => answer([
+        { type: "tool_use", id: "c1", name: "get_task", input: { task: "b" } },
+        { type: "tool_use", id: "c2", name: "propose_dependency_repair", input: { task: "b", blocker: "a", operation: "unlink" } },
+      ]),
+      () => answer([{ type: "text", text: "I prepared the safe repair for confirmation." }]),
+    );
+    await post(cookie, "/chat", { csrf, message: "repair b's cancelled dependency" });
+    await settle();
+
+    let html = await page(cookie);
+    expect(html).toContain('data-card-kind="repair"');
+    expect(html).toContain("Dependency repair");
+    expect(html).toContain("may become runnable immediately without");
+    expect(html).toContain(">stop waiting</button>");
+    expect(store.blockers("b")).toEqual(["a"]);
+
+    const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf });
+    expect(confirmed.status).toBe(303);
+    expect(store.getMateProposal(1)).toMatchObject({ state: "confirmed", outcome: { taskId: "b" } });
+    expect(store.blockers("b")).toEqual([]);
+    html = await page(cookie);
+    expect(html).toContain("b stopped waiting on a and is being reconsidered now");
   });
 
   test("a cancel card only points at the task; dismiss retires a card; ending the session forgets the thread", async () => {

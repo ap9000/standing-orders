@@ -2896,16 +2896,19 @@ export function createDecisionServer(options: ServeOptions): Server {
           const blocker = admitted ? store.getTask(blockerId) : null;
           return { id: blockerId, state: blocker === null ? null : blocker.state, admitted };
         }),
-        // Candidates a "wait for" select may offer: the OPEN project's own
-        // open work, never itself. A projectless roll-up session gets no
-        // select at all — the roll-up never lists across projects.
-        waitCandidates:
-          who.via !== "cookie" || (who.session.project === null && !unscopedMode)
+        // Candidates a "wait for" or replacement select may offer: this
+        // TASK's own project, even when the sidebar is in all-project mode.
+        // That keeps repair complete without ever mixing unrelated projects.
+        waitCandidates: (() => {
+          if (who.via !== "cookie") return [];
+          const candidateRepo = ref?.repo ?? who.session.project;
+          return candidateRepo === null
             ? []
             : store
-                .listTasksScoped(who.session.project, undefined, 100, null)
-                .filter(one => one.id !== taskId && one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
-                .map(one => ({ id: one.id, title: one.title })),
+                .listTasksScoped(candidateRepo, undefined, 100, null)
+                .filter(one => one.id !== taskId && (one.state === "queued" || one.state === "running") && visible(one.repo))
+                .map(one => ({ id: one.id, title: one.title }));
+        })(),
         // The one liveness fact, computed here where the store is: the run
         // whose lease is the task's CURRENT claim — not merely the first
         // unfinished run (round-4 finding, A1).
@@ -4260,7 +4263,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|next|reopen|steer|follow-up|accept-proof)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -5541,6 +5544,48 @@ export function createDecisionServer(options: ServeOptions): Server {
           return taskScreen(response, who, taskId, `${taskId} was not waiting on ${on}`, 409);
         }
         return redirect(response, taskHref(taskId));
+      }
+      case "repair-dependency": {
+        const blocker = (body.get("blocker") ?? "").trim();
+        const operation = (body.get("operation") ?? "").trim();
+        const blockerTask = blocker === "" || !store.blockers(taskId).includes(blocker) ? null : store.getTask(blocker);
+        if (blockerTask === null || (blockerTask.state !== "failed" && blockerTask.state !== "cancelled")) {
+          return taskScreen(response, who, taskId, "that dependency changed — review the current chain and try again", 409);
+        }
+        if (store.openContestFor(ref.id) !== null) {
+          return taskScreen(response, who, taskId, "a tournament is running on this task — let it finish before changing its dependencies", 409);
+        }
+        if (operation === "retry") {
+          const blockerRef = store.lookupRef(blocker);
+          if (blockerTask.state !== "failed" || blockerRef === null || !visible(blockerRef.repo)) {
+            return taskScreen(response, who, taskId, "that blocker cannot be retried here — replace it or stop waiting", 409);
+          }
+          const retried = store.requeueTask(blocker, who.name, now);
+          if (!retried.ok) return taskScreen(response, who, taskId, `the blocker was not retried — ${retried.reason}`, 409);
+          return redirect(response, taskHref(taskId));
+        }
+        if (operation === "unlink") {
+          const removed = store.removeEdge(taskId, blocker);
+          if (!removed.ok) return taskScreen(response, who, taskId, "that dependency changed — review the current chain and try again", 409);
+          return redirect(response, taskHref(taskId));
+        }
+        if (operation === "replace") {
+          const replacement = (body.get("replacement") ?? "").trim();
+          const replacementTask = replacement === "" ? null : store.getTask(replacement);
+          const replacementRef = replacement === "" ? null : store.lookupRef(replacement);
+          if (
+            replacementTask === null ||
+            replacementRef === null ||
+            !visible(replacementRef.repo) ||
+            (replacementTask.state !== "queued" && replacementTask.state !== "running")
+          ) {
+            return taskScreen(response, who, taskId, "choose unfinished replacement work from a project you can manage", 409);
+          }
+          const replaced = store.replaceEdge(taskId, blocker, replacement);
+          if (!replaced.ok) return taskScreen(response, who, taskId, `the dependency was not replaced — ${replaced.reason}`, 409);
+          return redirect(response, taskHref(taskId));
+        }
+        return taskScreen(response, who, taskId, "choose retry, replace, or stop waiting", 400);
       }
       case "next": {
         if (body.get("undo") !== null) {
@@ -7132,6 +7177,16 @@ const STYLE = `
   .acts-bar .primary button:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); }
   .acts-bar .act-hold input[type=text] { width: 10rem; min-height: 2.25rem; margin: 0; font-size: .8125rem; }
   .acts-why { margin: 0 0 .5rem; }
+  .dispatch-status { padding: .8rem .9rem; border-radius: var(--radius); }
+  .dispatch-status[data-dispatch-status="terminal-dependency"] {
+    color: var(--foreground); border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+    background: color-mix(in srgb, var(--warning-soft) 72%, var(--glass));
+  }
+  .dispatch-status[data-dispatch-status="terminal-dependency"] > strong { color: var(--warning); }
+  .dependency-repair-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin-top: .7rem; }
+  .dependency-repair-actions form { display: inline-flex; align-items: center; gap: .4rem; margin: 0; }
+  .dependency-repair-actions select { width: auto; max-width: 16rem; min-height: 2rem; margin: 0; font-size: .75rem; }
+  .dependency-repair-actions button { min-height: 2rem; padding: .3rem .65rem; font-size: .75rem; }
   .approve-form { margin: .75rem 0; }
   .approve-form .ceremony-head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; margin: 0 0 .5rem; }
   .approve-form .ceremony-head a { font-size: .8125rem; color: var(--muted-foreground); white-space: nowrap; }
@@ -7195,6 +7250,11 @@ const STYLE = `
     .acts-bar .primary button { width: 100%; }
     .acts-bar .act-hold { flex-wrap: wrap; }
     .acts-bar .act-hold input[type=text] { flex: 1 1 8rem; width: auto; }
+    .dependency-repair-actions { align-items: stretch; }
+    .dependency-repair-actions form { flex: 1 1 10rem; }
+    .dependency-repair-actions form:has(select) { flex-basis: 100%; }
+    .dependency-repair-actions select { flex: 1 1 auto; min-width: 0; max-width: none; }
+    .dependency-repair-actions button { white-space: nowrap; }
     .split { grid-template-columns: 1fr; }
     .list-pane { display: none; }
     .workbench-mobile-rail, .workbench-mobile-back { display: block; }
@@ -7585,6 +7645,7 @@ const STYLE = `
   .proposal-icon svg { width: 1rem; height: 1rem; }
   .proposal-cancel .proposal-icon { color: var(--destructive); background: var(--destructive-soft); }
   .proposal-answer .proposal-icon { color: var(--warning); background: var(--warning-soft); }
+  .proposal-repair .proposal-icon { color: var(--warning); background: var(--warning-soft); }
   .proposal-body { padding: .85rem; }
   .proposal-body h3 { margin: 0; color: var(--foreground); font-size: .9rem; letter-spacing: -.015em; }
   .proposal-summary { margin: .45rem 0 0; color: var(--foreground); white-space: pre-wrap; }
@@ -9785,6 +9846,11 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     scope: { label: "Scope revision", action: "save scope", icon: `<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>` },
     answer: { label: "Decision answer", action: "confirm answer", icon: `<path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>` },
     cancel: { label: "Cancel task", action: "open task", icon: `<path d="m15 9-6 6"/><path d="m9 9 6 6"/><circle cx="12" cy="12" r="9"/>` },
+    repair: {
+      label: "Dependency repair",
+      action: text("operation") === "retry" ? "retry blocker" : text("operation") === "replace" ? "replace blocker" : "stop waiting",
+      icon: `<path d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/>`,
+    },
   };
   const presentation = presentations[view.kind];
   const facts = (...rows: [string, string][]): string => {
@@ -9813,6 +9879,30 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     what =
       `<h3>Rewrite <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("goal"))}</p>` +
       facts(["out of scope", escape(text("not"))], ["may touch", Array.isArray(payload["touches"]) ? escape((payload["touches"] as string[]).join(", ")) : ""], ["project", `<span class="mono">${escape(repoId)}</span>`]);
+  } else if (view.kind === "repair") {
+    const blocker = text("blocker");
+    const operation = text("operation");
+    const replacement = text("replacement");
+    const heading =
+      operation === "retry"
+        ? `Retry <a href="${taskHref(blocker)}">${escape(blocker)}</a>`
+        : operation === "replace"
+          ? `Replace the blocker on <a href="${taskHref(task)}">${escape(task)}</a>`
+          : `Let <a href="${taskHref(task)}">${escape(task)}</a> stop waiting`;
+    const consequence =
+      operation === "retry"
+        ? `${escape(task)} keeps waiting while ${escape(blocker)} gets another attempt.`
+        : operation === "replace"
+          ? `${escape(task)} will wait on ${escape(replacement)} instead; the old edge is removed atomically.`
+          : `${escape(task)} may become runnable immediately without ${escape(blocker)}.`;
+    what =
+      `<h3>${heading}</h3><p class="proposal-summary">${consequence}</p>` +
+      facts(
+        ["blocked task", `<a href="${taskHref(task)}">${escape(task)}</a>`],
+        ["current blocker", `<a href="${taskHref(blocker)}">${escape(blocker)}</a> · ${escape(text("sawBlockerState"))}`],
+        ["replacement", replacement === "" ? "" : `<a href="${taskHref(replacement)}">${escape(replacement)}</a>`],
+        ["project", `<span class="mono">${escape(repoId)}</span>`],
+      );
   } else if (view.kind === "answer") {
     const decisionId = typeof payload["decision"] === "number" ? payload["decision"] : 0;
     const pick = text("option");
@@ -12010,9 +12100,9 @@ function taskBody(data: {
   // gives the nearest concrete repair rather than making the operator infer
   // it from the rest of the page.
   const dispatchStatus = (() => {
-    const box = (kind: "ok" | "problem", title: string, detail: string, status?: string): string =>
+    const box = (kind: "ok" | "problem", title: string, detail: string, status?: string, controls = ""): string =>
       `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
-      `<strong>${escape(title)}</strong> <span class="meta">${detail}</span></div>`;
+      `<strong>${escape(title)}</strong> <span class="meta">${detail}</span>${controls}</div>`;
 
     if (task.state !== "done") {
       const diagnosis = data.dispatch ?? null;
@@ -12035,14 +12125,34 @@ function taskBody(data: {
           case "repair-capability": return ` <a href="/caps">Repair the requirement</a>.`;
           case "repair-dependency":
             return blocker?.admitted === true
-              ? ` <a href="${taskHref(blocker.id)}">Open the blocker</a> to retry, replace, or unlink it.`
-              : ` Retry, replace, or unlink the blocker.`;
+              ? ` <a href="${taskHref(blocker.id)}">Open the blocker</a> for its full history.`
+              : "";
           default: return "";
         }
       })();
+      const repairControls = (() => {
+        if (diagnosis.action !== "repair-dependency" || blocker == null || data.csrf === "") return "";
+        const endpoint = `${taskHref(task.id)}/repair-dependency`;
+        const common =
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+          `<input type="hidden" name="blocker" value="${escape(blocker.id)}">`;
+        const retry = blocker.admitted && blocker.state === "failed"
+          ? `<form method="post" action="${endpoint}">${common}<input type="hidden" name="operation" value="retry"><button type="submit">Retry blocker</button></form>`
+          : "";
+        const unlink =
+          `<form method="post" action="${endpoint}">${common}<input type="hidden" name="operation" value="unlink"><button type="submit" class="quiet">Stop waiting</button></form>`;
+        const standing = new Set((data.waitsFor ?? []).map(one => one.id));
+        const replacements = (data.waitCandidates ?? []).filter(one => !standing.has(one.id));
+        const replace = replacements.length === 0
+          ? ""
+          : `<form method="post" action="${endpoint}">${common}<input type="hidden" name="operation" value="replace">` +
+            `<select name="replacement" aria-label="replacement dependency">${replacements.map(one => `<option value="${escape(one.id)}">${escape(one.title)}</option>`).join("")}</select>` +
+            `<button type="submit" class="quiet">Replace blocker</button></form>`;
+        return `<div class="dependency-repair-actions" aria-label="dependency repair actions">${retry}${replace}${unlink}</div>`;
+      })();
       const positive = diagnosis.code === "running" || diagnosis.code === "ready" || diagnosis.code === "planning-ready" || diagnosis.code === "scouting-ready";
       const status = diagnosis.code === "ready" ? "ready-to-run" : diagnosis.code;
-      return box(positive ? "ok" : "problem", diagnosis.summary, `${escape(diagnosis.detail)}${action}`, status);
+      return box(positive ? "ok" : "problem", diagnosis.summary, `${escape(diagnosis.detail)}${action}`, status, repairControls);
     }
 
     if (task.state === "done") {

@@ -1,5 +1,19 @@
 # Progress
 
+**2026-09-08 — Never Stuck dependency repair is an action, not advice.** A
+failed or cancelled prerequisite now renders an inline repair surface on the
+dependent task: retry a failed blocker without dropping the edge, atomically
+replace the edge with unfinished work, or explicitly stop waiting. Each act
+re-proves the live edge and terminal state; replacement refuses cycles without
+removing the old dependency, and every successful repair bumps the durable wake
+sequence so an installed worker reconsiders the queue immediately. Unified chat
+can draft the same three-way repair as a rich card, showing the exact blocker,
+graph change, and consequence before the operator confirms it through the
+existing authenticated proposal door. The model itself never silently removes
+a prerequisite. Schema v42 adds the durable `repair` proposal kind with an
+exact, row-preserving migration. Final verification: 103 files / 1,922 tests
+passed, 12 skipped; typecheck and production build passed.
+
 **2026-09-08 — Never Stuck P0+P1: one lifecycle contract, one dispatch
 diagnosis, and the first real Windows gate.** `dispatch.ts` now owns the
 typed read-side answer to “will this task run?”: four top-level conditions

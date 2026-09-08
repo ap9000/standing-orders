@@ -818,10 +818,11 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     throw new Error(`seed reviewed+repaired: expected a draft, got ${repairTrigger.kind}`);
   }
 
-  // --- waiting: a dependency and a hold ----------------------------------
+  // --- waiting: a repairable terminal dependency and a hold ---------------
   task("design-tokens", "Extract the design tokens package", repos.web);
   task("ship-dark-mode", "Ship dark mode", repos.web);
   store.addEdge("ship-dark-mode", "design-tokens", {});
+  store.cancelTask("design-tokens", hoursAgo(10), "the token package was superseded");
   const held = task("migrate-billing", "Migrate billing exports to the new vendor", repos.api);
   store.hold(store.refFor("built-in", held).id, "waiting on the vendor sandbox account", null, hoursAgo(12));
 

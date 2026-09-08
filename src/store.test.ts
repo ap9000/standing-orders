@@ -205,6 +205,24 @@ describe("the built-in task store", () => {
       expect(store.addEdge("b", "a")).toEqual({ ok: true });
       expect(ready(store)).toEqual(["a"]);
     });
+
+    test("replaces an edge atomically, wakes dispatch, and keeps the old edge on refusal", () => {
+      for (const id of ["a", "b", "c"]) store.createTask({ id, title: id }, T0);
+      store.addEdge("c", "a");
+      expect(store.replaceEdge("c", "a", "ghost")).toEqual({ ok: false, reason: "unknown-replacement" });
+      expect(store.blockers("c")).toEqual(["a"]);
+
+      store.addEdge("b", "c");
+      const cycle = store.replaceEdge("c", "a", "b");
+      expect(cycle).toMatchObject({ ok: false });
+      expect(store.blockers("c")).toEqual(["a"]);
+
+      store.removeEdge("b", "c");
+      const beforeReplace = store.wakeSeq();
+      expect(store.replaceEdge("c", "a", "b")).toEqual({ ok: true });
+      expect(store.blockers("c")).toEqual(["b"]);
+      expect(store.wakeSeq()).toBeGreaterThan(beforeReplace);
+    });
   });
 
   describe("the overlay", () => {

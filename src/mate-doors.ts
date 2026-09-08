@@ -292,6 +292,58 @@ function executeProposal(
     return { ok: true, kind, said: `${taskId} released from its hold`, taskId };
   }
 
+  if (kind === "repair") {
+    const blocker = payloadString(payload, "blocker");
+    const operation = payloadString(payload, "operation");
+    const sawBlockerState = payloadString(payload, "sawBlockerState");
+    if (blocker === null || !store.blockers(taskId).includes(blocker)) {
+      return refuse("stale", "this task no longer waits on that blocker — look again");
+    }
+    const blockerTask = store.getTask(blocker);
+    if (
+      blockerTask === null ||
+      blockerTask.state !== sawBlockerState ||
+      (blockerTask.state !== "failed" && blockerTask.state !== "cancelled")
+    ) {
+      return refuse("stale", "the blocker changed since this was proposed — look again");
+    }
+    if (store.openContestFor(ref.id) !== null) {
+      return refuse("contest-open", "a tournament is running on the dependent task — let it finish first");
+    }
+    if (operation === "retry") {
+      const blockerRef = store.lookupRef(blocker);
+      if (blockerTask.state !== "failed" || blockerRef === null || !admitted(blockerRef.repo)) {
+        return refuse("stale", "that failed blocker cannot be retried from this conversation");
+      }
+      const retried = store.requeueTask(blocker, actor.name, now);
+      if (!retried.ok) return refuseFromReason(kind, retried.reason);
+      return { ok: true, kind, said: `${blocker} queued again; ${taskId} will follow when it completes`, taskId };
+    }
+    if (operation === "unlink") {
+      const removed = store.removeEdge(taskId, blocker);
+      if (!removed.ok) return refuse("stale", "this task no longer waits on that blocker — look again");
+      return { ok: true, kind, said: `${taskId} stopped waiting on ${blocker} and is being reconsidered now`, taskId };
+    }
+    if (operation === "replace") {
+      const replacement = payloadString(payload, "replacement");
+      const replacementRef = replacement === null ? null : store.lookupRef(replacement);
+      const replacementTask = replacement === null ? null : store.getTask(replacement);
+      if (
+        replacement === null ||
+        replacementRef === null ||
+        !admitted(replacementRef.repo) ||
+        replacementTask === null ||
+        (replacementTask.state !== "queued" && replacementTask.state !== "running")
+      ) {
+        return refuse("stale", "the replacement is no longer unfinished work in your projects — look again");
+      }
+      const replaced = store.replaceEdge(taskId, blocker, replacement);
+      if (!replaced.ok) return refuse("stale", `the dependency could not be replaced — ${replaced.reason}`);
+      return { ok: true, kind, said: `${taskId} now waits on ${replacement} instead of ${blocker}`, taskId };
+    }
+    return refuse("refused", "this dependency repair has no valid operation");
+  }
+
   if (kind === "scope") {
     const goal = payloadString(payload, "goal");
     if (goal === null) return refuse("refused", "this proposal carries no goal");

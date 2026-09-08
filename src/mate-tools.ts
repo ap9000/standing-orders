@@ -356,7 +356,7 @@ export const MATE_TOOLS: MateTool[] = [
   {
     name: "get_task",
     description:
-      "One task: its state, deliverable (branch or report), scope standing (none / not approved / rewritten since approval / approved), queue place, holds, attempts, its own open decisions, and — for a finished scout — the report's title, summary, and follow-ups. Never its scope text or paths.",
+      "One task: its state, dispatch diagnosis, dependencies, deliverable (branch or report), scope standing (none / not approved / rewritten since approval / approved), queue place, holds, attempts, its own open decisions, and — for a finished scout — the report's title, summary, and follow-ups. Never its scope text or paths. Read this before proposing a dependency repair.",
     inputSchema: schema({ task: TASK_ARG }, ["task"]),
     handle: (ctx, args) => {
       const taskId = taskIdOf(args);
@@ -376,6 +376,11 @@ export const MATE_TOOLS: MateTool[] = [
           title: task.title,
           state: task.state,
           dispatch: diagnoseTaskDispatch(ctx.store, taskId, ctx.now),
+          dependencies: ctx.store.blockers(taskId).map(blocker => {
+            const blockerRef = admittedRef(ctx, blocker);
+            const state = blockerRef === null ? null : ctx.store.getTask(blocker)?.state ?? null;
+            return { task: blocker, state };
+          }),
           deliverable: ctx.store.refForId(ref.id)?.deliverable ?? "branch",
           report: reportSummaryFor(ctx.store, ctx.evidenceRoot, ref.id),
           scope: scopeStandingOf(ctx.store, taskId),
@@ -512,6 +517,63 @@ export const MATE_TOOLS: MateTool[] = [
       const id = ctx.draft("unhold", { task: taskId, repoId: ref.repoId, holdId: hold.id });
       if (id === null) return tooMany();
       return { ok: true, body: { proposal: id, kind: "unhold", task: taskId, awaiting: "the operator's confirmation" } };
+    },
+  },
+  {
+    name: "propose_dependency_repair",
+    description:
+      "Propose repairing a task stranded behind a failed or cancelled dependency. Read the dependent task with get_task first, then choose: retry (failed blocker only), unlink, or replace (replacement required). The operator sees the exact graph change and confirms it; nothing is changed by this tool.",
+    inputSchema: schema(
+      {
+        task: TASK_ARG,
+        blocker: TASK_ARG,
+        operation: { type: "string", enum: ["retry", "unlink", "replace"] },
+        replacement: TASK_ARG,
+      },
+      ["task", "blocker", "operation"],
+    ),
+    handle: (ctx, args) => {
+      const taskId = taskIdOf(args);
+      const ref = taskId === null ? null : admittedRef(ctx, taskId);
+      if (taskId === null || ref === null) return notFound();
+      const blocker = typeof args["blocker"] === "string" && TASK_ID.test(args["blocker"]) ? args["blocker"] : null;
+      if (blocker === null || !ctx.store.blockers(taskId).includes(blocker)) {
+        return { ok: false, message: "that task is not waiting on that blocker — read it again with get_task" };
+      }
+      const blockedBy = ctx.store.getTask(blocker);
+      if (blockedBy === null || (blockedBy.state !== "failed" && blockedBy.state !== "cancelled")) {
+        return { ok: false, message: "that dependency is no longer failed or cancelled — read the task again" };
+      }
+      const operation = args["operation"];
+      if (operation !== "retry" && operation !== "unlink" && operation !== "replace") {
+        return { ok: false, message: "operation is retry, unlink, or replace" };
+      }
+      if (operation === "retry") {
+        if (blockedBy.state !== "failed") return { ok: false, message: "only a failed blocker can retry; replace or unlink a cancelled blocker" };
+        if (admittedRef(ctx, blocker) === null) return { ok: false, message: "the failed blocker is outside this conversation's projects" };
+      }
+      let replacement: string | null = null;
+      if (operation === "replace") {
+        replacement = typeof args["replacement"] === "string" && TASK_ID.test(args["replacement"]) ? args["replacement"] : null;
+        const replacementRef = replacement === null ? null : admittedRef(ctx, replacement);
+        const replacementTask = replacement === null ? null : ctx.store.getTask(replacement);
+        if (replacement === null || replacementRef === null || replacementTask === null) return { ok: false, message: "replacement must be a task in this conversation's projects" };
+        if (replacement === taskId || replacement === blocker || (replacementTask.state !== "queued" && replacementTask.state !== "running")) {
+          return { ok: false, message: "replacement must be different, unfinished work that can still complete" };
+        }
+      } else if (args["replacement"] !== undefined) {
+        return { ok: false, message: "replacement is only used with the replace operation" };
+      }
+      const id = ctx.draft("repair", {
+        task: taskId,
+        repoId: ref.repoId,
+        blocker,
+        operation,
+        sawBlockerState: blockedBy.state,
+        ...(replacement === null ? {} : { replacement }),
+      });
+      if (id === null) return tooMany();
+      return { ok: true, body: { proposal: id, kind: "repair", task: taskId, blocker, operation, awaiting: "the operator's confirmation" } };
     },
   },
   {

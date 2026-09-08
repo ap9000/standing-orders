@@ -27,7 +27,10 @@ breaking automation that branches on the code.
    same SQLite write transaction that grants the fenced lease.
 3. **A terminal dependency is a repair.** A dependency on a failed or
    cancelled task cannot describe itself as ordinary waiting; it must name the
-   blocker and offer retry, replacement, or unlinking.
+   blocker and offer retry, replacement, or unlinking. Retrying preserves the
+   edge; replacement removes the old edge and adds the new one atomically;
+   unlinking is always an explicit operator act. Every successful repair bumps
+   the durable wake sequence so the worker loop reconsiders it immediately.
 4. **Automatic waits are bounded and visible.** Backoff and quota waits carry
    `nextAt` when the system knows it. Unknown reset times become operator work,
    not silent polling.
@@ -46,7 +49,8 @@ paths:
 - approved task → ready → claimed → running → terminal;
 - failed attempt → timed backoff → eligible retry;
 - question → waiting on a human → answer clears the hold;
-- cancelled/failed dependency → `terminal-dependency` → claim refused;
+- failed dependency → repair card → retry blocker → edge preserved → claim still refused until the blocker completes;
+- cancelled/failed dependency → repair card → atomic replace or explicit unlink → immediate readiness re-evaluation;
 - no registered or answering worker → one-command repair;
 - full worker or exhausted provider quota → retrying with honest capacity or
   reset detail;

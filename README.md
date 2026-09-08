@@ -46,8 +46,9 @@ boundaries, evidence requirements, model, and permissions.
 ### What is in the current build
 
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
-  decisions, and confirm rich action cards from one conversation. The chat
-  proposes; durable workflow state remains the source of truth.
+  decisions, repair failed or cancelled dependencies, and confirm rich action
+  cards from one conversation. The chat proposes; durable workflow state
+  remains the source of truth.
 - **Chat-first task handoff.** The default form is one outcome prompt. The
   repository-aware planner drafts the goal, boundaries, acceptance criteria,
   likely files, and execution approach. Expert controls remain under **Edit
@@ -440,8 +441,9 @@ terminal, or with `--json`, it prints one snapshot and exits.
 `/chat` in the console (or `standing-orders chat` in the terminal) is one
 conversation across every project you serve. The mate reads the fleet
 and **only proposes**: file a task (or a scout), move one to the front,
-reserve it for a worker, hold it, rewrite a scope, cancel, or suggest an
-answer to a parked decision. Every proposal is a card you confirm, with
+reserve it for a worker, hold it, rewrite a scope, retry/replace/unlink a
+terminal dependency, cancel, or suggest an answer to a parked decision. Every
+proposal is a card you confirm, with
 every consequence and the builder's recommendation shown beside the
 mate's pick; a scope the mate wrote never seals under an operating mode.
 It never sees a path, a digest, or an account name. Direct API use spends

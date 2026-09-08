@@ -23,7 +23,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   const session = () =>
     store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
-  const pending = (kind: "next" | "reserve" | "hold" | "answer", payload: Record<string, unknown>): number => {
+  const pending = (kind: "next" | "reserve" | "hold" | "answer" | "repair", payload: Record<string, unknown>): number => {
     const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
     const live = store.activeMateSession("alex")!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
@@ -96,6 +96,32 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     store.hold(store.refFor("built-in", "b").id, "by hand", null, clock());
     expect(confirmMateProposal(store, who, again, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "stale" });
     expect(store.activeHolds(store.refFor("built-in", "b").id, clock()).map(one => one.reason)).toEqual(["by hand"]);
+  });
+
+  test("dependency repair cards retry, atomically replace, unlink, and refuse stale graph state", () => {
+    session();
+    store.setTaskState("a", "failed", clock());
+    store.addEdge("b", "a");
+    const retry = pending("repair", { task: "b", blocker: "a", operation: "retry", sawBlockerState: "failed" });
+    expect(confirmMateProposal(store, who, retry, clock(), { via: "web" })).toMatchObject({ ok: true, said: expect.stringContaining("queued again") });
+    expect(store.getTask("a")?.state).toBe("queued");
+    expect(store.blockers("b")).toEqual(["a"]);
+
+    store.setTaskState("a", "cancelled", clock());
+    const replace = pending("repair", { task: "b", blocker: "a", operation: "replace", replacement: "c", sawBlockerState: "cancelled" });
+    expect(confirmMateProposal(store, who, replace, clock(), { via: "web" })).toMatchObject({ ok: true, said: "b now waits on c instead of a" });
+    expect(store.blockers("b")).toEqual(["c"]);
+
+    store.setTaskState("c", "cancelled", clock());
+    const unlink = pending("repair", { task: "b", blocker: "c", operation: "unlink", sawBlockerState: "cancelled" });
+    expect(confirmMateProposal(store, who, unlink, clock(), { via: "web" })).toMatchObject({ ok: true, said: expect.stringContaining("being reconsidered now") });
+    expect(store.blockers("b")).toEqual([]);
+
+    store.addEdge("b", "a");
+    const stale = pending("repair", { task: "b", blocker: "a", operation: "unlink", sawBlockerState: "cancelled" });
+    store.removeEdge("b", "a");
+    expect(confirmMateProposal(store, who, stale, clock(), { via: "web" })).toMatchObject({ ok: false, reason: "stale" });
+    expect(store.blockers("b")).toEqual([]);
   });
 
   test("an answer card answers the decision as the operator; an irreversible option needs the explicit field; an answered decision refuses", () => {

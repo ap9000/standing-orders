@@ -573,6 +573,41 @@ describe("the mate's turn", () => {
     expect(script.bodies.join("\n")).not.toContain("RECAP-CANARY");
   });
 
+  test("get_task exposes dependency state and repair proposals capture the exact graph seen", () => {
+    store.setTaskState("in-3", "failed", clock());
+    store.addEdge("in-2", "in-3");
+    let drafted: { kind: string; payload: Record<string, unknown> } | null = null;
+    const ctx = {
+      store,
+      who,
+      now: clock(),
+      draft: (kind: string, payload: Record<string, unknown>) => {
+        drafted = { kind, payload };
+        return 12;
+      },
+      step: 1,
+      readDecisions: new Map<number, number>(),
+    };
+
+    expect(executeMateTool(ctx, "get_task", { task: "in-2" })).toMatchObject({
+      ok: true,
+      body: { dependencies: [{ task: "in-3", state: "failed" }], dispatch: { code: "terminal-dependency" } },
+    });
+    expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-3", operation: "retry" })).toMatchObject({
+      ok: true,
+      body: { proposal: 12, kind: "repair", operation: "retry" },
+    });
+    expect(drafted).toEqual({
+      kind: "repair",
+      payload: { task: "in-2", repoId: "r1", blocker: "in-3", operation: "retry", sawBlockerState: "failed" },
+    });
+    expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-3", operation: "replace", replacement: "other-1" })).toMatchObject({ ok: true });
+    expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-1", operation: "unlink" })).toMatchObject({ ok: false, message: expect.stringContaining("not waiting") });
+
+    store.setTaskState("in-3", "cancelled", clock());
+    expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-3", operation: "retry" })).toMatchObject({ ok: false, message: expect.stringContaining("cancelled") });
+  });
+
   test("the tools refuse bad arguments with typed messages, count decisions per task, and place the queue by column", () => {
     const ctx = { store, who, now: clock(), draft: () => 1, step: 1, readDecisions: new Map<number, number>() };
     expect(executeMateTool(ctx, "queue", { repo: "r9" })).toMatchObject({ ok: false });
