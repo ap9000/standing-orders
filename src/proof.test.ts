@@ -134,6 +134,17 @@ describe("parseProof", () => {
       expect(problemsOf({ ...sound, changed: ["x".repeat(PROOF_LIMITS.changedPath + 1)] })).toContain("changed[0]-too-long");
       expect(problemsOf({ ...sound, caveats: ["look]0;pwned"] })).toContain("caveats[0]-controls");
     });
+    test("a caveat is capped at PROOF_LIMITS.caveat bytes UTF-8, not characters: exact cap accepted, one byte over refused", () => {
+      // "é" is one character but two UTF-8 bytes — a char-length check would
+      // wrongly pass this at half PROOF_LIMITS.caveat characters.
+      const atCap = "é".repeat(PROOF_LIMITS.caveat / 2);
+      const atCapResult = parse({ ...sound, caveats: [atCap] });
+      expect(atCapResult.ok).toBe(true);
+      if (atCapResult.ok) expect(atCapResult.proof.caveats[0]).toBe(atCap);
+
+      const overCap = atCap + "x";
+      expect(problemsOf({ ...sound, caveats: [overCap] })).toContain("caveats[0]-too-long");
+    });
   });
 
   describe("screenshots", () => {

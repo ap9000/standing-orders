@@ -615,6 +615,19 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain('measure every "how" string\'s UTF-8 byte length');
   });
 
+  test("the brief states the hard 300-byte cap on a caveat, a 180-byte target, and tells the agent to measure before finalizing", async () => {
+    // Run 1460 came back short only because two caveats ran over
+    // PROOF_LIMITS.caveat (300 bytes) — the whole proof was refused. The
+    // brief must make the cap, a safe target, and the act of measuring
+    // explicit, the same way it already does for a criterion's "how".
+    await build1();
+
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("Each caveat has a hard cap of 300 bytes UTF-8");
+    expect(prompt).toContain("Target 180 bytes or fewer");
+    expect(prompt).toContain("measure every caveat string's UTF-8 byte length");
+  });
+
   test("steering notes land fenced in the brief, and delivery settles only on the stream's receipt (arc 1)", async () => {
     store.fileSteerNote("t-1", "alex", "start with the retry path, the guard can wait", T0);
     // This agent's stream fires the receipt — the prompt provably arrived.
