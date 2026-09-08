@@ -4,6 +4,7 @@ import { mintCoordinator, fileCoordinatorProposal, revokeCoordinator } from "./c
 import { serveMcp, MODERN, LEGACY, type McpIo } from "./mcp.js";
 import { register } from "./runner.js";
 import { acquire } from "./claim.js";
+import { PACKAGE_VERSION } from "./version.js";
 
 const T0 = new Date("2026-08-30T12:00:00.000Z");
 const REPO = "/repo/mcp-server";
@@ -523,7 +524,7 @@ describe("the MCP stdio server", () => {
         result: {
           protocolVersion: LEGACY,
           capabilities: { tools: {} },
-          serverInfo: { name: "standing-orders", version: "0.4.2" },
+          serverInfo: { name: "standing-orders", version: PACKAGE_VERSION },
         },
       }),
     );
@@ -550,7 +551,7 @@ describe("the MCP stdio server", () => {
           protocolVersion: MODERN,
           supportedVersions: [MODERN, LEGACY],
           capabilities: { tools: {} },
-          _meta: { "io.modelcontextprotocol/serverInfo": { name: "standing-orders", version: "0.4.2" } },
+          _meta: { "io.modelcontextprotocol/serverInfo": { name: "standing-orders", version: PACKAGE_VERSION } },
           tools,
           resultType: "complete",
           ttlMs: 0,
