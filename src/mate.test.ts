@@ -599,10 +599,18 @@ describe("the mate's turn", () => {
     });
     expect(drafted).toEqual({
       kind: "repair",
-      payload: { task: "in-2", repoId: "r1", blocker: "in-3", operation: "retry", sawBlockerState: "failed" },
+      payload: {
+        task: "in-2",
+        taskTitle: "rotate the webhook secret",
+        repoId: "r1",
+        blocker: "in-3",
+        blockerTitle: `see ${INSIDE}/notes by alex, digest ${"d".repeat(64)}`,
+        operation: "retry",
+        sawBlockerState: "failed",
+      },
     });
     expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-3", operation: "replace", replacement: "other-1" })).toMatchObject({ ok: true });
-    expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-1", operation: "unlink" })).toMatchObject({ ok: false, message: expect.stringContaining("not waiting") });
+    expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-1", operation: "unlink" })).toMatchObject({ ok: false, message: expect.stringContaining("no longer waiting") });
 
     store.setTaskState("in-3", "cancelled", clock());
     expect(executeMateTool(ctx, "propose_dependency_repair", { task: "in-2", blocker: "in-3", operation: "retry" })).toMatchObject({ ok: false, message: expect.stringContaining("cancelled") });

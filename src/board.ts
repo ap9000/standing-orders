@@ -313,7 +313,11 @@ export function classify(facts: BoardFacts, now: Date): BoardCard {
     // A terminal blocker will never clear itself. Say repair instead of
     // presenting an impossible dependency as ordinary patience.
     if (facts.blockerState === "failed" || facts.blockerState === "cancelled") {
-      return { ...base, lane: "waiting", reason: `dependency needs repair — ${facts.unmetDependency} is ${facts.blockerState}` };
+      return {
+        ...base,
+        lane: "waiting",
+        reason: `waiting for ${facts.unmetDependency}, but it ${facts.blockerState === "cancelled" ? "was cancelled" : "failed"}`,
+      };
     }
     const doing =
       facts.blockerState === null

@@ -2894,7 +2894,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const blockerRef = store.lookupRef(blockerId);
           const admitted = blockerRef !== null && visible(blockerRef.repo);
           const blocker = admitted ? store.getTask(blockerId) : null;
-          return { id: blockerId, state: blocker === null ? null : blocker.state, admitted };
+          return { id: blockerId, title: blocker === null ? null : blocker.title, state: blocker === null ? null : blocker.state, admitted };
         }),
         // Candidates a "wait for" or replacement select may offer: this
         // TASK's own project, even when the sidebar is in all-project mode.
@@ -5550,7 +5550,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const operation = (body.get("operation") ?? "").trim();
         const blockerTask = blocker === "" || !store.blockers(taskId).includes(blocker) ? null : store.getTask(blocker);
         if (blockerTask === null || (blockerTask.state !== "failed" && blockerTask.state !== "cancelled")) {
-          return taskScreen(response, who, taskId, "that dependency changed — review the current chain and try again", 409);
+          return taskScreen(response, who, taskId, "what this task waits for changed — refresh the page and choose again", 409);
         }
         if (store.openContestFor(ref.id) !== null) {
           return taskScreen(response, who, taskId, "a tournament is running on this task — let it finish before changing its dependencies", 409);
@@ -5558,15 +5558,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (operation === "retry") {
           const blockerRef = store.lookupRef(blocker);
           if (blockerTask.state !== "failed" || blockerRef === null || !visible(blockerRef.repo)) {
-            return taskScreen(response, who, taskId, "that blocker cannot be retried here — replace it or stop waiting", 409);
+            return taskScreen(response, who, taskId, "that failed task cannot be tried again here — wait for a different task or continue without it", 409);
           }
           const retried = store.requeueTask(blocker, who.name, now);
-          if (!retried.ok) return taskScreen(response, who, taskId, `the blocker was not retried — ${retried.reason}`, 409);
+          if (!retried.ok) return taskScreen(response, who, taskId, `that task could not be queued again — ${retried.reason}`, 409);
           return redirect(response, taskHref(taskId));
         }
         if (operation === "unlink") {
           const removed = store.removeEdge(taskId, blocker);
-          if (!removed.ok) return taskScreen(response, who, taskId, "that dependency changed — review the current chain and try again", 409);
+          if (!removed.ok) return taskScreen(response, who, taskId, "what this task waits for changed — refresh the page and choose again", 409);
           return redirect(response, taskHref(taskId));
         }
         if (operation === "replace") {
@@ -5579,13 +5579,13 @@ export function createDecisionServer(options: ServeOptions): Server {
             !visible(replacementRef.repo) ||
             (replacementTask.state !== "queued" && replacementTask.state !== "running")
           ) {
-            return taskScreen(response, who, taskId, "choose unfinished replacement work from a project you can manage", 409);
+            return taskScreen(response, who, taskId, "choose another unfinished task from a project you can manage", 409);
           }
           const replaced = store.replaceEdge(taskId, blocker, replacement);
-          if (!replaced.ok) return taskScreen(response, who, taskId, `the dependency was not replaced — ${replaced.reason}`, 409);
+          if (!replaced.ok) return taskScreen(response, who, taskId, `this task could not wait for the selected work — ${replaced.reason}`, 409);
           return redirect(response, taskHref(taskId));
         }
-        return taskScreen(response, who, taskId, "choose retry, replace, or stop waiting", 400);
+        return taskScreen(response, who, taskId, "choose whether to try that task again, wait for a different task, or continue without it", 400);
       }
       case "next": {
         if (body.get("undo") !== null) {
@@ -7185,8 +7185,14 @@ const STYLE = `
     background: color-mix(in srgb, var(--warning-soft) 72%, var(--glass));
   }
   .dispatch-status[data-dispatch-status="terminal-dependency"] .dispatch-copy > strong { color: var(--warning); }
+  .dispatch-status[data-dispatch-status="waiting-dependency"] {
+    color: var(--foreground); border-color: var(--glass-border); background: var(--glass);
+  }
   .dependency-repair-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin-top: .7rem; }
+  .dependency-repair-help { flex: 1 0 100%; margin: 0 0 .1rem; }
   .dependency-repair-actions form { display: inline-flex; align-items: center; gap: .4rem; min-width: 0; max-width: 100%; margin: 0; }
+  .dependency-repair-label { flex: 1 1 16rem; min-width: 0; margin: 0; color: var(--foreground); font-size: .75rem; }
+  .dependency-repair-label select { display: block; margin: .3rem 0 0; }
   .dependency-repair-actions select { width: auto; max-width: 16rem; min-height: 2rem; margin: 0; font-size: .75rem; }
   .dependency-repair-actions button { min-height: 2rem; padding: .3rem .65rem; font-size: .75rem; }
   .approve-form { margin: .75rem 0; }
@@ -7924,7 +7930,8 @@ button { min-height: 44px; }
   .dependency-repair-actions .dependency-repair-replace {
     display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem;
   }
-  .dependency-repair-actions .dependency-repair-replace > select { width: 100%; min-width: 0; margin: 0; }
+  .dependency-repair-actions .dependency-repair-label { width: 100%; min-width: 0; }
+  .dependency-repair-actions .dependency-repair-label > select { width: 100%; min-width: 0; max-width: none; }
   .dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: auto; }
   .acts-bar { display: grid; grid-template-columns: minmax(0, 1fr); gap: .5rem; margin: .75rem 0 .35rem; }
   .acts-bar > *, .acts-bar form.inline { min-width: 0; margin: 0; }
@@ -8813,12 +8820,12 @@ function inboxPage(chrome: Chrome, data: {
   const cancelled =
     data.cancelledBlockers.length === 0
       ? ""
-      : `<h2>repair a dependency</h2><p class="hint">these were cancelled, but other tasks still wait on them — re-create the blocker or remove the dependency</p>` +
+      : `<h2>choose how waiting tasks continue</h2><p class="hint">these tasks were waiting for work that was cancelled — open one and choose what happens next</p>` +
         data.cancelledBlockers
           .map(
             one =>
-              `<p class="row"><a href="${taskHref(one.blockerId)}">${escape(one.blockerId)}</a>${chip(one.blockerRepo)} ` +
-              `<span class="meta">cancelled \u00b7 ${one.dependentCount} task${one.dependentCount > 1 ? "s" : ""} waiting (e.g. ${escape(one.exampleDependent)})` +
+              `<p class="row"><a href="${taskHref(one.exampleDependent)}">${escape(one.exampleDependent)}</a>${chip(one.repo)} ` +
+              `<span class="meta">${one.dependentCount > 1 ? `one of ${one.dependentCount} tasks waiting` : "waiting"} for cancelled task ${escape(one.blockerId)}` +
               `${data.rollup && one.repo !== one.blockerRepo ? ` \u00b7 across projects${one.repo === null || one.repo === undefined ? "" : ` \u2014 waits in ${escape(projectName(one.repo))}`}` : ""}</span></p>`,
           )
           .join("\n");
@@ -9259,7 +9266,7 @@ function boardBody(
     `<div class="board">`,
     lane("attention", "needs you", "these wait for a person", plain),
     lane("queued", "queued", "starts when a worker is free", queuedCard),
-    lane("waiting", "waiting", "paused on a timer, dependency, or requirement", plain),
+    lane("waiting", "waiting", "paused until a time, another task, or a requirement is ready", plain),
     lane("building", "building", "one agent per card, in its own workspace", building),
     `<details class="lane lane-done"${data.done.length === 0 ? "" : " open"}><summary><h2><a href="/done">done recently</a></h2></summary><p class="hint">the most recent \u2014 the full list is under done</p>${doneCards}</details>`,
     `</div>`,
@@ -9467,7 +9474,7 @@ function chatFleetOverview(
     `<a href="/board?scope=all&amp;view=order" class="chat-overview-stat"><b>${queued}</b><span>queued</span></a>` +
     `<a href="/done" class="chat-overview-stat"><b>${done}</b><span>done today</span></a>` +
     `</div>` +
-    (rows.length === 0 ? `<p class="chat-overview-clear"><span class="dot dot-ok"></span>No active blockers or builds. The fleet is quiet.</p>` : `<div class="chat-overview-items">${rows.join("")}</div>`) +
+    (rows.length === 0 ? `<p class="chat-overview-clear"><span class="dot dot-ok"></span>No tasks are waiting and no builds are running.</p>` : `<div class="chat-overview-items">${rows.join("")}</div>`) +
     (saturated ? `<p class="meta chat-overview-note">Showing a bounded live view; ask for a narrower project or state to go deeper.</p>` : "") +
     `</section>`
   );
@@ -9526,7 +9533,7 @@ function matePromptStarters(csrf: string): string {
   const prompts = [
     ["brief me", "Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."],
     ["decisions", "Walk me through the open decisions, their options, and what you recommend I inspect first."],
-    ["building now", "What is building right now across every project? Call out blockers or unusual risk."],
+    ["building now", "What is building right now across every project? Call out anything preventing progress or any unusual risk."],
     ["prioritize queues", "Review every project's queue and propose the most valuable reversible reprioritization."],
     ["draft next task", "Based on the current fleet, suggest one high-leverage task or scout investigation and draft it as a proposal."],
   ] as const;
@@ -9886,8 +9893,8 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     answer: { label: "Decision answer", action: "confirm answer", icon: `<path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>` },
     cancel: { label: "Cancel task", action: "open task", icon: `<path d="m15 9-6 6"/><path d="m9 9 6 6"/><circle cx="12" cy="12" r="9"/>` },
     repair: {
-      label: "Dependency repair",
-      action: text("operation") === "retry" ? "retry blocker" : text("operation") === "replace" ? "replace blocker" : "stop waiting",
+      label: "Task is waiting",
+      action: text("operation") === "retry" ? "try again" : text("operation") === "replace" ? "wait for another task" : "continue without it",
       icon: `<path d="M14.7 6.3a4 4 0 0 0-5 5L4 17l3 3 5.7-5.7a4 4 0 0 0 5-5l-2.4 2.4-3-3z"/>`,
     },
   };
@@ -9922,24 +9929,30 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     const blocker = text("blocker");
     const operation = text("operation");
     const replacement = text("replacement");
+    const taskTitle = text("taskTitle") || task;
+    const blockerTitle = text("blockerTitle") || blocker;
+    const replacementTitle = text("replacementTitle") || replacement;
+    const taskLink = `<a href="${taskHref(task)}">${escape(taskTitle)}</a>`;
+    const blockerLink = `<a href="${taskHref(blocker)}">${escape(blockerTitle)}</a>`;
+    const replacementLink = replacement === "" ? "" : `<a href="${taskHref(replacement)}">${escape(replacementTitle)}</a>`;
     const heading =
       operation === "retry"
-        ? `Retry <a href="${taskHref(blocker)}">${escape(blocker)}</a>`
+        ? `Try ${blockerLink} again`
         : operation === "replace"
-          ? `Replace the blocker on <a href="${taskHref(task)}">${escape(task)}</a>`
-          : `Let <a href="${taskHref(task)}">${escape(task)}</a> stop waiting`;
+          ? `Have ${taskLink} wait for different work`
+          : `Let ${taskLink} continue without ${blockerLink}`;
     const consequence =
       operation === "retry"
-        ? `${escape(task)} keeps waiting while ${escape(blocker)} gets another attempt.`
+        ? `${escape(taskTitle)} will keep waiting while ${escape(blockerTitle)} gets another attempt.`
         : operation === "replace"
-          ? `${escape(task)} will wait on ${escape(replacement)} instead; the old edge is removed atomically.`
-          : `${escape(task)} may become runnable immediately without ${escape(blocker)}.`;
+          ? `${escape(taskTitle)} will wait for ${escape(replacementTitle)} instead.`
+          : `${escape(taskTitle)} may be ready to run once it no longer waits for ${escape(blockerTitle)}.`;
     what =
       `<h3>${heading}</h3><p class="proposal-summary">${consequence}</p>` +
       facts(
-        ["blocked task", `<a href="${taskHref(task)}">${escape(task)}</a>`],
-        ["current blocker", `<a href="${taskHref(blocker)}">${escape(blocker)}</a> · ${escape(text("sawBlockerState"))}`],
-        ["replacement", replacement === "" ? "" : `<a href="${taskHref(replacement)}">${escape(replacement)}</a>`],
+        ["task that is waiting", taskLink],
+        ["work it needed", `${blockerLink} · ${escape(text("sawBlockerState"))}`],
+        ["wait for instead", replacementLink],
         ["project", `<span class="mono">${escape(repoId)}</span>`],
       );
   } else if (view.kind === "answer") {
@@ -10350,13 +10363,13 @@ function homePage(chrome: Chrome, data: {
   const stranded =
     data.stranded.length === 0
       ? ""
-      : `<h2>blocked tasks</h2><p class="hint">queued behind something that failed — fix or retry the blocker and these start</p>` +
+      : `<h2>tasks waiting on failed work</h2><p class="hint">open a task and choose whether to try the failed work again, wait for something else, or continue without it</p>` +
         data.stranded
           .map(
             one =>
               `<p class="row"><a href="${taskHref(one.id)}">${escape(one.id)}</a> waits on ${one.blockedBy
                 .map(blocker => `<a href="${taskHref(blocker)}">${escape(blocker)}</a>`)
-                .join(", ")} <span class="right meta">open the blocker to retry it</span></p>`,
+                .join(", ")} <span class="right meta">choose what happens →</span></p>`,
           )
           .join("\n");
 
@@ -10891,8 +10904,9 @@ function portfolioOverview(data: {
   const cancelledRows = data.cancelledBlockers
     .map(
       one =>
-        `<p class="row"><a href="${taskHref(one.blockerId)}">${escape(one.blockerId)}</a>${projectChip(one.blockerRepo)} ` +
-        `<span class="meta">cancelled · ${one.dependentCount} task${one.dependentCount > 1 ? "s" : ""} waiting (e.g. ${escape(one.exampleDependent)})</span></p>`,
+        `<p class="row"><a href="${taskHref(one.exampleDependent)}">${escape(one.exampleDependent)}</a>${projectChip(one.repo)} ` +
+        `<span class="meta">${one.dependentCount > 1 ? `one of ${one.dependentCount} tasks waiting` : "waiting"} for cancelled task ${escape(one.blockerId)}</span>` +
+        `<span class="right meta">choose what happens →</span></p>`,
     )
     .join("\n");
   const gapRows = data.gaps
@@ -12004,7 +12018,7 @@ function taskBody(data: {
   claimed: boolean;
   /** What this task waits for — blockers outside this console's ceiling
    * are named but carry no state and no link. */
-  waitsFor?: { id: string; state: string | null; admitted: boolean }[];
+  waitsFor?: { id: string; title: string | null; state: string | null; admitted: boolean }[];
   /** Open tasks a "wait for" select may offer (this console's view only). */
   waitCandidates?: { id: string; title: string }[];
   /** The run whose lease is the CURRENT live claim — computed by the data
@@ -12164,7 +12178,7 @@ function taskBody(data: {
           case "repair-capability": return ` <a href="/caps">Repair the requirement</a>.`;
           case "repair-dependency":
             return blocker?.admitted === true
-              ? ` <a href="${taskHref(blocker.id)}">Open the blocker</a> for its full history.`
+              ? ` <a href="${taskHref(blocker.id)}">Review that task</a>.`
               : "";
           default: return "";
         }
@@ -12176,22 +12190,33 @@ function taskBody(data: {
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
           `<input type="hidden" name="blocker" value="${escape(blocker.id)}">`;
         const retry = blocker.admitted && blocker.state === "failed"
-          ? `<form method="post" action="${endpoint}" class="dependency-repair-retry">${common}<input type="hidden" name="operation" value="retry"><button type="submit">Retry blocker</button></form>`
+          ? `<form method="post" action="${endpoint}" class="dependency-repair-retry">${common}<input type="hidden" name="operation" value="retry"><button type="submit">Try that task again</button></form>`
           : "";
         const unlink =
-          `<form method="post" action="${endpoint}" class="dependency-repair-unlink">${common}<input type="hidden" name="operation" value="unlink"><button type="submit" class="quiet">Stop waiting</button></form>`;
+          `<form method="post" action="${endpoint}" class="dependency-repair-unlink">${common}<input type="hidden" name="operation" value="unlink"><button type="submit" class="quiet">Continue without it</button></form>`;
         const standing = new Set((data.waitsFor ?? []).map(one => one.id));
         const replacements = (data.waitCandidates ?? []).filter(one => !standing.has(one.id));
         const replace = replacements.length === 0
           ? ""
           : `<form method="post" action="${endpoint}" class="dependency-repair-replace">${common}<input type="hidden" name="operation" value="replace">` +
-            `<select name="replacement" aria-label="replacement dependency">${replacements.map(one => `<option value="${escape(one.id)}">${escape(one.title)}</option>`).join("")}</select>` +
-            `<button type="submit" class="quiet">Replace blocker</button></form>`;
-        return `<div class="dependency-repair-actions" aria-label="dependency repair actions">${retry}${replace}${unlink}</div>`;
+            `<label class="dependency-repair-label">Choose another task that must finish first<select name="replacement" aria-label="another task that must finish first">${replacements.map(one => `<option value="${escape(one.id)}">${escape(one.title)}</option>`).join("")}</select></label>` +
+            `<button type="submit" class="quiet">Wait for selected task</button></form>`;
+        return `<div class="dependency-repair-actions" aria-label="ways to continue this task"><p class="meta dependency-repair-help">Choose another task that must finish first, or let this task continue without it.</p>${retry}${replace}${unlink}</div>`;
       })();
       const positive = diagnosis.code === "running" || diagnosis.code === "ready" || diagnosis.code === "planning-ready" || diagnosis.code === "scouting-ready";
       const status = diagnosis.code === "ready" ? "ready-to-run" : diagnosis.code;
-      return box(positive ? "ok" : "problem", diagnosis.summary, `${escape(diagnosis.detail)}${action}`, status, repairControls);
+      const repairingDependency = diagnosis.action === "repair-dependency" && blocker !== null;
+      const dependencyDetail =
+        blocker?.admitted === true
+          ? `This task was waiting for <strong>${escape(blocker.title ?? blocker.id)}</strong>, but that task was ${escape(blocker.state ?? "stopped")}.${action}`
+          : "This task is waiting for other work that did not finish.";
+      return box(
+        positive ? "ok" : "problem",
+        repairingDependency ? "Choose what happens next" : diagnosis.summary,
+        repairingDependency ? dependencyDetail : `${escape(diagnosis.detail)}${action}`,
+        status,
+        repairControls,
+      );
     }
 
     if (task.state === "done") {
@@ -12867,6 +12892,7 @@ function taskBody(data: {
 
   const stalled =
     task.state === "failed" || data.incidents.some(one => one.resolvedAt === null);
+  const dependencyChoiceNeeded = data.dispatch?.action === "repair-dependency";
 
   // The chain: what this task waits for, editable in place. Blockers
   // outside this console's view are named without state or link — the same
@@ -12883,7 +12909,7 @@ function taskBody(data: {
         `<form method="post" action="${taskHref(task.id)}/unblock" class="inline">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
         `<input type="hidden" name="on" value="${escape(one.id)}">` +
-        `<button type="submit">stop waiting</button></form></p>`,
+        `<button type="submit">don't wait for this</button></form></p>`,
     )
     .join("\n");
   const waitAdd =
@@ -12894,7 +12920,7 @@ function taskBody(data: {
         `<select name="on" aria-label="task to wait for">` +
         candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
         `</select>` +
-        `<button type="submit">wait for this</button>` +
+        `<button type="submit">wait for this task</button>` +
         `<span class="meta"> — this task starts only after it finishes</span></form>`;
   const waitsForCard =
     waitRows === "" && waitAdd === ""
@@ -12931,7 +12957,10 @@ function taskBody(data: {
     task.state === "queued" && (data.position?.position ?? 2) === 1 && task.priority > 0
       ? act("next", "back to filing order", `<input type="hidden" name="undo" value="1">`)
       : "",
-    holdAct,
+    // A task with no scope is already unable to start. Showing a hold next
+    // to "plan first" adds a second, unnecessary decision at the exact
+    // moment the page should have one obvious action.
+    canPlan ? "" : holdAct,
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     `</div>`,
     primaryAct === null ? "" : `<p class="meta acts-why acts-why-${primaryAct.whyClass}">${primaryAct.why}</p>`,
@@ -12977,9 +13006,9 @@ function taskBody(data: {
     `<h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
-    approveForm === "" && data.plan !== "requested" ? dispatchStatus : "",
+    (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
     planCard,
-    approveForm === "" ? actsBar : "",
+    approveForm === "" && !dependencyChoiceNeeded ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
     // observed state, and — when the tracker closed it and has been seen
     // open again — the authenticated reopen act. Done + closed is display
@@ -13019,7 +13048,7 @@ function taskBody(data: {
     // The board sent them here saying "needs you" — the page must open by
     // saying WHY and pointing at the act, not read as a fact sheet
     // (operator finding: clicking a needs-you card landed with no context).
-    scope === null && data.plan === null && task.state === "queued"
+    scope === null && data.plan === null && task.state === "queued" && data.dispatch?.code !== "needs-scope" && data.dispatch?.code !== "waiting-dependency" && !dependencyChoiceNeeded
       ? data.coordinator !== null && data.coordinator !== undefined
         // The quarantine speaks here too (round-2 finding 5): the planner
         // is as fenced as the builder on a coordinator filing, so "plan
@@ -13029,8 +13058,8 @@ function taskBody(data: {
         : `<div class="card task-scope-needed"><p><strong>No approved scope yet</strong></p>` +
           `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
       : "",
-    approveForm,
-    approveForm === "" ? "" : actsBar,
+    dependencyChoiceNeeded ? "" : approveForm,
+    dependencyChoiceNeeded || approveForm === "" ? "" : actsBar,
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up. The rail
@@ -13076,7 +13105,7 @@ function taskBody(data: {
       ["<h2>scope</h2>", scopeCard, revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
       data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan),
     ),
-    section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
+    dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),
     cancelAct,
     `</div><aside class="task-rail">${rail}</aside></div>`,

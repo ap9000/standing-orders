@@ -232,8 +232,8 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   if (local?.code === "dependency") {
     const terminal = local.blockerState === "failed" || local.blockerState === "cancelled";
     return terminal
-      ? answer("terminal-dependency", "waiting", "Dependency needs repair", `${local.blockerId} is ${local.blockerState}; retry or replace it, or remove this dependency.`, { action: "repair-dependency", blockerTaskId: local.blockerId })
-      : answer("waiting-dependency", "waiting", "Waiting on another task", `${local.blockerId} is ${local.blockerState} and must finish first.`, { blockerTaskId: local.blockerId });
+      ? answer("terminal-dependency", "waiting", "A required task did not finish", `${local.blockerId} ${local.blockerState === "cancelled" ? "was cancelled" : "failed"} before it finished.`, { action: "repair-dependency", blockerTaskId: local.blockerId })
+      : answer("waiting-dependency", "waiting", "Waiting for another task", `${local.blockerId} must finish before this task can start.`, { blockerTaskId: local.blockerId });
   }
 
   const role = dispatchRoleFor(store, ref.id, now);

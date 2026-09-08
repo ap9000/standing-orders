@@ -538,39 +538,43 @@ export const MATE_TOOLS: MateTool[] = [
       if (taskId === null || ref === null) return notFound();
       const blocker = typeof args["blocker"] === "string" && TASK_ID.test(args["blocker"]) ? args["blocker"] : null;
       if (blocker === null || !ctx.store.blockers(taskId).includes(blocker)) {
-        return { ok: false, message: "that task is not waiting on that blocker — read it again with get_task" };
+        return { ok: false, message: "that task is no longer waiting for the selected work — read it again with get_task" };
       }
       const blockedBy = ctx.store.getTask(blocker);
       if (blockedBy === null || (blockedBy.state !== "failed" && blockedBy.state !== "cancelled")) {
-        return { ok: false, message: "that dependency is no longer failed or cancelled — read the task again" };
+        return { ok: false, message: "the task it was waiting for is no longer failed or cancelled — read the task again" };
       }
       const operation = args["operation"];
       if (operation !== "retry" && operation !== "unlink" && operation !== "replace") {
-        return { ok: false, message: "operation is retry, unlink, or replace" };
+        return { ok: false, message: "choose try again, wait for another task, or continue without it" };
       }
       if (operation === "retry") {
-        if (blockedBy.state !== "failed") return { ok: false, message: "only a failed blocker can retry; replace or unlink a cancelled blocker" };
-        if (admittedRef(ctx, blocker) === null) return { ok: false, message: "the failed blocker is outside this conversation's projects" };
+        if (blockedBy.state !== "failed") return { ok: false, message: "only failed work can be tried again; wait for a different task or continue without cancelled work" };
+        if (admittedRef(ctx, blocker) === null) return { ok: false, message: "the failed task is outside this conversation's projects" };
       }
       let replacement: string | null = null;
+      let replacementTitle: string | null = null;
       if (operation === "replace") {
         replacement = typeof args["replacement"] === "string" && TASK_ID.test(args["replacement"]) ? args["replacement"] : null;
         const replacementRef = replacement === null ? null : admittedRef(ctx, replacement);
         const replacementTask = replacement === null ? null : ctx.store.getTask(replacement);
-        if (replacement === null || replacementRef === null || replacementTask === null) return { ok: false, message: "replacement must be a task in this conversation's projects" };
+        if (replacement === null || replacementRef === null || replacementTask === null) return { ok: false, message: "choose another task from this conversation's projects" };
         if (replacement === taskId || replacement === blocker || (replacementTask.state !== "queued" && replacementTask.state !== "running")) {
-          return { ok: false, message: "replacement must be different, unfinished work that can still complete" };
+          return { ok: false, message: "choose different, unfinished work that can still complete" };
         }
+        replacementTitle = replacementTask.title;
       } else if (args["replacement"] !== undefined) {
-        return { ok: false, message: "replacement is only used with the replace operation" };
+        return { ok: false, message: "only include another task when this one should wait for it" };
       }
       const id = ctx.draft("repair", {
         task: taskId,
+        taskTitle: ctx.store.getTask(taskId)?.title ?? taskId,
         repoId: ref.repoId,
         blocker,
+        blockerTitle: blockedBy.title,
         operation,
         sawBlockerState: blockedBy.state,
-        ...(replacement === null ? {} : { replacement }),
+        ...(replacement === null ? {} : { replacement, replacementTitle }),
       });
       if (id === null) return tooMany();
       return { ok: true, body: { proposal: id, kind: "repair", task: taskId, blocker, operation, awaiting: "the operator's confirmation" } };

@@ -109,12 +109,12 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
 
     store.setTaskState("a", "cancelled", clock());
     const replace = pending("repair", { task: "b", blocker: "a", operation: "replace", replacement: "c", sawBlockerState: "cancelled" });
-    expect(confirmMateProposal(store, who, replace, clock(), { via: "web" })).toMatchObject({ ok: true, said: "b now waits on c instead of a" });
+    expect(confirmMateProposal(store, who, replace, clock(), { via: "web" })).toMatchObject({ ok: true, said: "b will now wait for c instead of a" });
     expect(store.blockers("b")).toEqual(["c"]);
 
     store.setTaskState("c", "cancelled", clock());
     const unlink = pending("repair", { task: "b", blocker: "c", operation: "unlink", sawBlockerState: "cancelled" });
-    expect(confirmMateProposal(store, who, unlink, clock(), { via: "web" })).toMatchObject({ ok: true, said: expect.stringContaining("being reconsidered now") });
+    expect(confirmMateProposal(store, who, unlink, clock(), { via: "web" })).toMatchObject({ ok: true, said: "b can now continue without c" });
     expect(store.blockers("b")).toEqual([]);
 
     store.addEdge("b", "a");

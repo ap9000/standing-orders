@@ -1,5 +1,17 @@
 # Progress
 
+**2026-09-08 — Waiting-task recovery now speaks in outcomes, not graph
+jargon.** The task page says which named task did not finish, then asks the
+operator to choose what happens next: try failed work again, choose another
+task that must finish first, or continue without it. “Replace blocker,”
+“unlink,” and “dependency repair” no longer appear in operator-facing actions;
+the inbox, board, and unified chat use the same plain-language status. While
+this choice is open, unrelated plan, hold, scope, and duplicate waiting
+controls are suppressed so the page has one clear decision. Chat repair cards
+now use task titles and explain the result before confirmation. A real-browser
+phone pass also exercised replacement end to end and verified that the next
+state reads “Waiting for another task.”
+
 **2026-09-08 — The task page now composes for phones instead of wrapping by
 accident.** At phone widths, dependency repair has explicit full-width rows
 and stacks its replacement picker before text or buttons can clip; the primary

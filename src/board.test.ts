@@ -147,10 +147,10 @@ describe("the lane classifier", () => {
     ).toBe("waits on t-0 — building now");
     expect(
       classify(facts({ unmetDependency: "t-0", blockerState: "failed" }), T0).reason,
-    ).toBe("dependency needs repair — t-0 is failed");
+    ).toBe("waiting for t-0, but it failed");
     expect(
       classify(facts({ unmetDependency: "t-0", blockerState: "cancelled" }), T0).reason,
-    ).toBe("dependency needs repair — t-0 is cancelled");
+    ).toBe("waiting for t-0, but it was cancelled");
     // Redacted blocker state: the name stays, the other project's status
     // does not.
     expect(classify(facts({ unmetDependency: "t-0" }), T0).reason).toBe("waits on t-0");

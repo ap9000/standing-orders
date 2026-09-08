@@ -2848,7 +2848,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
 
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
     expect(html).toContain('data-dispatch-status="terminal-dependency"');
-    expect(html).toContain("dependency needs repair");
+    expect(html).toContain("a required task did not finish");
   });
 
   test("the whole loop: password-gated ask, reply, draft card, password-gated file through the door", async () => {
@@ -3747,14 +3747,14 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     const page = await (await fetch(url("/t/t-api"), { headers: { cookie } })).text();
     expect(page).toContain("waits for");
     expect(page).toContain("t-schema");
-    expect(page).toContain("stop waiting");
+    expect(page).toContain("don't wait for this");
 
     // The loop refuses with the store's own sentence, on the page.
     const loop = await post("/t/t-schema/block", { on: "t-api" });
     expect(loop.status).toBe(409);
     expect(await loop.text()).toContain("cycle");
 
-    // Stop waiting; a wait that never was refuses.
+    // Remove the wait; a relationship that never existed refuses.
     expect((await post("/t/t-api/unblock", { on: "t-schema" })).status).toBe(303);
     expect((await post("/t/t-api/unblock", { on: "t-schema" })).status).toBe(409);
 
@@ -6496,22 +6496,29 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
 
     const task = await (await fetch(url("/t/t-dependent"), { headers: { cookie } })).text();
     expect(task).toContain('data-dispatch-status="terminal-dependency"');
-    expect(task).toContain("Dependency needs repair");
-    expect(task).toContain("t-blocker is cancelled");
-    expect(task).toContain("Open the blocker");
-    expect(task).toContain('aria-label="dependency repair actions"');
+    expect(task).toContain("Choose what happens next");
+    expect(task).toContain("This task was waiting for <strong>obsolete prerequisite</strong>, but that task was cancelled.");
+    expect(task).toContain("Review that task");
+    expect(task).toContain("Choose another task that must finish first");
+    expect(task).toContain("Wait for selected task");
+    expect(task).toContain("Continue without it");
+    expect(task).toContain('aria-label="ways to continue this task"');
     expect(task).toContain('class="dependency-repair-replace"');
     expect(task).toContain('class="dependency-repair-unlink"');
     expect(task).toContain('name="operation" value="replace"');
     expect(task).toContain('name="operation" value="unlink"');
     expect(task).not.toContain('name="operation" value="retry"');
+    expect(task).not.toContain(">plan first</button>");
+    expect(task).not.toContain("hold next attempt");
+    expect(task).not.toContain("No approved scope yet");
+    expect(task).not.toContain('<details class="section" id="waits-for"');
     expect(task).toContain(".dependency-repair-actions form > button[type=submit] { width: 100%; }");
     expect(task).toContain(".dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: auto; }");
 
     const queue = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(queue).toContain('data-task="t-dependent"');
     expect(queue).toContain('data-dispatch-status="terminal-dependency"');
-    expect(queue).toContain("dependency needs repair");
+    expect(queue).toContain("a required task did not finish");
 
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(task)?.[1];
     if (csrf === undefined) throw new Error("no csrf on task");
@@ -6523,6 +6530,11 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     });
     expect(replaced.status).toBe(303);
     expect(store.blockers("t-dependent")).toEqual(["t-replacement"]);
+
+    const waiting = await (await fetch(url("/t/t-dependent"), { headers: { cookie } })).text();
+    expect(waiting).toContain('data-dispatch-status="waiting-dependency"');
+    expect(waiting).toContain("Waiting for another task");
+    expect(waiting).not.toContain("No approved scope yet");
 
     expect(store.cancelTask("t-replacement", T0, "also obsolete")).toMatchObject({ ok: true });
     const afterReplace = await (await fetch(url("/t/t-dependent"), { headers: { cookie } })).text();
@@ -6547,6 +6559,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const cookie = await login();
     const task = await (await fetch(url("/t/t-after"), { headers: { cookie } })).text();
     expect(task).toContain('name="operation" value="retry"');
+    expect(task).toContain("Try that task again");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(task)?.[1];
     if (csrf === undefined) throw new Error("no csrf on task");
 
@@ -7543,9 +7556,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
 
     let html = await page(cookie);
     expect(html).toContain('data-card-kind="repair"');
-    expect(html).toContain("Dependency repair");
-    expect(html).toContain("may become runnable immediately without");
-    expect(html).toContain(">stop waiting</button>");
+    expect(html).toContain("Task is waiting");
+    expect(html).toContain("task b may be ready to run once it no longer waits for task a");
+    expect(html).toContain(">continue without it</button>");
     expect(store.blockers("b")).toEqual(["a"]);
 
     const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf });
@@ -7553,7 +7566,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(store.getMateProposal(1)).toMatchObject({ state: "confirmed", outcome: { taskId: "b" } });
     expect(store.blockers("b")).toEqual([]);
     html = await page(cookie);
-    expect(html).toContain("b stopped waiting on a and is being reconsidered now");
+    expect(html).toContain("task b can now continue without task a");
   });
 
   test("a cancel card only points at the task; dismiss retires a card; ending the session forgets the thread", async () => {

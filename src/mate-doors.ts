@@ -296,8 +296,10 @@ function executeProposal(
     const blocker = payloadString(payload, "blocker");
     const operation = payloadString(payload, "operation");
     const sawBlockerState = payloadString(payload, "sawBlockerState");
+    const taskName = payloadString(payload, "taskTitle") ?? taskId;
+    const blockerName = payloadString(payload, "blockerTitle") ?? blocker ?? "that task";
     if (blocker === null || !store.blockers(taskId).includes(blocker)) {
-      return refuse("stale", "this task no longer waits on that blocker — look again");
+      return refuse("stale", "this task no longer waits for that work — look again");
     }
     const blockerTask = store.getTask(blocker);
     if (
@@ -305,7 +307,7 @@ function executeProposal(
       blockerTask.state !== sawBlockerState ||
       (blockerTask.state !== "failed" && blockerTask.state !== "cancelled")
     ) {
-      return refuse("stale", "the blocker changed since this was proposed — look again");
+      return refuse("stale", "the task it was waiting for changed since this was proposed — look again");
     }
     if (store.openContestFor(ref.id) !== null) {
       return refuse("contest-open", "a tournament is running on the dependent task — let it finish first");
@@ -313,19 +315,20 @@ function executeProposal(
     if (operation === "retry") {
       const blockerRef = store.lookupRef(blocker);
       if (blockerTask.state !== "failed" || blockerRef === null || !admitted(blockerRef.repo)) {
-        return refuse("stale", "that failed blocker cannot be retried from this conversation");
+        return refuse("stale", "that failed task cannot be tried again from this conversation");
       }
       const retried = store.requeueTask(blocker, actor.name, now);
       if (!retried.ok) return refuseFromReason(kind, retried.reason);
-      return { ok: true, kind, said: `${blocker} queued again; ${taskId} will follow when it completes`, taskId };
+      return { ok: true, kind, said: `${blockerName} was queued again; ${taskName} will follow when it finishes`, taskId };
     }
     if (operation === "unlink") {
       const removed = store.removeEdge(taskId, blocker);
-      if (!removed.ok) return refuse("stale", "this task no longer waits on that blocker — look again");
-      return { ok: true, kind, said: `${taskId} stopped waiting on ${blocker} and is being reconsidered now`, taskId };
+      if (!removed.ok) return refuse("stale", "this task no longer waits for that work — look again");
+      return { ok: true, kind, said: `${taskName} can now continue without ${blockerName}`, taskId };
     }
     if (operation === "replace") {
       const replacement = payloadString(payload, "replacement");
+      const replacementName = payloadString(payload, "replacementTitle") ?? replacement ?? "the selected task";
       const replacementRef = replacement === null ? null : store.lookupRef(replacement);
       const replacementTask = replacement === null ? null : store.getTask(replacement);
       if (
@@ -335,13 +338,13 @@ function executeProposal(
         replacementTask === null ||
         (replacementTask.state !== "queued" && replacementTask.state !== "running")
       ) {
-        return refuse("stale", "the replacement is no longer unfinished work in your projects — look again");
+        return refuse("stale", "the selected task is no longer unfinished work in your projects — look again");
       }
       const replaced = store.replaceEdge(taskId, blocker, replacement);
-      if (!replaced.ok) return refuse("stale", `the dependency could not be replaced — ${replaced.reason}`);
-      return { ok: true, kind, said: `${taskId} now waits on ${replacement} instead of ${blocker}`, taskId };
+      if (!replaced.ok) return refuse("stale", `this task could not wait for the selected work — ${replaced.reason}`);
+      return { ok: true, kind, said: `${taskName} will now wait for ${replacementName} instead of ${blockerName}`, taskId };
     }
-    return refuse("refused", "this dependency repair has no valid operation");
+    return refuse("refused", "this request does not say how the waiting task should continue");
   }
 
   if (kind === "scope") {
