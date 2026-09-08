@@ -39,6 +39,10 @@ const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false }
  * buffered claude envelope's `result` field — never a file written to
  * disk. Every stubbed agent below "speaks" its review through this. */
 const spoken = (payload: unknown): string => JSON.stringify({ result: JSON.stringify(payload) });
+/** Run 1467's fix: the shape a claude turn actually carries under
+ * `--json-schema` — the review-phase-only structured-output field
+ * `claudeEnvelopeOf` now prefers over the plain `result` string. */
+const spokenStructured = (payload: unknown): string => JSON.stringify({ structured_output: payload });
 /** A harmless spoken reply for fixtures where the content never matters
  * (the pass returns before it would be read). */
 const SAID = spoken({ version: 1, comments: [] });
@@ -457,6 +461,58 @@ describe("the reviewer role in the store", () => {
       expect(reports[0]?.outcome).toBe("failed");
       expect(reports[0]?.detail).toBe("malformed-review");
       expect(store.liveDiffComments(builtRun)).toHaveLength(0);
+    });
+
+    test("run 1467's fix: a malformed-review failure persists a bounded, sanitized parse diagnostic explaining WHY", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      const brokenAgent: Runner = async () => ({ ...OK, stdout: JSON.stringify({ result: "not json at all ```" }) });
+      const reports = await passOnce(brokenAgent);
+      expect(reports[0]?.detail).toBe("malformed-review");
+      const reviewerRow = store.raw().prepare("SELECT outcome, reason FROM run WHERE role = 'reviewer'").get() as
+        | { outcome: string; reason: string }
+        | undefined;
+      expect(reviewerRow?.outcome).toBe("failed");
+      // The stored reason explains itself: the short code, the structural
+      // problem, AND (best-effort) what the agent actually said — a future
+      // reader never needs a live repro to see why this one failed.
+      expect(reviewerRow?.reason.startsWith("reviewer-malformed-review: ")).toBe(true);
+      expect(reviewerRow?.reason).toContain("not JSON");
+      expect(reviewerRow?.reason).toContain("not json at all");
+      // Bounded: even an adversarial reply cannot grow the stored row past
+      // the shared diagnostic cap plus the short prefix.
+      expect(Buffer.byteLength(reviewerRow?.reason ?? "", "utf8")).toBeLessThan(2200);
+      const request = store.raw().prepare("SELECT consumed_reason FROM review_request").get() as
+        | { consumed_reason: string }
+        | undefined;
+      expect(request?.consumed_reason).toBe(reviewerRow?.reason);
+    });
+
+    test("run 1467's fix: an adversarial spoken reply with a secret-shaped string withholds the diagnostic, never quotes it", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      // Not valid review JSON (so parseReview refuses it) AND shaped like a
+      // credential — the diagnostic path must refuse to persist it intact.
+      const leaking: Runner = async () => ({
+        ...OK,
+        stdout: JSON.stringify({ result: "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }),
+      });
+      const reports = await passOnce(leaking);
+      expect(reports[0]?.detail).toBe("malformed-review");
+      const reviewerRow = store.raw().prepare("SELECT reason FROM run WHERE role = 'reviewer'").get() as { reason: string } | undefined;
+      expect(reviewerRow?.reason).not.toContain("sk-ant-api03");
+      expect(reviewerRow?.reason).toContain("withheld");
+    });
+
+    test("run 1467's fix: a structured_output reply (the --json-schema turn) parses exactly like a plain result string", async () => {
+      store.requestReview(builtRun, "alex", T0);
+      const structuredAgent: Runner = async () => ({
+        ...OK,
+        stdout: spokenStructured({ version: 1, comments: [{ path: "src/payouts.ts", line: 2, note: "structured reply" }] }),
+      });
+      const reports = await passOnce(structuredAgent);
+      expect(reports[0]?.outcome).toBe("reviewed");
+      const comments = store.liveDiffComments(builtRun);
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.note).toBe("structured reply");
     });
 
     test("a truncated diff never spawns an agent", async () => {

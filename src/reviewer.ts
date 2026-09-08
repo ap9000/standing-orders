@@ -35,7 +35,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { auditOf, type ProviderId } from "./provider.js";
+import { auditOf, safeDiagnostic, type ProviderId } from "./provider.js";
 import type { Store } from "./store.js";
 import { invokeAgent } from "./invoke.js";
 import { resolvePhaseAgent } from "./agentconfig.js";
@@ -383,7 +383,7 @@ export type ReviewRequest = {
 
 export type ReviewResult =
   | { ok: true; commentIds: number[]; commentCount: number; criteriaCount: number; verdict: ProofVerdict | null }
-  | { ok: false; reason: string; message: string };
+  | { ok: false; reason: string; message: string; diagnostic?: string };
 
 /** A file this pass wrote and seals against tamper the same way the patch
  * always has: hash the bytes at write time, re-read and re-hash after the
@@ -649,10 +649,19 @@ export async function review(store: Store, request: ReviewRequest): Promise<Revi
     }
     const parsed = parseReview(spoken, patchPaths, new Set(rubric.map(c => c.id)));
     if (!parsed.ok) {
+      const problemList = parsed.problems.map(one => one.reason).join(", ");
+      // Run 1467's fix: a bounded, sanitized record of WHY the parse
+      // failed — the problem list first (ours, already safe), then the
+      // agent's own spoken bytes as best-effort context — so the next
+      // failure explains itself from the stored run instead of needing a
+      // live repro. `safeDiagnostic` applies the same control-char strip,
+      // secret scan, and byte cap every other provider diagnostic gets.
+      const diagnostic = safeDiagnostic(`${problemList} — spoken: ${spoken}`);
       return {
         ok: false,
         reason: "malformed-review",
-        message: `the reviewer concluded, but the payload is not a review: ${parsed.problems.map(one => one.reason).join(", ")}`,
+        message: `the reviewer concluded, but the payload is not a review: ${problemList}`,
+        ...(diagnostic === null ? {} : { diagnostic }),
       };
     }
 
@@ -808,13 +817,17 @@ export async function reviewPass(
     } else {
       // One attempt, spent (R4): review is additive — the task's outcome
       // already stands, so a broken pass is a visible typed run, never a
-      // block and never a retry loop.
+      // block and never a retry loop. Run 1467's fix: a malformed-review
+      // failure carries its bounded, sanitized parse diagnostic into the
+      // stored reason too — every other failure reason is unchanged.
+      const storedReason =
+        result.diagnostic === undefined ? `reviewer-${result.reason}` : `reviewer-${result.reason}: ${result.diagnostic}`;
       store.finishRun(admitted.reviewerRunId, {
         outcome: "failed",
-        reason: `reviewer-${result.reason}`,
+        reason: storedReason,
         now: clock(),
       });
-      store.stampReviewRequestOutcome(request.id, `reviewer-${result.reason}`);
+      store.stampReviewRequestOutcome(request.id, storedReason);
       reports.push({ requestId: request.id, run: request.run, outcome: "failed", detail: result.reason });
     }
   }

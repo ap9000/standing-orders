@@ -200,6 +200,55 @@ const CLAUDE_REVIEW_ISOLATION_ARGV: readonly string[] = [
   '{"mcpServers":{}}',
 ];
 
+/**
+ * Run 1467's fix: Opus's reply to a review turn came back as JSON that
+ * `parseReview` refused outright — prose around the object, a stray code
+ * fence, a shape close but not exact. `--json-schema` is claude's own
+ * structured-output enforcement, so the CLI (not this codebase) is what
+ * makes the model's final message parse as JSON shaped like a review — it
+ * is a formatting floor, never a validator: an id absent from the signed
+ * rubric, a duplicate id, or a judgement word outside the three legal ones
+ * still only `parseReview` can catch, because only `parseReview` is handed
+ * the run's actual signed criteria. Claude-only and review-phase-only: no
+ * other provider has this flag, and no other phase asks for structured
+ * output.
+ */
+const CLAUDE_REVIEW_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    version: { type: "integer", enum: [1] },
+    comments: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          line: { type: ["integer", "null"] },
+          note: { type: "string" },
+          severity: { type: "string", enum: ["note", "question", "problem"] },
+        },
+        required: ["path", "note"],
+        additionalProperties: false,
+      },
+    },
+    criteria: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          judgement: { type: "string", enum: ["upholds", "contradicts", "cannot-tell"] },
+          note: { type: "string" },
+        },
+        required: ["id", "judgement", "note"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["version", "comments"],
+  additionalProperties: false,
+} as const;
+
 const claudeArgv = (invocation: Invocation): string[] => [
   "-p",
   invocation.brief,
@@ -219,12 +268,18 @@ const claudeArgv = (invocation: Invocation): string[] => [
     : ["--permission-mode", invocation.permissionMode]),
   ...(invocation.model === null ? [] : ["--model", invocation.model]),
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
-  ...(invocation.phase === "review" ? CLAUDE_REVIEW_ISOLATION_ARGV : []),
+  ...(invocation.phase === "review"
+    ? [...CLAUDE_REVIEW_ISOLATION_ARGV, "--json-schema", JSON.stringify(CLAUDE_REVIEW_JSON_SCHEMA)]
+    : []),
 ];
 
 /** A claude envelope object, whichever line carried it. */
 type ClaudeResultShape = {
   result?: unknown;
+  /** Present only when the turn ran under `--json-schema` (the review
+   * phase's structured-output floor, run 1467's fix): the model's reply,
+   * already schema-validated by the CLI itself. */
+  structured_output?: unknown;
   session_id?: unknown;
   usage?: { input_tokens?: unknown; output_tokens?: unknown };
   total_cost_usd?: unknown;
@@ -233,6 +288,22 @@ type ClaudeResultShape = {
   num_turns?: unknown;
   origin?: unknown;
 };
+
+/**
+ * The turn's own words, preferring the schema-validated structured field
+ * (present only under `--json-schema`) over the plain result string — the
+ * same preference `subscription-chat.ts`'s `claudeOutput` already applies
+ * for its own `--json-schema` turn. Re-serialized (never the CLI's raw
+ * text) so downstream parsing (`parseReview`) sees canonical JSON either
+ * way.
+ */
+function claudeFinalMessage(result: ClaudeResultShape | null): string | null {
+  if (result === null) return null;
+  if (result.structured_output !== undefined && result.structured_output !== null) {
+    return JSON.stringify(result.structured_output);
+  }
+  return typeof result.result === "string" ? result.result : null;
+}
 
 /**
  * The primary-result allowlist (arc 1 finding 10): only an absent origin or
@@ -256,7 +327,7 @@ function claudeEnvelopeOf(
   return {
     sessionId:
       typeof result?.session_id === "string" ? result.session_id : sessionFromInit,
-    finalMessage: typeof result?.result === "string" ? result.result : null,
+    finalMessage: claudeFinalMessage(result),
     ending: result === null ? null : {
       subtype: typeof result.subtype === "string" ? result.subtype : null,
       turns: typeof result.num_turns === "number" && result.num_turns >= 0 ? result.num_turns : null,
@@ -599,7 +670,7 @@ function capUtf8(text: string, bytes: number): string {
  * and line separators collapse to spaces (the fence's character class),
  * and a line that trips the secret scanner is REPLACED, never quoted.
  */
-function safeDiagnostic(text: string): string | null {
+export function safeDiagnostic(text: string): string | null {
   const normalized = text.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ").trim();
   if (normalized === "") return null;
   if (scanForSecrets(normalized).length > 0) return "the harness's error text was withheld — it matched a secret pattern";

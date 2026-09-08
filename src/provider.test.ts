@@ -74,6 +74,28 @@ describe("argv dialects", () => {
     expect(argv).toEqual(expect.arrayContaining(["--permission-mode", "auto", "--max-turns", "40"]));
   });
 
+  test("run 1467's fix: claude review turns carry a strict --json-schema; build and codex never do", () => {
+    const build = adapterFor("claude").argv({ ...ASK, phase: "build" });
+    expect(build).not.toContain("--json-schema");
+
+    const argv = adapterFor("claude").argv({ ...ASK, phase: "review" });
+    const schemaIndex = argv.indexOf("--json-schema");
+    expect(schemaIndex).toBeGreaterThan(-1);
+    const schema = JSON.parse(argv[schemaIndex + 1] ?? "null") as Record<string, unknown>;
+    expect(schema["type"]).toBe("object");
+    expect((schema["required"] as string[]).sort()).toEqual(["comments", "version"]);
+    const properties = schema["properties"] as Record<string, unknown>;
+    expect(properties).toHaveProperty("comments");
+    expect(properties).toHaveProperty("criteria");
+
+    // No other phase, and no other provider, gets the flag — a formatting
+    // floor for the one phase and the one provider run 1467 actually hit.
+    for (const phase of ["build", "plan", "repair"] as const) {
+      expect(adapterFor("claude").argv({ ...ASK, phase }).join(" ")).not.toContain("--json-schema");
+    }
+    expect(adapterFor("codex").argv({ ...ASK, phase: "review" }).join(" ")).not.toContain("--json-schema");
+  });
+
   test("codex review phase gets a read-only sandbox, refusing approvals, and ignores the user's own config — never workspace-write", () => {
     const build = adapterFor("codex").argv({ ...ASK, phase: "build" });
     expect(build).toContain("workspace-write");
@@ -398,6 +420,26 @@ describe("claudeParse — the streaming envelope", () => {
     expect(errored.finalMessage).toBe("auth token expired"); // diagnostics survive
     expect(errored.promptConsumed).toBe(false); // prose is not proof
     expect(errored.initObserved).toBe(false); // no init event in this stream
+  });
+
+  test("run 1467's fix: a structured_output result (the --json-schema turn) wins over the plain result string", () => {
+    const structured = { version: 1, comments: [], criteria: [{ id: "c1", judgement: "upholds", note: "fine" }] };
+    const parsed = claude.parse(result({ structured_output: structured, result: "```json\n" + JSON.stringify(structured) + "\n```" }));
+    // The re-serialized structured field, not the fenced prose the model
+    // would have spoken without --json-schema — this is exactly what run
+    // 1467's malformed JSON (code fences around the object) needed.
+    expect(parsed.finalMessage).toBe(JSON.stringify(structured));
+    expect(JSON.parse(parsed.finalMessage ?? "null")).toEqual(structured);
+  });
+
+  test("no structured_output field: the plain result string still carries the reply, unchanged", () => {
+    const parsed = claude.parse(result({ result: "plain text reply" }));
+    expect(parsed.finalMessage).toBe("plain text reply");
+  });
+
+  test("a null structured_output field falls back to the plain result string", () => {
+    const parsed = claude.parse(result({ structured_output: null, result: "fallback" }));
+    expect(parsed.finalMessage).toBe("fallback");
   });
 
   test("a stream with no primary result gives the same nulls as an unparseable envelope", () => {

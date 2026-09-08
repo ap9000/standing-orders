@@ -1,5 +1,35 @@
 # Progress
 
+**2026-09-08 — Run 1467's fix: a strict `--json-schema` for claude review
+turns, and a bounded diagnostic for when one still slips through.** Run
+1467 proved reviewer isolation end to end but Opus's reply came back as
+JSON `parseReview` refused — a shape close but not exact, likely fenced
+or prefaced prose around the object. `provider.ts`'s `claudeArgv` now
+appends `--json-schema <schema>` to the review-phase invocation only
+(claude-only, review-phase-only — no other provider has the flag, no
+other phase asks for structured output): a formatting floor the CLI
+itself enforces, never a validator — `parseReview` stays the exact
+signed-ID gate, since only it holds the run's actual signed criteria.
+`claudeEnvelopeOf` now prefers the turn's `structured_output` field
+(present only under `--json-schema`) over the plain `result` string for
+`finalMessage`, re-serialized rather than passed through raw — the same
+preference `subscription-chat.ts`'s own `--json-schema` turn already
+applies. Second half: a malformed-review failure that still occurs now
+persists a bounded, sanitized parse diagnostic (`safeDiagnostic`,
+exported from `provider.ts` — the same control-char strip, secret scan,
+and byte cap every other provider diagnostic gets) into the run's
+stored reason and the request's `consumed_reason`, so a future failure
+explains itself — the structural problem list plus a best-effort excerpt
+of what the agent actually said — without needing a live repro. Every
+other failure reason (`dirty-scratch`, `timeout`, …) is unchanged byte
+for byte. New regressions: `provider.test.ts` proves the schema rides
+only claude+review and the `structured_output` preference (with and
+without the field, and a null field falling back); `reviewer.test.ts`
+proves the persisted diagnostic's shape and bound, that a secret-shaped
+spoken reply is withheld rather than quoted, and that a
+`structured_output` reply ingests exactly like a plain one. Suite 100
+files / 1902 tests (12 skipped).
+
 **2026-09-08 — Run 1464's fix: reviewer isolation — no MCP servers, no
 tool but reading, and no mailbox to hang on.** Run 1464 no-op'd after 8
 minutes and, per the operator's own read of it, loaded global MCP servers
