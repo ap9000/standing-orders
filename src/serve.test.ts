@@ -3525,7 +3525,7 @@ describe("the workbench (attended A1) and the live substrate", () => {
   test("selection renders the full task detail — forms and all — in the main pane, never polled", async () => {
     const cookie = await login();
     const html = await (await fetch(url("/workbench?t=needs-scope"), { headers: { cookie } })).text();
-    expect(html).toContain("This task is waiting on you: it has no scope.");
+    expect(html).toContain("No approved scope yet");
     expect(html).toContain("write the scope");
     // The poll targets the rail region, not the pane.
     expect(html).toContain('"wb-rail"');
@@ -6500,9 +6500,13 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(task).toContain("t-blocker is cancelled");
     expect(task).toContain("Open the blocker");
     expect(task).toContain('aria-label="dependency repair actions"');
+    expect(task).toContain('class="dependency-repair-replace"');
+    expect(task).toContain('class="dependency-repair-unlink"');
     expect(task).toContain('name="operation" value="replace"');
     expect(task).toContain('name="operation" value="unlink"');
     expect(task).not.toContain('name="operation" value="retry"');
+    expect(task).toContain(".dependency-repair-actions form > button[type=submit] { width: 100%; }");
+    expect(task).toContain(".dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: auto; }");
 
     const queue = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(queue).toContain('data-task="t-dependent"');
@@ -6863,7 +6867,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const html = await (await fetch(url("/t/t-shape"), { headers: { cookie } })).text();
     // Order: the mono eyebrow, then the title with its state chip, then the acts bar.
     const eyebrow = html.indexOf('<p class="meta task-eyebrow"><span class="mono">t-shape</span>');
-    const title = html.search(/<h1>shaped <span class="badge badge-[a-z]+">[a-z]+<\/span><\/h1>/);
+    const title = html.search(/<h1 class="task-main-title">shaped <span class="badge badge-[a-z]+">[a-z]+<\/span><\/h1>/);
     const bar = html.indexOf('<div class="acts-bar">');
     expect(eyebrow).toBeGreaterThan(-1);
     expect(title).toBeGreaterThan(eyebrow);
@@ -6873,6 +6877,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(barHtml).toContain('<span class="primary"><form method="post" action="/t/t-shape/requeue"');
     expect(barHtml).toContain("<button type=\"submit\">hold next attempt</button>");
     expect(barHtml).toContain('name="reason"');
+    expect(barHtml.indexOf('name="reason"')).toBeLessThan(barHtml.indexOf("hold next attempt"));
     // The rail is the property list, one row grammar for every key fact.
     const rail = railOf(html);
     expect(rail).toContain('<div class="card props">');
@@ -7231,7 +7236,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     });
     const page = await (await fetch(url("/t/t-yes"), { headers: { cookie } })).text();
     const ceremony = page.indexOf('<form method="post" action="/t/t-yes/approve" class="card approve-form approval-card" id="approve">');
-    const title = page.indexOf("<h1>needs the yes ");
+    const title = page.indexOf('<h1 class="task-main-title">needs the yes ');
     const bar = page.indexOf('<div class="acts-bar">');
     const layout = page.indexOf('<div class="task-layout">');
     expect(ceremony).toBeGreaterThan(title);

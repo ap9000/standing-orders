@@ -7177,14 +7177,16 @@ const STYLE = `
   .acts-bar .primary button:hover { background: color-mix(in srgb, var(--primary) 85%, var(--background)); }
   .acts-bar .act-hold input[type=text] { width: 10rem; min-height: 2.25rem; margin: 0; font-size: .8125rem; }
   .acts-why { margin: 0 0 .5rem; }
-  .dispatch-status { padding: .8rem .9rem; border-radius: var(--radius); }
+  .dispatch-status { padding: .8rem .9rem; border-radius: var(--radius); overflow: hidden; }
+  .dispatch-copy { display: flex; align-items: baseline; flex-wrap: wrap; gap: .2rem .35rem; min-width: 0; }
+  .dispatch-copy .meta { min-width: 0; }
   .dispatch-status[data-dispatch-status="terminal-dependency"] {
     color: var(--foreground); border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
     background: color-mix(in srgb, var(--warning-soft) 72%, var(--glass));
   }
-  .dispatch-status[data-dispatch-status="terminal-dependency"] > strong { color: var(--warning); }
+  .dispatch-status[data-dispatch-status="terminal-dependency"] .dispatch-copy > strong { color: var(--warning); }
   .dependency-repair-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin-top: .7rem; }
-  .dependency-repair-actions form { display: inline-flex; align-items: center; gap: .4rem; margin: 0; }
+  .dependency-repair-actions form { display: inline-flex; align-items: center; gap: .4rem; min-width: 0; max-width: 100%; margin: 0; }
   .dependency-repair-actions select { width: auto; max-width: 16rem; min-height: 2rem; margin: 0; font-size: .75rem; }
   .dependency-repair-actions button { min-height: 2rem; padding: .3rem .65rem; font-size: .75rem; }
   .approve-form { margin: .75rem 0; }
@@ -7252,7 +7254,7 @@ const STYLE = `
     .acts-bar .act-hold input[type=text] { flex: 1 1 8rem; width: auto; }
     .dependency-repair-actions { align-items: stretch; }
     .dependency-repair-actions form { flex: 1 1 10rem; }
-    .dependency-repair-actions form:has(select) { flex-basis: 100%; }
+    .dependency-repair-actions .dependency-repair-replace { flex-basis: 100%; }
     .dependency-repair-actions select { flex: 1 1 auto; min-width: 0; max-width: none; }
     .dependency-repair-actions button { white-space: nowrap; }
     .split { grid-template-columns: 1fr; }
@@ -7910,6 +7912,35 @@ button { min-height: 44px; }
   form.card button[type=submit], form > button[type=submit] { width: 100%; }
   input[type=text], input[type=password] { width: 100%; max-width: 100%; box-sizing: border-box; }
   main { padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
+  /* Task actions are composed for a thumb, not allowed to wrap according
+     to their intrinsic text widths. Every row owns the available width. */
+  .task-eyebrow { line-height: 1.55; overflow-wrap: anywhere; }
+  .task-main-title { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem .4rem; }
+  .dispatch-copy { display: grid; gap: .2rem; }
+  .dispatch-copy > strong { line-height: 1.35; }
+  .dependency-repair-actions { display: grid; grid-template-columns: 1fr; gap: .5rem; margin-top: .75rem; }
+  .dependency-repair-actions form { display: flex; width: 100%; max-width: none; margin: 0; }
+  .dependency-repair-actions form > button[type=submit] { width: 100%; }
+  .dependency-repair-actions .dependency-repair-replace {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem;
+  }
+  .dependency-repair-actions .dependency-repair-replace > select { width: 100%; min-width: 0; margin: 0; }
+  .dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: auto; }
+  .acts-bar { display: grid; grid-template-columns: minmax(0, 1fr); gap: .5rem; margin: .75rem 0 .35rem; }
+  .acts-bar > *, .acts-bar form.inline { min-width: 0; margin: 0; }
+  .acts-bar .primary { display: block; width: 100%; }
+  .acts-bar .primary form { width: 100%; margin: 0; }
+  .acts-bar .primary form.inline > button[type=submit] { width: 100%; margin: 0; }
+  .acts-bar .act-hold {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    gap: .5rem; width: 100%;
+  }
+  .acts-bar .act-hold input[type=text] { width: 100%; min-width: 0; margin: 0; }
+  .acts-bar .act-hold > button[type=submit] { width: auto; white-space: nowrap; }
+  .acts-why { margin: .25rem 0 .85rem; font-size: .75rem; line-height: 1.5; }
+  .acts-why-plan { display: none; }
+  .task-scope-needed { padding: .85rem 1rem; }
+  .task-scope-needed p { margin: .2rem 0; }
   /* A decision option on a phone: the answer is the full-width thumb
      target; its recommendation and consequence share the line beneath. */
   .decide-option > button { flex: 0 0 100%; width: 100%; }
@@ -7927,6 +7958,14 @@ button { min-height: 44px; }
   /* The title sits beside the grip and wraps within its own box; the
      chips flow after it, never above the name. */
   .queue-card p.row > a:first-of-type { flex: 1 1 12rem; min-width: 0; }
+}
+@media (max-width: 30rem) {
+  .dependency-repair-actions .dependency-repair-replace { grid-template-columns: minmax(0, 1fr); }
+  .dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: 100%; }
+}
+@media (max-width: 26rem) {
+  .acts-bar .act-hold { grid-template-columns: minmax(0, 1fr); }
+  .acts-bar .act-hold > button[type=submit] { width: 100%; }
 }
 .next-pager { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem .75rem; margin: 0 0 .75rem; }
 .next-pager .skip {
@@ -12102,7 +12141,7 @@ function taskBody(data: {
   const dispatchStatus = (() => {
     const box = (kind: "ok" | "problem", title: string, detail: string, status?: string, controls = ""): string =>
       `<div class="${kind === "problem" ? "problem" : "answered"} dispatch-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}">` +
-      `<strong>${escape(title)}</strong> <span class="meta">${detail}</span>${controls}</div>`;
+      `<div class="dispatch-copy"><strong>${escape(title)}</strong><span class="meta">${detail}</span></div>${controls}</div>`;
 
     if (task.state !== "done") {
       const diagnosis = data.dispatch ?? null;
@@ -12137,15 +12176,15 @@ function taskBody(data: {
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
           `<input type="hidden" name="blocker" value="${escape(blocker.id)}">`;
         const retry = blocker.admitted && blocker.state === "failed"
-          ? `<form method="post" action="${endpoint}">${common}<input type="hidden" name="operation" value="retry"><button type="submit">Retry blocker</button></form>`
+          ? `<form method="post" action="${endpoint}" class="dependency-repair-retry">${common}<input type="hidden" name="operation" value="retry"><button type="submit">Retry blocker</button></form>`
           : "";
         const unlink =
-          `<form method="post" action="${endpoint}">${common}<input type="hidden" name="operation" value="unlink"><button type="submit" class="quiet">Stop waiting</button></form>`;
+          `<form method="post" action="${endpoint}" class="dependency-repair-unlink">${common}<input type="hidden" name="operation" value="unlink"><button type="submit" class="quiet">Stop waiting</button></form>`;
         const standing = new Set((data.waitsFor ?? []).map(one => one.id));
         const replacements = (data.waitCandidates ?? []).filter(one => !standing.has(one.id));
         const replace = replacements.length === 0
           ? ""
-          : `<form method="post" action="${endpoint}">${common}<input type="hidden" name="operation" value="replace">` +
+          : `<form method="post" action="${endpoint}" class="dependency-repair-replace">${common}<input type="hidden" name="operation" value="replace">` +
             `<select name="replacement" aria-label="replacement dependency">${replacements.map(one => `<option value="${escape(one.id)}">${escape(one.title)}</option>`).join("")}</select>` +
             `<button type="submit" class="quiet">Replace blocker</button></form>`;
         return `<div class="dependency-repair-actions" aria-label="dependency repair actions">${retry}${replace}${unlink}</div>`;
@@ -12872,19 +12911,19 @@ function taskBody(data: {
   const canPlan = data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined);
   const primaryAct =
     stalled && !data.claimed
-      ? { html: act("requeue", "retry — branch and workspace kept"), why: "resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased" }
+      ? { html: act("requeue", "retry — branch and workspace kept"), why: "resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased", whyClass: "retry" }
       : canPlan
-        ? { html: act("plan", "plan first"), why: "plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it" }
+        ? { html: act("plan", "plan first"), why: "plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it", whyClass: "plan" }
         : data.plan === "requested"
           ? null
         : task.state === "queued" && !data.claimed && (data.position?.position ?? 1) > 1
-          ? { html: act("next", "build this next"), why: "moves it to the front of its queue — the next free worker looks here first; approval is still required" }
+          ? { html: act("next", "build this next"), why: "moves it to the front of its queue — the next free worker looks here first; approval is still required", whyClass: "next" }
           : null;
   const holdAct =
     `<form method="post" action="${taskHref(task.id)}/hold" class="inline act-hold">` +
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-    `<button type="submit">hold next attempt</button>` +
-    `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason"></form>`;
+    `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason">` +
+    `<button type="submit">hold next attempt</button></form>`;
   const actsBar = [
     `<div class="acts-bar">`,
     // While a ceremony leads the page, no other act competes as primary.
@@ -12895,7 +12934,7 @@ function taskBody(data: {
     holdAct,
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     `</div>`,
-    primaryAct === null ? "" : `<p class="meta acts-why">${primaryAct.why}</p>`,
+    primaryAct === null ? "" : `<p class="meta acts-why acts-why-${primaryAct.whyClass}">${primaryAct.why}</p>`,
     data.claimed
       ? `<p class="meta acts-why">a worker is building this right now — <em>hold next attempt</em> stops the one after it; cancel waits for the current build to finish${
           stalled ? "; retry becomes available after this attempt finishes" : ""
@@ -12935,7 +12974,7 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`,
-    `<h1>${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
+    `<h1 class="task-main-title">${escape(task.title)} <span class="badge badge-${escape(task.state)}">${escape(task.state)}</span></h1>`,
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     approveForm === "" && data.plan !== "requested" ? dispatchStatus : "",
@@ -12987,9 +13026,8 @@ function taskBody(data: {
         // first" would recommend a road that refuses.
         ? `<div class="card"><p><strong>This task is waiting on you: an agent filed it, and it has no scope.</strong></p>` +
           `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span> — nothing plans, claims, or runs until you write a scope below and sign it. Your signature runs their request.</p></div>`
-        : `<div class="card"><p><strong>This task is waiting on you: it has no scope.</strong></p>` +
-          `<p class="meta">The scope is what you approve: the goal, what is off-limits, which paths it may touch. ` +
-          `<a href="#scope">Write it below</a>, or use <strong>plan first</strong> to have an agent draft it from the repository.</p></div>`
+        : `<div class="card task-scope-needed"><p><strong>No approved scope yet</strong></p>` +
+          `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
       : "",
     approveForm,
     approveForm === "" ? "" : actsBar,
@@ -13036,7 +13074,7 @@ function taskBody(data: {
     section(
       "scope",
       ["<h2>scope</h2>", scopeCard, revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
-      data.plan !== "requested" && approveForm === "",
+      data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan),
     ),
     section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),

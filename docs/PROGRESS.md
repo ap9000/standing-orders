@@ -1,5 +1,15 @@
 # Progress
 
+**2026-09-08 — The task page now composes for phones instead of wrapping by
+accident.** At phone widths, dependency repair has explicit full-width rows
+and stacks its replacement picker before text or buttons can clip; the primary
+task act owns the content width; the hold reason and act form a bounded row and
+stack again on the narrowest screens. Dispatch copy, title metadata, and the
+no-scope prompt are denser, while the long manual scope editor stays folded
+when the repository planner is the recommended path. A real-browser pass at
+320, 390, and 430 CSS pixels found no horizontal overflow across inbox, chat,
+board, builds, menu, task intake, or the repaired task page.
+
 **2026-09-08 — Never Stuck dependency repair is an action, not advice.** A
 failed or cancelled prerequisite now renders an inline repair surface on the
 dependent task: retry a failed blocker without dropping the edge, atomically
