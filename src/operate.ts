@@ -175,6 +175,7 @@ import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, INSTALLATION
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validModelId, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
+import { recognizesEligible } from "./exhaustion.js";
 import {
   build,
   proveApprovedProfile,
@@ -4477,16 +4478,36 @@ async function providersCommand(
   for (const { id, facts, version, installed, identity } of probed) {
     const lastSuccess = store.providerLastSuccess(id);
     const keyPresent = facts.requiresEnv === null ? null : (process.env[facts.requiresEnv] ?? "") !== "";
+    const installedVersion = installed ? (version.stdout.trim().split("\n")[0] ?? "") : null;
+    const authMode = readAuthMode(id);
+    const attestation = attestationOf(id);
+    const versionProvenAtSpawn =
+      installedVersion !== null && attestation !== null && versionInRange(installedVersion, attestation);
+    const exhaustionRecognized =
+      versionProvenAtSpawn && recognizesEligible(id, installedVersion, authMode);
     report.push({
       provider: id,
       binary: facts.binary,
       installed,
-      version: installed ? (version.stdout.trim().split("\n")[0] ?? "") : null,
+      version: installedVersion,
       identity,
       lastSuccessfulRun: lastSuccess,
       ...(keyPresent === null ? {} : { keyPresent, keyEnv: facts.requiresEnv }),
       measuresCost: facts.measuresCost,
       configuredPhases: configured.get(id) ?? [],
+      fallbackReadiness: {
+        authMode,
+        versionProvenAtSpawn,
+        exhaustionRecognized,
+        automaticSwitchArmed: exhaustionRecognized,
+        reason: exhaustionRecognized
+          ? "this build can recognize an exhausted credential for the installed provider version"
+          : attestation === null
+            ? "this provider does not yet prove its version at spawn, so exhaustion classification fails closed"
+            : !versionProvenAtSpawn
+              ? "the installed provider version is not inside this build's attested range"
+              : "no reviewed exhaustion fixture recognizes this auth mode at the installed provider version",
+      },
       // The audit: facts about the harness, reported before any of them is
       // enforced. What transport we read, whether a session can resume,
       // which init signal exists, what hermetic flag we deliberately do NOT
@@ -4527,6 +4548,17 @@ async function providersCommand(
     write(`  cost           ${one["measuresCost"] === true ? "measured in dollars per run" : "tokens only — runs land as UNMEASURED; ceilinged routines fail closed on them"}`);
     const phases = one["configuredPhases"] as string[];
     if (phases.length > 0) write(`  configured     ${phases.join(", ")} (installation)`);
+    const fallback = one["fallbackReadiness"] as {
+      automaticSwitchArmed: boolean;
+      reason: string;
+    };
+    write(
+      `  auto fallback  ${
+        fallback.automaticSwitchArmed
+          ? "armed — a configured and approved chain may advance after proven exhaustion"
+          : `not armed — ${fallback.reason}`
+      }`,
+    );
     const audit = one["audit"] as ProviderAudit;
     write(`  transport      ${audit.transport}${audit.initSignal === "none" ? " — no init signal; a failed run cannot say whether the harness came up" : ` — init signal: ${audit.initSignal}`}`);
     write(`  resume         ${audit.resume}`);

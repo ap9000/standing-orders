@@ -75,6 +75,23 @@ export type Runner = (
   options?: RunOptions,
 ) => Promise<ExecResult>;
 
+/**
+ * The native shell for an operator-approved repository command. There are
+ * exactly two consumers: dependency setup before an agent starts, and the
+ * verification command after it commits. Keeping the choice here prevents a
+ * Windows worker from trying to spawn `/bin/sh` while leaving the approved
+ * command itself byte-for-byte unchanged.
+ */
+export function approvedCommandShell(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+  windowsShell = process.env["ComSpec"] ?? process.env["COMSPEC"] ?? "cmd.exe",
+): { file: string; args: string[]; display: string } {
+  return platform === "win32"
+    ? { file: windowsShell, args: ["/d", "/s", "/c", command], display: `cmd.exe /d /s /c ${command}` }
+    : { file: "/bin/sh", args: ["-c", command], display: `sh -c ${command}` };
+}
+
 /** The attended dispatch (Parity II Phase 2): the authorization is the
  * authority, the coordinator takes ownership at the spawn point, and the
  * builder returns `held` without settling. */
@@ -723,7 +740,8 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       };
     }
     const runSetup = request.setup ?? run;
-    const made = await runSetup("/bin/sh", ["-c", setupWanted.command], {
+    const shell = approvedCommandShell(setupWanted.command);
+    const made = await runSetup(shell.file, shell.args, {
       cwd: worktree,
       timeoutMs: setupWanted.timeoutMs,
       envAllowlist: SETUP_ENV_ALLOWLIST,
@@ -1584,7 +1602,8 @@ async function settleProof(
     verifyCommand = { configured: true, ran: false, attemptFailed: true };
   } else {
     const runner = request.verify ?? run;
-    const made = await runner("/bin/sh", ["-c", configured.command], {
+    const shell = approvedCommandShell(configured.command);
+    const made = await runner(shell.file, shell.args, {
       cwd: worktree,
       timeoutMs: configured.timeoutMs,
       envAllowlist: SETUP_ENV_ALLOWLIST,
@@ -1596,7 +1615,7 @@ async function settleProof(
       const combined = `$ ${configured.command}\n(exit ${made.code}${made.timedOut ? ", timed out" : ""})\n\n--- stdout ---\n${made.stdout}\n\n--- stderr ---\n${made.stderr}`;
       const hits = scanForSecrets(combined);
       const logged = Buffer.from(hits.length > 0 ? redactSecretLines(combined, hits) : combined, "utf8");
-      storeEvidence(store, root, runId, "check-log", "check-log.txt", logged, `sh -c "${configured.command}" (exit ${made.code})`, now(), {
+      storeEvidence(store, root, runId, "check-log", "check-log.txt", logged, `${shell.display} (exit ${made.code})`, now(), {
         redacted: hits.length > 0,
         captureStatus: "ok",
       });

@@ -1330,10 +1330,22 @@ describe("providers — identification without spend", () => {
     const report = JSON.parse(lines.join("\n")).providers as Record<string, unknown>[];
     const codex = report.find(one => one["provider"] === "codex");
     expect(codex).toMatchObject({ installed: true, identity: "Logged in using ChatGPT", measuresCost: false });
+    expect(codex?.["fallbackReadiness"]).toMatchObject({
+      authMode: "subscription",
+      versionProvenAtSpawn: false,
+      exhaustionRecognized: false,
+      automaticSwitchArmed: false,
+    });
     const claude = report.find(one => one["provider"] === "claude");
     // No non-spending auth probe exists for claude: identity stays null,
     // history stands in ("never" on a fresh database).
     expect(claude).toMatchObject({ identity: null, lastSuccessfulRun: null, measuresCost: true });
+    expect(claude?.["fallbackReadiness"]).toMatchObject({
+      authMode: "subscription",
+      versionProvenAtSpawn: false,
+      exhaustionRecognized: false,
+      automaticSwitchArmed: false,
+    });
     const openrouter = report.find(one => one["provider"] === "openrouter");
     expect(openrouter).toHaveProperty("keyPresent");
     // Only --version and login status were ever run — nothing that spends.

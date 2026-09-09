@@ -10,6 +10,7 @@
     "test": "vitest run",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
+    "certify:provider": "npm run build && node scripts/provider-canary.mjs",
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "repository": {
@@ -53,6 +54,7 @@
     "vitest": "^4.1.10"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts/provider-canary.mjs"
   ]
 }

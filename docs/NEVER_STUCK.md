@@ -70,11 +70,16 @@ recovery, and evidence capture end to end.
 
 macOS and Linux run the full test suite on Node 22 and 24. Windows CI now runs
 type-check, production build, native daemon/link behavior, and the Never Stuck
-dispatch contract on both Node versions. That is a useful first gate, not a
-claim of full parity: physical Task Scheduler installation and real Codex,
-Claude, Git, and worktree executions on Windows remain the next bounded
-portability slice. POSIX-only fake executables in the test harness should be
-replaced deliberately rather than hidden behind blanket platform skips.
+dispatch contract on both Node versions. Approved dependency setup and
+post-build verification use the native command shell on all three platforms.
+The real-provider canary in [CERTIFICATION.md](CERTIFICATION.md) proves Claude
+and Codex planning, approval, worktree execution, evidence, and duplicate
+dispatch protection on macOS and is ready to run unchanged on Windows. That is
+a useful gate, not a claim of full parity: physical Task Scheduler installation,
+post-reboot recovery, and the same real-provider canaries on Windows remain the
+next bounded portability slice. POSIX-only fake executables in the broader test
+harness should be replaced deliberately rather than hidden behind blanket
+platform skips.
 
 ## Deliberate non-goals
 

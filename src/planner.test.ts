@@ -33,6 +33,7 @@ describe("planning mode, against real git", () => {
   let pool: string;
   let lines: string[] = [];
   let prompts: string[] = [];
+  let plannerArgv: string[][] = [];
 
   const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
 
@@ -50,6 +51,7 @@ describe("planning mode, against real git", () => {
 
   /** A planner that concludes with a well-formed plan. */
   const planningAgent: Runner = async (_file, args, options) => {
+    plannerArgv.push([...args]);
     const cwd = options?.cwd ?? "";
     const prompt = String(args[args.indexOf("-p") + 1] ?? "");
     prompts.push(prompt);
@@ -143,6 +145,7 @@ describe("planning mode, against real git", () => {
     db = join(base, "queue.db");
     pool = join(base, "pool");
     prompts = [];
+    plannerArgv = [];
     await mkdir(repo, { recursive: true });
     await git(["init", "-q", "-b", "main"]);
     await git(["config", "user.email", "test@example.com"]);
@@ -214,6 +217,7 @@ describe("planning mode, against real git", () => {
     expect(planned).toBe(EXIT.ok);
     expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "planned" }));
     expect(prompts.some(one => one.includes("Per-user or per-tenant?") && one.includes("user"))).toBe(true);
+    expect(plannerArgv.some(args => args[args.indexOf("--permission-mode") + 1] === "acceptEdits")).toBe(true);
 
     const after = openStore(db);
     const scope = after.getScope("limiter");

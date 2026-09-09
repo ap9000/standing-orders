@@ -170,6 +170,12 @@ function plannerBrief(
     "ID, and the evidence kinds that will be required to answer it. The",
     "operator signs the id, the statement, and the evidence kinds — `how`",
     "is advisory guidance only and is never part of what is signed.",
+    "Choose the narrowest evidence that can actually prove each outcome:",
+    "`check` for deterministic executable behavior, `changed-path` for the",
+    "set of files changed, and `screenshot` for rendered UI. Do not add",
+    "redundant evidence kinds. Use `manual-review` only for a genuinely",
+    "judgmental claim those other kinds cannot establish; requiring it",
+    "guarantees the task will still need a person before it reads verified.",
   ].join("\n");
 }
 
@@ -262,9 +268,13 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
         phase: "plan",
         brief: plannerBrief(request.taskTitle, mailbox, planFile, request.answers ?? []),
         maxTurns,
-        // Read-only by policy AND by check: plan mode is the permission
-        // posture; the clean-tree proof below is the law.
-        permissionMode: request.permissionMode ?? "plan",
+        // Claude's built-in `plan` permission mode diverts writes into its
+        // own ~/.claude/plans file and refuses the nonce-bound handoff file
+        // this protocol requires. `acceptEdits` admits that one write; the
+        // clean-tree proof below is still the law and rejects every path
+        // except this run's plan/question file. Codex and Gemini map this
+        // through their own non-bypass planning argv.
+        permissionMode: request.permissionMode ?? "acceptEdits",
         skipPermissions: false,
         resumeSession: null,
         // Minted identity where the harness supports it (Phase 3 A5) —

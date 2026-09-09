@@ -328,10 +328,12 @@ claims settle the race), it just is not needed.
 
 An honesty note for Windows: every pull request now type-checks, builds, and
 runs the native Task Scheduler/link tests plus the core dispatch contract on
-Windows with Node 22 and 24. The scheduled-task definition follows the Task
+Windows with Node 22 and 24. Approved setup and verification commands use
+Windows' native command shell. The scheduled-task definition follows the Task
 Scheduler XML schema and every `schtasks` interaction is covered by scripted
-tests. A physical Windows install has not yet been certified; the broader
-provider/worktree end-to-end matrix is the next portability slice.
+tests. A physical Windows install has not yet been certified; the exact
+real-provider and post-reboot checklist is in the
+[Never Stuck release certification](https://github.com/ap9000/standing-orders/blob/main/docs/CERTIFICATION.md).
 
 ### Unattended permissions
 
