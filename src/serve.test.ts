@@ -599,7 +599,11 @@ describe("provider keys & auth mode, over HTTP", () => {
     // The richer card structure and the unified add affordance render.
     expect(page).toContain("project-card");
     expect(page).toContain("add a project");
+    expect(page).toContain("project-add-actions");
+    expect(page).toContain("Choose a local folder");
+    expect(page).toContain("Add from GitHub");
     // The path-typing road is still reachable (now behind a details).
+    expect(page).toContain("Enter an exact path instead");
     expect(page).toContain("path on this server");
     rmSync(repoDir, { recursive: true, force: true });
   });

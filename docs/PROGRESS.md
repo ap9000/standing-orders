@@ -1,5 +1,14 @@
 # Progress
 
+**2026-09-08 — Adding a project now looks and acts like a primary action.**
+The Projects page no longer renders its local-folder and GitHub choices as
+tiny status badges. A stronger section heading now leads to two full action
+tiles with drawn icons, plain-language supporting copy, hover/focus feedback,
+and 80px desktop / 84px mobile targets. They sit side by side on a desk and
+stack without clipping at 390px; exact-path entry remains the clearly tertiary
+option. Route coverage, typecheck, production build, and real-browser desktop
+and mobile checks passed.
+
 **2026-09-08 — One machine service now manages every saved project.** The
 project registry now stores both explicitly added Git repositories and the
 project folders approved once with `standing-orders up --project-root <dir>`.

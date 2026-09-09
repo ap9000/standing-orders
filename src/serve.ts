@@ -7138,6 +7138,54 @@ const STYLE = `
   .project-card a.project-name:hover, .project-card button.project-name:hover { text-decoration: underline; }
   .project-card button.badge { min-height: auto; box-shadow: none; cursor: pointer; }
   .project-card button.badge:hover, .project-card a.badge:hover { border-color: var(--input); }
+  /* Adding a project is the page's primary job, not badge-sized metadata.
+   * Two roomy action tiles make both roads obvious on a desk and give each
+   * one a generous thumb target on a phone. The manual path stays tertiary. */
+  .project-add-card { margin-top: 1.25rem; padding: 1.25rem; }
+  .project-add-card h2.project-add-title {
+    margin: 0; color: var(--foreground); font-size: 1.0625rem; line-height: 1.35;
+    letter-spacing: -.015em;
+  }
+  .project-add-intro { margin: .25rem 0 0; max-width: 36rem; }
+  .project-add-actions {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .625rem; margin-top: 1rem;
+  }
+  .project-add-action {
+    display: grid; grid-template-columns: 2.75rem minmax(0, 1fr) auto;
+    align-items: center; gap: .75rem; min-height: 5rem; padding: .75rem .875rem;
+    border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 1px);
+    background: color-mix(in srgb, var(--glass-strong) 82%, transparent);
+    color: var(--foreground); text-decoration: none;
+    box-shadow: 0 1px 0 var(--glass-highlight) inset;
+    transition: transform .15s ease, background .15s, border-color .15s, box-shadow .15s;
+  }
+  .project-add-action:hover {
+    border-color: color-mix(in srgb, var(--border) 50%, var(--muted-foreground));
+    background: var(--card); text-decoration: none; transform: translateY(-1px);
+    box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
+  }
+  .project-add-action:active { transform: translateY(0); }
+  .project-add-icon {
+    display: grid; place-items: center; width: 2.75rem; height: 2.75rem;
+    border: 1px solid var(--border); border-radius: .75rem;
+    background: var(--muted); color: var(--foreground);
+  }
+  .project-add-icon svg { width: 1.125rem; height: 1.125rem; }
+  .project-add-copy { min-width: 0; }
+  .project-add-copy strong { display: block; font-size: .9375rem; line-height: 1.35; }
+  .project-add-copy small {
+    display: block; margin-top: .175rem; color: var(--muted-foreground);
+    font-size: .75rem; font-weight: 400; line-height: 1.4;
+  }
+  .project-add-arrow { color: var(--muted-foreground); font-size: 1rem; }
+  .project-add-more { margin-top: .875rem; border-top: 1px solid var(--border); }
+  .project-add-more > summary {
+    display: flex; align-items: center; min-height: 2.75rem; width: fit-content;
+    color: var(--muted-foreground); cursor: pointer; font-size: .8125rem; font-weight: 500;
+  }
+  .project-add-more > summary:hover { color: var(--foreground); }
+  .project-add-more > .card { margin: 0 0 .25rem; }
   .side nav { display: flex; flex-direction: column; gap: .125rem; }
   /* Inline decision options: neutral buttons — the card's amber outline is
    * the attention signal; recommendation is a neutral badge, never amber. */
@@ -7453,6 +7501,10 @@ const STYLE = `
       width: .375rem; height: .375rem; border-radius: 9999px; background: var(--brand);
     }
     .content > main { padding: 1rem 1rem calc(4.5rem + env(safe-area-inset-bottom, 0rem)); }
+    .project-add-card { padding: 1rem; }
+    .project-add-actions { grid-template-columns: minmax(0, 1fr); }
+    .project-add-action { min-height: 5.25rem; padding: .75rem; }
+    .project-add-more > summary { width: 100%; }
   }
 
   /* /menu mirrors the rail's workflows/admin grouping as plain headed
@@ -11807,18 +11859,37 @@ function projectsPage(
   const recentItems = recent.map(one => ({ path: one.path, name: one.name, note: `last opened ${when(one.lastOpenedAt)}` }));
   const candidateItems = candidates.map(path => ({ path, name: projectName(path), note: "seen in the queue" }));
 
-  // The two ways to ADD a project, side by side and honest about what each
-  // needs: browse this machine's filesystem, or paste a GitHub repo.
+  // The two ways to ADD a project are the page's large, primary actions:
+  // browse this machine, or choose a GitHub repository. Manual path entry
+  // stays available as the clearly secondary expert road.
+  const addAction = (href: string, paths: string, title: string, detail: string): string =>
+    `<a class="project-add-action" href="${href}">` +
+    `<span class="project-add-icon">${strokeIcon(paths)}</span>` +
+    `<span class="project-add-copy"><strong>${escape(title)}</strong><small>${escape(detail)}</small></span>` +
+    `<span class="project-add-arrow" aria-hidden="true">\u2192</span></a>`;
   const addCard = [
-    `<div class="card">`,
-    `<h2 style="margin-top:0">add a project</h2>`,
+    `<div class="card project-add-card">`,
+    `<h2 class="project-add-title">add a project</h2>`,
+    `<p class="meta project-add-intro">Choose where the project already lives. Standing Orders will remember it and connect its work automatically.</p>`,
+    `<div class="project-add-actions">`,
     browsable
-      ? `<p class="row"><a class="badge" href="/projects/browse">\ud83d\uddc2 browse this machine's folders \u2192</a></p>`
-      : `<p class="meta">choose a projects folder once with <code>standing-orders up --project-root &lt;dir&gt;</code>. Standing Orders remembers it after that.</p>`,
-    onboard === null ? "" : `<p class="row"><a class="badge" href="/projects/github">see your GitHub repositories \u2192</a></p>`,
+      ? addAction("/projects/browse", FOLDER_PATHS, "Choose a local folder", "Browse the project folders on this machine")
+      : "",
+    onboard === null
+      ? ""
+      : addAction(
+          "/projects/github",
+          `<circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
+          "Add from GitHub",
+          "Choose from repositories available to your GitHub login",
+        ),
+    `</div>`,
+    browsable
+      ? ""
+      : `<p class="meta">Choose a projects folder once with <code>standing-orders up --project-root &lt;dir&gt;</code>. Standing Orders remembers it after that.</p>`,
     onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
-    `<details style="margin-top:.5rem"><summary class="meta">or type an exact path</summary>`,
-    `<form method="post" action="/projects/open" class="card" style="margin-top:.4rem">`,
+    `<details class="project-add-more"><summary>Enter an exact path instead</summary>`,
+    `<form method="post" action="/projects/open" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
     `<button type="submit">open project</button>`,
