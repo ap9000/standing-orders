@@ -74,9 +74,26 @@ visible provenance and an operator-controlled reset.
 
 ## Current focus
 
-Priority 2 is active. Priority 1 is implemented and has passed every
+Priority 3 is active. Priority 1 is implemented and has passed every
 pre-Windows gate; only the physical-machine and real account-exhaustion checks
-listed above remain. The first three Priority 2 slices have landed already:
+listed above remain. Priority 2's proof contract, independent review, concise
+result receipt, and annotated revision flow have landed.
+
+The first Priority 3 slice closes the focused chat's request-to-result loop
+without introducing a second workflow engine. A confirmed task proposal now
+continues directly into its task conversation. That conversation shows one
+server-derived journey from requested → planned → approved → building → result,
+offers the existing digest-bound, password-step-up approval inline, refreshes
+live execution state without replacing the composer or losing typed text,
+answers durable blocking decisions and returns to the same chat, and lands on
+the evidence-backed result receipt with review, annotation, and revision
+controls. Approval nonces, decision rows, dispatch diagnoses, publications,
+and proof artifacts remain the same records used by the task and run pages;
+chat is a cohesive control surface over them, not a chat-only copy. A scope
+that changes during live polling asks for a secure page refresh instead of
+injecting a password form into an already-running document.
+
+The first three Priority 2 slices landed already:
 completion carries a typed, hash-addressed proof the plane
 adjudicates against evidence it captured itself, rather than an agent's own
 assertion; as of Acceptance Contract v2, that proof answers a rubric the

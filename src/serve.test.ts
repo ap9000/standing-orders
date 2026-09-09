@@ -12,7 +12,7 @@ import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire, release } from "./claim.js";
 import { register, hashToken } from "./runner.js";
-import { addApprover, approve, propose } from "./scope.js";
+import { addApprover, approvalOf, approve, propose } from "./scope.js";
 import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
@@ -1271,8 +1271,10 @@ describe("the operations console", () => {
     expect(chat).toContain('data-card-kind="result-receipt"');
     expect(chat).toContain("1/1 acceptance criteria passed");
     expect(chat).toContain("2 files · +14 −3");
-    expect(chat).toContain(`href="/r/${run}">Review full evidence</a>`);
-    expect(chat).toContain('href="/t/t-receipt">Open task overview →</a>');
+    expect(chat).toContain(`href="/r/${run}">Review & annotate</a>`);
+    expect(chat).toContain('href="#latest">Request changes in chat →</a>');
+    expect(chat).toContain('aria-label="task progress"');
+    expect(chat).toContain("Complete");
     expect(chat).not.toContain("Discuss or request changes →");
     expect(chat).not.toContain("Get this task running");
   });
@@ -6761,8 +6763,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // model-authored summary or a separate result record.
     const chat = await (await fetch(url("/chat?task=t-proof"), { headers: { cookie } })).text();
     expect(chat).toContain('class="card completion-receipt" data-card-kind="result-receipt"');
-    expect(chat).toContain(`href="/r/${run}">Review full evidence</a>`);
-    expect(chat).toContain('href="/t/t-proof">Open task overview →</a>');
+    expect(chat).toContain(`href="/r/${run}">Review & annotate</a>`);
+    expect(chat).toContain('href="#latest">Request changes in chat →</a>');
     expect(chat).not.toContain("Discuss or request changes →");
 
     store.saveProofVerdict(run, "refuted", ["claimed changed path not in the sealed diff: src/other.ts"], T0);
@@ -7600,11 +7602,31 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain('class="chat-workspace task-chat-workspace"');
     expect(html).toContain('aria-label="current task"');
     expect(html).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
-    expect(html).toContain('href="/t/a#approve">Get this task running</a>');
+    expect(html).toContain('aria-label="task progress"');
+    expect(html).toContain("Review the plan & start");
+    expect(html).toContain('action="/t/a/approve"');
     expect(html).toContain('name="return" value="/chat?task=a"');
+    expect(html).toContain('data-poll="0"');
     expect(html).not.toContain('id="chat-project-panel"');
     expect(html).not.toContain('data-card-kind="fleet-overview"');
     const csrf = csrfFrom(html);
+    const safeFragment = await (await fetch(url("/chat/task-status?task=a"), { headers: { cookie } })).text();
+    expect(safeFragment).toContain("Refresh this conversation to open the secure approval step.");
+    expect(safeFragment).not.toContain('type="password"');
+
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(html)?.[1];
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(html)?.[1];
+    if (nonce === undefined || digest === undefined) throw new Error("no focused-chat approval ceremony");
+    const approved = await post(cookie, "/t/a/approve", { csrf, nonce, digest, token: approverToken, return: "/chat?task=a" });
+    expect(approved.status).toBe(303);
+    expect(approved.headers.get("location")).toBe("/chat?task=a");
+    expect(approvalOf(store.getScope("a"))).toMatchObject({ approved: true, by: "alex" });
+    html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(html).toContain('data-poll="1"');
+    expect(html).not.toContain('action="/t/a/approve"');
+    const fragment = await (await fetch(url("/chat/task-status?task=a"), { headers: { cookie } })).text();
+    expect(fragment).toContain('id="task-chat-live"');
+    expect(fragment).toContain('data-poll="1"');
 
     const minted = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5", token: approverToken, return: "/chat?task=a" });
     expect(minted.status).toBe(303);
@@ -7642,6 +7664,66 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(store.listSteerNotes(store.refFor("built-in", "a").id)).toMatchObject([
       { note: "Polish the compact mobile navigation before broadening the sidebar.", author: "alex", authorshipState: "verified", attachedRun: null },
     ]);
+  });
+
+  test("a focused chat answers a blocking decision and returns to the same conversation", async () => {
+    const ref = store.refFor("built-in", "a").id;
+    const scope = store.getScope("a");
+    if (scope === null) throw new Error("no scope");
+    expect(approve(store, "a", "alex", clockNow, scope.digest, approverToken)).toMatchObject({ ok: true });
+    const run = store.startRun({ taskRef: ref, leaseId: "decision-lease", runner: "builder", branch: "standing-orders/a", worktree: "/tmp/a", now: clockNow });
+    const decision = store.saveDecision({
+      run,
+      urgency: "blocking",
+      recap: "The layout can preserve or replace the existing navigation.",
+      question: "Keep the familiar navigation structure?",
+      options: [
+        { id: "keep", label: "Keep it", consequence: "The information architecture stays familiar.", reversible: true },
+        { id: "replace", label: "Replace it", consequence: "The old structure is removed.", reversible: false },
+      ],
+      recommendation: "keep",
+    }, clockNow);
+    const cookie = await login();
+    const html = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    const csrf = csrfFrom(html);
+    expect(html).toContain("Keep the work moving");
+    expect(html).toContain(`action="/d/${decision}/answer"`);
+    expect(html).toContain('name="return" value="/chat?task=a"');
+    expect(html).toContain(`/d/${decision}?return=%2Fchat%3Ftask%3Da`);
+
+    const answered = await post(cookie, `/d/${decision}/answer`, { csrf, choice: "keep", return: "/chat?task=a" });
+    expect(answered.status).toBe(303);
+    expect(answered.headers.get("location")).toBe("/chat?task=a");
+    expect(store.getDecision(decision)).toMatchObject({ state: "answered", choice: "keep", answeredBy: "alex" });
+    const refreshed = await (await fetch(url("/chat?task=a"), { headers: { cookie } })).text();
+    expect(refreshed).not.toContain("Keep the familiar navigation structure?");
+  });
+
+  test("a task filed from chat hands off directly to its focused conversation", async () => {
+    const cookie = await login();
+    const csrf = await mint(cookie, "5");
+    script.push(
+      () => answer([{ type: "tool_use", id: "p1", name: "propose_task", input: {
+        repo: "r1",
+        title: "Polish the result cockpit",
+        goal: "Make completed work faster to review.",
+        acceptance: [{ id: "c1", statement: "A reviewer can understand the result quickly.", evidence: ["manual-review"] }],
+      } }]),
+      () => answer([{ type: "text", text: "I drafted the task for confirmation." }]),
+    );
+    const sent = await post(cookie, "/chat", { csrf, message: "Add a focused result cockpit." });
+    expect(sent.status).toBe(303);
+    await settle();
+    let html = await page(cookie);
+    expect(html).toContain('data-card-kind="task"');
+    const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf });
+    expect(confirmed.status).toBe(303);
+    const proposal = store.getMateProposal(1);
+    const taskId = typeof proposal?.outcome?.["taskId"] === "string" ? proposal.outcome["taskId"] : null;
+    if (taskId === null) throw new Error("the task proposal did not file");
+    html = await page(cookie);
+    expect(html).toContain(`href="/chat?task=${taskId}">continue in chat</a>`);
+    expect(html).toContain(`href="/t/${taskId}">overview</a>`);
   });
 
   test("a logged-in Codex membership has no dollar maximum in setup, minting, or the live conversation", async () => {

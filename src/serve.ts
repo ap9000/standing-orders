@@ -1972,7 +1972,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       store.sweepCoordinatorProposals(now);
       sweepChatDrafts(Date.now());
       const requestedTask = url.searchParams.get("task");
-      const focusTask = taskChatFocus(requestedTask, now);
+      const focusTask = taskChatFocus(requestedTask, now, who);
       const focusProblem = requestedTask !== null && focusTask === null
         ? "That task is not available in this workspace."
         : null;
@@ -2162,7 +2162,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 404, "no such decision");
       }
       const taskId = taskOf(store, decision);
-      return sendScreen(response, 200, decisionPage(chromeFor(project, "none"), decision, taskId, store.evidenceFor(decision.id), who, now));
+      const decisionReturn = url.searchParams.get("return");
+      const back = decisionReturn === null ? null : safeChatReturn(decisionReturn);
+      return sendScreen(response, 200, decisionPage(chromeFor(project, "none"), decision, taskId, store.evidenceFor(decision.id), who, now, back));
+    }
+
+    if (url.pathname === "/chat/task-status") {
+      if (who.via !== "cookie") return respond(response, 403, "text/plain; charset=utf-8", "sign in to see this task");
+      const focus = taskChatFocus(url.searchParams.get("task"), now, who);
+      if (focus === null) return respond(response, 404, "text/plain; charset=utf-8", "this task is not available in this workspace");
+      response.setHeader("cache-control", "no-store");
+      return respond(response, 200, "text/html; charset=utf-8", taskChatLiveRegion(focus, who.session.csrf, true));
     }
 
     const artifact = /^\/d\/([0-9]{1,15})\/evidence\/([0-9]{1,15})$/.exec(url.pathname);
@@ -2857,7 +2867,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // The nonce is minted at render, per viewer, bound to the digest being
     // shown — the browser approval flow starts here and nowhere else.
     const nonce =
-      who.via === "cookie" && scope !== null && approvalDigest !== null && !approvalOf(scope).approved && !revisionBroken
+      who.via === "cookie" && scope !== null && approvalDigest !== null && !approvalOf(scope).approved && !revisionBroken && ref?.plan !== "requested"
         ? mintApprovalNonce(who.name, taskId, approvalDigest)
         : "";
     const runs = ref === null ? [] : store.runsFor(ref.id);
@@ -3078,22 +3088,53 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   /** Resolve a task-scoped chat lens without trusting its query string.
    * Only an admitted task becomes model context or visible page copy. */
-  function taskChatFocus(taskId: string | null, now: Date): TaskChatFocus | null {
+  function taskChatFocus(taskId: string | null, now: Date, who?: Who): TaskChatFocus | null {
     if (taskId === null || taskId.length === 0 || taskId.length > 64 || hasForbiddenControls(taskId)) return null;
     const task = store.getTask(taskId);
     const ref = store.lookupRef(taskId);
     if (task === null || ref === null || !visible(ref.repo)) return null;
     const scope = store.getScope(taskId);
-    const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null && one.role !== "reviewer") ?? null;
+    // The focused chat is a lens over the task page's own assembled facts.
+    // Reusing that projection keeps approval nonces, joint race digests,
+    // revision verification, decisions, and result evidence on one source
+    // of truth instead of growing a chat-only lifecycle.
+    const view = who === undefined ? null : taskViewData(taskId, who, null);
+    const runs = view?.runs ?? store.runsFor(ref.id);
+    const latest = runs.find(one => one.finishedAt !== null && one.role !== "reviewer") ?? null;
+    const approval = approvalOf(scope);
+    const live = runs.find(one => runIsLive(one)) ?? null;
     return {
       id: task.id,
       title: task.title,
       state: task.state,
       project: ref.repo === null ? null : projectName(ref.repo),
+      now,
       dispatch: diagnoseTaskDispatch(store, taskId, now),
-      scope: scope === null ? "none" : approvalOf(scope).approved ? "approved" : "needs approval",
+      scope: scope === null ? "none" : approval.approved ? "approved" : "needs approval",
+      plan: ref.plan,
+      claimed: view?.claimed ?? store.hasLiveClaim(ref.id, now),
+      liveRun: live === null ? null : { id: live.id, runner: live.runner, startedAt: live.startedAt, phase: live.phase },
+      approval:
+        view === null || who?.role !== "approver" || scope === null || approval.approved
+          ? null
+          : {
+              scope,
+              nonce: view.nonce,
+              digest: view.approvalDigest ?? scope.digest,
+              planDocument: view.planDocument,
+              deliverable: view.deliverable ?? "branch",
+              raceTerms: view.raceTerms ?? null,
+              revision: view.revision ?? null,
+              coordinator: view.coordinator ?? null,
+            },
+      decisions: (view?.decisions ?? store.decisionsForTask(ref.id))
+        .filter(one => one.state === "open" || one.state === "expired")
+        .map(one => ({ ...one, taskId: task.id, repo: ref.repo })),
+      publication: view?.publication ?? null,
       result:
-        latest === null || (latest.outcome !== "built" && latest.outcome !== "no-change")
+        view?.completion?.receipt !== undefined && view.completion.receipt !== null
+          ? view.completion.receipt
+          : latest === null || (latest.outcome !== "built" && latest.outcome !== "no-change")
           ? null
           : completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot),
     };
@@ -4225,6 +4266,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     const answer = /^\/d\/([0-9]{1,15})\/answer$/.exec(url.pathname);
     if (answer !== null) {
       const id = Number(answer[1]);
+      const requestedReturn = body.get("return");
+      const decisionBack = requestedReturn === "next"
+        ? "/next"
+        : requestedReturn === null
+          ? `/d/${id}`
+          : safeChatReturn(requestedReturn);
       const decision = store.getDecision(id);
       if (decision === null) return refuse(response, who, 404, "no such decision");
       const answeringRun = store.getRun(decision.run);
@@ -4237,7 +4284,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // them behind an explicit confirmation field, and the server checks —
       // the client rendering is convenience, this is the rule.
       if (chosen !== undefined && !chosen.reversible && body.get("confirm") !== "yes") {
-        return refuse(response, who, 400, "an irreversible choice must be confirmed", `/d/${id}`);
+        return refuse(response, who, 400, "an irreversible choice must be confirmed", requestedReturn === null ? `/d/${id}` : `/d/${id}?return=${encodeURIComponent(decisionBack)}`);
       }
       const note = body.get("note");
       const answered = store.answerDecision(
@@ -4253,9 +4300,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!answered.ok) {
         const status = answered.reason === "bad-option" || answered.reason === "bad-note" ? 400 : 409;
         const why = answered.reason === "already-answered" ? "already answered — somebody got there first" : answered.reason;
-        return refuse(response, who, status, why, `/d/${id}`);
+        return refuse(response, who, status, why, requestedReturn === null ? `/d/${id}` : decisionBack);
       }
-      return redirect(response, body.get("return") === "next" ? "/next" : `/d/${id}`);
+      return redirect(response, decisionBack);
     }
 
     const contestAct = /^\/contest\/([0-9]{1,15})\/(arm|pick|abandon)$/.exec(url.pathname);
@@ -5976,12 +6023,21 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, taskHref(taskId));
       }
       case "approve": {
+        const requestedReturn = body.get("return");
+        const approvalBack = requestedReturn === "next"
+          ? "/next"
+          : requestedReturn === null
+            ? taskHref(taskId)
+            : safeChatReturn(requestedReturn);
+        const approvalProblem = (message: string, status: number): void => {
+          if (requestedReturn !== null && requestedReturn !== "next") {
+            return redirect(response, chatReturnWithSaid(approvalBack, message));
+          }
+          return taskScreen(response, who, taskId, message, status);
+        };
         const approvingRef = store.lookupRef(taskId);
         if (approvingRef?.plan === "requested") {
-          return taskScreen(
-            response,
-            who,
-            taskId,
+          return approvalProblem(
             "approval is blocked while planning is in progress — review the drafted plan first",
             409,
           );
@@ -5994,11 +6050,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (who.via === "cookie") {
           const nonce = body.get("nonce") ?? "";
           if (!consumeApprovalNonce(nonce, who.name, taskId, digest)) {
-            return taskScreen(response, who, taskId, "that approval form is stale — read it again", 409);
+            return approvalProblem("that approval form is stale — read it again", 409);
           }
         }
         if (token === "") {
-          return taskScreen(response, who, taskId, "approval requires your password, typed again", 400);
+          return approvalProblem("approval requires your password, typed again", 400);
         }
         // A revision approves ONLY against a brief that still verifies
         // (Codex M5-M8 audit, IV-3): the batch the screen restated must be
@@ -6008,7 +6064,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (approvingRef !== null && approvingRef.revisionBriefArtifact !== null) {
           const view = revisionViewOf(approvingRef);
           if (view !== null && "problem" in view) {
-            return taskScreen(response, who, taskId, `approval is blocked: ${view.problem}`, 409);
+            return approvalProblem(`approval is blocked: ${view.problem}`, 409);
           }
         }
         // A tournament task's yes covers BOTH documents (finding 31): the
@@ -6018,7 +6074,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (raceTerms !== null) {
           const scopeRow = store.getScope(taskId);
           if (scopeRow === null || digest !== jointApprovalDigest(scopeRow.digest, raceTerms.raceDigest)) {
-            return taskScreen(response, who, taskId, "this task races a tournament — the form was stale; read it again", 409);
+            return approvalProblem("this task races a tournament — the form was stale; read it again", 409);
           }
           const both = store.transact(() => {
             const scopeApproved = approveScope(store, taskId, who.name, now, scopeRow.digest, token);
@@ -6030,16 +6086,16 @@ export function createDecisionServer(options: ServeOptions): Server {
           });
           if (!both.ok) {
             const status = both.reason === "changed" ? 409 : 403;
-            return taskScreen(response, who, taskId, `not approved: ${both.reason}`, status);
+            return approvalProblem(`not approved: ${both.reason}`, status);
           }
-          return redirect(response, body.get("return") === "next" ? "/next" : taskHref(taskId));
+          return redirect(response, approvalBack);
         }
         const approved = approveScope(store, taskId, who.name, now, digest, token);
         if (!approved.ok) {
           const status = approved.reason === "changed" ? 409 : 403;
-          return taskScreen(response, who, taskId, `not approved: ${approved.reason}`, status);
+          return approvalProblem(`not approved: ${approved.reason}`, status);
         }
-        return redirect(response, body.get("return") === "next" ? "/next" : taskHref(taskId));
+        return redirect(response, approvalBack);
       }
       case "accept-proof": {
         // Accepting is a person's act, like approving a scope (Priority
@@ -7850,6 +7906,50 @@ const STYLE = `
   .task-chat-overview-actions { display: grid; justify-items: start; gap: .55rem; margin-top: .75rem; }
   .task-chat-overview-link { display: block; font-size: .72rem; text-decoration: none; }
   .task-chat-recovery-link { min-height: 2rem; padding-inline: .7rem; font-size: .7rem; }
+  #task-chat-live { display: grid; gap: 1rem; margin-bottom: 1.1rem; }
+  .task-journey {
+    position: relative; overflow: hidden; padding: 1rem 1.05rem;
+    border-color: color-mix(in srgb, var(--accent) 16%, var(--glass-border));
+    background: linear-gradient(145deg, color-mix(in srgb, var(--glass) 92%, white 8%), color-mix(in srgb, var(--card) 93%, var(--accent) 7%));
+  }
+  .task-journey::after { content: ""; position: absolute; width: 9rem; height: 9rem; right: -4rem; top: -5rem; border-radius: 50%; background: color-mix(in srgb, var(--accent) 8%, transparent); filter: blur(12px); pointer-events: none; }
+  .task-journey-head { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+  .task-journey h2 { margin: .2rem 0 0; font-size: 1rem; letter-spacing: -.025em; }
+  .task-journey > ol { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 0; margin: 1rem 0 .75rem; padding: 0; list-style: none; }
+  .task-journey > ol::before { content: ""; position: absolute; top: .7rem; left: 10%; right: 10%; height: 1px; background: var(--border); }
+  .task-journey li { position: relative; z-index: 1; display: grid; justify-items: center; gap: .35rem; color: var(--muted-foreground); font-size: .625rem; text-align: center; }
+  .task-journey li i { display: grid; place-items: center; width: 1.4rem; height: 1.4rem; border: 1px solid var(--border); border-radius: 50%; background: var(--card); font: 600 .58rem/1 var(--font-mono); font-style: normal; }
+  .task-journey li.complete i { color: var(--success); border-color: color-mix(in srgb,var(--success) 32%,var(--border)); background: color-mix(in srgb,var(--success) 9%,var(--card)); }
+  .task-journey li.complete span { color: var(--foreground); }
+  .task-journey li.active i { color: white; border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb,var(--accent) 12%,transparent); }
+  .task-journey li.active span { color: var(--foreground); font-weight: 650; }
+  .task-journey > .meta { margin: 0; line-height: 1.45; }
+  .task-journey-action { margin-top: .75rem; }
+  .task-live-build { display: flex; align-items: center; flex-wrap: wrap; gap: .3rem; margin: .75rem 0 0; font-size: .72rem; }
+  .task-live-build .live-dot { width: .45rem; height: .45rem; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px color-mix(in srgb,var(--success) 10%,transparent); }
+  .chat-action-card { padding: 0; overflow: hidden; }
+  .chat-action-card:not(details) { padding: 1rem 1.05rem; }
+  .chat-action-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.05rem; cursor: pointer; list-style: none; }
+  .chat-action-card > summary::-webkit-details-marker { display: none; }
+  .chat-action-card > summary > span:first-child { display: grid; gap: .18rem; }
+  .chat-action-card > summary strong { font-size: .92rem; }
+  .chat-action-card > summary small { color: var(--muted-foreground); font-size: .68rem; font-weight: 400; }
+  .chat-action-card[open] > summary { border-bottom: 1px solid var(--border); }
+  .chat-approval-form { display: grid; gap: .85rem; padding: 1.05rem; }
+  .chat-approval-section { display: grid; gap: .3rem; }
+  .chat-approval-section > p, .chat-approval-section > pre { margin: 0; }
+  .chat-approval-form .approval-boundaries { margin: 0; }
+  .chat-run-details { padding: .65rem .75rem; border: 1px solid var(--border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb,var(--muted) 45%,transparent); }
+  .chat-run-details > summary { color: var(--muted-foreground); cursor: pointer; font-size: .68rem; }
+  .chat-run-details > .meta { margin-bottom: 0; }
+  .chat-approval-form .approval-confirm { align-items: end; margin-top: .15rem; }
+  .chat-approval-form .approval-confirm label { flex: 1 1 18rem; }
+  .chat-approval-form .approval-confirm button { min-height: 2.65rem; }
+  .chat-decisions { display: grid; gap: .7rem; }
+  .chat-section-head { margin: .15rem .15rem 0; }
+  .chat-section-head h2 { margin: .2rem 0 0; font-size: 1rem; }
+  .chat-decisions .decide-card { margin: 0; background: var(--glass); box-shadow: var(--shadow); }
+  .chat-publication { margin: -.25rem .25rem .25rem; }
   .chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: .5rem .25rem 0; }
   .chat-head h1 { margin-bottom: .2rem; font-size: 1.65rem; letter-spacing: -.04em; }
   .chat-head .badge-running { margin-top: .2rem; background: color-mix(in srgb, var(--success) 11%, var(--glass)); color: var(--success); }
@@ -8092,16 +8192,24 @@ const STYLE = `
     .chat-head { padding-inline: 0; }
     .chat-head h1 { font-size: 1.4rem; }
     .chat-head-actions { align-items: flex-start; }
-    .task-chat-workspace .task-chat-context { position: static; margin-bottom: .85rem; padding: .75rem; }
-    .task-chat-context h2, .task-chat-context > .meta { display: none; }
-    .task-chat-status { margin-top: .6rem; padding: .55rem .6rem; }
-    .task-chat-status span { display: none; }
-    .task-chat-facts { display: none; }
-    .task-chat-overview-link { margin-top: .55rem; }
+    .task-chat-workspace .task-chat-context { display: none; }
     .task-chat-head { display: block; }
     .task-chat-head > .badge { display: none; }
     .task-chat-title-line { display: grid; gap: .65rem; }
     .task-chat-title-line .task-view-switch { justify-self: start; }
+    #task-chat-live { gap: .75rem; }
+    .task-journey { padding: .85rem; }
+    .task-journey > ol { margin: .85rem -.2rem .65rem; }
+    .task-journey > ol::before { left: 9%; right: 9%; }
+    .task-journey li { font-size: .56rem; }
+    .task-journey li i { width: 1.25rem; height: 1.25rem; }
+    .chat-action-card > summary { align-items: flex-start; padding: .85rem; }
+    .chat-action-card > summary .button-link { min-height: 2.1rem; padding-inline: .6rem; font-size: .65rem; white-space: nowrap; }
+    .chat-action-card > summary small { max-width: 14rem; }
+    .chat-approval-form { padding: .85rem; }
+    .chat-approval-form .approval-boundaries { grid-template-columns: 1fr; }
+    .chat-approval-form .approval-confirm { display: grid; }
+    .chat-approval-form .approval-confirm button { width: 100%; }
     .chat-budget { gap: .3rem; margin: .65rem 0 .9rem; }
     .chat-budget > span { padding: .25rem .48rem; }
     .chat-budget > span:first-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
@@ -9775,8 +9883,25 @@ type TaskChatFocus = {
   title: string;
   state: TaskState;
   project: string | null;
+  now: Date;
   dispatch: DispatchDiagnosis | null;
   scope: "none" | "needs approval" | "approved";
+  plan: "requested" | "drafted" | null;
+  claimed: boolean;
+  liveRun: { id: number; runner: string; startedAt: string; phase: string | null } | null;
+  /** Approval uses the task page's exact nonce and joint digest. */
+  approval: {
+    scope: Scope;
+    nonce: string;
+    digest: string;
+    planDocument: string | null;
+    deliverable: "branch" | "report";
+    raceTerms: TournamentTerms | null;
+    revision: RevisionView | null;
+    coordinator: { label: string; filedAgo: string | null } | null;
+  } | null;
+  decisions: (Decision & { taskId: string; repo: string | null })[];
+  publication: Publication | null;
   /** The same compact, evidence-backed receipt shown on the task page.
    * Chat is a lens over durable workflow state, never a second copy. */
   result: CompletionReceiptView | null;
@@ -9827,31 +9952,117 @@ function taskViewSwitch(taskId: string, active: "overview" | "ask"): string {
 }
 
 function taskChatContext(focus: TaskChatFocus): string {
-  const positive = focus.state === "done" || focus.dispatch?.condition === "running" || focus.dispatch?.code === "ready" || focus.dispatch?.code === "planning-ready" || focus.dispatch?.code === "scouting-ready";
-  const dispatchSummary = focus.dispatch?.summary ?? "Status unavailable";
-  const dispatchDetail = focus.dispatch?.detail ?? "Refresh the task overview before relying on its scheduler state.";
-  const recoveryHref = focus.state === "done" || focus.state === "cancelled"
-    ? null
-    : taskRecoveryHref(focus.id, focus.dispatch);
   return (
     `<aside class="task-chat-context" aria-label="current task">` +
-    `<div class="task-chat-context-head"><span class="eyebrow">current task</span><span class="badge badge-${escape(focus.state)}">${escape(focus.state)}</span></div>` +
+    `<div class="task-chat-context-head"><span class="eyebrow">current task</span></div>` +
     `<h2>${escape(focus.title)}</h2>` +
     `<p class="meta mono">${escape(focus.id)}${focus.project === null ? "" : ` · ${escape(focus.project)}`}</p>` +
-    `<div class="task-chat-status${positive ? " ready" : ""}"><strong>${escape(dispatchSummary)}</strong><span>${escape(dispatchDetail)}</span></div>` +
-    `<dl class="task-chat-facts"><div><dt>scope</dt><dd>${escape(focus.scope)}</dd></div><div><dt>new messages</dt><dd>task attached</dd></div></dl>` +
     `<div class="task-chat-overview-actions">` +
-    (recoveryHref === null ? "" : `<a class="button-link task-chat-recovery-link" href="${recoveryHref}">Get this task running</a>`) +
     `<a class="task-chat-overview-link" href="${taskHref(focus.id)}">Open full overview →</a></div>` +
     `</aside>`
   );
 }
 
-/** A focused chat opens with the result it is discussing. The receipt is
- * server-derived from sealed artifacts; the model's later prose cannot
- * rewrite it. */
-function taskChatResult(focus: TaskChatFocus): string {
-  return focus.result === null ? "" : completionReceiptCard(focus.result, focus.id, "chat");
+function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
+  const approval = focus.approval;
+  if (focus.plan === "requested") {
+    return `<section class="card chat-action-card"><span class="eyebrow">planning now</span><h2>The planner is preparing a scope for you</h2><p class="meta">It is reading the repository first. This conversation updates when the plan is ready; nothing builds before you approve it.</p></section>`;
+  }
+  if (approval === null) return "";
+  const scope = approval.scope;
+  const returnTo = taskChatHref(focus.id);
+  if (approval.revision !== null && "problem" in approval.revision) {
+    return `<section class="card chat-action-card" id="task-chat-action"><span class="eyebrow">approval needs attention</span><h2>The revision brief can’t be verified</h2><p class="meta">${escape(approval.revision.problem)}</p><a class="button-link" href="${taskHref(focus.id)}#approve">Fix this on the task →</a></section>`;
+  }
+  if (scope.profileState === "unresolved" || approval.nonce === "") {
+    return `<section class="card chat-action-card" id="task-chat-action"><span class="eyebrow">approval needs attention</span><h2>The agent setup isn’t ready yet</h2>${profileWords(scope)}<a class="button-link" href="${taskHref(focus.id)}#scope">Fix the agent setup →</a></section>`;
+  }
+  const profile = scope.profile ?? null;
+  const permission =
+    profile === null
+      ? null
+      : profile.provider === "claude"
+        ? profile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
+        : profile.provider === "gemini"
+          ? profile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
+          : profile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
+  const revision = approval.revision === null
+    ? ""
+    : `<div class="chat-approval-section"><span class="approval-label">revision notes</span><ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul></div>`;
+  const race = approval.raceTerms === null
+    ? ""
+    : `<div class="chat-approval-section"><span class="approval-label">${approval.raceTerms.kind === "comparison" ? "comparison" : "tournament"}</span>` +
+      `<p>${approval.raceTerms.agents.length} agents build independently: ${approval.raceTerms.agents.map(one => `<span class="mono">${escape(one.provider)} · ${escape(one.model)}</span>`).join(" vs ")}.</p>` +
+      (approval.raceTerms.kind === "comparison"
+        ? `<p class="meta">No dollar caps; every result and its evidence is kept for you to compare.</p>`
+        : `<p class="meta">$${(approval.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} per agent plus $${(approval.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} reserve; $${(approval.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)} total.</p>`) +
+      `</div>`;
+  return (
+    `<details class="card chat-action-card chat-approval" id="task-chat-action">` +
+    `<summary><span><span class="eyebrow">your next step</span><strong>Review the plan & start</strong><small>Nothing builds until you approve the exact scope.</small></span><span class="button-link">Review & start</span></summary>` +
+    `<form method="post" action="${taskHref(focus.id)}/approve" class="chat-approval-form approve-form">` +
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
+    `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
+    `<input type="hidden" name="return" value="${escape(returnTo)}">` +
+    `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
+    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span><pre class="recap plan-doc">${escape(approval.planDocument)}</pre></div>`) +
+    (approval.deliverable === "report" ? `<p class="meta"><span class="badge">report only</span> This investigates and reports back without changing the repository.</p>` : "") +
+    (approval.coordinator === null ? "" : `<p class="meta">Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.</p>`) +
+    `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
+    `<div class="approval-boundaries"><div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>` +
+    `<div class="approval-boundary"><p class="approval-label">may touch</p><p>${scope.touches.length === 0 ? "anything" : scope.touches.map(escape).join(", ")}</p></div></div>` +
+    acceptanceCeremonyHtml(scope.acceptance) + revision + race +
+    `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
+    (profile === null ? "" : `<span class="approval-chip">${escape(profile.provider)} · ${escape(profile.model)}</span>`) +
+    (permission === null ? "" : `<span class="approval-chip">${escape(permission)}</span>`) +
+    (scope.budgetMicrousd === null ? "" : `<span class="approval-chip">$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap</span>`) +
+    `</div><details class="chat-run-details"><summary>Agent and fallback details</summary>${profileWords(scope)}</details>` +
+    `<div class="approval-confirm"><label>Your password <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>` +
+    `<button type="submit">Approve & start</button></div></form></details>`
+  );
+}
+
+/** One live, server-derived journey from request to proof. The fragment is
+ * safe to refresh independently, so an in-progress message is never lost. */
+function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false, inert = false): string {
+  const hasScope = focus.scope !== "none";
+  const approved = focus.scope === "approved";
+  const hasResult = focus.result !== null;
+  const building = focus.claimed || focus.liveRun !== null || focus.dispatch?.condition === "running";
+  const active = hasResult ? 4 : building || approved ? 3 : focus.plan === "requested" ? 1 : hasScope ? 2 : 1;
+  const labels = ["Requested", "Planned", "Approved", "Building", "Result"];
+  const steps = labels.map((label, index) => {
+    const state = index < active || (index === 4 && hasResult) ? "complete" : index === active ? "active" : "upcoming";
+    return `<li class="${state}"><i aria-hidden="true">${state === "complete" ? "✓" : index + 1}</i><span>${label}</span></li>`;
+  }).join("");
+  const summary = focus.dispatch?.summary ?? (hasResult ? "Result ready" : "Checking task status");
+  const detail = focus.dispatch?.detail ?? "This status comes from the task scheduler.";
+  const fallback = focus.state === "done" || focus.state === "cancelled" || focus.approval !== null
+    ? null
+    : taskRecoveryHref(focus.id, focus.dispatch);
+  const polling = !inert && (focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled";
+  return (
+    `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}">` +
+    `<section class="card task-journey" aria-label="task progress"><div class="task-journey-head"><div><span class="eyebrow">task journey</span><h2>${escape(summary)}</h2></div><span class="badge badge-${escape(focus.state)}">${escape(focus.state)}</span></div>` +
+    `<ol>${steps}</ol><p class="meta">${escape(detail)}</p>` +
+    (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
+    (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
+    `</section>` +
+    (inert && focus.approval !== null && focus.plan !== "requested"
+      ? `<section class="card chat-action-card"><span class="eyebrow">approval ready</span><h2>Finish the current chat response first</h2><p class="meta">The secure approval step appears here as soon as this response lands.</p></section>`
+      : fragment && focus.approval !== null && focus.plan !== "requested"
+        ? `<section class="card chat-action-card chat-refresh-action"><span class="eyebrow">the plan changed</span><h2>Review the updated scope before work continues</h2><p class="meta">Refresh this conversation to open the secure approval step.</p><a class="button-link" href="${taskChatHref(focus.id)}#task-chat-action">Review the updated plan →</a></section>`
+        : taskChatApproval(focus, csrf)) +
+    (focus.decisions.length === 0
+      ? ""
+      : `<section class="chat-decisions"><div class="chat-section-head"><span class="eyebrow">needs your answer</span><h2>Keep the work moving</h2></div>${focus.decisions.map(one => focus.approval !== null || inert
+        ? `<div class="decide-card"><p class="q">${escape(one.question)}</p><p class="meta">${escape(oneLineOf(one.recap, 160))}</p><a href="/d/${one.id}?return=${encodeURIComponent(taskChatHref(focus.id))}">Review and answer →</a></div>`
+        : decisionAnswerCard(one, csrf, focus.now, false, taskChatHref(focus.id))).join("")}</section>`) +
+    (focus.result === null ? "" : completionReceiptCard(focus.result, focus.id, "chat")) +
+    (focus.publication === null ? "" : `<p class="chat-publication meta">Published as ${safePrUrl(focus.publication.prUrl) === null ? `<span class="mono">PR #${focus.publication.prNumber ?? "?"}</span>` : `<a href="${escape(safePrUrl(focus.publication.prUrl) as string)}">PR #${focus.publication.prNumber ?? "?"}</a>`} · ${escape(focus.publication.state)}${focus.publication.lastCheckState === null ? "" : ` · CI ${escape(focus.publication.lastCheckState)}`}</p>`) +
+    `</section>`
+  );
 }
 
 function taskChatHeading(focus: TaskChatFocus): string {
@@ -10099,9 +10310,15 @@ const CHAT_UI_SCRIPT =
   `if(projectClose)projectClose.addEventListener("click",function(){apply(false);});` +
   `document.addEventListener("click",function(ev){if(wide.matches||!workspace.classList.contains("projects-open"))return;var target=ev.target;if(target instanceof Node&&!projectPanel.contains(target)&&!projectToggle.contains(target))apply(false);});` +
   `wide.addEventListener("change",function(){apply(preferred());});document.addEventListener("keydown",function(ev){if(ev.key==="Escape"&&!wide.matches&&workspace.classList.contains("projects-open"))apply(false);});}` +
-  `var box=document.querySelector(".composer textarea");if(!box)return;` +
+  `var taskLive=document.getElementById("task-chat-live");function refreshTask(){if(!taskLive||taskLive.getAttribute("data-poll")!=="1")return;` +
+  `if(document.hidden){setTimeout(refreshTask,5000);return;}var source=taskLive.getAttribute("data-source");if(!source)return;` +
+  `fetch(source,{cache:"no-store"}).then(function(r){if(r.status===401||r.status===403||r.redirected){location.href="/login";return null;}return r.ok?r.text():null;})` +
+  `.then(function(html){if(!html||!taskLive)return;var parsed=new DOMParser().parseFromString(html,"text/html"),next=parsed.getElementById("task-chat-live");if(!next)return;taskLive.replaceWith(next);taskLive=next;` +
+  `if(taskLive.getAttribute("data-poll")==="1")setTimeout(refreshTask,5000);}).catch(function(){setTimeout(refreshTask,10000);});}` +
+  `if(taskLive&&taskLive.getAttribute("data-poll")==="1")setTimeout(refreshTask,5000);` +
+  `var box=document.querySelector(".composer textarea");if(box){` +
   `function size(){box.style.height="auto";box.style.height=Math.min(box.scrollHeight,208)+"px";}size();box.addEventListener("input",size);` +
-  `box.addEventListener("keydown",function(ev){if(ev.isComposing||ev.key!=="Enter"||ev.shiftKey||!window.matchMedia("(min-width: 761px)").matches)return;ev.preventDefault();if(box.value.trim()!=="")box.form.requestSubmit();});})();`;
+  `box.addEventListener("keydown",function(ev){if(ev.isComposing||ev.key!=="Enter"||ev.shiftKey||!window.matchMedia("(min-width: 761px)").matches)return;ev.preventDefault();if(box.value.trim()!=="")box.form.requestSubmit();});}})();`;
 
 function chatPage(chrome: Chrome, data: {
   enabled: { ok: true } & Record<string, unknown> | { ok: false; why: string };
@@ -10181,22 +10398,22 @@ function chatPage(chrome: Chrome, data: {
     data.focusTask === null
       ? chatHeading("one place to understand every project and shape what happens next", data.projects.length, false, data.enabled.ok)
       : taskChatHeading(data.focusTask),
-    data.focusTask === null ? "" : taskChatResult(data.focusTask),
+    data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
     const code = (data.enabled as { code?: string }).code;
     parts.push(
       code === "demo"
-        ? `<div class="card"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Standing Orders with a real project to use chat.</p></div>`
-        : `<div class="card"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
+        ? `<div class="card" id="latest"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Standing Orders with a real project to use chat.</p></div>`
+        : `<div class="card" id="latest"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
     );
     // The ceiling refusals need a restart to fix; configuration does not —
     // it is a first-class act of this console (operator request).
     if (data.canManage && (code === "unconfigured" || code === "unpriced" || code === "no-key")) {
       parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
     }
-    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT } });
+    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null } });
   }
   const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
   const subscription = isSubscriptionChatProvider(config.provider);
@@ -10220,7 +10437,7 @@ function chatPage(chrome: Chrome, data: {
   if (data.pending !== null) {
     parts.push(`<div class="card chat-thinking" id="latest" aria-live="polite"><span class="thinking-orb"></span><p><strong>Working on it</strong><span class="meta">turn #${data.pending.id} · up to ${chatMoney(data.pending.reservedMicrousd)} reserved · this page refreshes itself</span></p></div>`);
     parts.push(`<p class="meta"><a href="/chat">refresh now</a></p>`);
-    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
+    return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null }, refreshSeconds: 3 });
   }
   const last = data.chat?.lastTurn ?? null;
   if (last !== null) {
@@ -10298,7 +10515,7 @@ function chatPage(chrome: Chrome, data: {
       );
     }
   }
-  return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT } });
+  return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null } });
 }
 
 function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): Screen {
@@ -10327,7 +10544,7 @@ function mateMintCard(
 ): string {
   const subscription = enabled.billing === "subscription";
   return [
-    `<div class="card mate-mint">`,
+    `<div class="card mate-mint" id="latest">`,
     `<p><strong>talk to the mate.</strong> <span class="meta">one conversation across every project this console serves — it reads, recaps, and proposes; you confirm each act on a card</span></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
@@ -10511,7 +10728,11 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     const filed = outcome !== null && typeof outcome.taskId === "string" ? outcome.taskId : null;
     acts =
       `<p class="done">${escape(said ?? "confirmed")}` +
-      (view.kind === "scope" && filed !== null ? ` — <a href="${taskHref(filed)}#approve">approve it</a>` : filed !== null && view.kind === "task" ? ` — <a href="${taskHref(filed)}">open it</a>` : "") +
+      (view.kind === "scope" && filed !== null
+        ? ` — <a href="${taskChatHref(filed)}#task-chat-action">review & start in chat</a>`
+        : filed !== null && view.kind === "task"
+          ? ` — <a href="${taskChatHref(filed)}">continue in chat</a> · <a href="${taskHref(filed)}">overview</a>`
+          : "") +
       `</p>`;
   } else if (view.state === "refused") {
     acts = `<p class="refused">${escape(said ?? "refused")}</p>`;
@@ -10594,7 +10815,7 @@ function matePage(chrome: Chrome, data: {
         : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
           `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
       `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span></div>`,
-    data.focusTask === null ? "" : taskChatResult(data.focusTask),
+    data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
     data.focusTask === null ? chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null) : "",
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
@@ -10641,7 +10862,7 @@ function matePage(chrome: Chrome, data: {
       `<form method="post" action="/chat/mate/stop" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="turn" value="${data.pending.id}">` +
       `<button type="submit" class="quiet">stop</button></form></div>`,
     );
-    return screen("chat", chatWorkspace(conversation.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT }, refreshSeconds: 3 });
+    return screen("chat", chatWorkspace(conversation.join("\n"), data.projects, data.csrf, true, data.focusTask), { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null }, refreshSeconds: 3 });
   }
   conversation.push(
     data.messages.length === 0 ? "" : matePromptStarters(data.csrf, data.focusTask),
@@ -10665,7 +10886,7 @@ function matePage(chrome: Chrome, data: {
   return screen(
     "chat",
     chatWorkspace(conversation.join("\n"), data.projects, data.csrf, false, data.focusTask),
-    { chrome, functional: { script: CHAT_UI_SCRIPT } },
+    { chrome, functional: { script: CHAT_UI_SCRIPT, fetches: data.focusTask !== null } },
   );
 }
 
@@ -11238,7 +11459,9 @@ function decisionAnswerCard(
   csrf: string,
   now: Date,
   chip: boolean,
+  returnTo: string | null = null,
 ): string {
+  const returnField = returnTo === null ? "" : `<input type="hidden" name="return" value="${escape(returnTo)}">`;
   const options = decision.options
     .map(option => {
       const recommended = option.id === decision.recommendation
@@ -11246,7 +11469,7 @@ function decisionAnswerCard(
         : "";
       if (!option.reversible) {
         return (
-          `<p class="decide-option"><a href="/d/${decision.id}">${escape(option.label)}</a>` +
+          `<p class="decide-option"><a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">${escape(option.label)}</a>` +
           ` <span class="badge badge-overdue">irreversible</span>${recommended}` +
           ` <span class="meta">${escape(option.consequence)}</span></p>`
         );
@@ -11254,6 +11477,7 @@ function decisionAnswerCard(
       return (
         `<form class="decide-option decide-inline" method="post" action="/d/${decision.id}/answer">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+        returnField +
         `<input type="hidden" name="choice" value="${escape(option.id)}">` +
         `<button type="submit">${escape(option.label)}</button>${recommended}` +
         ` <span class="meta">${escape(option.consequence)} · reversible</span></form>`
@@ -11266,7 +11490,7 @@ function decisionAnswerCard(
     `<p class="meta">${escape(oneLineOf(decision.recap, 160))}</p>` +
     `<p class="meta"><span class="mono">${escape(decision.taskId)}</span>${chip ? projectChip(decision.repo) : ""}` +
     `${isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
-    ` · <a href="/d/${decision.id}">the full question →</a></p>` +
+    ` · <a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">the full question →</a></p>` +
     `<div class="decide-options">${options}</div></div>`
   );
 }
@@ -14514,10 +14738,10 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     `<span><strong>${escape(diff)}</strong><small>from the sealed final diff</small></span>` +
     `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : "validated visual proof"}</small></span></div>` +
     shots + caveats +
-    `<div class="receipt-actions"><a class="button-link" href="/r/${view.runId}">Review full evidence</a>` +
+    `<div class="receipt-actions"><a class="button-link" href="/r/${view.runId}">${place === "chat" ? "Review & annotate" : "Review full evidence"}</a>` +
     (place === "task"
       ? `<a href="${taskChatHref(taskId)}">Discuss or request changes →</a>`
-      : `<a href="${taskHref(taskId)}">Open task overview →</a>`) +
+      : `<a href="#latest">Request changes in chat →</a>`) +
     `</div></section>`
   );
 }
@@ -15246,7 +15470,7 @@ function nextPage(chrome: Chrome, data: {
  * independently requires the confirm field. `returnTo` is allow-listed by
  * the answer handler, never an arbitrary URL.
  */
-function decisionOptionForms(decision: Decision, csrf: string, returnTo: "next" | null): string {
+function decisionOptionForms(decision: Decision, csrf: string, returnTo: string | null): string {
   return decision.options
     .map(option => {
       const recommended = option.id === decision.recommendation;
@@ -15254,7 +15478,7 @@ function decisionOptionForms(decision: Decision, csrf: string, returnTo: "next" 
         `<form class="option${recommended ? " recommended" : ""}" method="post" action="/d/${decision.id}/answer">`,
         `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
         `<input type="hidden" name="choice" value="${escape(option.id)}">`,
-        ...(returnTo === null ? [] : [`<input type="hidden" name="return" value="${returnTo}">`]),
+        ...(returnTo === null ? [] : [`<input type="hidden" name="return" value="${escape(returnTo)}">`]),
         ...(option.reversible ? [] : [`<input type="hidden" name="confirm" value="yes">`]),
         recommended ? `<p class="meta" style="margin:0 0 .375rem"><span class="badge">recommended</span></p>` : "",
         `<p class="consequence">${escape(option.consequence)}</p>`,
@@ -15276,9 +15500,10 @@ function decisionPage(
   artifacts: Artifact[],
   who: Who,
   now: Date,
+  returnTo: string | null = null,
 ): Screen {
   const csrf = who.via === "cookie" ? who.session.csrf : "";
-  const options = decisionOptionForms(decision, csrf, null);
+  const options = decisionOptionForms(decision, csrf, returnTo);
 
   const answered =
     decision.state === "answered"
@@ -15308,7 +15533,7 @@ function decisionPage(
     `<div class="question">${escape(decision.question)}</div>`,
     decision.state === "answered" ? answered : options,
     evidence,
-    `<p class="meta"><a href="/">← everything waiting</a></p>`,
+    `<p class="meta"><a href="${returnTo === null ? "/" : escape(returnTo)}">← ${returnTo === null ? "everything waiting" : "back to the task chat"}</a></p>`,
   ].join("\n"), { chrome });
 }
 
