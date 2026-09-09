@@ -2889,6 +2889,10 @@ export function createDecisionServer(options: ServeOptions): Server {
         // its own latest run (the one that triggered a draft); a DRAFT
         // task's page finds the SAME chain by being named as the draft.
         repairChain: store.repairChainFor(latest.id) ?? store.repairChainForDraft(taskId),
+        receipt:
+          latest.outcome === "built" || latest.outcome === "no-change"
+            ? completionReceiptView(store, latest, artifacts, evidenceRoot)
+            : null,
       };
     })();
     return {
@@ -3080,6 +3084,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const ref = store.lookupRef(taskId);
     if (task === null || ref === null || !visible(ref.repo)) return null;
     const scope = store.getScope(taskId);
+    const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null && one.role !== "reviewer") ?? null;
     return {
       id: task.id,
       title: task.title,
@@ -3087,6 +3092,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       project: ref.repo === null ? null : projectName(ref.repo),
       dispatch: diagnoseTaskDispatch(store, taskId, now),
       scope: scope === null ? "none" : approvalOf(scope).approved ? "approved" : "needs approval",
+      result:
+        latest === null || (latest.outcome !== "built" && latest.outcome !== "no-change")
+          ? null
+          : completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot),
     };
   }
 
@@ -5058,7 +5067,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const comments = store.liveDiffComments(id);
       if (comments.length === 0) {
-        return refuse(response, who, 400, "no live comments to turn into a revision", `/r/${id}`);
+        return refuse(response, who, 400, "add at least one annotation before creating a revision", `/r/${id}`);
       }
       const sourceTaskId = store.externalIdFor(found.taskRef) ?? "?";
       const sourceScope = store.getScope(sourceTaskId);
@@ -5113,11 +5122,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         const result = store.sealRevision(
         {
           task: {
-            title: `revise ${sourceTaskId}: ${comments.length} review comment(s) on build #${id}`,
+            title: `Revise ${sourceTaskId} from ${comments.length} annotation${comments.length === 1 ? "" : "s"} on build #${id}`,
             ...(repo === null ? {} : { repo }),
             goal:
               `${sourceScope?.goal ?? `revise ${sourceTaskId}`}` +
-              ` — apply the review comments recorded on build #${id}; the revision brief carries the exact batch`,
+              ` — apply the annotations recorded on build #${id}; the revision brief carries the exact batch`,
             outOfScope: sourceScope?.outOfScope ?? null,
             touches: sourceScope?.touches ?? [],
             acceptance: sourceScope !== null && sourceScope.acceptance.length > 0
@@ -7021,6 +7030,136 @@ const STYLE = `
     box-shadow: var(--shadow-card), 0 1px 0 var(--glass-highlight) inset;
   }
   .result-card h2 { margin: 0; }
+  .completion-receipt {
+    position: relative; overflow: hidden; margin: 1rem 0 1.25rem; padding: 1.15rem;
+    border-color: color-mix(in srgb, var(--foreground) 13%, var(--glass-border));
+    background: linear-gradient(145deg, color-mix(in srgb, var(--glass-strong) 88%, transparent), var(--glass));
+    box-shadow: var(--shadow-card), 0 1px 0 var(--glass-highlight) inset;
+  }
+  .completion-receipt::after {
+    content: ""; position: absolute; width: 11rem; height: 11rem; right: -5rem; top: -7rem;
+    border-radius: 50%; background: color-mix(in srgb, var(--running) 9%, transparent); filter: blur(4px); pointer-events: none;
+  }
+  .receipt-head { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+  .receipt-head h2 { margin: .15rem 0 0; font-size: 1.15rem; }
+  .receipt-proof { display: inline-flex; align-items: center; gap: .4rem; flex: none; color: var(--muted-foreground); font-size: .75rem; font-weight: 600; }
+  .receipt-proof i { width: .48rem; height: .48rem; border-radius: 50%; background: var(--muted-foreground); box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted-foreground) 12%, transparent); }
+  .receipt-proof[data-proof-state="verified"] { color: var(--success); }
+  .receipt-proof[data-proof-state="verified"] i { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 13%, transparent); }
+  .receipt-proof[data-proof-state="attested"] { color: var(--running); }
+  .receipt-proof[data-proof-state="attested"] i { background: var(--running); box-shadow: 0 0 0 3px color-mix(in srgb, var(--running) 13%, transparent); }
+  .receipt-proof[data-proof-state="problem"] { color: var(--warning); }
+  .receipt-proof[data-proof-state="problem"] i { background: var(--warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 13%, transparent); }
+  .receipt-summary { position: relative; z-index: 1; max-width: 43rem; margin: .75rem 0 1rem; font-size: 1rem; line-height: 1.55; }
+  .receipt-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; }
+  .receipt-facts > span { min-width: 0; padding: .7rem .75rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass-strong) 64%, transparent); }
+  .receipt-facts strong, .receipt-facts small { display: block; overflow-wrap: anywhere; }
+  .receipt-facts strong { font-size: .78rem; font-weight: 600; }
+  .receipt-facts small { margin-top: .18rem; color: var(--muted-foreground); font-size: .68rem; line-height: 1.35; }
+  .receipt-visuals { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: .55rem; margin-top: .75rem; }
+  .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .7rem; text-decoration: none; }
+  .receipt-shot img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
+  .receipt-shot:hover { color: var(--foreground); }
+  .receipt-caveats { margin-top: .8rem; padding: .7rem .8rem; border-left: 2px solid var(--warning); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--warning-soft) 52%, transparent); font-size: .78rem; }
+  .receipt-caveats ul { margin: .3rem 0 0; padding-left: 1.15rem; }
+  .receipt-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem 1rem; margin-top: .9rem; }
+  .receipt-actions > a:not(.button-link) { font-size: .78rem; font-weight: 550; }
+  .diff-review {
+    overflow: hidden; margin: .8rem 0 .5rem; border: 1px solid var(--glass-border);
+    border-radius: var(--radius); background: color-mix(in srgb, var(--card) 82%, transparent);
+    box-shadow: 0 1px 0 var(--glass-highlight) inset;
+  }
+  .diff-review-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+    min-height: 2.8rem; padding: .4rem .55rem .4rem .85rem;
+    border-bottom: 1px solid var(--glass-border); background: color-mix(in srgb, var(--glass-strong) 68%, transparent);
+  }
+  .diff-modes { display: inline-flex; padding: .18rem; border: 1px solid var(--glass-border); border-radius: 999px; background: var(--muted); }
+  .diff-modes button {
+    min-height: 1.75rem; padding: .2rem .7rem; border: 0; border-radius: 999px;
+    background: transparent; box-shadow: none; color: var(--muted-foreground); font-size: .7rem;
+  }
+  .diff-modes button:hover { transform: none; color: var(--foreground); }
+  .diff-modes button[aria-pressed="true"] { background: var(--card); color: var(--foreground); box-shadow: 0 1px 3px color-mix(in srgb, var(--background) 20%, transparent); }
+  .diff-review-help {
+    margin: 0; padding: .62rem .85rem; border-bottom: 1px solid var(--glass-border);
+    background: color-mix(in srgb, var(--running) 7%, transparent); color: var(--muted-foreground); font-size: .75rem;
+  }
+  .diff-review[data-mode="view"] .diff-review-help { display: none; }
+  .diff-file { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  .diff-file + .diff-file { border-top: 1px solid var(--glass-border); }
+  .diff-file[open] { padding-bottom: 0; }
+  .diff-file > summary {
+    display: flex; align-items: center; gap: .7rem; min-height: 2.75rem; padding: .45rem .85rem;
+    list-style: none; color: var(--foreground); background: color-mix(in srgb, var(--glass) 55%, transparent);
+  }
+  .diff-file > summary::-webkit-details-marker { display: none; }
+  .diff-file > summary::before {
+    content: ""; flex: none; width: .35rem; height: .35rem;
+    border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground);
+    transform: rotate(-45deg); transition: transform .15s ease;
+  }
+  .diff-file[open] > summary::before { transform: rotate(45deg) translateY(-.1rem); }
+  .diff-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 .75rem/1.4 var(--font-mono); }
+  .diff-file-counts { display: inline-flex; gap: .45rem; flex: none; margin-left: auto; font: 500 .68rem/1 var(--font-mono); }
+  .diff-file-counts b { color: var(--success); font-weight: 500; }
+  .diff-file-counts i { color: var(--destructive); font-style: normal; }
+  .diff-rename { margin: 0; padding: .4rem .85rem; border-top: 1px solid var(--glass-border); }
+  .diff-hunk + .diff-hunk { border-top: 1px solid var(--glass-border); }
+  .diff-hunk-head {
+    overflow-x: auto; padding: .42rem .85rem; border-top: 1px solid var(--glass-border); border-bottom: 1px solid var(--glass-border);
+    background: color-mix(in srgb, var(--running) 8%, var(--card)); color: color-mix(in srgb, var(--running) 72%, var(--foreground));
+    font: 500 .68rem/1.4 var(--font-mono); white-space: pre;
+  }
+  .diff-lines { max-width: 100%; overflow-x: auto; background: color-mix(in srgb, var(--background) 48%, var(--card)); }
+  .diff-line {
+    display: grid; grid-template-columns: 2rem 3.2rem 3.2rem minmax(max-content, 1fr); align-items: stretch;
+    min-width: max-content; min-height: 1.8rem; font: 400 .72rem/1.55 var(--font-mono);
+  }
+  .diff-line:hover { background: color-mix(in srgb, var(--foreground) 4%, transparent); }
+  .diff-line code { display: flex; min-width: 0; padding: .3rem .75rem .3rem .6rem; color: inherit; white-space: pre; }
+  .diff-line code b { display: inline-block; width: 1rem; flex: none; font-weight: 500; opacity: .72; }
+  .diff-gutter {
+    display: flex; align-items: flex-start; justify-content: flex-end; min-width: 0; padding: .3rem .45rem;
+    border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); color: var(--muted-foreground); user-select: none;
+  }
+  .diff-addition { background: color-mix(in srgb, var(--success) 10%, transparent); color: color-mix(in srgb, var(--success) 38%, var(--foreground)); }
+  .diff-deletion { background: color-mix(in srgb, var(--destructive) 9%, transparent); color: color-mix(in srgb, var(--destructive) 38%, var(--foreground)); }
+  .diff-meta { color: var(--muted-foreground); }
+  .diff-annotate, .diff-annotate-space {
+    position: sticky; left: 0; z-index: 1; display: grid; place-items: center; width: 2rem; min-width: 2rem; min-height: 1.8rem;
+    border: 0; border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); border-radius: 0;
+  }
+  .diff-annotate { padding: 0; background: color-mix(in srgb, var(--card) 94%, transparent); color: var(--muted-foreground); box-shadow: none; opacity: .35; }
+  .diff-annotate svg { width: .78rem; height: .78rem; }
+  .diff-annotate:hover { transform: none; background: color-mix(in srgb, var(--running) 15%, var(--card)); color: var(--running); opacity: 1; }
+  .diff-annotate-space { background: color-mix(in srgb, var(--card) 94%, transparent); }
+  .diff-review[data-mode="view"] .diff-line { grid-template-columns: 0 3.2rem 3.2rem minmax(max-content, 1fr); }
+  .diff-review[data-mode="view"] .diff-annotate,
+  .diff-review[data-mode="view"] .diff-annotate-space { visibility: hidden; width: 0; min-width: 0; overflow: hidden; border: 0; pointer-events: none; }
+  .diff-review[data-mode="annotate"] .diff-annotate { opacity: .72; }
+  .diff-cut { margin: 0; padding: .65rem .85rem; border-top: 1px solid var(--glass-border); color: var(--warning); font-size: .75rem; }
+  .diff-comments { display: grid; gap: .5rem; margin: .7rem 0; }
+  .diff-comment {
+    position: relative; padding: .7rem .8rem .7rem 1rem; border: 1px solid var(--glass-border);
+    border-radius: calc(var(--radius) - 2px); background: color-mix(in srgb, var(--glass) 76%, transparent);
+  }
+  .diff-comment-pin { position: absolute; left: -.2rem; top: .75rem; width: .38rem; height: 1.2rem; border-radius: 999px; background: var(--running); }
+  .diff-comment p { margin: 0 0 .25rem; overflow-wrap: anywhere; }
+  .diff-comment .meta { font-size: .68rem; }
+  .diff-comment-form { display: grid; gap: .65rem; margin: .75rem 0; padding: .85rem; }
+  .diff-comment-target { display: grid; grid-template-columns: minmax(0, 1fr) 5.5rem; gap: .6rem; }
+  .diff-comment-form label { margin: 0; color: var(--muted-foreground); font-size: .68rem; font-weight: 550; }
+  .diff-comment-form input, .diff-comment-form textarea { margin-top: .28rem; }
+  .diff-comment-form button { justify-self: start; }
+  .revision-from-comments {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    margin: .75rem 0; padding: .85rem; border-color: color-mix(in srgb, var(--running) 24%, var(--glass-border));
+    background: linear-gradient(145deg, color-mix(in srgb, var(--running) 6%, var(--glass-strong)), var(--glass));
+  }
+  .revision-from-comments > div { display: grid; gap: .15rem; }
+  .revision-from-comments > div > span { display: block; }
+  .revision-from-comments button { flex: none; }
   .result-section { margin-top: .875rem; }
   .result-section > strong {
     display: block; font: 600 .6875rem/1.3 var(--font-mono); color: var(--muted-foreground);
@@ -8167,6 +8306,24 @@ button { min-height: 44px; }
   .acts-why-plan { display: none; }
   .task-scope-needed { padding: .85rem 1rem; }
   .task-scope-needed p { margin: .2rem 0; }
+  .receipt-head { display: grid; gap: .45rem; }
+  .receipt-proof { justify-self: start; }
+  .receipt-facts { grid-template-columns: 1fr; }
+  .receipt-actions { display: grid; grid-template-columns: 1fr; }
+  .receipt-actions .button-link { width: 100%; box-sizing: border-box; text-align: center; }
+  .diff-review { margin-inline: -.1rem; }
+  .diff-review-bar { padding-left: .7rem; }
+  .diff-file > summary { padding-inline: .7rem; }
+  .diff-line { grid-template-columns: 2.75rem 2.65rem 2.65rem minmax(max-content, 1fr); min-height: 2.75rem; }
+  .diff-annotate, .diff-annotate-space { width: 2.75rem; min-width: 2.75rem; min-height: 2.75rem; }
+  .diff-review[data-mode="view"] .diff-line { grid-template-columns: 0 2.65rem 2.65rem minmax(max-content, 1fr); }
+  .diff-review[data-mode="view"] .diff-annotate,
+  .diff-review[data-mode="view"] .diff-annotate-space { width: 0; min-width: 0; }
+  .diff-line code, .diff-gutter { padding-top: .72rem; padding-bottom: .72rem; }
+  .diff-comment-target { grid-template-columns: minmax(0, 1fr) 4.75rem; }
+  .diff-comment-form button { width: 100%; }
+  .revision-from-comments { display: grid; }
+  .revision-from-comments button { width: 100%; }
   /* A decision option on a phone: the answer is the full-width thumb
      target; its recommendation and consequence share the line beneath. */
   .decide-option > button { flex: 0 0 100%; width: 100%; }
@@ -9620,6 +9777,9 @@ type TaskChatFocus = {
   project: string | null;
   dispatch: DispatchDiagnosis | null;
   scope: "none" | "needs approval" | "approved";
+  /** The same compact, evidence-backed receipt shown on the task page.
+   * Chat is a lens over durable workflow state, never a second copy. */
+  result: CompletionReceiptView | null;
 };
 
 const taskChatHref = (taskId: string): string => `/chat?task=${encodeURIComponent(taskId)}`;
@@ -9667,10 +9827,12 @@ function taskViewSwitch(taskId: string, active: "overview" | "ask"): string {
 }
 
 function taskChatContext(focus: TaskChatFocus): string {
-  const positive = focus.dispatch?.condition === "running" || focus.dispatch?.code === "ready" || focus.dispatch?.code === "planning-ready" || focus.dispatch?.code === "scouting-ready";
+  const positive = focus.state === "done" || focus.dispatch?.condition === "running" || focus.dispatch?.code === "ready" || focus.dispatch?.code === "planning-ready" || focus.dispatch?.code === "scouting-ready";
   const dispatchSummary = focus.dispatch?.summary ?? "Status unavailable";
   const dispatchDetail = focus.dispatch?.detail ?? "Refresh the task overview before relying on its scheduler state.";
-  const recoveryHref = taskRecoveryHref(focus.id, focus.dispatch);
+  const recoveryHref = focus.state === "done" || focus.state === "cancelled"
+    ? null
+    : taskRecoveryHref(focus.id, focus.dispatch);
   return (
     `<aside class="task-chat-context" aria-label="current task">` +
     `<div class="task-chat-context-head"><span class="eyebrow">current task</span><span class="badge badge-${escape(focus.state)}">${escape(focus.state)}</span></div>` +
@@ -9683,6 +9845,13 @@ function taskChatContext(focus: TaskChatFocus): string {
     `<a class="task-chat-overview-link" href="${taskHref(focus.id)}">Open full overview →</a></div>` +
     `</aside>`
   );
+}
+
+/** A focused chat opens with the result it is discussing. The receipt is
+ * server-derived from sealed artifacts; the model's later prose cannot
+ * rewrite it. */
+function taskChatResult(focus: TaskChatFocus): string {
+  return focus.result === null ? "" : completionReceiptCard(focus.result, focus.id, "chat");
 }
 
 function taskChatHeading(focus: TaskChatFocus): string {
@@ -10012,6 +10181,7 @@ function chatPage(chrome: Chrome, data: {
     data.focusTask === null
       ? chatHeading("one place to understand every project and shape what happens next", data.projects.length, false, data.enabled.ok)
       : taskChatHeading(data.focusTask),
+    data.focusTask === null ? "" : taskChatResult(data.focusTask),
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
@@ -10424,6 +10594,7 @@ function matePage(chrome: Chrome, data: {
         : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
           `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
       `<span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span></div>`,
+    data.focusTask === null ? "" : taskChatResult(data.focusTask),
     data.focusTask === null ? chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null) : "",
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
@@ -12455,6 +12626,8 @@ function taskBody(data: {
     proofAccepted: boolean;
     /** v40: this run's own place in a bounded repair chain, if any. */
     repairChain: RepairChainRow | null;
+    /** Priority 2's concise, shared result package. */
+    receipt: CompletionReceiptView | null;
   } | null;
   decisions: Decision[];
   incidents: Incident[];
@@ -13355,6 +13528,7 @@ function taskBody(data: {
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
     `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason">` +
     `<button type="submit">hold next attempt</button></form>`;
+  const canHold = task.state === "queued" || task.state === "running" || task.state === "failed";
   const actsBar = [
     `<span id="task-actions"></span><div class="acts-bar">`,
     // While a ceremony leads the page, no other act competes as primary.
@@ -13365,7 +13539,7 @@ function taskBody(data: {
     // A task with no scope is already unable to start. Showing a hold next
     // to "plan first" adds a second, unnecessary decision at the exact
     // moment the page should have one obvious action.
-    canPlan ? "" : holdAct,
+    canPlan || !canHold ? "" : holdAct,
     data.holds.some(hold => hold.ownerKind === "operator") ? act("unhold", "unhold") : "",
     `</div>`,
     primaryAct === null ? "" : `<p class="meta acts-why acts-why-${primaryAct.whyClass}">${primaryAct.why}</p>`,
@@ -13412,6 +13586,9 @@ function taskBody(data: {
     // The planner and approval cards already answer "what now?". Avoid a
     // second status box above the one action the operator came here for.
     (approveForm === "" || dependencyChoiceNeeded) && data.plan !== "requested" ? dispatchStatus : "",
+    data.completion === null || data.completion === undefined || data.completion.receipt === null
+      ? ""
+      : completionReceiptCard(data.completion.receipt, task.id, "task"),
     planCard,
     approveForm === "" && !dependencyChoiceNeeded ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
@@ -13818,6 +13995,24 @@ type ProofBundleView = {
   repairChain: RepairChainRow | null;
 };
 
+/** The smallest complete answer to "what did this task deliver?". It is a
+ * projection of the same sealed handoff, proof, screenshot, and diff records
+ * used by the run page—not a new persistence layer or another verdict. */
+type CompletionReceiptView = {
+  runId: number;
+  outcome: string | null;
+  summary: string | null;
+  verdict: ProofVerdict | null;
+  accepted: boolean;
+  matrix: CriterionMatrixRow[];
+  diff:
+    | { fileCount: number; additions: number; deletions: number; binaryCount: number; filesTruncated: boolean }
+    | { problem: string }
+    | null;
+  screenshots: { path: string; caption: string; artifactId: number }[];
+  caveats: string[];
+};
+
 const SCREENSHOT_CAPTURE = /^agent-claimed screenshot at (.+) \(validated (?:png|jpeg)\)/;
 
 function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: string): ProofBundleView | null {
@@ -13869,6 +14064,33 @@ function proofBundleView(store: Store, run: Run, artifacts: Artifact[], root: st
       const ref = store.refById(run.taskRef);
       return ref === null ? null : store.repairChainForDraft(ref.externalId);
     })(),
+  };
+}
+
+function completionReceiptView(store: Store, run: Run, artifacts: Artifact[], root: string): CompletionReceiptView {
+  const handoff = structuredHandoffView(artifacts, root);
+  const proof = proofBundleView(store, run, artifacts, root);
+  const terminal = terminalDiffView(artifacts, root);
+  const stat = terminal?.stat ?? null;
+  return {
+    runId: run.id,
+    outcome: run.outcome,
+    summary: handoff?.conclusion ?? run.handoff,
+    verdict: proof?.verdict ?? null,
+    accepted: proof?.accepted !== null && proof?.accepted !== undefined,
+    matrix: proof?.matrix ?? [],
+    diff:
+      stat === null || "problem" in stat
+        ? stat
+        : {
+            fileCount: stat.fileCount,
+            additions: stat.additions,
+            deletions: stat.deletions,
+            binaryCount: stat.binaryCount,
+            filesTruncated: stat.filesTruncated,
+          },
+    screenshots: proof?.screenshots ?? [],
+    caveats: proof?.proof?.caveats ?? [],
   };
 }
 
@@ -13945,6 +14167,154 @@ function terminalDiffView(artifacts: Artifact[], root: string): TerminalDiffView
   return view;
 }
 
+type ReviewDiffLine = {
+  kind: "context" | "addition" | "deletion" | "meta";
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+};
+type ReviewDiffHunk = { header: string; lines: ReviewDiffLine[] };
+type ReviewDiffFile = { path: string; oldPath: string | null; meta: string[]; hunks: ReviewDiffHunk[] };
+type ReviewDiff = { files: ReviewDiffFile[]; linesTruncated: boolean };
+
+const REVIEW_DIFF_LINE_CAP = 4_000;
+
+/** Parse only the stable structure Git's unified patch format guarantees.
+ * Unknown metadata remains visible, and a patch that cannot be structured
+ * falls back to the sealed raw record—presentation never becomes proof. */
+function parseReviewDiff(text: string): ReviewDiff {
+  const files: ReviewDiffFile[] = [];
+  let file: ReviewDiffFile | null = null;
+  let hunk: ReviewDiffHunk | null = null;
+  let oldLine = 0;
+  let newLine = 0;
+  let rendered = 0;
+  let linesTruncated = false;
+
+  const pathOf = (raw: string): string => {
+    const withoutTimestamp = raw.split("\t", 1)[0]?.trim() ?? raw.trim();
+    let decoded = withoutTimestamp;
+    if (decoded.startsWith('"') && decoded.endsWith('"')) {
+      try { decoded = JSON.parse(decoded) as string; } catch { decoded = decoded.slice(1, -1); }
+    }
+    return decoded === "/dev/null" ? decoded : decoded.replace(/^[ab]\//, "");
+  };
+
+  for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
+    if (raw.startsWith("diff --git ")) {
+      const at = raw.lastIndexOf(" b/");
+      file = { path: at === -1 ? "changed file" : pathOf(raw.slice(at + 1)), oldPath: null, meta: [raw], hunks: [] };
+      files.push(file);
+      hunk = null;
+      continue;
+    }
+    if (file === null) continue;
+    if (raw.startsWith("--- ")) {
+      file.oldPath = pathOf(raw.slice(4));
+      file.meta.push(raw);
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      const nextPath = pathOf(raw.slice(4));
+      if (nextPath !== "/dev/null") file.path = nextPath;
+      file.meta.push(raw);
+      continue;
+    }
+    const hunkHeader = /^@@ -([0-9]+)(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@(.*)$/.exec(raw);
+    if (hunkHeader !== null) {
+      oldLine = Number(hunkHeader[1]);
+      newLine = Number(hunkHeader[2]);
+      hunk = { header: raw, lines: [] };
+      file.hunks.push(hunk);
+      continue;
+    }
+    if (hunk === null) {
+      if (raw !== "") file.meta.push(raw);
+      continue;
+    }
+    if (rendered >= REVIEW_DIFF_LINE_CAP) {
+      linesTruncated = true;
+      continue;
+    }
+    rendered += 1;
+    if (raw.startsWith("+") && !raw.startsWith("+++")) {
+      hunk.lines.push({ kind: "addition", text: raw.slice(1), oldLine: null, newLine });
+      newLine += 1;
+    } else if (raw.startsWith("-") && !raw.startsWith("---")) {
+      hunk.lines.push({ kind: "deletion", text: raw.slice(1), oldLine, newLine: null });
+      oldLine += 1;
+    } else if (raw.startsWith(" ")) {
+      hunk.lines.push({ kind: "context", text: raw.slice(1), oldLine, newLine });
+      oldLine += 1;
+      newLine += 1;
+    } else {
+      hunk.lines.push({ kind: "meta", text: raw, oldLine: null, newLine: null });
+    }
+  }
+  return { files, linesTruncated };
+}
+
+function reviewDiffHtml(
+  patch: { text: string; truncated: boolean; artifactId: number },
+  stat: TerminalDiffView["stat"],
+  runId: number,
+  commentable: boolean,
+): string {
+  const parsed = parseReviewDiff(patch.text);
+  const structured = parsed.files.some(file => file.hunks.length > 0);
+  if (!structured) {
+    return (
+      `<details><summary>the patch${patch.truncated ? " (TRUNCATED — the raw record says how much was cut)" : ""}</summary>` +
+      `<pre class="mono" style="overflow-x:auto">${escape(patch.text)}</pre></details>` +
+      `<p class="meta"><a href="/r/${runId}/evidence/${patch.artifactId}">Download the sealed patch</a></p>`
+    );
+  }
+  const stats = stat !== null && !("problem" in stat) ? new Map(stat.files.map(one => [one.path, one] as const)) : new Map();
+  const annotateIcon = strokeIcon(`<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 10h8"/>`);
+  const files = parsed.files.map((one, fileIndex) => {
+    const counts = stats.get(one.path);
+    const countWords = counts === undefined
+      ? ""
+      : counts.additions === null || counts.deletions === null
+        ? `<span class="diff-file-counts">binary</span>`
+        : `<span class="diff-file-counts"><b>+${counts.additions}</b><i>−${counts.deletions}</i></span>`;
+    const hunks = one.hunks.map(hunk =>
+      `<section class="diff-hunk"><div class="diff-hunk-head">${escape(hunk.header)}</div>` +
+      `<div class="diff-lines">${hunk.lines.map(line => {
+        const lineNumber = line.newLine ?? line.oldLine;
+        const side = line.newLine === null && line.oldLine !== null ? "old" : "new";
+        const annotate = !commentable || lineNumber === null || line.kind === "meta"
+          ? `<span class="diff-annotate-space"></span>`
+          : `<button type="button" class="diff-annotate pick-line" data-path="${escape(one.path)}" data-line="${lineNumber}" data-side="${side}" aria-label="Annotate ${escape(one.path)}, ${side} line ${lineNumber}" title="Annotate this line">${annotateIcon}</button>`;
+        const marker = line.kind === "addition" ? "+" : line.kind === "deletion" ? "−" : line.kind === "context" ? " " : "·";
+        return (
+          `<div class="diff-line diff-${line.kind}">${annotate}` +
+          `<span class="diff-gutter">${line.oldLine ?? ""}</span><span class="diff-gutter">${line.newLine ?? ""}</span>` +
+          `<code><b aria-hidden="true">${marker}</b>${escape(line.text)}</code></div>`
+        );
+      }).join("")}</div></section>`
+    ).join("");
+    return (
+      `<details class="diff-file"${fileIndex === 0 ? " open" : ""}>` +
+      `<summary><span class="diff-file-name">${escape(one.path)}</span>${countWords}</summary>` +
+      (one.oldPath !== null && one.oldPath !== "/dev/null" && one.oldPath !== one.path ? `<p class="diff-rename meta">from ${escape(one.oldPath)}</p>` : "") +
+      hunks + `</details>`
+    );
+  }).join("");
+  return (
+    `<div class="diff-review" data-review-diff>` +
+    (commentable
+      ? `<div class="diff-review-bar"><span class="meta">${parsed.files.length} changed file${parsed.files.length === 1 ? "" : "s"}</span>` +
+        `<div class="diff-modes" role="group" aria-label="diff mode"><button type="button" data-diff-mode="view" aria-pressed="true">View</button>` +
+        `<button type="button" data-diff-mode="annotate" aria-pressed="false">Annotate</button></div></div>` +
+        `<p class="diff-review-help">Select a line, then describe what should change. Nothing is revised until you create the revision below.</p>`
+      : "") +
+    files +
+    (patch.truncated || parsed.linesTruncated ? `<p class="diff-cut">This visual diff is shortened. Review the sealed patch before approving.</p>` : "") +
+    `</div><p class="meta"><a href="/r/${runId}/evidence/${patch.artifactId}">Download the sealed patch</a></p>`
+  );
+}
+
 /** Render the terminal diff card: stat and capture health first, the bounded
  * patch beneath a fold. `editor` (arc 6) links file rows to vscode:// on the
  * reviewing device; `commentable` adds a per-file "comment" button the
@@ -14006,11 +14376,7 @@ function terminalDiffCard(
   } else if (view.patch.text.trim() === "") {
     parts.push(`<p class="meta">empty diff — captured successfully, nothing changed</p>`);
   } else {
-    parts.push(
-      `<details><summary>the patch${view.patch.truncated ? " (TRUNCATED — the raw record says how much was cut)" : ""}</summary>` +
-        `<pre class="mono" style="overflow-x:auto">${escape(view.patch.text)}</pre></details>` +
-        `<p class="meta"><a href="/r/${runId}/evidence/${view.patch.artifactId}">the raw patch record</a></p>`,
-    );
+    parts.push(reviewDiffHtml(view.patch, view.stat, runId, commentable));
   }
 
   return parts.join("\n");
@@ -14092,6 +14458,68 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
   }
 
   return parts.length === 1 ? "" : parts.join("\n");
+}
+
+/** A calm, scan-first result receipt for the task and its focused chat.
+ * The full ledger remains one click away; this card carries only the facts
+ * needed to decide whether to inspect, discuss, or move on. */
+function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat"): string {
+  const proof =
+    view.verdict === null
+      ? { word: "Unverified", state: "unknown" }
+      : view.verdict === "verified"
+        ? { word: "Verified", state: "verified" }
+        : view.verdict === "attested"
+          ? { word: "Evidence captured", state: "attested" }
+          : view.verdict === "refuted"
+            ? { word: view.accepted ? "Accepted with concerns" : "Proof disagrees", state: "problem" }
+            : { word: view.accepted ? "Accepted with gaps" : "Needs verification", state: "problem" };
+  const passed = view.matrix.length === 0 ? null : passFraction(view.matrix);
+  const diff =
+    view.diff === null
+      ? "Change summary unavailable"
+      : "problem" in view.diff
+        ? "Change summary unavailable"
+        : view.diff.fileCount === 0
+          ? "No repository changes"
+          : `${view.diff.fileCount} file${view.diff.fileCount === 1 ? "" : "s"} · +${view.diff.additions} −${view.diff.deletions}` +
+            (view.diff.binaryCount > 0 ? ` · ${view.diff.binaryCount} binary` : "") +
+            (view.diff.filesTruncated ? " · list shortened" : "");
+  const criteria =
+    passed === null
+      ? "No signed rubric"
+      : `${passed.passed}/${passed.total} acceptance criteria passed`;
+  const shots =
+    view.screenshots.length === 0
+      ? ""
+      : `<div class="receipt-visuals" aria-label="visual proof">${view.screenshots
+          .slice(0, 4)
+          .map(
+            shot =>
+              `<a class="receipt-shot" href="/r/${view.runId}/evidence/${shot.artifactId}">` +
+              `<img src="/r/${view.runId}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}">` +
+              `<span>${escape(shot.caption)}</span></a>`,
+          )
+          .join("")}</div>`;
+  const caveats =
+    view.caveats.length === 0
+      ? ""
+      : `<div class="receipt-caveats"><strong>Before you move on</strong><ul>${view.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+  return (
+    `<section class="card completion-receipt" data-card-kind="result-receipt">` +
+    `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>What shipped</h2></div>` +
+    `<span class="receipt-proof" data-proof-state="${proof.state}"><i aria-hidden="true"></i>${escape(proof.word)}</span></div>` +
+    `<p class="receipt-summary">${escape(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."))}</p>` +
+    `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>against the approved scope</small></span>` +
+    `<span><strong>${escape(diff)}</strong><small>from the sealed final diff</small></span>` +
+    `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : "validated visual proof"}</small></span></div>` +
+    shots + caveats +
+    `<div class="receipt-actions"><a class="button-link" href="/r/${view.runId}">Review full evidence</a>` +
+    (place === "task"
+      ? `<a href="${taskChatHref(taskId)}">Discuss or request changes →</a>`
+      : `<a href="${taskHref(taskId)}">Open task overview →</a>`) +
+    `</div></section>`
+  );
 }
 
 /** The run's facts as rows — one renderer for the page and its live
@@ -14271,20 +14699,20 @@ function runPage(
   const commentRows = comments
     .map(
       one =>
-        `<p class="row"><span class="meta">${escape(one.author)}</span> ` +
+        `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>` +
         `${one.path === null ? "" : commentPathWords(one.path, one.line)}` +
-        `${escape(one.note)}</p>`,
+        `${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`,
     )
     .join("\n");
   const commentForm =
     csrf === "" || !hasTerminalDiff
       ? ""
-      : `<form method="post" action="/r/${run.id}/comment" class="row" id="comment-form">` +
+      : `<form method="post" action="/r/${run.id}/comment" class="card diff-comment-form" id="comment-form">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-        `<input type="text" name="path" placeholder="file (optional)" aria-label="file" class="mono" style="width:14rem">` +
-        `<input type="text" name="line" placeholder="line" aria-label="line" inputmode="numeric" style="width:4.5rem">` +
-        `<input type="text" name="note" placeholder="what should change here" aria-label="review comment" style="width:100%;max-width:22rem"${noted ? " autofocus" : ""}>` +
-        `<button type="submit">comment</button></form>`;
+        `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="select a line above" aria-label="file" class="mono"></label>` +
+        `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div>` +
+        `<label>change requested<textarea name="note" rows="2" maxlength="2000" placeholder="Explain what should change and why" aria-label="review comment"${noted ? " autofocus" : ""}></textarea></label>` +
+        `<button type="submit">Add annotation</button></form>`;
   // The device-side half of the editor-link activation (arc 6, finding 1):
   // rendered only when the server capability exists and this run belongs
   // to this machine's runner — the person at the browser flips it.
@@ -14300,10 +14728,11 @@ function runPage(
   const reviseForm =
     csrf === "" || comments.length === 0
       ? ""
-      : `<form method="post" action="/r/${run.id}/revise">` +
+      : `<form method="post" action="/r/${run.id}/revise" class="card revision-from-comments">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-        `<button type="submit">turn ${comments.length} comment(s) into a revision task</button>` +
-        `<span class="meta"> — creates one unapproved task carrying exactly this batch; you approve its scope before anything builds</span></form>`;
+        `<div><strong>${comments.length} annotation${comments.length === 1 ? "" : "s"} ready</strong>` +
+        `<span class="meta">Creates one revision carrying this exact batch. You review its scope before anything builds.</span></div>` +
+        `<button type="submit">Create revision from annotations</button></form>`;
   // CI repair, suggestion-first (M8.18): the observed red episode earns a
   // button; the button drafts ONE unapproved task; a person approves it.
   const repairCard =
@@ -14316,7 +14745,9 @@ function runPage(
         `<span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form></div>`;
 
   const reviewCard =
-    (commentRows === "" && commentForm === "" ? "" : `<h2 id="review">review</h2>${commentRows}${commentForm}${reviseForm}${editorToggleForm}`) + repairCard;
+    (commentRows === "" && commentForm === "" ? "" : `<h2 id="review">Review and revise</h2>` +
+      `<p class="meta">Annotate the diff above. When the batch is ready, create one scoped revision task from it.</p>` +
+      `${commentRows === "" ? "" : `<div class="diff-comments">${commentRows}</div>`}${commentForm}${reviseForm}${editorToggleForm}`) + repairCard;
 
   const noteRows =
     notes.length === 0
@@ -14384,19 +14815,25 @@ function runPage(
 
 /**
  * Click-to-prefill (arc 6, finding 4): client-side FORM mutation, named as
- * such — a "comment" button beside each changed file copies its path into
- * the comment form and focuses the note field. No fetch, no endpoint, no
- * submit; comments still leave through the same CSRF'd form POST. Reads a
- * data attribute, writes an input value — never markup.
+ * such — normal viewing stays the default; "Annotate" reveals line pins.
+ * A pin or file button copies its target into the comment form and focuses
+ * the note field. No fetch, endpoint, or submit: comments still leave
+ * through the same CSRF'd form POST. Reads data attributes, writes input
+ * values, and flips presentational state — never markup.
  */
 function prefillScript(): string {
   return (
-    `(function(){var form=document.getElementById("comment-form");if(!form)return;` +
+    `(function(){var form=document.getElementById("comment-form");if(!form)return;var review=document.querySelector("[data-review-diff]");` +
+    `if(review){review.setAttribute("data-mode","view");review.addEventListener("click",function(ev){` +
+    `var mode=ev.target&&ev.target.closest?ev.target.closest("button[data-diff-mode]"):null;if(!mode)return;` +
+    `var value=mode.getAttribute("data-diff-mode")==="annotate"?"annotate":"view";review.setAttribute("data-mode",value);` +
+    `review.querySelectorAll("button[data-diff-mode]").forEach(function(one){one.setAttribute("aria-pressed",String(one===mode));});});}` +
     `document.addEventListener("click",function(ev){` +
-    `var button=ev.target&&ev.target.closest?ev.target.closest("button.pick-file"):null;if(!button)return;` +
-    `var path=form.querySelector("[name=path]");var note=form.querySelector("[name=note]");` +
+    `var button=ev.target&&ev.target.closest?ev.target.closest("button.pick-file,button.pick-line"):null;if(!button)return;` +
+    `var path=form.querySelector("[name=path]");var line=form.querySelector("[name=line]");var note=form.querySelector("[name=note]");` +
     `if(path)path.value=button.getAttribute("data-path")||"";` +
-    `if(note)note.focus();});})();`
+    `if(line)line.value=button.getAttribute("data-line")||"";` +
+    `form.scrollIntoView({behavior:"smooth",block:"center"});if(note)note.focus();});})();`
   );
 }
 

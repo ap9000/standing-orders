@@ -18,6 +18,26 @@ Done means:
 - every blocked state gives one concrete next action;
 - an end-to-end check files, approves, runs, and reaches a terminal outcome.
 
+### Certification handoff
+
+The implementation and pre-Windows certification are complete. Real Claude
+and Codex subscription canaries pass planning → approval → build → verified
+proof → duplicate-dispatch refusal on macOS; Windows CI passes the native
+Task Scheduler/link/dispatch seam and `cmd.exe` setup/verification on Node 22
+and 24.
+
+Two environment-dependent checks remain, explicitly tracked rather than
+blocking the next product priority:
+
+1. On the physical Windows PC, run both real-provider canaries, install the
+   scheduled worker, prove a task finishes after the app and terminal close,
+   reboot, and prove a second task finishes. The exact commands and teardown
+   are in [CERTIFICATION.md](CERTIFICATION.md#physical-windows-checklist).
+2. Automatic provider fallback stays fail-closed until a real exhausted
+   subscription response is captured and reviewed for each exact CLI version.
+   A successful normal canary cannot prove that terminal. Readiness remains
+   visible through `standing-orders providers`.
+
 ## 2. Verified Done
 
 Completion is an evidence bundle, not an agent assertion. Each task should show
@@ -54,8 +74,10 @@ visible provenance and an operator-controlled reset.
 
 ## Current focus
 
-Priority 1 is active, and the first three Priority 2 slices have landed
-alongside it: completion carries a typed, hash-addressed proof the plane
+Priority 2 is active. Priority 1 is implemented and has passed every
+pre-Windows gate; only the physical-machine and real account-exhaustion checks
+listed above remain. The first three Priority 2 slices have landed already:
+completion carries a typed, hash-addressed proof the plane
 adjudicates against evidence it captured itself, rather than an agent's own
 assertion; as of Acceptance Contract v2, that proof answers a rubric the
 *operator* signed before the build ever started, not one the agent invented
@@ -64,6 +86,18 @@ well-formed proof is no longer the last word — an independent reviewer
 judges whether the diff actually does what each signed criterion says, and
 a bounded loop can draft (never dispatch unattended, absent a freshly
 signed grant) exactly one fix naming what remains unmet.
+
+The current Priority 2 slice turns those records into one concise result
+receipt on both the task overview and its focused chat: what shipped, proof
+level, acceptance pass count, sealed diff size, validated screenshots,
+caveats, and direct paths to the full evidence or a revision conversation.
+It is a projection of the existing sealed artifacts, not a parallel result
+store or another agent stage. The full-evidence road now renders the sealed
+patch as a responsive structured diff. Normal viewing is the default; an
+optional Annotate mode targets exact old or new lines, collects feedback, and
+then seals the chosen batch into one unapproved, scope-inheriting revision.
+This improves the existing review path without making review or revision a
+mandatory workflow stage.
 
 The first Priority 1 slice now pins the worker service to the installed Node
 runtime, requires a fresh worker heartbeat before installation reports success,

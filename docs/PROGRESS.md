@@ -1,5 +1,34 @@
 # Progress
 
+**2026-09-08 — Verified Done now starts with a result receipt and leads to a
+real review surface.** A completed task presents one shared, scan-first card on its overview
+and focused Ask view: the sealed handoff summary, proof level, acceptance pass
+count, final diff size, validated screenshot thumbnails, caveats, and direct
+roads to the full evidence or a revision conversation. Both surfaces project
+the same immutable run artifacts and stored verdict; chat cannot rewrite the
+result and no new state, agent role, or review stage was introduced. The card
+collapses cleanly from three facts across on desktop to one thumb-friendly
+column on phones. Route coverage proves that task and chat render the same
+run, verdict, criteria, diff, screenshot, and caveat facts. The evidence page
+now parses the sealed unified patch into folding file and hunk rows with honest
+old/new line numbers, subtle add/delete treatment, and a raw-patch escape hatch.
+View mode stays quiet by default; optional Annotate mode makes exact lines
+selectable, prefills the existing feedback form, and shows the accumulated
+batch before the operator deliberately creates one unapproved revision task.
+The revision still inherits the approved scope and must be reviewed before a
+builder can run, so the richer interface adds no new authority.
+
+**2026-09-08 — Never Stuck's pre-Windows certification is closed; the physical
+handoff is explicit.** Real logged-in Claude and Codex canaries now pass the
+public workflow from repository planning through exact approval, build,
+verified criterion matrix, and duplicate-dispatch refusal. Windows CI proves
+the native Task Scheduler/link/dispatch baseline and `cmd.exe` execution seam
+on Node 22 and 24. The only machine-dependent remainder is the documented
+physical Windows canary, scheduled-worker close/reboot sequence, and teardown.
+Automatic fallback remains separately fail-closed until a real exhausted
+subscription terminal is captured and bound to its exact CLI version; normal
+provider success is not misrepresented as exhaustion coverage.
+
 **2026-09-08 — Adding a project now looks and acts like a primary action.**
 The Projects page no longer renders its local-folder and GitHub choices as
 tiny status badges. A stronger section heading now leads to two full action

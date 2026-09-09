@@ -463,6 +463,17 @@ and offers plain-language starters for status, scope revision, steering, and
 proof review. Proposed guidance is inert until you confirm its card, then it
 reaches the next attempt without interrupting work already running.
 
+When a task finishes, both views lead with the same **result receipt**: what
+shipped, proof level, acceptance pass count, sealed diff size, validated UI
+screenshots, and any caveats. Open the full evidence ledger or discuss and
+request changes from there; chat cannot rewrite the stored result.
+
+The evidence page opens the sealed patch in a clean **View** mode. Switch to
+**Annotate** only when you need a change: select the exact line, leave plain-
+language feedback, and collect as many notes as needed. Creating a revision is
+a separate, optional act that seals the exact annotation batch into one scoped
+task for approval; ordinary result review never requires it.
+
 The chat setup screen defaults to **Codex membership · default model**.
 Run `codex login` once on the machine serving Standing Orders, choose that
 provider, and there is no Standing Orders dollar maximum. The conversation

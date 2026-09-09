@@ -55,6 +55,11 @@ proven at spawn. See [fallback-fixtures.md](fallback-fixtures.md).
 
 ## Physical Windows checklist
 
+**Handoff status:** pending the physical Windows PC. All pre-Windows work is
+complete: the same canary passes both subscription providers on macOS, and
+Windows CI passes Task Scheduler/link/dispatch plus the native `cmd.exe`
+command seam on Node 22 and 24.
+
 Run this on the Windows PC from a normal PowerShell session, after installing
 Git, Node 22 or 24, Claude Code, and Codex CLI and signing into both CLIs:
 
@@ -87,3 +92,8 @@ Then certify Task Scheduler with a real connected repository:
 
 Only those physical Task Scheduler and post-reboot checks remain outside the
 automated and macOS real-provider baseline.
+
+The separate automatic-fallback claim also remains intentionally unarmed until
+a real exhausted-account terminal is captured for the exact installed CLI
+version. That requires an actually exhausted subscription; ordinary successful
+provider runs cannot safely synthesize it.

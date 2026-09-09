@@ -869,7 +869,8 @@ describe("the operations console", () => {
 
     const runView = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runView).toContain("tighten the guard here");
-    expect(runView).toContain("turn 1 comment(s) into a revision task");
+    expect(runView).toContain("1 annotation ready");
+    expect(runView).toContain("Create revision from annotations");
 
     const revised = await fetch(url(`/r/${run}/revise`), {
       method: "POST",
@@ -883,6 +884,7 @@ describe("the operations console", () => {
     // The new task's screen restates the batch beside its own approval —
     // and the scope is unapproved by construction.
     const taskView = await (await fetch(url(target), { headers: { cookie } })).text();
+    expect(taskView).toContain("Revise t-rev from 1 annotation on build");
     expect(taskView).toContain("the review batch");
     expect(taskView).toContain("tighten the guard here");
     expect(taskView).toContain("t-rev");
@@ -1212,6 +1214,67 @@ describe("the operations console", () => {
     expect(screen).toContain("checks reported by the agent");
     expect(screen).toContain("Focused tests pass");
     expect(screen).toContain("Watch the first production run");
+  });
+
+  test("a finished task and its Ask view share one concise result receipt", async () => {
+    store.createTask({ id: "t-receipt", title: "make completion obvious" }, T0);
+    const ref = store.refFor("built-in", "t-receipt").id;
+    const run = seedRun(ref, 1);
+    store.recordOutcomeFacts(run, { handoff: "Shipped the compact result receipt." });
+    store.finishRun(run, { outcome: "built", reason: "clean", now: T0 });
+    store.setTaskState("t-receipt", "done", T0);
+    mkdirSync(join(evidenceRoot, String(run)), { recursive: true });
+
+    const save = (kind: "handoff" | "proof" | "diff-stat" | "screenshot", name: string, content: Buffer, capture: string): number => {
+      const key = `${run}/${name}`;
+      writeFileSync(join(evidenceRoot, key), content);
+      return store.saveArtifact({
+        run, kind, key,
+        bytesOriginal: content.length, bytesStored: content.length, truncated: false,
+        sha256: createHash("sha256").update(content).digest("hex"), capture,
+      }, T0);
+    };
+    save("handoff", "handoff.json", Buffer.from(JSON.stringify({ conclusion: "Shipped the compact result receipt." })), "agent terminal handoff");
+    save("proof", "proof.json", Buffer.from(JSON.stringify({
+      version: 1,
+      criteria: [{ id: "c1", statement: "The result is clear", verdict: "met", how: "Shown on task and chat", evidence: [{ kind: "changed-path", ref: "src/serve.ts" }] }],
+      checks: [{ command: "npm test", exitCode: 0, summary: "passed" }],
+      changed: ["src/serve.ts"],
+      caveats: ["Physical Windows presentation is still awaiting certification."],
+      screenshots: [{ path: "evidence/result.png", caption: "Completed task receipt" }],
+    })), "agent proof manifest");
+    save("diff-stat", "diff-stat.json", Buffer.from(JSON.stringify({
+      base: "a".repeat(40), head: "b".repeat(40), fileCount: 2, additions: 14, deletions: 3,
+      binaryCount: 0, filesTruncated: false,
+      files: [{ path: "src/serve.ts", additions: 12, deletions: 3 }, { path: "docs/PRIORITIES.md", additions: 2, deletions: 0 }],
+    })), "git diff --numstat (exit 0)");
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+    const screenshot = save("screenshot", "result.png", png, "agent-claimed screenshot at evidence/result.png (validated png)");
+    store.saveProofVerdict(run, "verified", ["the approved verification command passed"], T0, [{
+      id: "c1", statement: "The result is clear", requiredEvidence: ["changed-path"], state: "pass", detail: [],
+      answered: [{ kind: "changed-path", ref: "src/serve.ts" }], review: null,
+    }]);
+
+    const cookie = await login();
+    const task = await (await fetch(url("/t/t-receipt"), { headers: { cookie } })).text();
+    expect(task).toContain('data-card-kind="result-receipt"');
+    expect(task).toContain('data-proof-state="verified"');
+    expect(task).toContain("Shipped the compact result receipt.");
+    expect(task).toContain("1/1 acceptance criteria passed");
+    expect(task).toContain("2 files · +14 −3");
+    expect(task).toContain("Physical Windows presentation is still awaiting certification.");
+    expect(task).toContain(`src="/r/${run}/evidence/${screenshot}"`);
+    expect(task).toContain('href="/chat?task=t-receipt">Discuss or request changes →</a>');
+    expect(task).not.toContain("hold next attempt");
+
+    const chat = await (await fetch(url("/chat?task=t-receipt"), { headers: { cookie } })).text();
+    expect(chat).toContain('data-card-kind="result-receipt"');
+    expect(chat).toContain("1/1 acceptance criteria passed");
+    expect(chat).toContain("2 files · +14 −3");
+    expect(chat).toContain(`href="/r/${run}">Review full evidence</a>`);
+    expect(chat).toContain('href="/t/t-receipt">Open task overview →</a>');
+    expect(chat).not.toContain("Discuss or request changes →");
+    expect(chat).not.toContain("Get this task running");
   });
 
   test("run evidence: own artifacts serve, foreign artifacts and foreign repos are not found", async () => {
@@ -4820,7 +4883,17 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
         taskRef, leaseId: "l-review", runner: "builder-1",
         branch: "so/t-review", worktree: "/pool/t review", now: T0,
       });
-      const patch = "diff --git a/src/a.ts b/src/a.ts\n+edited\n";
+      const patch = [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -1,3 +1,3 @@",
+        " keep",
+        "-old value",
+        "+edited",
+        " end",
+        "",
+      ].join("\n");
       storeEvidence(store, evidenceRoot, runId, "terminal-diff", "terminal-diff.patch",
         Buffer.from(patch, "utf8"), "git diff (exit 0)", T0, { captureStatus: "ok" });
       storeEvidence(store, evidenceRoot, runId, "diff-stat", "terminal-diff-stat.json",
@@ -4902,6 +4975,16 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
       const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
       expect(html).toContain('class="pick-file" data-path="src/a.ts"');
       expect(html).toContain('id="comment-form"');
+      expect(html).toContain('data-review-diff');
+      expect(html).toContain('class="diff-file" open');
+      expect(html).toContain('class="diff-annotate pick-line" data-path="src/a.ts" data-line="2" data-side="old"');
+      expect(html).toContain('aria-label="Annotate src/a.ts, old line 2"');
+      expect(html).toContain('class="diff-annotate pick-line" data-path="src/a.ts" data-line="2" data-side="new"');
+      expect(html).toContain('aria-label="Annotate src/a.ts, new line 2"');
+      expect(html).toContain('data-diff-mode="view" aria-pressed="true"');
+      expect(html).toContain('data-diff-mode="annotate" aria-pressed="false"');
+      expect(html).toContain('closest("button.pick-file,button.pick-line")');
+      expect(html).toContain('form.scrollIntoView({behavior:"smooth",block:"center"})');
       // prefill alone earns no network: script-src yes, connect-src no
       const csp = (await fetch(url(`/r/${runId}`), { headers: { cookie } })).headers.get("content-security-policy") ?? "";
       expect(csp).toMatch(/script-src 'nonce-/);
@@ -6640,6 +6723,10 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const bare = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
     expect(bare).toContain('data-dispatch-status="needs-verification"');
     expect(bare).not.toContain('data-dispatch-status="complete-with-evidence"');
+    expect(bare).toContain('data-card-kind="result-receipt"');
+    expect(bare).toContain("What shipped");
+    expect(bare).toContain(`href="/r/${run}">Review full evidence</a>`);
+    expect(bare).toContain('href="/chat?task=t-proof">Discuss or request changes →</a>');
 
     const sha256 = createHash("sha256").update("").digest("hex");
     for (const kind of ["handoff", "terminal-diff"] as const) {
@@ -6668,6 +6755,15 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     store.saveProofVerdict(run, "verified", ["the approved verification command passed"], T0);
     const verified = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
     expect(verified).toContain('data-dispatch-status="complete-verified"');
+    expect(verified).toContain('data-proof-state="verified"');
+
+    // Focused chat is a second lens over the same durable receipt, not a
+    // model-authored summary or a separate result record.
+    const chat = await (await fetch(url("/chat?task=t-proof"), { headers: { cookie } })).text();
+    expect(chat).toContain('class="card completion-receipt" data-card-kind="result-receipt"');
+    expect(chat).toContain(`href="/r/${run}">Review full evidence</a>`);
+    expect(chat).toContain('href="/t/t-proof">Open task overview →</a>');
+    expect(chat).not.toContain("Discuss or request changes →");
 
     store.saveProofVerdict(run, "refuted", ["claimed changed path not in the sealed diff: src/other.ts"], T0);
     const refuted = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();

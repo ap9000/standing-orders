@@ -76,6 +76,7 @@ ring at 2px offset on buttons and links; a ring-colored border with a soft
 | Acceptance rubric | `acceptanceCeremonyHtml` (`<ul class="recap acceptance-rubric">`) | — | one line per signed criterion — mono id, sans statement, its required evidence kinds after it; restated text above the seal, never a second amber action |
 | Criterion matrix | `.badge-manual-review` (+ existing `.badge-done`/`-failed`); `criterionMatrixHtml` / `criterionMatrixSummary` | — | one row per criterion — a state badge (pass/missing/failed/manual review), mono id, statement, required evidence, and the proof's own answered evidence refs (a link to the underlying artifact where one resolves, plain text otherwise); the SAME states and words on the task page, the run page, done, builds, board, inbox, and `task show` |
 | Review judgement | reuses `.badge-done`/`-failed`/`-manual-review` (never a fourth color); `reviewJudgementBadge` | — | a second badge beside the matrix row's own — upholds/contradicts/cannot-tell read exactly as pass/failed/manual-review already do; hover title carries the reviewer's author and note |
+| Diff review | `.diff-review`, `.diff-file`, `.diff-line`, `.diff-modes`, `.diff-annotate` | — | sealed patch rendered as folding files and hunks; View is quiet and default, Annotate reveals exact old/new-line targets; raw patch remains downloadable and annotations only become work through the separate revision act |
 | Repair chain card | `.card.repair-chain`; `repairChainHtml` | — | one card, one chain — drafted (awaiting approval or mode-approved), resolved, or one of the three stops (attempts-spent, no-progress, integrity-refused); the same words on the task page and the run page, and the SAME shared `passFraction` helper (never a hand-rolled "N/M criteria") on board and chat |
 | Card | `.card` | `Card` | surface, hairline, 0.5rem radius, faint shadow; never nested |
 | Buttons | `button` (secondary), `form.card > [type=submit]` (primary), `.approve-form [type=submit]` (amber), `.danger` | `Button` | one primary per form; approve is the only amber verb |
@@ -144,6 +145,12 @@ top-down and every long thing folds.
    attempts (open), spend (folded), steering (open only when notes exist),
    scope (open; the edit form and the tournament fields fold inside it),
    waits for (folded when empty), holds.
+7. **Full evidence and revision** — the result receipt links to the run's
+   immutable record. Its diff opens in View mode: folding file rows, old/new
+   gutters, quiet semantic add/delete color, and horizontal containment on a
+   phone. Annotate is an explicit mode, not permanent chrome; selecting a line
+   prefills one ordinary feedback form. Collected annotations stay inert until
+   the separate revision card seals the exact batch into one unapproved task.
 
 ## 4c. The chat workspace
 
