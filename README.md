@@ -78,10 +78,10 @@ boundaries, evidence requirements, model, and permissions.
 
 ## Install
 
-One command, from inside the repository you want built:
+Choose your projects folder the first time:
 
 ```sh
-npx standing-orders up          # or: bunx standing-orders up
+npx standing-orders up --project-root ~/Projects    # or: bunx standing-orders up
 ```
 
 That is the install and the setup. It needs Node 22.13 or newer on the
@@ -90,18 +90,18 @@ Node, so it works too). `npm install -g standing-orders` gives you the
 bare `standing-orders` command for later.
 
 `up` prints your login once (and saves it beside the database as
-`up-login.txt`), opens the app in your browser, connects this machine as the
-project's builder, and watches the repository. Sign in with that login; from
-then on the console is the product. Starting it again later asks for your
-password once and reuses everything.
+`up-login.txt`), opens the app in your browser, and connects this machine as
+the builder. Add an existing folder or a GitHub repository from **Projects**;
+the builder and unified chat pick it up while the app keeps running. The
+projects folder and every added repository are remembered. Later,
+`standing-orders up` can be run from any directory and reconnects all of them.
 
 To reach it from your phone over a tailnet:
 `standing-orders up --host 0.0.0.0 --allow-host <your-machine>.ts.net:4180`.
 
 If the inbox says **Builder disconnected**, reopen Standing Orders on the
-machine where that project lives; queued work resumes automatically. If the
-project has never had a builder, run `standing-orders up` from that project on
-the machine that should do the work.
+machine where the projects live; queued work resumes automatically. You do not
+run `up` separately in each project.
 
 Advanced deployments can start the console alone with
 `standing-orders serve --repo .`: with no account yet it
@@ -117,10 +117,10 @@ npx standing-orders                    # what's in flight across your repos — 
 
 ## Getting started
 
-There is one normal road: keep `standing-orders up` running in the repository.
-It is the app and its builder together. The separate console, worker, and OS
-service commands documented later are advanced deployment tools for people
-splitting those parts across machines.
+There is one normal road: keep one `standing-orders up` running on the machine.
+It is the app and the builder for every saved project. The separate console,
+worker, and OS service commands documented later are advanced deployment tools
+for people splitting those parts across machines.
 
 ### In the console
 

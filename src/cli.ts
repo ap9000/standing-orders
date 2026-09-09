@@ -91,7 +91,7 @@ Usage
   standing-orders skills list      the guides this exact binary serves
   standing-orders skills get <name>  print one guide (version-matched, never stale)
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
-  standing-orders up               app + builder + browser, one command — the normal start
+  standing-orders up               app + builder for every saved project — the normal start
 
 Operating the queue — \`standing-orders task\` prints the whole surface,
 and any queue command + --help prints it too

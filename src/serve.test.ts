@@ -5000,6 +5000,46 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     expect(await refused.text()).toContain("--project-root");
   });
 
+  test("the console picks up a newly connected project without restarting", async () => {
+    const repo = join(root, "live-project");
+    mkdirSync(repo);
+    const { execSync } = await import("node:child_process");
+    execSync("git init -q", { cwd: repo });
+    const connected: string[] = [];
+    await boot({ projectRoots: [root], currentRepos: () => connected });
+    const cookie = await login();
+
+    const before = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+    expect(before).not.toContain("live-project");
+    connected.push(repo);
+    const after = await (await fetch(url("/projects"), { headers: { cookie } })).text();
+
+    expect(after).toContain("live-project");
+    expect(after).toContain('href="/chat"');
+  });
+
+  test("opening an allowed local repository adds it to the machine registry", async () => {
+    const repo = join(root, "opened-project");
+    mkdirSync(repo);
+    const { execSync } = await import("node:child_process");
+    execSync("git init -q", { cwd: repo });
+    const registry = join(root, "machine-repos.json");
+    await boot({ projectRoots: [root], registryPath: registry, upConsole: true });
+    const cookie = await login();
+    const csrf = await csrfFrom(cookie);
+
+    const opened = await fetch(url("/projects/open"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, path: repo }),
+      redirect: "manual",
+    });
+
+    expect(opened.status).toBe(303);
+    const saved = JSON.parse(readFileSync(registry, "utf8")) as { repos: string[] };
+    expect(saved.repos).toContain(realpathSync(repo));
+  });
+
   test("the GitHub listing offers ONE honest action per repo: open what's here, clone what isn't (cookie only)", async () => {
     // A real clone under the root whose origin names alex/Already-Here —
     // matched case-insensitively through its OWN .git/config, no process.

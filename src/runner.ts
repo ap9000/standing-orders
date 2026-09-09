@@ -168,6 +168,33 @@ export function heartbeat(store: Store, name: string, token: string, now: Date):
 }
 
 /**
+ * Extend a live runner's project binding using that runner's own credential.
+ *
+ * `up` owns both the credential and the registry watcher, so a project the
+ * operator admitted through its console can join without a second operator
+ * ceremony or a restart. Authentication and the additive write share one
+ * transaction: a replaced process cannot widen its successor's binding.
+ */
+export function addRunnerReposAuthed(
+  store: Store,
+  args: { name: string; token: string; repos: readonly string[] },
+  now: Date,
+): AuthResult {
+  return store.transact(() => {
+    const auth = authenticate(store, args.name, args.token);
+    if (!auth.ok) return auth;
+    const repos = [...new Set([...auth.runner.repos, ...canonicalRepos(args.repos)])].sort();
+    const bound = store.bindRunnerRepos(args.name, repos, now);
+    if (!bound.ok) return { ok: false as const, reason: bound.reason };
+    store.touchRunner(args.name, now);
+    return {
+      ok: true as const,
+      runner: { ...auth.runner, repos: bound.repos, heartbeatAt: now.toISOString() },
+    };
+  });
+}
+
+/**
  * The one runner-name rule (arc 2 finding 13): nonempty, control-free, at
  * most 60 characters — the console form's rule, now shared by every door.
  */

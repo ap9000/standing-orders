@@ -1,5 +1,22 @@
 # Progress
 
+**2026-09-08 — One machine service now manages every saved project.** The
+project registry now stores both explicitly added Git repositories and the
+project folders approved once with `standing-orders up --project-root <dir>`.
+Later starts reconnect those projects from any working directory. While `up`
+is running, opening a local repository or cloning one from GitHub enrolls it,
+extends the current worker's repo binding through that worker's credential,
+and starts its watch loop automatically—no restart and no repeated `--repo`.
+The unified chat and project rail read the same live, proved set instead of a
+startup snapshot. Registry polling is bounded local file I/O and works across
+macOS, Linux, and Windows; invalid paths and paths outside the saved roots are
+named and ignored rather than gaining authority. Targeted tests cover v1
+registry migration, root preservation, authenticated binding, live console
+updates, and adding a second real Git repository during one `up` process. A
+real-browser pass added that second repo from the Projects page and verified it
+in unified chat at desktop and 390px. Final verification: 104 files / 1,934
+tests passed, 12 skipped; typecheck and production build passed.
+
 **2026-09-08 — One product lifecycle, with recovery copy that matches the
 actual state.** `standing-orders up` is now the only normal lifecycle exposed
 to users: it opens the app, connects the project, and runs its builder. The

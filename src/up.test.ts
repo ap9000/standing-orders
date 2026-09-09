@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, statSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir, userInfo, hostname } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -15,6 +15,7 @@ import { runOperate, parseOperateArgs } from "./operate.js";
 import { openStore } from "./store.js";
 import { register, normalizeRunnerName } from "./runner.js";
 import { authenticateApprover } from "./scope.js";
+import { addRepos, loadProjectRegistry, updateRepos } from "./repos.js";
 
 const PORT = 41000 + (process.pid % 2000);
 
@@ -87,6 +88,28 @@ describe("standing-orders up", () => {
     expect(String(again["passwordFile"]).endsWith("up-login.txt")).toBe(true);
   });
 
+  test("the saved projects folder reconnects projects when started outside a repository", async () => {
+    expect(await up(["--project-root", base], PORT + 7)).toBe(0);
+    lines = [];
+    const previous = process.cwd();
+    let code: number;
+    try {
+      process.chdir(base);
+      code = await runOperate(
+        "up",
+        ["--port", String(PORT + 8), "--for", "900", "--json"],
+        line => lines.push(line),
+        { databaseFile: db },
+      );
+    } finally {
+      process.chdir(previous);
+    }
+
+    expect(code!).toBe(0);
+    expect(envelope()).toMatchObject({ ok: true, repos: [realpathSync(repo)] });
+    expect(await loadProjectRegistry(join(base, "repos.json"))).toMatchObject({ roots: [realpathSync(base)] });
+  });
+
   test("a busy port refuses BEFORE anything mints — the world stays untouched", async () => {
     const squatter = createServer();
     await new Promise<void>(ready => squatter.listen(PORT + 1, "127.0.0.1", ready));
@@ -133,6 +156,42 @@ describe("standing-orders up", () => {
     await up([], PORT + 4);
     const named = String(envelope()["runner"]);
     expect(named.startsWith(normalizeRunnerName(hostname()).slice(0, 8))).toBe(true);
+  });
+
+  test("a project added while up is running connects without a restart", async () => {
+    const secondPath = join(base, "second-project");
+    execFileSync("mkdir", ["-p", secondPath]);
+    const second = realpathSync(secondPath);
+    git(["init", "-q"], second);
+    writeFileSync(join(second, "README.md"), "second\n");
+    git(["add", "."], second);
+    git(["commit", "-qm", "first"], second);
+
+    const running = runOperate(
+      "up",
+      ["--repo", repo, "--project-root", base, "--port", String(PORT + 6), "--for", "2200", "--json"],
+      line => lines.push(line),
+      { databaseFile: db },
+    );
+    for (let attempt = 0; attempt < 100 && lines.length === 0; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(lines.length).toBeGreaterThan(0);
+    const runnerName = String(envelope()["runner"]);
+
+    const registry = join(base, "repos.json");
+    const added = await updateRepos(registry, current => addRepos(current, [second]));
+    expect(added).toMatchObject({ ok: true });
+    expect(await running).toBe(0);
+
+    const store = openStore(db);
+    try {
+      expect(store.getRunner(runnerName)?.runner.repos).toContain(second);
+      expect(store.latestWatchEpisode(second)).toMatchObject({ repo: second, runner: runnerName });
+    } finally {
+      store.close();
+    }
+    expect(await loadProjectRegistry(registry)).toMatchObject({ roots: [realpathSync(base)], repos: expect.arrayContaining([realpathSync(repo), second]) });
   });
 
   test("the remembered login answers for every operator verb: after one up, register and approve ask for nothing", async () => {

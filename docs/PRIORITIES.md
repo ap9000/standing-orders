@@ -79,6 +79,11 @@ service commands stay advanced plumbing rather than normal UI choices. A
 real-Git successor certification now proves that a stale
 worker is interrupted, exactly one successor completes with typed proof and
 terminal diff evidence, and a later dispatch cannot duplicate the result.
+The normal foreground service is now machine-wide rather than per-project:
+one saved projects folder defines the boundary, every added local or GitHub
+repository connects to the live worker without a restart, and later starts
+reconnect the full registry from any directory. The project rail and unified
+chat follow that same live set.
 Unattended permissions are now
 an installation default plus a durable per-task choice: `auto` keeps the guarded
 provider classifier, while Full access seals Claude's

@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, mkdir, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configPath, loadRepos, saveRepos, addRepos, removeRepos } from "./repos.js";
+import { configPath, loadProjectRegistry, loadRepos, saveRepos, addRepos, removeRepos, updateProjectRegistry, updateRepos } from "./repos.js";
 
 const HOME = "/Users/someone";
 
@@ -89,6 +89,22 @@ describe("loadRepos", () => {
     await mkdir(join(base, "empty"), { recursive: true });
 
     expect(await loadRepos(join(base, "empty", "repos.json"))).toEqual({ repos: [] });
+  });
+
+  test("reads old repo-only files and round-trips durable project roots", async () => {
+    const file = join(base, "repos.json");
+    await writeFile(file, JSON.stringify({ version: 1, repos: ["/code/a"] }));
+    expect(await loadProjectRegistry(file)).toEqual({ repos: ["/code/a"], roots: [] });
+
+    const configured = await updateProjectRegistry(file, current => ({
+      repos: current.repos,
+      roots: ["/code"],
+    }));
+    expect(configured).toMatchObject({ ok: true, registry: { repos: ["/code/a"], roots: ["/code"] } });
+
+    const enrolled = await updateRepos(file, repos => [...repos, "/code/b"]);
+    expect(enrolled).toMatchObject({ ok: true, repos: ["/code/a", "/code/b"] });
+    expect(await loadProjectRegistry(file)).toEqual({ repos: ["/code/a", "/code/b"], roots: ["/code"] });
   });
 
   test("a read FAILURE is an unreadable registry, never an empty one", async () => {

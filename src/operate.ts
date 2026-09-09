@@ -43,7 +43,7 @@ import {
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
-import { configPath, addRepos, updateRepos, loadRepos } from "./repos.js";
+import { configPath, addRepos, updateRepos, loadRepos, loadProjectRegistry, updateProjectRegistry } from "./repos.js";
 import { pushPass } from "./push.js";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
@@ -89,7 +89,7 @@ import { ask, askHidden, confirm, interactive } from "./prompt.js";
 import { runMateCli, answerContextLines, type MateCliSeams } from "./mate-cli.js";
 import { confirmCoordinatorProposal, dismissCoordinatorProposal } from "./mate-doors.js";
 import { verifyApproverByPassword } from "./principal.js";
-import { canonicalProject, projectName } from "./project.js";
+import { authorizedProject, canonicalProject, projectName, resolveCeiling } from "./project.js";
 import { tally, spendLine } from "./summary.js";
 import {
   bodyHashOf,
@@ -144,6 +144,7 @@ import {
   recoverDead,
   acquireWatchLeaseAuthed,
   heartbeatWatchLeaseAuthed,
+  addRunnerReposAuthed,
   registerRunnerIfIdle,
   retireRunnerIfCurrent,
   normalizeRunnerName,
@@ -314,13 +315,15 @@ External trackers — build what a tracker nominates, under local approvals
                                         [--max <n>] tasks (default 1),
                                         [--base <ref>] for first attempts.
                                         Never pushes.
-  standing-orders up [--repo <path>]...     one command to a working cockpit:
+  standing-orders up [--project-root <dir>] one command to a working cockpit:
                                         app + builder + browser. Mints
                                         your login on first run (saved to
                                         up-login.txt beside the database),
-                                        connects this machine as a builder,
-                                        and watches every named repository
-                                        (none named: the current one).
+                                        remembers the projects folder, and
+                                        reconnects every saved repository.
+                                        Add local or GitHub projects in the
+                                        app; they start without a restart.
+                                        --repo still adds an exact path;
                                         --no-open skips the browser;
                                         --host 0.0.0.0 --allow-host name:port
                                         reaches a phone over a tailnet;
@@ -3998,6 +4001,7 @@ async function startConsole(options: {
   setupCode?: string;
   repos?: string[];
   projectRoots?: string[];
+  currentRepos?: () => readonly string[];
   publicUrl?: string;
   registryPath?: string;
   upConsole?: boolean;
@@ -4017,6 +4021,7 @@ async function startConsole(options: {
     ...(options.setupCode === undefined ? {} : { setupCode: options.setupCode }),
     ...(options.repos === undefined ? {} : { repos: options.repos }),
     ...(options.projectRoots === undefined ? {} : { projectRoots: options.projectRoots }),
+    ...(options.currentRepos === undefined ? {} : { currentRepos: options.currentRepos }),
     ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
     ...(options.registryPath === undefined ? {} : { registryPath: options.registryPath }),
     ...(options.upConsole === undefined ? {} : { upConsole: options.upConsole }),
@@ -7023,33 +7028,85 @@ async function upCommand(
     else write(line);
   };
 
-  // 2. Canonical repository roots (finding 10): the git top-level, then the
-  // real path, deduplicated — printed before any side effect.
-  const inputs = context.repoList !== undefined && context.repoList.length > 0 ? context.repoList : [process.cwd()];
+  // 2. Load the machine's durable project registry. Repositories and the
+  // folders they may be added from are installation state, not arguments a
+  // person must repeat on every start.
+  const registryPath = registryPathOf(context);
+  const loadedRegistry = await loadProjectRegistry(registryPath);
+  if ("error" in loadedRegistry) {
+    return fail(write, json, "up", "registry", loadedRegistry.error, EXIT.refused);
+  }
   let sweptHeldOrphans = false;
   const gitRun = context.gitRunner ?? ((file: string, args: readonly string[], opts?: { cwd?: string }) => run(file, [...args], { ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }), timeoutMs: 10_000 }));
+
+  const rootInputs = (text(flags, "project-root") ?? "")
+    .split(",")
+    .map(one => one.trim())
+    .filter(one => one !== "");
+  const explicitRoots: string[] = [];
+  for (const input of rootInputs) {
+    const canonical = canonicalProject(input);
+    if (canonical === null) {
+      return fail(write, json, "up", "project-root", `${input} is not a directory this machine can use`, EXIT.refused);
+    }
+    if (!explicitRoots.includes(canonical)) explicitRoots.push(canonical);
+  }
+  const projectRoots = [...resolveCeiling([], addRepos(loadedRegistry.roots, explicitRoots)).ceiling.roots];
+
+  // Every saved repository reconnects automatically. Explicit --repo paths
+  // still work for first use; with none, a Git working directory joins the
+  // saved list for backwards compatibility. Starting elsewhere is valid as
+  // soon as a projects folder or saved repository exists.
   const repos: string[] = [];
-  for (const input of inputs) {
+  const proveRepo = async (input: string): Promise<string | null> => {
     const top = await gitRun("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(input) });
-    if (top.code !== 0) {
-      return fail(
-        write,
-        json,
-        "up",
-        "not-a-repository",
-        `${input} is not inside a git repository — name one with \`--repo <path>\`, or try the sandbox first: \`standing-orders demo\``,
-        EXIT.refused,
-      );
-    }
-    let root: string;
+    if (top.code !== 0) return null;
     try {
-      root = realpathSync(top.stdout.trim());
+      return realpathSync(top.stdout.trim());
     } catch {
-      return fail(write, json, "up", "not-a-repository", `${input} could not be resolved to a real path`, EXIT.refused);
+      return null;
     }
-    if (!repos.includes(root)) repos.push(root);
+  };
+  for (const input of loadedRegistry.repos) {
+    const root = await proveRepo(input);
+    if (root === null) {
+      progress(`saved project unavailable — skipped ${input}`);
+    } else if (!repos.includes(root)) {
+      repos.push(root);
+    }
+  }
+  const explicitRepos = context.repoList ?? [];
+  if (explicitRepos.length > 0) {
+    for (const input of explicitRepos) {
+      const root = await proveRepo(input);
+      if (root === null) {
+        return fail(
+          write,
+          json,
+          "up",
+          "not-a-repository",
+          `${input} is not inside a git repository — choose a repository, set a projects folder once with \`--project-root <dir>\`, or try the sandbox with \`standing-orders demo\``,
+          EXIT.refused,
+        );
+      }
+      if (!repos.includes(root)) repos.push(root);
+    }
+  } else {
+    const cwdRepo = await proveRepo(process.cwd());
+    if (cwdRepo !== null && !repos.includes(cwdRepo)) repos.push(cwdRepo);
+  }
+  if (repos.length === 0 && projectRoots.length === 0) {
+    return fail(
+      write,
+      json,
+      "up",
+      "no-projects",
+      "choose where your projects live once: `standing-orders up --project-root <dir>`",
+      EXIT.refused,
+    );
   }
   for (const repo of repos) progress(`repository  ${repo}`);
+  for (const root of projectRoots) progress(`projects    ${root}`);
 
   // 3. Reserve the port BEFORE any identity or enrollment mutation
   // (finding 7/19): a busy port must refuse while the world is untouched.
@@ -7140,13 +7197,16 @@ async function upCommand(
       );
     }
 
-    // 6. Enrollment: the canonical roots join repos.json so the plain
-    // report and future runs see them.
+    // 6. Enrollment: repositories and project roots are one atomic machine
+    // registry. A later `up` reconnects all of them without cwd or flags.
     {
       // The locked registry primitive (onboarding findings 9/17/25): a
       // refusal here also retires the runner this start just registered —
       // never today's silent empty-registry fallback.
-      const enrolled = await updateRepos(registryPathOf(context), current => addRepos(current, repos));
+      const enrolled = await updateProjectRegistry(registryPath, current => ({
+        repos: addRepos(current.repos, repos),
+        roots: addRepos(current.roots, projectRoots),
+      }));
       if (!enrolled.ok) {
         retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
         return fail(write, json, "up", "registry", `${enrolled.message} — nothing started`, EXIT.refused);
@@ -7182,6 +7242,10 @@ async function upCommand(
   // probe closing and this bind can lose a race; that failure tears down
   // cleanly below instead of leaving identities half-claimed silently.
   const pool = join(dirname(context.databaseFile), "worktrees");
+  // Mutated only by the registry supervisor below. The console reads this
+  // proved set on each request, so its project rail and unified chat move
+  // with the live builder instead of freezing at process start.
+  const activeRepos = new Set<string>(repos);
   let console_: Awaited<ReturnType<typeof startConsole>>;
   try {
     console_ = await startConsole({
@@ -7192,6 +7256,7 @@ async function upCommand(
       localRunner: runnerName,
       poolRoot: pool,
       repos,
+      currentRepos: () => [...activeRepos],
       upConsole: true,
       attended: {
         runner: runnerName,
@@ -7201,8 +7266,8 @@ async function upCommand(
           return answer.code === 0 ? answer.stdout.trim() : null;
         },
       },
-      registryPath: registryPathOf(context),
-      ...(text(flags, "project-root") === undefined ? {} : { projectRoots: [text(flags, "project-root") as string] }),
+      registryPath,
+      projectRoots,
       ...(text(flags, "public-url") === undefined ? {} : { publicUrl: text(flags, "public-url") as string }),
       ...(text(flags, "editor") === undefined ? {} : { editorLinks: "vscode" as const }),
     });
@@ -7211,13 +7276,17 @@ async function upCommand(
     return fail(write, json, "up", "port-busy", `${describe(error)} — the port was taken while starting; try again`, EXIT.refused);
   }
 
-  // 8. The watch loops: one per repository, sharing this store and this
-  // supervisor. First signal stops admission and starts the grace clock;
-  // the second — or the clock — hard-stops provider groups (M6.12).
+  // 8. The project supervisor: one watch loop per proved repository, plus a
+  // tiny registry poll that can add more while this process stays up. The
+  // poll is deliberately plain filesystem I/O (portable across macOS,
+  // Linux, and Windows) and never invokes an agent while nothing changed.
   let stopping = false;
   let fatal: string | null = null;
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  let runTimer: ReturnType<typeof setTimeout> | undefined;
   const followControllers: AbortController[] = [];
+  let resolveStopped: () => void = () => {};
+  const stopped = new Promise<void>(resolveStop => (resolveStopped = resolveStop));
   const stopGraceMs = Number(text(flags, "stop-grace") ?? 30_000);
   const hardStop = () => {
     const terminated = terminateLiveProviders();
@@ -7229,12 +7298,17 @@ async function upCommand(
       return;
     }
     stopping = true;
+    resolveStopped();
     for (const controller of followControllers) controller.abort();
     graceTimer = setTimeout(hardStop, stopGraceMs);
     graceTimer.unref?.();
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+  if (forGiven !== undefined) {
+    runTimer = setTimeout(stop, Number(forGiven));
+    runTimer.unref?.();
+  }
 
   const loopFlagsFor = (repo: string): Map<string, string | true> => {
     const copy = new Map<string, string | true>();
@@ -7242,16 +7316,28 @@ async function upCommand(
     copy.set("token", runnerToken);
     copy.set("repo", repo);
     copy.set("pool", pool);
-    if (forGiven !== undefined) copy.set("for", forGiven);
     return copy;
   };
-  const prefix = (repo: string): string => (repos.length > 1 ? `[${repo.split("/").pop() ?? repo}] ` : "");
+  const prefix = (repo: string): string => (activeRepos.size > 1 ? `[${projectName(repo)}] ` : "");
+  const loopResults = new Map<string, Promise<{ repo: string; result: WatchLoopResult }>>();
 
-  const readiness: Promise<void>[] = [];
-  const loops = repos.map(repo => {
+  const launchRepo = async (repo: string, bind: boolean): Promise<void> => {
+    if (loopResults.has(repo) || stopping) return;
+    if (bind) {
+      const bound = addRunnerReposAuthed(store, { name: runnerName, token: runnerToken, repos: [repo] }, clock());
+      if (!bound.ok) {
+        fatal = `the builder identity changed while adding ${repo} (${bound.reason})`;
+        stop();
+        return;
+      }
+      activeRepos.add(repo);
+      if (!store.listProjects().some(one => one.path === repo)) {
+        store.upsertProject(repo, projectName(repo), clock());
+      }
+    }
     let markReady: () => void = () => {};
-    readiness.push(new Promise<void>(resolveReady => (markReady = resolveReady)));
-    return runWatchLoop({
+    const ready = new Promise<void>(resolveReady => (markReady = resolveReady));
+    const loop = runWatchLoop({
       flags: loopFlagsFor(repo),
       context,
       runner: runnerName,
@@ -7260,27 +7346,76 @@ async function upCommand(
       progress: line => progress(`${prefix(repo)}${line}`),
       isStopping: () => stopping,
       onFollowController: controller => followControllers.push(controller),
-      onReady: markReady,
+      onReady: () => {
+        markReady();
+        if (bind) progress(`${prefix(repo)}builder connected — queued work can start`);
+      },
     }).then(
       result => ({ repo, result }),
       error => ({ repo, result: { ok: false as const, reason: "lease-lost" as const, detail: describe(error), ticks: 0, built: 0, broke: 0 } }),
     );
-  });
-
-  // A loop that dies while its siblings live must not leave a partial
-  // cockpit standing silently (finding 5): first failure aborts everything.
-  const watchdog = loops.map(one =>
-    one.then(({ repo, result }) => {
+    loopResults.set(repo, loop);
+    void loop.then(({ repo: endedRepo, result }) => {
+      // A loop that dies while its siblings live must not leave a partial
+      // cockpit standing silently (finding 5).
       if (!result.ok && !stopping) {
-        fatal = `${prefix(repo)}${result.detail}`;
+        fatal = `${prefix(endedRepo)}${result.detail}`;
         stop();
       }
-    }),
-  );
+      markReady(); // acquisition failures must not strand startup readiness
+    });
+    await ready;
+  };
+
+  await Promise.all(repos.map(repo => launchRepo(repo, false)));
+
+  const dynamicCeiling = resolveCeiling(repos, projectRoots).ceiling;
+  const rejected = new Set<string>();
+  const registrySupervisor = (async (): Promise<void> => {
+    const sleep = (ms: number) => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
+    while (!stopping) {
+      const loaded = await loadProjectRegistry(registryPath);
+      if ("error" in loaded) {
+        fatal = loaded.error;
+        stop();
+        break;
+      }
+      for (const candidate of loaded.repos) {
+        if (stopping) break;
+        const canonical = canonicalProject(candidate);
+        if (canonical !== null && activeRepos.has(canonical)) continue;
+        const allowed = canonical !== null && (await authorizedProject(dynamicCeiling, canonical));
+        if (!allowed) {
+          if (!rejected.has(candidate)) {
+            rejected.add(candidate);
+            progress(`project not connected — ${candidate} is not a Git repository inside a saved projects folder`);
+          }
+          continue;
+        }
+        rejected.delete(candidate);
+        await launchRepo(canonical, true);
+      }
+      if (!stopping) await sleep(500);
+    }
+  })().catch(error => {
+    fatal = `the project registry stopped (${describe(error)})`;
+    stop();
+  });
+
+  // A runner with no projects still stays visibly alive while the UI waits
+  // for the first addition. Watch loops heartbeat during their passes; this
+  // machine-level pulse also covers the intentionally empty state.
+  const runnerHeartbeat = setInterval(() => {
+    const beat = heartbeatRunner(store, runnerName, runnerToken, clock());
+    if (!beat.ok && !stopping) {
+      fatal = `the builder identity changed (${beat.reason})`;
+      stop();
+    }
+  }, 60_000);
+  runnerHeartbeat.unref?.();
 
   // 9. Readiness, then the ONE startup envelope / greeting (finding 11/20).
   const approverPlan2 = approver as UpApprover;
-  await Promise.race([Promise.all(readiness), Promise.all(loops)]);
   const url = console_.url;
   if (fatal === null) {
     if (json) {
@@ -7310,7 +7445,12 @@ async function upCommand(
       } else {
         write(`  login     one of: ${approverPlan2.approvers.join(", ")}`);
       }
-      write(`  builder   ${runnerName} is watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`);
+      write(
+        repos.length === 0
+          ? `  builder   ${runnerName} is ready — add a local folder or GitHub repository in Projects`
+          : `  builder   ${runnerName} is watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`,
+      );
+      if (projectRoots.length > 0) write(`  projects  new repositories under ${projectRoots.length === 1 ? projectRoots[0] : `${projectRoots.length} saved folders`} connect automatically`);
       write("  The inbox checklist shows what remains before approved work builds unattended.");
       write("  Ctrl-C stops Standing Orders on this machine.");
     }
@@ -7318,8 +7458,11 @@ async function upCommand(
   }
 
   // 10. Supervise to the end.
-  const results = await Promise.all(loops);
-  await Promise.all(watchdog);
+  await stopped;
+  await registrySupervisor;
+  const results = await Promise.all([...loopResults.values()]);
+  clearInterval(runnerHeartbeat);
+  if (runTimer !== undefined) clearTimeout(runTimer);
   if (graceTimer !== undefined) clearTimeout(graceTimer);
   process.removeListener("SIGINT", stop);
   process.removeListener("SIGTERM", stop);
@@ -7353,7 +7496,7 @@ async function upCommand(
   }
   const ticks = results.reduce((sum, one) => sum + one.result.ticks, 0);
   const built = results.reduce((sum, one) => sum + one.result.built, 0);
-  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`standing-orders up\` here to reconnect this builder.`);
+  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`standing-orders up\` anywhere on this machine to reconnect every saved project.`);
   return EXIT.ok;
 }
 

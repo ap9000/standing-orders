@@ -8,6 +8,7 @@ import {
   deadRunners,
   recoverDead,
   hashToken,
+  addRunnerReposAuthed,
   DEFAULT_LIVENESS_MS,
 } from "./runner.js";
 import { acquire, currentClaim } from "./claim.js";
@@ -84,6 +85,16 @@ describe("registering a runner", () => {
 
     expect(authenticate(store, "builder-1", fresh.token).ok).toBe(true);
     expect(authenticate(store, "builder-1", token).ok).toBe(false);
+  });
+
+  test("a live runner can add a project only with its current credential", () => {
+    const { token } = register(store, { name: "builder-1", host: "laptop", repos: ["/repo/a"], now: T0 });
+
+    expect(addRunnerReposAuthed(store, { name: "builder-1", token: "wrong", repos: ["/repo/b"] }, later(1_000))).toEqual({ ok: false, reason: "bad-token" });
+    const added = addRunnerReposAuthed(store, { name: "builder-1", token, repos: ["/repo/b"] }, later(2_000));
+
+    expect(added.ok && added.runner.repos).toEqual(["/repo/a", "/repo/b"]);
+    expect(store.getRunner("builder-1")?.runner.repos).toEqual(["/repo/a", "/repo/b"]);
   });
 });
 

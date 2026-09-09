@@ -15,11 +15,14 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-export const CONFIG_VERSION = 1;
+export const CONFIG_VERSION = 2;
 const DIR_NAME = "standing-orders";
 const FILE_NAME = "repos.json";
 
+export type ProjectRegistry = { repos: string[]; roots: string[] };
 export type LoadResult = { repos: string[] } | { error: string };
+export type RegistryLoadResult = ProjectRegistry | { error: string };
+type RegistryUpdateFailure = { ok: false; reason: "locked" | "registry" | "abandoned"; message: string };
 
 export function configPath(env: Record<string, string | undefined>, home: string): string {
   const xdg = env["XDG_CONFIG_HOME"];
@@ -32,7 +35,7 @@ export function configPath(env: Record<string, string | undefined>, home: string
   return renamed;
 }
 
-export async function loadRepos(file: string): Promise<LoadResult> {
+export async function loadProjectRegistry(file: string): Promise<RegistryLoadResult> {
   let text: string;
   try {
     text = await readFile(file, "utf8");
@@ -40,7 +43,7 @@ export async function loadRepos(file: string): Promise<LoadResult> {
     // ONLY the missing file is the ordinary first-run state (round-3
     // finding 6): a permission or I/O failure is an unreadable registry,
     // never an empty one — the MCP gateway fails closed on it.
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { repos: [] };
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { repos: [], roots: [] };
     return { error: `${file} could not be read (${String((cause as Error).message)})` };
   }
 
@@ -51,16 +54,22 @@ export async function loadRepos(file: string): Promise<LoadResult> {
     return { error: `${file} is not valid JSON — fix or delete it` };
   }
 
-  const repos = readRepoList(parsed);
-  if (repos === null) {
+  const registry = readProjectRegistry(parsed);
+  if (registry === null) {
     return { error: `${file} does not look like a Standing Orders config — fix or delete it` };
   }
-  return { repos: sortUnique(repos) };
+  return { repos: sortUnique(registry.repos), roots: sortUnique(registry.roots) };
+}
+
+/** Compatibility view for reports, CLI enrollment, and the MCP surface. */
+export async function loadRepos(file: string): Promise<LoadResult> {
+  const loaded = await loadProjectRegistry(file);
+  return "error" in loaded ? loaded : { repos: loaded.repos };
 }
 
 export async function saveRepos(file: string, repos: readonly string[]): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
-  const config = { version: CONFIG_VERSION, repos: sortUnique(repos) };
+  const config = { version: CONFIG_VERSION, repos: sortUnique(repos), roots: [] };
   await writeFile(file, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
@@ -81,7 +90,31 @@ export async function saveRepos(file: string, repos: readonly string[]): Promise
 export async function updateRepos(
   file: string,
   transform: (repos: string[]) => string[],
-): Promise<{ ok: true; repos: string[] } | { ok: false; reason: "locked" | "registry" | "abandoned"; message: string }> {
+): Promise<{ ok: true; repos: string[] } | RegistryUpdateFailure> {
+  const updated = await updateProjectRegistry(file, current => ({
+    ...current,
+    repos: transform(current.repos),
+  }));
+  return updated.ok ? { ok: true, repos: updated.registry.repos } : updated;
+}
+
+/** Persist project roots through the same lock as repo enrollment. */
+export async function updateProjectRoots(
+  file: string,
+  transform: (roots: string[]) => string[],
+): Promise<{ ok: true; roots: string[] } | RegistryUpdateFailure> {
+  const updated = await updateProjectRegistry(file, current => ({
+    ...current,
+    roots: transform(current.roots),
+  }));
+  return updated.ok ? { ok: true, roots: updated.registry.roots } : updated;
+}
+
+/** Atomically update repositories and roots without either writer erasing the other. */
+export async function updateProjectRegistry(
+  file: string,
+  transform: (registry: ProjectRegistry) => ProjectRegistry,
+): Promise<{ ok: true; registry: ProjectRegistry } | RegistryUpdateFailure> {
   const { openSync, closeSync, writeSync, readFileSync, unlinkSync, existsSync: exists, mkdirSync, renameSync } = await import("node:fs");
   const { randomBytes } = await import("node:crypto");
   mkdirSync(dirname(file), { recursive: true });
@@ -167,9 +200,9 @@ export async function updateRepos(
   if (!held) return { ok: false, reason: "locked", message: `${file} is busy — another enrollment holds its lock; try again` };
 
   try {
-    let current: string[];
+    let current: ProjectRegistry;
     if (!exists(file)) {
-      current = []; // ONLY the missing-file case is an empty registry
+      current = { repos: [], roots: [] }; // ONLY the missing-file case is an empty registry
     } else {
       let text: string;
       try {
@@ -183,13 +216,14 @@ export async function updateRepos(
       } catch {
         return { ok: false, reason: "registry", message: `${file} is not valid JSON — fix or delete it; refusing to replace it` };
       }
-      const repos = readRepoListStrict(parsed);
-      if (repos === null) {
+      const registry = readProjectRegistryStrict(parsed);
+      if (registry === null) {
         return { ok: false, reason: "registry", message: `${file} does not look like a Standing Orders config — refusing to replace it` };
       }
-      current = repos;
+      current = registry;
     }
-    const next = sortUnique(transform(current));
+    const transformed = transform({ repos: [...current.repos], roots: [...current.roots] });
+    const next = { repos: sortUnique(transformed.repos), roots: sortUnique(transformed.roots) };
     // Deadline BEFORE publication (finding 30): a rename past the hold
     // window would commit while the lock may already be reaped.
     if (acquiredAt() > 20_000) {
@@ -198,11 +232,11 @@ export async function updateRepos(
     }
     const temp = `${file}.${process.pid}.${token.slice(0, 8)}.tmp`;
     const fd = openSync(temp, "wx");
-    writeSync(fd, `${JSON.stringify({ version: CONFIG_VERSION, repos: next }, null, 2)}
+    writeSync(fd, `${JSON.stringify({ version: CONFIG_VERSION, ...next }, null, 2)}
 `);
     closeSync(fd);
     renameSync(temp, file);
-    return { ok: true, repos: next };
+    return { ok: true, registry: next };
   } finally {
     if (held && acquiredAt() < 25_000) {
       try { unlinkSync(lockPath); } catch { /* reaped despite liveness rules */ }
@@ -211,12 +245,13 @@ export async function updateRepos(
 }
 
 /** Strict shape for the locked path (finding 36): non-string entries REFUSE. */
-function readRepoListStrict(parsed: unknown): string[] | null {
+function readProjectRegistryStrict(parsed: unknown): ProjectRegistry | null {
   if (typeof parsed !== "object" || parsed === null) return null;
-  const { repos } = parsed as { repos?: unknown };
+  const { repos, roots } = parsed as { repos?: unknown; roots?: unknown };
   if (!Array.isArray(repos)) return null;
   if (!repos.every((repo): repo is string => typeof repo === "string")) return null;
-  return repos;
+  if (roots !== undefined && (!Array.isArray(roots) || !roots.every((root): root is string => typeof root === "string"))) return null;
+  return { repos, roots: roots ?? [] };
 }
 
 export function addRepos(existing: readonly string[], incoming: readonly string[]): string[] {
@@ -229,11 +264,15 @@ export function removeRepos(existing: readonly string[], targets: readonly strin
 }
 
 /** null when the shape is wrong; non-string entries are dropped, not trusted. */
-function readRepoList(parsed: unknown): string[] | null {
+function readProjectRegistry(parsed: unknown): ProjectRegistry | null {
   if (typeof parsed !== "object" || parsed === null) return null;
-  const { repos } = parsed as { repos?: unknown };
+  const { repos, roots } = parsed as { repos?: unknown; roots?: unknown };
   if (!Array.isArray(repos)) return null;
-  return repos.filter((repo): repo is string => typeof repo === "string");
+  if (roots !== undefined && !Array.isArray(roots)) return null;
+  return {
+    repos: repos.filter((repo): repo is string => typeof repo === "string"),
+    roots: (roots ?? []).filter((root): root is string => typeof root === "string"),
+  };
 }
 
 function sortUnique(repos: readonly string[]): string[] {

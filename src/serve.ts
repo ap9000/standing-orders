@@ -215,6 +215,10 @@ export type ServeOptions = {
    */
   repos?: readonly string[];
   projectRoots?: readonly string[];
+  /** Repositories the co-located `up` process has proved and is watching.
+   * Kept as a callback so projects added after startup appear immediately
+   * without turning the durable registry itself into an authorization source. */
+  currentRepos?: () => readonly string[];
   /** Injected by tests: the fetch direct-API chat turns use, and where chat
    * keys are read from (defaults to process.env). */
   chatFetcher?: typeof fetch;
@@ -463,11 +467,27 @@ export function createDecisionServer(options: ServeOptions): Server {
   const unscopedMode = ceiling.repos.length === 0 && ceiling.roots.length === 0;
   /** Per-row visibility under the ceiling — the authorization question for reads. */
   const visible = (repo: string | null): boolean => rowVisible(ceiling, repo);
+  /** The explicit, currently proved project list. The callback is supplied
+   * only by `up`, after it has independently checked git-ness and the root
+   * ceiling; this server still filters every row through its own ceiling. */
+  const managedRepos = (): string[] => {
+    const seen = new Set<string>();
+    const repos: string[] = [];
+    for (const path of [...ceiling.repos, ...(options.currentRepos?.() ?? [])]) {
+      const canonical = canonicalProject(path) ?? path;
+      if (seen.has(canonical) || !visible(canonical)) continue;
+      seen.add(canonical);
+      repos.push(canonical);
+    }
+    return repos;
+  };
   /** The enumerable admission list for roll-up SQL: repos-only ceilings
    * enumerate themselves; root ceilings enumerate the STORED repos that
    * pass the ceiling (Codex roll-up review, finding 11); unscoped = null. */
   const admissionList = (): string[] | null =>
-    unscopedMode ? null : ceiling.roots.length === 0 ? [...ceiling.repos] : store.knownRepos().filter(visible);
+    unscopedMode
+      ? null
+      : [...new Set([...managedRepos(), ...(ceiling.roots.length === 0 ? [] : store.knownRepos().filter(visible))])];
   /** The task behind a resource, for the ceiling check; null = no ref (visible). */
   const taskRepoOf = (taskRef: number): string | null => store.refForId(taskRef)?.repo ?? null;
 
@@ -962,7 +982,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/projects") {
-      return void projectsScreen(response, who, null, 200);
+      return void projectsScreen(response, who, url.searchParams.get("said"), 200);
     }
 
     if (url.pathname === "/") {
@@ -1957,7 +1977,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         ? "That task is not available in this workspace."
         : null;
       // Pending cards, and the recently answered ones so the door's words are read (last 30).
-      const allCoordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos: [...ceiling.repos], states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
+      const repos = managedRepos();
+      const allCoordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos, states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
       const coordinatorRows = focusTask === null
         ? allCoordinatorRows
         : allCoordinatorRows.filter(one => one.payload["task"] === focusTask.id);
@@ -1973,7 +1994,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // writes nothing (slice-2 review, finding 7) — the mint card below
       // starts a new conversation, and minting ends the old session.
       const ceilingStale = enabled.ok && mateSession !== null && principal !== null && mateSession.ceilingDigest !== principal.ceilingDigest;
-      const chatProjects = ceiling.repos.map((repo, index) => {
+      const chatProjects = repos.map((repo, index) => {
         let peek: ProjectPeek | null = null;
         try {
           peek = store.projectPeek(repo, now);
@@ -1984,9 +2005,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         return { id: `r${index + 1}`, label: projectName(repo), path: repo, peek };
       });
       let fleetSnapshot: ChatSnapshot | null = null;
-      if (ceiling.repos.length > 0) {
+      if (repos.length > 0) {
         try {
-          fleetSnapshot = withDispatchDiagnoses(store, store.chatSnapshot(ceiling.repos, now), now);
+          fleetSnapshot = withDispatchDiagnoses(store, store.chatSnapshot(repos, now), now);
         } catch {
           // The project rail already degrades each pulse independently.
           // A failed briefing query must not make the conversation vanish.
@@ -2243,7 +2264,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   /** The session-layer principal (ruling 3): cookie, csrf, and role were
    * proved at the edge; the row and the generation are re-proved here. */
   function matePrincipal(who: Who & { via: "cookie" }): VerifiedApprover | null {
-    const verified = verifyApproverStanding(store, who.name, who.session.generation, ceiling.repos);
+    const verified = verifyApproverStanding(store, who.name, who.session.generation, managedRepos());
     return verified.ok ? verified.who : null;
   }
   const CHAT_CANDIDATES_PER_APPROVER = 9;
@@ -2251,8 +2272,8 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   /** The frozen explicit repo list, digested canonically (sorted) — every
    * candidate binds to it and filing re-proves it (v2 new finding 5). */
-  const chatCeilingDigest = (): string =>
-    createHash("sha256").update([...ceiling.repos].sort().join("\n")).digest("hex");
+  const chatCeilingDigest = (repos: readonly string[] = managedRepos()): string =>
+    createHash("sha256").update([...repos].sort().join("\n")).digest("hex");
 
   type ChatEnablement =
     | { ok: true; billing: "metered"; config: ChatConfig & { provider: DirectChatProviderId }; key: string; keySource: "environment" | "stored"; price: import("./converse.js").ModelPrice; credentialKey: string }
@@ -2263,10 +2284,11 @@ export function createDecisionServer(options: ServeOptions): Server {
    * ask again; nothing is cached into authority. */
   function chatEnablement(): ChatEnablement {
     if (store.isDemo()) return { ok: false, code: "demo", why: "this is a demo database — chat cannot contact an external model" };
-    if (unscopedMode) return { ok: false, code: "unscoped", why: "chat needs an explicit ceiling: restart serve naming repos with --repo" };
-    if (ceiling.roots.length > 0) return { ok: false, code: "roots", why: "chat refuses root-derived ceilings — name each repo explicitly with --repo" };
-    if (unresolvedRepos.length > 0) return { ok: false, code: "unresolved", why: "a --repo path did not resolve at startup — fix it and restart before chat will run" };
-    if (ceiling.repos.length === 0) return { ok: false, code: "empty", why: "the ceiling is empty — chat has nothing it may see" };
+    if (unscopedMode) return { ok: false, code: "unscoped", why: "chat needs at least one added project" };
+    if (options.currentRepos === undefined && unresolvedRepos.length > 0) {
+      return { ok: false, code: "unresolved", why: "a configured project path did not resolve at startup — fix it and restart before chat will run" };
+    }
+    if (managedRepos().length === 0) return { ok: false, code: "empty", why: "add a project first — chat will include it automatically" };
     const config = store.getChatConfig();
     if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: standing-orders config set chat" };
     if (isSubscriptionChatProvider(config.provider)) {
@@ -2394,7 +2416,14 @@ export function createDecisionServer(options: ServeOptions): Server {
    * opened it. Every failure maps to the closed enum BEFORE anything can
    * log it; a turn that may have started but has no usable usage LATCHES
    * (unknown spend blocks the credential until acknowledged).  */
-  async function runChatTurn(turnId: number, session: Session, enabled: Extract<ChatEnablement, { ok: true; billing: "metered" }>, userMessage: string, dataDocument: string): Promise<void> {
+  async function runChatTurn(
+    turnId: number,
+    session: Session,
+    enabled: Extract<ChatEnablement, { ok: true; billing: "metered" }>,
+    userMessage: string,
+    dataDocument: string,
+    turnRepos: readonly string[],
+  ): Promise<void> {
     const started = store.startChatTurn(turnId, new Date());
     if (!started.ok) return;
     const controller = new AbortController();
@@ -2463,7 +2492,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     let kept = 0;
     for (const draft of envelope.envelope.proposals) {
       const repoIndex = Number(draft.repoId.slice(1)) - 1;
-      const repoPath = ceiling.repos[repoIndex];
+      const repoPath = turnRepos[repoIndex];
       if (repoPath === undefined) continue;
       while (approverCandidateCount(session.name) >= CHAT_CANDIDATES_PER_APPROVER) evictOldestCandidate(session.name);
       const key = randomBytes(16).toString("hex");
@@ -2473,7 +2502,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         repoPath,
         provider: enabled.config.provider,
         approver: session.name,
-        ceilingDigest: chatCeilingDigest(),
+        ceilingDigest: chatCeilingDigest(turnRepos),
         createdAt: Date.now(),
         state: "pending",
       });
@@ -2632,7 +2661,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const rows: { path: string; name: string }[] = [];
         for (const one of [
           ...store.listProjects().map(one => ({ path: one.path, name: one.name })),
-          ...ceiling.repos.map(path => ({ path, name: projectName(path) })),
+          ...managedRepos().map(path => ({ path, name: projectName(path) })),
         ]) {
           if (seen.has(one.path) || !visible(one.path)) continue;
           seen.add(one.path);
@@ -2657,7 +2686,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               }${liveModeTerms.publication === "automerge" ? " — merges fire themselves on green" : ""}`,
             },
           }),
-      ...(!unscopedMode && ceiling.roots.length === 0 && ceiling.repos.length > 0 ? { chat: true } : {}),
+      ...(!unscopedMode && managedRepos().length > 0 ? { chat: true } : {}),
       ...(listPane === undefined ? {} : { listPane }),
       ...(scope === undefined ? {} : { scope }),
     };
@@ -2729,7 +2758,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const recent = store.listProjects().filter(one => visible(one.path));
     const recentPaths = new Set(recent.map(one => one.path));
     const candidates = new Set<string>();
-    for (const path of [...ceiling.repos, ...store.knownRepos()]) {
+    for (const path of [...managedRepos(), ...store.knownRepos()]) {
       const canonical = canonicalProject(path) ?? path;
       if (!recentPaths.has(canonical) && visible(canonical)) candidates.add(canonical);
     }
@@ -2748,7 +2777,9 @@ export function createDecisionServer(options: ServeOptions): Server {
             : ceiling.roots.length === 0
               ? {
                   enabled: false as const,
-                  why: `naming where repositories live takes --project-root — restart ${options.upConsole === true ? "`standing-orders up --project-root <dir>`" : "serve with --project-root <dir>"} and this card comes alive`,
+                  why: options.upConsole === true
+                    ? "choose a projects folder once with `standing-orders up --project-root <dir>` — it is remembered on later starts"
+                    : "choose which folder this server may use with --project-root <dir>",
                 }
               : { enabled: true as const, roots: ceiling.roots, record: [...(who.session.onboard?.entries() ?? [])][0] ?? null };
     // A cheap peek per project for the switcher cards — one small set of
@@ -3729,6 +3760,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!(await isGitRepo(canonical))) {
         return void projectsScreen(response, who, "that path is not a git repository", 400);
       }
+      // Opening an allowed repository enrolls it in this machine's durable
+      // project list. A co-located `up` notices that list and connects its
+      // builder; there is no separate restart or runner-binding step.
+      if (options.registryPath !== undefined) {
+        const enrolled = await updateRepos(options.registryPath, repos => addRepos(repos, [canonical]));
+        if (!enrolled.ok) {
+          return void projectsScreen(response, who, `that project is valid, but it could not be added — ${enrolled.message}`, 400);
+        }
+      }
       store.upsertProject(canonical, projectName(canonical), now);
       who.session.project = canonical;
       who.session.projectRevision++;
@@ -4409,7 +4449,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         who,
         options.upConsole === true
-          ? `${admitted} is ready — restart \`standing-orders up\` adding --repo ${admitted} to watch it`
+          ? `${projectName(admitted)} is ready — the builder is connecting automatically`
           : `${admitted} is ready and open`,
         200,
       );
@@ -4554,7 +4594,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (enabled.billing === "metered" && (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000)) {
         return redirect(response, chatReturnWithSaid(back, "the session ceiling is a dollar amount between 0 and 1000"));
       }
-      const verified = verifyApproverByPassword(store, who.name, body.get("token") ?? "", ceiling.repos);
+      const verified = verifyApproverByPassword(store, who.name, body.get("token") ?? "", managedRepos());
       if (!verified.ok) return redirect(response, chatReturnWithSaid(back, "minting a session takes your password, typed again"));
       const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
       const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${verified.who.ceilingDigest}`).digest("hex");
@@ -4684,7 +4724,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `/chat?said=${encodeURIComponent("that looks like a credential — chat never forwards or stores those")}`);
       }
       store.sweepStaleChatTurns(now);
-      const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(ceiling.repos, now), now);
+      const turnRepos = managedRepos();
+      const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(turnRepos, now), now);
       const { document } = buildDataDocument(snapshot);
       // The WHOLE outbound body is scanned — a token in a task title
       // refuses the turn exactly like one typed in the box (v2 ruling 4).
@@ -4723,7 +4764,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 : "the weekly spend ceiling would be exceeded";
         return redirect(response, `/chat?said=${encodeURIComponent(said)}`);
       }
-      void runChatTurn(opened.id, who.session, enabled, message, document);
+      void runChatTurn(opened.id, who.session, enabled, message, document, turnRepos);
       return redirect(response, "/chat#latest");
     }
 
@@ -4771,7 +4812,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             touches: candidate.draft.touches,
             acceptance: candidate.draft.acceptance,
             filedVia,
-            admittedRepos: [...ceiling.repos],
+            admittedRepos: managedRepos(),
           },
           now,
         );
@@ -4795,7 +4836,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           schedule: candidate.draft.schedule,
           costCeilingUsd: null,
           filedVia,
-          admittedRepos: [...ceiling.repos],
+          admittedRepos: managedRepos(),
         },
         now,
       );
@@ -8977,7 +9018,7 @@ function inboxPage(chrome: Chrome, data: {
       ? ""
       : `<div class="card">` +
         `<p><strong>Getting started</strong> <span class="meta">\u2014 disappears after the first successful run</span></p>` +
-        `<p class="meta">Start Standing Orders from a repository with <span class="mono">standing-orders up</span> \u2014 one command opens the app and connects that project's builder.</p>` +
+        `<p class="meta">Keep <span class="mono">standing-orders up</span> running on this machine \u2014 it opens the app and reconnects every saved project's builder.</p>` +
         data.wizard
           .map(
             step =>
@@ -11643,7 +11684,7 @@ function githubReposPage(
                     ? openForm(localPath, data.registered.has(localPath) ? "open →" : "add + open →")
                     : data.cloneReady
                       ? cloneForm(repo.nameWithOwner)
-                      : `<span class="meta">clone needs --project-root</span>`;
+                      : `<span class="meta">choose a projects folder first</span>`;
               return [
                 `<div class="card project-card">`,
                 `<div class="row"><strong>${escape(repo.nameWithOwner)}</strong>${repo.isPrivate ? ` <span class="badge">private</span>` : ""}`,
@@ -11658,7 +11699,7 @@ function githubReposPage(
             .join("\n");
   return screen("projects", [
     `<h1>your GitHub repositories</h1>`,
-    `<p class="meta">what the server's signed-in <span class="mono">gh</span> account can see — repositories already on this machine offer open; the rest clone through the usual preview and password.</p>`,
+    `<p class="meta">repositories available to the GitHub account signed in on this machine — open one you already have, or clone a new one after a quick preview.</p>`,
     rows,
     `<p class="row" style="margin-top:.6rem"><a class="badge" href="/projects">← back to projects</a></p>`,
   ].join("\n"), { chrome });
@@ -11686,7 +11727,7 @@ function projectsPage(
         ? `<h2>add a repository</h2><p class="meta">${escape(onboard.why)}</p>`
         : [
             `<h2>add a repository</h2>`,
-            `<p class="meta">paste a GitHub repository — you see what it is before anything is written. The clone acts as the serve process's ambient GitHub credential and lands under your projects root. Large-file (LFS) objects are not downloaded.</p>`,
+            `<p class="meta">paste a GitHub repository — you will preview it before anything is downloaded. It goes into your saved projects folder and the builder connects automatically. Large-file (LFS) objects are not downloaded.</p>`,
             onboard.record === null
               ? [
                   `<form method="post" action="/projects/onboard-preview" class="card">`,
@@ -11773,7 +11814,7 @@ function projectsPage(
     `<h2 style="margin-top:0">add a project</h2>`,
     browsable
       ? `<p class="row"><a class="badge" href="/projects/browse">\ud83d\uddc2 browse this machine's folders \u2192</a></p>`
-      : `<p class="meta">folder browsing needs a scoped serve \u2014 start with <code>--project-root &lt;dir&gt;</code> or <code>--repo</code> and this lights up</p>`,
+      : `<p class="meta">choose a projects folder once with <code>standing-orders up --project-root &lt;dir&gt;</code>. Standing Orders remembers it after that.</p>`,
     onboard === null ? "" : `<p class="row"><a class="badge" href="/projects/github">see your GitHub repositories \u2192</a></p>`,
     onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
     `<details style="margin-top:.5rem"><summary class="meta">or type an exact path</summary>`,
@@ -11787,9 +11828,9 @@ function projectsPage(
 
   return screen("projects", [
     `<h1>projects</h1>`,
-    `<p class="meta">a project is a git repository this server was allowed to serve \u2014 open one to see its queue, its board, and its runs</p>`,
+    `<p class="meta">add a local folder or GitHub repository once; its tasks, builds, and chat context stay available here</p>`,
     unscopedMode
-      ? `<p class="meta">this server was started without a project list, so everything is visible \u2014 start serve with <code>--repo</code> or <code>--project-root</code> to scope it</p>`
+      ? `<p class="meta">no projects folder is set yet \u2014 start with <code>standing-orders up --project-root &lt;dir&gt;</code> once</p>`
       : "",
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     recentItems.length === 0 && candidateItems.length === 0
