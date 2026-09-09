@@ -62,7 +62,7 @@ Git, Node 22 or 24, Claude Code, and Codex CLI and signing into both CLIs:
 npm ci
 npm run typecheck
 npm run build
-npx vitest run src/daemon.test.ts src/link.test.ts src/dispatch.test.ts src/builder.test.ts
+npx vitest run src/daemon.test.ts src/link.test.ts src/dispatch.test.ts src/command-shell.test.ts
 
 npm run certify:provider -- --provider claude --model sonnet --keep --output output/certification/windows-claude.json
 npm run certify:provider -- --provider codex --model gpt-5.6-sol --keep --output output/certification/windows-codex.json

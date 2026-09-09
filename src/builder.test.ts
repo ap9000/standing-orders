@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { agentExitWords, approvedCommandShell } from "./builder.js";
+import { agentExitWords } from "./builder.js";
 import { openStore, type Store } from "./store.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
 import { acquire, currentClaim, reap } from "./claim.js";
@@ -24,19 +24,6 @@ function bootstrapApprover(store: Store): string {
   return added.token;
 }
 const AGENT_SAID = JSON.stringify({ result: "Added the guard and a test for it." });
-
-test("approved repository commands use the native shell on Windows and POSIX", () => {
-  expect(approvedCommandShell("npm ci", "win32", "C:\\Windows\\System32\\cmd.exe")).toEqual({
-    file: "C:\\Windows\\System32\\cmd.exe",
-    args: ["/d", "/s", "/c", "npm ci"],
-    display: "cmd.exe /d /s /c npm ci",
-  });
-  expect(approvedCommandShell("npm ci", "linux")).toEqual({
-    file: "/bin/sh",
-    args: ["-c", "npm ci"],
-    display: "sh -c npm ci",
-  });
-});
 
 import { mkdtempSync, writeFileSync as writeSync2 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
