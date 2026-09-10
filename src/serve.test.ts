@@ -17,6 +17,7 @@ import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT } from "./serve.js";
+import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
 import { resolveScopeProfile } from "./agentconfig.js";
 import type { MateProviderAnswer } from "./converse.js";
 
@@ -1970,6 +1971,224 @@ describe("the board — the pipeline as lanes, live in place", () => {
     });
     expect(staleApproval.status).toBe(409);
     expect(store.getScope("t-plan")?.approvedAt).toBeNull();
+  });
+
+  test("adaptive execution plans: the same live milestone progress and revision ledger render on the task page and the focused chat", async () => {
+    store.createTask({ id: "t-adapt", title: "adapting under evidence" }, T0);
+    const ref = store.refFor("built-in", "t-adapt").id;
+    store.placeTask(ref, "/repo/main");
+    store.saveScope({
+      taskId: "t-adapt", goal: "ship the guarded change", outOfScope: null, touches: [], acceptance: [],
+      proposedAt: T0.toISOString(), digest: "d-adapt",
+      approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d-adapt",
+    });
+
+    // Revision 1: the planner's own artifact — no plan_revision row yet,
+    // exactly like every task filed before this feature (c1).
+    const plannerRun = store.startRun({
+      taskRef: ref, leaseId: "plan-lease-adapt", runner: "b", role: "planner",
+      branch: "standing-orders-plan/t-adapt", worktree: "/pool/plan-adapt", now: T0,
+    });
+    const rev1Text = [
+      "## Approach", "Guard the change behind a feature flag.",
+      "## Milestones", "1. Add the guard.", "2. Wire the call sites.",
+      "## Dependencies", "- None found.",
+      "## Risks", "- The flag default might already be flipped; check config first.",
+      "## Proof", "- Run the focused suite.", "",
+    ].join("\n");
+    const rev1Content = Buffer.from(rev1Text, "utf8");
+    mkdirSync(join(evidenceRoot, String(plannerRun)), { recursive: true });
+    writeFileSync(join(evidenceRoot, String(plannerRun), "plan.md"), rev1Content);
+    const rev1Sha = createHash("sha256").update(rev1Content).digest("hex");
+    store.saveArtifact({
+      run: plannerRun, kind: "plan", key: `${plannerRun}/plan.md`,
+      bytesOriginal: rev1Content.length, bytesStored: rev1Content.length, truncated: false,
+      sha256: rev1Sha, capture: "planner handoff (verified tree)",
+    }, T0);
+    store.finishRun(plannerRun, { outcome: "built", reason: "plan-drafted", now: T0 });
+
+    // A builder run files a bounded, evidence-linked, plan-only revision:
+    // the repository showed the flag default was already flipped, so the
+    // first milestone is unnecessary (c3, c4's plan-only path).
+    const buildRun = store.startRun({
+      taskRef: ref, leaseId: "build-lease-adapt", runner: "b", role: "builder",
+      branch: "standing-orders/t-adapt", worktree: "/pool/build-adapt", now: T0,
+    });
+    const rev2Text = rev1Text
+      .replace("1. Add the guard.", "1. Confirm the flag default (already flipped).")
+      .replace("- The flag default might already be flipped; check config first.", "- None found — the default was already flipped, confirmed in config/flags.json.");
+    const rev2Parsed = parseExecutionPlanDocument(rev2Text);
+    if (!rev2Parsed.ok) throw new Error("fixture plan malformed");
+    const milestones = milestonesOf(rev2Parsed.document);
+    const rev2Content = Buffer.from(rev2Text, "utf8");
+    mkdirSync(join(evidenceRoot, String(buildRun)), { recursive: true });
+    writeFileSync(join(evidenceRoot, String(buildRun), "revision.md"), rev2Content);
+    const rev2Sha = createHash("sha256").update(rev2Content).digest("hex");
+    const rev2ArtifactId = store.saveArtifact({
+      run: buildRun, kind: "plan", key: `${buildRun}/revision.md`,
+      bytesOriginal: rev2Content.length, bytesStored: rev2Content.length, truncated: false,
+      sha256: rev2Sha, capture: "builder-filed revision proposal",
+    }, T0);
+    const rev2Id = store.insertPlanRevision({
+      taskRef: ref, revision: 2, artifact: rev2ArtifactId, parentHash: rev1Sha,
+      reason: "config/flags.json already flips the default — the guard milestone is unnecessary",
+      evidenceLink: "config/flags.json", author: `builder:${buildRun}`, originRun: buildRun,
+      kind: "builder-proposal", authorityKind: "plan-only", authorityDigest: "digest-plan-only",
+      changedFields: [], status: "applied",
+    }, T0);
+    store.setRunPlanRevision(buildRun, rev2Id, "digest-plan-only");
+    store.insertRunCheckpoint({
+      run: buildRun, taskRef: ref, planRevision: rev2Id,
+      snapshot: {
+        revisionHash: rev2Sha,
+        milestones: [
+          { id: milestones[0]?.id as string, state: "completed", note: "confirmed in config" },
+          { id: milestones[1]?.id as string, state: "current", note: null },
+        ],
+      },
+    }, T0);
+
+    const cookie = await login();
+    const taskPage = await (await fetch(url("/t/t-adapt"), { headers: { cookie } })).text();
+    expect(taskPage).toContain("plan revision 2");
+    expect(taskPage).toContain("the guard milestone is unnecessary");
+    expect(taskPage).toContain("config/flags.json");
+    expect(taskPage).toContain("Confirm the flag default (already flipped).");
+    expect(taskPage).toContain("confirmed in config");
+    expect(taskPage).toContain("milestone-completed");
+    expect(taskPage).toContain("milestone-current");
+    expect(taskPage).not.toContain("accept — resume with this plan");
+
+    const chatPage = await (await fetch(url(`/chat?task=t-adapt`), { headers: { cookie } })).text();
+    expect(chatPage).toContain("plan revision 2");
+    expect(chatPage).toContain("the guard milestone is unnecessary");
+    expect(chatPage).toContain("Confirm the flag default (already flipped).");
+    expect(chatPage).toContain("milestone-completed");
+
+    // Now an authority-changing proposal arrives (the defensive path, c4):
+    // the world moved under the run, so it stays paused for a person.
+    const buildRun2 = store.startRun({
+      taskRef: ref, leaseId: "build-lease-adapt-2", runner: "b", role: "builder",
+      branch: "standing-orders/t-adapt-2", worktree: "/pool/build-adapt-2", now: T0,
+    });
+    const rev3Content = Buffer.from(rev2Text.replace("## Approach", "## Approach\nRevised once more."), "utf8");
+    mkdirSync(join(evidenceRoot, String(buildRun2)), { recursive: true });
+    writeFileSync(join(evidenceRoot, String(buildRun2), "revision.md"), rev3Content);
+    const rev3ArtifactId = store.saveArtifact({
+      run: buildRun2, kind: "plan", key: `${buildRun2}/revision.md`,
+      bytesOriginal: rev3Content.length, bytesStored: rev3Content.length, truncated: false,
+      sha256: createHash("sha256").update(rev3Content).digest("hex"), capture: "builder-filed revision proposal",
+    }, T0);
+    const rev3Id = store.insertPlanRevision({
+      taskRef: ref, revision: 3, artifact: rev3ArtifactId, parentHash: rev2Sha,
+      reason: "the touches list no longer covers the file this fix needs",
+      evidenceLink: "src/guard.ts", author: `builder:${buildRun2}`, originRun: buildRun2,
+      kind: "builder-proposal", authorityKind: "authority-change", authorityDigest: "digest-changed",
+      changedFields: ["signed-scope"], status: "blocked",
+    }, T0);
+    store.holdOwned({ taskRef: ref, ownerKind: "revision", ownerId: String(rev3Id), reason: "a plan revision changed signed scope — accept or reject it", until: null }, T0);
+
+    const pendingPage = await (await fetch(url("/t/t-adapt"), { headers: { cookie } })).text();
+    expect(pendingPage).toContain("proposed revision 3");
+    expect(pendingPage).toContain("changes signed-scope");
+    expect(pendingPage).toContain("the touches list no longer covers");
+    expect(pendingPage).toContain("accept — resume with this plan");
+    expect(pendingPage).toContain("reject — keep the current plan");
+    const pendingCsrf = /name="csrf" value="([0-9a-f]{64})"/.exec(pendingPage)?.[1] ?? "";
+
+    // Accepting without the password ceremony refuses.
+    const noToken = await fetch(url("/t/t-adapt/accept-revision"), {
+      method: "POST", headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf: pendingCsrf, "revision-id": String(rev3Id) }),
+      redirect: "manual",
+    });
+    expect(noToken.status).toBe(403);
+    expect(store.getPlanRevision(rev3Id)?.status).toBe("blocked");
+
+    const accepted = await fetch(url("/t/t-adapt/accept-revision"), {
+      method: "POST", headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf: pendingCsrf, "revision-id": String(rev3Id), token: approverToken }),
+      redirect: "manual",
+    });
+    expect(accepted.status).toBe(303);
+    expect(store.getPlanRevision(rev3Id)?.status).toBe("applied");
+    expect(store.activeHold(ref, new Date())).toBeNull();
+
+    const afterAccept = await (await fetch(url("/t/t-adapt"), { headers: { cookie } })).text();
+    expect(afterAccept).not.toContain("accept — resume with this plan");
+    expect(afterAccept).toContain("plan revision 3");
+  });
+
+  test("adaptive execution plans: rejecting a blocked revision keeps the prior plan current and needs no password", async () => {
+    store.createTask({ id: "t-reject", title: "adapting, then declined" }, T0);
+    const ref = store.refFor("built-in", "t-reject").id;
+    store.placeTask(ref, "/repo/main");
+    store.saveScope({
+      taskId: "t-reject", goal: "ship it", outOfScope: null, touches: [], acceptance: [],
+      proposedAt: T0.toISOString(), digest: "d-reject",
+      approvedAt: T0.toISOString(), approvedBy: "alex", approvedDigest: "d-reject",
+    });
+    const plannerRun = store.startRun({
+      taskRef: ref, leaseId: "plan-lease-reject", runner: "b", role: "planner",
+      branch: "standing-orders-plan/t-reject", worktree: "/pool/plan-reject", now: T0,
+    });
+    const rev1Content = Buffer.from(
+      ["## Approach", "Do it plainly.", "## Milestones", "1. Do it.", "## Dependencies", "- None found.", "## Risks", "- None found.", "## Proof", "- Run the suite.", ""].join("\n"),
+      "utf8",
+    );
+    mkdirSync(join(evidenceRoot, String(plannerRun)), { recursive: true });
+    writeFileSync(join(evidenceRoot, String(plannerRun), "plan.md"), rev1Content);
+    store.saveArtifact({
+      run: plannerRun, kind: "plan", key: `${plannerRun}/plan.md`,
+      bytesOriginal: rev1Content.length, bytesStored: rev1Content.length, truncated: false,
+      sha256: createHash("sha256").update(rev1Content).digest("hex"), capture: "planner handoff (verified tree)",
+    }, T0);
+    store.finishRun(plannerRun, { outcome: "built", reason: "plan-drafted", now: T0 });
+
+    const buildRun = store.startRun({
+      taskRef: ref, leaseId: "build-lease-reject", runner: "b", role: "builder",
+      branch: "standing-orders/t-reject", worktree: "/pool/build-reject", now: T0,
+    });
+    const rev2Content = Buffer.from(rev1Content.toString("utf8").replace("Do it plainly.", "Do it carefully."), "utf8");
+    mkdirSync(join(evidenceRoot, String(buildRun)), { recursive: true });
+    writeFileSync(join(evidenceRoot, String(buildRun), "revision.md"), rev2Content);
+    const rev2ArtifactId = store.saveArtifact({
+      run: buildRun, kind: "plan", key: `${buildRun}/revision.md`,
+      bytesOriginal: rev2Content.length, bytesStored: rev2Content.length, truncated: false,
+      sha256: createHash("sha256").update(rev2Content).digest("hex"), capture: "builder-filed revision proposal",
+    }, T0);
+    const rev2Id = store.insertPlanRevision({
+      taskRef: ref, revision: 2, artifact: rev2ArtifactId, parentHash: null,
+      reason: "budget changed underneath the run", evidenceLink: null, author: `builder:${buildRun}`, originRun: buildRun,
+      kind: "builder-proposal", authorityKind: "authority-change", authorityDigest: "digest-changed-2",
+      changedFields: ["publication-authority"], status: "blocked",
+    }, T0);
+    store.holdOwned({ taskRef: ref, ownerKind: "revision", ownerId: String(rev2Id), reason: "publication authority changed", until: null }, T0);
+
+    const cookie = await login();
+    const page = await (await fetch(url("/t/t-reject"), { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] ?? "";
+
+    const rejected = await fetch(url("/t/t-reject/reject-revision"), {
+      method: "POST", headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, "revision-id": String(rev2Id) }),
+      redirect: "manual",
+    });
+    expect(rejected.status).toBe(303);
+    expect(store.getPlanRevision(rev2Id)?.status).toBe("rejected");
+    expect(store.activeHold(ref, new Date())).toBeNull();
+
+    const after = await (await fetch(url("/t/t-reject"), { headers: { cookie } })).text();
+    expect(after).not.toContain("proposed revision");
+    expect(after).toContain("Do it plainly.");
+
+    // Resolving twice fails closed: the decision already resolved.
+    const again = await fetch(url("/t/t-reject/reject-revision"), {
+      method: "POST", headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, "revision-id": String(rev2Id) }),
+      redirect: "manual",
+    });
+    expect(again.status).toBe(409);
   });
 
   test("the old morning route forwards to activity, which speaks of windows, not nights", async () => {

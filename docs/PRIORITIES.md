@@ -112,6 +112,22 @@ and stale approvals refuse, approval locks the exact verified artifact hash,
 and the builder receives that stable version. The existing plan artifact is
 still the only source of truth, with safe fallback rendering for older plans.
 
+The fourth Priority 3 slice lets that plan adapt while a build runs, without
+becoming a second workflow engine. A running build checkpoints durable
+milestone state—pending, current, completed, blocked—against the exact plan
+revision its brief named; older attempts with no checkpoint stay readable.
+When repository evidence invalidates a named dependency, risk, or approach,
+the builder files one bounded, evidence-linked replacement plan and pauses at
+a safe point rather than guessing or grinding on a false premise. A plan-only
+refinement inside the signed scope appends an immutable revision and resumes
+on its own; any change to goal, boundaries, touches, acceptance, permissions,
+quality, budget, or publication authority invalidates approval and stays
+paused until a person accepts or rejects it. The task page and focused chat
+render one shared projection—current revision, live milestones, and any
+pending decision—so the two surfaces can never disagree. Milestone progress
+is the agent's own report and is labeled as such; it never substitutes for
+the proof contract's own adjudicated verdict.
+
 The first three Priority 2 slices landed already:
 completion carries a typed, hash-addressed proof the plane
 adjudicates against evidence it captured itself, rather than an agent's own

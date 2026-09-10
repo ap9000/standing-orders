@@ -44,8 +44,9 @@ import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
+import type { ProgressSnapshot } from "./plan.js";
 
-export const SCHEMA_VERSION = 43;
+export const SCHEMA_VERSION = 44;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -432,7 +433,7 @@ export type RoutineFire = {
 };
 
 /** Who placed a hold — and therefore who alone may lift it. */
-export type HoldOwner = "operator" | "decision" | "incident" | "backoff" | "contest";
+export type HoldOwner = "operator" | "decision" | "incident" | "backoff" | "contest" | "revision";
 
 export type Hold = {
   id: number;
@@ -580,6 +581,13 @@ export type Run = {
    * dispatch's C8 gate re-checks hasRecognizer before any advance.
    */
   terminalClass?: TerminalClass | null;
+  /** v44 (adaptive execution plans): the exact plan revision this attempt's
+   * brief was built from, and the authority snapshot digest at that moment
+   * (`authoritySnapshotDigest` of the signed scope digest + publication
+   * authority). Null on every run before the feature, and on any role that
+   * carries no plan (a scout, a reviewer). */
+  planRevision?: number | null;
+  authorityDigest?: string | null;
 };
 
 /** The bounded activity vocabulary. Machine-authored — a model's prose never becomes one of these. */
@@ -801,6 +809,46 @@ export type Artifact = {
   redacted: boolean;
   /** Typed verdict of the capture itself (v14); null on rows from before. */
   captureStatus: "ok" | "failed" | null;
+};
+
+// ---- adaptive execution plans (v44) ---------------------------------------
+
+export type PlanRevisionKind = "initial" | "operator-edit" | "builder-proposal";
+export type PlanRevisionStatus = "applied" | "blocked" | "rejected";
+
+/** One immutable entry in a task's plan-revision ledger. `artifact` carries
+ * the complete replacement plan document; every other content field
+ * (reason, evidenceLink, author, parentHash) never changes once written —
+ * `status`/`resolvedAt`/`resolvedBy` are the one part an operator's later
+ * accept/reject act may update. */
+export type PlanRevision = {
+  id: number;
+  taskRef: number;
+  revision: number;
+  artifact: number;
+  parentHash: string | null;
+  reason: string;
+  evidenceLink: string | null;
+  author: string;
+  originRun: number | null;
+  kind: PlanRevisionKind;
+  authorityKind: "plan-only" | "authority-change";
+  authorityDigest: string;
+  changedFields: string[];
+  status: PlanRevisionStatus;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+};
+
+/** One atomic milestone-progress checkpoint a running build recorded. */
+export type RunCheckpoint = {
+  id: number;
+  run: number;
+  taskRef: number;
+  planRevision: number;
+  snapshot: ProgressSnapshot;
+  createdAt: string;
 };
 
 /** The bridge's digest cadence (v34). everyMs null = every fact pages as it lands. */
@@ -1536,7 +1584,7 @@ CREATE INDEX IF NOT EXISTS routine_fire_recent ON routine_fire (routine_id, id D
 CREATE TABLE IF NOT EXISTS hold (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
-  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest')),
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest','revision')),
   owner_id   TEXT NOT NULL,
   reason     TEXT NOT NULL,
   until      TEXT,
@@ -2685,6 +2733,55 @@ CREATE TABLE IF NOT EXISTS task_steer (
   CHECK (delivered_at IS NULL OR attached_run IS NOT NULL)
 );
 
+-- Adaptive execution plans (v44): an append-only ledger of plan revisions.
+-- Revision 1 for a task filed before this migration is never backfilled
+-- here — it stays a read-only projection off the existing planner artifact,
+-- so an old task with zero rows in this table is still exactly as readable
+-- as one with a hundred. 'artifact' carries the complete replacement plan
+-- document (kind 'plan', same shape the planner itself writes);
+-- 'parent_hash' is the prior revision's artifact sha256, so a reader can
+-- walk the chain without a second query per hop. 'authority_digest' is the
+-- signed-scope-plus-publication-authority digest at filing time — the
+-- complete thing an approval could invalidate. 'status' is the one mutable
+-- field: 'blocked' becomes 'applied' or 'rejected' by an operator's act;
+-- the content columns beside it never change once written.
+CREATE TABLE IF NOT EXISTS plan_revision (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref         INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  revision         INTEGER NOT NULL,
+  artifact         INTEGER NOT NULL REFERENCES artifact(id),
+  parent_hash      TEXT,
+  reason           TEXT NOT NULL,
+  evidence_link    TEXT,
+  author           TEXT NOT NULL,
+  origin_run       INTEGER REFERENCES run(id),
+  kind             TEXT NOT NULL CHECK (kind IN ('initial', 'operator-edit', 'builder-proposal')),
+  authority_kind   TEXT NOT NULL CHECK (authority_kind IN ('plan-only', 'authority-change')),
+  authority_digest TEXT NOT NULL,
+  changed_fields   TEXT,
+  status           TEXT NOT NULL CHECK (status IN ('applied', 'blocked', 'rejected')),
+  created_at       TEXT NOT NULL,
+  resolved_at      TEXT,
+  resolved_by      TEXT,
+  UNIQUE (task_ref, revision)
+);
+
+-- The running build's milestone checkpoints (v44): append-only, one row per
+-- atomic snapshot a build reported. 'plan_revision' is the exact revision
+-- this snapshot's ids were validated against (run.plan_revision names the
+-- same value at the run level; both are kept so a checkpoint remains
+-- self-describing after the run row is long gone from a query's join). The
+-- newest row per run is that run's current progress; earlier rows are the
+-- history a reader can show without a second table.
+CREATE TABLE IF NOT EXISTS run_checkpoint (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  run           INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  task_ref      INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+  plan_revision INTEGER NOT NULL REFERENCES plan_revision(id),
+  snapshot_json TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+
 -- A phone enrolled for web push (arc 3, v23). One row PER ACTIVATION —
 -- re-enrolling a retired endpoint is a new row with its own binding and
 -- audit trail; the partial unique index below keeps one LIVE row per
@@ -2979,7 +3076,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS fallback_transition_step
 -- One LIVE cycle per task (Codex E1 review, finding 5): the DB backstop
 -- behind openFallbackCycle's transact guard.
 CREATE UNIQUE INDEX IF NOT EXISTS one_live_fallback_cycle_per_task
-  ON fallback_cycle (task_ref) WHERE state NOT IN ('closed','incident');`);
+  ON fallback_cycle (task_ref) WHERE state NOT IN ('closed','incident');
+-- v44 (adaptive execution plans) — after migration because plan_revision and
+-- run_checkpoint arrive by IF NOT EXISTS on existing files. At most one
+-- revision 'blocked' at a time (a second proposal waits for the first to
+-- resolve rather than racing it); progress reads walk one run's checkpoints
+-- in order. (task_ref, revision) is already unique via the table's own
+-- UNIQUE constraint, so no extra index is needed for that.
+CREATE UNIQUE INDEX IF NOT EXISTS one_blocked_revision_per_task
+  ON plan_revision (task_ref) WHERE status = 'blocked';
+CREATE INDEX IF NOT EXISTS run_checkpoint_by_run ON run_checkpoint (run, id);
+CREATE INDEX IF NOT EXISTS run_checkpoint_by_task ON run_checkpoint (task_ref, id);`);
 
   const version = db.prepare("SELECT version FROM schema_version").get();
   if (version === undefined) {
@@ -3731,6 +3838,35 @@ function migrate(db: Database): void {
   // credentialed steering primitive is still the only write authority.
   rebuildMateProposalForV43(db);
   db.exec("CREATE INDEX IF NOT EXISTS mate_proposal_thread ON mate_proposal (thread, state)");
+
+  // v44 (adaptive execution plans): plan_revision and run_checkpoint are
+  // wholly new tables and arrive through the fresh SCHEMA's IF NOT EXISTS.
+  // `run` gains two nullable columns naming the exact plan revision and
+  // authority snapshot a build's brief was constructed from — additive,
+  // null on every run from before this migration. `hold`'s owner_kind CHECK
+  // is WIDENED to admit 'revision': the pause an authority-changing
+  // proposal places while it awaits an operator, lifted by that operator's
+  // accept or reject act exactly like a decision hold is lifted by
+  // answering it.
+  addColumn(db, "run", "plan_revision", "INTEGER REFERENCES plan_revision(id)");
+  addColumn(db, "run", "authority_digest", "TEXT");
+  rebuildForV4(
+    db,
+    "hold",
+    "'operator','decision','incident','backoff','contest'",
+    "'revision'",
+    `CREATE TABLE hold_next (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       task_ref   INTEGER NOT NULL REFERENCES task_ref(id) ON DELETE CASCADE,
+       owner_kind TEXT NOT NULL CHECK (owner_kind IN ('operator','decision','incident','backoff','contest','revision')),
+       owner_id   TEXT NOT NULL,
+       reason     TEXT NOT NULL,
+       until      TEXT,
+       held_at    TEXT NOT NULL,
+       UNIQUE (owner_kind, owner_id)
+     )`,
+    ["id", "task_ref", "owner_kind", "owner_id", "reason", "until", "held_at"],
+  );
 }
 
 /** The v17 artifact shape — what every v17..v33 database carries (the
@@ -3874,6 +4010,17 @@ function V34_RUN_PLUS_V41_DDL(name: string): string {
   );
 }
 
+/** v44: plan_revision and authority_digest are additive columns after every
+ * run-table rebuild, exactly like v41's quality_mode — SQLite inserts each
+ * new column immediately before the table CHECK, so this known final shape
+ * must be admitted by name wherever the run table's shape is recognized. */
+function V34_RUN_PLUS_V41_PLUS_V44_DDL(name: string): string {
+  return V34_RUN_PLUS_V41_DDL(name).replace(
+    " quality_mode TEXT NOT NULL DEFAULT 'default' CHECK (quality_mode IN ('default','strict')),\n    CHECK",
+    " quality_mode TEXT NOT NULL DEFAULT 'default' CHECK (quality_mode IN ('default','strict')), plan_revision INTEGER REFERENCES plan_revision(id), authority_digest TEXT,\n    CHECK",
+  );
+}
+
 const V34_RUN_COLUMNS = [
   "id", "task_ref", "lease_id", "runner", "scope_digest", "profile_digest", "provider_version", "role", "provider",
   "parent_run", "session_id", "base_revision", "branch", "worktree", "model", "phase", "contestant", "outcome",
@@ -3893,7 +4040,11 @@ export function rebuildRunForV34(db: Database): void {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run'").get();
   if (row === undefined) return;
   const stored = canonicalDdl(String(row["sql"]));
-  if (stored === canonicalDdl(V34_RUN_DDL("run")) || stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run"))) return;
+  if (
+    stored === canonicalDdl(V34_RUN_DDL("run")) ||
+    stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run")) ||
+    stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run"))
+  ) return;
   if (stored !== canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL)) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
   }
@@ -4142,7 +4293,8 @@ function rebuildRunForV29(db: Database): void {
     stored === canonicalDdl(V29_RUN_DDL("run")) ||
     stored === canonicalDdl(V29_RUN_PLUS_V30_COLS_DDL) ||
     stored === canonicalDdl(V34_RUN_DDL("run")) ||
-    stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run"))
+    stored === canonicalDdl(V34_RUN_PLUS_V41_DDL("run")) ||
+    stored === canonicalDdl(V34_RUN_PLUS_V41_PLUS_V44_DDL("run"))
   ) return;
   if (stored !== canonicalDdl(V28_RUN_DDL("run"))) {
     throw new Error("the run table's DDL is not a shape this migration knows — refusing to rebuild it");
@@ -12158,6 +12310,156 @@ export class Store {
     return row === undefined ? null : readArtifact(row as Record<string, unknown>);
   }
 
+  // ---- adaptive execution plans (v44) --------------------------------------
+
+  /** Append one immutable plan-revision row. The caller has already written
+   * the replacement document as a `kind: 'plan'` artifact and, for a
+   * builder-filed proposal, already classified its authority against the
+   * run's own snapshot — this only records the ledger entry around that
+   * work. `revision` is the caller's to assign (one past whatever
+   * `latestPlanRevision` returned, read in the same transaction) so two
+   * concurrent proposals can never collide silently on the UNIQUE index. */
+  insertPlanRevision(
+    revision: {
+      taskRef: number;
+      revision: number;
+      artifact: number;
+      parentHash: string | null;
+      reason: string;
+      evidenceLink: string | null;
+      author: string;
+      originRun: number | null;
+      kind: PlanRevisionKind;
+      authorityKind: "plan-only" | "authority-change";
+      authorityDigest: string;
+      changedFields: readonly string[];
+      status: PlanRevisionStatus;
+    },
+    now: Date,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO plan_revision
+           (task_ref, revision, artifact, parent_hash, reason, evidence_link, author, origin_run,
+            kind, authority_kind, authority_digest, changed_fields, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        revision.taskRef,
+        revision.revision,
+        revision.artifact,
+        revision.parentHash,
+        revision.reason,
+        revision.evidenceLink,
+        revision.author,
+        revision.originRun,
+        revision.kind,
+        revision.authorityKind,
+        revision.authorityDigest,
+        JSON.stringify(revision.changedFields),
+        revision.status,
+        now.toISOString(),
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /** Every revision for a task, newest first — the immutable history a
+   * reader can show without a second table. */
+  listPlanRevisions(taskRef: number): PlanRevision[] {
+    return this.db
+      .prepare("SELECT * FROM plan_revision WHERE task_ref = ? ORDER BY revision DESC")
+      .all(taskRef)
+      .map(readPlanRevision);
+  }
+
+  /** The current plan revision: the newest row an operator (or an
+   * auto-applied plan-only proposal) has actually put in force. Null for
+   * every task filed before this feature, and for a task whose only
+   * revision so far is still 'blocked' — callers fall back to
+   * `latestPlanArtifact`'s synthetic revision 1 in both cases. */
+  currentPlanRevision(taskRef: number): PlanRevision | null {
+    const row = this.db
+      .prepare("SELECT * FROM plan_revision WHERE task_ref = ? AND status = 'applied' ORDER BY revision DESC LIMIT 1")
+      .get(taskRef);
+    return row === undefined ? null : readPlanRevision(row as Record<string, unknown>);
+  }
+
+  /** The newest revision regardless of status, including one still
+   * 'blocked' awaiting an operator's decision — what a reader shows
+   * alongside the current one to render a pending proposal at all. */
+  latestPlanRevision(taskRef: number): PlanRevision | null {
+    const row = this.db.prepare("SELECT * FROM plan_revision WHERE task_ref = ? ORDER BY revision DESC LIMIT 1").get(taskRef);
+    return row === undefined ? null : readPlanRevision(row as Record<string, unknown>);
+  }
+
+  getPlanRevision(id: number): PlanRevision | null {
+    const row = this.db.prepare("SELECT * FROM plan_revision WHERE id = ?").get(id);
+    return row === undefined ? null : readPlanRevision(row as Record<string, unknown>);
+  }
+
+  /**
+   * An operator's accept/reject of a 'blocked' (authority-changing) revision.
+   * Fails closed (returns false) unless the row is still exactly 'blocked' —
+   * a stale page reload must never resolve a decision that already
+   * resolved, or resolve one that was never open. The content columns
+   * (artifact, reason, evidence link, author) never change; only this
+   * disposition does.
+   */
+  resolvePlanRevision(id: number, outcome: "applied" | "rejected", resolvedBy: string, now: Date): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE plan_revision SET status = ?, resolved_at = ?, resolved_by = ?
+          WHERE id = ? AND status = 'blocked'`,
+      )
+      .run(outcome, now.toISOString(), resolvedBy, id);
+    return Number(changes) > 0;
+  }
+
+  /** Stamp the exact plan revision and authority snapshot a run's brief was
+   * built from — set once, early, before the agent is invoked. */
+  setRunPlanRevision(id: number, planRevisionId: number | null, authorityDigest: string | null): void {
+    this.db
+      .prepare("UPDATE run SET plan_revision = ?, authority_digest = ? WHERE id = ?")
+      .run(planRevisionId, authorityDigest, id);
+  }
+
+  /** Append one atomic milestone checkpoint. Append-only: the newest row
+   * for a run is its current progress, and every earlier row is history a
+   * reader can show without a second table. */
+  insertRunCheckpoint(
+    checkpoint: { run: number; taskRef: number; planRevision: number; snapshot: ProgressSnapshot },
+    now: Date,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO run_checkpoint (run, task_ref, plan_revision, snapshot_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(checkpoint.run, checkpoint.taskRef, checkpoint.planRevision, JSON.stringify(checkpoint.snapshot), now.toISOString());
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /** One run's current progress, or null if it has never checkpointed —
+   * true of every run before this feature, and of a run still on its first
+   * milestone. */
+  latestCheckpointForRun(run: number): RunCheckpoint | null {
+    const row = this.db.prepare("SELECT * FROM run_checkpoint WHERE run = ? ORDER BY id DESC LIMIT 1").get(run);
+    return row === undefined ? null : readRunCheckpoint(row as Record<string, unknown>);
+  }
+
+  /** The latest progress for a task, whichever run wrote it — what the task
+   * page and focused chat render live, including once the run that wrote
+   * it has ended. */
+  latestCheckpointForTask(taskRef: number): RunCheckpoint | null {
+    const row = this.db.prepare("SELECT * FROM run_checkpoint WHERE task_ref = ? ORDER BY id DESC LIMIT 1").get(taskRef);
+    return row === undefined ? null : readRunCheckpoint(row as Record<string, unknown>);
+  }
+
+  /** One run's full checkpoint history, oldest first. */
+  checkpointHistory(run: number): RunCheckpoint[] {
+    return this.db.prepare("SELECT * FROM run_checkpoint WHERE run = ? ORDER BY id ASC").all(run).map(readRunCheckpoint);
+  }
+
   /** The newest scout run's report for a task (v34), when one exists. */
   latestReportArtifact(taskRef: number): Artifact | null {
     const row = this.db
@@ -16555,6 +16857,8 @@ function readRun(row: Record<string, unknown>): Run {
       row["terminal_class"] === null || row["terminal_class"] === undefined
         ? null
         : (String(row["terminal_class"]) as TerminalClass),
+    planRevision: row["plan_revision"] === null || row["plan_revision"] === undefined ? null : Number(row["plan_revision"]),
+    authorityDigest: row["authority_digest"] === null || row["authority_digest"] === undefined ? null : String(row["authority_digest"]),
   };
 }
 
@@ -16748,6 +17052,39 @@ function readArtifact(row: Record<string, unknown>): Artifact {
     createdAt: String(row["created_at"]),
     redacted: Number(row["redacted"]) === 1,
     captureStatus: row["capture_status"] === null || row["capture_status"] === undefined ? null : (String(row["capture_status"]) as "ok" | "failed"),
+  };
+}
+
+function readPlanRevision(row: Record<string, unknown>): PlanRevision {
+  return {
+    id: Number(row["id"]),
+    taskRef: Number(row["task_ref"]),
+    revision: Number(row["revision"]),
+    artifact: Number(row["artifact"]),
+    parentHash: row["parent_hash"] === null || row["parent_hash"] === undefined ? null : String(row["parent_hash"]),
+    reason: String(row["reason"]),
+    evidenceLink: row["evidence_link"] === null || row["evidence_link"] === undefined ? null : String(row["evidence_link"]),
+    author: String(row["author"]),
+    originRun: row["origin_run"] === null || row["origin_run"] === undefined ? null : Number(row["origin_run"]),
+    kind: String(row["kind"]) as PlanRevisionKind,
+    authorityKind: String(row["authority_kind"]) as "plan-only" | "authority-change",
+    authorityDigest: String(row["authority_digest"]),
+    changedFields: row["changed_fields"] === null || row["changed_fields"] === undefined ? [] : (JSON.parse(String(row["changed_fields"])) as string[]),
+    status: String(row["status"]) as PlanRevisionStatus,
+    createdAt: String(row["created_at"]),
+    resolvedAt: row["resolved_at"] === null || row["resolved_at"] === undefined ? null : String(row["resolved_at"]),
+    resolvedBy: row["resolved_by"] === null || row["resolved_by"] === undefined ? null : String(row["resolved_by"]),
+  };
+}
+
+function readRunCheckpoint(row: Record<string, unknown>): RunCheckpoint {
+  return {
+    id: Number(row["id"]),
+    run: Number(row["run"]),
+    taskRef: Number(row["task_ref"]),
+    planRevision: Number(row["plan_revision"]),
+    snapshot: JSON.parse(String(row["snapshot_json"])) as ProgressSnapshot,
+    createdAt: String(row["created_at"]),
   };
 }
 

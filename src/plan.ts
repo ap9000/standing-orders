@@ -6,6 +6,7 @@
  * the scope proposal is authority-bearing, so it gets the park discipline).
  */
 
+import { createHash } from "node:crypto";
 import { hasForbiddenControls } from "./decision.js";
 import { parseAcceptanceCriteria, type AcceptanceCriterion } from "./scope.js";
 
@@ -123,6 +124,39 @@ export function parseExecutionPlanDocument(raw: string): ExecutionPlanDocumentRe
     proof: list("proof"),
   };
   return problems.length === 0 ? { ok: true, document } : { ok: false, problems };
+}
+
+/**
+ * The inverse of `parseExecutionPlanDocument`: the canonical fenced-section
+ * markdown for a document the parser already admitted.
+ *
+ * A builder's revision proposal arrives as free-form text that the parser
+ * validates and reduces to this shape; what gets STORED — and later
+ * hash-verified, re-read, and quoted into the next brief — is rendered back
+ * from that validated shape, never the agent's raw bytes (the scout
+ * report's rule, and settleProof's). `parseExecutionPlanDocument` composed
+ * with this function is the identity on every document the parser admits:
+ * sections in their fixed order, one bullet per item, nothing else.
+ */
+export function renderExecutionPlanDocument(document: ExecutionPlanDocument): string {
+  const bullets = (items: readonly string[]): string[] => items.map(item => `- ${item}`);
+  return [
+    "## Approach",
+    document.approach,
+    "",
+    "## Milestones",
+    ...bullets(document.milestones),
+    "",
+    "## Dependencies",
+    ...bullets(document.dependencies),
+    "",
+    "## Risks",
+    ...bullets(document.risks),
+    "",
+    "## Proof",
+    ...bullets(document.proof),
+    "",
+  ].join("\n");
 }
 
 export type PlanParseResult =
@@ -244,4 +278,225 @@ export function parsePlan(raw: string): PlanParseResult {
     ok: true,
     plan: { goal: goal as string, outOfScope, touches, acceptance: acceptanceParse.criteria, plan: document as string },
   };
+}
+
+// ---- adaptive execution plans --------------------------------------------
+//
+// A running build checkpoints durable milestone state against the exact
+// plan revision it received, and may file one bounded, evidence-linked
+// revision proposal when repository evidence invalidates a named
+// dependency, risk, or implementation assumption. Everything below is a
+// pure primitive: identity, state, and classification only — no I/O, no
+// storage, no claim/lease knowledge. Those live in store.ts, claim.ts, and
+// builder.ts, which reuse these functions rather than re-deriving them.
+
+export type MilestoneState = "pending" | "current" | "completed" | "blocked";
+
+const MILESTONE_STATES: readonly MilestoneState[] = ["pending", "current", "completed", "blocked"];
+
+export type Milestone = { id: string; description: string };
+
+/**
+ * A milestone's identity is its position plus a short hash of its
+ * normalized text — stable across re-reads of the same revision, but a
+ * milestone whose wording changes materially becomes a NEW identity rather
+ * than silently inheriting stale completion state from a differently-worded
+ * predecessor.
+ */
+export function milestoneId(index: number, description: string): string {
+  const hash = createHash("sha256").update(description.trim().toLowerCase(), "utf8").digest("hex").slice(0, 8);
+  return `m${index + 1}-${hash}`;
+}
+
+export function milestonesOf(document: ExecutionPlanDocument): Milestone[] {
+  return document.milestones.map((description, index) => ({ id: milestoneId(index, description), description }));
+}
+
+export type ProgressEntry = { id: string; state: MilestoneState; note: string | null };
+
+/** The builder's atomic progress checkpoint: every milestone in the plan
+ * revision it received, exactly once each, bound to that revision's exact
+ * hash so a checkpoint can never be misread against a different plan. */
+export type ProgressSnapshot = {
+  revisionHash: string;
+  milestones: ProgressEntry[];
+};
+
+export type ProgressParseResult =
+  | { ok: true; snapshot: ProgressSnapshot }
+  | { ok: false; problems: PlanProblem[] };
+
+export const PROGRESS_LIMITS = {
+  payload: 8 * 1024,
+  note: 300,
+  milestones: EXECUTION_PLAN_LIST_CAP,
+} as const;
+
+/** Parse a progress checkpoint written by a running build. `expectedRevisionHash`
+ * and `knownIds` come from the plan revision the build's brief actually
+ * named — a snapshot naming a different revision, an unknown milestone id,
+ * a missing milestone, or more than one "current" milestone fails closed
+ * with every problem at once, the same 422 rule as the plan itself. */
+export function parseProgressSnapshot(
+  raw: string,
+  expectedRevisionHash: string,
+  knownIds: readonly string[],
+): ProgressParseResult {
+  if (Buffer.byteLength(raw, "utf8") > PROGRESS_LIMITS.payload) {
+    return { ok: false, problems: [{ reason: "progress-too-large", message: `progress is over ${PROGRESS_LIMITS.payload} bytes` }] };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return { ok: false, problems: [{ reason: "progress-not-json", message: `progress is not JSON: ${error instanceof Error ? error.message : String(error)}` }] };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, problems: [{ reason: "progress-not-an-object", message: "progress must be one JSON object" }] };
+  }
+  const body = parsed as Record<string, unknown>;
+  const problems: PlanProblem[] = [];
+
+  const revisionHash = typeof body["revisionHash"] === "string" ? body["revisionHash"] : null;
+  if (revisionHash === null) {
+    problems.push({ reason: "progress-missing-revision", message: "progress must name revisionHash" });
+  } else if (revisionHash !== expectedRevisionHash) {
+    problems.push({ reason: "progress-stale-revision", message: "progress names a plan revision that is not the one this build received" });
+  }
+
+  const rawMilestones = body["milestones"];
+  const milestones: ProgressEntry[] = [];
+  if (!Array.isArray(rawMilestones)) {
+    problems.push({ reason: "progress-bad-milestones", message: `milestones must be an array (got ${describe(rawMilestones)})` });
+  } else if (rawMilestones.length > PROGRESS_LIMITS.milestones) {
+    problems.push({ reason: "progress-too-many-milestones", message: `milestones is capped at ${PROGRESS_LIMITS.milestones} entries` });
+  } else {
+    const seen = new Set<string>();
+    for (const [index, entryRaw] of rawMilestones.entries()) {
+      if (typeof entryRaw !== "object" || entryRaw === null || Array.isArray(entryRaw)) {
+        problems.push({ reason: `progress-bad-entry-${index}`, message: `milestones[${index}] must be an object` });
+        continue;
+      }
+      const entry = entryRaw as Record<string, unknown>;
+      const id = typeof entry["id"] === "string" ? entry["id"] : null;
+      const state = typeof entry["state"] === "string" ? entry["state"] : null;
+      const note = prose(entry["note"], `milestones[${index}].note`, PROGRESS_LIMITS.note, false, problems);
+      if (id === null || !knownIds.includes(id)) {
+        problems.push({ reason: `progress-unknown-milestone-${index}`, message: `milestones[${index}] names a milestone id not in this plan revision` });
+        continue;
+      }
+      if (seen.has(id)) {
+        problems.push({ reason: `progress-duplicate-milestone-${index}`, message: `milestone ${id} appears more than once` });
+        continue;
+      }
+      seen.add(id);
+      if (state === null || !MILESTONE_STATES.includes(state as MilestoneState)) {
+        problems.push({ reason: `progress-bad-state-${index}`, message: `milestones[${index}].state must be one of ${MILESTONE_STATES.join(", ")}` });
+        continue;
+      }
+      milestones.push({ id, state: state as MilestoneState, note });
+    }
+    for (const knownId of knownIds) {
+      if (!seen.has(knownId)) problems.push({ reason: "progress-missing-milestone", message: `progress must report every milestone in the plan revision (missing ${knownId})` });
+    }
+    if (milestones.filter(entry => entry.state === "current").length > 1) {
+      problems.push({ reason: "progress-multiple-current", message: "at most one milestone may be current at a time" });
+    }
+  }
+
+  if (problems.length > 0) return { ok: false, problems };
+  return { ok: true, snapshot: { revisionHash: revisionHash as string, milestones } };
+}
+
+/** Whether a checkpoint transition is a legitimate update or a regression:
+ * once a milestone is completed it never reverts — an agent restating an
+ * old snapshot (a stale pulse, a retried read) must never erase progress
+ * that a later, newer checkpoint already recorded. */
+export function isMilestoneRegression(previous: MilestoneState | undefined, next: MilestoneState): boolean {
+  return previous === "completed" && next !== "completed";
+}
+
+export type PlanRevisionProposal = {
+  /** The complete replacement plan document — the same shape the planner
+   * itself produces, never a diff, so a revision is always fully readable
+   * on its own. */
+  document: ExecutionPlanDocument;
+  /** Why: the named dependency, risk, or implementation assumption the
+   * repository evidence invalidated. */
+  reason: string;
+  /** Where: a path, commit, or command output the operator (or a later
+   * reader) can go re-check. */
+  evidenceLink: string;
+};
+
+export type PlanRevisionProposalParseResult =
+  | { ok: true; proposal: PlanRevisionProposal }
+  | { ok: false; problems: PlanProblem[] };
+
+export const REVISION_LIMITS = {
+  payload: 32 * 1024,
+  reason: 2_000,
+  evidenceLink: 500,
+} as const;
+
+/** Parse the builder's terminal revision-proposal file: a complete
+ * replacement plan document plus the evidence that invalidated the one it
+ * was given. One proposal per build — the caller enforces that by never
+ * offering the agent more than one nonce-named path to write. */
+export function parsePlanRevisionProposal(raw: string): PlanRevisionProposalParseResult {
+  if (Buffer.byteLength(raw, "utf8") > REVISION_LIMITS.payload) {
+    return { ok: false, problems: [{ reason: "revision-too-large", message: `revision proposal is over ${REVISION_LIMITS.payload} bytes` }] };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return { ok: false, problems: [{ reason: "revision-not-json", message: `revision proposal is not JSON: ${error instanceof Error ? error.message : String(error)}` }] };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, problems: [{ reason: "revision-not-an-object", message: "revision proposal must be one JSON object" }] };
+  }
+  const body = parsed as Record<string, unknown>;
+  const problems: PlanProblem[] = [];
+  const reason = prose(body["reason"], "reason", REVISION_LIMITS.reason, true, problems);
+  const evidenceLink = prose(body["evidenceLink"], "evidenceLink", REVISION_LIMITS.evidenceLink, true, problems);
+  const planText = prose(body["plan"], "plan", PLAN_LIMITS.document, true, problems);
+  let document: ExecutionPlanDocument | null = null;
+  if (planText !== null) {
+    const execution = parseExecutionPlanDocument(planText);
+    if (!execution.ok) problems.push(...execution.problems);
+    else document = execution.document;
+  }
+  if (problems.length > 0) return { ok: false, problems };
+  return { ok: true, proposal: { document: document as ExecutionPlanDocument, reason: reason as string, evidenceLink: evidenceLink as string } };
+}
+
+/** The exact authority a build's approval rests on: the signed scope
+ * (goal, out-of-scope, touches, acceptance, permissions, quality, budget —
+ * everything folded into the scope digest) plus publication authority
+ * (branch vs. report). A plan revision may only auto-resume when this is
+ * byte-identical to what it was when the build started; anything else
+ * stays paused for a person, named. */
+export type AuthoritySnapshot = { scopeDigest: string; deliverable: "branch" | "report" };
+
+export function authoritySnapshotDigest(snapshot: AuthoritySnapshot): string {
+  return createHash("sha256").update(`${snapshot.scopeDigest} ${snapshot.deliverable}`, "utf8").digest("hex").slice(0, 32);
+}
+
+export type AuthorityChangeField = "signed-scope" | "publication-authority";
+
+export type RevisionAuthorityCheck = { kind: "plan-only" } | { kind: "authority-change"; changed: AuthorityChangeField[] };
+
+/** Classify a revision against the complete authority snapshot the build
+ * actually started under. Everything the builder's own proposal can name is
+ * plan-only by construction (it carries no scope fields at all) — this
+ * check exists as the defense against the world moving underneath a live
+ * build: if the signed scope or publication authority changed by any other
+ * road while the build ran, the revision is never auto-applied, whatever it
+ * proposes. */
+export function classifyRevisionAuthority(previous: AuthoritySnapshot, current: AuthoritySnapshot): RevisionAuthorityCheck {
+  const changed: AuthorityChangeField[] = [];
+  if (previous.scopeDigest !== current.scopeDigest) changed.push("signed-scope");
+  if (previous.deliverable !== current.deliverable) changed.push("publication-authority");
+  return changed.length === 0 ? { kind: "plan-only" } : { kind: "authority-change", changed };
 }

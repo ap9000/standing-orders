@@ -123,6 +123,7 @@ export const HOLD_OWNER_WORDS: Record<string, string> = {
   incident: "stopped by an incident",
   backoff: "backing off after a failure",
   contest: "held by a tournament",
+  revision: "waiting on a plan-revision decision",
 };
 
 export function holdOwnerWords(ownerKind: string): string {

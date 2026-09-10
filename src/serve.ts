@@ -114,7 +114,7 @@ import {
 } from "./scope.js";
 import { isQualityMode, qualityModeTitle, type QualityMode } from "./quality.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
-import { parseExecutionPlanDocument, PLAN_LIMITS } from "./plan.js";
+import { parseExecutionPlanDocument, PLAN_LIMITS, milestonesOf, type MilestoneState } from "./plan.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
@@ -160,6 +160,7 @@ import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf,
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, plausibleKey, readAuthMode, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
+import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus } from "./store.js";
 import { loadBotToken, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -2918,6 +2919,12 @@ export function createDecisionServer(options: ServeOptions): Server {
             : null,
       };
     })();
+    // Adaptive execution plans (v44): the plan-revision ledger and live
+    // milestone projection, both null for a task with no plan at all.
+    // taskChatFocus below reads the SAME two calls, so the task page and
+    // focused chat always render identical facts (c2).
+    const planRevisions = ref === null ? null : revisionLedgerOf(ref.id);
+    const milestoneProgress = ref === null ? null : progressOf(ref.id, planRevisions?.current?.document ?? null);
     return {
         task: found,
         dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -2928,6 +2935,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         deliverable: ref?.deliverable ?? "branch",
         report: ref === null ? null : readVerifiedReport(store, evidenceRoot, ref.id),
         revision,
+        planRevisions,
+        milestoneProgress,
         // v40: the fallback for a task page with no completed run yet (a
         // freshly drafted, unapproved repair) — completion's own branches
         // cover every case once a run exists.
@@ -3117,6 +3126,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const latest = runs.find(runIsTaskResult) ?? null;
     const approval = approvalOf(scope);
     const live = runs.find(one => runIsLive(one)) ?? null;
+    const planRevisions = view?.planRevisions ?? revisionLedgerOf(ref.id);
     return {
       id: task.id,
       title: task.title,
@@ -3126,6 +3136,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       dispatch: diagnoseTaskDispatch(store, taskId, now),
       scope: scope === null ? "none" : approval.approved ? "approved" : "needs approval",
       plan: ref.plan,
+      // Adaptive execution plans (v44): the identical ledger/progress
+      // projection the task page renders (c2) — reused from `view` when
+      // available, computed fresh only when this call has no `who`.
+      planRevisions,
+      milestoneProgress: view?.milestoneProgress ?? progressOf(ref.id, planRevisions?.current?.document ?? null),
       claimed: view?.claimed ?? store.hasLiveClaim(ref.id, now),
       liveRun: live === null ? null : { id: live.id, runner: live.runner, startedAt: live.startedAt, phase: live.phase },
       approval:
@@ -4402,7 +4417,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -5906,6 +5921,37 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return redirect(response, taskHref(taskId));
       }
+      case "accept-revision":
+      case "reject-revision": {
+        // Adaptive execution plans (v44): resolving a revision the builder
+        // filed while its authority snapshot no longer matched the run it
+        // started under — the ONLY road a 'blocked' plan_revision reaches,
+        // since a plan-only proposal auto-applies without ever pausing here.
+        if (who.via !== "cookie") {
+          return refuse(response, who, 403, "resolving a plan revision is a browser session's act");
+        }
+        const revisionId = Number(body.get("revision-id") ?? "");
+        const revision = Number.isFinite(revisionId) ? store.getPlanRevision(revisionId) : null;
+        if (revision === null || revision.taskRef !== ref.id || revision.status !== "blocked") {
+          return taskScreen(response, who, taskId, "that plan revision is no longer waiting on a decision — refresh and try again", 409);
+        }
+        const outcome = verb === "accept-revision" ? "applied" : "rejected";
+        if (outcome === "applied") {
+          // Accepting a revision that changed signed scope or publication
+          // authority takes the password ceremony again — the same act
+          // that would be required to approve that authority from scratch.
+          const token = (body.get("token") ?? "").trim();
+          if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+            return taskScreen(response, who, taskId, "accepting this revision takes your password, typed again", 403);
+          }
+        }
+        const resolved = store.resolvePlanRevision(revision.id, outcome, who.name, now);
+        if (!resolved) {
+          return taskScreen(response, who, taskId, "that plan revision is no longer waiting on a decision — refresh and try again", 409);
+        }
+        store.releaseOwnedHold("revision", String(revision.id));
+        return redirect(response, taskHref(taskId));
+      }
       case "cancel": {
         const cancelled = store.cancelTask(taskId, now);
         if (!cancelled.ok) {
@@ -6276,6 +6322,93 @@ export function createDecisionServer(options: ServeOptions): Server {
     } catch {
       return null;
     }
+  }
+
+  function revisionDocOf(row: PlanRevision): RevisionDocView | null {
+    const artifact = store.getArtifact(row.artifact);
+    if (artifact === null) return null;
+    try {
+      const verified = readVerifiedArtifact(evidenceRoot, artifact);
+      if (!verified.ok) return null;
+      return {
+        id: row.id,
+        revision: row.revision,
+        status: row.status,
+        reason: row.reason,
+        evidenceLink: row.evidenceLink,
+        author: row.author,
+        kind: row.kind,
+        authorityKind: row.authorityKind,
+        changedFields: row.changedFields,
+        document: verified.content.toString("utf8"),
+        sha256: artifact.sha256,
+        createdAt: row.createdAt,
+        resolvedAt: row.resolvedAt,
+        resolvedBy: row.resolvedBy,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The adaptive-plan ledger for one task: the revision currently in force,
+   * any revision still 'blocked' awaiting an operator's accept or reject,
+   * and the full immutable history. A task with no `plan_revision` rows at
+   * all — every task filed before this feature, or one whose first
+   * revision is still 'blocked' — reads `current` as a read-only
+   * projection off the existing planner artifact (`planViewOf`), never
+   * written back as a row: c1's "older builds with no checkpoints remain
+   * readable."
+   */
+  function revisionLedgerOf(taskRef: number): PlanRevisionLedgerView {
+    const history = store.listPlanRevisions(taskRef).map(revisionDocOf).filter((view): view is RevisionDocView => view !== null);
+    const currentRow = store.currentPlanRevision(taskRef);
+    const latestRow = store.latestPlanRevision(taskRef);
+    const pending = latestRow !== null && latestRow.status === "blocked" ? revisionDocOf(latestRow) : null;
+    let current = currentRow === null ? null : revisionDocOf(currentRow);
+    if (current === null) {
+      const legacy = planViewOf(taskRef);
+      current =
+        legacy === null
+          ? null
+          : {
+              id: null,
+              revision: 1,
+              status: "applied",
+              reason: "the plan the operator approved",
+              evidenceLink: null,
+              author: "planner",
+              kind: "initial",
+              authorityKind: "plan-only",
+              changedFields: [],
+              document: legacy.document,
+              sha256: legacy.sha256,
+              createdAt: "",
+              resolvedAt: null,
+              resolvedBy: null,
+            };
+    }
+    return { current, pending, history };
+  }
+
+  /** The live milestone projection for a task: every milestone in the
+   * CURRENT revision's document, in order, each carrying the newest
+   * checkpoint's state for its exact id — a checkpoint filed against an
+   * older, differently-worded revision simply has no matching ids, so its
+   * milestones fall back to "pending" rather than showing stale progress
+   * under a plan that no longer says that. */
+  function progressOf(taskRef: number, currentDocument: string | null): MilestoneProgressView[] | null {
+    if (currentDocument === null) return null;
+    const parsed = parseExecutionPlanDocument(currentDocument);
+    if (!parsed.ok) return null;
+    const milestones = milestonesOf(parsed.document);
+    const checkpoint = store.latestCheckpointForTask(taskRef);
+    const byId = new Map((checkpoint?.snapshot.milestones ?? []).map(entry => [entry.id, entry]));
+    return milestones.map(milestone => {
+      const entry = byId.get(milestone.id);
+      return { id: milestone.id, description: milestone.description, state: entry?.state ?? "pending", note: entry?.note ?? null };
+    });
   }
 
   // ---- evidence ------------------------------------------------------------
@@ -7667,6 +7800,18 @@ const STYLE = `
   .plan-editor > summary { width: fit-content; color: var(--muted-foreground); cursor: pointer; font-size: .8rem; font-weight: 600; }
   .plan-editor form { margin-top: .7rem; }
   .plan-editor textarea { width: 100%; font-family: var(--font-mono); font-size: .75rem; line-height: 1.55; }
+  .milestone-list { list-style: none; margin: .6rem 0 0; padding: 0; display: grid; gap: .4rem; }
+  .milestone { display: flex; align-items: baseline; gap: .5rem; padding: .5rem .65rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass) 74%, transparent); overflow-wrap: anywhere; }
+  .milestone-badge { flex: none; padding: .1rem .5rem; border-radius: 999px; font-size: .68rem; font-weight: 600; text-transform: uppercase; letter-spacing: .02em; }
+  .milestone-pending .milestone-badge { color: var(--muted-foreground); background: color-mix(in srgb, var(--muted) 55%, transparent); }
+  .milestone-current .milestone-badge { color: var(--running); background: var(--running-soft); }
+  .milestone-completed .milestone-badge { color: var(--success, var(--running)); background: color-mix(in srgb, var(--running-soft) 60%, transparent); }
+  .milestone-blocked .milestone-badge { color: var(--destructive, #b91c1c); background: color-mix(in srgb, var(--destructive, #b91c1c) 16%, transparent); }
+  .plan-revision-pending { margin-top: .85rem; padding: .85rem .9rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 2px); background: color-mix(in srgb, var(--running-soft) 30%, transparent); }
+  .plan-revision-pending form { margin-top: .6rem; display: inline-flex; gap: .4rem; align-items: center; }
+  .plan-revision-pending form + form { margin-left: .5rem; }
+  .plan-revision-history { margin-top: .85rem; }
+  .plan-revision-history > summary { cursor: pointer; color: var(--muted-foreground); font-size: .8rem; font-weight: 600; }
   .planner-status { display: flex; gap: .8rem; align-items: flex-start; }
   .planner-orb { position: relative; flex: 0 0 2.15rem; width: 2.15rem; height: 2.15rem; border-radius: .75rem; background: var(--running-soft); }
   .planner-orb::after { content: ""; position: absolute; inset: .65rem; border-radius: 999px; background: var(--running); animation: pulse 1.25s ease-in-out infinite; }
@@ -7725,6 +7870,9 @@ const STYLE = `
     .execution-plan-head { flex-direction: column; align-items: flex-start; gap: .55rem; }
     .execution-support { grid-template-columns: 1fr; }
     .plan-lock { white-space: nowrap; }
+    .plan-revision-pending form { display: flex; width: 100%; }
+    .plan-revision-pending form + form { margin-left: 0; margin-top: .4rem; }
+    .plan-revision-pending button { width: 100%; }
   }
 
   /* The phone shell: the sidebar disappears; a top bar carries the project
@@ -10015,6 +10163,10 @@ type TaskChatFocus = {
   dispatch: DispatchDiagnosis | null;
   scope: "none" | "needs approval" | "approved";
   plan: "requested" | "drafted" | null;
+  /** Adaptive execution plans (v44): the identical ledger/progress
+   * projection the task page renders (c2). */
+  planRevisions: PlanRevisionLedgerView | null;
+  milestoneProgress: MilestoneProgressView[] | null;
   claimed: boolean;
   liveRun: { id: number; runner: string; startedAt: string; phase: string | null } | null;
   /** Approval uses the task page's exact nonce and joint digest. */
@@ -10177,6 +10329,8 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     (focus.liveRun === null ? "" : `<p class="task-live-build"><span class="live-dot" aria-hidden="true"></span><strong>Build #${focus.liveRun.id}</strong> · ${escape(focus.liveRun.runner)} · <time data-elapsed-since="${escape(focus.liveRun.startedAt)}"></time> <a href="/r/${focus.liveRun.id}">watch details →</a></p>`) +
     (fallback === null ? "" : `<a class="button-link task-journey-action" href="${fallback}">Open the next step →</a>`) +
     `</section>` +
+    milestoneProgressHtml(focus.milestoneProgress) +
+    planRevisionLedgerHtml(focus.planRevisions, focus.id, csrf) +
     (inert && focus.approval !== null && focus.plan !== "requested"
       ? `<section class="card chat-action-card"><span class="eyebrow">approval ready</span><h2>Finish the current chat response first</h2><p class="meta">The secure approval step appears here as soon as this response lands.</p></section>`
       : fragment && focus.approval !== null && focus.plan !== "requested"
@@ -12906,6 +13060,88 @@ function newTaskPage(
 /** A plan is stored as inert Markdown for portability into the builder
  * brief, but the console renders its known structure as a useful control
  * surface. Historical free-form plans keep their safe plain-text fallback. */
+const MILESTONE_STATE_WORDS: Record<MilestoneState, string> = {
+  pending: "pending",
+  current: "in progress",
+  completed: "completed",
+  blocked: "blocked",
+};
+
+function milestoneStateWord(state: MilestoneState): string {
+  return MILESTONE_STATE_WORDS[state] ?? "pending";
+}
+
+/** Adaptive execution plans (v44): the live milestone projection a running
+ * (or finished) build has reported. A shared render used by BOTH the task
+ * page and the focused chat's live region (c2) — labeled clearly as an
+ * agent's own report, since a milestone claim is never completion proof
+ * (Priority 2's proof contract is the only thing that adjudicates "done"). */
+function milestoneProgressHtml(milestones: MilestoneProgressView[] | null | undefined): string {
+  if (milestones === null || milestones === undefined || milestones.length === 0) return "";
+  return (
+    `<div class="card milestone-progress"><h2>build progress</h2><ul class="milestone-list">` +
+    milestones
+      .map(
+        one =>
+          `<li class="milestone milestone-${one.state}"><span class="milestone-badge">${milestoneStateWord(one.state)}</span> ` +
+          `${escape(one.description)}${one.note === null ? "" : ` <span class="meta">— ${escape(one.note)}</span>`}</li>`,
+      )
+      .join("\n") +
+    `</ul><p class="meta">reported by the agent, checkpointed by the machine — a milestone claim is not completion proof</p></div>`
+  );
+}
+
+/** Adaptive execution plans (v44): the current plan revision's own reason
+ * and evidence, any revision still awaiting an operator's accept/reject,
+ * and the immutable history. A shared render used by BOTH the task page
+ * and the focused chat's live region (c2), reading a document already
+ * verified before a byte reached this function (c5). */
+function planRevisionLedgerHtml(ledger: PlanRevisionLedgerView | null | undefined, taskId: string, csrf: string): string {
+  // Nothing to show yet unless a plan has actually been revised: a task
+  // still on its synthetic revision-1 projection, with no pending proposal
+  // and no persisted history, is exactly what the plan card already shows.
+  if (ledger === null || ledger === undefined || ledger.current === null || (ledger.pending === null && ledger.history.length === 0)) return "";
+  const current = ledger.current;
+  const pending =
+    ledger.pending === null
+      ? ""
+      : `<div class="plan-revision-pending"><p><strong>proposed revision ${ledger.pending.revision}</strong> ` +
+        `<span class="meta">${ledger.pending.authorityKind === "authority-change" ? `changes ${ledger.pending.changedFields.map(escape).join(", ")} — needs a fresh approval` : "plan-only"}</span></p>` +
+        `<p class="meta">${escape(ledger.pending.reason)}${ledger.pending.evidenceLink === null ? "" : ` · evidence: ${escape(ledger.pending.evidenceLink)}`}</p>` +
+        executionPlanHtml(ledger.pending.document, true) +
+        (csrf === "" || ledger.pending.id === null
+          ? ""
+          : `<form method="post" action="${taskHref(taskId)}/accept-revision" class="inline">` +
+            `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="revision-id" value="${ledger.pending.id}">` +
+            (ledger.pending.authorityKind === "authority-change"
+              ? `<input type="password" name="token" placeholder="approval password" required autocomplete="current-password">`
+              : "") +
+            `<button type="submit">accept — resume with this plan</button></form>` +
+            `<form method="post" action="${taskHref(taskId)}/reject-revision" class="inline">` +
+            `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="revision-id" value="${ledger.pending.id}">` +
+            `<button type="submit">reject — keep the current plan</button></form>`) +
+        `</div>`;
+  const history =
+    ledger.history.length <= 1
+      ? ""
+      : `<details class="plan-revision-history"><summary>revision history (${ledger.history.length})</summary>` +
+        ledger.history
+          .map(
+            one =>
+              `<p class="row"><span class="mono">rev ${one.revision}</span> <span class="badge">${escape(one.status)}</span> ` +
+              `<span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span> — ${escape(one.reason)}</p>`,
+          )
+          .join("\n") +
+        `</details>`;
+  return (
+    `<div class="card plan-revision"><h2>plan revision ${current.revision}</h2>` +
+    `<p class="meta">${escape(current.reason)}${current.evidenceLink === null ? "" : ` · evidence: ${escape(current.evidenceLink)}`}</p>` +
+    pending +
+    history +
+    `</div>`
+  );
+}
+
 function executionPlanHtml(document: string, compact = false): string {
   const parsed = parseExecutionPlanDocument(document);
   if (!parsed.ok) return `<pre class="recap plan-doc">${escape(document)}</pre>`;
@@ -12923,6 +13159,32 @@ function executionPlanHtml(document: string, compact = false): string {
   );
 }
 
+/** One plan revision, its document verified before a byte renders — the
+ * same verify-then-read discipline as `planViewOf`, just carrying the
+ * ledger row's own facts alongside the text. `id: null` marks the
+ * read-only revision-1 projection for a task with no `plan_revision` rows
+ * yet (c1). */
+type RevisionDocView = {
+  id: number | null;
+  revision: number;
+  status: PlanRevisionStatus;
+  reason: string;
+  evidenceLink: string | null;
+  author: string;
+  kind: PlanRevisionKind;
+  authorityKind: "plan-only" | "authority-change";
+  changedFields: string[];
+  document: string;
+  sha256: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+};
+
+type PlanRevisionLedgerView = { current: RevisionDocView | null; pending: RevisionDocView | null; history: RevisionDocView[] };
+
+type MilestoneProgressView = { id: string; description: string; state: MilestoneState; note: string | null };
+
 /** The revision batch a task's approval screen restates, or the named reason it cannot. */
 type RevisionView =
   | { sourceTask: string; sourceRun: number; comments: { path: string | null; line: number | null; note: string; author: string }[] }
@@ -12937,6 +13199,10 @@ function taskBody(data: {
   planDocument: string | null;
   /** Hash of the verified plan artifact currently shown. */
   planSha?: string | null;
+  /** Adaptive execution plans (v44): the revision ledger and live milestone
+   * projection — null for a task with no plan at all. */
+  planRevisions?: PlanRevisionLedgerView | null;
+  milestoneProgress?: MilestoneProgressView[] | null;
   /** v34: what this task delivers, and the scout's report when one exists. */
   deliverable?: "branch" | "report";
   report?: ReportView | null;
@@ -13383,6 +13649,16 @@ function taskBody(data: {
 
   // The plan a planner drafted, when one exists: rendered inert above the
   // approval it proposes. The scope stays the contract; this is the road.
+  // Adaptive execution plans (v44): once approved, the CURRENT revision's
+  // text displays here — the same document the builder actually reads —
+  // rather than the original artifact frozen at approval time; the edit
+  // form and its staleness guard stay bound to that original artifact,
+  // since editing is a pre-approval act this ledger does not touch.
+  const currentRevisionForDisplay = data.planRevisions?.current ?? null;
+  const displayedPlanDocument =
+    currentRevisionForDisplay !== null && currentRevisionForDisplay.revision > 1
+      ? currentRevisionForDisplay.document
+      : data.planDocument;
   const planCard =
     data.planDocument === null
       ? data.plan === "requested"
@@ -13390,8 +13666,14 @@ function taskBody(data: {
           `<span class="meta">The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work.</span></p></div>`
         : ""
       : `<section class="card planner-plan"><div class="execution-plan-head"><div><span class="eyebrow">execution plan</span><h2>How the agent will tackle this</h2></div>` +
-        `<span class="plan-lock">${approval.approved ? "approved · locked" : "review before starting"}</span></div>` +
-        executionPlanHtml(data.planDocument) +
+        `<span class="plan-lock">${
+          !approval.approved
+            ? "review before starting"
+            : currentRevisionForDisplay !== null && currentRevisionForDisplay.revision > 1
+              ? `approved · adapted to revision ${currentRevisionForDisplay.revision}`
+              : "approved · locked"
+        }</span></div>` +
+        executionPlanHtml(displayedPlanDocument ?? data.planDocument) +
         (data.csrf === "" || data.planSha == null || approval.approved
           ? ""
           : `<details class="plan-editor"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
@@ -13400,6 +13682,9 @@ function taskBody(data: {
             `<textarea name="plan-document" rows="14">${escape(data.planDocument)}</textarea></label>` +
             `<button type="submit">Save plan</button></form></details>`) +
         `</section>`;
+
+  const progressCard = milestoneProgressHtml(data.milestoneProgress);
+  const revisionLedgerCard = planRevisionLedgerHtml(data.planRevisions, task.id, data.csrf);
 
   // The revision batch (M6.8), restated on the SAME screen as the approval
   // it belongs to: the approver sees exactly the comments the brief carries.
@@ -13983,6 +14268,8 @@ function taskBody(data: {
       ? ""
       : completionReceiptCard(data.completion.receipt, task.id, "task"),
     planCard,
+    progressCard,
+    revisionLedgerCard,
     approveForm === "" && !dependencyChoiceNeeded ? actsBar : "",
     // External work wears its tracker on the page: the link, the last
     // observed state, and — when the tracker closed it and has been seen

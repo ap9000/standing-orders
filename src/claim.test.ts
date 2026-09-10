@@ -8,6 +8,7 @@ import {
   finalizeFailureFenced,
   finalizeMalformedFenced,
   finalizeParkFenced,
+  finalizeRevisionFenced,
   type FailureClass,
   heartbeat,
   release,
@@ -1282,5 +1283,213 @@ describe("capacity and quota, at the claim", () => {
     expect(acquireIfReady(store, a, "r", { token: tok("r"), now: later(9e9) })).toMatchObject({ ok: false, reason: "quota" });
     store.clearQuota("r", "claude", "");
     expect(acquireIfReady(store, a, "r", { token: tok("r"), now: later(9e9 + 1_000) })).toMatchObject({ ok: true });
+  });
+});
+
+describe("sealing a plan revision", () => {
+  let store: Store;
+  let task: number;
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    enrollRunners(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    placeAll(store, "t-1");
+    approveScopeFor(store, "t-1");
+    task = store.refFor("built-in", "t-1").id;
+  });
+
+  afterEach(() => store.close());
+
+  const openRun = (leaseId: string) =>
+    store.startRun({
+      taskRef: task,
+      leaseId,
+      runner: "runner-a",
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      now: T0,
+    });
+
+  /** The replacement plan document's row. The ledger's `artifact` column is
+   * a real foreign key, so a revision cannot be filed against a document
+   * nobody stored — every fixture writes one first. */
+  const planArtifact = (runId: number, sha = "a".repeat(64)) =>
+    store.saveArtifact(
+      {
+        run: runId,
+        kind: "plan",
+        key: `${runId}/plan-revision.md`,
+        bytesOriginal: 120,
+        bytesStored: 120,
+        truncated: false,
+        sha256: sha,
+        capture: "builder-filed plan revision 2 (validated, re-serialized)",
+      },
+      T0,
+    );
+
+  const proposal = (runId: number, artifact: number, over: Record<string, unknown> = {}) => ({
+    revision: 2,
+    artifact,
+    parentHash: null,
+    reason: "src/legacy/pay.ts does not exist — the plan's first dependency names a file this repo deleted in 82c5eea",
+    evidenceLink: "git log --diff-filter=D -- src/legacy/pay.ts",
+    author: `builder:${runId}`,
+    originRun: runId,
+    authorityKind: "plan-only" as const,
+    authorityDigest: "d".repeat(32),
+    changedFields: [] as readonly ("signed-scope" | "publication-authority")[],
+    ...over,
+  });
+
+  test("a plan-only revision applies, releases the task, and resumes without a hold", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = openRun("lease-a");
+    const artifact = planArtifact(runId);
+
+    const sealed = finalizeRevisionFenced(store, {
+      leaseId: "lease-a",
+      runId,
+      taskId: "t-1",
+      taskRef: task,
+      revision: proposal(runId, artifact),
+      now: later(1_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: true, authorityKind: "plan-only" });
+    if (!sealed.ok) return;
+
+    // The ledger row is in force: this IS the plan the next attempt reads.
+    const row = store.getPlanRevision(sealed.revisionId);
+    expect(row).toMatchObject({
+      taskRef: task,
+      revision: 2,
+      artifact,
+      kind: "builder-proposal",
+      authorityKind: "plan-only",
+      status: "applied",
+      originRun: runId,
+    });
+    expect(store.currentPlanRevision(task)?.id).toBe(sealed.revisionId);
+    // Nothing waits on a person: no hold, and the task is ready again —
+    // which is exactly what "applied — resuming" promises.
+    expect(store.activeHolds(task, later(9e8))).toHaveLength(0);
+    // The attempt ended without committing, and said so in the vocabulary
+    // that already exists — refused, never a new outcome word.
+    expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "plan-revised" });
+    // The claim was handed back inside the same transaction.
+    expect(currentClaim(store, task, later(2_000))).toBeNull();
+    expect(store.listNotifications("pending").map(one => one.subject)).toContain(
+      "t-1: plan revision 2 applied — resuming",
+    );
+  });
+
+  test("an authority-changing revision is blocked behind a named hold, never applied", () => {
+    // The world moved underneath the build: whatever the revision proposes,
+    // it is not the plane's to auto-apply once the signed scope has changed.
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = openRun("lease-a");
+    const artifact = planArtifact(runId);
+
+    const sealed = finalizeRevisionFenced(store, {
+      leaseId: "lease-a",
+      runId,
+      taskId: "t-1",
+      taskRef: task,
+      revision: proposal(runId, artifact, {
+        authorityKind: "authority-change",
+        changedFields: ["signed-scope", "publication-authority"],
+      }),
+      now: later(1_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: true, authorityKind: "authority-change" });
+    if (!sealed.ok) return;
+
+    expect(store.getPlanRevision(sealed.revisionId)).toMatchObject({ status: "blocked", authorityKind: "authority-change" });
+    // Blocked means blocked: it is NOT the current plan, and nothing runs.
+    expect(store.currentPlanRevision(task)).toBeNull();
+    expect(store.latestPlanRevision(task)?.id).toBe(sealed.revisionId);
+    const holds = store.activeHolds(task, later(9e8));
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({ ownerKind: "revision", ownerId: String(sealed.revisionId) });
+    // The hold NAMES what moved — a person should not have to diff to find out.
+    expect(holds[0]?.reason).toContain("the signed scope and publication authority");
+    expect(store.listReady(later(9e8))).toHaveLength(0);
+    expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "plan-revision-blocked" });
+    expect(store.listNotifications("pending").map(one => one.subject)).toContain(
+      "t-1: plan revision 2 awaiting your approval",
+    );
+  });
+
+  test("a superseded lease files nothing — no revision, no hold, no page", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60_000 });
+    const runId = openRun("lease-a");
+    const artifact = planArtifact(runId);
+    // The lease expires and the task is retaken: the world moved on, and a
+    // runner the world moved past does not get to rewrite the road.
+    acquire(store, task, "runner-b", { token: tok("runner-b"), now: later(120_000), newLeaseId: ids("lease-b") });
+
+    const sealed = finalizeRevisionFenced(store, {
+      leaseId: "lease-a",
+      runId,
+      taskId: "t-1",
+      taskRef: task,
+      revision: proposal(runId, artifact),
+      now: later(121_000),
+    });
+
+    expect(sealed).toMatchObject({ ok: false, reason: "fenced" });
+    expect(store.listPlanRevisions(task)).toHaveLength(0);
+    expect(store.activeHolds(task, later(9e8))).toHaveLength(0);
+    expect(store.listNotifications("pending")).toHaveLength(0);
+    // The run records the refusal it was, and runner-b's claim is untouched.
+    expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "fenced" });
+    expect(currentClaim(store, task, later(121_000))?.leaseId).toBe("lease-b");
+  });
+
+  test("a run that names another lease cannot file a revision", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = openRun("some-other-lease");
+    const artifact = planArtifact(runId);
+
+    expect(() =>
+      finalizeRevisionFenced(store, {
+        leaseId: "lease-a",
+        runId,
+        taskId: "t-1",
+        taskRef: task,
+        revision: proposal(runId, artifact),
+        now: later(1_000),
+      }),
+    ).toThrow(/open attempt/);
+    expect(store.listPlanRevisions(task)).toHaveLength(0);
+  });
+
+  test("only a builder run files a plan revision — a planner's road is its own", () => {
+    acquire(store, task, "runner-a", { token: tok("runner-a"), now: T0, newLeaseId: ids("lease-a"), ttlMs: 60 * 60_000 });
+    const runId = store.startRun({
+      taskRef: task,
+      leaseId: "lease-a",
+      runner: "runner-a",
+      branch: "standing-orders/t-1",
+      worktree: "/pool/t-1",
+      role: "planner",
+      now: T0,
+    });
+    const artifact = planArtifact(runId);
+
+    expect(() =>
+      finalizeRevisionFenced(store, {
+        leaseId: "lease-a",
+        runId,
+        taskId: "t-1",
+        taskRef: task,
+        revision: proposal(runId, artifact),
+        now: later(1_000),
+      }),
+    ).toThrow(/only builder runs/);
+    expect(store.listPlanRevisions(task)).toHaveLength(0);
   });
 });

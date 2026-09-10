@@ -1,5 +1,32 @@
 # Progress
 
+**2026-09-10 — Execution plans adapt safely while a build is running.** A
+running build now checkpoints durable milestone state—pending, current,
+completed, blocked—against the exact plan revision its brief named, in a new
+append-only `run_checkpoint` table; older attempts with no checkpoint read
+exactly as before. When repository evidence invalidates a named dependency,
+risk, or implementation assumption, the builder files one bounded,
+evidence-linked replacement plan through a new nonce-scoped proposal file
+(atomic, one-shot, quarantined like park and proof) and pauses at a safe
+checkpoint rather than committing over a false premise or grinding on. The
+proposal settles through the same fenced-transaction discipline as every
+other terminal outcome: a plan-only refinement inside the signed scope
+appends an immutable revision to a new `plan_revision` ledger and the task
+requeues on its own, no strike, no second approval. A revision that would
+touch goal, out-of-scope, touches, acceptance, permissions, quality, budget,
+or publication authority—checked by comparing the exact authority snapshot
+the run started under against the current one—instead places a new
+`revision`-owner hold (the same hold table every other pause already uses)
+and stays paused until an operator accepts or rejects it from the task page
+or focused chat, both of which render one shared projection so they can
+never disagree. Every revision preserves its prior artifact hash, reason,
+evidence link, author, and milestone history; a stale accept/reject or a
+malformed proposal fails closed. No parallel workflow engine or mutable plan
+store was added—the existing plan artifact, claim fencing, hold, and task
+lifecycle machinery carry the whole feature, and a milestone claim is
+labeled as the agent's own report, never fed into the proof contract's
+adjudicated verdict.
+
 **2026-09-10 — Repository planning is now a durable execution plan, not a
 Markdown blob.** New planner handoffs must state a concise approach, ordered
 milestones, dependencies, risks with mitigations, and proof that names every

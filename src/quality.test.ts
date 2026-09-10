@@ -71,6 +71,12 @@ describe("two quality modes", () => {
       propose(legacy, { taskId: "old", goal: "keep the old workflow", now: T0 });
       const ref = legacy.refFor("built-in", "old");
       legacy.startRun({ taskRef: ref.id, leaseId: "legacy", runner: "builder", branch: "old", worktree: "/old", now: T0 });
+      // A v40 fixture predates v44's plan_revision/authority_digest columns
+      // too — drop them along with quality_mode so this reopen genuinely
+      // exercises the v41 recognizer against the exact v34 shape it expects,
+      // not today's schema with only one column missing.
+      legacy.raw().exec("ALTER TABLE run DROP COLUMN plan_revision");
+      legacy.raw().exec("ALTER TABLE run DROP COLUMN authority_digest");
       legacy.raw().exec("ALTER TABLE run DROP COLUMN quality_mode");
       legacy.raw().exec("ALTER TABLE task_scope DROP COLUMN quality_mode");
       legacy.raw().exec("ALTER TABLE task_ref DROP COLUMN quality_mode");

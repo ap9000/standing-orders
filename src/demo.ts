@@ -37,6 +37,7 @@ import { approveRoutine, fireRoutine } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import { storeEvidence, budgetedStatJson, imageDimensions, type DiffStat } from "./evidence.js";
 import { parseProof, adjudicate } from "./proof.js";
+import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { deflateSync } from "node:zlib";
 
@@ -189,6 +190,53 @@ const DEMO_EXECUTION_PLAN = [
   "- c1 — run the logger and dashboard fixture checks and review the rendered JSON lines.",
   "",
 ].join("\n");
+
+/** Adaptive execution plans (v44): the "building" demo task's revision 1,
+ * the planner's original plan before the running build's own evidence
+ * revised it. */
+const DEMO_BUILDING_PLAN_V1 = [
+  "## Approach",
+  "Add a per-endpoint token-bucket limiter and enforce it before dispatch, reusing the existing webhook queue.",
+  "## Milestones",
+  "1. Add a per-endpoint token-bucket limiter.",
+  "2. Enforce the limiter before dispatch.",
+  "3. Add timeout budgets per endpoint.",
+  "4. Cover the limiter and budget interaction with load tests.",
+  "## Dependencies",
+  "- The existing webhook queue exposes a stable per-endpoint key.",
+  "## Risks",
+  "- A shared limiter could starve a burst-y but healthy endpoint; scope it per-endpoint from the start.",
+  "## Proof",
+  "- c1 — load-test one slow and one healthy endpoint together.",
+  "",
+].join("\n");
+
+/** Revision 2: a prior builder attempt found the named dependency was
+ * false (the queue has no stable per-endpoint key) and filed a bounded,
+ * evidence-linked, plan-only revision — auto-applied, no operator wait,
+ * exactly what c3/c4's plan-only path resumes without another approval. */
+const DEMO_BUILDING_PLAN_V2 = [
+  "## Approach",
+  "Derive a stable per-endpoint key from the normalized webhook URL host, since the queue has none; add a per-endpoint token-bucket limiter keyed on it and enforce it before dispatch.",
+  "## Milestones",
+  "1. Derive a stable per-endpoint key from the normalized URL host.",
+  "2. Add a per-endpoint token-bucket limiter.",
+  "3. Enforce the limiter before dispatch.",
+  "4. Confirm the dispatch feature flag is enabled in every deploy target.",
+  "5. Add timeout budgets per endpoint.",
+  "6. Cover the limiter and budget interaction with load tests.",
+  "## Dependencies",
+  "- None found — the per-endpoint key is now derived, not assumed.",
+  "## Risks",
+  "- A shared limiter could starve a burst-y but healthy endpoint; scope it per-endpoint from the start.",
+  "## Proof",
+  "- c1 — load-test one slow and one healthy endpoint together.",
+  "",
+].join("\n");
+
+const DEMO_BUILDING_REVISION_REASON =
+  "The webhook queue has no stable per-endpoint key (src/webhooks/queue.ts) — the planned limiter needed one, so this revision derives it from the normalized URL host instead.";
+const DEMO_BUILDING_REVISION_EVIDENCE = "src/webhooks/queue.ts";
 
 /**
  * A minimal, real, uncompressed-per-scanline PNG encoder — no image
@@ -385,21 +433,113 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(21),
   });
   approve(store, building, "demo", hoursAgo(20), proposedBuilding.digest, token);
+  const buildingRef = store.refFor("built-in", building).id;
+
+  // Adaptive execution plans (v44): the planner's revision 1, and a prior
+  // builder attempt that found a stated dependency false and filed a
+  // bounded, evidence-linked, plan-only revision — auto-applied, no
+  // operator wait (c3, c4's plan-only path). The CURRENT live build below
+  // resumes under revision 2, exactly as a real fresh claim would.
+  const buildingPlannerRun = store.startRun({
+    taskRef: buildingRef,
+    leaseId: "demo-lease-plan-2",
+    runner: "night-shift-1",
+    role: "planner",
+    branch: `standing-orders-plan/${building}`,
+    worktree: join(repos.api, ".demo-worktree-plan-2"),
+    now: hoursAgo(19),
+  });
+  const buildingRev1Artifact = storeEvidence(
+    store,
+    evidenceRoot,
+    buildingPlannerRun,
+    "plan",
+    "plan.md",
+    Buffer.from(DEMO_BUILDING_PLAN_V1, "utf8"),
+    "planner handoff (verified tree) [demo: synthetic]",
+    hoursAgo(18.9),
+  );
+  store.finishRun(buildingPlannerRun, { outcome: "built", reason: "plan-drafted", now: hoursAgo(18.9) });
+  const buildingRev1Sha = store.getArtifact(buildingRev1Artifact)?.sha256 ?? null;
+
+  const buildingPriorRun = store.startRun({
+    taskRef: buildingRef,
+    leaseId: "demo-lease-prior",
+    runner: "night-shift-1",
+    branch: `standing-orders/${building}`,
+    worktree: join(repos.api, ".demo-worktree-1"),
+    now: hoursAgo(2),
+  });
+  const buildingRev2Artifact = storeEvidence(
+    store,
+    evidenceRoot,
+    buildingPriorRun,
+    "plan",
+    "revision.md",
+    Buffer.from(DEMO_BUILDING_PLAN_V2, "utf8"),
+    "builder-filed revision proposal [demo: synthetic]",
+    hoursAgo(1.6),
+  );
+  const buildingRev2Id = store.insertPlanRevision(
+    {
+      taskRef: buildingRef,
+      revision: 2,
+      artifact: buildingRev2Artifact,
+      parentHash: buildingRev1Sha,
+      reason: DEMO_BUILDING_REVISION_REASON,
+      evidenceLink: DEMO_BUILDING_REVISION_EVIDENCE,
+      author: `builder:${buildingPriorRun}`,
+      originRun: buildingPriorRun,
+      kind: "builder-proposal",
+      authorityKind: "plan-only",
+      authorityDigest: "demo-authority-digest-unchanged",
+      changedFields: [],
+      status: "applied",
+    },
+    hoursAgo(1.6),
+  );
+  store.setRunPlanRevision(buildingPriorRun, buildingRev2Id, "demo-authority-digest-unchanged");
+  store.finishRun(buildingPriorRun, { outcome: "refused", reason: "plan-revised", now: hoursAgo(1.6) });
+
   // The board's "building" lane keys off a live claim — take one through
   // the real claim machinery so the card wears worker and lease honestly.
-  acquire(store, store.refFor("built-in", building).id, "night-shift-1", {
+  acquire(store, buildingRef, "night-shift-1", {
     now: hoursAgo(0.4),
     token: nightShift.token,
     ttlMs: 4 * 3_600_000,
   });
   const liveRun = store.startRun({
-    taskRef: store.refFor("built-in", building).id,
+    taskRef: buildingRef,
     leaseId: "demo-lease-live",
     runner: "night-shift-1",
     branch: `standing-orders/${building}`,
     worktree: join(repos.api, ".demo-worktree-2"),
     now: hoursAgo(0.4),
   });
+  store.setRunPlanRevision(liveRun, buildingRev2Id, "demo-authority-digest-unchanged");
+  {
+    // Mixed milestone states (c1, c2): completed, in progress, blocked, and
+    // pending all shown at once on the live build's own checkpoint.
+    const buildingRev2Parsed = parseExecutionPlanDocument(DEMO_BUILDING_PLAN_V2);
+    if (!buildingRev2Parsed.ok) throw new Error("demo building revision 2 plan is malformed");
+    const buildingMilestones = milestonesOf(buildingRev2Parsed.document);
+    const state = (index: number): "pending" | "current" | "completed" | "blocked" =>
+      index === 0 || index === 1 ? "completed" : index === 2 ? "current" : index === 3 ? "blocked" : "pending";
+    const note = (index: number): string | null =>
+      index === 3 ? "the flag is off in the staging deploy target — confirming before enforcing" : null;
+    store.insertRunCheckpoint(
+      {
+        run: liveRun,
+        taskRef: buildingRef,
+        planRevision: buildingRev2Id,
+        snapshot: {
+          revisionHash: store.getArtifact(buildingRev2Artifact)?.sha256 ?? "",
+          milestones: buildingMilestones.map((one, index) => ({ id: one.id, state: state(index), note: note(index) })),
+        },
+      },
+      hoursAgo(0.1),
+    );
+  }
   store.setRunPhase(liveRun, "agent-running");
   store.setTaskState(building, "running", hoursAgo(0.4));
 

@@ -55,6 +55,7 @@ import {
 import type { ParsedDecision, Problem } from "./decision.js";
 import { digestOf } from "./scope.js";
 import type { ParsedPlan } from "./plan.js";
+import type { AuthorityChangeField } from "./plan.js";
 import type { ParsedReport } from "./scout-report.js";
 
 
@@ -1391,6 +1392,129 @@ export function finalizePlanFenced(
       now,
     );
     return { ok: true as const };
+  });
+}
+
+export type RevisionFinalize =
+  | { ok: true; revisionId: number; authorityKind: "plan-only" | "authority-change" }
+  | { ok: false; reason: "fenced" | "unknown" };
+
+/**
+ * Seal a running build's plan-revision proposal (adaptive execution plans).
+ *
+ * A builder that finds repository evidence invalidating a named dependency,
+ * risk, or assumption in the plan it was given files ONE proposal and stops
+ * without committing — the park discipline, applied to the road rather than
+ * to a question. The ledger row, the hold when one is owed, the run's
+ * outcome, and the page exist together or, if the lease was superseded,
+ * not at all. Structurally `finalizePlanFenced`'s twin: the same
+ * open-attempt assertion, the same fenced release, the same all-or-nothing
+ * transaction.
+ *
+ * Two dispositions, decided by the caller's classification and recorded
+ * here:
+ *
+ *   plan-only        the signed scope and publication authority are
+ *                    byte-identical to what this build started under, so
+ *                    nothing authority-bearing moved and the revision is
+ *                    APPLIED. The claim releases plainly, the task returns
+ *                    to the ready set, and the next attempt reads the new
+ *                    plan — that is the "resume" the subject line promises.
+ *
+ *   authority-change something else moved the signed scope or the
+ *                    publication authority WHILE this build ran. Whatever
+ *                    the revision proposes, it is never auto-applied: the
+ *                    row lands 'blocked', a `revision` hold keeps the task
+ *                    out of every ready set until a person accepts or
+ *                    rejects it, and the page names exactly which fields
+ *                    changed.
+ *
+ * The lease is released either way — the attempt is over — and the run is
+ * finished as `refused`, reusing the existing outcome vocabulary rather
+ * than growing it: no work was committed, and nothing failed.
+ */
+export function finalizeRevisionFenced(
+  store: Store,
+  args: {
+    leaseId: string;
+    runId: number;
+    taskId: string;
+    taskRef: number;
+    /** Every content column of the row about to be appended. `status` is
+     * NOT the caller's to set: it follows from `authorityKind`, decided in
+     * exactly one place — here — so a caller can never file an
+     * authority-changing revision as already applied. */
+    revision: {
+      revision: number;
+      artifact: number;
+      parentHash: string | null;
+      reason: string;
+      evidenceLink: string | null;
+      author: string;
+      originRun: number | null;
+      authorityKind: "plan-only" | "authority-change";
+      authorityDigest: string;
+      changedFields: readonly AuthorityChangeField[];
+    };
+    now: Date;
+  },
+): RevisionFinalize {
+  const { leaseId, runId, taskId, taskRef, revision, now } = args;
+  const db = store.handle;
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a plan revision seals exactly one`);
+    }
+    if (run.role !== "builder") {
+      throw new Error(`run ${runId} is a ${run.role} run — only builder runs file plan revisions`);
+    }
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'released'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    if (Number(changes) === 0) {
+      store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
+      return refusal(db, leaseId);
+    }
+
+    const applied = revision.authorityKind === "plan-only";
+    const revisionId = store.insertPlanRevision(
+      { taskRef, ...revision, kind: "builder-proposal", status: applied ? "applied" : "blocked" },
+      now,
+    );
+    const moved = revision.changedFields
+      .map(field => (field === "signed-scope" ? "the signed scope" : "publication authority"))
+      .join(" and ");
+    if (!applied) {
+      store.holdOwned(
+        {
+          taskRef,
+          ownerKind: "revision",
+          ownerId: String(revisionId),
+          reason: `plan-revision-blocked — ${moved} changed while this build ran, so revision ${revision.revision} waits for a person`,
+          until: null,
+        },
+        now,
+      );
+    }
+    store.finishRun(runId, { outcome: "refused", reason: applied ? "plan-revised" : "plan-revision-blocked", now });
+    store.enqueueNotification(
+      {
+        dedupeKey: `plan-revision:${taskRef}:${revisionId}`,
+        kind: applied ? "plan-revised" : "plan-revision-blocked",
+        ...(applied ? {} : { pushClass: "attention" as const }),
+        link: `/t/${encodeURIComponent(taskId)}`,
+        subject: `${taskId}: plan revision ${revision.revision} ${applied ? "applied — resuming" : "awaiting your approval"}`,
+        body: applied
+          ? `The build found the plan wrong and rewrote it: ${oneLine(revision.reason, 200)}\nEvidence: ${oneLine(revision.evidenceLink ?? "none given", 200)}\nNothing was committed. The next attempt builds against the new plan.`
+          : `The build proposed a new plan, but ${moved} changed while it ran — so nothing was applied: ${oneLine(revision.reason, 200)}\nEvidence: ${oneLine(revision.evidenceLink ?? "none given", 200)}\nNothing runs on this task until you accept or reject the revision.`,
+      },
+      now,
+    );
+    return { ok: true as const, revisionId, authorityKind: revision.authorityKind };
   });
 }
 
