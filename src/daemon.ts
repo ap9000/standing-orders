@@ -41,6 +41,25 @@ export type DaemonPlan = {
 };
 
 /**
+ * `launchctl bootout` can return before the old label has disappeared from
+ * the user domain. Bootstrapping the replacement during that short window
+ * appears to succeed, then the pending bootout removes the new job too. Wait
+ * for the observable supervisor boundary before loading the replacement.
+ */
+async function waitForLaunchdBootout(
+  run: SupervisorRunner,
+  service: string,
+  attempts = 50,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const status = await run("launchctl", ["print", service]);
+    if (status.code !== 0) return true;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
+/**
  * Pin a service to the Node runtime that is executing Standing Orders.
  *
  * launchd does not inherit an interactive shell's PATH, so invoking a JS
@@ -261,8 +280,13 @@ export async function installDaemon(
       // Re-install is an update, not a false "already installed" success.
       // If this label is already loaded, boot it out and bootstrap the unit
       // we just wrote so changed runtimes/flags actually take effect.
-      const replaced = await run("launchctl", ["bootout", `gui/${uid}/${plan.label}`]);
+      const service = `gui/${uid}/${plan.label}`;
+      const replaced = await run("launchctl", ["bootout", service]);
       if (replaced.code === 0) {
+        const gone = await waitForLaunchdBootout(run, service);
+        if (!gone) {
+          return { ok: false, message: "launchd did not finish stopping the previous worker; try the install again" };
+        }
         modern = await run("launchctl", ["bootstrap", `gui/${uid}`, plan.unitPath]);
       }
     }

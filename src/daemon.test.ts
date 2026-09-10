@@ -154,13 +154,14 @@ describe("the daemon plan", () => {
     const made = plan("darwin");
     const script = scripted({
       "launchctl bootstrap": { code: 1 },
+      "launchctl bootout": { code: 3 },
       "launchctl load": { code: 0 },
     });
 
     const installed = await installDaemon(made, "secret-token", script.run);
 
     expect(installed).toMatchObject({ ok: true });
-    expect(script.calls.map(call => call.args[0])).toEqual(["bootstrap", "bootout", "bootstrap", "load"]);
+    expect(script.calls.map(call => call.args[0])).toEqual(["bootstrap", "bootout", "load"]);
   });
 
   test("re-install replaces a loaded job before starting the newly written unit", async () => {
@@ -173,11 +174,34 @@ describe("the daemon plan", () => {
         bootstraps += 1;
         return { ...OK, code: bootstraps === 1 ? 5 : 0 };
       }
+      if (args[0] === "print") return { ...OK, code: 113 };
       return OK;
     };
 
     expect(await installDaemon(made, "secret-token", run)).toMatchObject({ ok: true });
-    expect(calls).toEqual(["bootstrap", "bootout", "bootstrap", "kickstart"]);
+    expect(calls).toEqual(["bootstrap", "bootout", "print", "bootstrap", "kickstart"]);
+  });
+
+  test("re-install waits for an asynchronous bootout before bootstrapping the replacement", async () => {
+    const made = plan("darwin");
+    const calls: string[] = [];
+    let bootstraps = 0;
+    let prints = 0;
+    const run = async (_file: string, args: readonly string[]) => {
+      calls.push(args[0] as string);
+      if (args[0] === "bootstrap") {
+        bootstraps += 1;
+        return { ...OK, code: bootstraps === 1 ? 5 : 0 };
+      }
+      if (args[0] === "print") {
+        prints += 1;
+        return { ...OK, code: prints < 3 ? 0 : 113 };
+      }
+      return OK;
+    };
+
+    expect(await installDaemon(made, "secret-token", run)).toMatchObject({ ok: true });
+    expect(calls).toEqual(["bootstrap", "bootout", "print", "print", "print", "bootstrap", "kickstart"]);
   });
 
   test("a loaded plist is not reported as started when kickstart fails", async () => {

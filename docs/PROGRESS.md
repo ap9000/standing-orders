@@ -12,7 +12,10 @@ alive, its PID remains the worktree's occupancy fence so another agent cannot
 enter the same checkout. Persistent macOS, Linux, and Windows services also
 inherit the installer PATH, so subscription CLIs found during setup remain
 available after terminal close or reboot. Recovery, occupancy, lineage, and
-cross-platform daemon environment paths are covered by focused tests; the
+cross-platform daemon environment paths are covered by focused tests. macOS
+upgrades also wait for an asynchronous `launchctl bootout` to actually remove
+the old label before loading its replacement, preventing an install that
+briefly looks healthy and then disappears. The
 failure that prompted this work was recovered from its captured patch and the
 successor passed the full suite and production build before committing it.
 
