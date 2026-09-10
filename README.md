@@ -463,6 +463,15 @@ and offers plain-language starters for status, scope revision, steering, and
 proof review. Proposed guidance is inert until you confirm its card, then it
 reaches the next attempt without interrupting work already running.
 
+New work starts the same way: describe the outcome once in ordinary language.
+The mate infers a concise title, narrow scope, safe non-goals, and proof
+criteria; it asks only when the project or outcome is genuinely ambiguous, or
+when an irreversible or compatibility tradeoff changes what should be built.
+Questions are grouped, carry a recommended default, and stop for reversible
+choices when you say **use your judgment**. The task card says whether Standing
+Orders will inspect the repository and draft a plan before asking you to
+approve anything.
+
 When a task finishes, both views lead with the same **result receipt**: what
 shipped, proof level, acceptance pass count, sealed diff size, validated UI
 screenshots, and any caveats. Open the full evidence ledger or discuss and

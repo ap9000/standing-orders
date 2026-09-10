@@ -8238,6 +8238,12 @@ const STYLE = `
        explanation or buttons on a short phone viewport. */
     .chat-main:has(.proposal.pending) { padding-bottom: 0; }
     .chat-main:has(.proposal.pending) .composer { position: static; width: 100%; margin-top: .5rem; }
+    /* First use is one cohesive intake card: prompt, suggestions, then the
+       box. A fixed box belongs to an established thread; here it would sit
+       above the very question it is asking the person to answer. */
+    .chat-main:has(.chat-empty) { padding-bottom: 0; }
+    .chat-main:has(.chat-empty) .thread { min-height: 14rem; }
+    .chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }
     .composer textarea { min-height: 2.75rem; padding: .55rem .65rem; font-size: .9375rem; }
   }
   main:has(.mate-mint) { max-width: 68rem; }
@@ -10224,7 +10230,7 @@ function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): s
         ["decisions", "Walk me through the open decisions, their options, and what you recommend I inspect first."],
         ["building now", "What is building right now across every project? Call out anything preventing progress or any unusual risk."],
         ["prioritize queues", "Review every project's queue and propose the most valuable reversible reprioritization."],
-        ["draft next task", "Based on the current fleet, suggest one high-leverage task or scout investigation and draft it as a proposal."],
+        ["new task", "Help me define a new task. Ask only about choices that materially change the result; otherwise use your judgment and sensible reversible defaults."],
       ] as const
     : [
         ["what’s happening", "Read this task and explain its current status, what is blocking it, and what should happen next."],
@@ -10622,11 +10628,20 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
   };
   let what: string;
   if (view.kind === "task") {
+    const planning = text("planning") || "auto";
+    const planningWords = payload["report"] === true
+      ? "not needed — this is an investigation"
+      : planning === "required"
+        ? "inspect the project and draft a plan first"
+        : planning === "skip"
+          ? "start from this proposed scope"
+          : "inspect first when the work needs repository context";
     what =
       `<h3>${escape(text("title"))}</h3><p class="proposal-summary">${escape(text("goal"))}</p>` +
       facts(
         ["project", `<span class="mono">${escape(repoId)}</span>`],
         ["deliverable", payload["report"] === true ? "report only" : "branch"],
+        ["planning", planningWords],
         ["out of scope", escape(text("not"))],
         ["may touch", Array.isArray(payload["touches"]) ? escape((payload["touches"] as string[]).join(", ")) : ""],
       );
@@ -10836,8 +10851,8 @@ function matePage(chrome: Chrome, data: {
   conversation.push(`<div class="thread">`);
   if (data.messages.length === 0) {
     conversation.push(
-      `<div class="chat-empty"><strong>${data.focusTask === null ? "What should we look at first?" : "What do you want to understand or change?"}</strong>` +
-      `<p class="meta">${data.focusTask === null ? "Ask in your own words, or start with a fleet question." : "I’ll read the current task first. Ask naturally, or choose a useful starting point."}</p>${matePromptStarters(data.csrf, data.focusTask)}</div>`,
+      `<div class="chat-empty"><strong>${data.focusTask === null ? "What do you want to get done?" : "What do you want to understand or change?"}</strong>` +
+      `<p class="meta">${data.focusTask === null ? "Describe the outcome in your own words. I’ll infer the routine details and only ask when a choice materially changes the result." : "I’ll read the current task first. Ask naturally, or choose a useful starting point."}</p>${matePromptStarters(data.csrf, data.focusTask)}</div>`,
     );
   }
   for (const message of data.messages) {
@@ -10869,9 +10884,10 @@ function matePage(chrome: Chrome, data: {
     `<form method="post" action="/chat" class="card composer" id="latest" aria-label="message the mate">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
-    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Ask about projects, prioritize work, or draft the next task…" : "Ask about status, revise scope, or steer the next attempt…"}"></textarea></label>`,
+    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Describe what you want done…" : "Ask about status, revise scope, or steer the next attempt…"}"></textarea></label>`,
     `<button type="submit" aria-label="send message">send</button>`,
     `</form>`,
+    data.focusTask === null ? `<p class="meta composer-hint">One message is enough. I’ll infer the title, scope, and proof; say “use your judgment” to accept sensible reversible defaults.</p>` : "",
     `<details><summary class="meta">this conversation</summary>`,
     `<p class="meta">started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z · stays live until you end it · only bounded recent context is sent to the model</p>`,
     `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,

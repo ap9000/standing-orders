@@ -426,9 +426,9 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_task",
-    description: "Propose filing a new task. It becomes a card the operator confirms; nothing is filed until then, and a filed task still needs its scope approved. report: true proposes a SCOUT task — a read-only investigation whose only deliverable is a report, never a branch.",
+    description: "Propose filing a new task from a plain-language outcome. Infer routine fields instead of asking for them. It becomes a card the operator confirms; nothing is filed until then. planning chooses repository inspection before approval: required for broad/risky work, skip only when explicitly requested for a small direct change, otherwise auto. report: true proposes a SCOUT task — a read-only investigation whose only deliverable is a report, never a branch.",
     inputSchema: schema(
-      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA, report: { type: "boolean" } },
+      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: { type: "string", maxLength: 2000 }, not: { type: "string", maxLength: 2000 }, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA, planning: { type: "string", enum: ["auto", "required", "skip"] }, report: { type: "boolean" } },
       ["repo", "title", "goal", "acceptance"],
     ),
     handle: (ctx, args) => {
@@ -441,11 +441,13 @@ export const MATE_TOOLS: MateTool[] = [
       if (touches === null) return { ok: false, message: "touches is up to 50 plain paths" };
       const acceptance = readAcceptanceArg(args["acceptance"]);
       if (acceptance === null) return { ok: false, message: "acceptance is required: at least one criterion with an id, statement, and evidence kinds" };
+      const planning = args["planning"] ?? "auto";
+      if (planning !== "auto" && planning !== "required" && planning !== "skip") return { ok: false, message: "planning is auto, required, or skip" };
       if (args["report"] !== undefined && typeof args["report"] !== "boolean") return { ok: false, message: "report is true or false" };
       const report = args["report"] === true;
-      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches, acceptance, report });
+      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches, acceptance, planning, report });
       if (id === null) return tooMany();
-      return { ok: true, body: { proposal: id, kind: "task", repo: args["repo"], deliverable: report ? "report" : "branch", awaiting: "the operator's confirmation" } };
+      return { ok: true, body: { proposal: id, kind: "task", repo: args["repo"], deliverable: report ? "report" : "branch", planning: report ? "not needed for a scout" : planning, awaiting: "the operator's confirmation" } };
     },
   },
   {

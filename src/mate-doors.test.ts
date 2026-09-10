@@ -23,7 +23,7 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   const session = () =>
     store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
-  const pending = (kind: "next" | "reserve" | "hold" | "steer" | "answer" | "repair", payload: Record<string, unknown>): number => {
+  const pending = (kind: "task" | "next" | "reserve" | "hold" | "steer" | "answer" | "repair", payload: Record<string, unknown>): number => {
     const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
     const live = store.activeMateSession("alex")!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
@@ -96,6 +96,30 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     store.hold(store.refFor("built-in", "b").id, "by hand", null, clock());
     expect(confirmMateProposal(store, who, again, clock(), { via: "cli" })).toMatchObject({ ok: false, reason: "stale" });
     expect(store.activeHolds(store.refFor("built-in", "b").id, clock()).map(one => one.reason)).toEqual(["by hand"]);
+  });
+
+  test("a confirmed intake card honors plan-first instead of pretending its draft is ready to approve", () => {
+    session();
+    const id = pending("task", {
+      repo: REPO,
+      repoId: "r1",
+      title: "Modernize the whole navigation",
+      goal: "Make navigation coherent across desktop and mobile.",
+      not: null,
+      touches: [],
+      acceptance: [{ id: "c1", statement: "Navigation works coherently at desktop and mobile widths.", evidence: ["screenshot"] }],
+      planning: "required",
+      report: false,
+    });
+    const outcome = confirmMateProposal(store, who, id, clock(), { via: "web" });
+    expect(outcome).toMatchObject({
+      ok: true,
+      said: expect.stringContaining("the planner is reading the project before you approve anything"),
+      taskId: expect.any(String),
+    });
+    if (!outcome.ok || outcome.taskId === null) throw new Error("task was not filed");
+    expect(store.lookupRef(outcome.taskId)?.plan).toBe("requested");
+    expect(store.getScope(outcome.taskId)?.approvedAt).toBeNull();
   });
 
   test("a steering card becomes verified guidance for the next attempt only after confirmation", () => {

@@ -7579,6 +7579,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain("standing-orders:chat-projects");
     expect(thread).toContain('.chat-workspace .composer { position: static; width: 100%; box-shadow: var(--shadow); }');
     expect(thread).toContain('position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));');
+    expect(thread).toContain('.chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }');
     expect(thread).toContain('data-card-kind="fleet-overview"');
     expect(thread).toContain('aria-label="live portfolio overview"');
     expect(thread).toContain('aria-label="projects in this conversation"');
@@ -7586,6 +7587,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toMatch(/<span class="name">all projects/);
     expect(thread).toContain('class="card composer"');
     expect(thread).not.toContain('name="token"');
+    expect(thread).toContain("What do you want to get done?");
+    expect(thread).toContain("Describe what you want done…");
+    expect(thread).toContain("One message is enough.");
+    expect(thread).toContain("use your judgment");
+    expect(thread).toContain('>new task</button>');
     expect(thread).toContain("this conversation: $0.00 of $5.00");
     expect(thread).toContain("stays live until you end it");
     expect(thread).toContain('action="/chat/mate/end"');
@@ -7708,6 +7714,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
         title: "Polish the result cockpit",
         goal: "Make completed work faster to review.",
         acceptance: [{ id: "c1", statement: "A reviewer can understand the result quickly.", evidence: ["manual-review"] }],
+        planning: "required",
       } }]),
       () => answer([{ type: "text", text: "I drafted the task for confirmation." }]),
     );
@@ -7716,12 +7723,15 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     await settle();
     let html = await page(cookie);
     expect(html).toContain('data-card-kind="task"');
+    expect(html).toContain("inspect the project and draft a plan first");
     const confirmed = await post(cookie, "/chat/proposal/1/confirm", { csrf });
     expect(confirmed.status).toBe(303);
     const proposal = store.getMateProposal(1);
     const taskId = typeof proposal?.outcome?.["taskId"] === "string" ? proposal.outcome["taskId"] : null;
     if (taskId === null) throw new Error("the task proposal did not file");
+    expect(store.lookupRef(taskId)?.plan).toBe("requested");
     html = await page(cookie);
+    expect(html).toContain("the planner is reading the project before you approve anything");
     expect(html).toContain(`href="/chat?task=${taskId}">continue in chat</a>`);
     expect(html).toContain(`href="/t/${taskId}">overview</a>`);
   });

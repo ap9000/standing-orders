@@ -1,5 +1,22 @@
 # Progress
 
+**2026-09-10 — Unified chat now starts from an outcome, not an order form.**
+The mate treats one plain-language request as enough to draft a task: it
+infers the title, narrow goal, safe non-goals, acceptance criteria, and the
+need for repository planning. It asks only when the answer changes the
+result—an ambiguous project or outcome, or an irreversible/public/security/
+data/migration/compatibility tradeoff—and groups at most three questions with
+a recommended default instead of drip-feeding fields. “Use your judgment”
+closes reversible questions and chooses the narrowest safe default. Task
+proposal cards now say whether the project will be inspected first; confirming
+a plan-first proposal starts the existing planner and says so instead of
+incorrectly asking for immediate scope approval. The empty desktop and mobile
+thread leads with “What do you want to get done?”, one outcome composer, and a
+plain explanation of inferred defaults. On phones the empty composer stays in
+the document flow so it cannot float above its own prompt. The new planning
+choice is validated again at the confirmation door, defaults old proposals to
+the existing automatic policy, and adds no authority or parallel intake state.
+
 **2026-09-08 — Verified Done now starts with a result receipt and leads to a
 real review surface.** A completed task presents one shared, scan-first card on its overview
 and focused Ask view: the sealed handoff summary, proof level, acceptance pass

@@ -6,6 +6,7 @@ import { ceilingDigestOf, isVerifiedApprover, reproveApprover, verifyApproverSta
 import { MATE_MAX_STEPS, MATE_STEP_TEXT_CAP_BYTES, MATE_TOOL_CALL_CAP_BYTES, MATE_TOOL_RESULT_CAP_BYTES, MAX_OUTPUT_TOKENS, credentialKeyOf, mateWorstCaseForPrice, parseMateProviderWrapper, subscriptionCredentialKey } from "./converse.js";
 import { runMateTurn, historyFor, MATE_REFUSAL_COPY } from "./mate.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, executeMateTool, redactForMate } from "./mate-tools.js";
+import { MATE_CONTRACT, MATE_CONTRACT_VERSION } from "./mate-contract.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 
 const T0 = new Date("2026-09-02T12:00:00.000Z");
@@ -115,6 +116,47 @@ describe("the mate's turn", () => {
       clock,
       ...overrides,
     });
+
+  test("the intake contract treats one outcome as enough and asks only material questions", () => {
+    expect(MATE_CONTRACT_VERSION).toBe(6);
+    expect(MATE_CONTRACT).toContain("a plain-language outcome is enough to draft a task");
+    expect(MATE_CONTRACT).toContain("at most three questions");
+    expect(MATE_CONTRACT).toContain("Do not ask the operator for a title, paths, implementation details, acceptance wording, model, budget");
+    expect(MATE_CONTRACT).toContain("use your judgment");
+    expect(MATE_CONTRACT).toContain("Set propose_task planning to 'required'");
+  });
+
+  test("task intake records an explicit planning choice and defaults it to auto", () => {
+    const drafted: Record<string, unknown>[] = [];
+    const ctx = {
+      store,
+      who,
+      now: clock(),
+      draft: (_kind: "task", payload: Record<string, unknown>) => {
+        drafted.push(payload);
+        return drafted.length;
+      },
+      step: 1,
+      readDecisions: new Map<number, number>(),
+    };
+    const base = {
+      repo: "r1",
+      title: "Make project intake conversational",
+      goal: "Let a person describe the outcome once and infer routine task details.",
+      acceptance: [{ id: "c1", statement: "A plain-language request produces a reviewable task proposal.", evidence: ["manual-review"] }],
+    };
+    expect(executeMateTool(ctx, "propose_task", { ...base, planning: "required" })).toMatchObject({
+      ok: true,
+      body: { planning: "required" },
+    });
+    expect(drafted[0]).toMatchObject({ planning: "required", touches: [], not: null });
+    expect(executeMateTool(ctx, "propose_task", base)).toMatchObject({ ok: true, body: { planning: "auto" } });
+    expect(drafted[1]).toMatchObject({ planning: "auto" });
+    expect(executeMateTool(ctx, "propose_task", { ...base, planning: "sometimes" })).toMatchObject({
+      ok: false,
+      message: "planning is auto, required, or skip",
+    });
+  });
 
   test("a loop: two tool steps, then text — steps ledgered, session debited, only text kept", async () => {
     const script = scripted([

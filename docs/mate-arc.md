@@ -270,7 +270,7 @@ parameterized by a **principal** (`{ kind: "coordinator", cid, repos }` or
 | `recap` | since-stamp: what waits (decisions, approvals, requeues), what runs, what finished; counts and ids, no recaps/consequences | read |
 | `list_decisions` | open decisions: id, task, question, option ids and labels (no consequences), reversible flags, age | read |
 | `queue` | a repo's columns and order (ids, titles, reservations) | read |
-| `propose_task` | `{repo, title, goal, not, touches}` → row | confirm → the operator's own `fileTaskProposal` (`filed_via: mate`); unapproved, ordinary |
+| `propose_task` | `{repo, title, goal, not, touches, acceptance, planning:auto|required|skip}` → row | confirm → the operator's own `fileTaskProposal` (`filed_via: mate`); unapproved; broad/risky work may start the existing planner before approval |
 | `propose_next` | `{task, queueRevision, position}` → row | confirm → `moveTaskNext` with the revision CAS |
 | `propose_reserve` | `{task, worker|null, queueRevision}` → row | confirm → `moveTask` with the revision CAS |
 | `propose_hold` / `propose_unhold` | `{task, reason}` / `{task, holdId}` → row | confirm → the hold primitives |
@@ -338,6 +338,15 @@ choice, any cancel, anything outside the admitted repos), and the shape of
 a good recap (what waits first, then what runs, then what finished, counts
 before names). The model never sees paths, decision consequences, or
 recommendations — the data document already hides them.
+
+**Contract v6 (2026-09-10): conversational intake.** One plain-language
+outcome is sufficient to propose work. The mate infers routine form fields
+and asks only when a project/outcome is ambiguous or a consequential tradeoff
+can materially change the result. It groups at most three questions with safe
+defaults, honors “use your judgment” for reversible choices, and marks whether
+repository planning is required, automatic, or explicitly skipped. The
+confirmation door validates that choice again and starts the same planner used
+by every other filing surface; chat gains no private intake state.
 
 ## 5. The console
 

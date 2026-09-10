@@ -93,6 +93,16 @@ chat is a cohesive control surface over them, not a chat-only copy. A scope
 that changes during live polling asks for a secure page refresh instead of
 injecting a password form into an already-running document.
 
+The second Priority 3 slice makes intake conversational. One plain-language
+outcome is sufficient: the mate infers routine task fields and acceptance
+criteria, leaves file discovery to the planner, and asks only about ambiguity
+or a consequential tradeoff that can materially change the result. It groups
+at most three questions, recommends a safe default, and honors “use your
+judgment” for reversible choices. The proposal card makes the inferred
+planning posture visible; confirmation either starts the existing repository
+planner or leads to scope approval using the same filing door. No chat-only
+intake record or second planning engine was added.
+
 The first three Priority 2 slices landed already:
 completion carries a typed, hash-addressed proof the plane
 adjudicates against evidence it captured itself, rather than an agent's own

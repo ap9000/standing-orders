@@ -68,6 +68,11 @@ function payloadStrings(payload: Record<string, unknown>, key: string): string[]
   return Array.isArray(value) ? value.filter((one): one is string => typeof one === "string") : [];
 }
 
+function payloadPlanning(payload: Record<string, unknown>): "auto" | "required" | "skip" | null {
+  const value = payload["planning"] ?? "auto";
+  return value === "auto" || value === "required" || value === "skip" ? value : null;
+}
+
 /**
  * Confirm one of the mate's proposals as `who`. The whole check-and-act
  * is one transaction: brand and standing (re-proved inside); the
@@ -191,7 +196,9 @@ function executeProposal(
     const repo = payloadString(payload, "repo");
     const title = payloadString(payload, "title");
     const goal = payloadString(payload, "goal");
+    const planning = payloadPlanning(payload);
     if (!admitted(repo) || title === null || goal === null) return refuse("outside-ceiling", "that project is not one of yours");
+    if (planning === null) return refuse("refused", "that proposal carries an invalid planning choice");
     const filed = fileTaskProposal(
       store,
       {
@@ -202,6 +209,7 @@ function executeProposal(
         touches: payloadStrings(payload, "touches"),
         acceptance: payload["acceptance"],
         ...(payload["report"] === true ? { deliverable: "report" as const } : {}),
+        planning,
         filedVia: "mate",
         proposedVia: "mate",
         admittedRepos: [...actor.repos],
@@ -209,7 +217,14 @@ function executeProposal(
       now,
     );
     if (!filed.ok) return refuse("refused", `not filed: ${filed.message}`);
-    return { ok: true, kind, said: `filed ${filed.id} — its scope still needs your approval`, taskId: filed.id };
+    return {
+      ok: true,
+      kind,
+      said: filed.planning
+        ? `filed ${filed.id} — the planner is reading the project before you approve anything`
+        : `filed ${filed.id} — review and approve its scope to start work`,
+      taskId: filed.id,
+    };
   }
 
   if (kind === "answer") {

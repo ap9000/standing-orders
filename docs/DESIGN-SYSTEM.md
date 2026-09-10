@@ -84,7 +84,7 @@ ring at 2px offset on buttons and links; a ring-colored border with a soft
 | Section header | `h2` (+ `.lane-count` pill) | — | small semibold dim sans |
 | Lane | `details.lane` with `summary > h2` | — | a column on a desktop, a folding section on a phone; a state dot on every header |
 | Workspace card | `.workspace-card` | — | name · status word · four inset count cells · proportional bar · board tap |
-| Chat workspace | `.chat-workspace` + `.chat-projects` + `.thread` | — | one bounded project pulse beside the shared mate thread; project actions remain ordinary guarded forms |
+| Chat workspace | `.chat-workspace` + `.chat-projects` + `.thread` | — | one bounded project pulse beside the shared mate thread; project actions remain ordinary guarded forms; an empty thread asks for one outcome, infers routine task fields, and keeps its prompt → suggestions → composer sequence in document flow on a phone |
 | Switcher | `details.switcher` + `.switcher-menu` | `NavBar` | POST forms with the session token; a check marks the current row; inert on sensitive pages |
 | Shell | `.side` 220px with icon rows; `.mobile-top` + `.tabbar` | `NavBar` | primary rows carry icons, the foot list stays text; one visible `/projects` link per breakpoint |
 
