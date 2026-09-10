@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import {
   raceDigestOf,
@@ -694,7 +694,9 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
     const { run: exec } = await import("./exec.js");
     const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 
-    const base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-race-park-")));
+    // Keep `c1` in the parent path so lane detection must use the worktree's
+    // contestant segment rather than accidentally matching a temp prefix.
+    const base = realpathSync(await mkdtemp(join(tmpdir(), "standing-orders-race-park-c1-")));
     const repo = join(base, "repo");
     const db = join(base, "queue.db");
     const pool = join(base, "pool");
@@ -726,7 +728,9 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
       const cwd = options?.cwd ?? "";
       const prompt = args[args.indexOf("-p") + 1] ?? "";
       prompts.push(prompt);
-      const isFirstAgent = cwd.includes("c1");
+      // Match the contestant segment, not an arbitrary `c1` in the random
+      // temp-directory prefix (which can otherwise make every lane park).
+      const isFirstAgent = /-c1-[0-9a-f]{8}$/.test(basename(cwd));
       if (isFirstAgent && !parkedOnce.has(cwd)) {
         parkedOnce.add(cwd);
         const name = /STANDING-ORDERS-PARK-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
@@ -734,7 +738,7 @@ describe("stage 4 — a racing agent parks, the answer resumes it, the tournamen
         await writeFile(join(cwd, name), JSON.stringify(DECISION));
         return { ...OK, stdout: JSON.stringify({ result: "parked", total_cost_usd: 0.1, usage: { input_tokens: 10, output_tokens: 5 } }) };
       }
-      await writeFile(join(cwd, `work-${cwd.includes("c1") ? "one" : "two"}.ts`), "export const raced = true;\n");
+      await writeFile(join(cwd, `work-${isFirstAgent ? "one" : "two"}.ts`), "export const raced = true;\n");
       const done = /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0];
       if (done !== undefined) {
         await writeFile(join(cwd, done), JSON.stringify({ version: 1, status: "completed", conclusion: "picked a lane and finished" }));
