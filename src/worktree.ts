@@ -24,10 +24,12 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Store, WorktreeRow } from "./store.js";
+import { HANDOFF_PREFIX, MAILBOX_SUFFIX, readMailbox } from "./evidence.js";
+import { parseHandoff } from "./decision.js";
 
 export type Runner = (
   file: string,
@@ -60,7 +62,14 @@ export type LeaseRequest = {
 };
 
 export type LeaseResult =
-  | { ok: true; worktree: WorktreeRow; created: boolean; reclaimed?: string }
+  | {
+      ok: true;
+      worktree: WorktreeRow;
+      created: boolean;
+      reclaimed?: string;
+      resumedFromRun?: number;
+      recoveryKind?: "completed" | "partial";
+    }
   | { ok: false; reason: LeaseFailure; message: string };
 
 export type LeaseFailure = "held" | "dirty" | "git" | "unverified" | "unknown-runner" | "in-use";
@@ -169,6 +178,19 @@ export class WorktreePool {
     }
   }
 
+  /**
+   * Once a provider exists it, not the supervising console, is the process
+   * whose liveness protects this checkout. Rewriting the occupancy marker at
+   * spawn means a replacement control plane waits for an orphaned provider
+   * to finish instead of starting a second writer in the same worktree.
+   */
+  markProviderOccupancy(path: string, runner: string, providerPid: number): boolean {
+    if (!Number.isInteger(providerPid) || providerPid <= 0) return false;
+    const leased = this.store.getWorktree(path);
+    if (leased === null || leased.releasedAt !== null || leased.runner !== runner) return false;
+    return this.mark(path, runner, providerPid);
+  }
+
   async lease(request: LeaseRequest): Promise<LeaseResult> {
     // A worktree leased to a runner nobody registered cannot be heartbeated
     // and cannot be recovered — it would be a checkout that never comes back.
@@ -206,11 +228,14 @@ export class WorktreePool {
       };
     }
 
-    // A directory that came back from a dead runner is unverified: what is in
-    // it describes a process that stopped without saying why. Checked before
-    // reuse, never assumed.
+    // Re-inspect every released checkout at the lease boundary. `verified`
+    // says it was clean when released, not that no orphan/provider/person
+    // wrote to it afterwards; trusting that old bit is how a restored safety
+    // patch can be handed out without recovery lineage or silently reset.
     let reclaimed: string | undefined;
-    if (existing !== null && !existing.verified && existing.releasedAt !== null) {
+    let resumedFromRun: number | undefined;
+    let recoveryKind: "completed" | "partial" | undefined;
+    if (existing !== null && existing.releasedAt !== null) {
       const dirty = await this.isDirty(path);
       if (dirty === null) {
         return { ok: false, reason: "git", message: `${path} could not be inspected` };
@@ -227,11 +252,25 @@ export class WorktreePool {
             message: `${path} has uncommitted or untracked work from a previous run — look before reusing it`,
           };
         }
+        const previousRun = this.store.latestRunInWorktree(path);
+        const recoveryRun = this.store.latestRecoverableRunInWorktree(path);
+        const recovery = recoveryRun === null ? null : this.recoverableDraft(path, recoveryRun);
         const kept = await this.keepLeftover(path, (request.reclaim as { evidenceRoot: string }).evidenceRoot, request.now);
         if (!kept.ok) return { ok: false, reason: "git", message: kept.message };
-        const reset = await this.resetTree(path);
-        if (!reset.ok) return { ok: false, reason: "git", message: reset.message };
         reclaimed = kept.file;
+        if (recovery !== null) {
+          // The predecessor reached a structurally valid completed handoff
+          // before its runner disappeared. Keep its draft in place under the
+          // fresh lease so the successor reviews and verifies it. build()
+          // quarantines the old nonce-bound handoff before the new provider
+          // starts, so only the source draft crosses attempts — never the old
+          // attempt's authority.
+          resumedFromRun = recovery.runId;
+          recoveryKind = recovery.kind;
+        } else {
+          const reset = await this.resetTree(path);
+          if (!reset.ok) return { ok: false, reason: "git", message: reset.message };
+        }
       }
     }
 
@@ -278,7 +317,50 @@ export class WorktreePool {
     }
 
     this.store.saveWorktree(row);
-    return { ok: true, worktree: row, created, ...(reclaimed === undefined ? {} : { reclaimed }) };
+    return {
+      ok: true,
+      worktree: row,
+      created,
+      ...(reclaimed === undefined ? {} : { reclaimed }),
+      ...(resumedFromRun === undefined ? {} : { resumedFromRun }),
+      ...(recoveryKind === undefined ? {} : { recoveryKind }),
+    };
+  }
+
+  /**
+   * A crash can strand either a finished handoff or a partial source draft.
+   * The expired lease can no longer authorize a commit, so this never ingests
+   * the old result. It classifies the recovery context for the next freshly
+   * fenced attempt, which must review and prove the inherited work itself.
+   */
+  private recoverableDraft(path: string, runId: number): { runId: number; kind: "completed" | "partial" } | null {
+    const prior = this.store.getRun(runId);
+    if (prior === null) return null;
+    // Once a fresh attempt has explicitly inherited a validated draft, keep
+    // that lineage through an infrastructure/provider failure too. A warm
+    // park resume also uses parentRun, but its parent is `parked`, never the
+    // failed/interrupted source required here.
+    if (prior.parentRun !== null) {
+      const source = this.store.getRun(prior.parentRun);
+      if (source?.outcome === "failed" && source.reason === "interrupted") {
+        return { runId: source.id, kind: "partial" };
+      }
+    }
+    if (prior.outcome !== null && (prior.outcome !== "failed" || prior.reason !== "interrupted")) return null;
+    let names: string[];
+    try {
+      names = readdirSync(path).filter(name => name.startsWith(HANDOFF_PREFIX) && name.endsWith(MAILBOX_SUFFIX));
+    } catch {
+      return { runId, kind: "partial" };
+    }
+    if (names.length !== 1) return { runId, kind: "partial" };
+    const read = readMailbox(join(path, names[0] as string));
+    if (!read.ok) return { runId, kind: "partial" };
+    const parsed = parseHandoff(read.raw.toString("utf8"));
+    return {
+      runId,
+      kind: parsed.ok && parsed.handoff.status === "completed" ? "completed" : "partial",
+    };
   }
 
   /**
@@ -327,9 +409,9 @@ export class WorktreePool {
   }
 
   /** Leave a note naming the process holding this checkout. */
-  private mark(path: string, runner: string): boolean {
+  private mark(path: string, runner: string, pid = process.pid): boolean {
     try {
-      writeFileSync(join(path, MARKER), `${process.pid} ${runner}\n`, "utf8");
+      writeFileSync(join(path, MARKER), `${pid} ${runner}\n`, "utf8");
       return true;
     } catch {
       return false;

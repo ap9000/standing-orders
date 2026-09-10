@@ -421,4 +421,132 @@ describe("the pool, against real git", () => {
     expect(existsSync(join(again.worktree.path, ".standing-orders-lease"))).toBe(true);
     expect((await pool.release(again.worktree.path, later(4_000))).ok).toBe(true);
   });
+
+  test("a completed interrupted draft stays in place for a freshly fenced retry", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const evidence = join(base, "evidence");
+    store.createTask({ id: "t-resume", title: "recover completed work" }, T0);
+    const ref = store.refFor("built-in", "t-resume").id;
+    const first = await pool.lease({
+      repo,
+      branch: "feat/resume",
+      base: "main",
+      runner: "builder-1",
+      taskRef: ref,
+      now: T0,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const runId = store.startRun({
+      taskRef: ref,
+      leaseId: "dead-lease",
+      runner: "builder-1",
+      branch: "feat/resume",
+      worktree: first.worktree.path,
+      now: T0,
+    });
+    await writeFile(join(first.worktree.path, "README.md"), "hello\ncompleted draft\n");
+    await writeFile(join(first.worktree.path, "new-file.ts"), "export const recovered = true;\n");
+    await writeFile(
+      join(first.worktree.path, "STANDING-ORDERS-DONE-0123456789abcdef.json"),
+      JSON.stringify({ version: 2, status: "completed", conclusion: "The draft is ready.", changes: [], verification: [], followUps: [] }),
+    );
+    store.finishRun(runId, { outcome: "failed", reason: "interrupted", now: later(1_000) });
+    expect(await pool.release(first.worktree.path, later(2_000))).toMatchObject({ ok: false, reason: "dirty" });
+
+    const resumed = await pool.lease({
+      repo,
+      branch: "feat/resume",
+      runner: "builder-1",
+      taskRef: ref,
+      now: later(3_000),
+      reclaim: { evidenceRoot: evidence },
+    });
+    expect(resumed).toMatchObject({ ok: true, resumedFromRun: runId, recoveryKind: "completed" });
+    if (!resumed.ok) return;
+    expect(resumed.reclaimed).toBeDefined();
+    expect(await import("node:fs/promises").then(fs => fs.readFile(join(resumed.worktree.path, "README.md"), "utf8"))).toContain("completed draft");
+    expect(existsSync(join(resumed.worktree.path, "new-file.ts"))).toBe(true);
+    expect(existsSync(join(resumed.worktree.path, "STANDING-ORDERS-DONE-0123456789abcdef.json"))).toBe(true);
+
+    // The fresh attempt quarantines the old nonce, then an infrastructure
+    // failure must still preserve the inherited draft for attempt three.
+    await rm(join(resumed.worktree.path, "STANDING-ORDERS-DONE-0123456789abcdef.json"));
+    const reviewRun = store.startRun({
+      taskRef: ref,
+      leaseId: "review-lease",
+      runner: "builder-1",
+      branch: "feat/resume",
+      worktree: resumed.worktree.path,
+      parentRun: runId,
+      now: later(3_100),
+    });
+    await writeFile(join(resumed.worktree.path, "review-note.ts"), "export const reviewed = true;\n");
+    store.finishRun(reviewRun, { outcome: "failed", reason: "provider-init", now: later(3_200) });
+    expect(await pool.release(resumed.worktree.path, later(3_300))).toMatchObject({ ok: false, reason: "dirty" });
+
+    const third = await pool.lease({
+      repo,
+      branch: "feat/resume",
+      runner: "builder-1",
+      taskRef: ref,
+      now: later(4_000),
+      reclaim: { evidenceRoot: evidence },
+    });
+    expect(third).toMatchObject({ ok: true, resumedFromRun: runId, recoveryKind: "partial" });
+    if (!third.ok) return;
+    expect(existsSync(join(third.worktree.path, "new-file.ts"))).toBe(true);
+    expect(existsSync(join(third.worktree.path, "review-note.ts"))).toBe(true);
+  });
+
+  test("an open partial draft left by a vanished runner is preserved for continuation, not erased", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const evidence = join(base, "evidence");
+    store.createTask({ id: "t-partial", title: "continue partial work" }, T0);
+    const ref = store.refFor("built-in", "t-partial").id;
+    const first = await pool.lease({ repo, branch: "feat/partial", base: "main", runner: "builder-1", taskRef: ref, now: T0 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const runId = store.startRun({ taskRef: ref, leaseId: "partial-lease", runner: "builder-1", branch: "feat/partial", worktree: first.worktree.path, now: T0 });
+    await writeFile(join(first.worktree.path, "partial.ts"), "export const halfDone = true;\n");
+    expect(await pool.release(first.worktree.path, later(2_000))).toMatchObject({ ok: false, reason: "dirty" });
+
+    const resumed = await pool.lease({ repo, branch: "feat/partial", runner: "builder-1", taskRef: ref, now: later(3_000), reclaim: { evidenceRoot: evidence } });
+    expect(resumed).toMatchObject({ ok: true, resumedFromRun: runId, recoveryKind: "partial" });
+    if (!resumed.ok) return;
+    expect(existsSync(join(resumed.worktree.path, "partial.ts"))).toBe(true);
+  });
+
+  test("provider occupancy replaces the console pid and is fenced to the live lease", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const leased = await pool.lease({ repo, branch: "feat/provider", base: "main", runner: "builder-1", now: T0 });
+    expect(leased.ok).toBe(true);
+    if (!leased.ok) return;
+
+    expect(pool.markProviderOccupancy(leased.worktree.path, "someone-else", 424242)).toBe(false);
+    expect(pool.markProviderOccupancy(leased.worktree.path, "builder-1", 424242)).toBe(true);
+    const marker = await import("node:fs/promises").then(fs => fs.readFile(join(leased.worktree.path, ".standing-orders-lease"), "utf8"));
+    expect(marker).toBe("424242 builder-1\n");
+    expect(pool.markProviderOccupancy(leased.worktree.path, "builder-1", 0)).toBe(false);
+  });
+
+  test("a released checkout is re-inspected even when its old row said clean", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const evidence = join(base, "evidence");
+    store.createTask({ id: "t-late", title: "recover a late write" }, T0);
+    const ref = store.refFor("built-in", "t-late").id;
+    const first = await pool.lease({ repo, branch: "feat/late", base: "main", runner: "builder-1", taskRef: ref, now: T0 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const runId = store.startRun({ taskRef: ref, leaseId: "late-lease", runner: "builder-1", branch: "feat/late", worktree: first.worktree.path, now: T0 });
+    expect(await pool.release(first.worktree.path, later(1_000))).toMatchObject({ ok: true });
+    expect(store.getWorktree(first.worktree.path)?.verified).toBe(true);
+
+    // The provider's last write lands after the controller's clean release.
+    await writeFile(join(first.worktree.path, "late.ts"), "export const arrivedLate = true;\n");
+    const resumed = await pool.lease({ repo, branch: "feat/late", runner: "builder-1", taskRef: ref, now: later(2_000), reclaim: { evidenceRoot: evidence } });
+    expect(resumed).toMatchObject({ ok: true, resumedFromRun: runId, recoveryKind: "partial" });
+    if (!resumed.ok) return;
+    expect(existsSync(join(resumed.worktree.path, "late.ts"))).toBe(true);
+  });
 });

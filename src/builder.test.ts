@@ -718,6 +718,27 @@ describe("what the builder tells the agent", () => {
     expect(prompt).toContain('"reversible": true or false');
   });
 
+  test("a recovered completed draft is reviewed under a fresh handoff instead of rebuilt", async () => {
+    await build1({ recoveredDraftRun: 42, recoveredDraftKind: "completed" });
+
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("completed source draft");
+    expect(prompt).toContain("#42");
+    expect(prompt).toContain("reviewing the existing changes");
+    expect(prompt).toContain("write this attempt's own handoff and proof");
+    expect(prompt).toContain("Do not discard and recreate sound work");
+  });
+
+  test("an interrupted partial draft is continued without pretending it was complete", async () => {
+    await build1({ recoveredDraftRun: 43, recoveredDraftKind: "partial" });
+
+    const prompt = asked[asked.indexOf("-p") + 1] ?? "";
+    expect(prompt).toContain("work-in-progress draft");
+    expect(prompt).toContain("#43");
+    expect(prompt).toContain("preserve sound work");
+    expect(prompt).not.toContain("completed source draft");
+  });
+
   test("the brief states the hard 500-byte cap on a criterion's \"how\", a 350-byte target, and tells the agent to measure before finalizing", async () => {
     // Run 1458 came back short only because every criteria[].how in the proof
     // ran over PROOF_LIMITS.criterionHow (500 bytes) — the whole proof was

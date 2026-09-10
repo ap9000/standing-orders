@@ -2928,6 +2928,15 @@ async function tickCommand(
       ...(spec.model === null ? {} : { model: spec.model }),
       now: clock(),
     });
+    if (leased.resumedFromRun !== undefined) {
+      store.stampRun(runId, { parentRun: leased.resumedFromRun });
+      store.addRunNote(
+        runId,
+        "Standing Orders",
+        `Recovered the ${leased.recoveryKind === "completed" ? "completed source draft" : "work-in-progress draft"} from interrupted attempt #${leased.resumedFromRun}. This fresh attempt is reviewing and verifying it; the safety patch is retained.`,
+        clock(),
+      );
+    }
 
     // The chain custody for this run (E3b/E3d): a parked chain tail hands
     // custody to this successor through the PROVEN resume transfer (parent
@@ -2979,6 +2988,9 @@ async function tickCommand(
       // 30-minute constant read as an operator's ask and stale-approved
       // every profile whose honest clock is shorter (codex-shaped, gemini).
       ...(capMicrousd === null ? {} : { maxBudgetUsd: capMicrousd / 1_000_000 }),
+      onProviderSpawn: pid => {
+        worktrees.markProviderOccupancy(leased.worktree.path, runner, pid);
+      },
       provider: spec.provider,
       ...(spec.model === null ? {} : { model: spec.model }),
       ...(repairModel === undefined ? {} : { repairModel }),
@@ -2989,6 +3001,8 @@ async function tickCommand(
       // the last gate before the commit, so an operator's stop beats an
       // agent's finish even mid-build.
       ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
+      ...(leased.resumedFromRun === undefined ? {} : { recoveredDraftRun: leased.resumedFromRun }),
+      ...(leased.recoveryKind === undefined ? {} : { recoveredDraftKind: leased.recoveryKind }),
       ...(attendedDispatch === null || context.heldCoordinator === undefined
         ? {}
         : {
@@ -3188,6 +3202,15 @@ async function tickCommand(
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: `fallback-${admitted.reason}` });
       continue;
     }
+    if (leased.resumedFromRun !== undefined) {
+      store.stampRun(admitted.runId, { parentRun: leased.resumedFromRun });
+      store.addRunNote(
+        admitted.runId,
+        "Standing Orders",
+        `Recovered the ${leased.recoveryKind === "completed" ? "completed source draft" : "work-in-progress draft"} from interrupted attempt #${leased.resumedFromRun}. This fresh attempt is reviewing and verifying it; the safety patch is retained.`,
+        clock(),
+      );
+    }
     // The effective cap, RE-DERIVED after admission (E3d verify, R6): the
     // pre-claim value is a survey; a backstop set while the claim and
     // worktree awaits ran must govern the spend that actually happens. The
@@ -3218,11 +3241,16 @@ async function tickCommand(
       now: clock(),
       clock,
       ...(capNow === null ? {} : { maxBudgetUsd: capNow / 1_000_000 }),
+      onProviderSpawn: pid => {
+        worktrees.markProviderOccupancy(leased.worktree.path, runner, pid);
+      },
       provider: admitted.provider as ProviderId,
       model: admitted.model,
       ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
       ...(context.gitRunner === undefined ? {} : { git: context.gitRunner }),
       ...(context.shouldStop === undefined ? {} : { shouldStop: context.shouldStop }),
+      ...(leased.resumedFromRun === undefined ? {} : { recoveredDraftRun: leased.resumedFromRun }),
+      ...(leased.recoveryKind === undefined ? {} : { recoveredDraftKind: leased.recoveryKind }),
     });
     await worktrees.release(leased.worktree.path, clock());
     const disposition = disposeBuildOutcome(

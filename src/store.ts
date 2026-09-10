@@ -7618,6 +7618,21 @@ export class Store {
     return row === undefined ? null : Number(row.id);
   }
 
+  /** The newest attempt whose draft custody may still matter after a crash.
+   * Open rows cover a runner that vanished before takeover settlement;
+   * interrupted rows and their explicit recovery children preserve lineage. */
+  latestRecoverableRunInWorktree(path: string): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM run
+          WHERE worktree = ?
+            AND (outcome IS NULL OR reason = 'interrupted' OR parent_run IS NOT NULL)
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(path) as { id: number } | undefined;
+    return row === undefined ? null : Number(row.id);
+  }
+
   getWorktree(path: string): WorktreeRow | null {
     const row = this.db.prepare("SELECT * FROM worktree WHERE path = ?").get(path);
     return row === undefined ? null : readWorktree(row);

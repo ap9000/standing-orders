@@ -87,9 +87,13 @@ export function planDaemon(args: {
   configDir: string;
   watchFlags: readonly string[];
   home?: string;
+  /** The interactive installer's executable search path, pinned into the
+   * service so logged-in provider CLIs remain discoverable after reboot. */
+  pathEnv?: string;
 }): DaemonPlan | { error: string } {
   const { platform, bin, binArgs, runner, repo, configDir, watchFlags } = args;
   const home = args.home ?? homedir();
+  const pathEnv = args.pathEnv ?? process.env["PATH"] ?? "";
   if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
     return {
       error: `no supervisor template for ${platform} — run \`standing-orders watch\` under your own service manager`,
@@ -128,6 +132,11 @@ ${escaped}
   </array>
   <key>WorkingDirectory</key>
   <string>${xml(repo)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${xml(pathEnv)}</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -165,7 +174,8 @@ ${escaped}
     const inner = [quoteWin(bin), ...binArgs.map(quoteWin), "watch",
       "--runner", quoteWin(runner), "--token-file", quoteWin(tokenFile),
       "--repo", quoteWin(repo), ...watchFlags.map(quoteWin)].join(" ");
-    const cmdArguments = `/c "${inner} >> ${quoteWin(logPath)} 2>&1"`;
+    const pathPrefix = pathEnv === "" ? "" : `set "PATH=${pathEnv};%PATH%" && `;
+    const cmdArguments = `/d /s /c "${pathPrefix}${inner} >> ${quoteWin(logPath)} 2>&1"`;
     const unitContent = `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -209,6 +219,7 @@ ${escaped}
 Description=standing-orders watch — ${repo}
 
 [Service]
+Environment=${systemdEscape(`PATH=${pathEnv}`)}
 ExecStart=${command.map(systemdEscape).join(" ")}
 WorkingDirectory=${systemdEscape(repo)}
 Restart=on-failure

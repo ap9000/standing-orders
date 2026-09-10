@@ -57,6 +57,7 @@ describe("the daemon plan", () => {
       configDir: dir,
       watchFlags: ["--tick-every", "60000"],
       home: dir,
+      pathEnv: "/Users/alex/.local/bin:/usr/local/bin:/usr/bin:/bin",
     });
     if ("error" in made) throw new Error(made.error);
     return made;
@@ -76,6 +77,8 @@ describe("the daemon plan", () => {
     expect(made.unitContent).toContain("<key>WorkingDirectory</key>");
     expect(made.unitContent).toContain("<string>/Users/alex/code/thing</string>");
     expect(made.unitContent).toContain("<string>--token-file</string>");
+    expect(made.unitContent).toContain("<key>EnvironmentVariables</key>");
+    expect(made.unitContent).toContain("/Users/alex/.local/bin:/usr/local/bin:/usr/bin:/bin");
     expect(made.unitContent).toContain(join(dir, "runner-token"));
     expect(made.unitContent).not.toContain("--token<");
     // Crash-only KeepAlive: a clean exit (uninstall, operator stop) stays down.
@@ -110,6 +113,7 @@ describe("the daemon plan", () => {
     expect(portablePath(made.unitPath)).toContain(".config/systemd/user");
     expect(made.unitContent).toContain("Restart=on-failure");
     expect(made.unitContent).toContain("WorkingDirectory=/Users/alex/code/thing");
+    expect(made.unitContent).toContain("Environment=PATH=/Users/alex/.local/bin:/usr/local/bin:/usr/bin:/bin");
     expect(made.unitContent).toContain("--token-file");
     expect(made.unitContent).toContain(`append:${made.logPath}`);
   });
@@ -236,6 +240,7 @@ describe("the daemon on windows", () => {
       configDir: dir,
       watchFlags: [],
       home: dir,
+      pathEnv: "C:\\Users\\alex\\AppData\\Roaming\\npm;C:\\Windows\\System32",
     });
     if ("error" in made) throw new Error(made.error);
     return made;
@@ -251,6 +256,7 @@ describe("the daemon on windows", () => {
     expect(made.unitContent).toContain("IgnoreNew");
     // The action funnels output into the shared log file via cmd.
     expect(made.unitContent).toContain("cmd.exe");
+    expect(made.unitContent).toContain("PATH=C:\\Users\\alex\\AppData\\Roaming\\npm;C:\\Windows\\System32;%PATH%");
     expect(made.unitContent).toContain("--token-file");
     expect(made.unitContent).not.toContain("--token ");
     // No wall-clock kill: watch is supposed to run forever.
