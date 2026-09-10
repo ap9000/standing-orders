@@ -152,6 +152,39 @@ top-down and every long thing folds.
    prefills one ordinary feedback form. Collected annotations stay inert until
    the separate revision card seals the exact batch into one unapproved task.
 
+### 4b′. The review cockpit (`/review`)
+
+A master/detail over completed work, built from the same rows the done view
+and the run page read. Desktop: a sticky ranked queue (`minmax(15rem, 19rem)`)
+beside one detail column; at 980px and below the two stack, the queue first
+with a bounded scroll, so the phone reads queue → header → primary act →
+sections. The rules:
+
+- **Review priority is a chip, never a verdict.** Three words — *review
+  first* (`badge-failed`), *look closer* (`badge-manual-review`), *routine*
+  (`badge-done`) — and the reasons are always printed beside the chip, on the
+  row and under the header. The proof word beside it is the receipt's own
+  `receipt-proof` chip, so the cockpit and the task page never disagree.
+- **One primary act** (`.cockpit-next`), chosen from the state: accept a
+  short/refuted proof (the amber `.approve-form`, the same rule as approving
+  a scope), compare a tournament, draft a CI repair, seal ready annotations,
+  open the pull request, or plainly "nothing waits on you". Every other road
+  stays in its own section. A bearer session sees the act named, never a form.
+- **Sections in one scan path**, each a `.cockpit-section` card with an
+  uppercase muted `h3`: approved intent → proof → what the agent said →
+  what changed → annotate and revise → publication → operator notes. Every
+  evidence row is labeled by source (`data-cockpit-source`: machine, agent,
+  reviewer, screenshots, caveats), and an absent source says "none", never
+  nothing.
+- **Changed files carry their own priority** (`.cockpit-files`): outside the
+  signed touches first (flagged `badge-failed`), then binary, dependency/CI/
+  schema/credential paths, uncited files, and large changes, then churn. Each
+  row anchors to its file in the sealed patch (`diff-file-<sha256[0..16]>`),
+  which keeps its sealed order beneath.
+- **Escaping and anchors.** Every displayed value goes through `escape`; the
+  file anchor is derived from the path's bytes so a hostile name can neither
+  break the id nor leave the attribute.
+
 ## 4c. The chat workspace
 
 Chat is always an all-project surface. On a desk, a sticky project rail sits

@@ -65,6 +65,23 @@ Make review faster than reading an agent transcript: intent-to-diff mapping,
 risk-weighted file order, visual proof, test evidence, unresolved caveats, and
 one-click accept, revise, compare, or publish actions.
 
+The first slice has landed as the `/review` cockpit: a master/detail over the
+existing completion records. The queue ranks visible completed tasks by a
+labeled *review priority* (refuted or unaccepted-short proofs, reviewer
+contradictions, and observed CI failures first; manual completions, legacy
+results, and pending manual-review criteria next), with a stable
+`?result=<task>` deep link. The selected result joins the approved scope and
+plan to the stored criterion matrix and sealed diff: changed-path citations
+anchor into the matching file of the parsed patch, files outside non-empty
+signed touches are flagged, and every evidence source — the plane's re-run,
+the agent's checks, the reviewer's judgements and findings, validated
+screenshots, caveats, publication and CI observations — is labeled and says
+plainly when it is missing or truncated. The primary act is chosen from the
+state and posts to the endpoint that already owns it (accept-proof, comment,
+revise, draft-repair) or links to the comparison screen and the pull
+request. No review-state schema, agent stage, or authority was added; the
+priority order never changes the persisted verdict or the downloadable patch.
+
 ## 6. Adaptive routing and project learning
 
 Route planning, building, repair, and review independently by task risk and
@@ -77,7 +94,8 @@ visible provenance and an operator-controlled reset.
 Priority 3 is active. Priority 1 is implemented and has passed every
 pre-Windows gate; only the physical-machine and real account-exhaustion checks
 listed above remain. Priority 2's proof contract, independent review, concise
-result receipt, and annotated revision flow have landed.
+result receipt, and annotated revision flow have landed, and Priority 5's first
+slice — the review cockpit over completed work — is in.
 
 The first Priority 3 slice closes the focused chat's request-to-result loop
 without introducing a second workflow engine. A confirmed task proposal now

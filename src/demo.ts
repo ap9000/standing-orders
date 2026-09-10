@@ -122,7 +122,9 @@ const DEMO_PROOF = {
   ],
   checks: [{ command: "npm test", exitCode: 0, summary: "214 tests passed, including the new rounding boundary cases." }],
   changed: ["src/payout.ts", "src/payout.test.ts"],
-  caveats: [],
+  // One declared caveat, so the review cockpit's "caveats" row shows a real
+  // agent-declared concern in the sandbox rather than only its empty state.
+  caveats: ["The dashboard screenshot was captured against the ledger fixtures, not production data."],
   screenshots: [{ path: "evidence/payout-dashboard.png", caption: "Payout dashboard after the fix — totals match the ledger." }],
 };
 

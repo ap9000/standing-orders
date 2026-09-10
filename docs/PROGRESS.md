@@ -1,5 +1,31 @@
 # Progress
 
+**2026-09-10 — Completed work now has a review cockpit.** The `/review` view of
+builds is no longer a PR-order list; it is a master/detail over every visible
+completed task, ranked by a labeled review priority — refuted or unaccepted
+proofs, reviewer contradictions, and observed CI failures first; manual
+completions, legacy results, and criteria still waiting for a human next —
+with a stable `?result=<task>` deep link and an honest note when the link
+names something not in view. The selected result joins the approved goal,
+boundary, touches, and plan approach to the stored criterion matrix and the
+sealed diff: every changed-path citation anchors into that file's section of
+the parsed patch, files outside non-empty signed touches are flagged, and the
+changed-file list is ordered by its own explained priority while the sealed
+patch beneath keeps its order and downloads byte for byte. Evidence is
+labeled by source — the plane's re-run, the agent's checks, the independent
+reviewer's judgements and findings, validated screenshots, caveats and
+follow-ups, publication state and what the CI watcher actually saw — and each
+absent or truncated source says so. One primary act is chosen from the state
+and posts to the endpoint that already owns it (accept-proof, comment,
+revise, draft-repair) or links to the comparison screen and the pull request;
+the comment endpoint now honors exactly one validated cockpit return path.
+The done archive and the result receipt link into the cockpit. Route and
+pure-helper coverage proves admission before ranking, escaping, legacy and
+manual completions, broken artifacts, every priority band and tie-break,
+action eligibility with CSRF, and the bearer read-only view; desktop and
+390px captures from the seeded demo are checked in under
+`evidence/review-cockpit/`. No schema, agent stage, or authority was added.
+
 **2026-09-10 — Interrupted agents keep their work instead of starting over.**
 The recovery path now re-inspects every released worktree at lease time rather
 than trusting an older “clean” database flag. If a runner or console disappears

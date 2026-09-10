@@ -1311,30 +1311,41 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/review") {
-      // The review queue (M8.19): READ-ONLY merge-order advice. The plane
-      // observes and recommends; the person merges on GitHub. Every row is
-      // ceiling-checked like any other run resource, and CI claims stay
-      // honest — an open episode is an OBSERVED failure, its absence is
-      // "no failing observation", never a green the machine did not see.
-      // Rank by what was OBSERVED (audit SD-4): passing first, silence in
-      // the middle and labeled as silence, failing last. Green is a fact
-      // the watcher saw, never an inference from quiet.
-      const rankOf = (failing: boolean, checkState: string | null): number =>
-        failing ? 2 : checkState === "passing" ? 0 : 1;
+      // The review cockpit (Priority 5): every visible COMPLETED task,
+      // ranked by review priority, with one selected result projected
+      // from the records the task, run, and done pages already read —
+      // scope, plan, run, artifacts, verdict, contest, publication. The
+      // ranking is a labeled presentation aid: it never rewrites the
+      // stored verdict, and the sealed patch downloads exactly as stored.
+      // Admission binds BEFORE the SQL limit (the done page's own rule),
+      // and every row is re-proved against the ceiling before ranking.
       const rows = store
-        .openedPublications()
-        .filter(one => visible(taskRepoOf(one.taskRef)))
-        .map(one => ({
-          publication: one,
-          taskId: store.externalIdFor(one.taskRef) ?? "?",
-          failing: one.prNumber === null ? false : store.hasOpenCiEpisode(one.githubRepo, one.prNumber),
-        }))
-        .sort((a, b) => {
-          const rankA = rankOf(a.failing, a.publication.lastCheckState);
-          const rankB = rankOf(b.failing, b.publication.lastCheckState);
-          return rankA !== rankB ? rankA - rankB : a.publication.updatedAt.localeCompare(b.publication.updatedAt);
-        });
-      return sendScreen(response, 200, reviewPage(chromeFor(project, "runs"), rows, now));
+        .listCompletedWorkScoped(project, REVIEW_QUEUE_CAP, admissionList())
+        .filter(row => visible(row.repo))
+        .map(row => ({ ...row, ciFailing: ciFailingFor(row.runId, row.prNumber) }));
+      const ranked = rankReviewQueue(rows);
+      const wanted = url.searchParams.get("result");
+      const wantedId =
+        wanted === null || wanted.length === 0 || wanted.length > 64 || hasForbiddenControls(wanted) ? null : wanted;
+      const chosen = wantedId === null ? null : ranked.find(one => one.taskId === wantedId) ?? null;
+      const selectedRow = chosen ?? ranked[0] ?? null;
+      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow);
+      return sendScreen(
+        response,
+        200,
+        reviewCockpitPage(chromeFor(project, "runs"), {
+          queue: ranked,
+          selected,
+          // A deep link to a result this queue cannot show — not done, not
+          // admitted, or never existed — says so in one sentence and
+          // shows the top of the queue; the three cases read identically.
+          missing: wantedId !== null && chosen === null ? wantedId : null,
+          csrf,
+          noted: url.searchParams.get("noted") === "1",
+          now,
+        }),
+      );
     }
 
     if (url.pathname === "/activity") {
@@ -2551,7 +2562,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       { label: "workbench", href: "/workbench" },
       { label: "routines", href: "/routines" },
       { label: "done", href: "/done" },
-      { label: "review queue", href: "/review" },
+      { label: "review cockpit", href: "/review" },
       { label: "task list", href: "/tasks" },
       { label: "fleet", href: "/fleet" },
       { label: "activity", href: "/activity" },
@@ -5079,8 +5090,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       // Land back AT the review card with the note field ready — writing
       // five comments in a row must cost five keystrokes of navigation,
       // not five scrolls (arc 6, finding 5/6: this REDUCES the unsent-note
-      // hazard; the seal below remains the real batch operation).
-      return redirect(response, `/r/${id}?noted=1#review`);
+      // hazard; the seal below remains the real batch operation). The
+      // review cockpit (Priority 5) names itself as the return road; only
+      // that exact shape is honored — anything else lands on the run page.
+      const back = body.get("return") ?? "";
+      return redirect(response, REVIEW_RETURN.test(back) ? `${back}&noted=1#annotate` : `/r/${id}?noted=1#review`);
     }
 
     if (url.pathname === "/session/editor-links") {
@@ -6411,6 +6425,146 @@ export function createDecisionServer(options: ServeOptions): Server {
     });
   }
 
+
+  /**
+   * The review cockpit's projection of ONE completed task (Priority 5):
+   * approved intent from the scope and plan already on file, the result
+   * run's sealed artifacts through the same verified readers the run page
+   * uses, the stored verdict and matrix, the contest and publication
+   * rows. Nothing here is a new record: a manual completion (no run), a
+   * legacy result (no proof verdict), and a broken artifact each read as
+   * exactly what they are. Only the selected result is enriched — the
+   * queue rows carry the done list's own facts and nothing more.
+   */
+  /** An OBSERVED CI failure on a completed row's PR — the open episode the
+   * watcher recorded for exactly that repository and number; never a guess
+   * from quiet. One indexed publication read per row that has a PR. */
+  function ciFailingFor(runId: number | null, prNumber: number | null): boolean {
+    if (runId === null || prNumber === null) return false;
+    const publication = store.publicationForRun(runId);
+    return publication !== null && publication.prNumber === prNumber && store.hasOpenCiEpisode(publication.githubRepo, prNumber);
+  }
+
+  function reviewCockpitViewOf(row: RankedReviewRow): ReviewCockpitView {
+    const ref = store.lookupRef(row.taskId);
+    const scope = store.getScope(row.taskId);
+    const intent: ReviewCockpitView["intent"] =
+      scope === null
+        ? null
+        : {
+            goal: scope.goal,
+            outOfScope: scope.outOfScope,
+            touches: scope.touches,
+            acceptance: scope.acceptance,
+            approval: approvalOf(scope),
+            approvedBy: scope.approvedBy,
+          };
+    const plan = (() => {
+      if (ref === null) return null;
+      const current = revisionLedgerOf(ref.id).current;
+      if (current === null) return null;
+      const parsed = parseExecutionPlanDocument(current.document);
+      return {
+        revision: current.revision,
+        sha256: current.sha256,
+        approach: parsed.ok ? oneLineOf(parsed.document.approach, 600) : null,
+      };
+    })();
+    const contestOf = (): ReviewCockpitView["contest"] => {
+      // Either road to a tournament: the result run was one of its
+      // contestants, or the task still owes an operator a comparison.
+      const run = row.runId === null ? null : store.getRun(row.runId);
+      const viaRun = run?.contestant === null || run?.contestant === undefined ? null : store.getContestant(run.contestant);
+      const contest = viaRun === null ? (ref === null ? null : store.contestNeedingOperator(ref.id)) : store.getContest(viaRun.contest);
+      return contest === null ? null : { id: contest.id, state: contest.state, kind: contest.kind, agents: store.contestants(contest.id).length };
+    };
+    const base = {
+      taskId: row.taskId,
+      title: row.title,
+      repo: row.repo,
+      completedAt: row.completedAt,
+      priority: row.priority,
+      intent,
+      plan,
+      contest: contestOf(),
+    };
+    const run = row.runId === null ? null : store.getRun(row.runId);
+    if (run === null) {
+      return { ...base, run: null, handoff: null, proof: null, terminal: null, files: [], outsideTouches: [], fileAnchors: new Map(), comments: [], reviewerFindings: [], publication: null, notes: [] };
+    }
+    const artifacts = store.artifactsFor(run.id);
+    const terminal = terminalDiffView(artifacts, evidenceRoot);
+    const proof = proofBundleView(store, run, artifacts, evidenceRoot);
+    const handoff = structuredHandoffView(artifacts, evidenceRoot);
+    // File anchors come from the PARSED sealed patch — a stat path with no
+    // hunk in the patch gets no anchor, never a dangling one.
+    const parsedPaths =
+      terminal?.patch !== null && terminal?.patch !== undefined && !("problem" in terminal.patch)
+        ? parseReviewDiff(terminal.patch.text).files.filter(one => one.hunks.length > 0).map(one => one.path)
+        : [];
+    const fileAnchors = new Map(parsedPaths.map(path => [path, diffFileAnchor(path)] as const));
+    const statFiles =
+      terminal?.stat !== null && terminal?.stat !== undefined && !("problem" in terminal.stat) ? terminal.stat.files : [];
+    const cited = new Set<string>();
+    for (const criterion of proof?.matrix ?? []) {
+      for (const answer of criterion.answered) if (answer.kind === "changed-path") cited.add(answer.ref);
+    }
+    const touches = intent?.touches ?? [];
+    const files = orderChangedFiles(
+      statFiles.map(file => ({
+        path: file.path,
+        additions: file.additions,
+        deletions: file.deletions,
+        renamedFrom: file.renamedFrom ?? null,
+        anchor: fileAnchors.get(file.path) ?? null,
+        outsideTouches: touches.length > 0 && !withinSignedTouches(file.path, touches),
+        cited: cited.has(file.path),
+      })),
+      cited.size > 0,
+    );
+    const publication = store.publicationForRun(run.id);
+    return {
+      ...base,
+      run: {
+        id: run.id,
+        outcome: run.outcome,
+        runner: run.runner,
+        provider: run.provider,
+        model: run.model,
+        finishedAt: run.finishedAt,
+        branch: run.branch,
+        headRevision: run.headRevision,
+        ranMinutes: row.ranMinutes,
+        cost: runCostWords(run, false),
+        summary: handoff?.conclusion ?? run.handoff,
+      },
+      handoff,
+      proof,
+      terminal,
+      files,
+      outsideTouches: files.filter(one => one.outsideTouches).map(one => one.path),
+      fileAnchors,
+      comments: store.liveDiffComments(run.id),
+      reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
+      publication:
+        publication === null
+          ? null
+          : {
+              state: publication.state,
+              prNumber: publication.prNumber,
+              prUrl: safePrUrl(publication.prUrl),
+              githubRepo: publication.githubRepo,
+              remoteState: publication.remoteState,
+              lastCheckState: publication.lastCheckState,
+              lastCheckAt: publication.lastCheckAt,
+              lastError: publication.lastError,
+              attempts: publication.attempts,
+              ciFailing: publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber),
+            },
+      notes: store.notesForRun(run.id),
+    };
+  }
+
   // ---- evidence ------------------------------------------------------------
 
   function decisionEvidence(response: ServerResponse, decisionId: number, artifactId: number): void {
@@ -6733,7 +6887,7 @@ function evidenceLinksFor(artifacts: readonly Artifact[]): EvidenceLinkMap {
  * given and a link resolves; plain text otherwise. */
 function criterionMatrixHtml(
   matrix: readonly CriterionMatrixRow[],
-  options: { compact?: boolean; runId?: number; links?: EvidenceLinkMap } = {},
+  options: { compact?: boolean; runId?: number; links?: EvidenceLinkMap; fileAnchors?: ReadonlyMap<string, string> } = {},
 ): string {
   if (matrix.length === 0) return "";
   const compact = options.compact === true;
@@ -6742,6 +6896,11 @@ function criterionMatrixHtml(
     if (answered.length === 0) return "";
     const items = answered.map((a: CriterionEvidenceRef) => {
       const text = `${escape(a.kind)}: ${escape(a.ref)}`;
+      // The review cockpit (Priority 5): a changed-path citation whose
+      // file is in the parsed sealed patch links to THAT file's section on
+      // the same page; every other ref keeps its artifact link.
+      const anchor = a.kind === "changed-path" ? options.fileAnchors?.get(a.ref) : undefined;
+      if (anchor !== undefined) return `<a href="#${anchor}">${text}</a>`;
       const artifactId = options.links?.get(`${a.kind}:${a.ref}`) ?? (a.kind === "changed-path" ? options.links?.get("changed-path:*") : undefined);
       return artifactId !== undefined && options.runId !== undefined
         ? `<a href="/r/${options.runId}/evidence/${artifactId}">${text}</a>`
@@ -7325,6 +7484,50 @@ const STYLE = `
   .receipt-caveats ul { margin: .3rem 0 0; padding-left: 1.15rem; }
   .receipt-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem 1rem; margin-top: .9rem; }
   .receipt-actions > a:not(.button-link) { font-size: .78rem; font-weight: 550; }
+  /* The review cockpit (Priority 5): a master/detail over completed work.
+     The queue is a ranked list, the detail one scan path — intent, proof,
+     changes, publication — and the primary act sits under the header. */
+  main:has(.cockpit) { max-width: 82rem; }
+  .cockpit { display: grid; grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr); gap: 0 1.5rem; align-items: start; }
+  .cockpit-queue { position: sticky; top: 1rem; min-width: 0; }
+  .cockpit-queue h2 { display: flex; align-items: center; gap: .4rem; margin: 0 0 .25rem; }
+  .cockpit-queue .lane-count { border: 1px solid var(--border); border-radius: 999px; padding: .04rem .5rem; font-weight: 500; color: var(--muted-foreground); font-size: .6875rem; }
+  .cockpit-queue-hint { margin: 0 0 .6rem; font-size: .7rem; line-height: 1.4; }
+  .cockpit-queue-list { list-style: none; margin: 0; padding: 0; max-height: calc(100vh - 9rem); overflow-y: auto; }
+  .cockpit-row {
+    display: grid; gap: .2rem; padding: .55rem .65rem; margin-bottom: .2rem; min-width: 0;
+    border: 1px solid transparent; border-radius: calc(var(--radius) - 3px); text-decoration: none; color: var(--foreground);
+  }
+  .cockpit-row:hover { background: var(--card); }
+  .cockpit-row.current { background: var(--muted); border-color: color-mix(in srgb, var(--foreground) 12%, var(--border)); }
+  .cockpit-row-head { display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem; min-width: 0; }
+  .cockpit-row-head strong { min-width: 0; overflow-wrap: anywhere; font-size: .8125rem; font-weight: 550; }
+  .cockpit-row-meta { display: block; color: var(--muted-foreground); font-size: .68rem; overflow-wrap: anywhere; }
+  .cockpit-why { display: block; color: var(--muted-foreground); font-size: .7rem; line-height: 1.35; overflow-wrap: anywhere; }
+  .review-priority { flex: none; white-space: nowrap; }
+  .cockpit-detail { min-width: 0; }
+  .cockpit-head h2 { margin: .15rem 0 .5rem; font-size: 1.25rem; overflow-wrap: anywhere; }
+  .cockpit-head .eyebrow { margin: 0; }
+  .cockpit-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin: 0 0 .35rem; }
+  .cockpit-next { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .85rem 0 1rem; padding: .85rem 1rem;
+    border-color: color-mix(in srgb, var(--running) 24%, var(--glass-border)); }
+  .cockpit-next > div { display: grid; gap: .2rem; min-width: 0; }
+  .cockpit-next .meta { font-size: .78rem; line-height: 1.45; }
+  .cockpit-next form { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; }
+  .cockpit-next form input[type=text] { min-width: 9rem; margin: 0; }
+  .cockpit-next .button-link, .cockpit-next button[type=submit] { white-space: nowrap; }
+  .cockpit-section { margin: .85rem 0; padding: .95rem 1.05rem; }
+  .cockpit-section h3 { margin: 0 0 .5rem; font-size: .8rem; letter-spacing: .02em; text-transform: uppercase; color: var(--muted-foreground); }
+  .cockpit-section .recap { margin: .35rem 0; }
+  .cockpit-section .result-section { margin-top: .6rem; }
+  .cockpit-section .result-section ul, .cockpit-section ul { margin: .25rem 0 0; padding-left: 1.15rem; }
+  .cockpit-section li { overflow-wrap: anywhere; }
+  .cockpit-drift { margin: .6rem 0; font-size: .8rem; }
+  .cockpit-files { margin: .4rem 0 .6rem; padding-left: 1.25rem; font-size: .78rem; }
+  .cockpit-files li { margin: .2rem 0; }
+  .cockpit-files .pick-file { min-height: 1.6rem; padding: 0 .5rem; font-size: .65rem; }
+  .cockpit-section .diff-review { margin-top: .6rem; }
+  .cockpit-section .receipt-visuals { margin-top: .6rem; grid-template-columns: repeat(auto-fill, minmax(9rem, 14rem)); }
   .diff-review {
     overflow: hidden; margin: .8rem 0 .5rem; border: 1px solid var(--glass-border);
     border-radius: var(--radius); background: color-mix(in srgb, var(--card) 82%, transparent);
@@ -7871,6 +8074,9 @@ const STYLE = `
   main:has(.task-layout) { max-width: 76rem; }
   @media (max-width: 980px) {
     .task-layout { grid-template-columns: 1fr; }
+    .cockpit { grid-template-columns: 1fr; }
+    .cockpit-queue { position: static; padding-bottom: .75rem; margin-bottom: .5rem; border-bottom: 1px solid var(--border); }
+    .cockpit-queue-list { max-height: 15rem; }
     .task-rail { position: static; order: -1; border-bottom: 1px solid var(--border); padding-bottom: .75rem; margin-bottom: .75rem; }
     .acts-bar form.inline, .acts-bar .primary, .acts-bar .primary form { flex: 1 1 auto; }
     .acts-bar .primary { flex-basis: 100%; }
@@ -8709,6 +8915,14 @@ button { min-height: 44px; }
   .receipt-facts { grid-template-columns: 1fr; }
   .receipt-actions { display: grid; grid-template-columns: 1fr; }
   .receipt-actions .button-link { width: 100%; box-sizing: border-box; text-align: center; }
+  .cockpit { grid-template-columns: 1fr; }
+  .cockpit-queue { position: static; padding-bottom: .75rem; margin-bottom: .5rem; border-bottom: 1px solid var(--border); }
+  .cockpit-queue-list { max-height: 15rem; }
+  .cockpit-next { display: grid; }
+  .cockpit-next form, .cockpit-next .button-link { width: 100%; box-sizing: border-box; }
+  .cockpit-next form input[type=text] { flex: 1 1 100%; }
+  .cockpit-next form button[type=submit] { width: 100%; }
+  .cockpit-section { padding: .85rem .8rem; }
   .diff-review { margin-inline: -.1rem; }
   .diff-review-bar { padding-left: .7rem; }
   .diff-file > summary { padding-inline: .7rem; }
@@ -10074,14 +10288,15 @@ function donePage(
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
               `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}${needsVerification}${criterionMatrixSummary(row.proofMatrix)}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
-              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}</p></div>`
+              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}` +
+              ` \u00b7 <a href="${reviewHref(row.taskId)}">review \u2192</a></p></div>`
             );
           })
           .join("\n");
   return screen("done", [
     `<h1>done</h1>`,
     buildsViews("done"),
-    `<p class="hint">completed work \u2014 each with its final build, the agent's conclusion, usage, and its pull request</p>`,
+    `<p class="hint">completed work in order of completion \u2014 each with its final build, the agent's conclusion, usage, and its pull request; <a href="/review">review</a> ranks the same work by what needs a reviewer first</p>`,
     list,
   ].join("\n"), { chrome });
 }
@@ -14463,48 +14678,606 @@ function safePrUrl(url: string | null): string | null {
   }
 }
 
-function reviewPage(
-  chrome: Chrome,
-  rows: { publication: Publication; taskId: string; failing: boolean }[],
-  now: Date,
-): Screen {
-  const ageOf = (iso: string): string => {
-    const hours = Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / 3_600_000));
-    return hours < 1 ? "under an hour" : hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
+// ---- the review cockpit (Priority 5) ----------------------------------------
+
+/** The queue reads at most this many completed tasks — the store's own
+ * page ceiling, admission bound before it. */
+const REVIEW_QUEUE_CAP = 100;
+
+/** The one return road the comment endpoint honors besides its own run
+ * page: the cockpit's selected-result link, exactly. */
+const REVIEW_RETURN = /^\/review\?result=[A-Za-z0-9._~%-]{1,200}$/;
+
+/** Review priority: a deterministic, LABELED presentation aid over facts
+ * the done list already carries. Band 0 goes first; the words name why.
+ * It is never a verdict — the stored proof verdict stays the authority,
+ * and an operator's acceptance lowers a band without touching it. */
+export type ReviewPriority = { band: 0 | 1 | 2; label: "review first" | "look closer" | "routine"; reasons: string[] };
+
+export type ReviewQueueFacts = {
+  runId: number | null;
+  outcome: string | null;
+  proofVerdict: ProofVerdict | null;
+  proofAccepted: boolean;
+  proofMatrix: readonly CriterionMatrixRow[];
+  ciFailing: boolean;
+  publicationState: string | null;
+};
+
+const PRIORITY_LABELS: Record<ReviewPriority["band"], ReviewPriority["label"]> = { 0: "review first", 1: "look closer", 2: "routine" };
+
+export function reviewPriorityOf(row: ReviewQueueFacts): ReviewPriority {
+  const reasons: string[] = [];
+  let band: ReviewPriority["band"] = 2;
+  const raise = (to: ReviewPriority["band"], why: string): void => {
+    if (to < band) band = to;
+    reasons.push(why);
   };
-  const ready = rows.filter(one => !one.failing && one.publication.lastCheckState === "passing");
-  const list =
-    rows.length === 0
-      ? `<p class="meta">No open pull requests from this plane. Built work appears here the moment its PR opens.</p>`
-      : rows
-          .map((one, index) => {
-            const p = one.publication;
+  if (row.runId === null) {
+    raise(1, "marked done by hand — no build record to verify");
+    return { band, label: PRIORITY_LABELS[band], reasons };
+  }
+  const ids = (predicate: (one: CriterionMatrixRow) => boolean): string => row.proofMatrix.filter(predicate).map(one => one.id).join(", ");
+  const contradicted = ids(one => one.review?.judgement === "contradicts");
+  const broken = ids(one => one.state === "failed" || one.state === "missing");
+  const manual = ids(one => one.state === "manual-review");
+  if (row.proofVerdict === "refuted") {
+    raise(row.proofAccepted ? 1 : 0, row.proofAccepted ? "proof refuted — accepted anyway by an operator" : "proof refuted — not accepted");
+  } else if (row.proofVerdict === "short") {
+    raise(row.proofAccepted ? 1 : 0, row.proofAccepted ? "proof incomplete — accepted anyway by an operator" : "proof incomplete — needs verification");
+  }
+  if (contradicted !== "") raise(row.proofAccepted ? 1 : 0, `an independent reviewer contradicted ${contradicted}`);
+  if (broken !== "") raise(row.proofAccepted ? 1 : 0, `evidence failed or missing for ${broken}`);
+  if (row.ciFailing) raise(0, "CI failing on its pull request — observed, not inferred");
+  if (row.publicationState === "failed") raise(1, "publication failed — the branch never reached its remote");
+  if (manual !== "" && !row.proofAccepted) raise(1, `awaits a human's eyes: ${manual}`);
+  if (row.proofVerdict === null && row.outcome !== "no-change") raise(1, "built before the proof system — no machine verdict on record");
+  return { band, label: PRIORITY_LABELS[band], reasons };
+}
+
+/** Ranked, stable: band first, then newest completion, then task id — the
+ * same input always yields the same queue, whoever loads it. */
+export function rankReviewQueue<T extends ReviewQueueFacts & { completedAt: string; taskId: string }>(rows: readonly T[]): (T & { priority: ReviewPriority })[] {
+  return rows
+    .map(row => ({ ...row, priority: reviewPriorityOf(row) }))
+    .sort((a, b) =>
+      a.priority.band !== b.priority.band
+        ? a.priority.band - b.priority.band
+        : a.completedAt !== b.completedAt
+          ? b.completedAt.localeCompare(a.completedAt)
+          : a.taskId.localeCompare(b.taskId),
+    );
+}
+
+/** Whether a changed path sits inside the scope's signed "touches" — an
+ * exact file, a directory prefix (with or without its slash), or a plain
+ * `*` / `**` glob. Touches are advisory in the scope; here they only
+ * decide which files wear the "outside the signed touches" flag. */
+export function withinSignedTouches(path: string, touches: readonly string[]): boolean {
+  return touches.some(raw => {
+    const touch = raw.trim().replace(/^\.\//, "");
+    if (touch === "") return false;
+    if (touch.includes("*")) {
+      const pattern = touch
+        .split("**")
+        .map(part => part.split("*").map(piece => piece.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*"))
+        .join(".*");
+      return new RegExp(`^${pattern}(?:/.*)?$`).test(path);
+    }
+    const dir = touch.endsWith("/") ? touch : `${touch}/`;
+    return path === touch || path.startsWith(dir);
+  });
+}
+
+/** A stable, attribute-safe anchor for one file of the sealed patch —
+ * derived from the path's bytes, never from the path's characters, so a
+ * hostile file name can neither break the id nor escape the attribute. */
+export function diffFileAnchor(path: string): string {
+  return `diff-file-${createHash("sha256").update(path, "utf8").digest("hex").slice(0, 16)}`;
+}
+
+export type ReviewFileRow = {
+  path: string;
+  additions: number | null;
+  deletions: number | null;
+  renamedFrom: string | null;
+  anchor: string | null;
+  outsideTouches: boolean;
+  cited: boolean;
+};
+
+const SENSITIVE_PATH =
+  /(^|\/)(\.github|migrations?)\/|(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|Dockerfile|\.env[^/]*|schema[^/]*\.(sql|prisma)|[^/]*(auth|secret|token|permission|credential)[^/]*)$/i;
+const LARGE_CHANGE_LINES = 200;
+
+/** The changed-file list's own review priority: outside the signed
+ * touches first, then files a machine cannot diff or a criterion never
+ * cited, then the rest by churn. Presentation only — the sealed patch
+ * keeps its own order beneath, byte for byte. */
+export function reviewFilePriority(file: ReviewFileRow, proofCitesPaths: boolean): ReviewPriority {
+  const reasons: string[] = [];
+  let band: ReviewPriority["band"] = 2;
+  const raise = (to: ReviewPriority["band"], why: string): void => {
+    if (to < band) band = to;
+    reasons.push(why);
+  };
+  if (file.outsideTouches) raise(0, "outside the signed touches");
+  if (file.additions === null || file.deletions === null) raise(1, "binary — nothing to read here");
+  if (SENSITIVE_PATH.test(file.path)) raise(1, "dependencies, CI, schema, or credentials");
+  if (proofCitesPaths && !file.cited) raise(1, "no criterion cites this file");
+  if (file.additions !== null && file.deletions !== null && file.additions + file.deletions >= LARGE_CHANGE_LINES) raise(1, "a large change");
+  if (file.anchor === null) raise(1, "not in the sealed patch — see the raw record");
+  return { band, label: PRIORITY_LABELS[band], reasons };
+}
+
+export function orderChangedFiles(files: readonly ReviewFileRow[], proofCitesPaths: boolean): (ReviewFileRow & { priority: ReviewPriority })[] {
+  const churn = (file: ReviewFileRow): number => (file.additions ?? 0) + (file.deletions ?? 0);
+  return files
+    .map(file => ({ ...file, priority: reviewFilePriority(file, proofCitesPaths) }))
+    .sort((a, b) =>
+      a.priority.band !== b.priority.band
+        ? a.priority.band - b.priority.band
+        : churn(a) !== churn(b)
+          ? churn(b) - churn(a)
+          : a.path.localeCompare(b.path),
+    );
+}
+
+type RankedReviewRow = ReturnType<Store["listCompletedWorkScoped"]>[number] & { ciFailing: boolean; priority: ReviewPriority };
+
+/** What the cockpit shows of one selected result — a projection of the
+ * scope, plan, run, artifact, verdict, contest, and publication records,
+ * each read through the verifier the run page already uses. */
+type ReviewCockpitView = {
+  taskId: string;
+  title: string;
+  repo: string | null;
+  completedAt: string;
+  priority: ReviewPriority;
+  /** null = no scope was ever filed (a task marked done by hand). */
+  intent: {
+    goal: string;
+    outOfScope: string | null;
+    touches: string[];
+    acceptance: AcceptanceCriterion[];
+    approval: ReturnType<typeof approvalOf>;
+    approvedBy: string | null;
+  } | null;
+  plan: { revision: number; sha256: string; approach: string | null } | null;
+  contest: { id: number; state: string; kind: "race" | "comparison"; agents: number } | null;
+  /** null = the task is done with no finished build attempt on record. */
+  run: {
+    id: number;
+    outcome: string | null;
+    runner: string;
+    provider: string;
+    model: string | null;
+    finishedAt: string | null;
+    branch: string | null;
+    headRevision: string | null;
+    ranMinutes: number | null;
+    cost: string;
+    summary: string | null;
+  } | null;
+  handoff: StructuredHandoffView | null;
+  proof: ProofBundleView | null;
+  terminal: TerminalDiffView | null;
+  files: (ReviewFileRow & { priority: ReviewPriority })[];
+  outsideTouches: string[];
+  fileAnchors: ReadonlyMap<string, string>;
+  comments: DiffComment[];
+  reviewerFindings: DiffComment[];
+  publication: {
+    state: Publication["state"];
+    prNumber: number | null;
+    prUrl: string | null;
+    githubRepo: string;
+    remoteState: string | null;
+    lastCheckState: string | null;
+    lastCheckAt: string | null;
+    lastError: string | null;
+    attempts: number;
+    ciFailing: boolean;
+  } | null;
+  notes: { id: number; author: string; note: string; createdAt: string }[];
+};
+
+const reviewHref = (taskId: string): string => `/review?result=${encodeURIComponent(taskId)}`;
+
+function priorityChip(priority: ReviewPriority): string {
+  const cls = priority.band === 0 ? "badge-failed" : priority.band === 1 ? "badge-manual-review" : "badge-done";
+  return `<span class="badge ${cls} review-priority" data-review-priority="${priority.band}">${escape(priority.label)}</span>`;
+}
+
+/** The one-word verdict chip the receipt already wears, so the cockpit
+ * and the task page never disagree on the state's name. */
+function proofStateChip(verdict: ProofVerdict | null, accepted: boolean, run: boolean, outcome: string | null): string {
+  const chip =
+    !run
+      ? { word: "No build record", state: "unknown" }
+      : outcome === "no-change"
+        ? { word: "No change needed", state: verdict === null ? "attested" : verdict === "verified" ? "verified" : "attested" }
+        : verdict === null
+          ? { word: "Unverified", state: "unknown" }
+          : verdict === "verified"
+            ? { word: "Verified", state: "verified" }
+            : verdict === "attested"
+              ? { word: "Evidence captured", state: "attested" }
+              : verdict === "refuted"
+                ? { word: accepted ? "Accepted with concerns" : "Proof refuted", state: "problem" }
+                : { word: accepted ? "Accepted with gaps" : "Needs verification", state: "problem" };
+  return `<span class="receipt-proof" data-proof-state="${chip.state}"><i aria-hidden="true"></i>${escape(chip.word)}</span>`;
+}
+
+function reviewCockpitPage(
+  chrome: Chrome,
+  data: { queue: readonly RankedReviewRow[]; selected: ReviewCockpitView | null; missing: string | null; csrf: string; noted: boolean; now: Date },
+): Screen {
+  const { queue, selected, csrf } = data;
+  const elevated = queue.filter(one => one.priority.band < 2).length;
+  const queueRows =
+    queue.length === 0
+      ? `<p class="meta">No finished tasks yet. Completed work appears here the moment a build finishes or a task is marked done.</p>`
+      : `<ol class="cockpit-queue-list">` +
+        queue
+          .map(row => {
+            const current = selected !== null && selected.taskId === row.taskId;
+            const why = row.priority.reasons.length === 0 ? "" : `<span class="cockpit-why">${escape(row.priority.reasons[0] as string)}${row.priority.reasons.length > 1 ? ` · +${row.priority.reasons.length - 1} more` : ""}</span>`;
             return (
-              `<div class="card">` +
-              `<p><strong>${index === 0 && !one.failing && p.lastCheckState === "passing" ? "review next — " : ""}PR #${p.prNumber ?? "?"}</strong> ` +
-              `<span class="mono">${escape(one.taskId)}</span>` +
-              `<span class="meta"> · ${escape(p.githubRepo)} · open ${ageOf(p.updatedAt)}</span></p>` +
-              `<p class="meta">${
-                one.failing
-                  ? "CI failing — observed; a repair can be drafted from the run page"
-                  : p.lastCheckState === "passing"
-                    ? `CI passing — observed ${escape(when(p.lastCheckAt ?? p.updatedAt))}`
-                    : p.lastCheckState === "running"
-                      ? "CI still running at the last observation"
-                      : "no checks observed (the machine never calls silence green — verify on GitHub)"
-              }</p>` +
-              `<p class="row">${safePrUrl(p.prUrl) === null ? "" : `<a href="${escape(safePrUrl(p.prUrl) as string)}">review on GitHub →</a>`} ` +
-              `<a href="/r/${p.run}">the build</a></p>` +
-              `</div>`
+              `<li><a class="cockpit-row${current ? " current" : ""}" href="${reviewHref(row.taskId)}"${current ? ` aria-current="page"` : ""}>` +
+              `<span class="cockpit-row-head"><strong>${escape(row.title)}</strong>${priorityChip(row.priority)}</span>` +
+              `<span class="cockpit-row-meta mono">${escape(row.taskId)} · ${escape(when(row.completedAt))}${row.runId === null ? " · no build" : row.outcome === "no-change" ? " · no change" : ""}${row.prNumber === null ? "" : ` · PR #${row.prNumber}`}</span>` +
+              why +
+              `</a></li>`
             );
           })
-          .join("\n");
-  return screen("review queue", [
-    `<h1>review queue</h1>`,
+          .join("\n") +
+        `</ol>`;
+  const queuePane =
+    `<aside class="cockpit-queue" aria-label="review queue"><h2>results <span class="lane-count">${queue.length}</span></h2>` +
+    `<p class="meta cockpit-queue-hint">${queue.length === 0 ? "" : `${elevated} elevated · ordered by review priority, then newest — the stored verdict is never changed by this order`}</p>` +
+    queueRows +
+    `</aside>`;
+  const missingNote =
+    data.missing === null
+      ? ""
+      : `<p class="problem">No completed task <span class="mono">${escape(data.missing)}</span> is in view here — it may not be finished, or it is outside this console's projects. ${selected === null ? "" : "Showing the top of the queue instead."}</p>`;
+  const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted);
+  const commentable = selected !== null && selected.run !== null && csrf !== "" && selected.terminal?.patch !== null && selected.terminal?.patch !== undefined && !("problem" in selected.terminal.patch);
+  return screen("review", [
+    `<h1>review</h1>`,
     buildsViews("review"),
-    `<p class="hint">published work waiting for review, oldest first — merging happens on GitHub. ${ready.length} reviewable, ${rows.length - ready.length} with failing CI.</p>`,
-    list,
-  ].join("\n"), { chrome });
+    `<p class="hint">completed work, ranked by what needs a reviewer's eyes first — approved intent, evidence, sealed changes, and the next act, without reading a transcript</p>`,
+    missingNote,
+    `<div class="cockpit">${queuePane}${detail}</div>`,
+  ].join("\n"), {
+    chrome,
+    ...(commentable ? { functional: { script: prefillScript(), fetches: false } } : {}),
+  });
+}
+
+/** The selected result: intent → proof → changes → publication → acts,
+ * one scan path, every fact labeled by its source. */
+function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boolean): string {
+  const parts: string[] = [];
+  const run = view.run;
+  const proof = view.proof;
+  const accepted = proof?.accepted !== null && proof?.accepted !== undefined;
+  const hasDiff = view.terminal?.patch !== null && view.terminal?.patch !== undefined && !("problem" in view.terminal.patch) && view.terminal.patch.text.trim() !== "";
+  const canAnnotate = run !== null && csrf !== "" && hasDiff;
+
+  // Header: what this is, its verdict word, and why it sits where it does.
+  parts.push(
+    `<header class="cockpit-head" data-review-task="${escape(view.taskId)}">` +
+      `<p class="eyebrow mono">${run === null ? "no build" : `build #${run.id}`} · <a href="${taskHref(view.taskId)}">${escape(view.taskId)}</a>${projectChip(view.repo)}</p>` +
+      `<h2>${escape(view.title)}</h2>` +
+      `<p class="cockpit-chips">${proofStateChip(proof?.verdict ?? null, accepted, run !== null, run?.outcome ?? null)}${priorityChip(view.priority)}</p>` +
+      (view.priority.reasons.length === 0
+        ? `<p class="meta">review priority: routine — nothing on record elevates this result</p>`
+        : `<p class="meta">review priority — ${escape(view.priority.label)} because: ${view.priority.reasons.map(escape).join("; ")}</p>`) +
+      `</header>`,
+  );
+
+  // The primary next act — exactly one road, chosen from the state.
+  parts.push(reviewNextAction(view, csrf, accepted, canAnnotate));
+
+  // Approved intent: the signed scope's words, the plan's approach.
+  const intent = view.intent;
+  if (intent === null) {
+    parts.push(`<section class="card cockpit-section" data-cockpit-section="intent"><h3>approved intent</h3><p class="meta">No scope was ever filed for this task — it was marked done by hand, so there is no signed goal, boundary, or rubric to check the result against.</p></section>`);
+  } else {
+    const approval = intent.approval.approved
+      ? `approved by ${escape(intent.approvedBy ?? "an operator")} · ${escape(when(intent.approval.at))}`
+      : intent.approval.reason === "changed"
+        ? "the scope changed after approval — the words below are the current text, not the signed one"
+        : "never approved — the result was built without a signed scope";
+    parts.push(
+      `<section class="card cockpit-section" data-cockpit-section="intent"><h3>approved intent</h3>` +
+        `<p class="meta">${approval}</p>` +
+        `<p class="recap" style="margin-top:.25rem"><strong>goal</strong> ${escape(intent.goal)}</p>` +
+        (intent.outOfScope === null ? `<p class="meta">no boundary was stated</p>` : `<p class="recap"><strong>not this</strong> ${escape(intent.outOfScope)}</p>`) +
+        (intent.touches.length === 0
+          ? `<p class="meta">no expected paths were signed — every changed file reads as in bounds</p>`
+          : `<p class="row"><span class="meta">expected to touch</span> ${intent.touches.map(one => `<span class="mono">${escape(one)}</span>`).join(" ")}</p>`) +
+        (view.plan === null
+          ? ""
+          : `<p class="meta">plan revision ${view.plan.revision} · <span class="mono" title="${escape(view.plan.sha256)}">${escape(view.plan.sha256.slice(0, 12))}…</span>${view.plan.approach === null ? "" : ` — ${escape(view.plan.approach)}`}</p>`) +
+        `</section>`,
+    );
+  }
+
+  if (run === null) {
+    parts.push(
+      `<section class="card cockpit-section" data-cockpit-section="proof"><h3>proof</h3>` +
+        `<p class="meta">This task is done, but no finished build attempt is on record — there is no sealed diff, proof, or verdict to review. Treat it as unverified; the task page has its history.</p>` +
+        `<p class="row"><a href="${taskHref(view.taskId)}">the task →</a></p></section>`,
+    );
+    return `<section class="cockpit-detail">${parts.join("\n")}</section>`;
+  }
+
+  // Proof: the stored verdict, the criterion-to-evidence matrix (with
+  // changed-path citations linking to the matching sealed file), and each
+  // evidence source under its own label.
+  const proofParts: string[] = [`<h3>proof</h3>`];
+  if (run.outcome === "no-change") {
+    proofParts.push(`<p class="meta">The build concluded that no repository change was needed. A no-change conclusion owes no proof — its handoff and machine-captured diff are the record.</p>`);
+  }
+  if (proof === null) {
+    proofParts.push(
+      run.outcome === "no-change"
+        ? ""
+        : `<p class="meta">No proof verdict, proof file, check log, or screenshot is on record for build #${run.id} — it finished before the proof system existed, or the agent wrote no proof. Review the sealed diff by hand.</p>`,
+    );
+  } else {
+    if (proof.verdict !== null) {
+      const words = proofVerdictWords(proof.verdict, proof.reasons);
+      proofParts.push(`<p class="row" data-proof-verdict="${escape(dispatchStatusToken(proof.verdict))}"><strong>${escape(words.word)}</strong>${words.detail === "" ? "" : ` <span class="meta">${escape(words.detail)}</span>`} <span class="meta">— the machine's stored verdict</span></p>`);
+    } else if (run.outcome !== "no-change") {
+      proofParts.push(`<p class="meta">no machine verdict on record — adjudication never ran for this build</p>`);
+    }
+    if (proof.machineVerdict !== null && proof.machineVerdict !== proof.verdict) {
+      proofParts.push(`<p class="meta">the machine's own verdict was ${escape(proofVerdictWords(proof.machineVerdict, []).word)}; an independent review lowered it</p>`);
+    }
+    if (proof.accepted !== null) {
+      proofParts.push(`<p class="meta">accepted by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
+    }
+    if (proof.matrix.length === 0) {
+      proofParts.push(
+        view.intent !== null && view.intent.acceptance.length > 0
+          ? `<p class="meta">the scope signed ${view.intent.acceptance.length} criteri${view.intent.acceptance.length === 1 ? "on" : "a"}, but no criterion matrix was adjudicated for this build</p>`
+          : `<p class="meta">no signed rubric — the scope predates acceptance criteria, so there is nothing to answer by id</p>`,
+      );
+    } else {
+      proofParts.push(criterionMatrixHtml(proof.matrix, { runId: run.id, links: proof.matrixLinks, fileAnchors: view.fileAnchors }));
+    }
+    proofParts.push(repairChainHtml(proof.repairChain));
+    if (view.outsideTouches.length > 0) {
+      proofParts.push(
+        `<p class="problem cockpit-drift" data-cockpit-drift="${view.outsideTouches.length}"><strong>${view.outsideTouches.length} changed file${view.outsideTouches.length === 1 ? "" : "s"} outside the signed touches</strong> — ` +
+          view.outsideTouches.map(path => `<span class="mono">${escape(path)}</span>`).join(", ") +
+          `. The touches are advisory, so this is a flag for a reviewer, not a refusal.</p>`,
+      );
+    }
+    // Reviewer judgements and findings — an independent pass, named.
+    const judgements = proof.matrix.filter(one => one.review !== null);
+    if (judgements.length > 0 || view.reviewerFindings.length > 0) {
+      proofParts.push(
+        `<div class="result-section" data-cockpit-source="reviewer"><strong>independent review</strong><ul>` +
+          judgements
+            .map(one => `<li>${reviewJudgementBadge(one.review)} <code>${escape(one.id)}</code> <span class="meta">${escape(one.review?.author ?? "")}: ${escape(one.review?.note ?? "")}</span></li>`)
+            .join("") +
+          view.reviewerFindings
+            .map(one => `<li><span class="badge${one.severity === "problem" ? " badge-failed" : ""}">${escape(one.severity ?? "note")}</span> ${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`)
+            .join("") +
+          `</ul></div>`,
+      );
+    }
+    if (proof.proofProblem !== null) {
+      proofParts.push(`<p class="problem">the agent's proof cannot be shown: ${escape(proof.proofProblem)}</p>`);
+    }
+    // Machine re-run — labeled as the plane's own, never the agent's.
+    proofParts.push(
+      proof.checkLog === null
+        ? `<p class="meta" data-cockpit-source="machine">re-run here: none — no approved verification command ran for this build</p>`
+        : `<details data-cockpit-source="machine"><summary>re-run here: the plane's own check${proof.checkLog.truncated ? " (TRUNCATED — the raw log says how much was cut)" : ""}</summary>` +
+            `<pre class="mono" style="overflow-x:auto;max-height:18rem">${escape(proof.checkLog.text)}</pre></details>` +
+            `<p class="meta"><a href="/r/${run.id}/evidence/${proof.checkLog.artifactId}">the raw check log</a></p>`,
+    );
+    // Agent-reported checks — the agent's own claim, labeled as such.
+    proofParts.push(
+      proof.proof === null || proof.proof.checks.length === 0
+        ? `<p class="meta" data-cockpit-source="agent">checks reported by the agent: none</p>`
+        : `<div class="result-section" data-cockpit-source="agent"><strong>checks reported by the agent</strong><ul>` +
+            proof.proof.checks.map(one => `<li><span class="mono">${escape(one.command)}</span> <span class="meta">(exit ${one.exitCode}) — ${escape(one.summary)}</span></li>`).join("") +
+            `</ul></div>`,
+    );
+    // Screenshots — validated images only, or an honest absence.
+    const screenshotRequired = proof.matrix.some(one => one.requiredEvidence.includes("screenshot"));
+    proofParts.push(
+      proof.screenshots.length === 0
+        ? `<p class="meta" data-cockpit-source="screenshots">screenshots: none${screenshotRequired ? " — a criterion required one and the build stored no validated image" : " captured or required"}</p>`
+        : `<div class="receipt-visuals" data-cockpit-source="screenshots" aria-label="validated screenshots">` +
+            proof.screenshots
+              .map(shot => `<a class="receipt-shot" href="/r/${run.id}/evidence/${shot.artifactId}"><img src="/r/${run.id}/evidence/${shot.artifactId}" alt="${escape(shot.caption)}"><span>${escape(shot.caption)} · <span class="mono">${escape(shot.path)}</span></span></a>`)
+              .join("") +
+            `</div>`,
+    );
+    // Caveats — the agent's own, plus follow-ups from the handoff.
+    const caveats = [...(proof.proof?.caveats ?? []), ...(view.handoff?.followUps ?? []).map(one => `follow-up: ${one}`)];
+    proofParts.push(
+      caveats.length === 0
+        ? `<p class="meta" data-cockpit-source="caveats">caveats: none declared</p>`
+        : `<div class="receipt-caveats" data-cockpit-source="caveats"><strong>caveats</strong><ul>${caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`,
+    );
+  }
+  parts.push(`<section class="card cockpit-section" data-cockpit-section="proof">${proofParts.join("\n")}</section>`);
+
+  // The agent's conclusion — the handoff, labeled as the agent's words.
+  if (run.summary !== null) {
+    parts.push(
+      `<section class="card cockpit-section" data-cockpit-section="handoff"><h3>what the agent said it did</h3><p class="recap">${escape(run.summary)}</p>` +
+        (view.handoff === null || view.handoff.changes.length === 0 ? "" : `<ul>${view.handoff.changes.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`) +
+        `<p class="meta">${escape(run.runner)} · ${escape(run.provider)}${run.model === null ? "" : ` · ${escape(run.model)}`}${run.ranMinutes === null ? "" : ` · ran ${run.ranMinutes}m`} · ${escape(run.cost)}${run.branch === null ? "" : ` · <span class="mono">${escape(run.branch)}</span>`}</p>` +
+        `</section>`,
+    );
+  }
+
+  // Changed files: capture health, the priority-ordered list with anchors
+  // into the sealed patch, then the patch itself in its own order.
+  const changeParts: string[] = [`<h3>what changed</h3>`];
+  const terminal = view.terminal;
+  if (terminal === null) {
+    changeParts.push(`<p class="meta">no final diff or change summary was captured for this build — a legacy record, or a capture that never ran</p>`);
+  } else {
+    if (terminal.stat === null) changeParts.push(`<p class="meta">no change summary was captured</p>`);
+    else if ("problem" in terminal.stat) changeParts.push(`<p class="problem">change summary: ${escape(terminal.stat.problem)}</p>`);
+    else {
+      const s = terminal.stat;
+      changeParts.push(
+        `<p class="row"><span class="mono">${escape(s.base.slice(0, 12))} → ${escape(s.head.slice(0, 12))}</span> — ` +
+          (s.fileCount === 0
+            ? "no changes, verified"
+            : `${s.fileCount} file${s.fileCount === 1 ? "" : "s"} · +${s.additions} −${s.deletions}${s.binaryCount > 0 ? ` · ${s.binaryCount} binary` : ""}${s.filesTruncated ? " · file list cut, counts complete" : ""}`) +
+          `</p>`,
+      );
+    }
+    if (view.files.length > 0) {
+      changeParts.push(
+        `<p class="meta">ordered by review priority — outside the signed touches, then sensitive or uncited files, then by size; the sealed patch below keeps its own order</p>` +
+          `<ol class="cockpit-files">` +
+          view.files
+            .map(file => {
+              const name = file.anchor === null ? `<span class="mono">${escape(file.path)}</span>` : `<a class="mono" href="#${file.anchor}">${escape(file.path)}</a>`;
+              const counts = file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`;
+              const flags =
+                (file.outsideTouches ? ` <span class="badge badge-failed" data-outside-touches="1">outside touches</span>` : "") +
+                (file.cited ? ` <span class="badge badge-done">cited</span>` : "");
+              const why = file.priority.reasons.length === 0 ? "" : ` <span class="meta">— ${file.priority.reasons.map(escape).join("; ")}</span>`;
+              return `<li data-file-priority="${file.priority.band}">${name}${file.renamedFrom === null ? "" : ` <span class="meta">(was ${escape(file.renamedFrom)})</span>`} <span class="meta">${counts}</span>${flags}${canAnnotate ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">comment</button>` : ""}${why}</li>`;
+            })
+            .join("") +
+          `</ol>`,
+      );
+    }
+    if (terminal.patch === null) changeParts.push(`<p class="meta">the final diff was not captured for this build</p>`);
+    else if ("problem" in terminal.patch) changeParts.push(`<p class="problem">patch: ${escape(terminal.patch.problem)}</p>`);
+    else if (terminal.patch.text.trim() === "") changeParts.push(`<p class="meta">empty diff — captured successfully, nothing changed</p>`);
+    else changeParts.push(reviewDiffHtml(terminal.patch, terminal.stat, run.id, canAnnotate, view.fileAnchors));
+  }
+  parts.push(`<section class="card cockpit-section" data-cockpit-section="changes">${changeParts.join("\n")}</section>`);
+
+  // Annotations and the revision seal — the run page's own forms, posting
+  // to the run page's own guarded endpoints.
+  if (canAnnotate || view.comments.length > 0) {
+    const rows = view.comments
+      .map(one => `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> `}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`)
+      .join("\n");
+    parts.push(
+      `<section class="card cockpit-section" data-cockpit-section="annotate" id="annotate"><h3>annotate and revise</h3>` +
+        `<p class="meta">Select a line or a file above, describe what should change, and seal the batch into one revision task you approve before anything builds.</p>` +
+        (rows === "" ? "" : `<div class="diff-comments">${rows}</div>`) +
+        (canAnnotate
+          ? `<form method="post" action="/r/${run.id}/comment" class="diff-comment-form" id="comment-form">` +
+            `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+            `<input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">` +
+            `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="select a line or file above" aria-label="file" class="mono"></label>` +
+            `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div>` +
+            `<label>change requested<textarea name="note" rows="2" maxlength="2000" placeholder="Explain what should change and why" aria-label="review comment"${noted ? " autofocus" : ""}></textarea></label>` +
+            `<button type="submit">Add annotation</button></form>`
+          : "") +
+        (csrf !== "" && view.comments.length > 0
+          ? `<form method="post" action="/r/${run.id}/revise" class="revision-from-comments"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+            `<div><strong>${view.comments.length} annotation${view.comments.length === 1 ? "" : "s"} ready</strong><span class="meta">Creates one revision carrying this exact batch. You review its scope before anything builds.</span></div>` +
+            `<button type="submit">Create revision from annotations</button></form>`
+          : "") +
+        `</section>`,
+    );
+  }
+
+  // Publication: observed facts only — what the watcher saw, never a green
+  // inferred from silence.
+  const publication = view.publication;
+  parts.push(
+    `<section class="card cockpit-section" data-cockpit-section="publication"><h3>publication</h3>` +
+      (publication === null
+        ? `<p class="meta">not published — no branch push or pull request was intended for this build</p>`
+        : `<p class="row">${
+            publication.prNumber === null
+              ? `<span class="badge">${escape(publication.state)}</span> ${publication.state === "failed" ? `publication failed after ${publication.attempts} attempt${publication.attempts === 1 ? "" : "s"}${publication.lastError === null ? "" : ` — ${escape(oneLineOf(publication.lastError, 200))}`}` : `${escape(publication.githubRepo)} · the branch ${publication.state === "pushed" ? "is pushed; no PR yet" : "is intended for publication"}`}`
+              : `${publication.prUrl === null ? `<span class="badge badge-open">PR #${publication.prNumber}</span>` : `<a href="${escape(publication.prUrl)}" class="badge badge-open">PR #${publication.prNumber}</a>`} <span class="meta">${escape(publication.githubRepo)}${publication.remoteState === null ? "" : ` · ${escape(publication.remoteState.toLowerCase())} on GitHub`}</span>`
+          }</p>` +
+          (publication.prNumber === null
+            ? ""
+            : `<p class="meta" data-ci-observed="${escape(publication.ciFailing ? "failing" : (publication.lastCheckState ?? "none"))}">${
+                publication.ciFailing
+                  ? "CI failing — observed by the episode watcher"
+                  : publication.lastCheckState === "passing"
+                    ? `CI passing — observed ${escape(when(publication.lastCheckAt))}`
+                    : publication.lastCheckState === "running"
+                      ? "CI still running at the last observation"
+                      : "no checks observed — the machine never calls silence green; verify on GitHub"
+              }</p>`) +
+          (publication.ciFailing && csrf !== ""
+            ? `<form method="post" action="/r/${run.id}/draft-repair" class="row"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">draft a repair task</button><span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form>`
+            : "")) +
+      `<p class="row"><a href="/r/${run.id}">the full build record →</a>${view.contest === null ? "" : ` <a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a>`}</p>` +
+      `</section>`,
+  );
+
+  if (view.notes.length > 0) {
+    parts.push(
+      `<section class="card cockpit-section" data-cockpit-section="notes"><h3>operator notes</h3>` +
+        view.notes.map(one => `<p class="row"><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span> ${escape(one.note)}</p>`).join("\n") +
+        `</section>`,
+    );
+  }
+
+  return `<section class="cockpit-detail">${parts.join("\n")}</section>`;
+}
+
+/** Exactly one primary road per result, chosen from its state; the
+ * others stay reachable from their own sections. Every form posts to the
+ * endpoint that already owns the act, with the session's CSRF token; a
+ * bearer session (no token) sees the road named, never a form. */
+function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boolean, canAnnotate: boolean): string {
+  const run = view.run;
+  const card = (kind: string, title: string, detail: string, control: string): string =>
+    `<div class="card cockpit-next" data-next-action="${escape(kind)}"><div><strong>${escape(title)}</strong><span class="meta">${detail}</span></div>${control}</div>`;
+  if (run === null) {
+    return card("inspect-task", "Nothing sealed to act on", "This completion has no build record; the task page holds whatever history exists.", `<a class="button-link" href="${taskHref(view.taskId)}">Open the task</a>`);
+  }
+  const verdict = view.proof?.verdict ?? null;
+  if ((verdict === "short" || verdict === "refuted") && !accepted) {
+    const control =
+      csrf === ""
+        ? `<span class="meta">accepting is a browser session's act</span>`
+        : `<form method="post" action="${taskHref(view.taskId)}/accept-proof" class="approve-form"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+          `<input type="text" name="note" maxlength="500" placeholder="optional note" aria-label="acceptance note"><button type="submit">accept anyway</button></form>`;
+    return card(
+      "accept-proof",
+      verdict === "refuted" ? "Decide on a refuted proof" : "Decide on an incomplete proof",
+      verdict === "refuted"
+        ? "The proof disagrees with what the machine captured. Read the evidence below; accepting records your name and note without changing the stored verdict."
+        : "The proof does not answer every signed criterion by machine-checkable evidence. Read the evidence below; accepting records your name and note without changing the stored verdict.",
+      control,
+    );
+  }
+  if (view.contest !== null && view.contest.state === "pick-wait") {
+    return card("compare-contest", `Compare the ${contestNoun(view.contest.kind)}`, `${view.contest.agents} agents finished — compare their results side by side and pick one.`, `<a class="button-link" href="/contest/${view.contest.id}">Compare results</a>`);
+  }
+  if (view.publication !== null && view.publication.ciFailing && csrf !== "") {
+    return card("draft-repair", "CI is failing on its pull request", "Observed by the episode watcher. Draft one unapproved repair task; you approve its scope before anything builds.", `<form method="post" action="/r/${run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Draft a repair task</button></form>`);
+  }
+  if (view.comments.length > 0 && csrf !== "") {
+    return card("revise", `${view.comments.length} annotation${view.comments.length === 1 ? "" : "s"} ready to seal`, "Create one revision task carrying exactly this batch; its scope waits for your approval.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Create revision</button></form>`);
+  }
+  if (view.publication !== null && view.publication.prNumber !== null && view.publication.prUrl !== null) {
+    return card("publication", `Review PR #${view.publication.prNumber} on GitHub`, "The evidence below is the same sealed record the PR was cut from; merging stays a person's act on GitHub.", `<a class="button-link" href="${escape(view.publication.prUrl)}">Open the pull request</a>`);
+  }
+  if (canAnnotate) {
+    return card("annotate", "Inspect the sealed diff", "Nothing waits on you. Read the changes below; annotate any line to start a revision.", `<a class="button-link" href="#annotate">Annotate the diff</a>`);
+  }
+  return card("inspect-run", "Inspect the build record", "Nothing waits on you; the full record has every artifact as stored.", `<a class="button-link" href="/r/${run.id}">Open the build</a>`);
 }
 
 /**
@@ -14987,6 +15760,7 @@ function reviewDiffHtml(
   stat: TerminalDiffView["stat"],
   runId: number,
   commentable: boolean,
+  anchors: ReadonlyMap<string, string> = new Map(),
 ): string {
   const parsed = parseReviewDiff(patch.text);
   const structured = parsed.files.some(file => file.hunks.length > 0);
@@ -15022,8 +15796,9 @@ function reviewDiffHtml(
         );
       }).join("")}</div></section>`
     ).join("");
+    const anchor = anchors.get(one.path);
     return (
-      `<details class="diff-file"${fileIndex === 0 ? " open" : ""}>` +
+      `<details class="diff-file"${fileIndex === 0 ? " open" : ""}${anchor === undefined ? "" : ` id="${anchor}"`}>` +
       `<summary><span class="diff-file-name">${escape(one.path)}</span>${countWords}</summary>` +
       (one.oldPath !== null && one.oldPath !== "/dev/null" && one.oldPath !== one.path ? `<p class="diff-rename meta">from ${escape(one.oldPath)}</p>` : "") +
       hunks + `</details>`
@@ -15246,6 +16021,8 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     (place === "task"
       ? `<a href="${taskChatHref(taskId)}">Discuss or request changes →</a>`
       : `<a href="#latest">Request changes in chat →</a>`) +
+    // The cockpit (Priority 5): the same records, arranged for a reviewer.
+    `<a href="${reviewHref(taskId)}">Open in the review cockpit →</a>` +
     `</div></section>`
   );
 }

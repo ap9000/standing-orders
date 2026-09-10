@@ -179,8 +179,23 @@ for people splitting those parts across machines.
    file in one tap. Publishing to a branch and a pull request happens only
    under a publication grant whose terms you approved on the **system**
    page.
+7. **Review it without the transcript.** The **review** view of builds is a
+   cockpit over completed work: a queue ranked by *review priority* (a
+   labeled, deterministic aid — refuted or incomplete proofs, reviewer
+   contradictions, and observed CI failures first; it never rewrites the
+   stored verdict), and one selected result showing the approved goal and
+   boundary, every signed criterion with its adjudicated state and the
+   evidence it cited, the machine's re-run and the agent's own checks
+   labeled apart, reviewer findings, validated screenshots, caveats, the
+   sealed diff with changed files ordered by priority and flagged when they
+   fall outside the signed touches, and what the publication watcher
+   actually saw. The next act sits under the header: accept an incomplete
+   proof, annotate the diff and seal a revision, compare a tournament, or
+   open the pull request — each through the road that already owns it. A
+   task marked done by hand, or built before proofs existed, says so
+   plainly instead of pretending to a verdict.
 
-Everything else is under **more**: the activity ledger, the review queue,
+Everything else is under **more**: the activity ledger, the review cockpit,
 routines (standing orders that file themselves on a schedule), the fleet,
 people (invite a second approver), the operating mode (a signed, expiring
 envelope that pre-approves your own filings), and **chat** — the mate, one

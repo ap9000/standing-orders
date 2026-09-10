@@ -16,7 +16,7 @@ import { addApprover, approvalOf, approve, propose } from "./scope.js";
 import { approveRoutine, fireRoutine, routineDigestOf } from "./routine.js";
 import { planTournament, admitContest, finalizeContestant } from "./contest.js";
 import { storeEvidence } from "./evidence.js";
-import { createDecisionServer, SENSITIVE_INPUT } from "./serve.js";
+import { createDecisionServer, SENSITIVE_INPUT, reviewPriorityOf, rankReviewQueue, withinSignedTouches, diffFileAnchor, reviewFilePriority, orderChangedFiles, type ReviewQueueFacts, type ReviewFileRow } from "./serve.js";
 import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
 import { resolveScopeProfile } from "./agentconfig.js";
 import type { MateProviderAnswer } from "./converse.js";
@@ -901,12 +901,13 @@ describe("the operations console", () => {
     expect(again.status).toBe(400);
   });
 
-  test("the review queue ranks reviewable PRs first and the plane never merges (M8.19); a red episode earns the repair draft (M8.18)", async () => {
+  test("the review cockpit ranks an observed CI failure first and the plane never merges (M8.19); a red episode earns the repair draft from the cockpit and the run page (M8.18)", async () => {
     // Two published PRs: one quiet, one with an observed CI failure.
     store.createTask({ id: "t-pr1", title: "shipped one" }, T0);
     const ref1 = store.refFor("built-in", "t-pr1").id;
     const run1 = store.startRun({ taskRef: ref1, leaseId: "l-p1", runner: "b-1", branch: "so/t-pr1", worktree: "/w", now: T0 });
     store.finishRun(run1, { outcome: "built", now: T0 });
+    store.setTaskState("t-pr1", "done", T0);
     const pub1 = store.createPublicationIntent(
       { run: run1, taskRef: ref1, githubRepo: "ap9000/thing", remote: "origin", base: "main", head: "so/t-pr1", headSha: "a".repeat(40), bodyHash: "h1", draft: false },
       T0,
@@ -921,6 +922,7 @@ describe("the operations console", () => {
     const ref2 = store.refFor("built-in", "t-pr2").id;
     const run2 = store.startRun({ taskRef: ref2, leaseId: "l-p2", runner: "b-1", branch: "so/t-pr2", worktree: "/w", now: T0 });
     store.finishRun(run2, { outcome: "built", now: T0 });
+    store.setTaskState("t-pr2", "done", new Date(T0.getTime() - 60_000));
     const pub2 = store.createPublicationIntent(
       { run: run2, taskRef: ref2, githubRepo: "ap9000/thing", remote: "origin", base: "main", head: "so/t-pr2", headSha: "b".repeat(40), bodyHash: "h2", draft: false },
       T0,
@@ -934,14 +936,27 @@ describe("the operations console", () => {
 
     const cookie = await login();
     const queue = await (await fetch(url("/review"), { headers: { cookie } })).text();
-    // The quiet PR is recommended; the failing one is labeled, not hidden.
-    expect(queue.indexOf("PR #101")).toBeLessThan(queue.indexOf("PR #102"));
-    expect(queue).toContain("review next");
-    expect(queue).toContain("CI passing — observed");
-    expect(queue).toContain("CI failing — observed");
-    // Read-only: no merge button, no form on this page's own content
-    // (the chrome's project switcher is the one form outside <main>).
-    expect(queue.slice(queue.indexOf("<main>"), queue.indexOf("</main>"))).not.toContain("<form");
+    // Review priority puts the OBSERVED failure first — it needs a person —
+    // even though the quiet PR finished later; the quiet one is not hidden.
+    const list = /<ol class="cockpit-queue-list">(.*?)<\/ol>/s.exec(queue)?.[1] ?? "";
+    expect(list.indexOf("PR #102")).toBeLessThan(list.indexOf("PR #101"));
+    expect(list.indexOf("PR #102")).toBeGreaterThanOrEqual(0);
+    expect(list).toContain("CI failing on its pull request — observed, not inferred");
+    // The failing result is selected by default; its publication card says
+    // exactly what the watcher saw, and offers the repair draft.
+    expect(queue).toContain('data-review-task="t-pr2"');
+    expect(queue).toContain("CI failing — observed by the episode watcher");
+    expect(queue).toContain(`action="/r/${run2}/draft-repair"`);
+    expect(queue).toContain('data-next-action="draft-repair"');
+    // Read-only where it matters: no merge button anywhere, and the only
+    // forms post to endpoints that already exist.
+    expect(queue).not.toMatch(/merge/i);
+    // The quiet PR, selected by its stable link, reads the observed green.
+    const quiet = await (await fetch(url("/review?result=t-pr1"), { headers: { cookie } })).text();
+    expect(quiet).toContain('data-review-task="t-pr1"');
+    expect(quiet).toContain("CI passing — observed");
+    expect(quiet).toContain('data-next-action="publication"');
+    expect(quiet).not.toContain("draft-repair");
 
     // The failing run's page carries the draft button; the quiet one does not.
     const failingRun = await (await fetch(url(`/r/${run2}`), { headers: { cookie } })).text();
@@ -4350,6 +4365,20 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     await new Promise<void>(resolve => server.close(() => resolve()));
     store.close();
     rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("the review cockpit offers the comparison road for a task whose result run raced (Priority 5)", async () => {
+    store.setTaskState("race-w", "done", T0);
+    const cookie = await login();
+    const cockpit = await (await fetch(url("/review?result=race-w"), { headers: { cookie } })).text();
+    expect(cockpit).toContain('data-review-task="race-w"');
+    // The tournament waits for a pick: that is the one primary act, and it
+    // goes to the existing comparison screen — the cockpit picks nothing.
+    expect(cockpit).toContain('data-next-action="compare-contest"');
+    expect(cockpit).toContain(`<a class="button-link" href="/contest/${contestId}">Compare results</a>`);
+    expect(cockpit).toContain(`<a href="/contest/${contestId}">compare the tournament and pick →</a>`);
+    expect(cockpit).not.toContain("pick this result");
+    expect(cockpit).not.toContain('name="nonce"');
   });
 
   test("the whole ceremony: compare → arm (POST mints) → password → picked; a GET never mints and a replay refuses", async () => {
@@ -8998,5 +9027,590 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(css).not.toContain(".lane-attention .lane-card {");
     expect(css).not.toContain(".workspace-card.hot {");
     expect(css).toMatch(/\.seal \{[^}]*border: 1px solid var\(--border\);[^}]*color: var\(--foreground\)/s);
+  });
+});
+
+describe("the review cockpit (Priority 5): a ranked, verified projection of completed work", () => {
+  let store: Store;
+  let server: Server | null = null;
+  let base: string;
+  let approverToken: string;
+  let evidenceRoot: string;
+
+  const T0 = new Date("2026-08-11T00:00:00.000Z");
+  const url = (path: string) => `${base}${path}`;
+  const at = (hoursAgo: number): Date => new Date(T0.getTime() - hoursAgo * 3_600_000);
+
+  const login = async (): Promise<string> => {
+    const response = await fetch(url("/login"), {
+      method: "POST",
+      body: new URLSearchParams({ name: "alex", token: approverToken }),
+      redirect: "manual",
+    });
+    expect(response.status).toBe(303);
+    return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  };
+
+  const boot = async (options: Record<string, unknown> = {}) => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), repo: "/repo/main", ...options });
+    await new Promise<void>(resolve => (server as Server).listen(0, "127.0.0.1", resolve));
+    const address = (server as Server).address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+  };
+
+  const csrfOf = (html: string): string => {
+    const match = /name="csrf" value="([0-9a-f]{64})"/.exec(html);
+    if (match === null) throw new Error("no csrf on the page");
+    return match[1] as string;
+  };
+  const mainOf = (html: string): string => html.slice(html.indexOf("<main>"), html.indexOf("</main>"));
+  const queueOf = (html: string): string => /<ol class="cockpit-queue-list">(.*?)<\/ol>/s.exec(html)?.[1] ?? "";
+  const post = (cookie: string, path: string, fields: Record<string, string>) =>
+    fetch(url(path), {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields),
+      redirect: "manual",
+    });
+
+  /** A done task with a signed scope in the project (or elsewhere). */
+  const seed = (id: string, title: string, repo = "/repo/main", scope: { goal?: string; outOfScope?: string | null; touches?: string[]; acceptance?: { id: string; statement: string; evidence: ("check" | "screenshot" | "changed-path" | "manual-review")[] }[] } | null = {}): number => {
+    store.createTask({ id, title }, T0);
+    const ref = store.refFor("built-in", id, "ours").id;
+    store.placeTask(ref, repo);
+    if (scope !== null) {
+      const proposed = propose(store, {
+        taskId: id,
+        goal: scope.goal ?? `goal of ${id}`,
+        outOfScope: scope.outOfScope ?? null,
+        touches: scope.touches ?? [],
+        acceptance: (scope.acceptance ?? [{ id: "c1", statement: `${id} is done`, evidence: ["manual-review"] }]).map(one => ({ ...one, how: null })),
+        now: T0,
+      });
+      const agreed = approve(store, id, "alex", T0, proposed.digest, approverToken);
+      if (!agreed.ok) throw new Error(`approval refused: ${agreed.reason}`);
+    }
+    return ref;
+  };
+
+  /** A finished build with the artifacts the cockpit projects. */
+  const build = (
+    id: string,
+    ref: number,
+    parts: {
+      patch?: string;
+      stat?: { path: string; additions: number | null; deletions: number | null }[];
+      handoff?: Record<string, unknown>;
+      proof?: Record<string, unknown>;
+      checkLog?: string;
+      screenshot?: { path: string; caption: string };
+      verdict?: { verdict: "verified" | "attested" | "short" | "refuted"; reasons?: string[]; matrix?: import("./proof.js").CriterionMatrixRow[]; machineVerdict?: "verified" | "attested" | "short" | "refuted" };
+      outcome?: "built" | "no-change";
+      finishedAt?: Date;
+    } = {},
+  ): number => {
+    const when = parts.finishedAt ?? T0;
+    const run = store.startRun({ taskRef: ref, leaseId: `lease-${id}`, runner: "night-shift-1", provider: "claude", branch: `standing-orders/${id}`, worktree: `/pool/${id}`, now: new Date(when.getTime() - 60_000) });
+    if (parts.patch !== undefined) {
+      storeEvidence(store, evidenceRoot, run, "terminal-diff", "terminal-diff.patch", Buffer.from(parts.patch, "utf8"), "git diff --no-ext-diff 0000..HEAD (exit 0)", when, { captureStatus: "ok" });
+    }
+    if (parts.stat !== undefined) {
+      const files = parts.stat;
+      const stat = {
+        schema: 1, base: "a".repeat(40), head: "b".repeat(40), fileCount: files.length,
+        additions: files.reduce((sum, one) => sum + (one.additions ?? 0), 0), deletions: files.reduce((sum, one) => sum + (one.deletions ?? 0), 0),
+        binaryCount: files.filter(one => one.additions === null).length, filesTruncated: false, files,
+      };
+      storeEvidence(store, evidenceRoot, run, "diff-stat", "diff-stat.json", Buffer.from(JSON.stringify(stat), "utf8"), "parsed from git diff --numstat -z", when, { captureStatus: "ok" });
+    }
+    if (parts.handoff !== undefined) {
+      storeEvidence(store, evidenceRoot, run, "handoff", "handoff.json", Buffer.from(JSON.stringify(parts.handoff), "utf8"), "composed at completion", when);
+    }
+    if (parts.proof !== undefined) {
+      storeEvidence(store, evidenceRoot, run, "proof", "proof.json", Buffer.from(JSON.stringify(parts.proof), "utf8"), "agent-authored proof (validated)", when);
+    }
+    if (parts.checkLog !== undefined) {
+      storeEvidence(store, evidenceRoot, run, "check-log", "check-log.txt", Buffer.from(parts.checkLog, "utf8"), `sh -c "npm test" (exit 0)`, when);
+    }
+    if (parts.screenshot !== undefined) {
+      const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+      storeEvidence(store, evidenceRoot, run, "screenshot", "shot.png", png, `agent-claimed screenshot at ${parts.screenshot.path} (validated png)`, when);
+    }
+    if (parts.verdict !== undefined) {
+      store.saveProofVerdict(run, parts.verdict.verdict, parts.verdict.reasons ?? [], when, parts.verdict.matrix ?? [], parts.verdict.machineVerdict ?? null);
+    }
+    store.recordOutcomeFacts(run, { headRevision: "b".repeat(40), handoff: `handoff of ${id}` });
+    store.finishRun(run, { outcome: parts.outcome ?? "built", committed: true, now: when });
+    store.setTaskState(id, "done", when);
+    return run;
+  };
+
+  const row = (id: string, statement: string, state: "pass" | "missing" | "failed" | "manual-review", answered: { kind: "check" | "screenshot" | "changed-path" | "manual-review"; ref: string }[] = [], detail: string[] = [], review: { judgement: "upholds" | "contradicts" | "cannot-tell"; note: string; author: string } | null = null): import("./proof.js").CriterionMatrixRow => ({
+    id, statement, requiredEvidence: answered.length === 0 ? ["manual-review"] : [...new Set(answered.map(one => one.kind))], state, detail, answered, review,
+  });
+
+  beforeEach(async () => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", T0);
+    evidenceRoot = mkdtempSync(join(tmpdir(), "standing-orders-cockpit-"));
+    const added = addApprover(store, "alex", T0);
+    if (!added.ok) throw new Error("bootstrap failed");
+    approverToken = added.token;
+    register(store, { name: "night-shift-1", host: "here", capacity: 4, repos: ["/repo/main"], now: T0, newToken: () => "tok-night-shift-1" });
+  });
+
+  afterEach(async () => {
+    if (server !== null) await new Promise<void>(resolve => (server as Server).close(() => resolve()));
+    server = null;
+    store.close();
+    rmSync(evidenceRoot, { recursive: true, force: true });
+  });
+
+  test("review priority is deterministic and labeled: every band, every reason, and a stable tie-break", () => {
+    const facts = (over: Partial<ReviewQueueFacts>): ReviewQueueFacts => ({ runId: 1, outcome: "built", proofVerdict: "verified", proofAccepted: false, proofMatrix: [], ciFailing: false, publicationState: null, ...over });
+    expect(reviewPriorityOf(facts({}))).toEqual({ band: 2, label: "routine", reasons: [] });
+    expect(reviewPriorityOf(facts({ runId: null, proofVerdict: null }))).toEqual({ band: 1, label: "look closer", reasons: ["marked done by hand — no build record to verify"] });
+    expect(reviewPriorityOf(facts({ proofVerdict: "refuted" }))).toMatchObject({ band: 0, label: "review first", reasons: ["proof refuted — not accepted"] });
+    expect(reviewPriorityOf(facts({ proofVerdict: "refuted", proofAccepted: true }))).toMatchObject({ band: 1, reasons: ["proof refuted — accepted anyway by an operator"] });
+    expect(reviewPriorityOf(facts({ proofVerdict: "short" }))).toMatchObject({ band: 0, reasons: ["proof incomplete — needs verification"] });
+    expect(reviewPriorityOf(facts({ proofVerdict: "short", proofAccepted: true }))).toMatchObject({ band: 1 });
+    expect(reviewPriorityOf(facts({ proofMatrix: [row("c2", "x", "pass", [{ kind: "check", ref: "npm test" }], [], { judgement: "contradicts", note: "no", author: "reviewer:codex" })] }))).toMatchObject({ band: 0, reasons: ["an independent reviewer contradicted c2"] });
+    expect(reviewPriorityOf(facts({ proofMatrix: [row("c1", "x", "failed"), row("c3", "y", "missing")] }))).toMatchObject({ band: 0, reasons: ["evidence failed or missing for c1, c3"] });
+    expect(reviewPriorityOf(facts({ ciFailing: true }))).toMatchObject({ band: 0, reasons: ["CI failing on its pull request — observed, not inferred"] });
+    expect(reviewPriorityOf(facts({ publicationState: "failed" }))).toMatchObject({ band: 1, reasons: ["publication failed — the branch never reached its remote"] });
+    expect(reviewPriorityOf(facts({ proofVerdict: "attested", proofMatrix: [row("c1", "x", "manual-review")] }))).toMatchObject({ band: 1, reasons: ["awaits a human's eyes: c1"] });
+    expect(reviewPriorityOf(facts({ proofVerdict: "attested", proofAccepted: true, proofMatrix: [row("c1", "x", "manual-review")] }))).toMatchObject({ band: 2, reasons: [] });
+    expect(reviewPriorityOf(facts({ proofVerdict: null }))).toMatchObject({ band: 1, reasons: ["built before the proof system — no machine verdict on record"] });
+    expect(reviewPriorityOf(facts({ proofVerdict: null, outcome: "no-change" }))).toMatchObject({ band: 2, reasons: [] });
+    // A refuted, CI-failing result names every reason and keeps band 0.
+    expect(reviewPriorityOf(facts({ proofVerdict: "refuted", ciFailing: true })).reasons).toHaveLength(2);
+
+    // Band first, then newest completion, then task id — twice, identically.
+    const rows = [
+      { taskId: "b-old", completedAt: "2026-08-10T00:00:00.000Z", ...facts({}) },
+      { taskId: "a-new", completedAt: "2026-08-11T00:00:00.000Z", ...facts({}) },
+      { taskId: "z-same", completedAt: "2026-08-11T00:00:00.000Z", ...facts({}) },
+      { taskId: "hot", completedAt: "2026-08-01T00:00:00.000Z", ...facts({ proofVerdict: "short" }) },
+      { taskId: "warm", completedAt: "2026-08-02T00:00:00.000Z", ...facts({ proofVerdict: null }) },
+    ];
+    const order = rankReviewQueue(rows).map(one => one.taskId);
+    expect(order).toEqual(["hot", "warm", "a-new", "z-same", "b-old"]);
+    expect(rankReviewQueue([...rows].reverse()).map(one => one.taskId)).toEqual(order);
+  });
+
+  test("changed files rank by review priority — outside touches first, then sensitive or uncited, then churn — with stable anchors", () => {
+    expect(withinSignedTouches("src/a.ts", ["src/"])).toBe(true);
+    expect(withinSignedTouches("src/a.ts", ["src"])).toBe(true);
+    expect(withinSignedTouches("src/a.ts", ["src/a.ts"])).toBe(true);
+    expect(withinSignedTouches("srcx/a.ts", ["src"])).toBe(false);
+    expect(withinSignedTouches("docs/x/y.md", ["docs/**"])).toBe(true);
+    expect(withinSignedTouches("docs/x/y.md", ["docs/*.md"])).toBe(false);
+    expect(withinSignedTouches("docs/y.md", ["docs/*.md"])).toBe(true);
+    expect(withinSignedTouches("a(b).ts", ["a(b).ts"])).toBe(true);
+    expect(withinSignedTouches("anything", [])).toBe(false);
+
+    expect(diffFileAnchor("src/a.ts")).toMatch(/^diff-file-[0-9a-f]{16}$/);
+    expect(diffFileAnchor("src/a.ts")).toBe(diffFileAnchor("src/a.ts"));
+    expect(diffFileAnchor(`"><script>`)).toMatch(/^diff-file-[0-9a-f]{16}$/);
+    expect(diffFileAnchor("a")).not.toBe(diffFileAnchor("b"));
+
+    const file = (path: string, over: Partial<ReviewFileRow> = {}): ReviewFileRow => ({ path, additions: 1, deletions: 1, renamedFrom: null, anchor: "x", outsideTouches: false, cited: true, ...over });
+    expect(reviewFilePriority(file("src/a.ts"), true)).toEqual({ band: 2, label: "routine", reasons: [] });
+    expect(reviewFilePriority(file("src/a.ts", { outsideTouches: true }), true)).toMatchObject({ band: 0, reasons: ["outside the signed touches"] });
+    expect(reviewFilePriority(file("img.png", { additions: null, deletions: null }), true)).toMatchObject({ band: 1, reasons: ["binary — nothing to read here"] });
+    expect(reviewFilePriority(file("package-lock.json"), true)).toMatchObject({ band: 1, reasons: ["dependencies, CI, schema, or credentials"] });
+    expect(reviewFilePriority(file(".github/workflows/ci.yml"), true)).toMatchObject({ band: 1 });
+    expect(reviewFilePriority(file("src/auth-token.ts"), true)).toMatchObject({ band: 1 });
+    expect(reviewFilePriority(file("src/a.ts", { cited: false }), true)).toMatchObject({ band: 1, reasons: ["no criterion cites this file"] });
+    expect(reviewFilePriority(file("src/a.ts", { cited: false }), false)).toMatchObject({ band: 2, reasons: [] });
+    expect(reviewFilePriority(file("src/a.ts", { additions: 150, deletions: 60 }), true)).toMatchObject({ band: 1, reasons: ["a large change"] });
+    expect(reviewFilePriority(file("src/a.ts", { anchor: null }), true)).toMatchObject({ band: 1, reasons: ["not in the sealed patch — see the raw record"] });
+
+    const ordered = orderChangedFiles([
+      file("z.ts", { additions: 5, deletions: 0 }),
+      file("a.ts", { additions: 5, deletions: 0 }),
+      file("big.ts", { additions: 400, deletions: 0 }),
+      file("drift.ts", { outsideTouches: true }),
+      file("package.json"),
+    ], true).map(one => one.path);
+    expect(ordered).toEqual(["drift.ts", "big.ts", "package.json", "a.ts", "z.ts"]);
+  });
+
+  test("the queue is authenticated, visibility-safe, bounded to done tasks, deep-linkable, and honest when empty or when the link misses", async () => {
+    await boot();
+    // Unauthenticated: the login door, never the queue.
+    const anonymous = await fetch(url("/review"), { redirect: "manual" });
+    expect(anonymous.status).toBe(303);
+    expect(anonymous.headers.get("location")).toContain("/login");
+    const cookie = await login();
+
+    // Empty, honestly.
+    const empty = await (await fetch(url("/review"), { headers: { cookie } })).text();
+    expect(empty).toContain("No finished tasks yet.");
+    expect(empty).toContain("Nothing to review yet.");
+    expect(empty).toContain('<a href="/runs" class="active">');
+
+    // Two visible done tasks, one still running, one done in a repo outside the ceiling.
+    seed("t-ours", "ours — the <b>title</b>");
+    build("t-ours", store.refFor("built-in", "t-ours").id, { verdict: { verdict: "attested" }, patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", stat: [{ path: "x", additions: 1, deletions: 1 }] });
+    seed("t-older", "older, needs eyes");
+    build("t-older", store.refFor("built-in", "t-older").id, { verdict: { verdict: "short", reasons: ["no proof"] }, finishedAt: at(5) });
+    seed("t-live", "still going");
+    store.setTaskState("t-live", "running", T0);
+    seed("t-theirs", "theirs — never shown", "/repo/other");
+    build("t-theirs", store.refFor("built-in", "t-theirs").id, { verdict: { verdict: "refuted" } });
+
+    const html = await (await fetch(url("/review"), { headers: { cookie } })).text();
+    const queue = queueOf(html);
+    // Only done tasks inside the ceiling; the older short proof ranks first.
+    expect(queue).toContain("t-older");
+    expect(queue).toContain("t-ours");
+    expect(queue).not.toContain("t-live");
+    expect(queue).not.toContain("t-theirs");
+    expect(html).not.toContain("never shown");
+    expect(queue.indexOf("t-older")).toBeLessThan(queue.indexOf("t-ours"));
+    expect(html).toContain("1 elevated");
+    // The queue explains the order in words, next to the row it elevates.
+    expect(queue).toContain("proof incomplete — needs verification");
+    // Escaped everywhere the title lands.
+    expect(html).toContain("ours — the &lt;b&gt;title&lt;/b&gt;");
+    expect(html).not.toContain("<b>title</b>");
+    // The first-ranked row is selected by default and marked current.
+    expect(html).toContain('data-review-task="t-older"');
+    expect(queue).toContain('class="cockpit-row current" href="/review?result=t-older" aria-current="page"');
+
+    // A stable deep link selects, and the row it names is current.
+    const picked = await (await fetch(url("/review?result=t-ours"), { headers: { cookie } })).text();
+    expect(picked).toContain('data-review-task="t-ours"');
+    expect(queueOf(picked)).toContain('class="cockpit-row current" href="/review?result=t-ours"');
+    expect(picked).not.toContain("is in view here");
+
+    // A hidden result and a nonexistent one read identically: a note, and
+    // the top of the queue — never a 404 that confirms existence.
+    for (const miss of ["t-theirs", "t-live", "nope"]) {
+      const missed = await fetch(url(`/review?result=${miss}`), { headers: { cookie } });
+      expect(missed.status).toBe(200);
+      const body = await missed.text();
+      expect(body).toContain(`No completed task <span class="mono">${miss}</span> is in view here`);
+      expect(body).toContain("Showing the top of the queue instead.");
+      expect(body).toContain('data-review-task="t-older"');
+      expect(body).not.toContain("never shown");
+    }
+    // A hostile id never echoes raw.
+    const hostile = await (await fetch(url(`/review?result=${encodeURIComponent("<img src=x>")}`), { headers: { cookie } })).text();
+    expect(hostile).not.toContain("<img src=x>");
+    expect(hostile).toContain("&lt;img src=x&gt;");
+  });
+
+  test("a manual completion and a legacy result read as exactly what they are; broken artifacts name their problem", async () => {
+    // Done by hand: no scope, no run.
+    store.createTask({ id: "t-manual", title: "closed by hand" }, T0);
+    store.placeTask(store.refFor("built-in", "t-manual", "ours").id, "/repo/main");
+    store.setTaskState("t-manual", "done", at(2));
+    // Legacy: a finished build with no artifacts and no verdict.
+    const legacyRef = seed("t-legacy", "from before proofs");
+    const legacyRun = build("t-legacy", legacyRef, { finishedAt: at(3) });
+    // Broken: a patch whose bytes no longer match their record, a truncated
+    // check log, and a stat capture that failed.
+    const brokenRef = seed("t-broken", "tampered after sealing");
+    const brokenRun = build("t-broken", brokenRef, { patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", verdict: { verdict: "attested" }, finishedAt: at(4) });
+    const patchArtifact = store.artifactsFor(brokenRun).find(one => one.kind === "terminal-diff");
+    if (patchArtifact === undefined) throw new Error("no patch");
+    writeFileSync(join(evidenceRoot, patchArtifact.key), "diff --git a/x b/x\n+tampered\n");
+    storeEvidence(store, evidenceRoot, brokenRun, "check-log", "check-log.txt", Buffer.alloc(70 * 1024, "x"), `sh -c "npm test" (exit 0)`, at(4));
+    storeEvidence(store, evidenceRoot, brokenRun, "diff-stat", "diff-stat.json", Buffer.from("{}"), "git diff --numstat (exit 128)", at(4), { captureStatus: "failed" });
+    await boot();
+    const cookie = await login();
+
+    const manual = await (await fetch(url("/review?result=t-manual"), { headers: { cookie } })).text();
+    expect(manual).toContain('data-review-task="t-manual"');
+    expect(manual).toContain("No build record");
+    expect(manual).toContain("marked done by hand — no build record to verify");
+    expect(manual).toContain("No scope was ever filed for this task");
+    expect(manual).toContain("no finished build attempt is on record");
+    expect(manual).toContain('data-next-action="inspect-task"');
+    expect(manual).toContain('href="/t/t-manual"');
+    expect(mainOf(manual)).not.toContain("<form");
+
+    const legacy = await (await fetch(url("/review?result=t-legacy"), { headers: { cookie } })).text();
+    expect(legacy).toContain("Unverified");
+    expect(legacy).toContain("built before the proof system — no machine verdict on record");
+    expect(legacy).toContain(`No proof verdict, proof file, check log, or screenshot is on record for build #${legacyRun}`);
+    expect(legacy).toContain("no final diff or change summary was captured for this build");
+    expect(legacy).toContain('data-next-action="inspect-run"');
+    expect(legacy).toContain(`href="/r/${legacyRun}">Open the build</a>`);
+    // No diff means no annotation form — the endpoint would refuse it anyway.
+    expect(legacy).not.toContain('id="comment-form"');
+
+    const broken = await (await fetch(url("/review?result=t-broken"), { headers: { cookie } })).text();
+    expect(broken).toContain("patch: stored but unverifiable");
+    expect(broken).toContain("change summary: capture failed");
+    expect(broken).toContain("re-run here: the plane's own check (TRUNCATED — the raw log says how much was cut)");
+    expect(broken).not.toContain("tampered</code>");
+    expect(broken).not.toContain('id="comment-form"');
+    // The raw record is still one click away, exactly as stored.
+    expect(broken).toContain(`href="/r/${brokenRun}/evidence/`);
+  });
+
+  test("intent to diff: goal, boundary, every signed criterion with its state and citations; changed-path citations anchor into the sealed file; drift outside the touches is flagged", async () => {
+    const ref = seed("t-intent", "guard the payout", "/repo/main", {
+      goal: "Guard the payout <script>alert(1)</script>",
+      outOfScope: "No schema changes & no API changes",
+      touches: ["src/payout/"],
+      acceptance: [
+        { id: "c1", statement: "The guard is covered by tests", evidence: ["check", "changed-path"] },
+        { id: "c2", statement: "The dashboard still renders", evidence: ["screenshot"] },
+        { id: "c3", statement: "An operator reads the copy", evidence: ["manual-review"] },
+      ],
+    });
+    const patch = [
+      "diff --git a/src/payout/guard.ts b/src/payout/guard.ts",
+      "--- a/src/payout/guard.ts",
+      "+++ b/src/payout/guard.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const a = 1;",
+      "+export const guard = true;",
+      " export const b = 2;",
+      'diff --git "a/docs/we\\"ird.md" "b/docs/we\\"ird.md"',
+      '--- "a/docs/we\\"ird.md"',
+      '+++ "b/docs/we\\"ird.md"',
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "diff --git a/package-lock.json b/package-lock.json",
+      "--- a/package-lock.json",
+      "+++ b/package-lock.json",
+      "@@ -1 +1 @@",
+      "-1",
+      "+2",
+      "",
+    ].join("\n");
+    const run = build("t-intent", ref, {
+      patch,
+      stat: [
+        { path: "src/payout/guard.ts", additions: 1, deletions: 0 },
+        { path: 'docs/we"ird.md', additions: 1, deletions: 1 },
+        { path: "package-lock.json", additions: 1, deletions: 1 },
+      ],
+      verdict: {
+        verdict: "short",
+        reasons: ["c3 needs a human"],
+        matrix: [
+          row("c1", "The guard is covered by tests", "pass", [{ kind: "check", ref: "npm test" }, { kind: "changed-path", ref: "src/payout/guard.ts" }]),
+          row("c2", "The dashboard still renders", "failed", [{ kind: "screenshot", ref: "evidence/dash.png" }], ["the screenshot did not validate"]),
+          row("c3", "An operator reads the copy", "manual-review", [{ kind: "manual-review", ref: "read it" }], ["needs a human"]),
+        ],
+      },
+    });
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/review?result=t-intent"), { headers: { cookie } })).text();
+
+    // The approved intent, escaped.
+    expect(html).toContain("approved by alex");
+    expect(html).toContain("<strong>goal</strong> Guard the payout &lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("<strong>not this</strong> No schema changes &amp; no API changes");
+    expect(html).toContain('<span class="meta">expected to touch</span> <span class="mono">src/payout/</span>');
+
+    // Every signed criterion, by id, with its adjudicated state and citations.
+    for (const [id, state] of [["c1", "pass"], ["c2", "failed"], ["c3", "manual-review"]] as const) {
+      expect(html).toMatch(new RegExp(`data-matrix-state="${state}"[^]*?<code>${id}</code>`));
+    }
+    expect(html).toContain("[answered: check: npm test, <a href=\"#" + diffFileAnchor("src/payout/guard.ts") + "\">changed-path: src/payout/guard.ts</a>]");
+    expect(html).toContain("the screenshot did not validate");
+    // The citation's anchor lands on that file's section of the sealed diff.
+    expect(html).toContain(`<details class="diff-file" open id="${diffFileAnchor("src/payout/guard.ts")}">`);
+    expect(html).toContain(`href="#${diffFileAnchor('docs/we"ird.md')}"`);
+    expect(html).toContain(`id="${diffFileAnchor('docs/we"ird.md')}"`);
+    expect(html).toContain("docs/we&quot;ird.md");
+
+    // Drift: two files outside src/payout/ are named, first in the list.
+    expect(html).toContain('data-cockpit-drift="2"');
+    expect(html).toContain("2 changed files outside the signed touches");
+    const files = /<ol class="cockpit-files">(.*?)<\/ol>/s.exec(html)?.[1] ?? "";
+    const items = [...files.matchAll(/<li data-file-priority="(\d)">.*?<a class="mono" href="#[^"]+">([^<]+)<\/a>/g)].map(m => [m[1], m[2]]);
+    expect(items).toEqual([["0", "docs/we&quot;ird.md"], ["0", "package-lock.json"], ["2", "src/payout/guard.ts"]]);
+    expect(files).toContain('data-outside-touches="1"');
+    expect(files).toContain("outside the signed touches");
+    expect(files).toContain("dependencies, CI, schema, or credentials");
+    expect(files).toContain("no criterion cites this file");
+    // The stored verdict and the sealed bytes are untouched by any of it.
+    expect(store.proofVerdictFor(run)?.verdict).toBe("short");
+    const artifact = store.artifactsFor(run).find(one => one.kind === "terminal-diff");
+    if (artifact === undefined) throw new Error("no patch");
+    const raw = await (await fetch(url(`/r/${run}/evidence/${artifact.id}`), { headers: { cookie } })).text();
+    expect(raw).toBe(patch);
+    // The patch beneath keeps its own order: guard.ts first, as sealed.
+    const diff = html.slice(html.indexOf('<div class="diff-review"'));
+    expect(diff.indexOf("src/payout/guard.ts")).toBeLessThan(diff.indexOf("package-lock.json"));
+  });
+
+  test("evidence is labeled by source — machine re-run, agent checks, reviewer judgements and findings, screenshots, caveats — and says plainly what is missing", async () => {
+    const richRef = seed("t-rich", "everything on record", "/repo/main", {
+      acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }],
+    });
+    const rich = build("t-rich", richRef, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      stat: [{ path: "x", additions: 1, deletions: 1 }],
+      handoff: { conclusion: "Made it work.", changes: ["changed x"], verification: ["ran it"], followUps: ["watch the first deploy"] },
+      proof: {
+        version: 1,
+        criteria: [{ id: "c1", statement: "It works", verdict: "met", how: "ran it", evidence: [{ kind: "check", ref: "npm test" }, { kind: "screenshot", ref: "evidence/x.png" }] }],
+        checks: [{ command: "npm test", exitCode: 0, summary: "12 passed" }],
+        changed: ["x"],
+        caveats: ["The staging flag is still off."],
+        screenshots: [{ path: "evidence/x.png", caption: "x after the change" }],
+      },
+      checkLog: "$ npm test\n12 passed\n",
+      screenshot: { path: "evidence/x.png", caption: "x after the change" },
+      verdict: {
+        verdict: "refuted",
+        machineVerdict: "verified",
+        reasons: ["reviewer:codex contradicts c1"],
+        matrix: [row("c1", "It works", "failed", [{ kind: "check", ref: "npm test" }, { kind: "screenshot", ref: "evidence/x.png" }], ["contradicted"], { judgement: "contradicts", note: "the guard is a TODO", author: "reviewer:codex" })],
+      },
+    });
+    const reviewerRun = store.startRun({ taskRef: richRef, leaseId: "lease-reviewer", runner: "night-shift-1", role: "reviewer", parentRun: rich, provider: "codex", now: T0 });
+    const richPatch = store.artifactsFor(rich).find(one => one.kind === "terminal-diff");
+    if (richPatch === undefined) throw new Error("no patch");
+    store.addReviewerComments({ reviewerRunId: reviewerRun, runId: rich, artifactId: richPatch.id, author: "reviewer:codex", comments: [{ path: "x", line: 1, note: "this is not a lock", severity: "problem" }] }, T0);
+    store.finishRun(reviewerRun, { outcome: "no-change", reason: "reviewed", now: T0 });
+
+    const bareRef = seed("t-bare", "nothing but a diff");
+    const bare = build("t-bare", bareRef, {
+      patch: "diff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-a\n+b\n",
+      stat: [{ path: "y", additions: 1, deletions: 1 }],
+      verdict: { verdict: "short", reasons: ["no proof file"], matrix: [row("c1", "t-bare is done", "missing")] },
+      finishedAt: at(1),
+    });
+    // A failed publication, observed.
+    const pub = store.createPublicationIntent({ run: bare, taskRef: bareRef, githubRepo: "acme/thing", remote: "origin", base: "main", head: "standing-orders/t-bare", headSha: "b".repeat(40), bodyHash: "h", draft: false }, T0);
+    store.recordPublicationError(pub, "remote: permission denied", T0);
+    store.failPublication(pub, T0);
+    await boot();
+    const cookie = await login();
+
+    const html = await (await fetch(url("/review?result=t-rich"), { headers: { cookie } })).text();
+    expect(html).toContain('data-proof-verdict="proof-refuted"');
+    expect(html).toContain("the machine's stored verdict");
+    expect(html).toContain("the machine's own verdict was complete — verified; an independent review lowered it");
+    expect(html).toContain('data-cockpit-source="machine"');
+    expect(html).toContain("re-run here: the plane's own check");
+    expect(html).toContain("12 passed");
+    expect(html).toContain('<div class="result-section" data-cockpit-source="agent"><strong>checks reported by the agent</strong>');
+    expect(html).toContain("(exit 0) — 12 passed");
+    expect(html).toContain('data-cockpit-source="reviewer"');
+    expect(html).toContain('data-review-judgement="contradicts"');
+    expect(html).toContain("reviewer:codex: the guard is a TODO");
+    expect(html).toContain('<span class="badge badge-failed">problem</span> <span class="mono">x:1</span> this is not a lock');
+    expect(html).toContain('data-cockpit-source="screenshots"');
+    expect(html).toMatch(new RegExp(`<img src="/r/${rich}/evidence/\\d+" alt="x after the change">`));
+    expect(html).toContain('data-cockpit-source="caveats"');
+    expect(html).toContain("The staging flag is still off.");
+    expect(html).toContain("follow-up: watch the first deploy");
+    expect(html).toContain("Made it work.");
+    expect(html).toContain("<li>changed x</li>");
+    expect(html).toContain("not published — no branch push or pull request was intended for this build");
+
+    const plain = await (await fetch(url("/review?result=t-bare"), { headers: { cookie } })).text();
+    expect(plain).toContain("re-run here: none — no approved verification command ran for this build");
+    expect(plain).toContain("checks reported by the agent: none");
+    expect(plain).toContain("screenshots: none captured or required");
+    expect(plain).toContain("caveats: none declared");
+    expect(plain).toContain('data-matrix-state="missing"');
+    expect(plain).toContain('<span class="badge">failed</span> publication failed after 1 attempt — remote: permission denied');
+    expect(plain).toContain("publication failed — the branch never reached its remote");
+  });
+
+  test("actions: only applicable roads appear, each through its existing endpoint with the session's CSRF; a bearer session sees no forms", async () => {
+    const ref = seed("t-act", "decide on me");
+    const run = build("t-act", ref, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      stat: [{ path: "x", additions: 1, deletions: 1 }],
+      verdict: { verdict: "short", reasons: ["c1 needs a human"], matrix: [row("c1", "t-act is done", "manual-review", [{ kind: "manual-review", ref: "look" }])] },
+    });
+    await boot();
+    const cookie = await login();
+
+    const before = await (await fetch(url("/review?result=t-act"), { headers: { cookie } })).text();
+    // The primary act is the accept decision, posting to the task's own endpoint.
+    expect(before).toContain('data-next-action="accept-proof"');
+    expect(before).toContain('<form method="post" action="/t/t-act/accept-proof" class="approve-form">');
+    expect(before).toContain("accept anyway");
+    // Annotation and its return road, and no revision seal before a comment.
+    expect(before).toContain(`<form method="post" action="/r/${run}/comment" class="diff-comment-form" id="comment-form">`);
+    expect(before).toContain('<input type="hidden" name="return" value="/review?result=t-act">');
+    expect(before).not.toContain(`action="/r/${run}/revise"`);
+    expect(before).not.toContain("draft-repair");
+    expect(before).not.toContain("/contest/");
+    // Every form carries the token, and the annotate script rides along.
+    const forms = [...mainOf(before).matchAll(/<form[^>]*>(.*?)<\/form>/gs)];
+    expect(forms.length).toBe(2);
+    for (const form of forms) expect(form[1]).toContain('name="csrf"');
+    expect(before).toContain('document.getElementById("comment-form")');
+    const csrf = csrfOf(before);
+
+    // No token: refused at the existing gate, nothing accepted.
+    const forged = await post(cookie, "/t/t-act/accept-proof", { note: "sneaky" });
+    expect(forged.status).toBe(403);
+    expect(store.proofAcceptance(run)).toBeNull();
+
+    // An annotation from the cockpit lands back on the cockpit, focused.
+    const noted = await post(cookie, `/r/${run}/comment`, { csrf, path: "x", line: "1", note: "tighten this", return: "/review?result=t-act" });
+    expect(noted.status).toBe(303);
+    expect(noted.headers.get("location")).toBe("/review?result=t-act&noted=1#annotate");
+    // Any other return shape falls back to the run page.
+    const elsewhere = await post(cookie, `/r/${run}/comment`, { csrf, path: "x", line: "1", note: "and this", return: "https://evil.example/review?result=t-act" });
+    expect(elsewhere.headers.get("location")).toBe(`/r/${run}?noted=1#review`);
+
+    const after = await (await fetch(url("/review?result=t-act&noted=1"), { headers: { cookie } })).text();
+    expect(after).toContain("tighten this");
+    expect(after).toContain(`<form method="post" action="/r/${run}/revise" class="revision-from-comments">`);
+    expect(after).toContain("2 annotations ready");
+    expect(after).toContain('aria-label="review comment" autofocus>');
+    // Still the accept decision first: it resolves the state; the seal waits below.
+    expect(after).toContain('data-next-action="accept-proof"');
+
+    // Accept from the cockpit — the existing act, recorded under the session's name.
+    const accepted = await post(cookie, "/t/t-act/accept-proof", { csrf, note: "read it myself" });
+    expect(accepted.status).toBe(303);
+    expect(store.proofAcceptance(run)?.approver).toBe("alex");
+    const done = await (await fetch(url("/review?result=t-act"), { headers: { cookie } })).text();
+    expect(done).not.toContain("accept-proof");
+    expect(done).toContain("Accepted with gaps");
+    expect(done).toContain("accepted by <span class=\"mono\">alex</span>");
+    expect(done).toContain("read it myself");
+    expect(done).toContain("proof incomplete — accepted anyway by an operator");
+    expect(done).toContain('data-next-action="revise"');
+    // The stored verdict never moved.
+    expect(store.proofVerdictFor(run)?.verdict).toBe("short");
+
+    // A bearer credential reads the same facts but is offered no form.
+    const bearer = await (await fetch(url("/review?result=t-act"), { headers: { authorization: `Bearer alex:${approverToken}` } })).text();
+    expect(bearer).toContain('data-review-task="t-act"');
+    expect(mainOf(bearer)).not.toContain("<form");
+    expect(bearer).not.toContain('id="comment-form"');
+  });
+
+  test("the archive and the result receipt lead into the cockpit; the cockpit leads back to the sealed record", async () => {
+    const ref = seed("t-link", "linked both ways");
+    const run = build("t-link", ref, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      stat: [{ path: "x", additions: 1, deletions: 1 }],
+      handoff: { conclusion: "Linked." },
+      verdict: { verdict: "attested" },
+    });
+    await boot();
+    const cookie = await login();
+    const done = await (await fetch(url("/done"), { headers: { cookie } })).text();
+    expect(done).toContain('<a href="/review?result=t-link">review →</a>');
+    const task = await (await fetch(url("/t/t-link"), { headers: { cookie } })).text();
+    expect(task).toContain('<a href="/review?result=t-link">Open in the review cockpit →</a>');
+    const cockpit = await (await fetch(url("/review?result=t-link"), { headers: { cookie } })).text();
+    expect(cockpit).toContain(`<a href="/r/${run}">the full build record →</a>`);
+    expect(cockpit).toContain('href="/t/t-link"');
   });
 });
