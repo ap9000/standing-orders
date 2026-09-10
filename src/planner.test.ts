@@ -229,6 +229,13 @@ describe("planning mode, against real git", () => {
     expect(planned).toBe(EXIT.ok);
     expect(payload().dispatched).toContainEqual(expect.objectContaining({ id: "limiter", outcome: "planned" }));
     expect(prompts.some(one => one.includes("Per-user or per-tenant?") && one.includes("user"))).toBe(true);
+    expect(
+      prompts.some(one =>
+        one.includes("Each id is capped at 40 UTF-8 bytes, each statement at 300,") &&
+        one.includes("each non-null how at 500") &&
+        one.includes("Validate those byte limits"),
+      ),
+    ).toBe(true);
     expect(plannerArgv.some(args => args[args.indexOf("--permission-mode") + 1] === "acceptEdits")).toBe(true);
 
     const after = openStore(db);
