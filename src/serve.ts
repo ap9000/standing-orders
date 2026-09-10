@@ -8226,8 +8226,12 @@ const STYLE = `
     .proposal-actions .acts form { flex: 1 1 8rem; width: auto; }
     .proposal-actions .acts form:has(.arm) { flex-basis: 100%; }
     .proposal-actions .acts button { width: 100%; }
-    .chat-prompts { justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; padding-bottom: .35rem; }
-    .chat-prompts form { flex: none; }
+    .chat-prompts {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .5rem; width: 100%; max-width: 100%; overflow: visible; padding: 0;
+    }
+    .chat-prompts form, .chat-prompts button { min-width: 0; width: 100%; }
+    .chat-prompts form:last-child:nth-child(odd) { grid-column: 1 / -1; }
     .chat-main { padding-bottom: 6rem; }
     .chat-workspace .composer {
       position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));
@@ -8242,7 +8246,13 @@ const STYLE = `
        box. A fixed box belongs to an established thread; here it would sit
        above the very question it is asking the person to answer. */
     .chat-main:has(.chat-empty) { padding-bottom: 0; }
-    .chat-main:has(.chat-empty) .thread { min-height: 14rem; }
+    .chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }
+    .chat-main:has(.chat-empty) .chat-empty {
+      width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;
+    }
+    .chat-main:has(.chat-empty) .chat-empty > strong,
+    .chat-main:has(.chat-empty) .chat-empty > .meta { max-width: 22rem; margin-inline: auto; }
+    .chat-main:has(.chat-empty) .chat-empty > .meta { margin-top: .45rem; }
     .chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }
     .composer textarea { min-height: 2.75rem; padding: .55rem .65rem; font-size: .9375rem; }
   }

@@ -7579,6 +7579,10 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).toContain("standing-orders:chat-projects");
     expect(thread).toContain('.chat-workspace .composer { position: static; width: 100%; box-shadow: var(--shadow); }');
     expect(thread).toContain('position: fixed; left: 1rem; right: 1rem; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0rem));');
+    expect(thread).toContain('grid-template-columns: repeat(2, minmax(0, 1fr));');
+    expect(thread).toContain('.chat-prompts form:last-child:nth-child(odd) { grid-column: 1 / -1; }');
+    expect(thread).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }');
+    expect(thread).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
     expect(thread).toContain('.chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }');
     expect(thread).toContain('data-card-kind="fleet-overview"');
     expect(thread).toContain('aria-label="live portfolio overview"');
