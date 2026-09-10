@@ -51,8 +51,10 @@ boundaries, evidence requirements, model, and permissions.
   remains the source of truth.
 - **Chat-first task handoff.** The default form is one outcome prompt. The
   repository-aware planner drafts the goal, boundaries, acceptance criteria,
-  likely files, and execution approach. Expert controls remain under **Edit
-  details**.
+  likely files, and a concise execution plan with milestones, dependencies,
+  risks, and proof. Review or refine that plan before starting; approval locks
+  the exact revision the builder receives. Expert controls remain under
+  **Edit details**.
 - **Long-running, recoverable execution.** There is no arbitrary task
   countdown. Installed workers survive terminal closure and reboot, recover
   expired claims, and continue until a terminal result, a real decision, or a
@@ -136,9 +138,10 @@ for people splitting those parts across machines.
    criterion — a plain outcome statement and the evidence kind (check,
    screenshot, changed-path, or manual review) that will answer it — before it
    can be signed. The task page leads with a concise approval card; the full
-   planner document and editable contract remain one click away. It restates
-   the exact scope AND rubric you are signing, the provider and model it will
-   run on, and your password. Nothing spends a token until this yes.
+   structured, editable execution plan and full contract remain one click
+   away. It restates the exact scope AND rubric you are signing, the provider
+   and model it will run on, and your password. Nothing spends a token until
+   this yes.
 4. **Watch it build.** The **board** moves the card to *building*; the
    card's own page shows the stage and the live transcript; **peek**
    (`/peek`, or *peek at the live ones →* on the builds page) shows every

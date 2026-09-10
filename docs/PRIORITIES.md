@@ -103,6 +103,15 @@ planning posture visible; confirmation either starts the existing repository
 planner or leads to scope approval using the same filing door. No chat-only
 intake record or second planning engine was added.
 
+The third Priority 3 slice turns the planner's handoff into a durable execution
+plan. New plans have one compact, validated structure—approach, ordered
+milestones, dependencies, risks and mitigations, and proof mapped to every
+signed acceptance id—and render as the same rich card on task, chat, and
+triage surfaces. The operator can refine the plan before starting; stale edits
+and stale approvals refuse, approval locks the exact verified artifact hash,
+and the builder receives that stable version. The existing plan artifact is
+still the only source of truth, with safe fallback rendering for older plans.
+
 The first three Priority 2 slices landed already:
 completion carries a typed, hash-addressed proof the plane
 adjudicates against evidence it captured itself, rather than an agent's own

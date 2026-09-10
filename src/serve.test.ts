@@ -1909,7 +1909,20 @@ describe("the board — the pipeline as lanes, live in place", () => {
       taskRef: ref, leaseId: "plan-lease", runner: "b", role: "planner",
       branch: "standing-orders-plan/t-plan", worktree: "/pool/plan", now: new Date(),
     });
-    const content = Buffer.from("## Approach\nDo the thing carefully.\n", "utf8");
+    const content = Buffer.from([
+      "## Approach",
+      "Use the existing task flow and keep the change narrow.",
+      "## Milestones",
+      "1. Do the thing carefully.",
+      "2. Verify the result.",
+      "## Dependencies",
+      "- None found.",
+      "## Risks",
+      "- The first pass may miss an edge case; cover it with a focused check.",
+      "## Proof",
+      "- Run the focused integration check.",
+      "",
+    ].join("\n"), "utf8");
     const { mkdirSync: mkdirS, writeFileSync: writeS } = await import("node:fs");
     mkdirS(join(evidenceRoot, String(run)), { recursive: true });
     writeS(join(evidenceRoot, String(run), "plan.md"), content);
@@ -1919,13 +1932,44 @@ describe("the board — the pipeline as lanes, live in place", () => {
       sha256: createHash("sha256").update(content).digest("hex"),
       capture: "planner handoff (verified tree)",
     }, new Date());
+    store.finishRun(run, { outcome: "built", reason: "plan-drafted", now: new Date() });
 
     const review = await (await fetch(url("/board"), { headers: { cookie } })).text();
     expect(review).toContain("review the plan");
     const drafted = await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text();
     expect(drafted).toContain("Do the thing carefully.");
+    expect(drafted).toContain("How the agent will tackle this");
+    expect(drafted).toContain("risks &amp; mitigations");
+    expect(drafted).toContain("proof of done");
+    expect(drafted).toContain("Edit plan");
     expect(drafted).toContain("approve exactly this:");
     expect(drafted).toContain("The negotiated goal");
+    expect(drafted).not.toContain('data-card-kind="result-receipt"');
+
+    // The operator can refine the durable plan before approval. A form
+    // opened on the previous artifact cannot approve the new revision.
+    const sawPlan = /name="saw-plan" value="([0-9a-f]{64})"/.exec(drafted)?.[1] ?? "";
+    const staleDigest = /name="digest" value="([0-9a-f]{32,64})"/.exec(drafted)?.[1] ?? "";
+    const staleNonce = /name="nonce" value="([^"]+)"/.exec(drafted)?.[1] ?? "";
+    expect(sawPlan).not.toBe("");
+    const revisedDocument = content.toString("utf8").replace("2. Verify the result.", "2. Verify the result on desktop and mobile.");
+    const edited = await fetch(url("/t/t-plan/plan-edit"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, "saw-plan": sawPlan, "plan-document": revisedDocument }),
+      redirect: "manual",
+    });
+    expect(edited.status).toBe(303);
+    expect((await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text())).toContain("desktop and mobile");
+
+    const staleApproval = await fetch(url("/t/t-plan/approve"), {
+      method: "POST",
+      headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, digest: staleDigest, nonce: staleNonce, token: approverToken }),
+      redirect: "manual",
+    });
+    expect(staleApproval.status).toBe(409);
+    expect(store.getScope("t-plan")?.approvedAt).toBeNull();
   });
 
   test("the old morning route forwards to activity, which speaks of windows, not nights", async () => {

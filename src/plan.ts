@@ -24,6 +24,107 @@ export type ParsedPlan = {
   plan: string;
 };
 
+/** A deliberately small execution plan. The signed scope remains the
+ * authority; this is the durable road the builder is expected to follow.
+ * Fixed sections make the handoff scannable in the console and prevent the
+ * planner from hiding the useful parts in a long essay. */
+export type ExecutionPlanDocument = {
+  approach: string;
+  milestones: string[];
+  dependencies: string[];
+  risks: string[];
+  proof: string[];
+};
+
+export type ExecutionPlanDocumentResult =
+  | { ok: true; document: ExecutionPlanDocument }
+  | { ok: false; problems: PlanProblem[] };
+
+const EXECUTION_PLAN_SECTIONS = ["approach", "milestones", "dependencies", "risks", "proof"] as const;
+const EXECUTION_PLAN_LIST_CAP = 12;
+const EXECUTION_PLAN_ITEM_CAP = 600;
+
+/** Parse the planner's human-readable artifact without executing Markdown.
+ * Older free-form plan artifacts remain renderable through the caller's
+ * fallback, while every newly accepted planner handoff uses this shape. */
+export function parseExecutionPlanDocument(raw: string): ExecutionPlanDocumentResult {
+  const problems: PlanProblem[] = [];
+  if (Buffer.byteLength(raw, "utf8") > PLAN_LIMITS.document) {
+    return { ok: false, problems: [{ reason: "plan-too-long", message: `plan is over ${PLAN_LIMITS.document} bytes` }] };
+  }
+  const normalized = raw.replace(/\r\n?/g, "\n");
+  if (hasForbiddenControls(normalized)) {
+    return { ok: false, problems: [{ reason: "plan-controls", message: "plan carries control characters that could become terminal escapes" }] };
+  }
+
+  const sections = new Map<string, string[]>();
+  let current: string | null = null;
+  let lastSection = -1;
+  for (const line of normalized.split("\n")) {
+    const heading = /^##\s+(.+?)\s*$/.exec(line);
+    if (heading !== null) {
+      const name = (heading[1] ?? "").trim().toLowerCase();
+      if (!EXECUTION_PLAN_SECTIONS.includes(name as (typeof EXECUTION_PLAN_SECTIONS)[number])) {
+        problems.push({ reason: "plan-unknown-section", message: `plan section \"${heading[1]}\" is not one of Approach, Milestones, Dependencies, Risks, or Proof` });
+        current = null;
+        continue;
+      }
+      const position = EXECUTION_PLAN_SECTIONS.indexOf(name as (typeof EXECUTION_PLAN_SECTIONS)[number]);
+      if (position < lastSection) {
+        problems.push({ reason: "plan-section-order", message: "plan sections must stay in order: Approach, Milestones, Dependencies, Risks, Proof" });
+      }
+      lastSection = Math.max(lastSection, position);
+      if (sections.has(name)) problems.push({ reason: `plan-duplicate-${name}`, message: `plan has more than one ${name} section` });
+      sections.set(name, []);
+      current = name;
+      continue;
+    }
+    if (current === null) {
+      if (line.trim() !== "") problems.push({ reason: "plan-preamble", message: "plan must start with ## Approach" });
+      continue;
+    }
+    sections.get(current)?.push(line);
+  }
+
+  for (const section of EXECUTION_PLAN_SECTIONS) {
+    if (!sections.has(section)) problems.push({ reason: `plan-missing-${section}`, message: `plan needs a ## ${section[0]?.toUpperCase()}${section.slice(1)} section` });
+  }
+  if (problems.length > 0) return { ok: false, problems };
+
+  const approach = (sections.get("approach") ?? []).join("\n").trim();
+  if (approach === "") problems.push({ reason: "plan-empty-approach", message: "Approach must say how the work will be done" });
+  if (approach.length > 2_000) problems.push({ reason: "plan-approach-too-long", message: "Approach is over 2000 characters" });
+
+  const list = (name: "milestones" | "dependencies" | "risks" | "proof"): string[] => {
+    const items: string[] = [];
+    for (const line of sections.get(name) ?? []) {
+      if (line.trim() === "") continue;
+      const item = /^(?:[-*]\s+|\d+[.)]\s+)(.+)$/.exec(line.trim())?.[1]?.trim();
+      if (item === undefined || item === "") {
+        problems.push({ reason: `plan-bad-${name}-item`, message: `${name} entries must be bullets or numbered items` });
+        continue;
+      }
+      if (item.length > EXECUTION_PLAN_ITEM_CAP) {
+        problems.push({ reason: `plan-${name}-item-too-long`, message: `${name} entries are capped at ${EXECUTION_PLAN_ITEM_CAP} characters` });
+        continue;
+      }
+      items.push(item);
+    }
+    if (items.length === 0) problems.push({ reason: `plan-empty-${name}`, message: `${name} needs at least one item (use \"None found.\" when honest)` });
+    if (items.length > EXECUTION_PLAN_LIST_CAP) problems.push({ reason: `plan-too-many-${name}`, message: `${name} is capped at ${EXECUTION_PLAN_LIST_CAP} items` });
+    return items;
+  };
+
+  const document = {
+    approach,
+    milestones: list("milestones"),
+    dependencies: list("dependencies"),
+    risks: list("risks"),
+    proof: list("proof"),
+  };
+  return problems.length === 0 ? { ok: true, document } : { ok: false, problems };
+}
+
 export type PlanParseResult =
   | { ok: true; plan: ParsedPlan }
   | { ok: false; problems: PlanProblem[] };
@@ -121,6 +222,21 @@ export function parsePlan(raw: string): PlanParseResult {
   }
   if (acceptanceParse.problems.length === 0 && acceptanceParse.criteria.length === 0) {
     problems.push({ reason: "missing-acceptance", message: "acceptance is required — at least one signed criterion the build will be judged against" });
+  }
+
+  if (document !== null) {
+    const execution = parseExecutionPlanDocument(document);
+    if (!execution.ok) {
+      problems.push(...execution.problems);
+    } else if (acceptanceParse.problems.length === 0) {
+      const proof = execution.document.proof.join("\n");
+      for (const criterion of acceptanceParse.criteria) {
+        const mentioned = new RegExp(`(^|[^A-Za-z0-9_-])${criterion.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_-]|$)`).test(proof);
+        if (!mentioned) {
+          problems.push({ reason: `plan-proof-missing-${criterion.id}`, message: `Proof must name acceptance criterion ${criterion.id}` });
+        }
+      }
+    }
   }
 
   if (problems.length > 0) return { ok: false, problems };

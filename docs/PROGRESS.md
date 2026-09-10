@@ -1,5 +1,19 @@
 # Progress
 
+**2026-09-10 — Repository planning is now a durable execution plan, not a
+Markdown blob.** New planner handoffs must state a concise approach, ordered
+milestones, dependencies, risks with mitigations, and proof that names every
+signed acceptance criterion. Malformed or vague handoffs fail closed before a
+scope is proposed. Task, focused-chat, and triage approval surfaces render the
+same verified artifact as a structured, responsive plan card; historical
+free-form artifacts retain a safe plain-text fallback. Before approval, an
+operator can edit the plan in place with stale-revision protection. Browser
+approval is now bound to the exact verified plan hash (and any race terms), so
+another tab cannot approve a plan revision it did not show; after approval the
+plan is locked and the builder receives that stable artifact. No second plan
+store or workflow engine was added—the existing planner artifact remains the
+single durable handoff.
+
 **2026-09-10 — Unified chat now starts from an outcome, not an order form.**
 The mate treats one plain-language request as enough to draft a task: it
 infers the title, narrow goal, safe non-goals, acceptance criteria, and the

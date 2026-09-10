@@ -64,7 +64,19 @@ describe("planning mode, against real git", () => {
           outOfScope: "No schema changes",
           touches: ["src/payouts.ts"],
           acceptance: [{ id: "c1", statement: "The payout endpoint is rate limited.", evidence: ["check"] }],
-          plan: "## Approach\nWrap the handler in a sliding-window limiter.\n",
+          plan: [
+            "## Approach",
+            "Wrap the existing handler in a sliding-window limiter.",
+            "## Milestones",
+            "1. Add the limiter at the payout boundary.",
+            "2. Cover allowed and rejected requests.",
+            "## Dependencies",
+            "- The existing payout handler remains the request boundary.",
+            "## Risks",
+            "- Shared state may leak across tenants; key the limiter by tenant.",
+            "## Proof",
+            "- c1 — run the payout endpoint checks and capture their passing output.",
+          ].join("\n"),
         }),
       );
     }

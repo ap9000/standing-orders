@@ -172,6 +172,24 @@ const DEMO_COPY_PROOF = {
   screenshots: [],
 };
 
+const DEMO_EXECUTION_PLAN = [
+  "## Approach",
+  "Move the request logger to structured JSON lines at the existing boundary, then update only the dashboards that still parse the legacy text format.",
+  "## Milestones",
+  "1. Trace the logger and the two dashboard consumers.",
+  "2. Add the JSON-line formatter without changing local human-readable output.",
+  "3. Migrate both dashboard parsers and cover the compatibility boundary.",
+  "## Dependencies",
+  "- The collector accepts one JSON object per line.",
+  "- Local development keeps the existing console formatter.",
+  "## Risks",
+  "- A partial rollout could mix formats; keep parsing compatibility at the collector boundary during the change.",
+  "- Dashboard field names could drift; lock them with fixture-based checks.",
+  "## Proof",
+  "- c1 — run the logger and dashboard fixture checks and review the rendered JSON lines.",
+  "",
+].join("\n");
+
 /**
  * A minimal, real, uncompressed-per-scanline PNG encoder — no image
  * library, just IHDR + one zlib-deflated IDAT + IEND. Used only to give
@@ -248,6 +266,11 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
 
   const hoursAgo = (hours: number): Date => new Date(now.getTime() - hours * 3_600_000);
 
+  // Configure the install before filing any task, exactly as a normal first
+  // run does. Every seeded scope can then be approved from the demo instead
+  // of inheriting an artificial "model not set" blocker.
+  store.setPhaseConfig("installation", "build", "claude", "sonnet", "demo", now);
+
   // The demo's builder goes through the REAL claim machinery, and the claim
   // primitive proves identity and repo binding in-transaction — so the demo
   // runner is registered like a real one, bound to both demo repos.
@@ -273,12 +296,34 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   };
 
   // --- needs-you: an approval waiting -----------------------------------
-  task(
+  const planned = task(
     "rotate-log-format",
     "Rotate the request-log format to JSON lines",
     repos.web,
     "Switch the request logger to JSON lines so the collector stops parsing free text. Keep the human console formatter for local dev. Migrate the two dashboards that grep the old format.",
   );
+  const plannedRef = store.refFor("built-in", planned).id;
+  store.setPlanState(plannedRef, "drafted");
+  const plannerRun = store.startRun({
+    taskRef: plannedRef,
+    leaseId: "demo-lease-plan",
+    runner: "night-shift-1",
+    role: "planner",
+    branch: `standing-orders-plan/${planned}`,
+    worktree: join(repos.web, ".demo-worktree-plan"),
+    now: hoursAgo(3),
+  });
+  storeEvidence(
+    store,
+    evidenceRoot,
+    plannerRun,
+    "plan",
+    "plan.md",
+    Buffer.from(DEMO_EXECUTION_PLAN, "utf8"),
+    "planner handoff (verified tree) [demo: synthetic]",
+    hoursAgo(2.8),
+  );
+  store.finishRun(plannerRun, { outcome: "built", reason: "plan-drafted", now: hoursAgo(2.8) });
 
   // --- needs-you: a blocking decision -----------------------------------
   const asking = task(
@@ -827,7 +872,6 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   store.hold(store.refFor("built-in", held).id, "waiting on the vendor sandbox account", null, hoursAgo(12));
 
   // --- a standing order with a track record ------------------------------
-  store.setPhaseConfig("installation", "build", "claude", "sonnet", "demo", now);
   const routine = fileRoutineProposal(
     store,
     {

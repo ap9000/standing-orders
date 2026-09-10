@@ -114,6 +114,7 @@ import {
 } from "./scope.js";
 import { isQualityMode, qualityModeTitle, type QualityMode } from "./quality.js";
 import { hasForbiddenControls, validateNote } from "./decision.js";
+import { parseExecutionPlanDocument, PLAN_LIMITS } from "./plan.js";
 import { observeWorktree, parseBaseTreeSnapshot, aggregateNewNames, PEEK_LIMITS } from "./peek.js";
 import { readLiveWindow } from "./live.js";
 import { dirname } from "node:path";
@@ -133,7 +134,7 @@ function oneLineUa(raw: string | string[] | undefined): string {
   if (/windows/i.test(text)) return "a Windows machine";
   return "a device";
 }
-import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, planComparison, contestNoun, jointApprovalDigest } from "./contest.js";
+import { buildPickView, computePickPlan, finalizeContestPick, abandonContest, nonceHashOf, pickTupleDigest, planTournament, planComparison, contestNoun } from "./contest.js";
 import type { AgentView } from "./contest.js";
 import type { Runner } from "./runner.js";
 import { register as registerRunner, isAlive as runnerAlive } from "./runner.js";
@@ -1065,18 +1066,24 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (item !== null && item.kind === "approval") {
         // The card restates the digest-bound terms, so the nonce may be
         // minted here — same rule as the task screen, same binding.
-        const nonce = who.via === "cookie" ? mintApprovalNonce(who.name, item.approval.taskId, item.approval.digest) : "";
         const ref = store.lookupRef(item.approval.taskId);
         const scope = store.getScope(item.approval.taskId);
+        const planView = ref !== null && ref.plan === "drafted" ? planViewOf(ref.id) : null;
+        const raceTerms = ref === null ? null : store.activeTournamentTerms(ref.id);
+        const approvalDigest = approvalFormDigest(item.approval.digest, raceTerms?.raceDigest ?? null, planView?.sha256 ?? null);
+        const nonce = who.via === "cookie" ? mintApprovalNonce(who.name, item.approval.taskId, approvalDigest) : "";
         return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
           item, scope,
-          planDocument: ref !== null && ref.plan === "drafted" ? planDocumentOf(ref.id) : null,
+          planDocument: planView?.document ?? null,
+          approvalDigest,
+          raceTerms,
           deliverable: ref?.deliverable ?? "branch",
           csrf, nonce, remaining: remaining.length, skipped: [...skipped], now,
         }));
       }
       return sendScreen(response, 200, nextPage(chromeFor(project, "inbox"), {
         item, scope: null, planDocument: null, csrf, nonce: "",
+        approvalDigest: null, raceTerms: null,
         remaining: remaining.length, skipped: [...skipped], now,
       }));
     }
@@ -2728,6 +2735,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     return run.outcome === null && store.currentLiveLease(run.taskRef, clock()) === run.leaseId;
   }
 
+  /** Planner and reviewer bookkeeping can finish around a build but are
+   * never the task's delivered result. Repair attempts remain results. */
+  const runIsTaskResult = (run: Pick<Run, "role" | "finishedAt">): boolean =>
+    run.finishedAt !== null && (run.role === "builder" || run.role === "repair" || run.role === "scout");
+
   /** The live subset of a bounded run page \u2014 one indexed lookup per row. */
   function liveRunIds(rows: readonly (Pick<Run, "id" | "outcome" | "leaseId" | "taskRef">)[]): Set<number> {
     const live = new Set<number>();
@@ -2862,8 +2874,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     // race terms are filed, the digest being shown — and bound by the
     // nonce — is the joint fingerprint, never the scope's alone.
     const raceTerms = ref === null ? null : store.activeTournamentTerms(ref.id);
+    const planView = ref === null ? null : planViewOf(ref.id);
     const approvalDigest =
-      scope === null ? null : raceTerms === null ? scope.digest : jointApprovalDigest(scope.digest, raceTerms.raceDigest);
+      scope === null ? null : approvalFormDigest(scope.digest, raceTerms?.raceDigest ?? null, planView?.sha256 ?? null);
     // The nonce is minted at render, per viewer, bound to the digest being
     // shown — the browser approval flow starts here and nowhere else.
     const nonce =
@@ -2877,7 +2890,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // "no-change" outcome would hijack the task's own completion card
       // the instant a review lands, showing "proof missing" for a proof
       // that is right there on the builder's run.
-      const latest = runs.find(one => one.finishedAt !== null && one.role !== "reviewer");
+      const latest = runs.find(runIsTaskResult);
       if (latest === undefined) return null;
       const artifacts = store.artifactsFor(latest.id);
       const verdict = store.proofVerdictFor(latest.id);
@@ -2910,7 +2923,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         dispatch: diagnoseTaskDispatch(store, taskId, now),
         strikes: ref?.strikes ?? 0,
         plan: ref?.plan ?? null,
-        planDocument: ref === null ? null : planDocumentOf(ref.id),
+        planDocument: planView?.document ?? null,
+        planSha: planView?.sha256 ?? null,
         deliverable: ref?.deliverable ?? "branch",
         report: ref === null ? null : readVerifiedReport(store, evidenceRoot, ref.id),
         revision,
@@ -3100,7 +3114,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // of truth instead of growing a chat-only lifecycle.
     const view = who === undefined ? null : taskViewData(taskId, who, null);
     const runs = view?.runs ?? store.runsFor(ref.id);
-    const latest = runs.find(one => one.finishedAt !== null && one.role !== "reviewer") ?? null;
+    const latest = runs.find(runIsTaskResult) ?? null;
     const approval = approvalOf(scope);
     const live = runs.find(one => runIsLive(one)) ?? null;
     return {
@@ -4388,7 +4402,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof)$");
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -5838,6 +5852,60 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return redirect(response, taskHref(taskId));
       }
+      case "plan-edit": {
+        if (who.via !== "cookie") {
+          return refuse(response, who, 403, "editing a plan is a browser session's act");
+        }
+        const scope = store.getScope(taskId);
+        const current = planViewOf(ref.id);
+        if (ref.plan !== "drafted" || scope === null || current === null) {
+          return taskScreen(response, who, taskId, "there is no editable plan on this task", 409);
+        }
+        if (approvalOf(scope).approved) {
+          return taskScreen(response, who, taskId, "this plan is already approved and locked — file a revision instead", 409);
+        }
+        if (store.hasLiveClaim(ref.id, now)) {
+          return taskScreen(response, who, taskId, "this task is running — its plan cannot change underneath the agent", 409);
+        }
+        if ((body.get("saw-plan") ?? "") !== current.sha256) {
+          return taskScreen(response, who, taskId, "the plan changed while this editor was open — read the latest version and try again", 409);
+        }
+        const document = (body.get("plan-document") ?? "").replace(/\r\n?/g, "\n").trim();
+        const parsed = parseExecutionPlanDocument(document);
+        if (!parsed.ok) {
+          return taskScreen(response, who, taskId, `plan not saved: ${parsed.problems.map(one => one.message).join("; ")}`, 400);
+        }
+        const proof = parsed.document.proof.join("\n");
+        const missing = scope.acceptance.filter(criterion => {
+          const id = criterion.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          return !new RegExp(`(^|[^A-Za-z0-9_-])${id}([^A-Za-z0-9_-]|$)`).test(proof);
+        });
+        if (missing.length > 0) {
+          return taskScreen(response, who, taskId, `plan not saved: Proof must name ${missing.map(one => one.id).join(", ")}`, 400);
+        }
+        if (document === current.document.trim()) return redirect(response, taskHref(taskId));
+        const content = Buffer.from(`${document}\n`, "utf8");
+        if (content.length > PLAN_LIMITS.document) {
+          return taskScreen(response, who, taskId, `plan not saved: it is over ${PLAN_LIMITS.document} bytes`, 400);
+        }
+        try {
+          const name = `plan-edit-${randomUUID().replace(/-/g, "")}.md`;
+          const key = writeEvidenceFile(evidenceRoot, current.run, name, content);
+          store.saveArtifact({
+            run: current.run,
+            kind: "plan",
+            key,
+            bytesOriginal: content.length,
+            bytesStored: content.length,
+            truncated: false,
+            sha256: createHash("sha256").update(content).digest("hex"),
+            capture: `operator edit by ${who.name} (verified session)`,
+          }, now);
+        } catch {
+          return taskScreen(response, who, taskId, "the plan could not be saved safely — nothing changed", 500);
+        }
+        return redirect(response, taskHref(taskId));
+      }
       case "cancel": {
         const cancelled = store.cancelTask(taskId, now);
         if (!cancelled.ok) {
@@ -6056,6 +6124,14 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (token === "") {
           return approvalProblem("approval requires your password, typed again", 400);
         }
+        const scopeRow = store.getScope(taskId);
+        if (scopeRow === null) return approvalProblem("this task has no scope to approve", 409);
+        const raceTerms = store.activeTournamentTerms(ref.id);
+        const planView = planViewOf(ref.id);
+        const expectedDigest = approvalFormDigest(scopeRow.digest, raceTerms?.raceDigest ?? null, planView?.sha256 ?? null);
+        if (digest !== expectedDigest) {
+          return approvalProblem("the scope or plan changed while this form was open — read the latest version and approve again", 409);
+        }
         // A revision approves ONLY against a brief that still verifies
         // (Codex M5-M8 audit, IV-3): the batch the screen restated must be
         // provably the batch on disk at the moment of the yes — a brief
@@ -6070,12 +6146,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // A tournament task's yes covers BOTH documents (finding 31): the
         // form bound the joint fingerprint, and the scope and race terms
         // approve together, in one transaction, or not at all.
-        const raceTerms = store.activeTournamentTerms(ref.id);
         if (raceTerms !== null) {
-          const scopeRow = store.getScope(taskId);
-          if (scopeRow === null || digest !== jointApprovalDigest(scopeRow.digest, raceTerms.raceDigest)) {
-            return approvalProblem("this task races a tournament — the form was stale; read it again", 409);
-          }
           const both = store.transact(() => {
             const scopeApproved = approveScope(store, taskId, who.name, now, scopeRow.digest, token);
             if (!scopeApproved.ok) return scopeApproved;
@@ -6090,7 +6161,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           }
           return redirect(response, approvalBack);
         }
-        const approved = approveScope(store, taskId, who.name, now, digest, token);
+        const approved = approveScope(store, taskId, who.name, now, scopeRow.digest, token);
         if (!approved.ok) {
           const status = approved.reason === "changed" ? 409 : 403;
           return approvalProblem(`not approved: ${approved.reason}`, status);
@@ -6105,7 +6176,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         // v40 fix: a reviewer run is never the attempt whose proof is
         // being accepted.
-        const latest = store.runsFor(ref.id).find(one => one.finishedAt !== null && one.role !== "reviewer");
+        const latest = store.runsFor(ref.id).find(runIsTaskResult);
         if (latest === undefined) {
           return taskScreen(response, who, taskId, "this task has no finished attempt to accept", 404);
         }
@@ -6194,13 +6265,14 @@ export function createDecisionServer(options: ServeOptions): Server {
     return queueBody(tasks, workers, csrf, revision, store.queueRevision());
   }
 
-  /** The newest plan document for a task, verified before a byte renders. */
-  function planDocumentOf(taskRef: number): string | null {
+  /** The newest plan document for a task, verified before a byte renders.
+   * Its hash is also the plan revision the approval form was minted for. */
+  function planViewOf(taskRef: number): { document: string; sha256: string; run: number } | null {
     const artifact = store.latestPlanArtifact(taskRef);
     if (artifact === null) return null;
     try {
       const verified = readVerifiedArtifact(evidenceRoot, artifact);
-      return verified.ok ? verified.content.toString("utf8") : null;
+      return verified.ok ? { document: verified.content.toString("utf8"), sha256: artifact.sha256, run: artifact.run } : null;
     } catch {
       return null;
     }
@@ -7576,7 +7648,25 @@ const STYLE = `
   .approval-confirm { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem; align-items: end; margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--glass-border); }
   .approval-confirm label { margin: 0; }
   .approval-confirm button { min-height: 2.5rem; }
-  details.planner-plan { margin-top: .75rem; background: color-mix(in srgb, var(--glass) 72%, transparent); }
+  .planner-plan { margin-top: .75rem; padding: 1.15rem 1.2rem; overflow: hidden; background: color-mix(in srgb, var(--glass) 82%, transparent); }
+  .execution-plan-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: .95rem; }
+  .execution-plan-head h2 { margin: .15rem 0 0; font-size: 1.05rem; letter-spacing: -.025em; }
+  .plan-lock { flex: none; padding: .3rem .6rem; border: 1px solid var(--glass-border); border-radius: 999px; color: var(--muted-foreground); background: color-mix(in srgb, var(--muted) 50%, transparent); font-size: .7rem; }
+  .execution-plan { display: grid; gap: .75rem; }
+  .execution-plan p { margin: .2rem 0 0; line-height: 1.55; white-space: pre-wrap; }
+  .execution-plan ol, .execution-plan ul { display: grid; gap: .45rem; margin: .35rem 0 0; padding-left: 1.3rem; }
+  .execution-plan li { padding-left: .15rem; line-height: 1.45; overflow-wrap: anywhere; }
+  .execution-milestones { padding: .85rem .9rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 2px); background: color-mix(in srgb, var(--muted) 36%, transparent); }
+  .execution-milestones li::marker { color: var(--muted-foreground); font: 500 .7rem var(--font-mono); }
+  .execution-support { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
+  .execution-support > div, .execution-proof { padding: .8rem .85rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass) 74%, transparent); }
+  .execution-proof li::marker { content: "✓  "; color: var(--running); }
+  .execution-plan-compact { gap: .55rem; margin-top: .4rem; }
+  .execution-plan-compact .execution-support { grid-template-columns: 1fr; }
+  .plan-editor { margin-top: .9rem; padding-top: .75rem; border-top: 1px solid var(--glass-border); }
+  .plan-editor > summary { width: fit-content; color: var(--muted-foreground); cursor: pointer; font-size: .8rem; font-weight: 600; }
+  .plan-editor form { margin-top: .7rem; }
+  .plan-editor textarea { width: 100%; font-family: var(--font-mono); font-size: .75rem; line-height: 1.55; }
   .planner-status { display: flex; gap: .8rem; align-items: flex-start; }
   .planner-orb { position: relative; flex: 0 0 2.15rem; width: 2.15rem; height: 2.15rem; border-radius: .75rem; background: var(--running-soft); }
   .planner-orb::after { content: ""; position: absolute; inset: .65rem; border-radius: 999px; background: var(--running); animation: pulse 1.25s ease-in-out infinite; }
@@ -7629,6 +7719,12 @@ const STYLE = `
     .workbench-mobile-rail, .workbench-mobile-back { display: block; }
     .workbench-mobile-rail { margin-top: 1.75rem; border-top: 1px solid var(--border); padding-top: .75rem; }
     .workbench-mobile-back { margin: 0 0 1rem; }
+  }
+  @media (max-width: 620px) {
+    .planner-plan { padding: 1rem; }
+    .execution-plan-head { flex-direction: column; align-items: flex-start; gap: .55rem; }
+    .execution-support { grid-template-columns: 1fr; }
+    .plan-lock { white-space: nowrap; }
   }
 
   /* The phone shell: the sidebar disappears; a top bar carries the project
@@ -9892,6 +9988,22 @@ type ChatProjectPulse = {
   peek: ProjectPeek | null;
 };
 
+/** The browser's one-click approval binds not only the signed scope but the
+ * exact advisory plan revision and any race terms shown beside it. The scope
+ * digest remains the durable authority; this composite makes a stale open
+ * tab fail when somebody edits the plan before approval. */
+function approvalFormDigest(scopeDigest: string, raceDigest: string | null, planSha: string | null): string {
+  if (raceDigest === null && planSha === null) return scopeDigest;
+  return createHash("sha256")
+    .update("standing-orders/browser-approval/v1\0", "utf8")
+    .update(scopeDigest, "utf8")
+    .update("\0", "utf8")
+    .update(raceDigest ?? "", "utf8")
+    .update("\0", "utf8")
+    .update(planSha ?? "", "utf8")
+    .digest("hex");
+}
+
 /** A task attached by the server to one chat turn. The thread remains the
  * unified conversation; this is a focused lens, not a second chat silo. */
 type TaskChatFocus = {
@@ -10022,7 +10134,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
     `<input type="hidden" name="return" value="${escape(returnTo)}">` +
     `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
-    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span><pre class="recap plan-doc">${escape(approval.planDocument)}</pre></div>`) +
+    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}</div>`) +
     (approval.deliverable === "report" ? `<p class="meta"><span class="badge">report only</span> This investigates and reports back without changing the repository.</p>` : "") +
     (approval.coordinator === null ? "" : `<p class="meta">Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.</p>`) +
     `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
@@ -12791,6 +12903,26 @@ function newTaskPage(
   ].join("\n"), { chrome });
 }
 
+/** A plan is stored as inert Markdown for portability into the builder
+ * brief, but the console renders its known structure as a useful control
+ * surface. Historical free-form plans keep their safe plain-text fallback. */
+function executionPlanHtml(document: string, compact = false): string {
+  const parsed = parseExecutionPlanDocument(document);
+  if (!parsed.ok) return `<pre class="recap plan-doc">${escape(document)}</pre>`;
+  const plan = parsed.document;
+  const items = (values: string[], ordered = false): string =>
+    `<${ordered ? "ol" : "ul"}>${values.map(value => `<li>${escape(value)}</li>`).join("")}</${ordered ? "ol" : "ul"}>`;
+  return (
+    `<div class="execution-plan${compact ? " execution-plan-compact" : ""}">` +
+    `<div class="execution-approach"><span class="approval-label">approach</span><p>${escape(plan.approach)}</p></div>` +
+    `<div class="execution-milestones"><span class="approval-label">milestones</span>${items(plan.milestones, true)}</div>` +
+    `<div class="execution-support"><div><span class="approval-label">dependencies</span>${items(plan.dependencies)}</div>` +
+    `<div><span class="approval-label">risks &amp; mitigations</span>${items(plan.risks)}</div></div>` +
+    `<div class="execution-proof"><span class="approval-label">proof of done</span>${items(plan.proof)}</div>` +
+    `</div>`
+  );
+}
+
 /** The revision batch a task's approval screen restates, or the named reason it cannot. */
 type RevisionView =
   | { sourceTask: string; sourceRun: number; comments: { path: string | null; line: number | null; note: string; author: string }[] }
@@ -12803,6 +12935,8 @@ function taskBody(data: {
   strikes: number;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
+  /** Hash of the verified plan artifact currently shown. */
+  planSha?: string | null;
   /** v34: what this task delivers, and the scout's report when one exists. */
   deliverable?: "branch" | "report";
   report?: ReportView | null;
@@ -13255,8 +13389,17 @@ function taskBody(data: {
         ? `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>planning requested</strong>` +
           `<span class="meta">The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work.</span></p></div>`
         : ""
-      : `<details class="planner-plan"><summary><strong>Planner’s approach</strong> <span class="meta">— review the plan or approve the concise scope below</span></summary>` +
-        `<pre class="recap plan-doc">${escape(data.planDocument)}</pre></details>`;
+      : `<section class="card planner-plan"><div class="execution-plan-head"><div><span class="eyebrow">execution plan</span><h2>How the agent will tackle this</h2></div>` +
+        `<span class="plan-lock">${approval.approved ? "approved · locked" : "review before starting"}</span></div>` +
+        executionPlanHtml(data.planDocument) +
+        (data.csrf === "" || data.planSha == null || approval.approved
+          ? ""
+          : `<details class="plan-editor"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
+            `<input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="saw-plan" value="${escape(data.planSha)}">` +
+            `<label>plan details <span class="meta">Keep the five headings. Approval locks this version for the build.</span>` +
+            `<textarea name="plan-document" rows="14">${escape(data.planDocument)}</textarea></label>` +
+            `<button type="submit">Save plan</button></form></details>`) +
+        `</section>`;
 
   // The revision batch (M6.8), restated on the SAME screen as the approval
   // it belongs to: the approver sees exactly the comments the brief carries.
@@ -13618,7 +13761,7 @@ function taskBody(data: {
     liveRun !== undefined
       ? prop("worker", `${escape(liveRun.runner)} · <a href="/r/${liveRun.id}">build #${liveRun.id}</a> running`)
       : data.runs[0] !== undefined
-        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">build #${data.runs[0].id}</a> · ${escape(data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
+        ? prop("last attempt", `<a href="/r/${data.runs[0].id}">${runNoun(data.runs[0])} #${data.runs[0].id}</a> · ${escape(data.runs[0].role === "planner" && data.runs[0].reason === "plan-drafted" ? "planned" : data.runs[0].outcome ?? "never finished")} · ${escape(data.runs[0].runner)}`)
         : "";
   const queueRow =
     data.position !== null && data.position !== undefined && task.state === "queued"
@@ -14128,10 +14271,16 @@ function shortDigest(digest: string): string {
  * the caller proved the run's lease is the task's current live claim — an
  * orphaned run keeps saying what actually became of it. */
 function runOutcomeBadge(run: Run, live: boolean): string {
+  if (!live && run.role === "planner" && run.reason === "plan-drafted") {
+    return `<span class="badge">planned</span>`;
+  }
   return live
     ? `<span class="badge badge-running">running</span>`
     : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>`;
 }
+
+const runNoun = (run: Pick<Run, "role">): string =>
+  run.role === "planner" ? "plan" : run.role === "reviewer" ? "review" : run.role === "scout" ? "report" : "build";
 
 
 function runsPage(
@@ -15408,6 +15557,8 @@ function nextPage(chrome: Chrome, data: {
     | null;
   scope: Scope | null;
   planDocument: string | null;
+  approvalDigest: string | null;
+  raceTerms: TournamentTerms | null;
   /** v34: said inside the ceremony when the yes buys a report, not a branch. */
   deliverable?: "branch" | "report";
   csrf: string;
@@ -15448,11 +15599,11 @@ function nextPage(chrome: Chrome, data: {
       `<p>${escape(item.approval.title)}</p>` +
       (data.planDocument === null
         ? ""
-        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p><pre class="recap plan-doc">${escape(data.planDocument)}</pre></div>`) +
+        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p>${executionPlanHtml(data.planDocument, true)}</div>`) +
       `<form method="post" action="${taskHref(item.approval.taskId)}/approve" class="card approve-form">` +
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
       `<input type="hidden" name="nonce" value="${escape(data.nonce)}">` +
-      `<input type="hidden" name="digest" value="${escape(item.approval.digest)}">` +
+      `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? item.approval.digest)}">` +
       `<input type="hidden" name="return" value="next">` +
       `<p><strong>approve exactly this:</strong></p>` +
       (data.deliverable === "report" ? `<p class="meta"><span class="badge">scout</span> a read-only session investigates this goal and delivers a report — no branch, nothing changes in the repository</p>` : "") +
@@ -15461,6 +15612,9 @@ function nextPage(chrome: Chrome, data: {
       `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
       `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
       (scope === null ? "" : acceptanceCeremonyHtml(scope.acceptance)) +
+      (data.raceTerms === null
+        ? ""
+        : `<p><strong>${data.raceTerms.kind === "comparison" ? "comparison" : "tournament"}</strong></p><p class="meta">${data.raceTerms.n} agents build independently: ${data.raceTerms.agents.map(one => `${escape(one.provider)} · ${escape(one.model)}`).join(" vs ")}.</p>`) +
       `<label>your password, typed again — a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>` +
       `<div class="sticky-actions"><button type="submit">approve this scope</button></div>` +
       `</form>` +
