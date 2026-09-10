@@ -6,7 +6,8 @@ import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { build, PROTECTED, type Runner } from "./builder.js";
 import { resetAttestationCache } from "./attest.js";
-import { readVerifiedArtifact } from "./evidence.js";
+import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
+import { createHash as sha } from "node:crypto";
 
 const OK = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
 const T0 = new Date("2026-08-11T22:00:00.000Z");
@@ -2449,5 +2450,408 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     const verdict = store.proofVerdictFor(req.runId as number);
     expect(verdict).toMatchObject({ verdict: "refuted" });
     expect(verdict?.reasons[0]).toContain("src/other.ts");
+  });
+});
+
+describe("adaptive execution plans", () => {
+  let store: Store;
+  let approverToken: string;
+  let taskRef: number;
+  let worktree: string;
+  let evidence: string;
+  let runId: number;
+  let planRunId: number;
+  const gitCalls: string[][] = [];
+  const agentCalls: string[][] = [];
+
+  const {
+    mkdtempSync: mkdtemp,
+    rmSync: rm,
+    writeFileSync: write,
+    existsSync: exists,
+    readdirSync: readdir,
+  } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+
+  /** A real execution plan: three milestones, so a checkpoint has something
+   * to say and a revision has something to replace. */
+  const PLAN = [
+    "## Approach",
+    "Add the guard at the payout boundary, then cover it with a test.",
+    "",
+    "## Milestones",
+    "- Find the payout boundary",
+    "- Add the guard",
+    "- Cover it with a test",
+    "",
+    "## Dependencies",
+    "- src/legacy/pay.ts holds the boundary",
+    "",
+    "## Risks",
+    "- The boundary may live in two places",
+    "",
+    "## Proof",
+    "- a1 is met when the new test passes",
+    "",
+  ].join("\n");
+
+  /** The replacement a build proposes once the repository contradicts the
+   * dependency above. */
+  const REPLACEMENT = PLAN.replace("- src/legacy/pay.ts holds the boundary", "- src/pay/boundary.ts holds the boundary");
+
+  const git: Runner = async (_file, args) => {
+    gitCalls.push([...args]);
+    if (args.includes("--abbrev-ref")) return { ...OK, stdout: "feat/a\n" };
+    if (args.includes("symbolic-ref")) {
+      return args.includes("refs/remotes/origin/HEAD") ? { ...OK, code: 1 } : { ...OK, stdout: "main\n" };
+    }
+    if (args.includes("rev-parse")) return { ...OK, stdout: "abc123def\n" };
+    if (args.includes("diff")) return { ...OK, stdout: "diff --git a/src/x.ts b/src/x.ts\n+guard\n" };
+    if (args.includes("status")) return { ...OK, stdout: " M src/x.ts\n" };
+    return { ...OK };
+  };
+
+  /** Everything the agent knows, it knows from its brief — the milestone
+   * ids, the revision hash, and both nonce-bearing filenames are READ OUT
+   * of the prompt, exactly as a real agent would have to. */
+  const readBrief = (args: readonly string[]) => {
+    const prompt = args[args.indexOf("-p") + 1] ?? "";
+    return {
+      prompt,
+      progress: /STANDING-ORDERS-PROGRESS-[0-9a-f]{16}\.json/.exec(prompt)?.[0] ?? null,
+      proposal: /STANDING-ORDERS-PROPOSAL-[0-9a-f]{16}\.json/.exec(prompt)?.[0] ?? null,
+      done: /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0] ?? null,
+      hash: /hash is ([0-9a-f]{64})/.exec(prompt)?.[1] ?? null,
+      milestones: [...new Set(prompt.match(/m\d+-[0-9a-f]{8}/g) ?? [])],
+    };
+  };
+
+  /** Reports progress, then finishes normally. */
+  const checkpointingAgent =
+    (states: readonly string[], overHash?: string): Runner =>
+    async (_file, args, options) => {
+      agentCalls.push([...args]);
+      const brief = readBrief(args);
+      const cwd = options?.cwd ?? worktree;
+      if (brief.progress !== null) {
+        write(
+          join(cwd, brief.progress),
+          JSON.stringify({
+            revisionHash: overHash ?? brief.hash,
+            milestones: brief.milestones.map((id, index) => ({ id, state: states[index] ?? "pending", note: null })),
+          }),
+        );
+      }
+      if (brief.done !== null) {
+        write(join(cwd, brief.done), JSON.stringify({ version: 1, status: "completed", conclusion: "Added the guard." }));
+      }
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+  /** Files ONE plan revision and stops — no handoff, nothing committed. */
+  const revisingAgent =
+    (payload: unknown, before?: () => void): Runner =>
+    async (_file, args, options) => {
+      agentCalls.push([...args]);
+      before?.();
+      const brief = readBrief(args);
+      if (brief.proposal === null) throw new Error("the brief offered no revision file");
+      write(
+        join(options?.cwd ?? worktree, brief.proposal),
+        typeof payload === "string" ? payload : JSON.stringify(payload),
+      );
+      return { ...OK, stdout: JSON.stringify({ result: "the plan is wrong" }) };
+    };
+
+  const goodProposal = {
+    reason: "src/legacy/pay.ts does not exist — the plan's only dependency names a file this repository never had",
+    evidenceLink: "git log --diff-filter=D -- src/legacy/pay.ts",
+    plan: REPLACEMENT,
+  };
+
+  const request = (over: Record<string, unknown> = {}) => ({
+    taskId: "t-1",
+    taskRef,
+    runner: "builder-1",
+    leaseId: "test-lease",
+    worktree,
+    branch: "feat/a",
+    now: T0,
+    runId,
+    evidenceRoot: evidence,
+    git,
+    ...over,
+  });
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    approverToken = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    worktree = mkdtemp(join(tmpdir(), "standing-orders-plan-wt-"));
+    evidence = mkdtemp(join(tmpdir(), "standing-orders-plan-ev-"));
+    store.saveWorktree({
+      path: worktree,
+      repo: "/code/thing",
+      branch: "feat/a",
+      runner: "builder-1",
+      taskRef,
+      createdAt: T0.toISOString(),
+      leasedAt: T0.toISOString(),
+      releasedAt: null,
+      verified: true,
+    });
+    propose(store, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, approverToken);
+    // A ttl that outlives the REAL clock: most tests here run at T0, but the
+    // pulse test below beats on `new Date()`, and the spawn's custody proof
+    // reads that same real clock (the pulse describe's own rule).
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 100 * 365 * 24 * 60 * 60_000, newLeaseId: () => "test-lease" });
+
+    // The planner's own run and its plan document, stored exactly the way
+    // planner.ts stores one — so `latestPlanArtifact` finds it and the
+    // verified read proves it before a byte reaches the brief.
+    planRunId = store.startRun({
+      taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree, role: "planner", now: T0,
+    });
+    const content = Buffer.from(PLAN, "utf8");
+    const key = writeEvidenceFile(evidence, planRunId, "plan.md", content);
+    store.saveArtifact(
+      {
+        run: planRunId,
+        kind: "plan",
+        key,
+        bytesOriginal: content.length,
+        bytesStored: content.length,
+        truncated: false,
+        sha256: sha("sha256").update(content).digest("hex"),
+        capture: "planner handoff (verified tree)",
+      },
+      T0,
+    );
+    store.finishRun(planRunId, { outcome: "built", reason: "plan-drafted", now: T0 });
+
+    runId = store.startRun({
+      taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree, now: T0,
+    });
+    gitCalls.length = 0;
+    agentCalls.length = 0;
+  });
+
+  afterEach(() => {
+    store.close();
+    rm(worktree, { recursive: true, force: true });
+    rm(evidence, { recursive: true, force: true });
+  });
+
+  test("the brief names the revision, its hash, and every milestone id", async () => {
+    await build(store, request({ agent: checkpointingAgent(["completed", "current", "pending"]) }));
+
+    const brief = readBrief(agentCalls[0] ?? []);
+    expect(brief.progress).not.toBeNull();
+    expect(brief.proposal).not.toBeNull();
+    expect(brief.hash).toBe(sha("sha256").update(Buffer.from(PLAN, "utf8")).digest("hex"));
+    expect(brief.milestones).toHaveLength(3);
+    expect(brief.prompt).toContain("This build received plan revision 1 of that plan.");
+    // The milestone text is untrusted plan prose, so it arrives fenced.
+    expect(brief.prompt).toContain("| m1-");
+    expect(brief.prompt).toContain("Find the payout boundary");
+    expect(brief.prompt).toMatch(/List all 3 milestones every time/);
+  });
+
+  test("a build records its milestones against the revision it was given, and backfills revision 1", async () => {
+    const result = await build(store, request({ agent: checkpointingAgent(["completed", "current", "pending"]) }));
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+
+    // The read-only revision-1 projection became the real row the moment
+    // something needed to reference it durably — once, pointing at the
+    // planner's own artifact.
+    const revisions = store.listPlanRevisions(taskRef);
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]).toMatchObject({ revision: 1, kind: "initial", status: "applied", author: "planner", parentHash: null });
+    // The run says which plan and which authority it ran under — stamped
+    // before the agent, so it would be there even if nothing was reported.
+    expect(store.getRun(runId)?.planRevision).toBe(revisions[0]?.id);
+    expect(store.getRun(runId)?.authorityDigest).toMatch(/^[0-9a-f]{32}$/);
+
+    const checkpoint = store.latestCheckpointForRun(runId);
+    expect(checkpoint).not.toBeNull();
+    expect(checkpoint?.planRevision).toBe(revisions[0]?.id);
+    expect(checkpoint?.snapshot.milestones.map(one => one.state)).toEqual(["completed", "current", "pending"]);
+    // The same progress is what a task page reads, whichever run wrote it.
+    expect(store.latestCheckpointForTask(taskRef)?.id).toBe(checkpoint?.id);
+    // The checkpoint file is READ, never consumed — unlike park and proof.
+    expect(readdir(worktree).filter(name => name.startsWith("STANDING-ORDERS-PROGRESS-"))).toHaveLength(1);
+  });
+
+  test("a checkpoint naming a plan this build never received is ignored, and never fails it", async () => {
+    // A torn read, a stale rename, or an agent quoting the wrong hash: the
+    // snapshot is discarded whole and the build proceeds untouched.
+    const result = await build(store, request({
+      agent: checkpointingAgent(["completed", "completed", "completed"], "f".repeat(64)),
+    }));
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    expect(store.latestCheckpointForRun(runId)).toBeNull();
+    expect(store.checkpointHistory(runId)).toHaveLength(0);
+  });
+
+  test("a filed plan revision replaces the plan, resumes the task, and commits nothing", async () => {
+    const result = await build(store, request({ agent: revisingAgent(goodProposal) }));
+
+    expect(result).toMatchObject({ ok: false, reason: "plan-revised", message: goodProposal.reason });
+
+    // Revision 2 is in force, parented to revision 1's document by hash.
+    const current = store.currentPlanRevision(taskRef);
+    expect(current).toMatchObject({ revision: 2, kind: "builder-proposal", status: "applied", originRun: runId });
+    expect(current?.author).toBe(`builder:${runId}`);
+    expect(current?.evidenceLink).toBe(goodProposal.evidenceLink);
+    expect(current?.parentHash).toBe(sha("sha256").update(Buffer.from(PLAN, "utf8")).digest("hex"));
+
+    // The replacement was stored re-serialized from the validated shape,
+    // and it verifies — which is what the next brief will read.
+    const artifact = store.getArtifact(current!.artifact)!;
+    const verified = readVerifiedArtifact(evidence, artifact);
+    expect(verified.ok).toBe(true);
+    if (verified.ok) expect(verified.content.toString("utf8")).toContain("- src/pay/boundary.ts holds the boundary");
+
+    // Nothing committed, nothing held, and the claim went back — the task
+    // is ready for the next attempt to build the NEW plan.
+    expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
+    expect(store.activeHolds(taskRef, T0)).toHaveLength(0);
+    expect(currentClaim(store, taskRef, T0)).toBeNull();
+    expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "plan-revised" });
+    // Terminal like a park: ingested once, then gone from the worktree.
+    expect(readdir(worktree).filter(name => name.startsWith("STANDING-ORDERS-PROPOSAL-"))).toHaveLength(0);
+  });
+
+  test("a revision filed after the signed scope moved waits for a person, behind a named hold", async () => {
+    // The defense is not against the proposal — a builder's proposal carries
+    // no scope fields at all — but against the world moving under a live
+    // build. Somebody rewrote the scope while the agent ran.
+    const result = await build(store, request({
+      agent: revisingAgent(goodProposal, () => {
+        propose(store, { taskId: "t-1", goal: "rewrite the billing model entirely", now: T0 });
+      }),
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: "plan-revision-blocked" });
+
+    // Filed, but NOT in force: the plan a next attempt would read is still
+    // revision 1 — nothing was applied on authority nobody re-signed.
+    const latest = store.latestPlanRevision(taskRef);
+    expect(latest).toMatchObject({ revision: 2, status: "blocked", authorityKind: "authority-change" });
+    expect(latest?.changedFields).toEqual(["signed-scope"]);
+    expect(store.currentPlanRevision(taskRef)?.revision).toBe(1);
+
+    const hold = store.activeHold(taskRef, T0);
+    expect(hold).toMatchObject({ ownerKind: "revision", ownerId: String(latest!.id) });
+    expect(hold?.reason).toContain("the signed scope");
+    expect(store.getRun(runId)).toMatchObject({ outcome: "refused", reason: "plan-revision-blocked" });
+    expect(gitCalls.some(args => args.includes("commit"))).toBe(false);
+  });
+
+  test("a malformed revision ends the attempt in its own words, and buys no repair turns", async () => {
+    // A park earns two repair turns because somebody is waiting on the
+    // question. A revision is unsolicited and reproducible, so it earns
+    // none — one strike, the reasons recorded, nothing more spent.
+    const result = await build(store, request({
+      agent: revisingAgent({ reason: "the plan is wrong", evidenceLink: "look at it" }),
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: "agent-reported" });
+    expect(result.ok === false ? result.message : "").toContain("missing-plan");
+    expect(agentCalls).toHaveLength(1);
+    expect(store.listPlanRevisions(taskRef).filter(one => one.kind === "builder-proposal")).toHaveLength(0);
+    expect(readdir(worktree).filter(name => name.startsWith("STANDING-ORDERS-PROPOSAL-"))).toHaveLength(0);
+    // The lease is still this attempt's: nothing was sealed, so disposal
+    // takes the ordinary failure road.
+    expect(currentClaim(store, taskRef, T0)?.leaseId).toBe("test-lease");
+  });
+
+  test("the pulse records progress WHILE the build runs, not only at the end", async () => {
+    // The whole point of a checkpoint: a watcher can see where a long build
+    // has got to before it finishes. Two distinct snapshots written with
+    // beats in between must land as two rows — settlement alone would only
+    // ever see the second, so a history of two proves the pulse ingested.
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const agent: Runner = async (_file, args, options) => {
+      agentCalls.push([...args]);
+      const brief = readBrief(args);
+      const cwd = options?.cwd ?? worktree;
+      const checkpoint = (states: readonly string[]) =>
+        write(
+          join(cwd, brief.progress!),
+          JSON.stringify({
+            revisionHash: brief.hash,
+            milestones: brief.milestones.map((id, index) => ({ id, state: states[index] ?? "pending", note: null })),
+          }),
+        );
+      checkpoint(["current", "pending", "pending"]);
+      await sleep(40);
+      checkpoint(["completed", "current", "pending"]);
+      await sleep(40);
+      write(join(cwd, brief.done!), JSON.stringify({ version: 1, status: "completed", conclusion: "Added the guard." }));
+      return { ...OK, stdout: AGENT_SAID };
+    };
+
+    const result = await build(store, request({ agent, pulseMs: 5, clock: () => new Date() }));
+
+    expect(result).toMatchObject({ ok: true, committed: true });
+    const history = store.checkpointHistory(runId);
+    expect(history.length).toBeGreaterThanOrEqual(2);
+    expect(history[0]?.snapshot.milestones.map(one => one.state)).toEqual(["current", "pending", "pending"]);
+    expect(history[history.length - 1]?.snapshot.milestones.map(one => one.state)).toEqual([
+      "completed",
+      "current",
+      "pending",
+    ]);
+    // An unchanged checkpoint re-read on the next beat is not new progress:
+    // every row here is a snapshot the agent actually changed.
+    expect(new Set(history.map(one => JSON.stringify(one.snapshot))).size).toBe(history.length);
+  });
+
+  test("a task with no plan is never offered the protocol at all", async () => {
+    // Every task filed before this feature: no plan, no milestones, no
+    // revision to name — and a build that behaves exactly as it always did.
+    const bare = openStore(":memory:");
+    try {
+      bare.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+      const token = bootstrapApprover(bare);
+      bare.createTask({ id: "t-1", title: "the work" }, T0);
+      const ref = bare.refFor("built-in", "t-1").id;
+      register(bare, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+      bare.placeTask(ref, REPO);
+      bare.saveWorktree({
+        path: worktree, repo: "/code/thing", branch: "feat/a", runner: "builder-1", taskRef: ref,
+        createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+      });
+      propose(bare, { taskId: "t-1", goal: "add a guard on the payout path", now: T0 });
+      approve(bare, "t-1", "alex", T0, bare.getScope("t-1")!.digest, token);
+      acquire(bare, ref, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
+      const bareRun = bare.startRun({
+        taskRef: ref, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree, now: T0,
+      });
+
+      const result = await build(bare, request({ taskRef: ref, runId: bareRun, agent: checkpointingAgent([]) }));
+
+      expect(result).toMatchObject({ ok: true, committed: true });
+      const brief = readBrief(agentCalls[0] ?? []);
+      expect(brief.progress).toBeNull();
+      expect(brief.proposal).toBeNull();
+      expect(brief.prompt).not.toContain("plan revision");
+      // No ledger row is invented for a task that has no plan to record.
+      expect(bare.listPlanRevisions(ref)).toHaveLength(0);
+      expect(bare.getRun(bareRun)?.planRevision).toBeNull();
+      // The authority snapshot is stamped anyway — every run carries one.
+      expect(bare.getRun(bareRun)?.authorityDigest).toMatch(/^[0-9a-f]{32}$/);
+    } finally {
+      bare.close();
+    }
   });
 });

@@ -55,6 +55,17 @@ boundaries, evidence requirements, model, and permissions.
   risks, and proof. Review or refine that plan before starting; approval locks
   the exact revision the builder receives. Expert controls remain under
   **Edit details**.
+- **A plan that adapts without quietly widening what you signed.** While a
+  build runs, it checkpoints which milestone is pending, in progress, done,
+  or blocked — reported by the agent, never counted as completion proof. When
+  the repository shows a stated dependency, risk, or approach was wrong, the
+  builder can file one evidence-linked replacement plan and pause at a safe
+  point. A plan-only refinement appends an immutable revision and resumes on
+  its own; anything that would touch the goal, boundaries, touches,
+  acceptance, permissions, quality, budget, or publication authority stays
+  paused for your accept or reject. The task page and focused chat always
+  show the same live progress, the same revision, and the same pending
+  decision.
 - **Long-running, recoverable execution.** There is no arbitrary task
   countdown. Installed workers survive terminal closure and reboot, recover
   expired claims, and continue until a terminal result, a real decision, or a
@@ -143,9 +154,14 @@ for people splitting those parts across machines.
    and model it will run on, and your password. Nothing spends a token until
    this yes.
 4. **Watch it build.** The **board** moves the card to *building*; the
-   card's own page shows the stage and the live transcript; **peek**
-   (`/peek`, or *peek at the live ones →* on the builds page) shows every
-   live agent at once.
+   card's own page shows the stage, the live transcript, and — once the
+   agent checkpoints one — which milestone is pending, in progress, done,
+   or blocked; **peek** (`/peek`, or *peek at the live ones →* on the builds
+   page) shows every live agent at once. If the repository disproves a
+   named dependency or risk, the task page shows the replacement plan with
+   its evidence; a plan-only fix resumes on its own, while anything that
+   would touch what you signed waits for your accept or reject, right
+   there next to the plan.
 5. **Answer when asked.** An agent that hits a judgement call parks a typed
    decision — question, options, consequences, which are reversible. It
    arrives in the inbox, on `/next`, and on your phone if Telegram is

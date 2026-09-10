@@ -1,5 +1,48 @@
 # Progress
 
+**2026-09-10 — Interrupted agents keep their work instead of starting over.**
+The recovery path now re-inspects every released worktree at lease time rather
+than trusting an older “clean” database flag. If a runner or console disappears
+after an agent has changed files, Standing Orders keeps that draft in place,
+quarantines the old handoff, preserves a binary safety patch, and starts the
+successor as a reviewer of the existing work—not a second builder from zero.
+A completed draft and a partial draft are named separately in the new run's
+lineage and operator-visible note. While an orphaned provider process is still
+alive, its PID remains the worktree's occupancy fence so another agent cannot
+enter the same checkout. Persistent macOS, Linux, and Windows services also
+inherit the installer PATH, so subscription CLIs found during setup remain
+available after terminal close or reboot. Recovery, occupancy, lineage, and
+cross-platform daemon environment paths are covered by focused tests; the
+failure that prompted this work was recovered from its captured patch and the
+successor passed the full suite and production build before committing it.
+
+**2026-09-10 — Execution plans adapt safely while a build is running.** A
+running build now checkpoints durable milestone state—pending, current,
+completed, blocked—against the exact plan revision its brief named, in a new
+append-only `run_checkpoint` table; older attempts with no checkpoint read
+exactly as before. When repository evidence invalidates a named dependency,
+risk, or implementation assumption, the builder files one bounded,
+evidence-linked replacement plan through a new nonce-scoped proposal file
+(atomic, one-shot, quarantined like park and proof) and pauses at a safe
+checkpoint rather than committing over a false premise or grinding on. The
+proposal settles through the same fenced-transaction discipline as every
+other terminal outcome: a plan-only refinement inside the signed scope
+appends an immutable revision to a new `plan_revision` ledger and the task
+requeues on its own, no strike, no second approval. A revision that would
+touch goal, out-of-scope, touches, acceptance, permissions, quality, budget,
+or publication authority—checked by comparing the exact authority snapshot
+the run started under against the current one—instead places a new
+`revision`-owner hold (the same hold table every other pause already uses)
+and stays paused until an operator accepts or rejects it from the task page
+or focused chat, both of which render one shared projection so they can
+never disagree. Every revision preserves its prior artifact hash, reason,
+evidence link, author, and milestone history; a stale accept/reject or a
+malformed proposal fails closed. No parallel workflow engine or mutable plan
+store was added—the existing plan artifact, claim fencing, hold, and task
+lifecycle machinery carry the whole feature, and a milestone claim is
+labeled as the agent's own report, never fed into the proof contract's
+adjudicated verdict.
+
 **2026-09-10 — Repository planning is now a durable execution plan, not a
 Markdown blob.** New planner handoffs must state a concise approach, ordered
 milestones, dependencies, risks with mitigations, and proof that names every

@@ -54,6 +54,15 @@ export const REPORT_PREFIX = "STANDING-ORDERS-REPORT-";
  * the handoff — a completed attempt's proof, never a parking or failure
  * artifact. */
 export const PROOF_PREFIX = "STANDING-ORDERS-PROOF-";
+/** The running build's atomic milestone checkpoint (adaptive execution
+ * plans): overwritten in place — a temp name, then a rename — rather than
+ * created once and unlinked, since progress is reported many times across
+ * one attempt. Read, never consumed, by the pulse and by settlement. */
+export const PROGRESS_PREFIX = "STANDING-ORDERS-PROGRESS-";
+/** The running build's bounded, evidence-linked plan-revision proposal
+ * (adaptive execution plans): a terminal file like park or proof, written
+ * at most once, read once at settlement. */
+export const PROPOSAL_PREFIX = "STANDING-ORDERS-PROPOSAL-";
 export const MAILBOX_SUFFIX = ".json";
 
 /** Bounds on a claimed screenshot file's own bytes — independent of the
@@ -111,6 +120,8 @@ export function looksLikeProtocolFile(name: string): boolean {
       name.startsWith(REVIEW_PREFIX) ||
       name.startsWith(REPORT_PREFIX) ||
       name.startsWith(PROOF_PREFIX) ||
+      name.startsWith(PROGRESS_PREFIX) ||
+      name.startsWith(PROPOSAL_PREFIX) ||
       name.startsWith("NIGHTORDERS-")) &&
     name.endsWith(MAILBOX_SUFFIX)
   );
@@ -132,6 +143,14 @@ export function proofFileName(): string {
 
 export function reportFileName(): string {
   return `${REPORT_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
+}
+
+export function progressFileName(): string {
+  return `${PROGRESS_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
+}
+
+export function proposalFileName(): string {
+  return `${PROPOSAL_PREFIX}${randomBytes(8).toString("hex")}${MAILBOX_SUFFIX}`;
 }
 
 /**

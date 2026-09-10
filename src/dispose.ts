@@ -319,6 +319,30 @@ export function disposeBuildOutcome(context: DisposeContext, result: BuildResult
 
   // ---- refusals and failures -----------------------------------------------
 
+  // THE ALREADY-SEALED ENDINGS (adaptive execution plans). Every other arm
+  // below ends the attempt itself — releases the claim, writes the run's
+  // outcome, counts what it costs. These two arrive with all of that
+  // already done: `finalizeRevisionFenced` released the lease, appended the
+  // ledger row, placed the hold when one was owed, finished the run, and
+  // paged, all inside ONE fenced transaction — the planner road's shape,
+  // where claim.ts owns the ending and dispose only reports it.
+  //
+  // So this branch exists to do NOTHING, deliberately, and it is placed
+  // above the policy arms so that every road — tick, standalone, held,
+  // continuation — skips them alike.
+  //
+  // Falling through instead would be wrong twice over. `release()` would
+  // survive it (an already-released lease whose `released_by` is
+  // 'released' reads as this same lease's duplicate hand-back, not a
+  // fence), but `finishRun` overwrites unconditionally, so the sealed
+  // `finished_at` would be restamped by a second, later writer; and the
+  // bottom of the chain returns `invariant`, which means "the dispatcher
+  // broke a rule it was supposed to uphold" — the opposite of what
+  // happened here, where the machine worked exactly as designed.
+  if (result.reason === "plan-revised" || result.reason === "plan-revision-blocked") {
+    return { kind: "skipped", reason: result.reason as never };
+  }
+
   if (policy === "continuation") {
     // The taskless failure (v4 Q7): the run says what happened, the claim
     // releases — NO strikes, NO holds, NO done→failed demotion; three

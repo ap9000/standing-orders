@@ -36,7 +36,7 @@ import { run, type ExecResult, type RunOptions } from "./exec.js";
 import type { Decision, SteerNote, Store } from "./store.js";
 import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { execFileSync } from "node:child_process";
-import { currentClaim, heartbeat, SYNC_MAX_AGE_MS } from "./claim.js";
+import { currentClaim, finalizeRevisionFenced, heartbeat, SYNC_MAX_AGE_MS } from "./claim.js";
 import { missingCapability } from "./dispatch.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
@@ -55,7 +55,9 @@ import {
   storeHandoffArtifact,
   looksLikeProtocolFile,
   mailboxName,
+  progressFileName,
   proofFileName,
+  proposalFileName,
   quarantineMailboxes,
   readMailbox,
   readVerifiedArtifact,
@@ -67,6 +69,21 @@ import {
   SCREENSHOT_BYTE_CAP,
 } from "./evidence.js";
 import { PROOF_LIMITS, parseProof, serializeProof, adjudicate, type DiffStatFacts, type ScreenshotOutcome, type VerifyCommandFacts } from "./proof.js";
+import {
+  authoritySnapshotDigest,
+  classifyRevisionAuthority,
+  isMilestoneRegression,
+  milestonesOf,
+  parseExecutionPlanDocument,
+  parsePlanRevisionProposal,
+  parseProgressSnapshot,
+  renderExecutionPlanDocument,
+  PROGRESS_LIMITS,
+  REVISION_LIMITS,
+  type AuthoritySnapshot,
+  type Milestone,
+  type MilestoneState,
+} from "./plan.js";
 import { maybeSettleRepairChain } from "./dispose.js";
 
 export type Runner = (
@@ -252,6 +269,14 @@ export type BuildRefusal =
   | "revision-brief"
   | "external"
   | "stopped"
+  // The adaptive-execution-plan endings: the build stopped without
+  // committing because the plan it was given was wrong. Neither is a
+  // failure and neither earns a strike — the first re-plans and resumes,
+  // the second waits for a person because authority moved underneath it.
+  // Both are sealed inside `finalizeRevisionFenced`, which has ALREADY
+  // released the lease and finished the run by the time dispose sees them.
+  | "plan-revised"
+  | "plan-revision-blocked"
   // Phase 3 (attested runtime): the gateway's value-shaped refusals. The
   // first is the race road only — the tick's pre-claim skip keeps the
   // normal road from ever claiming; the second is the harness breaking
@@ -892,6 +917,19 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   const mailbox = mailboxName();
   const done = handoffName();
   const proof = proofFileName();
+  // The two adaptive-execution-plan files, minted with the same per-attempt
+  // nonce discipline as the three above. `progress` is the only one of the
+  // five that is OVERWRITTEN rather than created once: the agent renames a
+  // new checkpoint over it whenever a milestone actually changes state, and
+  // the reader never unlinks it. `proposal` is terminal like the park
+  // mailbox — written at most once, read once, then removed.
+  //
+  // Both are already protocol-shaped names (`looksLikeProtocolFile` knows
+  // their prefixes), so the sweep below carries anything a cut-down earlier
+  // attempt left behind off to quarantine BEFORE these names exist, the
+  // commit pathspec excludes them, and the dirty-tree check ignores them.
+  const progress = progressFileName();
+  const proposal = proposalFileName();
   quarantineMailboxes(worktree, root, request.runId);
 
   // The pulse: while the agent runs, the lease is extended and the runner
@@ -906,6 +944,121 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   // never the worktree. Failure only disables the peek for this run (typed
   // inside the artifact); the build itself proceeds untouched.
   await captureBaseTree(store, git, leased.repo, leased.repo, baseRevision, root, request.runId, clock());
+
+  // ---- the plan revision this attempt is actually building against -------
+  //
+  // The approved plan, when planning preceded this build. Read through the
+  // verified evidence path — size and hash proven before a byte reaches a
+  // brief — and skipped without ceremony when absent or unreadable: the
+  // plan is advisory, the scope alone is the contract.
+  //
+  // Two roads reach the same three facts (text, revision number, exact
+  // hash). The ledger is preferred: once a task has ANY applied
+  // plan_revision row, that row is the plan, and its artifact's sha256 is
+  // the hash every checkpoint and proposal binds to. A task with no ledger
+  // at all — every task filed before this feature — falls back to the
+  // planner's newest plan artifact, read exactly as before, and is treated
+  // as a synthetic revision 1.
+  let planDocument: string | null = null;
+  let planRevisionId: number | null = null;
+  let planRevisionNumber = 1;
+  let planRevisionHash: string | null = null;
+  const deliverable = store.refForId(taskRef)?.deliverable ?? "branch";
+  // The authority this build's approval rests on, captured at the start and
+  // carried to settlement: the signed scope plus publication authority. A
+  // revision may only auto-apply when this is still byte-identical then.
+  const authority: AuthoritySnapshot = { scopeDigest: scope?.digest ?? "", deliverable };
+  const currentRevision = store.currentPlanRevision(taskRef);
+  if (currentRevision !== null) {
+    planRevisionId = currentRevision.id;
+    planRevisionNumber = currentRevision.revision;
+    const revisionArtifact = store.getArtifact(currentRevision.artifact);
+    if (revisionArtifact !== null) {
+      try {
+        const verified = readVerifiedArtifact(root, revisionArtifact);
+        if (verified.ok) {
+          planDocument = verified.content.toString("utf8");
+          planRevisionHash = revisionArtifact.sha256;
+        }
+      } catch {
+        planDocument = null;
+      }
+    }
+  } else {
+    const planArtifact = store.latestPlanArtifact(taskRef);
+    if (planArtifact !== null) {
+      try {
+        const verified = readVerifiedArtifact(root, planArtifact);
+        if (verified.ok) {
+          planDocument = verified.content.toString("utf8");
+          planRevisionHash = planArtifact.sha256;
+        }
+      } catch {
+        planDocument = null;
+      }
+      // THE LAZY BACKFILL: `run_checkpoint.plan_revision` and a proposal's
+      // `parent_hash` both need a REAL row to point at, and the read-only
+      // revision-1 projection has none. So the first time a build on a
+      // ledger-less task could durably reference its plan, the projection
+      // becomes the row it was always describing — same artifact, same
+      // text, same hash, authored by the planner that wrote it. Exactly
+      // once per task: the `store.latestPlanRevision(...) === null` guard
+      // means a task whose ledger already has rows (an all-rejected or
+      // still-blocked history) is left alone rather than having a
+      // revision 1 invented underneath it.
+      if (planDocument !== null && store.latestPlanRevision(taskRef) === null) {
+        planRevisionId = store.insertPlanRevision(
+          {
+            taskRef,
+            revision: 1,
+            artifact: planArtifact.id,
+            parentHash: null,
+            reason: "the plan the operator approved",
+            evidenceLink: null,
+            author: "planner",
+            originRun: planArtifact.run,
+            kind: "initial",
+            authorityKind: "plan-only",
+            authorityDigest: authoritySnapshotDigest(authority),
+            changedFields: [],
+            status: "applied",
+          },
+          clock(),
+        );
+      }
+    }
+  }
+  // The milestones, named by identity rather than by position alone, so a
+  // checkpoint can never be read against a differently-worded plan. An
+  // older free-form plan artifact simply parses to nothing here: no
+  // milestones, no checkpoint instructions, no proposal offer — the build
+  // proceeds exactly as it did before this feature existed.
+  let milestones: Milestone[] = [];
+  if (planDocument !== null) {
+    const parsedPlan = parseExecutionPlanDocument(planDocument);
+    if (parsedPlan.ok) milestones = milestonesOf(parsedPlan.document);
+  }
+  // Stamped BEFORE the agent is invoked, so a run always carries the exact
+  // plan and the exact authority it started under — even if the agent never
+  // touches either protocol file.
+  store.setRunPlanRevision(request.runId, planRevisionId, authoritySnapshotDigest(authority));
+
+  // The checkpoint reader's own state, shared by the pulse and by the one
+  // final pass at settlement: the last raw bytes actually ingested (so a
+  // re-read of an unchanged file costs one buffer compare) and the last
+  // state each milestone reached (so a stale snapshot can never un-complete
+  // one).
+  const progressState: ProgressIngestState = {
+    runId: request.runId,
+    taskRef,
+    planRevisionId,
+    expectedRevisionHash: planRevisionHash,
+    knownIds: milestones.map(one => one.id),
+    progressPath: join(worktree, progress),
+    lastRaw: null,
+    lastStates: new Map<string, MilestoneState>(),
+  };
+
   const pulseMs = request.pulseMs ?? DEFAULT_PULSE_MS;
   let fencedMidBuild = false;
   let pulseTimer: ReturnType<typeof setInterval> | undefined;
@@ -931,25 +1084,21 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         // lease — but a build that cannot prove its lease must not commit.
         fencedMidBuild = true;
       }
+      // The mid-build checkpoint, read only after the beat proved the lease
+      // still stands. Its own try/catch is deliberate and MUST stay outside
+      // the one above: a checkpoint is bookkeeping, and bookkeeping that
+      // throws must never latch the fence and kill a healthy build.
+      if (!fencedMidBuild) {
+        try {
+          ingestProgress(store, progressState, clock());
+        } catch {
+          // A checkpoint is never worth an attempt. The next beat retries.
+        }
+      }
       if (fencedMidBuild && pulseTimer !== undefined) clearInterval(pulseTimer);
     };
     pulseTimer = setInterval(beat, pulseMs);
     pulseTimer.unref?.();
-  }
-
-  // The approved plan, when planning preceded this build. Read through the
-  // verified evidence path — size and hash proven before a byte reaches a
-  // brief — and skipped without ceremony when absent or unreadable: the
-  // plan is advisory, the scope alone is the contract.
-  let planDocument: string | null = null;
-  const planArtifact = store.latestPlanArtifact(taskRef);
-  if (planArtifact !== null) {
-    try {
-      const verified = readVerifiedArtifact(root, planArtifact);
-      if (verified.ok) planDocument = verified.content.toString("utf8");
-    } catch {
-      planDocument = null;
-    }
   }
 
   // The revision brief, when this task revises a reviewed run (M6.8): the
@@ -1053,6 +1202,13 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     retryBase,
     request.recoveredDraftRun ?? null,
     request.recoveredDraftKind ?? "partial",
+    // The adaptive-execution-plan protocol is offered ONLY when there is a
+    // real plan with real milestones to checkpoint against: no plan means
+    // no revision to name, no ids to report, and nothing to propose a
+    // replacement for.
+    milestones.length === 0 || planRevisionHash === null
+      ? null
+      : { revision: planRevisionNumber, hash: planRevisionHash, milestones, progress, proposal },
   );
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
@@ -1076,6 +1232,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
       runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof,
       clock, fenced: () => fencedMidBuild,
+      plan: { proposal, revision: planRevisionNumber, authority, progress: progressState },
     };
     const launched = await attended.coordinator.launch({
       store,
@@ -1181,6 +1338,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
     runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof,
     clock, fenced: () => fencedMidBuild,
+    plan: { proposal, revision: planRevisionNumber, authority, progress: progressState },
   };
   return settleProviderOutcome(captured, result);
 }
@@ -1216,7 +1374,96 @@ export type CapturedBuild = {
   proof: string;
   clock: () => Date;
   fenced: () => boolean;
+  /** The adaptive-execution-plan binding, when this attempt received a plan
+   * with milestones. Optional: a build with no plan (or an older free-form
+   * one) settles exactly as it always has, and a caller assembling a
+   * capture by hand need not know this protocol exists. */
+  plan?: PlanBinding;
 };
+
+/** What settlement needs to know about the plan this attempt built against. */
+export type PlanBinding = {
+  /** This attempt's terminal revision-proposal file, worktree-relative. */
+  proposal: string;
+  /** The revision number the brief named — what a page and a page's
+   * notification say out loud. */
+  revision: number;
+  /** The signed scope and publication authority as they stood when the
+   * build STARTED. A revision auto-applies only if both still match. */
+  authority: AuthoritySnapshot;
+  /** The checkpoint reader's live state, shared with the pulse: settlement
+   * makes one more pass with it, so a final checkpoint that raced the last
+   * beat is not lost, and one the beat already ingested is not doubled. */
+  progress: ProgressIngestState;
+};
+
+/**
+ * Everything the milestone-checkpoint reader carries between passes. Two
+ * callers share one instance — the pulse's `beat()` and the single
+ * settlement pass — which is exactly why the dedupe state lives here rather
+ * than in either of them: the last beat and the final read routinely see
+ * the same bytes, and a checkpoint written twice would read as progress
+ * twice.
+ */
+export type ProgressIngestState = {
+  runId: number;
+  taskRef: number;
+  /** Null when this task has no ledger row to attach a checkpoint to —
+   * `run_checkpoint.plan_revision` is NOT NULL, so nothing is recorded. */
+  planRevisionId: number | null;
+  expectedRevisionHash: string | null;
+  knownIds: readonly string[];
+  progressPath: string;
+  /** The exact bytes last ingested — a cheap `Buffer.equals` against the
+   * file skips the parse entirely on an unchanged checkpoint. */
+  lastRaw: Buffer | null;
+  /** The furthest state each milestone has reached, for the regression
+   * check. Not a full snapshot: only the states matter. */
+  lastStates: Map<string, MilestoneState>;
+};
+
+/**
+ * Read the running build's milestone checkpoint and record it, if it says
+ * anything new and says it honestly. Called from the pulse on every beat
+ * and once more at settlement.
+ *
+ * Every rejection here is SILENT and total. The file is written by an agent
+ * mid-flight, with a rename that this reader may catch half-finished, so a
+ * malformed read is very often a torn read of a good checkpoint rather than
+ * a protocol failure — and failing a build over one would make an optional
+ * progress report the most dangerous thing in the worktree. A snapshot that
+ * cannot be read, cannot be parsed, names the wrong revision, names an
+ * unknown milestone, or would move any milestone BACKWARD out of
+ * `completed` is skipped whole. Never partially applied: half a snapshot is
+ * a state no agent ever reported.
+ *
+ * The file is never unlinked — unlike park and proof, it is overwritten in
+ * place and read many times.
+ */
+function ingestProgress(store: Store, state: ProgressIngestState, now: Date): void {
+  if (state.planRevisionId === null || state.expectedRevisionHash === null || state.knownIds.length === 0) return;
+  const read = readMailbox(state.progressPath, PROGRESS_LIMITS.payload);
+  if (!read.ok) return;
+  if (state.lastRaw !== null && state.lastRaw.equals(read.raw)) return;
+
+  const parsed = parseProgressSnapshot(read.raw.toString("utf8"), state.expectedRevisionHash, state.knownIds);
+  if (!parsed.ok) return;
+  for (const entry of parsed.snapshot.milestones) {
+    if (isMilestoneRegression(state.lastStates.get(entry.id), entry.state)) return;
+  }
+
+  store.insertRunCheckpoint(
+    {
+      run: state.runId,
+      taskRef: state.taskRef,
+      planRevision: state.planRevisionId,
+      snapshot: parsed.snapshot,
+    },
+    now,
+  );
+  state.lastRaw = read.raw;
+  for (const entry of parsed.snapshot.milestones) state.lastStates.set(entry.id, entry.state);
+}
 
 /**
  * The post-provider state machine, extracted verbatim from build(): the
@@ -1297,6 +1544,26 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   if (result.sessionId !== null) {
     store.stampRun(request.runId, { sessionId: result.sessionId });
   }
+
+  // The adaptive-execution-plan settlement, checked at exactly the point
+  // park is: both are "stop without committing" endings, and both must be
+  // decided before the handoff is required of the agent at all.
+  if (captured.plan !== undefined) {
+    // One last checkpoint read, for the ordinary race where the agent's
+    // final rename landed between the last pulse beat and now. The shared
+    // state makes this idempotent: identical bytes are skipped.
+    try {
+      ingestProgress(store, captured.plan.progress, clock());
+    } catch {
+      // Bookkeeping never fails an attempt — the same rule as the pulse.
+    }
+    const revised = settleRevisionProposal(captured, captured.plan);
+    // A filed proposal is terminal for this attempt: no handoff is
+    // required, nothing commits, and the rest of settlement is skipped
+    // exactly the way a park skips it.
+    if (revised !== null) return revised;
+  }
+
   const parked = await ingestPark({
     profile: effective.profile,
     store,
@@ -1529,6 +1796,166 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     }
   }
   return made;
+}
+
+/**
+ * The bounded, evidence-linked plan revision a build may file when the
+ * repository contradicts the plan it was handed — read, validated, and
+ * sealed, or `null` when the agent filed none (overwhelmingly the common
+ * case, and the only one that costs anything on the hot path: one `open`
+ * that returns ENOENT).
+ *
+ * Shaped exactly like `settleProof` and `ingestPark`: prove the fence
+ * before trusting a byte, validate with the module that owns the format,
+ * re-serialize what was admitted rather than storing the agent's raw
+ * bytes, and put every durable consequence inside one fenced transaction.
+ *
+ * A MALFORMED proposal is deliberately NOT given repair turns. Repair
+ * exists because a park is a question a person is already waiting on, so
+ * paying two short turns to recover its wording is cheaper than losing it.
+ * A revision proposal is the opposite: it is unsolicited, optional, and
+ * entirely reproducible by the next attempt, which will read the same
+ * repository and reach the same conclusion. So a malformed one is simply
+ * the attempt ending badly in its own words — `agent-reported`, one
+ * strike, the validation reasons recorded where a person reads them — and
+ * nothing more is spent on it.
+ */
+function settleRevisionProposal(captured: CapturedBuild, binding: PlanBinding): BuildResult | null {
+  const { store, request, worktree, taskId, taskRef, root, clock } = captured;
+  const path = join(worktree, binding.proposal);
+  const read = readMailbox(path, REVISION_LIMITS.payload);
+  if (!read.ok && read.missing) return null;
+
+  // The fence, re-proved synchronously before ANY of this is trusted — the
+  // same discipline `ingestPark` and `settleProof` keep. A lease the world
+  // moved past does not get to rewrite the task's plan.
+  if (request.leaseId !== undefined) {
+    const alive = heartbeat(store, request.leaseId, clock());
+    if (!alive.ok) {
+      return {
+        ok: false,
+        reason: "fenced",
+        message: `${taskId}'s lease did not survive the build — its plan revision is not this lease's to file`,
+      };
+    }
+  }
+
+  // Terminal like the park mailbox: ingested once, then gone, so no later
+  // attempt can mistake these bytes for its own agent's voice.
+  const drop = (): void => {
+    try {
+      unlinkSync(path);
+    } catch {
+      // Unremovable is survivable: every commit path excludes the name.
+    }
+  };
+  const broke = (message: string, problems?: Problem[]): BuildResult => {
+    store.recordOutcomeFacts(request.runId, { handoff: message });
+    return { ok: false, reason: "agent-reported", message, ...(problems === undefined ? {} : { problems }) };
+  };
+
+  if (!read.ok) {
+    // A symlink, a FIFO, something oversized: hostile or broken, and either
+    // way not readable as a proposal. Removed unread.
+    drop();
+    return broke(`the agent filed a plan revision that could not be read: ${read.problem}`);
+  }
+  const parsed = parsePlanRevisionProposal(read.raw.toString("utf8"));
+  drop();
+  if (!parsed.ok) {
+    return broke(
+      `the agent filed a plan revision, but the payload is not a proposal: ${parsed.problems.map(problem => problem.reason).join(", ")}`,
+      parsed.problems,
+    );
+  }
+  const proposal = parsed.proposal;
+
+  // A revision is authority-bearing bookkeeping, so it seals against a
+  // lease or not at all — the same posture as a park with no lease to seal
+  // it (`park-fenced`). A person driving `build` by hand simply cannot
+  // rewrite the ledger from inside the agent.
+  if (request.leaseId === undefined) {
+    return {
+      ok: false,
+      reason: "fenced",
+      message: "a plan revision seals against a lease, and this attempt was dispatched without one",
+    };
+  }
+  // At most one revision may await a person at a time — the ledger's own
+  // `one_blocked_revision_per_task` index says so, and reaching it as a
+  // constraint violation inside the fenced transaction would be a thrown
+  // error where a sentence belongs. Unreachable in the ordinary run of
+  // things (a blocked revision holds the task, and a held task never
+  // dispatches), which is exactly why it is checked rather than assumed.
+  const latest = store.latestPlanRevision(taskRef);
+  if (latest !== null && latest.status === "blocked") {
+    return broke("the agent proposed a plan revision, but one is already awaiting your approval on this task");
+  }
+  const revisionNumber = (latest?.revision ?? 0) + 1;
+
+  // Stored re-serialized from the validated shape, never the agent's raw
+  // bytes: what a later brief quotes and hash-verifies is exactly what this
+  // parser admitted.
+  let artifactId: number;
+  try {
+    artifactId = storeEvidence(
+      store,
+      root,
+      request.runId,
+      "plan",
+      "plan-revision.md",
+      Buffer.from(renderExecutionPlanDocument(proposal.document), "utf8"),
+      `builder-filed plan revision ${revisionNumber} (validated, re-serialized)`,
+      clock(),
+    );
+  } catch (error) {
+    return broke(`the agent's plan revision could not be stored as evidence: ${String(error)}`);
+  }
+
+  const previous = store.currentPlanRevision(taskRef);
+  const parentHash = previous === null ? null : (store.getArtifact(previous.artifact)?.sha256 ?? null);
+  // The authority as it stands RIGHT NOW, re-fetched rather than
+  // remembered, against the snapshot this build actually started under.
+  // Nothing the agent can write appears in either: this comparison is the
+  // defense against the world moving beneath a live build, not against the
+  // proposal's contents.
+  const now: AuthoritySnapshot = {
+    scopeDigest: store.getScope(taskId)?.digest ?? "",
+    deliverable: store.refForId(taskRef)?.deliverable ?? "branch",
+  };
+  const classification = classifyRevisionAuthority(binding.authority, now);
+
+  const sealed = finalizeRevisionFenced(store, {
+    leaseId: request.leaseId,
+    runId: request.runId,
+    taskId,
+    taskRef,
+    revision: {
+      revision: revisionNumber,
+      artifact: artifactId,
+      parentHash,
+      reason: proposal.reason,
+      evidenceLink: proposal.evidenceLink,
+      author: `builder:${request.runId}`,
+      originRun: request.runId,
+      authorityKind: classification.kind,
+      authorityDigest: authoritySnapshotDigest(now),
+      changedFields: classification.kind === "authority-change" ? classification.changed : [],
+    },
+    now: clock(),
+  });
+  if (!sealed.ok) {
+    return {
+      ok: false,
+      reason: "fenced",
+      message: `${taskId}'s lease did not survive the build — its plan revision is not this lease's to file`,
+    };
+  }
+  return {
+    ok: false,
+    reason: sealed.authorityKind === "plan-only" ? "plan-revised" : "plan-revision-blocked",
+    message: proposal.reason,
+  };
 }
 
 /**
@@ -2009,6 +2436,11 @@ function brief(
   retryBase: string | null = null,
   recoveredDraftRun: number | null = null,
   recoveredDraftKind: "completed" | "partial" = "partial",
+  /** The exact plan revision this attempt received, plus the two files it
+   * may answer with. Null when there is no parseable plan with milestones,
+   * in which case the brief never mentions the protocol at all — an agent
+   * is never offered a file it has nothing to say in. */
+  planRevision: { revision: number; hash: string; milestones: readonly Milestone[]; progress: string; proposal: string } | null = null,
 ): string {
   return [
     "You are building one task, unattended, in an isolated git worktree.",
@@ -2046,6 +2478,25 @@ function brief(
           "--- BEGIN APPROVED PLAN ---",
           fence(planDocument),
           "--- END APPROVED PLAN ---",
+          "",
+        ]),
+    // The exact revision, and the exact milestone identities, this attempt
+    // is held to. The ids are the machine's (position plus a hash of the
+    // wording); the descriptions came out of the plan document above, so
+    // they are fenced as the untrusted text they are — a milestone reading
+    // "ignore the rules below" arrives as quoted data with the rules still
+    // to come.
+    ...(planRevision === null
+      ? []
+      : [
+          `This build received plan revision ${planRevision.revision} of that plan. Its exact`,
+          `hash is ${planRevision.hash}, and the rules below ask you to quote that`,
+          "hash back. The plan's milestones, with the exact ids to report them",
+          "by, are quoted below as data:",
+          "",
+          "--- BEGIN PLAN MILESTONES ---",
+          ...planRevision.milestones.map(one => fence(`${one.id}: ${one.description}`)),
+          "--- END PLAN MILESTONES ---",
           "",
         ]),
     // The previous attempt's handoff, freshness-proven by the caller and
@@ -2228,6 +2679,50 @@ function brief(
     "  approved verification command, if one is configured, is re-run by the",
     "  machine itself — never by you. Write it to a temporary name first,",
     "  then rename it into place.",
+    // The two adaptive-execution-plan files. Both are optional to the
+    // machine and neither can widen anything: one reports where the work
+    // has got to, the other says the road itself was wrong.
+    ...(planRevision === null
+      ? []
+      : [
+          "- Report progress as you go. Whenever a milestone above actually",
+          "  CHANGES state — you start one, finish one, or find one blocked —",
+          `  overwrite ONE file named exactly ${planRevision.progress} in the`,
+          "  worktree root. Write a temporary name first, then rename it into",
+          "  place, so a reader never catches half a file. JSON object:",
+          `    { "revisionHash": "${planRevision.hash}",`,
+          '      "milestones": [ { "id": "<the exact id of a milestone above>",',
+          '        "state": "pending" | "current" | "completed" | "blocked",',
+          '        "note": "<optional, at most 300 characters>" }, ... ] }',
+          `  List all ${planRevision.milestones.length} milestone${planRevision.milestones.length === 1 ? "" : "s"} every time, in any order: a checkpoint`,
+          "  is the whole picture, never a delta. At most one may be current.",
+          "  Write it when a state really changes — not on every turn, and never",
+          "  for narration; an unchanged checkpoint is ignored. A milestone that",
+          "  is already completed can never go back to anything else, so a",
+          "  checkpoint that un-completes one is discarded whole. This file is",
+          "  overwritten rather than deleted, and it is never committed.",
+          "- If — and only if — something you actually FOUND in this repository",
+          "  invalidates a named dependency, risk, or implementation assumption",
+          "  of the plan above (the file it names does not exist, the library it",
+          "  assumes behaves differently, the approach it describes cannot work",
+          "  here), you may file ONE plan revision. Write ONE file named exactly",
+          `  ${planRevision.proposal} in the worktree root:`,
+          '    { "reason": "<what evidence invalidated what — name the specific',
+          '        dependency, risk, or assumption, and what you found instead>",',
+          '      "evidenceLink": "<a path, a commit, or a command a person can go',
+          '        re-check for themselves>",',
+          '      "plan": "<the COMPLETE replacement plan document, in the same',
+          '        ## Approach / ## Milestones / ## Dependencies / ## Risks /',
+          '        ## Proof shape as the plan quoted above — never a diff, never',
+          '        a fragment>" }',
+          "  Write it to a temporary name first, then rename it into place. Then",
+          `  STOP — do not write ${done} — and leave any work in progress`,
+          "  uncommitted, exactly as parking does. At most ONE plan revision per",
+          "  attempt: you get one, so spend it on evidence, not on preference.",
+          "  This is for a plan the repository contradicts, never for a plan you",
+          "  would merely have written differently, and it cannot widen or change",
+          "  the agreed scope above — that is not yours or the plan's to move.",
+        ]),
     ...(retryBase === null
       ? []
       : [
