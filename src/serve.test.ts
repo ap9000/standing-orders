@@ -9210,6 +9210,20 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(withinSignedTouches("docs/y.md", ["docs/*.md"])).toBe(true);
     expect(withinSignedTouches("a(b).ts", ["a(b).ts"])).toBe(true);
     expect(withinSignedTouches("anything", [])).toBe(false);
+    // Globstar spans zero or more directories (v2 review, comment 2): a
+    // false negative here is a loud "outside the signed touches" flag.
+    for (const path of ["src/a.ts", "src/nested/a.ts", "src/deep/er/a.ts"]) expect(withinSignedTouches(path, ["src/**/*.ts"])).toBe(true);
+    expect(withinSignedTouches("src/a.js", ["src/**/*.ts"])).toBe(false);
+    expect(withinSignedTouches("lib/a.ts", ["src/**/*.ts"])).toBe(false);
+    expect(withinSignedTouches("src/a.ts/x", ["src/**/*.ts"])).toBe(true);
+    expect(withinSignedTouches("README.md", ["**/*.md"])).toBe(true);
+    expect(withinSignedTouches("docs/x/y.md", ["**/*.md"])).toBe(true);
+    expect(withinSignedTouches("docs/x/y.md", ["**/y.md"])).toBe(true);
+    expect(withinSignedTouches("docs/x/y.ts", ["**/*.md"])).toBe(false);
+    expect(withinSignedTouches("src/a.ts", ["src/**/"])).toBe(true);
+    expect(withinSignedTouches("src/serve.test.ts", ["src/*.test.ts"])).toBe(true);
+    expect(withinSignedTouches("src/x/serve.test.ts", ["src/*.test.ts"])).toBe(false);
+    expect(withinSignedTouches("evidence/review-cockpit/desktop.png", ["evidence/review-cockpit/**"])).toBe(true);
 
     expect(diffFileAnchor("src/a.ts")).toMatch(/^diff-file-[0-9a-f]{16}$/);
     expect(diffFileAnchor("src/a.ts")).toBe(diffFileAnchor("src/a.ts"));
@@ -9223,6 +9237,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(reviewFilePriority(file("package-lock.json"), true)).toMatchObject({ band: 1, reasons: ["dependencies, CI, schema, or credentials"] });
     expect(reviewFilePriority(file(".github/workflows/ci.yml"), true)).toMatchObject({ band: 1 });
     expect(reviewFilePriority(file("src/auth-token.ts"), true)).toMatchObject({ band: 1 });
+    // The credential heuristic (v2 review, comment 4): whole delimited
+    // name pieces only — never a substring of an ordinary word.
+    const sensitiveWhy = "dependencies, CI, schema, or credentials";
+    for (const path of ["src/auth.ts", "src/api-token.ts", "config/secrets.json", "credentials.yml", "auth_middleware.ts", "lib/user.credentials.ts", ".env", ".env.local", "app/.env.production", "db/schema.prisma", "prisma/migrations/0001_init.sql", "Dockerfile", "pnpm-lock.yaml"]) {
+      expect(reviewFilePriority(file(path), true), path).toMatchObject({ band: 1, reasons: [sensitiveWhy] });
+    }
+    for (const path of ["src/author.ts", "src/tokenizer.ts", "src/permissions-ui.tsx", "src/.envelope.ts", "src/environment.ts", "src/authorize.ts", "src/permissions.ts", "docs/secretary.md", "src/tokens/theme.ts"]) {
+      expect(reviewFilePriority(file(path), true), path).toEqual({ band: 2, label: "routine", reasons: [] });
+    }
     expect(reviewFilePriority(file("src/a.ts", { cited: false }), true)).toMatchObject({ band: 1, reasons: ["no criterion cites this file"] });
     expect(reviewFilePriority(file("src/a.ts", { cited: false }), false)).toMatchObject({ band: 2, reasons: [] });
     expect(reviewFilePriority(file("src/a.ts", { additions: 150, deletions: 60 }), true)).toMatchObject({ band: 1, reasons: ["a large change"] });
@@ -9593,6 +9616,115 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(bearer).toContain('data-review-task="t-act"');
     expect(mainOf(bearer)).not.toContain("<form");
     expect(bearer).not.toContain('id="comment-form"');
+  });
+
+  test("a deep link resolves a completion older than the bounded queue directly, re-proved as done and in view; the queue states its cap (v2 review, comment 1)", async () => {
+    // One built completion far older than a window's worth of hand-closed
+    // tasks, plus an equally old one in a repo outside the ceiling.
+    const oldRef = seed("t-old", "finished long ago");
+    const oldRun = build("t-old", oldRef, {
+      patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+      stat: [{ path: "x", additions: 1, deletions: 1 }],
+      verdict: { verdict: "attested" },
+      finishedAt: at(400),
+    });
+    seed("t-old-theirs", "theirs, long ago", "/repo/other");
+    build("t-old-theirs", store.refFor("built-in", "t-old-theirs").id, { verdict: { verdict: "refuted" }, finishedAt: at(401) });
+    // A task that was done once and reopened: no longer a completion.
+    store.createTask({ id: "t-reopened", title: "reopened" }, T0);
+    store.placeTask(store.refFor("built-in", "t-reopened", "ours").id, "/repo/main");
+    store.setTaskState("t-reopened", "done", at(402));
+    store.setTaskState("t-reopened", "queued", at(1));
+    for (let i = 0; i < 101; i += 1) {
+      const id = `t-recent-${String(i).padStart(3, "0")}`;
+      store.createTask({ id, title: `recent ${i}` }, T0);
+      store.placeTask(store.refFor("built-in", id, "ours").id, "/repo/main");
+      store.setTaskState(id, "done", new Date(T0.getTime() - i * 60_000));
+    }
+    await boot();
+    const cookie = await login();
+
+    // The queue is bounded to the newest 100 and says so.
+    const html = await (await fetch(url("/review"), { headers: { cookie } })).text();
+    expect(queueOf(html).match(/<li>/g)?.length).toBe(100);
+    expect(queueOf(html)).not.toContain("t-old");
+    expect(html).toContain("The queue shows the newest 100 completions; older results still open by their own link");
+    expect(html).not.toContain('data-cockpit-beyond="1"');
+
+    // The old completion's link still opens it — its own build, verdict,
+    // diff, and annotation road — with an honest note and no queue row.
+    const old = await (await fetch(url("/review?result=t-old"), { headers: { cookie } })).text();
+    expect(old).toContain('data-review-task="t-old"');
+    expect(old).toContain('data-cockpit-beyond="1"');
+    expect(old).toContain('Opened directly: <span class="mono">t-old</span> finished earlier than the newest 100 completions the queue lists');
+    expect(old).not.toContain("is in view here");
+    expect(old).not.toContain('aria-current="page"');
+    expect(old).toContain("Evidence captured");
+    expect(old).toContain(`href="/r/${oldRun}">the full build record →</a>`);
+    expect(old).toContain(`<form method="post" action="/r/${oldRun}/comment" class="diff-comment-form" id="comment-form">`);
+    expect(old).toContain('data-next-action="annotate"');
+
+    // Outside the ceiling, or not done any more: still the missing note,
+    // never the hidden row's facts.
+    for (const miss of ["t-old-theirs", "t-reopened", "nope"]) {
+      const body = await (await fetch(url(`/review?result=${miss}`), { headers: { cookie } })).text();
+      expect(body).toContain(`No completed task <span class="mono">${miss}</span> is in view here`);
+      expect(body).not.toContain('data-cockpit-beyond="1"');
+      expect(body).not.toContain("theirs, long ago");
+    }
+  });
+
+  test("the proof-state chip is the receipt's own word, verdict first: a no-change run never masks a refuted proof (v2 review, comment 3)", async () => {
+    const refutedRef = seed("t-nc-refuted", "no change, refuted");
+    build("t-nc-refuted", refutedRef, {
+      handoff: { conclusion: "Nothing to do." },
+      verdict: { verdict: "refuted", reasons: ["a criterion cites a file that did not change"] },
+      outcome: "no-change",
+    });
+    const quietRef = seed("t-nc-attested", "no change, attested");
+    build("t-nc-attested", quietRef, { handoff: { conclusion: "Already done." }, verdict: { verdict: "attested" }, outcome: "no-change", finishedAt: at(1) });
+    const bareRef = seed("t-nc-bare", "no change, no verdict");
+    build("t-nc-bare", bareRef, { outcome: "no-change", finishedAt: at(2) });
+    await boot();
+    const cookie = await login();
+    const chipOf = (html: string): string => /<span class="receipt-proof" data-proof-state="([a-z]+)"><i aria-hidden="true"><\/i>([^<]+)<\/span>/.exec(html)?.slice(1).join(" · ") ?? "(no chip)";
+
+    for (const [id, expected] of [
+      ["t-nc-refuted", "problem · Proof disagrees"],
+      ["t-nc-attested", "attested · Evidence captured"],
+      ["t-nc-bare", "unknown · Unverified"],
+    ] as const) {
+      const cockpit = await (await fetch(url(`/review?result=${id}`), { headers: { cookie } })).text();
+      const receipt = await (await fetch(url(`/t/${id}`), { headers: { cookie } })).text();
+      expect(chipOf(cockpit), id).toBe(expected);
+      expect(chipOf(receipt), id).toBe(expected);
+      expect(cockpit).not.toContain("No change needed");
+    }
+    const refuted = await (await fetch(url("/review?result=t-nc-refuted"), { headers: { cookie } })).text();
+    expect(refuted).toContain('data-next-action="accept-proof"');
+    expect(refuted).toContain("The build concluded that no repository change was needed.");
+  });
+
+  test("annotation eligibility is one rule: an empty or unverifiable diff offers neither the form, the file buttons, nor the picker script (v2 review, comment 5)", async () => {
+    const emptyRef = seed("t-empty", "captured nothing");
+    build("t-empty", emptyRef, { patch: "\n", stat: [], verdict: { verdict: "attested" } });
+    const fullRef = seed("t-full", "captured something");
+    const fullRun = build("t-full", fullRef, { patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", stat: [{ path: "x", additions: 1, deletions: 1 }], verdict: { verdict: "attested" }, finishedAt: at(1) });
+    await boot();
+    const cookie = await login();
+    const empty = await (await fetch(url("/review?result=t-empty"), { headers: { cookie } })).text();
+    expect(empty).toContain("empty diff — captured successfully, nothing changed");
+    expect(empty).not.toContain('id="comment-form"');
+    expect(empty).not.toContain('class="pick-file"');
+    expect(empty).not.toContain('document.getElementById("comment-form")');
+    expect(empty).toContain('data-next-action="inspect-run"');
+    const full = await (await fetch(url("/review?result=t-full"), { headers: { cookie } })).text();
+    expect(full).toContain(`action="/r/${fullRun}/comment"`);
+    expect(full).toContain('class="pick-file"');
+    expect(full).toContain('document.getElementById("comment-form")');
+    const bearer = await (await fetch(url("/review?result=t-full"), { headers: { authorization: `Bearer alex:${approverToken}` } })).text();
+    expect(bearer).not.toContain('class="pick-file"');
+    expect(bearer).not.toContain('document.getElementById("comment-form")');
   });
 
   test("the archive and the result receipt lead into the cockpit; the cockpit leads back to the sealed record", async () => {

@@ -1327,7 +1327,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       const wanted = url.searchParams.get("result");
       const wantedId =
         wanted === null || wanted.length === 0 || wanted.length > 64 || hasForbiddenControls(wanted) ? null : wanted;
-      const chosen = wantedId === null ? null : ranked.find(one => one.taskId === wantedId) ?? null;
+      const inQueue = wantedId === null ? null : ranked.find(one => one.taskId === wantedId) ?? null;
+      // A stable deep link outlives the queue window (v2 review, comment
+      // 1): a completion older than the newest REVIEW_QUEUE_CAP resolves
+      // directly — re-proved as done, in this project, and inside the
+      // ceiling — so an old receipt never reads as unfinished or foreign.
+      // The ranked queue itself stays bounded and says so.
+      const beyond = wantedId === null || inQueue !== null ? null : completedRowFor(wantedId, project);
+      const beyondRow = beyond === null ? null : { ...beyond, ciFailing: ciFailingFor(beyond.runId, beyond.prNumber) };
+      const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
       const selectedRow = chosen ?? ranked[0] ?? null;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow);
@@ -1336,9 +1344,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         reviewCockpitPage(chromeFor(project, "runs"), {
           queue: ranked,
+          queueCap: REVIEW_QUEUE_CAP,
           selected,
-          // A deep link to a result this queue cannot show — not done, not
-          // admitted, or never existed — says so in one sentence and
+          beyondQueue: beyond !== null,
+          // A deep link to a result this console cannot show — not done,
+          // not admitted, or never existed — says so in one sentence and
           // shows the top of the queue; the three cases read identically.
           missing: wantedId !== null && chosen === null ? wantedId : null,
           csrf,
@@ -6426,6 +6436,56 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
 
+  /** An OBSERVED CI failure on a completed row's PR — the open episode the
+   * watcher recorded for exactly that repository and number; never a guess
+   * from quiet. One indexed publication read per row that has a PR. */
+  function ciFailingFor(runId: number | null, prNumber: number | null): boolean {
+    if (runId === null || prNumber === null) return false;
+    const publication = store.publicationForRun(runId);
+    return publication !== null && publication.prNumber === prNumber && store.hasOpenCiEpisode(publication.githubRepo, prNumber);
+  }
+
+  /**
+   * One completed row by task id, for a `?result=` deep link the bounded
+   * queue could not show — the done list's own predicate, re-proved per
+   * read: the task is done, sits in this project (or in none), and its
+   * repository passes the ceiling; the result run is the newest finished
+   * built/no-change attempt that is not a reviewer pass. Anything else is
+   * null, and null reads exactly like a task that never existed.
+   */
+  function completedRowFor(taskId: string, project: string | null): CompletedWorkRow | null {
+    const task = store.getTask(taskId);
+    const ref = store.lookupRef(taskId);
+    if (task === null || ref === null || task.state !== "done") return null;
+    if (!(project === null || ref.repo === null || ref.repo === project) || !visible(ref.repo)) return null;
+    const run =
+      store.runsFor(ref.id).find(one => (one.outcome === "built" || one.outcome === "no-change") && one.finishedAt !== null && one.role !== "reviewer") ?? null;
+    const publication = run === null ? null : store.publicationForRun(run.id);
+    const verdict = run === null ? null : store.proofVerdictFor(run.id);
+    return {
+      taskId: task.id,
+      title: task.title,
+      repo: ref.repo,
+      completedAt: task.updatedAt,
+      outcome: run?.outcome ?? null,
+      handoff: run?.handoff ?? null,
+      costUsd: run?.costUsd ?? null,
+      provider: run?.provider ?? null,
+      authMode: run?.authMode === "subscription" || run?.authMode === "api-key" ? run.authMode : null,
+      ranMinutes:
+        run === null || run.finishedAt === null
+          ? null
+          : Math.max(1, Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 60_000)),
+      prNumber: publication?.prNumber ?? null,
+      prUrl: publication?.prUrl ?? null,
+      publicationState: publication?.state ?? null,
+      runId: run?.id ?? null,
+      proofVerdict: verdict?.verdict ?? null,
+      proofMatrix: verdict?.matrix ?? [],
+      proofAccepted: run !== null && store.proofAcceptance(run.id) !== null,
+    };
+  }
+
   /**
    * The review cockpit's projection of ONE completed task (Priority 5):
    * approved intent from the scope and plan already on file, the result
@@ -6436,18 +6496,12 @@ export function createDecisionServer(options: ServeOptions): Server {
    * exactly what they are. Only the selected result is enriched — the
    * queue rows carry the done list's own facts and nothing more.
    */
-  /** An OBSERVED CI failure on a completed row's PR — the open episode the
-   * watcher recorded for exactly that repository and number; never a guess
-   * from quiet. One indexed publication read per row that has a PR. */
-  function ciFailingFor(runId: number | null, prNumber: number | null): boolean {
-    if (runId === null || prNumber === null) return false;
-    const publication = store.publicationForRun(runId);
-    return publication !== null && publication.prNumber === prNumber && store.hasOpenCiEpisode(publication.githubRepo, prNumber);
-  }
-
   function reviewCockpitViewOf(row: RankedReviewRow): ReviewCockpitView {
     const ref = store.lookupRef(row.taskId);
     const scope = store.getScope(row.taskId);
+    // The result run, read once: the contest road and the artifact
+    // projection below both hang off this one record.
+    const run = row.runId === null ? null : store.getRun(row.runId);
     const intent: ReviewCockpitView["intent"] =
       scope === null
         ? null
@@ -6473,7 +6527,6 @@ export function createDecisionServer(options: ServeOptions): Server {
     const contestOf = (): ReviewCockpitView["contest"] => {
       // Either road to a tournament: the result run was one of its
       // contestants, or the task still owes an operator a comparison.
-      const run = row.runId === null ? null : store.getRun(row.runId);
       const viaRun = run?.contestant === null || run?.contestant === undefined ? null : store.getContestant(run.contestant);
       const contest = viaRun === null ? (ref === null ? null : store.contestNeedingOperator(ref.id)) : store.getContest(viaRun.contest);
       return contest === null ? null : { id: contest.id, state: contest.state, kind: contest.kind, agents: store.contestants(contest.id).length };
@@ -6488,7 +6541,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       plan,
       contest: contestOf(),
     };
-    const run = row.runId === null ? null : store.getRun(row.runId);
     if (run === null) {
       return { ...base, run: null, handoff: null, proof: null, terminal: null, files: [], outsideTouches: [], fileAnchors: new Map(), comments: [], reviewerFindings: [], publication: null, notes: [] };
     }
@@ -8915,9 +8967,8 @@ button { min-height: 44px; }
   .receipt-facts { grid-template-columns: 1fr; }
   .receipt-actions { display: grid; grid-template-columns: 1fr; }
   .receipt-actions .button-link { width: 100%; box-sizing: border-box; text-align: center; }
-  .cockpit { grid-template-columns: 1fr; }
-  .cockpit-queue { position: static; padding-bottom: .75rem; margin-bottom: .5rem; border-bottom: 1px solid var(--border); }
-  .cockpit-queue-list { max-height: 15rem; }
+  /* The cockpit already stacks at 980px (above); only the phone-width
+     act card and section padding are decided here. */
   .cockpit-next { display: grid; }
   .cockpit-next form, .cockpit-next .button-link { width: 100%; box-sizing: border-box; }
   .cockpit-next form input[type=text] { flex: 1 1 100%; }
@@ -14658,12 +14709,6 @@ function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen 
   });
 }
 
-/**
- * The review queue (M8.19): the field parallelizes generation and lets
- * review pile up; this page compresses it. Read-only by design — ranked
- * advice and deep links, no merge button, because the PR is the terminus
- * and the person merges on GitHub.
- */
 /** Only an https github.com pull URL earns an anchor (audit IV-11) — a
  * corrupted row renders as text, never as navigation. */
 function safePrUrl(url: string | null): string | null {
@@ -14679,6 +14724,10 @@ function safePrUrl(url: string | null): string | null {
 }
 
 // ---- the review cockpit (Priority 5) ----------------------------------------
+// The field parallelizes generation and lets review pile up (M8.19); this
+// page compresses it. Read-only by design — ranked advice and deep links,
+// no merge button, because the PR is the terminus and the person merges
+// on GitHub.
 
 /** The queue reads at most this many completed tasks — the store's own
  * page ceiling, admission bound before it. */
@@ -14757,16 +14806,37 @@ export function withinSignedTouches(path: string, touches: readonly string[]): b
   return touches.some(raw => {
     const touch = raw.trim().replace(/^\.\//, "");
     if (touch === "") return false;
-    if (touch.includes("*")) {
-      const pattern = touch
-        .split("**")
-        .map(part => part.split("*").map(piece => piece.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*"))
-        .join(".*");
-      return new RegExp(`^${pattern}(?:/.*)?$`).test(path);
-    }
+    if (touch.includes("*")) return touchGlob(touch).test(path);
     const dir = touch.endsWith("/") ? touch : `${touch}/`;
     return path === touch || path.startsWith(dir);
   });
+}
+
+/** A signed touch's glob as a regular expression, gitignore-style: `*`
+ * stays inside one segment; `**` followed by `/` spans zero or more
+ * directories, so `src/**` followed by `/*.ts` matches `src/a.ts` as well
+ * as `src/nested/a.ts` (v2 review, comment 2); a bare `**` spans anything.
+ * Whatever the glob names, its contents are inside it too. */
+function touchGlob(raw: string): RegExp {
+  // A trailing slash names a directory; the contents clause below covers it.
+  const touch = raw.replace(/\/+$/, "");
+  let pattern = "";
+  for (let at = 0; at < touch.length; ) {
+    if (touch.startsWith("**/", at)) {
+      pattern += "(?:[^/]*/)*";
+      at += 3;
+    } else if (touch.startsWith("**", at)) {
+      pattern += ".*";
+      at += 2;
+    } else if (touch[at] === "*") {
+      pattern += "[^/]*";
+      at += 1;
+    } else {
+      pattern += (touch[at] as string).replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+      at += 1;
+    }
+  }
+  return new RegExp(`^${pattern}(?:/.*)?$`);
 }
 
 /** A stable, attribute-safe anchor for one file of the sealed patch —
@@ -14786,8 +14856,16 @@ export type ReviewFileRow = {
   cited: boolean;
 };
 
+/** Paths whose churn a reviewer reads first — dependency manifests and
+ * locks, CI workflows, container and schema definitions, migrations, the
+ * environment files secrets live in, and files NAMED for credentials.
+ * The credential words match only as whole `-`/`_`/`.`-delimited pieces
+ * of the file name (v2 review, comment 4): `auth.ts`, `api-token.ts`,
+ * `secrets.json` count; `author.ts`, `tokenizer.ts`, and `.envelope.ts`
+ * are ordinary names and do not. `permission` is not a credential word
+ * at all — `permissions-ui.tsx` is a screen, not a secret. */
 const SENSITIVE_PATH =
-  /(^|\/)(\.github|migrations?)\/|(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|Dockerfile|\.env[^/]*|schema[^/]*\.(sql|prisma)|[^/]*(auth|secret|token|permission|credential)[^/]*)$/i;
+  /(^|\/)(\.github|migrations?)\/|(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|Dockerfile|\.env(\.[^/]+)?|schema[^/]*\.(sql|prisma)|(?:[^/]*[-_.])?(auth|secrets?|tokens?|credentials?)(?:[-_.][^/]*)?)$/i;
 const LARGE_CHANGE_LINES = 200;
 
 /** The changed-file list's own review priority: outside the signed
@@ -14823,7 +14901,8 @@ export function orderChangedFiles(files: readonly ReviewFileRow[], proofCitesPat
     );
 }
 
-type RankedReviewRow = ReturnType<Store["listCompletedWorkScoped"]>[number] & { ciFailing: boolean; priority: ReviewPriority };
+type CompletedWorkRow = ReturnType<Store["listCompletedWorkScoped"]>[number];
+type RankedReviewRow = CompletedWorkRow & { ciFailing: boolean; priority: ReviewPriority };
 
 /** What the cockpit shows of one selected result — a projection of the
  * scope, plan, run, artifact, verdict, contest, and publication records,
@@ -14889,29 +14968,41 @@ function priorityChip(priority: ReviewPriority): string {
   return `<span class="badge ${cls} review-priority" data-review-priority="${priority.band}">${escape(priority.label)}</span>`;
 }
 
-/** The one-word verdict chip the receipt already wears, so the cockpit
- * and the task page never disagree on the state's name. */
-function proofStateChip(verdict: ProofVerdict | null, accepted: boolean, run: boolean, outcome: string | null): string {
-  const chip =
-    !run
-      ? { word: "No build record", state: "unknown" }
-      : outcome === "no-change"
-        ? { word: "No change needed", state: verdict === null ? "attested" : verdict === "verified" ? "verified" : "attested" }
-        : verdict === null
-          ? { word: "Unverified", state: "unknown" }
-          : verdict === "verified"
-            ? { word: "Verified", state: "verified" }
-            : verdict === "attested"
-              ? { word: "Evidence captured", state: "attested" }
-              : verdict === "refuted"
-                ? { word: accepted ? "Accepted with concerns" : "Proof refuted", state: "problem" }
-                : { word: accepted ? "Accepted with gaps" : "Needs verification", state: "problem" };
+/** The receipt's own proof-state word, so the cockpit and the task page
+ * never disagree on the state's name or its precedence: the stored
+ * verdict decides, whatever the run's outcome — a no-change run with a
+ * refuted proof reads as refuted, never as "no change needed". The one
+ * word the receipt never needs is "No build record": a manual completion
+ * has no receipt to share it with. */
+function proofStateChip(verdict: ProofVerdict | null, accepted: boolean, run: boolean): string {
+  const chip = run ? proofStateWords(verdict, accepted) : { word: "No build record", state: "unknown" };
   return `<span class="receipt-proof" data-proof-state="${chip.state}"><i aria-hidden="true"></i>${escape(chip.word)}</span>`;
+}
+
+/** Whether a reviewer can annotate this result's diff here: a build with
+ * a verified, non-empty sealed patch, read by a session that holds a CSRF
+ * token. The one rule behind the file "comment" buttons, the annotation
+ * form, and the line-picker script — decided once. */
+function canAnnotateDiff(view: ReviewCockpitView | null, csrf: string): boolean {
+  if (view === null || view.run === null || csrf === "") return false;
+  const patch = view.terminal?.patch ?? null;
+  return patch !== null && !("problem" in patch) && patch.text.trim() !== "";
 }
 
 function reviewCockpitPage(
   chrome: Chrome,
-  data: { queue: readonly RankedReviewRow[]; selected: ReviewCockpitView | null; missing: string | null; csrf: string; noted: boolean; now: Date },
+  data: {
+    queue: readonly RankedReviewRow[];
+    /** The queue's ceiling — printed when the queue reaches it. */
+    queueCap: number;
+    selected: ReviewCockpitView | null;
+    /** The deep link resolved a completion older than the queue shows. */
+    beyondQueue: boolean;
+    missing: string | null;
+    csrf: string;
+    noted: boolean;
+    now: Date;
+  },
 ): Screen {
   const { queue, selected, csrf } = data;
   const elevated = queue.filter(one => one.priority.band < 2).length;
@@ -14935,24 +15026,28 @@ function reviewCockpitPage(
         `</ol>`;
   const queuePane =
     `<aside class="cockpit-queue" aria-label="review queue"><h2>results <span class="lane-count">${queue.length}</span></h2>` +
-    `<p class="meta cockpit-queue-hint">${queue.length === 0 ? "" : `${elevated} elevated · ordered by review priority, then newest — the stored verdict is never changed by this order`}</p>` +
+    `<p class="meta cockpit-queue-hint">${queue.length === 0 ? "" : `${elevated} elevated · ordered by review priority, then newest — the stored verdict is never changed by this order${queue.length >= data.queueCap ? `. The queue shows the newest ${data.queueCap} completions; older results still open by their own link` : ""}`}</p>` +
     queueRows +
     `</aside>`;
   const missingNote =
     data.missing === null
       ? ""
       : `<p class="problem">No completed task <span class="mono">${escape(data.missing)}</span> is in view here — it may not be finished, or it is outside this console's projects. ${selected === null ? "" : "Showing the top of the queue instead."}</p>`;
+  const beyondNote =
+    !data.beyondQueue || selected === null
+      ? ""
+      : `<p class="meta cockpit-beyond" data-cockpit-beyond="1">Opened directly: <span class="mono">${escape(selected.taskId)}</span> finished earlier than the newest ${data.queueCap} completions the queue lists, so it has no row there.</p>`;
   const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted);
-  const commentable = selected !== null && selected.run !== null && csrf !== "" && selected.terminal?.patch !== null && selected.terminal?.patch !== undefined && !("problem" in selected.terminal.patch);
   return screen("review", [
     `<h1>review</h1>`,
     buildsViews("review"),
     `<p class="hint">completed work, ranked by what needs a reviewer's eyes first — approved intent, evidence, sealed changes, and the next act, without reading a transcript</p>`,
     missingNote,
+    beyondNote,
     `<div class="cockpit">${queuePane}${detail}</div>`,
   ].join("\n"), {
     chrome,
-    ...(commentable ? { functional: { script: prefillScript(), fetches: false } } : {}),
+    ...(canAnnotateDiff(selected, csrf) ? { functional: { script: prefillScript(), fetches: false } } : {}),
   });
 }
 
@@ -14963,15 +15058,14 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   const run = view.run;
   const proof = view.proof;
   const accepted = proof?.accepted !== null && proof?.accepted !== undefined;
-  const hasDiff = view.terminal?.patch !== null && view.terminal?.patch !== undefined && !("problem" in view.terminal.patch) && view.terminal.patch.text.trim() !== "";
-  const canAnnotate = run !== null && csrf !== "" && hasDiff;
+  const canAnnotate = canAnnotateDiff(view, csrf);
 
   // Header: what this is, its verdict word, and why it sits where it does.
   parts.push(
     `<header class="cockpit-head" data-review-task="${escape(view.taskId)}">` +
       `<p class="eyebrow mono">${run === null ? "no build" : `build #${run.id}`} · <a href="${taskHref(view.taskId)}">${escape(view.taskId)}</a>${projectChip(view.repo)}</p>` +
       `<h2>${escape(view.title)}</h2>` +
-      `<p class="cockpit-chips">${proofStateChip(proof?.verdict ?? null, accepted, run !== null, run?.outcome ?? null)}${priorityChip(view.priority)}</p>` +
+      `<p class="cockpit-chips">${proofStateChip(proof?.verdict ?? null, accepted, run !== null)}${priorityChip(view.priority)}</p>` +
       (view.priority.reasons.length === 0
         ? `<p class="meta">review priority: routine — nothing on record elevates this result</p>`
         : `<p class="meta">review priority — ${escape(view.priority.label)} because: ${view.priority.reasons.map(escape).join("; ")}</p>`) +
@@ -15966,17 +16060,23 @@ function evidenceBundleCard(view: ProofBundleView | null, runId: number): string
 /** A calm, scan-first result receipt for the task and its focused chat.
  * The full ledger remains one click away; this card carries only the facts
  * needed to decide whether to inspect, discuss, or move on. */
+/** The receipt's proof-state word and tone, from the stored verdict and
+ * the operator's acceptance alone — shared with the review cockpit's
+ * header chip so the two surfaces never name one state differently. */
+function proofStateWords(verdict: ProofVerdict | null, accepted: boolean): { word: string; state: "unknown" | "verified" | "attested" | "problem" } {
+  return verdict === null
+    ? { word: "Unverified", state: "unknown" }
+    : verdict === "verified"
+      ? { word: "Verified", state: "verified" }
+      : verdict === "attested"
+        ? { word: "Evidence captured", state: "attested" }
+        : verdict === "refuted"
+          ? { word: accepted ? "Accepted with concerns" : "Proof disagrees", state: "problem" }
+          : { word: accepted ? "Accepted with gaps" : "Needs verification", state: "problem" };
+}
+
 function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat"): string {
-  const proof =
-    view.verdict === null
-      ? { word: "Unverified", state: "unknown" }
-      : view.verdict === "verified"
-        ? { word: "Verified", state: "verified" }
-        : view.verdict === "attested"
-          ? { word: "Evidence captured", state: "attested" }
-          : view.verdict === "refuted"
-            ? { word: view.accepted ? "Accepted with concerns" : "Proof disagrees", state: "problem" }
-            : { word: view.accepted ? "Accepted with gaps" : "Needs verification", state: "problem" };
+  const proof = proofStateWords(view.verdict, view.accepted);
   const passed = view.matrix.length === 0 ? null : passFraction(view.matrix);
   const diff =
     view.diff === null

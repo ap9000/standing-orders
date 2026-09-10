@@ -69,8 +69,9 @@ The first slice has landed as the `/review` cockpit: a master/detail over the
 existing completion records. The queue ranks visible completed tasks by a
 labeled *review priority* (refuted or unaccepted-short proofs, reviewer
 contradictions, and observed CI failures first; manual completions, legacy
-results, and pending manual-review criteria next), with a stable
-`?result=<task>` deep link. The selected result joins the approved scope and
+results, and pending manual-review criteria next), bounded to the newest 100
+completions and saying so, with a stable `?result=<task>` deep link that
+resolves an older completion directly. The selected result joins the approved scope and
 plan to the stored criterion matrix and sealed diff: changed-path citations
 anchor into the matching file of the parsed patch, files outside non-empty
 signed touches are flagged, and every evidence source — the plane's re-run,

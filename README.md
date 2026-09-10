@@ -188,8 +188,10 @@ for people splitting those parts across machines.
    evidence it cited, the machine's re-run and the agent's own checks
    labeled apart, reviewer findings, validated screenshots, caveats, the
    sealed diff with changed files ordered by priority and flagged when they
-   fall outside the signed touches, and what the publication watcher
-   actually saw. The next act sits under the header: accept an incomplete
+   fall outside the signed touches (matched gitignore-style, so `src/**`
+   with `/*.ts` covers nested files), and what the publication watcher
+   actually saw. The queue shows the newest 100 completions; an older
+   result still opens by its own link. The next act sits under the header: accept an incomplete
    proof, annotate the diff and seal a revision, compare a tournament, or
    open the pull request — each through the road that already owns it. A
    task marked done by hand, or built before proofs existed, says so

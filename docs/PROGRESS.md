@@ -1,5 +1,27 @@
 # Progress
 
+**2026-09-10 — Review cockpit, revised from five review annotations.** A
+stable `?result=<task>` link now outlives the queue window: the ranked
+queue stays bounded to the newest 100 completions and says so, and a link
+to an older completion resolves directly — re-proved as done, in the open
+project, and inside the ceiling — with a plain "opened directly" note, so
+an old receipt never reads as unfinished or foreign. Signed-touch globs are
+matched gitignore-style: `src/**` followed by `/*.ts` covers `src/a.ts` and
+`src/nested/a.ts`, ending a false "outside the signed touches" warning.
+The credential heuristic behind the changed-file order matches whole
+delimited name pieces only (`auth.ts`, `api-token.ts`, `secrets.json`,
+`.env.local`), so `author.ts`, `tokenizer.ts`, `permissions-ui.tsx`, and
+`.envelope.ts` read as ordinary files. The cockpit's proof-state chip is
+the completion receipt's own words and precedence — the stored verdict
+decides, so a no-change run with a refuted proof reads "Proof disagrees",
+never "No change needed". Small duplicated sources of truth are gone: the
+selected run is fetched once, annotation eligibility is one rule shared by
+the form, file buttons, and picker script, the phone-width cockpit rules
+live in one media block, and the projection's docblock sits on its helper.
+Tests cover the cap, the direct resolve and its refusals, globstar cases,
+positive and negative credential names, chip parity with the task page,
+and empty-diff eligibility; the desktop and 390px captures were retaken.
+
 **2026-09-10 — Completed work now has a review cockpit.** The `/review` view of
 builds is no longer a PR-order list; it is a master/detail over every visible
 completed task, ranked by a labeled review priority — refuted or unaccepted

@@ -164,7 +164,16 @@ sections. The rules:
   first* (`badge-failed`), *look closer* (`badge-manual-review`), *routine*
   (`badge-done`) — and the reasons are always printed beside the chip, on the
   row and under the header. The proof word beside it is the receipt's own
-  `receipt-proof` chip, so the cockpit and the task page never disagree.
+  `receipt-proof` chip from the same `proofStateWords` mapping, so the
+  cockpit and the task page never disagree: the stored verdict decides the
+  word (a no-change run with a refuted proof still reads *Proof disagrees*),
+  and only a completion with no build at all wears *No build record*.
+- **The queue is a window, the link is stable.** The ranked queue lists at
+  most the newest 100 completions and prints that cap in its hint when it
+  reaches it; a `?result=` link to an older completion opens it directly
+  with a muted `.cockpit-beyond` note ("opened directly … no row there"),
+  never the "not in view" problem banner, which is reserved for tasks that
+  are not done, not admitted, or do not exist.
 - **One primary act** (`.cockpit-next`), chosen from the state: accept a
   short/refuted proof (the amber `.approve-form`, the same rule as approving
   a scope), compare a tournament, draft a CI repair, seal ready annotations,
@@ -180,7 +189,10 @@ sections. The rules:
   signed touches first (flagged `badge-failed`), then binary, dependency/CI/
   schema/credential paths, uncited files, and large changes, then churn. Each
   row anchors to its file in the sealed patch (`diff-file-<sha256[0..16]>`),
-  which keeps its sealed order beneath.
+  which keeps its sealed order beneath. Signed touches match gitignore-style
+  (`*` within one segment, `**/` across zero or more directories); the
+  credential heuristic matches whole `-`/`_`/`.`-delimited pieces of the
+  file name only, so `author.ts` or `permissions-ui.tsx` is never flagged.
 - **Escaping and anchors.** Every displayed value goes through `escape`; the
   file anchor is derived from the path's bytes so a hostile name can neither
   break the id nor leave the attribute.
