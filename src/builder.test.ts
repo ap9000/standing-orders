@@ -900,6 +900,23 @@ describe("what the builder tells the agent", () => {
     expect(asked[asked.indexOf("--max-turns") + 1]).toBe("1000");
   });
 
+  test("a strict quality approval re-verifies at the final builder gate", async () => {
+    const strict = propose(store, {
+      taskId: "t-1",
+      goal: "add a guard on the payout path",
+      outOfScope: "do not touch the billing model",
+      touches: ["src/payouts.ts"],
+      qualityMode: "strict",
+      now: T0,
+    });
+    expect(approve(store, "t-1", "alex", T0, strict.digest, approverToken)).toMatchObject({ ok: true });
+
+    const result = await build1();
+
+    expect(result).not.toMatchObject({ ok: false, reason: "stale-approval" });
+    expect(asked).toContain("--max-turns");
+  });
+
   test("runs in the leased worktree and nowhere else", async () => {
     let cwd: string | undefined;
     await build1({

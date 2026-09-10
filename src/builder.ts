@@ -400,7 +400,14 @@ export function proveApprovedProfile(
     const rederived =
       (scope.digestVersion ?? 1) >= 2
         ? digestOf(
-            { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance },
+            {
+              goal: scope.goal,
+              outOfScope: scope.outOfScope,
+              touches: scope.touches,
+              budgetMicrousd: scope.budgetMicrousd,
+              acceptance: scope.acceptance,
+              qualityMode: scope.qualityMode ?? "default",
+            },
             snapshot,
           )
         : digestOf({ goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance });
