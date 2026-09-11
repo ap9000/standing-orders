@@ -47,6 +47,22 @@ rescue; it does not measure planning-policy quality across arbitrary projects.
 
 ## Current real-provider baseline
 
+The latest bounded integration certificate tested `cf328cb` on 2026-09-11,
+macOS arm64 / Node 22.22.0. Both version-3 runs used the clean runtime hash
+`a9500a300add097a48b4eab4b1155bdf056648fd8550d539e980cb4ff99b05af`:
+
+| Provider | Model | Elapsed | Proof and independent review |
+|---|---|---:|---|
+| Claude subscription | `sonnet` | 149s | 3/3 verified and independently upheld; duplicate dispatch refused |
+| Codex ChatGPT subscription | `gpt-5.6-sol` | 270s | 3/3 verified and independently upheld; duplicate dispatch refused |
+
+The same revision passed 119 test files / 2,354 tests (12 existing skips) and
+100/100 real-writer recovery fixtures in 26.5s. Local JSON certificates are in
+`output/certification/reliability-{claude,codex,recovery}.json`. These bounded
+workflows do not complete the broader pilot or Windows release gates.
+
+## Earlier baseline
+
 This is the September 8 baseline, not certification of every later change.
 September 11 real work exposed additional recovery and handoff gaps. The
 [unattended completion plan](UNATTENDED_PLAN.md) tracks their fixes and the

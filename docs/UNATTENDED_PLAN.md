@@ -47,6 +47,18 @@ Main was still `917bc5b` when this plan was prepared.
 
 ## Execution status
 
+- The integrated code at `cf328cb` passes typecheck/build and the full suite:
+  119 files, 2,354 tests, 12 existing skips. Version-3 real-provider canaries
+  passed without intervention: Claude `sonnet` in 149s and Codex `gpt-5.6-sol`
+  in 270s. Both independently upheld every signed criterion, retained verified
+  machine proof, changed only the two requested files, and refused duplicate
+  dispatch. Both recorded the same unchanged runtime hash
+  `a9500a300add097a48b4eab4b1155bdf056648fd8550d539e980cb4ff99b05af`.
+  The permanent recovery canary also passed 100/100 real-writer cases in 26.5s.
+  These bounded fixtures establish the tested integration, not every P0/P1 exit
+  below. The original checkout/live worker remain unchanged; earlier human
+  acceptance is still outstanding. This implementation is assisted engineering.
+
 - Assisted review evidence delivery: Codex and OpenRouter's Codex adapter now
   receive the complete sealed text through stdin and screenshots as explicit
   image attachments while shell, unified execution, and app access remain
@@ -56,7 +68,7 @@ Main was still `917bc5b` when this plan was prepared.
   canary requires every signed criterion to be independently upheld by the
   requested reviewer; a `cannot-tell` judgement cannot produce a certificate.
   Focused regressions pass, including a real large-input pipe and early closure.
-  Real-provider review certification must be rerun on this revision.
+  The corrected real-provider certification is recorded above.
 
 - The custody follow-up records the active provider PID for planning, scouting,
   build corrections, and tournament corrections, bound to the original
@@ -71,16 +83,16 @@ Main was still `917bc5b` when this plan was prepared.
   Claude `sonnet` in 214s and Codex `gpt-5.6-sol` in 326s. Audit of the actual
   judgements upheld all three criteria for Claude, but found all three Codex
   judgements were `cannot-tell`: its restricted reviewer could not read the
-  evidence files. The Codex review certificate is therefore invalid; merely
-  keeping the machine proof verified was too weak a canary gate. Evidence
-  delivery and the certification assertion need correction. Both recorded
+  evidence files. That Codex review certificate is invalid; merely keeping the
+  machine proof verified was too weak a canary gate. The corrected delivery and
+  assertion are exercised by the version-3 runs above. Both earlier runs recorded
   the same clean runtime hash
   `12241fb22f8c1020658e62b01f7e2671c57695952886e1eb5ecca793d7b75ef4`.
   A separate 100-round real-writer fixture passed in 25.2s at that revision.
   It injected controller liveness expiry; it did not kill a real Standing
   Orders worker at every transition or exercise reboot. The later custody
   follow-up above passes typecheck and 118 files / 2,348 tests, with 12 existing
-  skips. Integration still awaits the corrected reviewer gate.
+  skips. The subsequent reviewer gate and final suite are recorded above.
 
 - Assisted review lifecycle slice: reviewers renew the authenticated runner
   through their paid turn and ingestion, so independent reconciliation cannot
